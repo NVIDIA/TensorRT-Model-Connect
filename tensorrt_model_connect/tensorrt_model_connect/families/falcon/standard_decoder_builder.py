@@ -101,10 +101,15 @@ def build_standard_decoder_engine(
         Serialized engine plan bytes.
     """
     import os as _os
-    # Dispatch to the dual-profile builder by default (one engine, two
-    # optimization profiles — Profile 0 = batched prefill, Profile 1 =
-    # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
-    # insertion through every projection matmul via
+    # Mark the graph as honoring the internal decoder role contract. This is
+    # embedded in the mutable config for family helpers that need to branch on
+    # the active engine layout while building.
+    config.raw["_decoder_engine_layout_supported"] = True
+    decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
+
+    # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
+    # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
+    # every projection matmul via
     # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
     #
     # The legacy single-profile graph below stays in place for paths the
@@ -125,7 +130,11 @@ def build_standard_decoder_engine(
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
-    if not _dual_profile_disabled_for:
+    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "split prefill engine is not supported for this standard decoder "
+            "configuration")
+    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -140,6 +149,7 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
+            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
@@ -172,6 +182,9 @@ def build_standard_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    import os as _os_pv
+    if _os_pv.environ.get("TRTMC_TRT_DETAILED_VERBOSITY") == "1":
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     # Precision configuration
     if precision == "fp16":
@@ -272,6 +285,7 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+    embedding_table = _cast_work_dtype(embedding_table)
 
     # RoPE tables (only needed when position_type == "rope")
     position_embed_table = None
@@ -302,21 +316,25 @@ def build_standard_decoder_engine(
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
             network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
+        position_embed_table = _cast_work_dtype(position_embed_table)
     elif position_type == "alibi":
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads) * float(alibi_bias_scale)
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
             alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)
+        alibi_slopes_tensor = _cast_work_dtype(alibi_slopes_tensor)
         # Cache position indices [0, 1, ..., max_cache_length-1].
         # The current token's position (position_id) is appended at runtime.
         alibi_indices_tensor = graph_ops.add_constant(
             network, (max_cache_length,),
             np.arange(max_cache_length, dtype=np.float32),
             dtype=np.float32)
+        alibi_indices_tensor = _cast_work_dtype(alibi_indices_tensor)
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
+    eps_tensor = _cast_work_dtype(eps_tensor)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
@@ -336,6 +354,7 @@ def build_standard_decoder_engine(
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
             dtype=work_np_dtype)
+        one_const = _cast_work_dtype(one_const)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math,
             trt.ElementWiseOperation.SUB)

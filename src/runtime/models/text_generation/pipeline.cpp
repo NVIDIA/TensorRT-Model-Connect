@@ -315,9 +315,38 @@ bool TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& inp
     if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
         return false;
     kv->write_prefill_kv(pk, pv, sq);
-    if (trt_log_to_stderr_enabled())
-        std::cerr << "[trtmc] Batched prefill (profile 0): " << sq << " tokens in one call\n";
+    if (trt_log_to_stderr_enabled()) {
+        std::cerr << "[trtmc] Batched prefill (";
+        if (!config_.prefill_log_label.empty()) {
+            std::cerr << config_.prefill_log_label;
+        } else {
+            std::cerr << "profile " << config_.prefill_profile_index;
+        }
+        std::cerr << "): " << sq << " tokens in one call\n";
+    }
     return true;
+}
+
+void TextGenerationPipeline::prime_decoder_after_batched_prefill(
+    const std::vector<int32_t>& input_ids) {
+    if (input_ids.empty())
+        return;
+
+    TrtModule& decoder = bind_decoder_for_step();
+    if (!decoder.cuda_graph_active())
+        return;
+
+    int32_t token_id = input_ids.back();
+    TensorMap inputs;
+    Tensor token_tensor;
+    token_tensor.data = &token_id;
+    token_tensor.shape = {1};
+    token_tensor.dtype = DType::kInt32;
+    inputs[config_.token_id_name] = token_tensor;
+
+    state_->prepare_step(inputs);
+    decoder.forward_async(inputs);
+    decoder.sync();
 }
 
 void TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
@@ -325,6 +354,7 @@ void TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
     // Fast path: batched prefill engine writes K/V for the whole prompt in
     // one forward and returns last-token logits on host.
     if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
+        prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
     }

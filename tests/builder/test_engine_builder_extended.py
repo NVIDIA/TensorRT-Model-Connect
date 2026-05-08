@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
+    import tensorrt_model_connect.engine_builder as engine_builder
     from tensorrt_model_connect.engine_builder import (
         _get_trt_version,
         _get_gpu_name,
@@ -198,6 +200,36 @@ class TestEnsureTokenizerJson:
 # ---------------------------------------------------------------------------
 # build_bundle orchestration
 # ---------------------------------------------------------------------------
+
+
+def build_standard_decoder_engine(config, weights, max_cache_length, *, verbose=False):
+    _decoder_engine_role = config.raw.get("_decoder_engine_role")
+    profile_mode = "prefill" if _decoder_engine_role == "prefill" else "dual_profile"
+    return f"{_decoder_engine_role}:{profile_mode}".encode()
+
+
+class _SplitDecoderPlugin:
+    name = "qwen"
+    runtime_strategy = "decoder_kv_cache"
+
+    def load_weights(self, model_dir, config, *, precision="fp32"):
+        return {}
+
+    def build_engine(
+        self,
+        config,
+        weights,
+        max_cache_length,
+        *,
+        precision="fp32",
+        verbose=False,
+    ):
+        return build_standard_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            verbose=verbose,
+        )
 
 
 class TestBuildBundleOrchestration:
@@ -672,6 +704,49 @@ class TestBuildBundleOrchestration:
                             )
 
         assert seen["precision"] == "fp16"
+
+    def test_split_decoder_builds_use_role_scoped_timing_caches(self, tmp_path, monkeypatch):
+        """Split prefill/decode builds should not share the global timing cache."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+        scopes = []
+
+        @contextmanager
+        def fake_scoped_timing_cache(scope):
+            scopes.append(scope)
+            yield
+
+        monkeypatch.setattr(
+            engine_builder.trt_compat,
+            "scoped_timing_cache",
+            fake_scoped_timing_cache,
+        )
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                   return_value=_SplitDecoderPlugin()):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                       return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                           return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                            build_bundle(
+                                str(model_dir),
+                                output_path,
+                                precision="bf16",
+                            )
+
+        sections = mock_write.call_args[0][2]
+        assert [section.name for section in sections[:2]] == [
+            "engine_plan",
+            "prefill_engine_plan",
+        ]
+        assert sections[0].data == b"decode:dual_profile"
+        assert sections[1].data == b"prefill:prefill"
+        assert scopes == [
+            "split-qwen3-h64-l2-bf16-noquant-prefill",
+            "split-qwen3-h64-l2-bf16-noquant-decode",
+        ]
 
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""

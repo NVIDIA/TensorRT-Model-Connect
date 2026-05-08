@@ -245,6 +245,34 @@ def _timing_cache_path() -> Path | None:
     return Path(cache_dir) / f"{_backend_module_name}-{version}-opt{opt_level}.cache"
 
 
+def _scope_cache_path(path: Path, scope: str) -> Path:
+    scoped_name = _sanitize_cache_name(scope)
+    return path.with_name(f"{path.stem}.{scoped_name}{path.suffix}")
+
+
+@contextmanager
+def scoped_timing_cache(scope: str | None):
+    """Temporarily route TensorRT timing-cache IO to a scoped cache file."""
+    if not scope:
+        yield
+        return
+
+    path = _timing_cache_path()
+    if path is None:
+        yield
+        return
+
+    previous = os.environ.get(_TIMING_CACHE_PATH_ENV)
+    os.environ[_TIMING_CACHE_PATH_ENV] = str(_scope_cache_path(path, scope))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(_TIMING_CACHE_PATH_ENV, None)
+        else:
+            os.environ[_TIMING_CACHE_PATH_ENV] = previous
+
+
 @contextmanager
 def _locked_cache(path: Path):
     lock_path = path.with_name(f"{path.name}.lock")
