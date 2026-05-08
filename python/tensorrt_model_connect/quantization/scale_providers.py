@@ -186,6 +186,8 @@ class ModelOptCalibrationProvider:
         )
         scales: dict[str, LayerScales] = {}
         for layer_name, scale_dict in raw_scales.items():
+            if "input_scale" not in scale_dict or "weight_scale" not in scale_dict:
+                continue
             mapped = adapter.map_layer_name(layer_name)
             if mapped is None:
                 continue

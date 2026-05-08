@@ -95,7 +95,7 @@ class TrtModuleImpl final : public ITrtModule {
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                 int32_t num_profiles);
-    void allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
+    void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -107,6 +107,7 @@ class TrtModuleImpl final : public ITrtModule {
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
     void record_timed_enqueue();
+    bool bind_tensor_address(const std::string& name, const BufferEntry& entry);
     void recreate_context_with_profile();
     void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
     bool attach_distributed_communicator();

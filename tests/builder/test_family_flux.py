@@ -894,6 +894,72 @@ def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
     assert calls["dit_build"][1]["cast_dtype"] == "bf16"
 
 
+def test_flux2_mha_forwards_fp8_attention_scales(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Intent: ensure FLUX.2 passes BMM scales into native IAttention."""
+    fake_trt = types.ModuleType("tensorrt")
+    fake_trt.__version__ = "test"
+    fake_trt.float16 = object()
+    fake_trt.bfloat16 = object()
+    fake_trt.float32 = object()
+    fake_trt.DataType = types.SimpleNamespace(FP8=object())
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    sys.modules.pop("tensorrt_model_connect.graph_ops", None)
+    sys.modules.pop("tensorrt_model_connect.flux2_dit_builder", None)
+
+    def _cleanup_trt_imports() -> None:
+        import tensorrt_model_connect.trt_compat as trt_compat
+        trt_compat._module = None
+        sys.modules.pop("tensorrt_model_connect.graph_ops", None)
+        sys.modules.pop("tensorrt_model_connect.flux2_dit_builder", None)
+
+    request.addfinalizer(_cleanup_trt_imports)
+
+    import tensorrt_model_connect.flux2_dit_builder as flux2_builder
+
+    calls: dict[str, object] = {}
+
+    def fake_attention_from_rows(*args, **kwargs):
+        calls["kwargs"] = kwargs
+        return "attention-output"
+
+    monkeypatch.setattr(
+        flux2_builder.graph_ops,
+        "add_attention_from_rows",
+        fake_attention_from_rows,
+    )
+    monkeypatch.setattr(flux2_builder, "_FP8_MODE", True)
+    monkeypatch.setattr(
+        flux2_builder,
+        "_FP8_SCALES",
+        {
+            "transformer_blocks.0.attn": {
+                "q_bmm_scale": 0.1,
+                "k_bmm_scale": 0.2,
+                "v_bmm_scale": 0.3,
+                "softmax_scale": 0.4,
+                "bmm2_output_scale": 0.5,
+            }
+        },
+    )
+
+    out = flux2_builder._mha(
+        object(), "q", "k", "v", 48, 128, 4096,
+        prefix="transformer_blocks.0.attn")
+
+    assert out == "attention-output"
+    assert calls["kwargs"]["quant_scales"] == {
+        "q_bmm_scale": 0.1,
+        "k_bmm_scale": 0.2,
+        "v_bmm_scale": 0.3,
+        "softmax_scale": 0.4,
+        "bmm2_output_scale": 0.5,
+    }
+    assert calls["kwargs"]["tag"] == "transformer_blocks.0.attn"
+
+
 def test_get_diffusion_config_guidance_toggle() -> None:
     """Intent: verify guidance-dependent scheduler defaults in diffusion config.
 

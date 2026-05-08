@@ -49,6 +49,44 @@ def add_constant(
     return layer.get_output(0)
 
 
+def _add_scalar_constant(
+    network: trt.INetworkDefinition,
+    value: float,
+    *,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    return add_constant(network, (), np.array(value, dtype=dtype), dtype=dtype)
+
+
+def _add_scalar_constant_like(
+    network: trt.INetworkDefinition,
+    value: float,
+    tensor: trt.ITensor,
+) -> trt.ITensor:
+    """Add a scalar constant matching a floating TensorRT tensor dtype."""
+    if tensor.dtype == trt.float16:
+        return _add_scalar_constant(network, value, dtype=np.float16)
+    scalar = _add_scalar_constant(network, value, dtype=np.float32)
+    if tensor.dtype == trt.bfloat16:
+        scalar = network.add_cast(scalar, trt.bfloat16).get_output(0)
+    return scalar
+
+
+def _add_fp8_qdq(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    scale: float,
+    *,
+    output_dtype: trt.DataType | None = None,
+) -> trt.ITensor:
+    """Explicit FP8 Q/DQ pair for static per-tensor quantization."""
+    scale_t = _add_scalar_constant(network, scale, dtype=np.float32)
+    q = network.add_quantize(tensor, scale_t, trt.DataType.FP8)
+    dq = network.add_dequantize(
+        q.get_output(0), scale_t, output_dtype or tensor.dtype)
+    return dq.get_output(0)
+
+
 def add_matmul_rhs_constant(
     network: trt.INetworkDefinition,
     lhs: trt.ITensor,
@@ -2637,6 +2675,7 @@ def add_attention_core(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     fp32_accumulation: bool = False,
+    quant_scales: dict[str, float] | None = None,
 ) -> trt.ITensor:
     """Scaled dot-product attention via TRT native IAttention layer.
 
@@ -2663,6 +2702,10 @@ def add_attention_core(
                  back to the original Q dtype.  TRT may still select a
                  Half-input fused MHA tactic after optimizing the casts, while
                  keeping the IAttention accumulation/output boundary in FP32.
+        quant_scales:
+                 Optional FP8 static quantization scales for IAttention.
+                 Expected keys are q_bmm_scale, k_bmm_scale, v_bmm_scale,
+                 softmax_scale, and optionally bmm2_output_scale.
 
     Returns:
         Context tensor [B, H, q_seq, D].
@@ -2675,7 +2718,7 @@ def add_attention_core(
         if mask is not None and mask.dtype != trt.float32:
             mask = network.add_cast(mask, trt.float32).get_output(0)
 
-    # Pre-scale Q: TRT IAttention does not apply score scaling itself.
+    # Pre-scale inputs: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
     # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
     # a type-mismatch error and produce a tensor with corrupted dimensions,
@@ -2683,26 +2726,67 @@ def add_attention_core(
     if scale is None:
         head_dim = q_4d.shape[-1]
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    # Use FP16 weights directly for FP16; BF16 has no numpy native type so
-    # create as FP32 and cast; FP32 falls through to the default.
-    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
-    scale_t = add_constant(network, (1, 1, 1, 1), np.array([[[[scale]]]]), dtype=scale_np_dtype)
-    if q_4d.dtype == trt.bfloat16:
-        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
-    q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
+
+    def _scale_attention_input(tensor: trt.ITensor, factor: float) -> trt.ITensor:
+        # Use FP16 weights directly for FP16; BF16 has no numpy native type so
+        # create as FP32 and cast; FP32 falls through to the default.
+        scale_np_dtype = np.float16 if tensor.dtype == trt.float16 else np.float32
+        scale_t = add_constant(
+            network, (1, 1, 1, 1), np.array([[[[factor]]]]),
+            dtype=scale_np_dtype)
+        if tensor.dtype == trt.bfloat16:
+            scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+        return network.add_elementwise(
+            tensor, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+    if quant_scales:
+        # Match ModelOpt's FP8 SDPA export pattern: Q and K are both scaled by
+        # sqrt(sm_scale) before the FP8 Q/DQ that feeds BMM1.
+        sqrt_scale = float(np.sqrt(scale))
+        q_attn = _scale_attention_input(q_4d, sqrt_scale)
+        k_attn = _scale_attention_input(k_4d, sqrt_scale)
+    else:
+        q_attn = _scale_attention_input(q_4d, scale)
+        k_attn = k_4d
+    v_attn = v_4d
+    if quant_scales:
+        required = ("q_bmm_scale", "k_bmm_scale", "v_bmm_scale", "softmax_scale")
+        missing = [key for key in required if quant_scales.get(key) is None]
+        if missing:
+            raise ValueError(
+                "quantized IAttention requires scales for "
+                f"{', '.join(required)}; missing {', '.join(missing)}")
+        q_attn = _add_fp8_qdq(
+            network, q_attn, float(quant_scales["q_bmm_scale"]),
+            output_dtype=output_dtype)
+        k_attn = _add_fp8_qdq(
+            network, k_attn, float(quant_scales["k_bmm_scale"]),
+            output_dtype=output_dtype)
+        v_attn = _add_fp8_qdq(
+            network, v_attn, float(quant_scales["v_bmm_scale"]),
+            output_dtype=output_dtype)
 
     attn = network.add_attention(
-        q_scaled.get_output(0), k_4d, v_4d,
+        q_attn, k_attn, v_attn,
         trt.AttentionNormalizationOp.SOFTMAX,
         causal,
     )
-    # Allow TRT to decompose into primitive ops when no fused kernel is
-    # available (e.g. unsupported head-dim or dtype).  This guarantees
-    # correctness on any configuration at the cost of potential performance.
-    attn.decomposable = True
+    if quant_scales:
+        attn.normalization_quantize_scale = _add_scalar_constant(
+            network, float(quant_scales["softmax_scale"]), dtype=np.float32)
+        attn.normalization_quantize_to_type = trt.DataType.FP8
+    # Allow fallback for ordinary BF16/FP16 attention.  Quantized IAttention
+    # should stay fused; otherwise TensorRT may lower a very large FP8 fallback
+    # subgraph through Myelin instead of selecting the MHA kernel.
+    attn.decomposable = not bool(quant_scales)
     if mask is not None and not causal:
         attn.mask = mask
-    return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
+    result = _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
+    if quant_scales and quant_scales.get("bmm2_output_scale") is not None:
+        result = _add_fp8_qdq(
+            network, result, float(quant_scales["bmm2_output_scale"]),
+            output_dtype=output_dtype)
+    return result
 
 
 def _scalar_constant_for_trt_dtype(
@@ -2854,6 +2938,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    quant_scales: dict[str, float] | None = None,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2876,6 +2961,9 @@ def add_attention_from_rows(
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     if logit_softcap is not None and float(logit_softcap) > 0.0:
+        if quant_scales:
+            raise NotImplementedError(
+                "quantized IAttention with logit_softcap is not supported")
         if causal:
             raise NotImplementedError(
                 "logit_softcap attention requires an explicit additive mask")
@@ -2886,7 +2974,8 @@ def add_attention_from_rows(
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
-            fp32_accumulation=fp32_accumulation)
+            fp32_accumulation=fp32_accumulation,
+            quant_scales=quant_scales)
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")

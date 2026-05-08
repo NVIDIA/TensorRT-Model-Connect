@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 # Module-level settings, configured by build_flux2_dit_engine.
 _CAST_DTYPE = trt.float16
 _FP8_MODE = False   # When True, uses FP8 Q/DQ with TN layout for matmuls
-_FP8_SCALES = {}    # Per-layer FP8 scales: {layer_name: {input_scale, weight_scale}}
+_FP8_SCALES = {}    # Per-layer FP8 scales, including optional attention BMM scales.
 
 # Hold references to weight arrays to prevent GC during engine build
 _weight_refs = []
@@ -257,6 +257,8 @@ def build_flux2_dit_engine(
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
+    if fp8_scales is not None and hasattr(trt, "ProfilingVerbosity"):
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -464,8 +466,10 @@ def build_flux2_dit_engine(
         v_cat.axis = 0
 
         # Multi-head attention via TRT native IAttention.
-        attn_out = _mha(network, q_cat.get_output(0), k_cat.get_output(0),
-                        v_cat.get_output(0), num_heads, head_dim, total_seq)
+        attn_out = _mha(
+            network, q_cat.get_output(0), k_cat.get_output(0),
+            v_cat.get_output(0), num_heads, head_dim, total_seq,
+            prefix=f"{p}.attn")
 
         # Split attention output back into text and image
         txt_attn = network.add_slice(attn_out, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
@@ -562,7 +566,9 @@ def build_flux2_dit_engine(
         k_s = _apply_native_rope_from_full_cache(
             network, k_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
 
-        attn_out_s = _mha(network, q_s, k_s, v_s, num_heads, head_dim, total_seq)
+        attn_out_s = _mha(
+            network, q_s, k_s, v_s, num_heads, head_dim, total_seq,
+            prefix=f"{p}.attn")
 
         # Concatenate attn + mlp -> to_out projection
         cat_attn_mlp = network.add_concatenation([attn_out_s, mlp_hidden])
@@ -818,12 +824,27 @@ def _apply_native_rope_from_full_cache(
         seq_len, interleaved=True)
 
 
-def _mha(network, q, k, v, num_heads, head_dim, seq_len):
+def _attention_fp8_scales(prefix: str | None):
+    if not _FP8_MODE or not prefix:
+        return None
+    entry = _FP8_SCALES.get(prefix, {})
+    required = ("q_bmm_scale", "k_bmm_scale", "v_bmm_scale", "softmax_scale")
+    if any(entry.get(key) is None for key in required):
+        return None
+    scales = {key: entry[key] for key in required}
+    if entry.get("bmm2_output_scale") is not None:
+        scales["bmm2_output_scale"] = entry["bmm2_output_scale"]
+    return scales
+
+
+def _mha(network, q, k, v, num_heads, head_dim, seq_len, prefix: str | None = None):
     """Multi-head attention via TRT native IAttention."""
     return graph_ops.add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=seq_len, kv_seq=seq_len)
+        q_seq=seq_len, kv_seq=seq_len,
+        quant_scales=_attention_fp8_scales(prefix),
+        tag=prefix)
 
 
 def _gate_1d(network, x, gate, seq_len):

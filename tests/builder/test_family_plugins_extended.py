@@ -512,7 +512,6 @@ class TestDebertaPlugin:
 
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, intermediate, max_pos):
-        head_dim = hidden // heads
         t = {}
         t["deberta.embeddings.word_embeddings.weight"] = _rand(vocab, hidden)
         t["deberta.embeddings.LayerNorm.weight"] = _rand(hidden)
@@ -1101,6 +1100,35 @@ class TestFp8Calibrate:
         assert abs(entry["weight_scale"] - 112.0 / 448.0) < 1e-6
         # Incomplete entry should not be present
         assert "model.layers.0.mlp.gate_proj" not in result
+
+    def test_extract_scales_with_attention_bmm_amax(self):
+        """Scale extraction preserves ModelOpt MHA quantizer amax tensors."""
+        from tensorrt_model_connect.fp8_calibrate import extract_scales_from_state_dict
+
+        state = {
+            "transformer_blocks.0.attn.q_bmm_quantizer._amax": 44.8,
+            "transformer_blocks.0.attn.k_bmm_quantizer._amax": 89.6,
+            "transformer_blocks.0.attn.v_bmm_quantizer._amax": 134.4,
+            "transformer_blocks.0.attn.softmax_quantizer._amax": 22.4,
+            "transformer_blocks.0.attn.bmm2_output_quantizer._amax": 67.2,
+            # Missing softmax_quantizer: ModelOpt SDPA FP8 hard-codes this
+            # amax to 1.0, so extraction derives 1.0 / 448.0.
+            "transformer_blocks.1.attn.q_bmm_quantizer._amax": 44.8,
+            "transformer_blocks.1.attn.k_bmm_quantizer._amax": 89.6,
+            "transformer_blocks.1.attn.v_bmm_quantizer._amax": 134.4,
+        }
+
+        result = extract_scales_from_state_dict(state)
+
+        entry = result["transformer_blocks.0.attn"]
+        assert abs(entry["q_bmm_scale"] - 0.1) < 1e-6
+        assert abs(entry["k_bmm_scale"] - 0.2) < 1e-6
+        assert abs(entry["v_bmm_scale"] - 0.3) < 1e-6
+        assert abs(entry["softmax_scale"] - 0.05) < 1e-6
+        assert abs(entry["bmm2_output_scale"] - 0.15) < 1e-6
+
+        default_softmax = result["transformer_blocks.1.attn"]["softmax_scale"]
+        assert abs(default_softmax - (1.0 / 448.0)) < 1e-9
 
     def test_extract_scales_with_exclude(self):
         """Scale extraction respects exclude_pattern."""

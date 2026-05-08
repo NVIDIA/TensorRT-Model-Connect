@@ -33,6 +33,104 @@ _MAXBOUND = {
 _DEFAULT_MAXBOUND = 448.0  # FP8 E4M3 (used by FP8_DEFAULT_CFG)
 
 
+FP8_MHA_CONFIG = {
+    "quant_cfg": {
+        "*": {"enable": False},
+        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*q_bmm_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*k_bmm_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*v_bmm_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*softmax_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*bmm2_output_quantizer": {"num_bits": [4, 3], "axis": None},
+    },
+    "algorithm": "max",
+}
+
+_QUANTIZER_SCALE_FIELDS = {
+    "input_quantizer": "input_scale",
+    "weight_quantizer": "weight_scale",
+    "q_bmm_quantizer": "q_bmm_scale",
+    "k_bmm_quantizer": "k_bmm_scale",
+    "v_bmm_quantizer": "v_bmm_scale",
+    "softmax_quantizer": "softmax_scale",
+    "bmm2_output_quantizer": "bmm2_output_scale",
+}
+_LINEAR_REQUIRED_SCALE_FIELDS = {"input_scale", "weight_scale"}
+_ATTENTION_REQUIRED_SCALE_FIELDS = {
+    "q_bmm_scale",
+    "k_bmm_scale",
+    "v_bmm_scale",
+    "softmax_scale",
+}
+
+
+def _config_requests_mha_quantizers(config: dict) -> bool:
+    quant_cfg = config.get("quant_cfg", {})
+    return any("bmm_quantizer" in str(pattern) for pattern in quant_cfg)
+
+
+def _register_diffusers_flux2_attention_quantizers() -> None:
+    """Register FLUX.2 Diffusers attention modules with ModelOpt's MHA wrapper.
+
+    ModelOpt has the FP8 attention quantizer implementation, but some releases
+    only register it for FLUX.1's ``FluxAttention`` class. FLUX.2 uses separate
+    ``Flux2Attention`` and ``Flux2ParallelSelfAttention`` classes, so register
+    those classes before ModelOpt recursively replaces modules.
+    """
+    try:
+        from diffusers.models.transformers.transformer_flux2 import (
+            Flux2Attention,
+            Flux2ParallelSelfAttention,
+        )
+        from modelopt.torch.quantization.nn import QuantModuleRegistry
+    except Exception as exc:  # pragma: no cover - optional Diffusers/ModelOpt deps
+        print(
+            "[fp8-calibrate] Skipping FLUX.2 MHA quantizer registration: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        try:
+            from modelopt.torch.quantization.plugins.diffusion.diffusers import (
+                _QuantAttention,
+            )
+        except ModuleNotFoundError:
+            from modelopt.torch.quantization.plugins.diffusers import _QuantAttention
+    except Exception as exc:  # pragma: no cover - private ModelOpt API drift
+        print(
+            "[fp8-calibrate] ModelOpt Diffusers MHA quantizer is unavailable: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        from diffusers.models.attention_dispatch import (
+            AttentionBackendName,
+            attention_backend,
+        )
+    except Exception:  # pragma: no cover - older Diffusers fallback
+        AttentionBackendName = None
+        attention_backend = None
+
+    class _QuantFlux2Attention(_QuantAttention):
+        def forward(self, *args, **kwargs):
+            if attention_backend is None or AttentionBackendName is None:
+                return super().forward(*args, **kwargs)
+            with attention_backend(AttentionBackendName.NATIVE):
+                return super().forward(*args, **kwargs)
+
+    for module_cls, key in (
+        (Flux2Attention, "Flux2Attention"),
+        (Flux2ParallelSelfAttention, "Flux2ParallelSelfAttention"),
+    ):
+        if module_cls not in QuantModuleRegistry:
+            QuantModuleRegistry.register({module_cls: key})(_QuantFlux2Attention)
+
+
 def _maxbound_from_config(config: dict) -> float:
     """Derive maxbound from a ModelOpt quantization config."""
     # FP8_DEFAULT_CFG uses num_bits=(4,3) for E4M3
@@ -65,12 +163,18 @@ def run_fp8_calibration(
 
     Returns:
         ``{layer_name: {"input_scale": float, "weight_scale": float}}``
-        for every quantized layer.
+        for every quantized linear layer, plus attention entries containing
+        ``q_bmm_scale``, ``k_bmm_scale``, ``v_bmm_scale``,
+        ``softmax_scale``, and optionally ``bmm2_output_scale`` when the
+        ModelOpt config includes MHA BMM quantizers.
     """
     import modelopt.torch.quantization as mtq
 
     if config is None:
         config = mtq.FP8_DEFAULT_CFG
+
+    if _config_requests_mha_quantizers(config):
+        _register_diffusers_flux2_attention_quantizers()
 
     maxbound = _maxbound_from_config(config)
 
@@ -97,8 +201,9 @@ def extract_scales_from_state_dict(
     """Extract quantization scales from a ModelOpt-quantized state dict.
 
     Converts amax values to TRT Q/DQ scales: ``scale = amax / maxbound``.
-    Only returns layers that have **both** input and weight scales and
-    do NOT match the exclusion pattern.
+    Returns complete linear entries that have both input and weight scales,
+    and complete attention entries that have Q/K/V BMM scales plus a softmax
+    normalization scale. Entries matching the exclusion pattern are dropped.
 
     Args:
         state_dict: Model state dict containing ``*_quantizer._amax`` entries.
@@ -111,27 +216,38 @@ def extract_scales_from_state_dict(
     for key, value in state_dict.items():
         if "_amax" not in key:
             continue
-        m = re.match(
-            r"(.+)\.(input_quantizer|weight_quantizer)\._amax", key)
+        m = re.match(r"(.+)\.([A-Za-z0-9_]+_quantizer)\._amax", key)
         if m is None:
             continue
 
         prefix = m.group(1)
         qtype = m.group(2)
+        scale_field = _QUANTIZER_SCALE_FIELDS.get(qtype)
+        if scale_field is None:
+            continue
         amax = value.item() if hasattr(value, "item") else float(value)
         scale = amax / maxbound
 
         if prefix not in scales:
             scales[prefix] = {}
-        if "input" in qtype:
-            scales[prefix]["input_scale"] = scale
-        else:
-            scales[prefix]["weight_scale"] = scale
+        scales[prefix][scale_field] = scale
 
-    # Keep only complete entries (both input + weight) that aren't excluded
+    # Keep only complete linear or attention entries that aren't excluded.
     result: dict[str, dict[str, float]] = {}
     for name, entry in scales.items():
-        if "input_scale" not in entry or "weight_scale" not in entry:
+        fields = set(entry)
+        complete_linear = _LINEAR_REQUIRED_SCALE_FIELDS.issubset(fields)
+        if {
+            "q_bmm_scale",
+            "k_bmm_scale",
+            "v_bmm_scale",
+        }.issubset(fields) and "softmax_scale" not in entry:
+            # ModelOpt's SDPA FP8 exporter hard-codes the softmax output amax
+            # to 1.0 instead of storing a softmax_quantizer._amax state.
+            entry["softmax_scale"] = 1.0 / maxbound
+            fields.add("softmax_scale")
+        complete_attention = _ATTENTION_REQUIRED_SCALE_FIELDS.issubset(fields)
+        if not complete_linear and not complete_attention:
             continue
         if exclude_pattern is not None and exclude_pattern.match(name):
             continue

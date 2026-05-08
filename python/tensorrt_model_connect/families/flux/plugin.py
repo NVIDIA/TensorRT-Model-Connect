@@ -875,7 +875,7 @@ class FluxPlugin:
         via ModelOpt max calibration.
         """
         import torch
-        from ...fp8_calibrate import run_fp8_calibration
+        from ...fp8_calibrate import FP8_MHA_CONFIG, run_fp8_calibration
 
         print("[fp8-calibrate] Loading FLUX.2-dev transformer ...",
               file=sys.stderr)
@@ -926,7 +926,8 @@ class FluxPlugin:
                               f"(t={t.item():.0f})", file=sys.stderr)
 
         return run_fp8_calibration(
-            model, calibration_loop, self._FP8_EXCLUDE)
+            model, calibration_loop, self._FP8_EXCLUDE,
+            config=FP8_MHA_CONFIG)
 
 
 def _is_flux2(tc: dict) -> bool:

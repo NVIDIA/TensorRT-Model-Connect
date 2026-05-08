@@ -533,7 +533,8 @@ class DiffusionMediaRunner:
                 distributed_runtime, ctx, case, env)
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=3600, env=env)
+                    cmd, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=3600, env=env)
             finally:
                 memory_meta = (
                     memory_sampler.stop() if memory_sampler is not None else None)

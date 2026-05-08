@@ -4,16 +4,16 @@
 Bypasses CUBLAS issues by running calibration entirely on CPU.
 Only quantizes the transformer backbone (not text encoder or VAE).
 """
-import sys
-import time
+import os
 import re
+import time
 
 import torch
-import numpy as np
+from tensorrt_model_connect.fp8_calibrate import FP8_MHA_CONFIG
 
 print("Loading ModelOpt...", flush=True)
-import modelopt.torch.quantization as mtq
-import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq  # noqa: E402
+import modelopt.torch.opt as mto  # noqa: E402
 
 # FLUX.2-dev layer exclusion (keep these in BF16)
 def filter_func_flux_dev(name):
@@ -26,7 +26,7 @@ def filter_func_flux_dev(name):
 # Load FLUX.2 transformer on CPU
 print("Loading FLUX.2-dev transformer on CPU...", flush=True)
 t0 = time.time()
-from diffusers import Flux2Pipeline
+from diffusers import Flux2Pipeline  # noqa: E402
 
 pipe = Flux2Pipeline.from_pretrained(
     "black-forest-labs/FLUX.2-dev",
@@ -76,7 +76,7 @@ t0 = time.time()
 
 transformer = mtq.quantize(
     transformer,
-    config=mtq.FP8_DEFAULT_CFG,
+    config=FP8_MHA_CONFIG,
     forward_loop=calibration_loop,
 )
 
@@ -97,7 +97,6 @@ t0 = time.time()
 dummy = make_flux2_inputs()
 
 onnx_dir = "/tmp/flux2_fp8_onnx"
-import os
 os.makedirs(onnx_dir, exist_ok=True)
 
 torch.onnx.export(
