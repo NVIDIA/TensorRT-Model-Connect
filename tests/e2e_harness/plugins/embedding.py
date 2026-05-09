@@ -1,8 +1,12 @@
 """Contract test plugin for embedding and retrieval models."""
 from __future__ import annotations
 import numpy as np
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
+
+from ..contracts import MetricResult
 from .base import make_pass, make_fail, make_error
+
+
+_MIN_CONTRACT_COSINE = 0.80
 
 
 class EmbeddingPlugin:
@@ -33,14 +37,20 @@ class EmbeddingPlugin:
         norm_r = np.linalg.norm(ref_arr)
         cosine = float(np.dot(trt_arr, ref_arr) / (max(norm_t, 1e-12) * max(norm_r, 1e-12)))
 
-        cosine_threshold = threshold.metrics.get(
+        configured_cosine_threshold = threshold.metrics.get(
             "contract_cosine_threshold",
             threshold.metrics.get("cls_embedding_cosine", 0.98))
+        cosine_threshold = max(configured_cosine_threshold, _MIN_CONTRACT_COSINE)
+        note = ""
+        if cosine_threshold != configured_cosine_threshold:
+            note = (
+                f"configured threshold {configured_cosine_threshold} raised to "
+                f"{_MIN_CONTRACT_COSINE} floor")
 
         metrics = {
             "cosine_similarity": MetricResult(
                 value=cosine, threshold=cosine_threshold, operator=">=",
-                passed=cosine >= cosine_threshold),
+                passed=cosine >= cosine_threshold, note=note),
         }
 
         if cosine >= cosine_threshold:

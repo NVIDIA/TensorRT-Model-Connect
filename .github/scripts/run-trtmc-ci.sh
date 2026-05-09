@@ -405,7 +405,8 @@ print(count)
       --output e2e_artifacts/diffusion_vlm_assessment.json \
       --model-id "${DIFFUSION_VLM_MODEL_ID:-Qwen/Qwen2.5-VL-3B-Instruct}" \
       --max-side "${DIFFUSION_VLM_MAX_SIDE:-512}" \
-      --max-new-tokens "${DIFFUSION_VLM_MAX_NEW_TOKENS:-384}"
+      --max-new-tokens "${DIFFUSION_VLM_MAX_NEW_TOKENS:-384}" \
+      --waives tests/e2e/waives.txt
 }
 
 generate_coverage_map() {

@@ -1,7 +1,8 @@
 """Contract test plugin for base causal LM continuation and code completion."""
 from __future__ import annotations
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
-from .base import (ContractTestPlugin, normalize_text, strip_prompt_echo, levenshtein_ned, make_pass, make_fail, make_error)
+
+from ..contracts import MetricResult
+from .base import normalize_text, strip_prompt_echo, levenshtein_ned, make_pass, make_fail
 
 class CausalContinuationPlugin:
     reference_families = ["causal_base_continuation", "code_base_completion", "seq2seq_base_weak"]
@@ -14,10 +15,21 @@ class CausalContinuationPlugin:
     def verify(self, trt_output, ref_output, case, threshold):
         prompt = case.inputs.get("prompt", "")
         trt_text = normalize_text(strip_prompt_echo(trt_output.text or "", prompt))
-        ref_text = normalize_text(strip_prompt_echo(ref_output.text or "", prompt))
+        if case.reference_family == "seq2seq_base_weak":
+            ref_text = normalize_text(ref_output.text or "")
+        else:
+            ref_text = normalize_text(strip_prompt_echo(ref_output.text or "", prompt))
 
         if not trt_text and not ref_text:
-            return make_pass("full_generation", {}, "both empty")
+            metrics = {
+                "non_empty_continuation": MetricResult(
+                    value=0.0, threshold=1.0, operator="==", passed=False,
+                    note="empty TRT and reference text do not validate parity"),
+            }
+            return make_fail(
+                "full_generation", metrics,
+                "non-empty continuation required",
+                "Both TRT and reference produced empty continuation")
 
         ned = levenshtein_ned(trt_text, ref_text)
         ned_threshold = threshold.metrics.get("contract_ned_threshold", 0.25)

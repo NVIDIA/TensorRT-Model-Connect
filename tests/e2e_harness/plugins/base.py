@@ -220,6 +220,18 @@ def make_fail(stage_name: str, metrics: Dict[str, MetricResult],
     )
 
 
+def make_skip(stage_name: str, metrics: Dict[str, MetricResult],
+              rule: str = "", message: str = "") -> CompareResult:
+    """Build a skipped CompareResult for an unvalidated required contract."""
+    return CompareResult(
+        stage_name=stage_name,
+        status=StageStatus.SKIPPED.value,
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
 def make_error(stage_name: str, error: str) -> CompareResult:
     """Build an error CompareResult."""
     return CompareResult(

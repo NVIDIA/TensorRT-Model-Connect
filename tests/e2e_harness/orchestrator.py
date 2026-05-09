@@ -1177,6 +1177,7 @@ class E2EOrchestrator:
         # 3. Execute stages
         stage_results: dict[str, CompareResult] = {}
         all_stages_pass = True
+        required_validation_skipped = False
         baseline_trt_outputs: dict[str, StageOutput] = {}
 
         for stage in case.stages:
@@ -1319,7 +1320,10 @@ class E2EOrchestrator:
                 if compare_result is not None:
                     stage_results[stage_name] = compare_result
                     sink.write_compare(stage_name, compare_result)
-                    if not compare_result.passed and stage.required:
+                    if compare_result.status == StageStatus.SKIPPED.value and stage.required:
+                        required_validation_skipped = True
+                        all_stages_pass = False
+                    elif not compare_result.passed and stage.required:
                         all_stages_pass = False
                 else:
                     stage_results[stage_name] = CompareResult(
@@ -1327,6 +1331,9 @@ class E2EOrchestrator:
                         status=StageStatus.SKIPPED.value,
                         message="TRT and reference ran (no contract plugin or comparator)",
                     )
+                    if stage.required:
+                        required_validation_skipped = True
+                        all_stages_pass = False
             elif trt_output is not None and ref_output is None:
                 # No reference — record as skipped
                 stage_results[stage_name] = CompareResult(
@@ -1334,6 +1341,9 @@ class E2EOrchestrator:
                     status=StageStatus.SKIPPED.value,
                     message="TRT run succeeded (no reference available)",
                 )
+                if stage.required:
+                    required_validation_skipped = True
+                    all_stages_pass = False
 
         # 4. Determinism reruns (if configured)
         determinism_results: dict[str, Any] = {}
@@ -1433,6 +1443,12 @@ class E2EOrchestrator:
         # 6. Aggregate result
         if all_stages_pass:
             status = E2EStatus.PASS.value
+            failure_type = None
+        elif required_validation_skipped and not any(
+            cr.status in (StageStatus.FAILED.value, StageStatus.ERROR.value)
+            for cr in stage_results.values()
+        ):
+            status = E2EStatus.SKIP.value
             failure_type = None
         else:
             status = E2EStatus.FAIL.value

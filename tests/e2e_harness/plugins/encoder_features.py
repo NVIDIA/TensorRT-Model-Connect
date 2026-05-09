@@ -1,8 +1,12 @@
 """Contract test plugin for encoder-only models (BERT, RoBERTa, etc)."""
 from __future__ import annotations
 import numpy as np
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
+
+from ..contracts import MetricResult
 from .base import make_pass, make_fail, make_error
+
+
+_MIN_CONTRACT_COSINE = 0.80
 
 
 class EncoderFeaturesPlugin:
@@ -31,14 +35,20 @@ class EncoderFeaturesPlugin:
         else:
             cosine = float(np.dot(trt_arr, ref_arr) / (norm_t * norm_r))
 
-        cosine_threshold = threshold.metrics.get(
+        configured_cosine_threshold = threshold.metrics.get(
             "contract_cosine_threshold",
             threshold.metrics.get("cls_embedding_cosine", 0.80))
+        cosine_threshold = max(configured_cosine_threshold, _MIN_CONTRACT_COSINE)
+        note = ""
+        if cosine_threshold != configured_cosine_threshold:
+            note = (
+                f"configured threshold {configured_cosine_threshold} raised to "
+                f"{_MIN_CONTRACT_COSINE} floor")
 
         metrics = {
             "cosine_similarity": MetricResult(
                 value=cosine, threshold=cosine_threshold, operator=">=",
-                passed=cosine >= cosine_threshold),
+                passed=cosine >= cosine_threshold, note=note),
         }
 
         if cosine >= cosine_threshold:

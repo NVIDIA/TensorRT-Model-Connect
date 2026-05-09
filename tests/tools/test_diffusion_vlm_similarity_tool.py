@@ -5,6 +5,8 @@ import json
 from tools.evaluate_diffusion_vlm_similarity import (
     _apply_gate,
     _discover_pairs,
+    _gate_failure_is_reference_only,
+    _load_xfail_waives,
     _parse_json,
 )
 
@@ -14,6 +16,9 @@ def test_vlm_similarity_gate_fails_low_semantic_similarity():
         "semantic_similarity_0_to_5": 0.1,
         "trt_prompt_alignment_0_to_5": 0.0,
         "trt_visual_quality_0_to_5": 0.0,
+        "hf_prompt_alignment_0_to_5": 4.0,
+        "hf_visual_quality_0_to_5": 4.0,
+        "is_regression": False,
     })
 
     assert result["failed"]
@@ -25,9 +30,86 @@ def test_vlm_similarity_gate_allows_minor_quality_delta():
         "semantic_similarity_0_to_5": 4.0,
         "trt_prompt_alignment_0_to_5": 4.0,
         "trt_visual_quality_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 4.0,
+        "hf_visual_quality_0_to_5": 4.0,
+        "is_regression": "false",
     })
 
     assert not result["failed"]
+
+
+def test_vlm_similarity_gate_fails_invalid_reference_quality():
+    result = _apply_gate({
+        "semantic_similarity_0_to_5": 4.0,
+        "trt_prompt_alignment_0_to_5": 4.0,
+        "trt_visual_quality_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 2.0,
+        "hf_visual_quality_0_to_5": 2.0,
+        "is_regression": False,
+    })
+
+    assert result["failed"]
+    assert any("hf_prompt_alignment" in reason for reason in result["reasons"])
+
+
+def test_vlm_similarity_gate_fails_explicit_regression():
+    result = _apply_gate({
+        "semantic_similarity_0_to_5": 4.0,
+        "trt_prompt_alignment_0_to_5": 4.0,
+        "trt_visual_quality_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 4.0,
+        "hf_visual_quality_0_to_5": 4.0,
+        "is_regression": True,
+    })
+
+    assert result["failed"]
+    assert "is_regression is true" in result["reasons"]
+
+
+def test_vlm_similarity_gate_fails_silhouette_reference_for_photo_prompt():
+    result = _apply_gate({
+        "semantic_similarity_0_to_5": 4.0,
+        "trt_prompt_alignment_0_to_5": 4.0,
+        "trt_visual_quality_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 4.0,
+        "hf_visual_quality_0_to_5": 4.0,
+        "is_regression": False,
+        "hf_description": "A silhouette of a cat sitting on a windowsill.",
+    }, prompt="A photo of a cat sitting on a windowsill at sunset")
+
+    assert result["failed"]
+    assert any("photo prompt" in reason for reason in result["reasons"])
+
+
+def test_vlm_reference_only_gate_failure_can_be_waived(tmp_path):
+    waives = tmp_path / "waives.txt"
+    waives.write_text(
+        "z-image-turbo-l0 XFAIL (bad HF reference)\n"
+        "other-model SKIP (not an xfail)\n",
+        encoding="utf-8",
+    )
+    gate = {
+        "failed": True,
+        "reasons": [
+            "HF reference description suggests non-photo/stylized output for a photo prompt",
+        ],
+    }
+
+    assert "z-image-turbo-l0" in _load_xfail_waives(waives)
+    assert "other-model" not in _load_xfail_waives(waives)
+    assert _gate_failure_is_reference_only(gate)
+
+
+def test_vlm_trt_gate_failure_is_not_reference_only():
+    gate = {
+        "failed": True,
+        "reasons": [
+            "trt_visual_quality_0_to_5=1.00 < 2.5",
+            "HF reference description suggests non-photo/stylized output for a photo prompt",
+        ],
+    }
+
+    assert not _gate_failure_is_reference_only(gate)
 
 
 def test_parse_json_normalizes_internvl_quality_key_typo():
