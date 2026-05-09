@@ -29,6 +29,12 @@ mkdir_if_set "${HF_HUB_CACHE:-}"
 mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
 mkdir_if_set "${HF_MODULES_CACHE:-}"
 
+if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+  chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
+    echo "::warning::Could not normalize workspace permissions before entering the CI container."
+  }
+fi
+
 # shellcheck disable=SC2086
 docker run --rm \
   $TRTMC_CONTAINER_OPTIONS \

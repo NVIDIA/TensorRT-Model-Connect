@@ -3,7 +3,7 @@ name: TensorRT-Model-Connect Docs
 on:
   push:
     branches:
-      - master
+      - main
     paths:
       - "website/**"
       - ".github/workflows/pages.yml"

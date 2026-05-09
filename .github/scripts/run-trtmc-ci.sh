@@ -61,6 +61,7 @@ prepare_shared_directories
 
 setup_environment() {
   git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
+  git config --global --add safe.directory "*" || true
   echo "ENGINE_DIR=${ENGINE_DIR:-}"
   echo "HF_HOME=${HF_HOME:-}"
   echo "HF_HUB_CACHE=${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-}}"
@@ -146,7 +147,7 @@ lint_changed_files() {
 
   local base_ref="$CI_BASE_REF"
   if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] || [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
-    base_ref="origin/${GITHUB_REF_NAME:-master}"
+    base_ref="origin/${GITHUB_REF_NAME:-main}"
   fi
 
   local changed_py

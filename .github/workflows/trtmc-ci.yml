@@ -3,14 +3,14 @@ name: TensorRT-Model-Connect Premerge CI
 on:
   push:
     branches:
-      - master
+      - main
       - ai-staging
     paths-ignore:
       - "website/**"
       - ".github/workflows/pages.yml"
   pull_request:
     branches:
-      - master
+      - main
       - ai-staging
     paths-ignore:
       - "website/**"
@@ -65,6 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$GITHUB_WORKSPACE" ]; then
+            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
             docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
               echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
               exit 1
@@ -107,13 +108,13 @@ jobs:
               base="${{ github.event.before }}"
               ;;
             workflow_dispatch)
-              base="origin/${GITHUB_REF_NAME:-master}"
+              base="origin/${GITHUB_REF_NAME:-main}"
               ;;
           esac
 
           if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            if git rev-parse --verify "origin/${GITHUB_REF_NAME:-master}" >/dev/null 2>&1; then
-              base="origin/${GITHUB_REF_NAME:-master}"
+            if git rev-parse --verify "origin/${GITHUB_REF_NAME:-main}" >/dev/null 2>&1; then
+              base="origin/${GITHUB_REF_NAME:-main}"
             else
               base="HEAD~1"
             fi

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: trtmc-nightly-master
+  group: trtmc-nightly-main
   cancel-in-progress: false
 
 env:
@@ -40,7 +40,7 @@ env:
 
 jobs:
   nightly-ci:
-    name: Nightly Full CI on GitHub master
+    name: Nightly Full CI on GitHub main
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 
@@ -53,6 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$GITHUB_WORKSPACE" ]; then
+            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
             docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
               echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
               exit 1
@@ -75,10 +76,10 @@ jobs:
               '
           fi
 
-      - name: Check out GitHub master tip
+      - name: Check out GitHub main tip
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
           fetch-depth: 0
           clean: false
           lfs: false
@@ -86,14 +87,14 @@ jobs:
       - name: Resolve comparison base
         run: |
           set -euo pipefail
-          git fetch origin master --quiet
+          git fetch origin main --quiet
           echo "CI_BASE_REF=HEAD~1" >> "$GITHUB_ENV"
-          echo "Running nightly on GitHub master tip: $(git rev-parse HEAD)"
+          echo "Running nightly on GitHub main tip: $(git rev-parse HEAD)"
 
       - name: Report CI mode
         run: |
           set -euo pipefail
-          echo "CI mode: nightly/full E2E on GitHub master"
+          echo "CI mode: nightly/full E2E on GitHub main"
           echo "FULL_E2E=$FULL_E2E"
           echo "RUN_COVERAGE_MAP=$RUN_COVERAGE_MAP"
           echo "REBUILD_ENGINES=$REBUILD_ENGINES"

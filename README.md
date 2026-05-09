@@ -2,9 +2,9 @@
 
 ![TensorRT-Model-Connect overview](website/static/img/trtmc-landing.png)
 
-[Documentation site](https://legendary-doodle-r37686v.pages.github.io/) |
-[Quick Start](https://legendary-doodle-r37686v.pages.github.io/getting-started/quick-start) |
-[GitHub Actions](https://github.com/NVIDIA-dev/TensorRT-Model-Connct/actions) |
+[Documentation site](https://sturdy-broccoli-y7zg5w9.pages.github.io/) |
+[Quick Start](https://sturdy-broccoli-y7zg5w9.pages.github.io/getting-started/quick-start) |
+[GitHub Actions](https://github.com/NVIDIA/TensorRT-Model-Connect/actions) |
 [Docs source](website/docs/intro.md)
 
 TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trtfb` TensorRT bundles and runs them from a native C++ runtime.
@@ -14,7 +14,7 @@ TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trt
 For the fastest setup, open Claude Code, Codex, or another repo-aware coding agent and ask:
 
 ```text
-Clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct, set up the dev
+Clone https://github.com/NVIDIA/TensorRT-Model-Connect, set up the dev
 container for this machine, build the project, build a Qwen/Qwen3-0.6B bundle,
 and run the C++ smoke test. Report the commands you ran.
 ```
@@ -26,7 +26,7 @@ Success means the final `./build/trtmc run` command prints generated text.
 Use the [Environment and First Repro](website/docs/getting-started/environment-and-repro.md) and [Quick Start](website/docs/getting-started/quick-start.md) guides for the full manual path. The short version is:
 
 ```bash
-git clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct.git
+git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
 cd TensorRT-Model-Connct
 
 ./scripts/docker_build_gb300.sh
