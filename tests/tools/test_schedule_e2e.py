@@ -142,6 +142,30 @@ def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path
     assert sum(len(workers) for workers in shared_schedule.values()) == 4
 
 
+def test_large_and_small_tests_are_balanced_across_even_worker_count(tmp_path: Path) -> None:
+    large_names = [f"large-{idx}" for idx in range(8)]
+    small_names = [f"small-{idx}" for idx in range(8)]
+    for name in large_names:
+        _write_manifest(tmp_path, name, hf_id=f"org/{name}-4B")
+    for name in small_names:
+        _write_manifest(tmp_path, name)
+
+    assignments = schedule_e2e.schedule(
+        [_test_id(name) for name in [*large_names, *small_names]],
+        tmp_path,
+        num_gpus=1,
+        workers_per_gpu=4,
+    )
+
+    workers = assignments["0"]
+    assert len(workers) == 4
+    for worker in workers:
+        worker_names = {_test_id(name) for name in large_names}
+        large_count = sum(1 for test_id in worker if test_id in worker_names)
+        assert large_count == 2
+        assert len(worker) == 4
+
+
 def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     bin_dir = tmp_path / "bin"

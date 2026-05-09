@@ -144,9 +144,9 @@ def schedule(
     1. Classify each test as large or small using its manifest.
     2. Round-robin large models across GPUs, then small models across GPUs.
        This ensures each GPU gets ~equal counts of each size tier.
-    3. For each GPU, interleave its large and small models (L, S, L, S, ...)
-       then round-robin across workers.  This ensures at any moment,
-       ~half the running models are large and ~half are small.
+    3. For each GPU, spread large models across every worker, then fill in
+       small models.  Large and small tests are distributed independently so
+       even worker counts do not alias with an L/S interleave pattern.
     """
     # Load manifests keyed by model name
     manifests = _load_manifests(manifest_dir)
@@ -191,26 +191,20 @@ def schedule(
     for i, tid in enumerate(small_tests):
         gpu_small[shared_gpu_ids[i % len(shared_gpu_ids)]].append(tid)
 
-    # For each GPU: interleave large/small, then distribute across workers
+    # For each GPU: distribute large and small tests independently.  Do not
+    # interleave first and then take i % workers_per_gpu: with even worker
+    # counts, an L/S pattern aliases so even worker slots receive all large
+    # tests and odd slots receive all small tests.
     for gpu_id in shared_gpu_ids:
         L = gpu_large[gpu_id]
         S = gpu_small[gpu_id]
 
-        # Interleave: L, S, L, S, ...
-        interleaved: list[str] = []
-        li = si = 0
-        while li < len(L) or si < len(S):
-            if li < len(L):
-                interleaved.append(L[li])
-                li += 1
-            if si < len(S):
-                interleaved.append(S[si])
-                si += 1
-
-        # Round-robin across workers
         workers: list[list[str]] = [[] for _ in range(workers_per_gpu)]
-        for i, tid in enumerate(interleaved):
+        for i, tid in enumerate(L):
             workers[i % workers_per_gpu].append(tid)
+        small_offset = len(L) % workers_per_gpu
+        for i, tid in enumerate(S):
+            workers[(i + small_offset) % workers_per_gpu].append(tid)
 
         # Drop empty workers
         shared_workers = [w for w in workers if w]
