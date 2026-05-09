@@ -218,6 +218,7 @@ def test_run_e2e_parallel_executes_exclusive_then_shared_phases(tmp_path: Path) 
     result_dir = tmp_path / "results"
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["TRTMC_E2E_EXCLUDE_GPU0"] = "0"
 
     completed = subprocess.run(
         [
