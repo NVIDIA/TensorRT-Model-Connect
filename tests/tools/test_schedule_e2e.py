@@ -142,6 +142,36 @@ def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path
     assert sum(len(workers) for workers in shared_schedule.values()) == 4
 
 
+def test_phase_schedule_offsets_large_shared_work_by_exclusive_load(tmp_path: Path) -> None:
+    for idx in range(5):
+        _write_manifest(
+            tmp_path,
+            f"exclusive-{idx}",
+            runtime_strategy="diffusion_flux",
+            e2e_parallel_resource="exclusive_gpu",
+        )
+    for idx in range(9):
+        _write_manifest(tmp_path, f"large-{idx}", hf_id=f"org/large-{idx}-4B")
+
+    phases = schedule_e2e.schedule_phases(
+        [
+            *[_test_id(f"exclusive-{idx}") for idx in range(5)],
+            *[_test_id(f"large-{idx}") for idx in range(9)],
+        ],
+        tmp_path,
+        num_gpus=3,
+        workers_per_gpu=2,
+    )
+
+    shared_schedule = phases[1]["schedule"]
+    shared_counts = {
+        gpu_id: sum(len(worker) for worker in workers)
+        for gpu_id, workers in shared_schedule.items()
+    }
+
+    assert shared_counts == {"0": 3, "1": 2, "2": 4}
+
+
 def test_large_and_small_tests_are_balanced_across_even_worker_count(tmp_path: Path) -> None:
     large_names = [f"large-{idx}" for idx in range(8)]
     small_names = [f"small-{idx}" for idx in range(8)]

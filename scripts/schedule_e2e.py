@@ -36,6 +36,8 @@ _HEAVY_STRATEGIES = frozenset({
 })
 
 _EXCLUSIVE_GPU_RESOURCE = "exclusive_gpu"
+_LARGE_TEST_WEIGHT = 4
+_EXCLUSIVE_GPU_TEST_WEIGHT = 8
 
 
 def _param_billions(hf_id: str) -> float | None:
@@ -127,6 +129,31 @@ def split_by_parallel_resource(
     return exclusive_tests, shared_tests
 
 
+def _test_weight(test_id: str, manifests: dict[str, dict]) -> int:
+    manifest = manifests.get(_model_name_from_test_id(test_id), {})
+    if classify_parallel_resource(manifest) == _EXCLUSIVE_GPU_RESOURCE:
+        return _EXCLUSIVE_GPU_TEST_WEIGHT
+    if classify_size(manifest) == "large":
+        return _LARGE_TEST_WEIGHT
+    return 1
+
+
+def _estimated_gpu_loads(
+    assignments: dict[str, list[list[str]]],
+    manifest_dir: Path,
+) -> dict[int, int]:
+    """Estimate per-GPU schedule load for phase-aware balancing."""
+    manifests = _load_manifests(manifest_dir)
+    loads: dict[int, int] = {}
+    for gpu_id, workers in assignments.items():
+        loads[int(gpu_id)] = sum(
+            _test_weight(test_id, manifests)
+            for worker in workers
+            for test_id in worker
+        )
+    return loads
+
+
 # ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------
@@ -137,6 +164,7 @@ def schedule(
     manifest_dir: Path,
     num_gpus: int,
     workers_per_gpu: int,
+    gpu_load_offsets: dict[int, int] | None = None,
 ) -> dict[str, list[list[str]]]:
     """Produce balanced GPU×worker assignments.
 
@@ -182,14 +210,30 @@ def schedule(
         for gpu_id in shared_gpu_ids:
             result.setdefault(str(gpu_id), [[]])
 
-    # Round-robin large across GPUs, then small across GPUs
+    # Balance large models against any prior phase load. The pipelined E2E
+    # runner can start shared work on each GPU only after that GPU's exclusive
+    # worker finishes, so assigning equal shared work to a late-starting GPU
+    # creates a tail. Small models stay round-robin to preserve broad fan-out.
     gpu_large: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
     gpu_small: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
+    gpu_loads = {
+        gpu_id: int((gpu_load_offsets or {}).get(gpu_id, 0))
+        for gpu_id in shared_gpu_ids
+    }
 
-    for i, tid in enumerate(large_tests):
-        gpu_large[shared_gpu_ids[i % len(shared_gpu_ids)]].append(tid)
+    for tid in large_tests:
+        gpu_id = min(
+            shared_gpu_ids,
+            key=lambda gid: (gpu_loads[gid], len(gpu_large[gid]), gid),
+        )
+        gpu_large[gpu_id].append(tid)
+        gpu_loads[gpu_id] += _LARGE_TEST_WEIGHT
+    small_gpu_order = sorted(
+        shared_gpu_ids,
+        key=lambda gid: ((gpu_load_offsets or {}).get(gid, 0), gid),
+    )
     for i, tid in enumerate(small_tests):
-        gpu_small[shared_gpu_ids[i % len(shared_gpu_ids)]].append(tid)
+        gpu_small[small_gpu_order[i % len(small_gpu_order)]].append(tid)
 
     # For each GPU: distribute large and small tests independently.  Do not
     # interleave first and then take i % workers_per_gpu: with even worker
@@ -231,15 +275,18 @@ def schedule_phases(
     """
     exclusive_tests, shared_tests = split_by_parallel_resource(test_ids, manifest_dir)
     phases: list[dict[str, object]] = []
+    exclusive_gpu_loads: dict[int, int] = {}
     if exclusive_tests:
+        exclusive_schedule = schedule(
+            exclusive_tests,
+            manifest_dir,
+            num_gpus=num_gpus,
+            workers_per_gpu=1,
+        )
+        exclusive_gpu_loads = _estimated_gpu_loads(exclusive_schedule, manifest_dir)
         phases.append({
             "name": "exclusive_gpu",
-            "schedule": schedule(
-                exclusive_tests,
-                manifest_dir,
-                num_gpus=num_gpus,
-                workers_per_gpu=1,
-            ),
+            "schedule": exclusive_schedule,
         })
     if shared_tests:
         phases.append({
@@ -249,6 +296,7 @@ def schedule_phases(
                 manifest_dir,
                 num_gpus=num_gpus,
                 workers_per_gpu=workers_per_gpu,
+                gpu_load_offsets=exclusive_gpu_loads,
             ),
         })
     return phases
