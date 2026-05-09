@@ -428,6 +428,203 @@ PY
     return "$phase_failures"
 }
 
+run_pipelined_exclusive_shared() {
+    CURRENT_PHASE="pipelined"
+
+    echo "=== E2E pipelined phases: exclusive_gpu -> shared ==="
+    echo "Exclusive workers keep whole-GPU isolation; each GPU starts its shared workers as soon as its exclusive queue finishes."
+    echo ""
+
+    local -a pids=()
+    local -a worker_labels=()
+    local -a worker_gpu_ids=()
+    local -a worker_phase_names=()
+    local -a worker_finished=()
+    local -a shared_started=()
+    local planned_workers
+    planned_workers=$(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(sum(len(workers) for phase in data["phases"] for workers in phase["schedule"].values()))
+PY
+)
+    TOTAL_WORKERS="$planned_workers"
+
+    launch_worker() {
+        local phase_name="$1"
+        local gpu_id="$2"
+        local worker_idx="$3"
+        local worker_tests="$4"
+        local worker_count label physical_gpu_id
+
+        worker_count=$(echo "$worker_tests" | wc -w)
+        [ "$worker_count" -eq 0 ] && return 0
+
+        label="gpu${gpu_id}-${phase_name}-w${worker_idx}"
+        physical_gpu_id="${GPU_IDS[$gpu_id]}"
+        echo "  $label: $worker_count tests"
+
+        (
+            export CUDA_VISIBLE_DEVICES=$physical_gpu_id
+            # shellcheck disable=SC2086
+            "$HF_PYTHON" -m pytest $worker_tests -v \
+                --engine-dir "$ENGINE_DIR" \
+                --trtmc-binary "$TRTMC_BINARY" \
+                --hf-python "$HF_PYTHON" \
+                --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
+                --junitxml="$RESULT_DIR/junit-${label}.xml" \
+                "${EXTRA_ARGS[@]}" \
+                > "$RESULT_DIR/console-${label}.log" 2>&1
+        ) &
+        pids+=($!)
+        worker_labels+=("$label")
+        worker_gpu_ids+=("$gpu_id")
+        worker_phase_names+=("$phase_name")
+        worker_finished+=(0)
+        ALL_WORKER_LABELS+=("$label")
+    }
+
+    launch_shared_for_gpu() {
+        local gpu_id="$1"
+        if [ "${shared_started[$gpu_id]:-0}" -eq 1 ]; then
+            return 0
+        fi
+        shared_started[$gpu_id]=1
+
+        while IFS= read -r line; do
+            local worker_idx worker_tests
+            worker_idx=$(echo "$line" | cut -d' ' -f1)
+            worker_tests=$(echo "$line" | cut -d' ' -f2-)
+            launch_worker "shared" "$gpu_id" "$worker_idx" "$worker_tests"
+        done < <(python - "$SCHEDULE_JSON" "$gpu_id" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][1]["schedule"]
+for w_idx, tests in enumerate(schedule.get(sys.argv[2], [])):
+    print(f'{w_idx} {" ".join(tests)}')
+PY
+)
+    }
+
+    local -a exclusive_gpu_ids=()
+    while IFS= read -r line; do
+        GPU_ID=$(echo "$line" | cut -d' ' -f1)
+        WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
+        WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
+        exclusive_gpu_ids+=("$GPU_ID")
+        launch_worker "exclusive_gpu" "$GPU_ID" "$WORKER_IDX" "$WORKER_TESTS"
+    done < <(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][0]["schedule"]
+for gpu_id in sorted(schedule, key=int):
+    for w_idx, tests in enumerate(schedule[gpu_id]):
+        print(f'{gpu_id} {w_idx} {" ".join(tests)}')
+PY
+)
+
+    while IFS= read -r GPU_ID; do
+        local has_exclusive=0
+        for exclusive_gpu_id in "${exclusive_gpu_ids[@]}"; do
+            if [ "$exclusive_gpu_id" = "$GPU_ID" ]; then
+                has_exclusive=1
+                break
+            fi
+        done
+        if [ "$has_exclusive" -eq 0 ]; then
+            launch_shared_for_gpu "$GPU_ID"
+        fi
+    done < <(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+for gpu_id in sorted(data["phases"][1]["schedule"], key=int):
+    print(gpu_id)
+PY
+)
+
+    if [ "${#pids[@]}" -eq 0 ]; then
+        echo "No workers in pipelined E2E schedule"
+        return 0
+    fi
+
+    echo ""
+    echo "Workers planned: $planned_workers"
+    echo "Initial workers launched: ${#pids[@]} (PIDs: ${pids[*]})"
+    echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
+    echo "  (live output suppressed to avoid interleaving; tail -f a log to watch)"
+    echo "Waiting for pipelined workers..."
+    echo ""
+
+    local pipeline_failures=0
+    local workers_done=0
+    local last_progress_ts=0
+    local i pid rc running_now now_ts log summary
+
+    while [ "$workers_done" -lt "$planned_workers" ]; do
+        running_now=0
+        for i in "${!pids[@]}"; do
+            if [ "${worker_finished[$i]}" -eq 1 ]; then
+                continue
+            fi
+
+            pid="${pids[$i]}"
+            if kill -0 "$pid" 2>/dev/null; then
+                running_now=$((running_now + 1))
+                continue
+            fi
+
+            if wait "$pid"; then
+                rc=0
+            else
+                rc=$?
+            fi
+
+            worker_finished[$i]=1
+            workers_done=$((workers_done + 1))
+            if [ "$rc" -ne 0 ]; then
+                pipeline_failures=$((pipeline_failures + 1))
+                FAILURES=$((FAILURES + 1))
+                echo "  ${worker_labels[$i]}: FAILED (exit code $rc)"
+            else
+                echo "  ${worker_labels[$i]}: OK"
+            fi
+
+            log="$RESULT_DIR/console-${worker_labels[$i]}.log"
+            summary=$(grep -E "^=+ .* in .* =+$" "$log" | tail -1 || true)
+            [ -n "$summary" ] && echo "    $summary"
+
+            if [ "${worker_phase_names[$i]}" = "exclusive_gpu" ]; then
+                launch_shared_for_gpu "${worker_gpu_ids[$i]}"
+            fi
+        done
+
+        now_ts=$(date +%s)
+        if [ "$last_progress_ts" -eq 0 ] || [ $(( now_ts - last_progress_ts )) -ge "$PROGRESS_INTERVAL" ] || [ "$running_now" -eq 0 ]; then
+            print_progress "$workers_done" "$running_now"
+            last_progress_ts="$now_ts"
+        fi
+
+        [ "$workers_done" -lt "$planned_workers" ] && sleep 5
+    done
+
+    echo ""
+    echo "=== Pipelined exclusive/shared schedule finished ==="
+
+    return "$pipeline_failures"
+}
+
 # --- Launch workers and collect exit codes ------------------------------------
 
 START_TIME=$(date +%s)
@@ -446,12 +643,27 @@ print(len(data["phases"]))
 PY
 )
 
-for ((phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++)); do
-    if ! run_schedule_phase "$phase_idx"; then
-        echo "Stopping after failed E2E phase: $CURRENT_PHASE"
-        break
+if python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+names = [phase["name"] for phase in data["phases"]]
+raise SystemExit(0 if names == ["exclusive_gpu", "shared"] else 1)
+PY
+then
+    if ! run_pipelined_exclusive_shared; then
+        echo "Stopping after failed pipelined E2E schedule"
     fi
-done
+else
+    for ((phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++)); do
+        if ! run_schedule_phase "$phase_idx"; then
+            echo "Stopping after failed E2E phase: $CURRENT_PHASE"
+            break
+        fi
+    done
+fi
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

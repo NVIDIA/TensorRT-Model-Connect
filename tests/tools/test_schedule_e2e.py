@@ -142,7 +142,7 @@ def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path
     assert sum(len(workers) for workers in shared_schedule.values()) == 4
 
 
-def test_run_e2e_parallel_executes_exclusive_then_shared_phases(tmp_path: Path) -> None:
+def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -247,9 +247,8 @@ def test_run_e2e_parallel_executes_exclusive_then_shared_phases(tmp_path: Path) 
     )
 
     assert completed.returncode == 0, completed.stdout
-    assert completed.stdout.index("=== E2E phase: exclusive_gpu ===") < (
-        completed.stdout.index("=== E2E phase: shared ===")
-    )
+    assert "=== E2E pipelined phases: exclusive_gpu -> shared ===" in completed.stdout
+    assert "Workers planned: 6" in completed.stdout
     assert "gpu0-exclusive_gpu-w0" in completed.stdout
     assert "gpu0-shared-w0" in completed.stdout
 
