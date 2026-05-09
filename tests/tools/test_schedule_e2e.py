@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -81,6 +84,180 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
         _test_id("small-b"),
         _test_id("large-a"),
     ])
+
+
+def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path) -> None:
+    for name in ("exclusive-a", "exclusive-b", "exclusive-c"):
+        _write_manifest(
+            tmp_path,
+            name,
+            runtime_strategy="diffusion_flux",
+            e2e_parallel_resource="exclusive_gpu",
+        )
+    for name in ("small-a", "small-b", "small-c", "small-d", "small-e", "small-f"):
+        _write_manifest(tmp_path, name)
+
+    phases = schedule_e2e.schedule_phases(
+        [
+            _test_id("exclusive-a"),
+            _test_id("exclusive-b"),
+            _test_id("exclusive-c"),
+            _test_id("small-a"),
+            _test_id("small-b"),
+            _test_id("small-c"),
+            _test_id("small-d"),
+            _test_id("small-e"),
+            _test_id("small-f"),
+        ],
+        tmp_path,
+        num_gpus=2,
+        workers_per_gpu=2,
+    )
+
+    assert [phase["name"] for phase in phases] == ["exclusive_gpu", "shared"]
+    exclusive_schedule = phases[0]["schedule"]
+    shared_schedule = phases[1]["schedule"]
+
+    exclusive_tests = [
+        test for workers in exclusive_schedule.values() for worker in workers for test in worker
+    ]
+    shared_tests = [
+        test for workers in shared_schedule.values() for worker in workers for test in worker
+    ]
+
+    assert sorted(exclusive_tests) == sorted([
+        _test_id("exclusive-a"),
+        _test_id("exclusive-b"),
+        _test_id("exclusive-c"),
+    ])
+    assert sorted(shared_tests) == sorted([
+        _test_id("small-a"),
+        _test_id("small-b"),
+        _test_id("small-c"),
+        _test_id("small-d"),
+        _test_id("small-e"),
+        _test_id("small-f"),
+    ])
+    assert sum(len(workers) for workers in exclusive_schedule.values()) == 2
+    assert sum(len(workers) for workers in shared_schedule.values()) == 4
+
+
+def test_run_e2e_parallel_executes_exclusive_then_shared_phases(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    nvidia_smi = bin_dir / "nvidia-smi"
+    nvidia_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'GPU 0: fake\\nGPU 1: fake\\n'\n",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
+
+    fake_python = bin_dir / "fake-python"
+    fake_python.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import html
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            if args == ["-"]:
+                sys.stdin.read()
+                raise SystemExit(0)
+
+            if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
+                tests = [
+                    arg for arg in args
+                    if arg.startswith("tests/test_e2e.py::test_e2e[")
+                ]
+                junit_path = None
+                for arg in args:
+                    if arg.startswith("--junitxml="):
+                        junit_path = arg.split("=", 1)[1]
+                        break
+                for test in tests:
+                    print(f"{test} PASSED")
+                print(f"=== {len(tests)} passed in 0.01s ===")
+                if junit_path:
+                    cases = "".join(
+                        f'<testcase classname="e2e" name="{html.escape(test)}" />'
+                        for test in tests
+                    )
+                    Path(junit_path).write_text(
+                        f'<testsuites><testsuite tests="{len(tests)}">'
+                        f"{cases}</testsuite></testsuites>",
+                        encoding="utf-8",
+                    )
+                raise SystemExit(0)
+
+            raise SystemExit(f"unexpected fake-python args: {args}")
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    models_file = tmp_path / "models.txt"
+    models_file.write_text(
+        "\n".join([
+            "flux-2-dev-l0",
+            "flux-schnell-l0",
+            "albert-base",
+            "bert-base-uncased",
+            "gpt2-125m",
+            "opt-125m",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    result_dir = tmp_path / "results"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+    completed = subprocess.run(
+        [
+            str(repo_root / "scripts" / "run_e2e_parallel.sh"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--result-dir",
+            str(result_dir),
+            "--trtmc-binary",
+            str(tmp_path / "trtmc"),
+            "--hf-python",
+            str(fake_python),
+            "--num-gpus",
+            "2",
+            "--workers-per-gpu",
+            "2",
+            "--models-file",
+            str(models_file),
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout
+    assert completed.stdout.index("=== E2E phase: exclusive_gpu ===") < (
+        completed.stdout.index("=== E2E phase: shared ===")
+    )
+    assert "gpu0-exclusive_gpu-w0" in completed.stdout
+    assert "gpu0-shared-w0" in completed.stdout
+
+    schedule = json.loads((result_dir / "schedule.json").read_text(encoding="utf-8"))
+    assert [phase["name"] for phase in schedule["phases"]] == [
+        "exclusive_gpu",
+        "shared",
+    ]
+    assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
 
 
 def test_qwen35_is_marked_exclusive_gpu() -> None:

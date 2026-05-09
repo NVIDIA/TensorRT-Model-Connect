@@ -197,60 +197,9 @@ SCHEDULE_JSON="$RESULT_DIR/schedule.json"
 echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" \
     --num-gpus "$NUM_GPUS" \
     --workers-per-gpu "$WORKERS_PER_GPU" \
+    --split-exclusive-phases \
     > "$SCHEDULE_JSON"
 
-echo ""
-
-# --- Launch workers -----------------------------------------------------------
-
-PIDS=()
-WORKER_LABELS=()
-START_TIME=$(date +%s)
-
-# Parse schedule JSON and launch one pytest per worker slot.
-# jq-free: use Python to emit "gpu_id worker_idx test1 test2 ..." lines.
-while IFS= read -r line; do
-    GPU_ID=$(echo "$line" | cut -d' ' -f1)
-    WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
-    WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
-    WORKER_COUNT=$(echo "$WORKER_TESTS" | wc -w)
-
-    [ "$WORKER_COUNT" -eq 0 ] && continue
-
-    LABEL="gpu${GPU_ID}-w${WORKER_IDX}"
-    PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
-    echo "  $LABEL: $WORKER_COUNT tests"
-
-    (
-        export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
-        # shellcheck disable=SC2086
-        "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
-            --engine-dir "$ENGINE_DIR" \
-            --trtmc-binary "$TRTMC_BINARY" \
-            --hf-python "$HF_PYTHON" \
-            --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
-            --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
-            "${EXTRA_ARGS[@]}" \
-            > "$RESULT_DIR/console-${LABEL}.log" 2>&1
-    ) &
-    PIDS+=($!)
-    WORKER_LABELS+=("$LABEL")
-
-done < <(python -c "
-import json, sys
-schedule = json.load(open('$SCHEDULE_JSON'))
-for gpu_id in sorted(schedule, key=int):
-    for w_idx, tests in enumerate(schedule[gpu_id]):
-        print(f'{gpu_id} {w_idx} {\" \".join(tests)}')
-")
-
-TOTAL_WORKERS=${#PIDS[@]}
-
-echo ""
-echo "Workers launched: $TOTAL_WORKERS (PIDs: ${PIDS[*]})"
-echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
-echo "  (live output suppressed to avoid interleaving — tail -f a log to watch)"
-echo "Waiting for all workers..."
 echo ""
 
 # --- Helpers ------------------------------------------------------------------
@@ -335,59 +284,173 @@ print_progress() {
         eta_str=" | ETA $(format_duration "$eta")"
     fi
 
-    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
+    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | ${CURRENT_PHASE} workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
 }
 
-# --- Wait and collect exit codes ----------------------------------------------
+run_schedule_phase() {
+    local phase_idx="$1"
+    local phase_name
+    phase_name=$(python - "$SCHEDULE_JSON" "$phase_idx" <<'PY'
+import json
+import sys
 
-FAILURES=0
-WORKERS_DONE=0
-LAST_PROGRESS_TS=0
-declare -a WORKER_FINISHED
-for i in "${!PIDS[@]}"; do
-    WORKER_FINISHED[$i]=0
-done
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(data["phases"][int(sys.argv[2])]["name"])
+PY
+)
+    CURRENT_PHASE="$phase_name"
 
-while [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ]; do
-    RUNNING_NOW=0
-    for i in "${!PIDS[@]}"; do
-        if [ "${WORKER_FINISHED[$i]}" -eq 1 ]; then
-            continue
-        fi
+    echo "=== E2E phase: $phase_name ==="
 
-        pid="${PIDS[$i]}"
-        if kill -0 "$pid" 2>/dev/null; then
-            RUNNING_NOW=$((RUNNING_NOW + 1))
-            continue
-        fi
+    local -a pids=()
+    local -a worker_labels=()
+    local phase_start
+    phase_start=$(date +%s)
 
-        if wait "$pid"; then
-            rc=0
-        else
-            rc=$?
-        fi
+    # Parse schedule JSON and launch one pytest per worker slot.
+    # jq-free: use Python to emit "gpu_id worker_idx test1 test2 ..." lines.
+    while IFS= read -r line; do
+        GPU_ID=$(echo "$line" | cut -d' ' -f1)
+        WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
+        WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
+        WORKER_COUNT=$(echo "$WORKER_TESTS" | wc -w)
 
-        WORKER_FINISHED[$i]=1
-        WORKERS_DONE=$((WORKERS_DONE + 1))
-        if [ "$rc" -ne 0 ]; then
-            FAILURES=$((FAILURES + 1))
-            echo "  ${WORKER_LABELS[$i]}: FAILED (exit code $rc)"
-        else
-            echo "  ${WORKER_LABELS[$i]}: OK"
-        fi
+        [ "$WORKER_COUNT" -eq 0 ] && continue
 
-        LOG="$RESULT_DIR/console-${WORKER_LABELS[$i]}.log"
-        SUMMARY=$(grep -E "^=+ .* in .* =+$" "$LOG" | tail -1 || true)
-        [ -n "$SUMMARY" ] && echo "    $SUMMARY"
-    done
+        LABEL="gpu${GPU_ID}-${phase_name}-w${WORKER_IDX}"
+        PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
+        echo "  $LABEL: $WORKER_COUNT tests"
 
-    NOW_TS=$(date +%s)
-    if [ "$LAST_PROGRESS_TS" -eq 0 ] || [ $(( NOW_TS - LAST_PROGRESS_TS )) -ge "$PROGRESS_INTERVAL" ] || [ "$RUNNING_NOW" -eq 0 ]; then
-        print_progress "$WORKERS_DONE" "$RUNNING_NOW"
-        LAST_PROGRESS_TS="$NOW_TS"
+        (
+            export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
+            # shellcheck disable=SC2086
+            "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
+                --engine-dir "$ENGINE_DIR" \
+                --trtmc-binary "$TRTMC_BINARY" \
+                --hf-python "$HF_PYTHON" \
+                --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
+                --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
+                "${EXTRA_ARGS[@]}" \
+                > "$RESULT_DIR/console-${LABEL}.log" 2>&1
+        ) &
+        pids+=($!)
+        worker_labels+=("$LABEL")
+        ALL_WORKER_LABELS+=("$LABEL")
+
+    done < <(python - "$SCHEDULE_JSON" "$phase_idx" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][int(sys.argv[2])]["schedule"]
+for gpu_id in sorted(schedule, key=int):
+    for w_idx, tests in enumerate(schedule[gpu_id]):
+        print(f'{gpu_id} {w_idx} {" ".join(tests)}')
+PY
+)
+
+    TOTAL_WORKERS=${#pids[@]}
+    if [ "$TOTAL_WORKERS" -eq 0 ]; then
+        echo "No workers in phase $phase_name"
+        return 0
     fi
 
-    [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ] && sleep 5
+    echo ""
+    echo "Workers launched: $TOTAL_WORKERS (PIDs: ${pids[*]})"
+    echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
+    echo "  (live output suppressed to avoid interleaving; tail -f a log to watch)"
+    echo "Waiting for phase $phase_name workers..."
+    echo ""
+
+    local phase_failures=0
+    local workers_done=0
+    local last_progress_ts=0
+    local -a worker_finished=()
+    local i pid rc running_now now_ts log summary
+    for i in "${!pids[@]}"; do
+        worker_finished[$i]=0
+    done
+
+    while [ "$workers_done" -lt "$TOTAL_WORKERS" ]; do
+        running_now=0
+        for i in "${!pids[@]}"; do
+            if [ "${worker_finished[$i]}" -eq 1 ]; then
+                continue
+            fi
+
+            pid="${pids[$i]}"
+            if kill -0 "$pid" 2>/dev/null; then
+                running_now=$((running_now + 1))
+                continue
+            fi
+
+            if wait "$pid"; then
+                rc=0
+            else
+                rc=$?
+            fi
+
+            worker_finished[$i]=1
+            workers_done=$((workers_done + 1))
+            if [ "$rc" -ne 0 ]; then
+                phase_failures=$((phase_failures + 1))
+                FAILURES=$((FAILURES + 1))
+                echo "  ${worker_labels[$i]}: FAILED (exit code $rc)"
+            else
+                echo "  ${worker_labels[$i]}: OK"
+            fi
+
+            log="$RESULT_DIR/console-${worker_labels[$i]}.log"
+            summary=$(grep -E "^=+ .* in .* =+$" "$log" | tail -1 || true)
+            [ -n "$summary" ] && echo "    $summary"
+        done
+
+        now_ts=$(date +%s)
+        if [ "$last_progress_ts" -eq 0 ] || [ $(( now_ts - last_progress_ts )) -ge "$PROGRESS_INTERVAL" ] || [ "$running_now" -eq 0 ]; then
+            print_progress "$workers_done" "$running_now"
+            last_progress_ts="$now_ts"
+        fi
+
+        [ "$workers_done" -lt "$TOTAL_WORKERS" ] && sleep 5
+    done
+
+    local phase_end phase_elapsed phase_minutes phase_seconds_rem
+    phase_end=$(date +%s)
+    phase_elapsed=$(( phase_end - phase_start ))
+    phase_minutes=$(( phase_elapsed / 60 ))
+    phase_seconds_rem=$(( phase_elapsed % 60 ))
+
+    echo ""
+    echo "=== Phase $phase_name finished in ${phase_minutes}m ${phase_seconds_rem}s ==="
+
+    return "$phase_failures"
+}
+
+# --- Launch workers and collect exit codes ------------------------------------
+
+START_TIME=$(date +%s)
+declare -a ALL_WORKER_LABELS=()
+FAILURES=0
+TOTAL_WORKERS=0
+CURRENT_PHASE="startup"
+
+PHASE_COUNT=$(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(len(data["phases"]))
+PY
+)
+
+for ((phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++)); do
+    if ! run_schedule_phase "$phase_idx"; then
+        echo "Stopping after failed E2E phase: $CURRENT_PHASE"
+        break
+    fi
 done
 
 END_TIME=$(date +%s)
@@ -396,7 +459,7 @@ MINUTES=$(( ELAPSED / 60 ))
 SECONDS_REM=$(( ELAPSED % 60 ))
 
 echo ""
-echo "=== All $TOTAL_WORKERS workers finished in ${MINUTES}m ${SECONDS_REM}s ==="
+echo "=== All E2E phases finished in ${MINUTES}m ${SECONDS_REM}s ==="
 
 # --- Merge JUnit XMLs --------------------------------------------------------
 
@@ -431,7 +494,7 @@ echo ""
 
 # Per-test results from each worker
 echo "--- Per-test results ---"
-for LABEL in "${WORKER_LABELS[@]}"; do
+for LABEL in "${ALL_WORKER_LABELS[@]}"; do
     LOG="$RESULT_DIR/console-${LABEL}.log"
     [ -f "$LOG" ] || continue
     echo ""
@@ -447,7 +510,7 @@ done
 if [ "$FAILURES" -gt 0 ]; then
     echo ""
     echo "--- Failure details ---"
-    for LABEL in "${WORKER_LABELS[@]}"; do
+    for LABEL in "${ALL_WORKER_LABELS[@]}"; do
         LOG="$RESULT_DIR/console-${LABEL}.log"
         [ -f "$LOG" ] || continue
         python -c "

@@ -734,6 +734,14 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path in ("tests/test_e2e.py", "tests/conftest.py"):
         return RuleMatch("e2e_entrypoint", list(imap.all_model_names), unit_tiers, rebuild)
 
+    # Rule 9b: E2E runner/scheduler scripts affect every selected model.
+    if path in {
+        "scripts/run_e2e_parallel.sh",
+        "scripts/schedule_e2e.py",
+        "scripts/warm_hf_cache.py",
+    }:
+        return RuleMatch("e2e_runner_script", list(imap.all_model_names), unit_tiers, rebuild)
+
     # Rule 10: Unit test directories (no E2E)
     if path.startswith("tests/builder/"):
         return RuleMatch("unit_builder", [], unit_tiers, rebuild)

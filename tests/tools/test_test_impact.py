@@ -427,6 +427,12 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
+    def test_e2e_runner_scripts_trigger_all_models(self, imap):
+        """E2E runner changes must not skip E2E validation."""
+        match = test_impact.classify_file("scripts/run_e2e_parallel.sh", imap)
+        assert match.rule == "e2e_runner_script"
+        assert match.models == imap.all_model_names
+
     def test_scripts_no_impact(self, imap):
         """scripts/ -> no E2E tests."""
         match = test_impact.classify_file("scripts/validate_family.sh", imap)
