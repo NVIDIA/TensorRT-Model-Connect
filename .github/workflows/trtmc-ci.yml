@@ -3,7 +3,6 @@ name: TensorRT-Model-Connect Premerge CI
 on:
   push:
     branches:
-      - main
       - ai-staging
     paths-ignore:
       - "website/**"

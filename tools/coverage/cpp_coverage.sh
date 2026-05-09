@@ -16,8 +16,8 @@ Environment:
   BUILD_DIR              Build directory (default: build-cov)
   REPORT_ROOT            Report directory (default: artifacts/coverage/cpp)
   CMAKE_GENERATOR        CMake generator (default: Ninja)
-  CMAKE_BUILD_TYPE       Build type (default: Debug)
-  COVERAGE_COMPILE_FLAGS Compiler flags (default: "--coverage -O0 -g")
+  CMAKE_BUILD_TYPE       Build type (default: Coverage)
+  COVERAGE_COMPILE_FLAGS Compiler flags (default: "--coverage -O0 -g0")
   COVERAGE_LINK_FLAGS    Linker flags (default: "--coverage")
   BUILD_PARALLEL         Build parallelism passed to cmake --build --parallel
   CMAKE_EXTRA_ARGS       Extra CMake configure args (space-separated)
@@ -66,8 +66,8 @@ SUMMARY_TXT="${SUMMARY_TXT:-${REPORT_ROOT}/summary.txt}"
 GATE_LOG="${GATE_LOG:-${REPORT_ROOT}/gate.log}"
 
 CMAKE_GENERATOR="${CMAKE_GENERATOR:-Ninja}"
-CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}"
-COVERAGE_COMPILE_FLAGS="${COVERAGE_COMPILE_FLAGS:---coverage -O0 -g}"
+CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Coverage}"
+COVERAGE_COMPILE_FLAGS="${COVERAGE_COMPILE_FLAGS:---coverage -O0 -g0}"
 COVERAGE_LINK_FLAGS="${COVERAGE_LINK_FLAGS:---coverage}"
 BUILD_PARALLEL="${BUILD_PARALLEL:-}"
 CPP_COVERAGE_MIN_LINE="${CPP_COVERAGE_MIN_LINE:-100}"
