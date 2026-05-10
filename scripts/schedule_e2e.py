@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Schedule E2E tests across GPUs and workers for balanced load.
 
-Reads pytest test IDs (one per line on stdin) and model manifests,
-classifies models as large/small, then distributes them evenly across
-GPU×worker slots so each GPU runs a mix of heavy and light models.
+Reads pytest test IDs (one per line on stdin), model manifests, and optional
+timing estimates, then distributes work across GPU worker slots by estimated
+critical-path load.
 
 Usage:
     pytest tests/test_e2e.py --co -q | grep test_e2e | \\
@@ -36,8 +36,11 @@ _HEAVY_STRATEGIES = frozenset({
 })
 
 _EXCLUSIVE_GPU_RESOURCE = "exclusive_gpu"
-_LARGE_TEST_WEIGHT = 4
-_EXCLUSIVE_GPU_TEST_WEIGHT = 8
+_SMALL_TEST_WEIGHT = 90.0
+_LARGE_TEST_WEIGHT = 300.0
+_EXCLUSIVE_GPU_TEST_WEIGHT = 900.0
+_QUICK_SKIP_TEST_WEIGHT = 1.0
+_TIMING_ESTIMATES_FILE = "timing_estimates.json"
 
 
 def _param_billions(hf_id: str) -> float | None:
@@ -107,6 +110,84 @@ def _load_manifests(manifest_dir: Path) -> dict[str, dict]:
     return manifests
 
 
+def _load_timing_estimates(path: Path | None) -> dict[str, float]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("estimates_s"), dict):
+        data = data["estimates_s"]
+    if not isinstance(data, dict):
+        return {}
+
+    estimates: dict[str, float] = {}
+    for name, value in data.items():
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 0:
+            estimates[str(name)] = seconds
+    return estimates
+
+
+def _default_timing_estimates_path(manifest_dir: Path) -> Path:
+    return manifest_dir.parent / _TIMING_ESTIMATES_FILE
+
+
+def _load_waived_models(waives_path: Path | None, actions: set[str]) -> set[str]:
+    if waives_path is None or not waives_path.is_file():
+        return set()
+
+    waived: set[str] = set()
+    for line in waives_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            continue
+        action = parts[1].upper()
+        if action not in actions:
+            continue
+        name = parts[0].split("/", 1)[-1]
+        waived.add(name)
+    return waived
+
+
+def _non_gating_success_manifest(manifest: dict) -> bool:
+    if manifest.get("skip_comparison"):
+        return True
+    reference_backend = str(manifest.get("reference_backend", "") or "")
+    reference_family = str(manifest.get("reference_family", "") or "")
+    return (
+        reference_backend == "none"
+        or (reference_backend == "invariant_only" and reference_family == "ocr_markdown")
+    )
+
+
+def _quick_skip_models(
+    test_ids: list[str],
+    manifests: dict[str, dict],
+    waives_path: Path | None = None,
+    skip_waived_xfail: bool = False,
+    skip_non_gating: bool = False,
+) -> set[str]:
+    models = {_model_name_from_test_id(tid) for tid in test_ids}
+    quick_skip: set[str] = set()
+    if skip_waived_xfail:
+        quick_skip.update(models & _load_waived_models(waives_path, {"XFAIL"}))
+    if skip_non_gating:
+        quick_skip.update(
+            name
+            for name in models
+            if _non_gating_success_manifest(manifests.get(name, {}))
+        )
+    return quick_skip
+
+
 def _model_name_from_test_id(test_id: str) -> str:
     match = re.search(r"\[(.+?)\]", test_id)
     return match.group(1) if match else ""
@@ -129,28 +210,41 @@ def split_by_parallel_resource(
     return exclusive_tests, shared_tests
 
 
-def _test_weight(test_id: str, manifests: dict[str, dict]) -> int:
-    manifest = manifests.get(_model_name_from_test_id(test_id), {})
+def _test_weight(
+    test_id: str,
+    manifests: dict[str, dict],
+    timing_estimates: dict[str, float] | None = None,
+    quick_skip_models: set[str] | None = None,
+) -> float:
+    name = _model_name_from_test_id(test_id)
+    if quick_skip_models and name in quick_skip_models:
+        return _QUICK_SKIP_TEST_WEIGHT
+    if timing_estimates and name in timing_estimates:
+        return timing_estimates[name]
+
+    manifest = manifests.get(name, {})
     if classify_parallel_resource(manifest) == _EXCLUSIVE_GPU_RESOURCE:
         return _EXCLUSIVE_GPU_TEST_WEIGHT
     if classify_size(manifest) == "large":
         return _LARGE_TEST_WEIGHT
-    return 1
+    return _SMALL_TEST_WEIGHT
 
 
 def _estimated_gpu_loads(
     assignments: dict[str, list[list[str]]],
     manifest_dir: Path,
+    timing_estimates: dict[str, float] | None = None,
+    quick_skip_models: set[str] | None = None,
 ) -> dict[int, int]:
     """Estimate per-GPU schedule load for phase-aware balancing."""
     manifests = _load_manifests(manifest_dir)
     loads: dict[int, int] = {}
     for gpu_id, workers in assignments.items():
-        loads[int(gpu_id)] = sum(
-            _test_weight(test_id, manifests)
+        loads[int(gpu_id)] = int(sum(
+            _test_weight(test_id, manifests, timing_estimates, quick_skip_models)
             for worker in workers
             for test_id in worker
-        )
+        ))
     return loads
 
 
@@ -165,19 +259,23 @@ def schedule(
     num_gpus: int,
     workers_per_gpu: int,
     gpu_load_offsets: dict[int, int] | None = None,
+    timing_estimates: dict[str, float] | None = None,
+    quick_skip_models: set[str] | None = None,
 ) -> dict[str, list[list[str]]]:
     """Produce balanced GPU×worker assignments.
 
     Algorithm:
-    1. Classify each test as large or small using its manifest.
-    2. Round-robin large models across GPUs, then small models across GPUs.
-       This ensures each GPU gets ~equal counts of each size tier.
-    3. For each GPU, spread large models across every worker, then fill in
-       small models.  Large and small tests are distributed independently so
-       even worker counts do not alias with an L/S interleave pattern.
+    1. Classify exclusive-GPU tests and reserve whole-GPU workers for them.
+    2. Weight each test by observed timing estimates when available, otherwise
+       by coarse manifest size.
+    3. Assign tests longest-processing-time first to the worker slot with the
+       lowest estimated end-to-end load, including any prior exclusive-GPU
+       offset for that GPU.
     """
-    # Load manifests keyed by model name
     manifests = _load_manifests(manifest_dir)
+    if timing_estimates is None:
+        timing_estimates = _load_timing_estimates(
+            _default_timing_estimates_path(manifest_dir))
 
     # Classify
     exclusive_tests: list[str] = []
@@ -194,15 +292,27 @@ def schedule(
         else:
             small_tests.append(tid)
 
+    def weight(tid: str) -> float:
+        return _test_weight(tid, manifests, timing_estimates, quick_skip_models)
+
     # Reserve whole GPUs for exclusive tests. This keeps high-memory build
     # cases from colliding with unrelated workers while preserving parallelism
     # on the remaining GPUs.
     result: dict[str, list[list[str]]] = {}
     reserved_gpu_count = min(len(exclusive_tests), num_gpus)
-    for i, tid in enumerate(exclusive_tests):
-        gpu_id = i % max(reserved_gpu_count, 1)
-        result.setdefault(str(gpu_id), [[]])
-        result[str(gpu_id)][0].append(tid)
+    if exclusive_tests:
+        exclusive_slots = [
+            [0.0, gpu_id, 0, []]
+            for gpu_id in range(max(reserved_gpu_count, 1))
+        ]
+        indexed_exclusive = list(enumerate(exclusive_tests))
+        for _, tid in sorted(indexed_exclusive, key=lambda item: (-weight(item[1]), item[0])):
+            slot = min(exclusive_slots, key=lambda item: (item[0], item[1]))
+            slot[0] += weight(tid)
+            slot[3].append(tid)
+        for _, gpu_id, _, tests_for_gpu in exclusive_slots:
+            if tests_for_gpu:
+                result[str(gpu_id)] = [tests_for_gpu]
 
     shared_gpu_ids = list(range(reserved_gpu_count, num_gpus))
     if not shared_gpu_ids:
@@ -210,47 +320,31 @@ def schedule(
         for gpu_id in shared_gpu_ids:
             result.setdefault(str(gpu_id), [[]])
 
-    # Balance large models against any prior phase load. The pipelined E2E
-    # runner can start shared work on each GPU only after that GPU's exclusive
-    # worker finishes, so assigning equal shared work to a late-starting GPU
-    # creates a tail. Small models stay round-robin to preserve broad fan-out.
-    gpu_large: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
-    gpu_small: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
-    gpu_loads = {
-        gpu_id: int((gpu_load_offsets or {}).get(gpu_id, 0))
-        for gpu_id in shared_gpu_ids
-    }
-
-    for tid in large_tests:
-        gpu_id = min(
-            shared_gpu_ids,
-            key=lambda gid: (gpu_loads[gid], len(gpu_large[gid]), gid),
-        )
-        gpu_large[gpu_id].append(tid)
-        gpu_loads[gpu_id] += _LARGE_TEST_WEIGHT
-    small_gpu_order = sorted(
-        shared_gpu_ids,
-        key=lambda gid: ((gpu_load_offsets or {}).get(gid, 0), gid),
-    )
-    for i, tid in enumerate(small_tests):
-        gpu_small[small_gpu_order[i % len(small_gpu_order)]].append(tid)
-
-    # For each GPU: distribute large and small tests independently.  Do not
-    # interleave first and then take i % workers_per_gpu: with even worker
-    # counts, an L/S pattern aliases so even worker slots receive all large
-    # tests and odd slots receive all small tests.
+    # Schedule shared work using longest-processing-time first across worker
+    # slots.  Each slot starts with the prior exclusive-GPU load for that GPU,
+    # matching the pipelined runner: shared workers on a GPU can only launch
+    # after that GPU's exclusive queue completes.
+    slots: list[list[object]] = []
     for gpu_id in shared_gpu_ids:
-        L = gpu_large[gpu_id]
-        S = gpu_small[gpu_id]
+        for worker_idx in range(workers_per_gpu):
+            slots.append([
+                float((gpu_load_offsets or {}).get(gpu_id, 0)),
+                gpu_id,
+                worker_idx,
+                [],
+            ])
 
+    indexed_shared = list(enumerate([*large_tests, *small_tests]))
+    for _, tid in sorted(indexed_shared, key=lambda item: (-weight(item[1]), item[0])):
+        slot = min(slots, key=lambda item: (item[0], item[1], item[2]))
+        slot[0] = float(slot[0]) + weight(tid)
+        slot[3].append(tid)
+
+    for gpu_id in shared_gpu_ids:
         workers: list[list[str]] = [[] for _ in range(workers_per_gpu)]
-        for i, tid in enumerate(L):
-            workers[i % workers_per_gpu].append(tid)
-        small_offset = len(L) % workers_per_gpu
-        for i, tid in enumerate(S):
-            workers[(i + small_offset) % workers_per_gpu].append(tid)
-
-        # Drop empty workers
+        for _, slot_gpu_id, worker_idx, worker_tests in slots:
+            if slot_gpu_id == gpu_id:
+                workers[int(worker_idx)] = list(worker_tests)
         shared_workers = [w for w in workers if w]
         if str(gpu_id) in result:
             result[str(gpu_id)][0].extend([tid for worker in shared_workers for tid in worker])
@@ -265,6 +359,8 @@ def schedule_phases(
     manifest_dir: Path,
     num_gpus: int,
     workers_per_gpu: int,
+    timing_estimates: dict[str, float] | None = None,
+    quick_skip_models: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Schedule exclusive-GPU tests before shared tests.
 
@@ -274,6 +370,9 @@ def schedule_phases(
     contract while letting shared tests use the full worker fan-out afterward.
     """
     exclusive_tests, shared_tests = split_by_parallel_resource(test_ids, manifest_dir)
+    if timing_estimates is None:
+        timing_estimates = _load_timing_estimates(
+            _default_timing_estimates_path(manifest_dir))
     phases: list[dict[str, object]] = []
     exclusive_gpu_loads: dict[int, int] = {}
     if exclusive_tests:
@@ -282,8 +381,11 @@ def schedule_phases(
             manifest_dir,
             num_gpus=num_gpus,
             workers_per_gpu=1,
+            timing_estimates=timing_estimates,
+            quick_skip_models=quick_skip_models,
         )
-        exclusive_gpu_loads = _estimated_gpu_loads(exclusive_schedule, manifest_dir)
+        exclusive_gpu_loads = _estimated_gpu_loads(
+            exclusive_schedule, manifest_dir, timing_estimates, quick_skip_models)
         phases.append({
             "name": "exclusive_gpu",
             "schedule": exclusive_schedule,
@@ -297,6 +399,8 @@ def schedule_phases(
                 num_gpus=num_gpus,
                 workers_per_gpu=workers_per_gpu,
                 gpu_load_offsets=exclusive_gpu_loads,
+                timing_estimates=timing_estimates,
+                quick_skip_models=quick_skip_models,
             ),
         })
     return phases
@@ -323,13 +427,49 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "tests" / "e2e" / "models",
     )
+    parser.add_argument(
+        "--timing-estimates",
+        type=Path,
+        default=None,
+        help="JSON model-name to estimated seconds mapping",
+    )
+    parser.add_argument(
+        "--waives",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "tests" / "e2e" / "waives.txt",
+        help="E2E waives file used for quick-skip scheduling",
+    )
+    parser.add_argument(
+        "--skip-waived-xfail",
+        action="store_true",
+        help="treat XFAIL waived tests as quick skips in the schedule",
+    )
+    parser.add_argument(
+        "--skip-non-gating",
+        action="store_true",
+        help="treat smoke-only/non-gating tests as quick skips in the schedule",
+    )
     args = parser.parse_args()
+    timing_estimates_path = (
+        args.timing_estimates
+        if args.timing_estimates is not None
+        else _default_timing_estimates_path(args.manifest_dir)
+    )
+    timing_estimates = _load_timing_estimates(timing_estimates_path)
 
     # Read test IDs from stdin
     test_ids = [line.strip() for line in sys.stdin if line.strip()]
     if not test_ids:
         print("ERROR: No test IDs on stdin.", file=sys.stderr)
         sys.exit(1)
+    manifests = _load_manifests(args.manifest_dir)
+    quick_skip_models = _quick_skip_models(
+        test_ids,
+        manifests,
+        waives_path=args.waives,
+        skip_waived_xfail=args.skip_waived_xfail,
+        skip_non_gating=args.skip_non_gating,
+    )
 
     if args.split_exclusive_phases:
         phases = schedule_phases(
@@ -337,12 +477,25 @@ def main() -> None:
             args.manifest_dir,
             args.num_gpus,
             args.workers_per_gpu,
+            timing_estimates=timing_estimates,
+            quick_skip_models=quick_skip_models,
         )
         print(
             f"Schedule: {len(test_ids)} tests across {args.num_gpus} GPUs "
             f"x {args.workers_per_gpu} workers/GPU in {len(phases)} phase(s)",
             file=sys.stderr,
         )
+        if timing_estimates:
+            print(
+                f"  Timing estimates: {timing_estimates_path} "
+                f"({len(timing_estimates)} models)",
+                file=sys.stderr,
+            )
+        if quick_skip_models:
+            print(
+                f"  Quick-skip weighting: {len(quick_skip_models)} models",
+                file=sys.stderr,
+            )
         for phase in phases:
             name = str(phase["name"])
             schedule_for_phase = phase["schedule"]
@@ -357,7 +510,12 @@ def main() -> None:
                 f"  Phase {name}: {phase_total} tests across {phase_workers} workers",
                 file=sys.stderr,
             )
-            _print_schedule_summary(schedule_for_phase, args.manifest_dir)
+            _print_schedule_summary(
+                schedule_for_phase,
+                args.manifest_dir,
+                timing_estimates,
+                quick_skip_models,
+            )
         json.dump({"phases": phases}, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return
@@ -367,27 +525,48 @@ def main() -> None:
         args.manifest_dir,
         args.num_gpus,
         args.workers_per_gpu,
+        timing_estimates=timing_estimates,
+        quick_skip_models=quick_skip_models,
     )
 
     print(f"Schedule: {len(test_ids)} tests across {args.num_gpus} GPUs "
           f"x {args.workers_per_gpu} workers/GPU", file=sys.stderr)
-    _print_schedule_summary(assignments, args.manifest_dir)
+    if timing_estimates:
+        print(
+            f"  Timing estimates: {timing_estimates_path} "
+            f"({len(timing_estimates)} models)",
+            file=sys.stderr,
+        )
+    if quick_skip_models:
+        print(
+            f"  Quick-skip weighting: {len(quick_skip_models)} models",
+            file=sys.stderr,
+        )
+    _print_schedule_summary(
+        assignments, args.manifest_dir, timing_estimates, quick_skip_models)
 
     # Output JSON to stdout
     json.dump(assignments, sys.stdout, indent=2)
     sys.stdout.write("\n")
 
 
-def _print_schedule_summary(assignments: dict[str, list[list[str]]], manifest_dir: Path) -> None:
+def _print_schedule_summary(
+    assignments: dict[str, list[list[str]]],
+    manifest_dir: Path,
+    timing_estimates: dict[str, float] | None = None,
+    quick_skip_models: set[str] | None = None,
+) -> None:
     """Print a human-readable schedule summary to stderr."""
     total_large = 0
     total_small = 0
+    total_estimated = 0.0
     manifests = _load_manifests(manifest_dir)
 
     for gpu_id, workers in sorted(assignments.items(), key=lambda x: int(x[0])):
         n_tests = sum(len(w) for w in workers)
         n_large = 0
         n_exclusive = 0
+        estimated = 0.0
         for w in workers:
             for tid in w:
                 name = _model_name_from_test_id(tid)
@@ -396,14 +575,22 @@ def _print_schedule_summary(assignments: dict[str, list[list[str]]], manifest_di
                     n_exclusive += 1
                 if classify_size(manifest) == "large":
                     n_large += 1
+                estimated += _test_weight(
+                    tid, manifests, timing_estimates, quick_skip_models)
         n_small = n_tests - n_large
         total_large += n_large
         total_small += n_small
+        total_estimated += estimated
         print(f"  GPU {gpu_id}: {n_tests} tests ({n_large}L + {n_small}S) "
               f"across {len(workers)} workers"
-              f"{f' [{n_exclusive} exclusive]' if n_exclusive else ''}",
+              f"{f' [{n_exclusive} exclusive]' if n_exclusive else ''}"
+              f", estimated {estimated / 60:.1f}m",
               file=sys.stderr)
-    print(f"  Total: {total_large} large + {total_small} small", file=sys.stderr)
+    print(
+        f"  Total: {total_large} large + {total_small} small, "
+        f"estimated {total_estimated / 60:.1f}m",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

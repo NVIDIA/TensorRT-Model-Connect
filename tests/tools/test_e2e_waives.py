@@ -42,3 +42,24 @@ def test_load_waives_without_platform_ignores_prefixed_entries(monkeypatch, tmp_
     waives = test_e2e._load_waives()
 
     assert waives == {"model-shared": ("XFAIL", "shared waive")}
+
+
+def test_non_gating_success_detects_manifest_skip_comparison() -> None:
+    case = test_e2e.get_case_by_name("qwen3-moe-tiny-random")
+
+    assert case is not None
+    assert "comparison skipped by manifest" in test_e2e._non_gating_success_reason(case)
+
+
+def test_non_gating_success_detects_missing_reference() -> None:
+    case = test_e2e.get_case_by_name("nemotron-h-nano-9b")
+
+    assert case is not None
+    assert "no reference backend" in test_e2e._non_gating_success_reason(case)
+
+
+def test_non_gating_success_keeps_green_invariant_case() -> None:
+    case = test_e2e.get_case_by_name("qwen3-0.6b-topp")
+
+    assert case is not None
+    assert test_e2e._non_gating_success_reason(case) == ""

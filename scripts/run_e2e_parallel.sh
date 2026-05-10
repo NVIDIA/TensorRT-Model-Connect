@@ -194,10 +194,22 @@ echo "Collected $TOTAL tests"
 # --- Schedule tests across GPUs × workers ------------------------------------
 
 SCHEDULE_JSON="$RESULT_DIR/schedule.json"
-echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" \
-    --num-gpus "$NUM_GPUS" \
-    --workers-per-gpu "$WORKERS_PER_GPU" \
-    --split-exclusive-phases \
+SCHEDULE_ARGS=(
+    --num-gpus "$NUM_GPUS"
+    --workers-per-gpu "$WORKERS_PER_GPU"
+    --split-exclusive-phases
+)
+for arg in "${EXTRA_ARGS[@]}"; do
+    case "$arg" in
+        --e2e-skip-waived-xfail)
+            SCHEDULE_ARGS+=(--skip-waived-xfail --waives tests/e2e/waives.txt)
+            ;;
+        --e2e-skip-non-gating)
+            SCHEDULE_ARGS+=(--skip-non-gating)
+            ;;
+    esac
+done
+echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" "${SCHEDULE_ARGS[@]}" \
     > "$SCHEDULE_JSON"
 
 echo ""
@@ -694,6 +706,86 @@ print(f'Merged {len(files)} files -> $RESULT_DIR/junit.xml')
 print(f'Total: {t} tests')
 " 2>/dev/null || echo "(install junitparser to auto-merge: pip install junitparser)"
 
+python3 - "$RESULT_DIR/artifacts" <<'PY' || true
+import json
+import sys
+from pathlib import Path
+
+artifacts_dir = Path(sys.argv[1])
+if not artifacts_dir.is_dir():
+    raise SystemExit(0)
+
+rows = []
+aggregate = {
+    "bundle_build_s": 0.0,
+    "trt_compile_s": 0.0,
+    "trt_load_deserialization_s": 0.0,
+    "reference_s": 0.0,
+    "inference_s": 0.0,
+    "comparison_s": 0.0,
+}
+for result_path in sorted(artifacts_dir.glob("*/result.json")):
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    timing = result.get("timing") or {}
+    detailed = result.get("detailed_timing") or {}
+    row = {
+        "case": result.get("case_name") or result_path.parent.name,
+        "status": result.get("status") or "",
+        "bundle_build_s": float(timing.get("bundle_build_s") or 0.0),
+        "trt_compile_s": float(detailed.get("trt_compile_s") or 0.0),
+        "trt_load_deserialization_s": float(
+            detailed.get("trt_load_deserialization_s") or 0.0),
+        "reference_s": float(detailed.get("reference_s") or 0.0),
+        "inference_s": float(detailed.get("inference_s") or 0.0),
+        "comparison_s": float(detailed.get("comparison_s") or 0.0),
+    }
+    row["accounted_s"] = (
+        row["bundle_build_s"]
+        + row["trt_load_deserialization_s"]
+        + row["reference_s"]
+        + row["inference_s"]
+        + row["comparison_s"]
+    )
+    rows.append(row)
+    for key in aggregate:
+        aggregate[key] += row[key]
+
+if not rows:
+    raise SystemExit(0)
+
+summary_path = artifacts_dir.parent / "timing-summary.json"
+summary_path.write_text(
+    json.dumps({"aggregate_s": aggregate, "cases": rows}, indent=2, sort_keys=True),
+    encoding="utf-8",
+)
+
+print("")
+print("--- E2E timing bottlenecks ---")
+print("Aggregate accounted time:")
+for key, value in sorted(aggregate.items(), key=lambda item: -item[1]):
+    print(f"  {key}: {value:.1f}s ({value / 60:.1f}m)")
+print("Top cases by accounted time:")
+for row in sorted(rows, key=lambda item: -item["accounted_s"])[:20]:
+    print(
+        "  {case:36s} {status:5s} total={total:7.1f}s "
+        "build={build:7.1f}s compile={compile:7.1f}s "
+        "load={load:6.1f}s ref={ref:6.1f}s infer={infer:5.1f}s".format(
+            case=row["case"][:36],
+            status=row["status"],
+            total=row["accounted_s"],
+            build=row["bundle_build_s"],
+            compile=row["trt_compile_s"],
+            load=row["trt_load_deserialization_s"],
+            ref=row["reference_s"],
+            infer=row["inference_s"],
+        )
+    )
+print(f"Timing summary: {summary_path}")
+PY
+
 # --- Summary ------------------------------------------------------------------
 
 echo ""
@@ -701,6 +793,7 @@ echo "Output files:"
 echo "  Schedule:      $RESULT_DIR/schedule.json"
 echo "  Console logs:  $RESULT_DIR/console-gpu*-w*.log"
 echo "  JUnit XML:     $RESULT_DIR/junit-gpu*-w*.xml (merged: $RESULT_DIR/junit.xml)"
+echo "  Timing JSON:   $RESULT_DIR/timing-summary.json"
 echo "  Artifacts:     $RESULT_DIR/artifacts/"
 echo ""
 

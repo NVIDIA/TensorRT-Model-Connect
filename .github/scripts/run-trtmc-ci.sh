@@ -327,6 +327,8 @@ if len(models) > 10:
     --trtmc-binary ./build/trtmc
     --workers-per-gpu 4
     --models-file e2e_models.txt
+    --e2e-skip-waived-xfail
+    --e2e-skip-non-gating
   )
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
