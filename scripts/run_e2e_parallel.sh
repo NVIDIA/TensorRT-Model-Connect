@@ -40,6 +40,7 @@ TRTMC_BINARY="${TRTMC_BINARY:-./build/trtmc}"
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+DYNAMIC_SHARED_QUEUE="${TRTMC_E2E_DYNAMIC_SHARED_QUEUE:-1}"
 
 # Auto-detect GPUs if not specified
 if [ -z "${NUM_GPUS:-}" ]; then
@@ -153,11 +154,15 @@ cd "$SCRIPT_DIR/.."
 mkdir -p "$RESULT_DIR" "$ENGINE_DIR"
 rm -f "$RESULT_DIR"/console-gpu*-w*.log \
       "$RESULT_DIR"/junit-gpu*-w*.xml \
-      "$RESULT_DIR"/junit.xml
+      "$RESULT_DIR"/junit.xml \
+      "$RESULT_DIR"/shared-tests.queue \
+      "$RESULT_DIR"/shared-tests.queue.tmp.*
+rm -rf "$RESULT_DIR"/shared-tests.queue.lock
 
 echo "=== E2E Parallel Test Runner ==="
 echo "  GPUs:            $NUM_GPUS healthy of $PHYSICAL_GPU_COUNT (${GPU_IDS[*]})"
 echo "  Workers/GPU:     $WORKERS_PER_GPU"
+echo "  Dynamic shared:  $DYNAMIC_SHARED_QUEUE"
 echo "  Engines:         $ENGINE_DIR"
 echo "  Results:         $RESULT_DIR"
 echo "  Binary:          $TRTMC_BINARY"
@@ -441,7 +446,55 @@ run_pipelined_exclusive_shared() {
     local -a worker_phase_names=()
     local -a worker_finished=()
     local -a shared_started=()
+    local shared_queue_file="$RESULT_DIR/shared-tests.queue"
+    local shared_queue_lock="$RESULT_DIR/shared-tests.queue.lock"
     local planned_workers
+
+    prepare_dynamic_shared_queue() {
+        python - "$SCHEDULE_JSON" "$shared_queue_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+
+schedule = data["phases"][1]["schedule"]
+workers = []
+for gpu_id in sorted(schedule, key=int):
+    workers.extend(schedule[gpu_id])
+
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    for idx in range(max((len(worker) for worker in workers), default=0)):
+        for worker in workers:
+            if idx < len(worker):
+                print(worker[idx], file=out)
+PY
+        rm -rf "$shared_queue_lock"
+    }
+
+    dequeue_shared_test() {
+        local queue_file="$1"
+        local lock_dir="$2"
+        local test_id=""
+        local tmp_file
+
+        while ! mkdir "$lock_dir" 2>/dev/null; do
+            sleep 0.1
+        done
+
+        if [ -s "$queue_file" ]; then
+            IFS= read -r test_id < "$queue_file" || true
+            if [ -n "$test_id" ]; then
+                tmp_file="${queue_file}.tmp.$$"
+                tail -n +2 "$queue_file" > "$tmp_file"
+                mv "$tmp_file" "$queue_file"
+            fi
+        fi
+
+        rmdir "$lock_dir"
+        printf '%s\n' "$test_id"
+    }
+
     planned_workers=$(python - "$SCHEDULE_JSON" <<'PY'
 import json
 import sys
@@ -452,6 +505,10 @@ print(sum(len(workers) for phase in data["phases"] for workers in phase["schedul
 PY
 )
     TOTAL_WORKERS="$planned_workers"
+
+    if [ "$DYNAMIC_SHARED_QUEUE" != "0" ]; then
+        prepare_dynamic_shared_queue
+    fi
 
     launch_worker() {
         local phase_name="$1"
@@ -487,12 +544,81 @@ PY
         ALL_WORKER_LABELS+=("$label")
     }
 
+    launch_dynamic_shared_worker() {
+        local gpu_id="$1"
+        local worker_idx="$2"
+        local label physical_gpu_id
+
+        label="gpu${gpu_id}-shared-w${worker_idx}"
+        physical_gpu_id="${GPU_IDS[$gpu_id]}"
+        echo "  $label: dynamic shared queue"
+
+        (
+            export CUDA_VISIBLE_DEVICES=$physical_gpu_id
+            test_index=0
+            worker_failed=0
+            log_path="$RESULT_DIR/console-${label}.log"
+            : > "$log_path"
+            while true; do
+                test_id=$(dequeue_shared_test "$shared_queue_file" "$shared_queue_lock")
+                [ -z "$test_id" ] && break
+                test_index=$((test_index + 1))
+                {
+                    echo "=== Running shared test $test_index: $test_id ==="
+                    set +e
+                    # shellcheck disable=SC2086
+                    "$HF_PYTHON" -m pytest "$test_id" -v \
+                        --engine-dir "$ENGINE_DIR" \
+                        --trtmc-binary "$TRTMC_BINARY" \
+                        --hf-python "$HF_PYTHON" \
+                        --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
+                        --junitxml="$RESULT_DIR/junit-${label}-t${test_index}.xml" \
+                        "${EXTRA_ARGS[@]}"
+                    rc=$?
+                    set -e
+                    echo "=== Shared test $test_index finished with exit code $rc ==="
+                    if [ "$rc" -ne 0 ]; then
+                        worker_failed=1
+                    fi
+                } >> "$log_path" 2>&1 || worker_failed=1
+            done
+            if [ "$test_index" -eq 0 ]; then
+                echo "No shared tests assigned." >> "$log_path"
+            fi
+            exit "$worker_failed"
+        ) &
+        pids+=($!)
+        worker_labels+=("$label")
+        worker_gpu_ids+=("$gpu_id")
+        worker_phase_names+=("shared")
+        worker_finished+=(0)
+        ALL_WORKER_LABELS+=("$label")
+    }
+
     launch_shared_for_gpu() {
         local gpu_id="$1"
         if [ "${shared_started[$gpu_id]:-0}" -eq 1 ]; then
             return 0
         fi
         shared_started[$gpu_id]=1
+
+        if [ "$DYNAMIC_SHARED_QUEUE" != "0" ]; then
+            local worker_count
+            worker_count=$(python - "$SCHEDULE_JSON" "$gpu_id" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][1]["schedule"]
+print(len(schedule.get(sys.argv[2], [])))
+PY
+)
+            for ((worker_idx = 0; worker_idx < worker_count; worker_idx++)); do
+                launch_dynamic_shared_worker "$gpu_id" "$worker_idx"
+            done
+            return 0
+        fi
 
         while IFS= read -r line; do
             local worker_idx worker_tests
@@ -678,7 +804,7 @@ echo "=== All E2E phases finished in ${MINUTES}m ${SECONDS_REM}s ==="
 python -c "
 from junitparser import JUnitXml
 import glob, sys
-files = sorted(glob.glob('$RESULT_DIR/junit-gpu*-w*.xml'))
+files = sorted(glob.glob('$RESULT_DIR/junit-gpu*.xml'))
 if not files:
     print('No JUnit XML files found to merge.')
     sys.exit(0)
@@ -714,7 +840,7 @@ for LABEL in "${ALL_WORKER_LABELS[@]}"; do
     grep -E "PASSED|FAILED|SKIPPED|ERROR" "$LOG" \
         | grep -E "^tests/" \
         | sed 's/^/    /' || echo "    (no test results found)"
-    SUMMARY=$(grep -E "^=" "$LOG" | tail -1)
+    SUMMARY=$(grep -E "^=" "$LOG" | tail -1 || true)
     [ -n "$SUMMARY" ] && echo "    $SUMMARY"
 done
 
