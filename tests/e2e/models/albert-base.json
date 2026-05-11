@@ -5,11 +5,10 @@
   "family": "albert",
   "runtime_strategy": "encoder_only",
   "max_cache_length": 256,
-  "prompt": "The capital of France is Paris.",
+  "prompt": "Replace me by any text you'd like.",
   "max_new_tokens": 0,
   "threshold_overrides": {
-    "cls_embedding_cosine": 0.6,
-    "cls_embedding_l2": 30.0
+    "cls_embedding_cosine": 0.95
   },
-  "notes": "ALBERT cross-layer sharing + embedding factorization causes larger TRT-HF delta than standard BERT"
+  "notes": "Matches the model-card feature extraction example: AlbertTokenizer + AlbertModel over output.last_hidden_state."
 }

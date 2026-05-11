@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -115,6 +116,19 @@ std::string precompiled_normalize(const std::string& text)
         if (is_control(cp)) continue;
         if (is_unicode_space(cp)) { result += ' '; continue; }
         result += char32_to_utf8(cp);
+    }
+    return result;
+}
+
+std::string ascii_lowercase(const std::string& text)
+{
+    std::string result;
+    result.reserve(text.size());
+    for (unsigned char c : text) {
+        if (c < 0x80)
+            result.push_back(static_cast<char>(std::tolower(c)));
+        else
+            result.push_back(static_cast<char>(c));
     }
     return result;
 }
@@ -304,7 +318,9 @@ public:
         }
 
         // Normalize
-        std::string normalized = mUsePrecompiled ? precompiled_normalize(text) : text;
+        std::string normalized = text;
+        if (mLowercase) normalized = ascii_lowercase(normalized);
+        if (mUsePrecompiled) normalized = precompiled_normalize(normalized);
 
         // Pre-tokenize: WhitespaceSplit → Metaspace
         auto words = whitespace_split(normalized);
@@ -459,26 +475,28 @@ private:
         }
     }
 
-    void parse_normalizer(const nlohmann::json& j)
+    void parse_normalizer_node(const nlohmann::json& norm)
     {
-        if (!j.contains("normalizer") || j["normalizer"].is_null()) return;
-        auto& norm = j["normalizer"];
+        if (norm.is_null()) return;
         std::string ntype = norm.value("type", "");
         if (ntype == "Precompiled") {
             mUsePrecompiled = true;
+        } else if (ntype == "Lowercase") {
+            mLowercase = true;
         } else if (ntype == "Prepend") {
             // Marian-style: prepend a string (e.g., "▁") to input
             mAddPrefixSpace = true;
         } else if (ntype == "Sequence" && norm.contains("normalizers")) {
             for (auto& sub : norm["normalizers"]) {
-                std::string stype = sub.value("type", "");
-                if (stype == "Precompiled") {
-                    mUsePrecompiled = true;
-                } else if (stype == "Prepend") {
-                    mAddPrefixSpace = true;
-                }
+                parse_normalizer_node(sub);
             }
         }
+    }
+
+    void parse_normalizer(const nlohmann::json& j)
+    {
+        if (!j.contains("normalizer") || j["normalizer"].is_null()) return;
+        parse_normalizer_node(j["normalizer"]);
     }
 
     void parse_pre_tokenizer(const nlohmann::json& j)
@@ -586,6 +604,7 @@ private:
     float mUnkScore = -100.0f;
     bool mAddSpecialTokens = true;
     bool mUsePrecompiled = false;
+    bool mLowercase = false;
     bool mAddPrefixSpace = true;
 
     int32_t mBosId = -1;

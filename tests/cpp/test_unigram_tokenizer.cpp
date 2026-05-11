@@ -117,6 +117,32 @@ static const char* kUnigramNoSpecialJson = R"({
   }
 })";
 
+// ─── Lowercase normalizer tokenizer ───
+static const char* kUnigramLowercaseJson = R"({
+  "model": {
+    "type": "Unigram",
+    "unk_id": 0,
+    "vocab": [
+      ["<unk>", 0.0],
+      ["\u2581the", -4.0],
+      ["\u2581cat", -4.0]
+    ]
+  },
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {"type": "Lowercase"}
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {"type": "WhitespaceSplit"},
+      {"type": "Metaspace", "replacement": "\u2581", "add_prefix_space": true}
+    ]
+  }
+})";
+
 int main()
 {
     std::cerr << "Unigram Tokenizer Unit Tests\n\n";
@@ -191,7 +217,18 @@ int main()
     }
 
     // ════════════════════════════════════════════════════════════
-    // 4. Encoding (with special tokens)
+    // 4. Normalization
+    // ════════════════════════════════════════════════════════════
+    {
+        std::cerr << "\n=== Normalization ===\n";
+
+        std::string json(kUnigramLowercaseJson);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
+        check_ids(tok->encode("The Cat"), {1, 2}, "encode_lowercase_normalizer");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // 5. Encoding (with special tokens)
     // ════════════════════════════════════════════════════════════
     {
         std::cerr << "\n=== Encoding (with special) ===\n";
@@ -205,7 +242,7 @@ int main()
     }
 
     // ════════════════════════════════════════════════════════════
-    // 5. Decoding
+    // 6. Decoding
     // ════════════════════════════════════════════════════════════
     {
         std::cerr << "\n=== Decoding ===\n";
@@ -227,7 +264,7 @@ int main()
     }
 
     // ════════════════════════════════════════════════════════════
-    // 6. Round-trip
+    // 7. Round-trip
     // ════════════════════════════════════════════════════════════
     {
         std::cerr << "\n=== Round-trip ===\n";
