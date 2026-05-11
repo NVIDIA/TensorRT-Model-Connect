@@ -5,16 +5,15 @@
   "bundle": "fnet-base.trtfb",
   "family": "fnet",
   "runtime_strategy": "encoder_only",
-  "max_cache_length": 256,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 1,
+  "max_cache_length": 512,
+  "prompt": "Replace me by any text you'd like.",
+  "max_new_tokens": 0,
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "notes": "FNet with 2D DFT via matrix multiplication; larger TRT-HF delta expected due to DFT approximation",
+  "notes": "Matches the model-card feature extraction example: FNetTokenizer + FNetModel with padding='max_length', truncation=True, max_length=512.",
   "core": false,
   "threshold_overrides": {
-    "cls_embedding_cosine": 0.6,
-    "cls_embedding_l2": 10.0
+    "cls_embedding_cosine": 0.95
   }
 }

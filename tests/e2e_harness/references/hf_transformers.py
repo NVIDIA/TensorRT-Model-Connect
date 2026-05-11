@@ -367,7 +367,14 @@ class HfTransformersReference:
                     torch_dtype={torch_dtype_expr})
             model.eval()
 
-            inputs = tokenizer(prompt, return_tensors="pt")
+            tokenizer_kwargs = {{"return_tensors": "pt"}}
+            if model_type == 'fnet':
+                tokenizer_kwargs.update({{
+                    "padding": "max_length",
+                    "truncation": True,
+                    "max_length": getattr(config, "max_position_embeddings", 512),
+                }})
+            inputs = tokenizer(prompt, **tokenizer_kwargs)
             with torch.no_grad():
                 outputs = model(**inputs)
 

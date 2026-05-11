@@ -1,5 +1,6 @@
 #include "runtime/pipelines/encoder_pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -46,14 +47,26 @@ bool engine_mask_is_int32(const TrtModule& module) {
     return false;
 }
 
+int32_t infer_input_length(const TrtModule& module, const std::string& input_name) {
+    for (const auto& info : module.input_info()) {
+        if (info.name != input_name || info.shape.empty())
+            continue;
+        const int64_t len = info.shape.back();
+        if (len > 0)
+            return static_cast<int32_t>(len);
+    }
+    return 0;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
-                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                                 int32_t pad_token_id)
     : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      model_id_(std::move(model_id_str)), pad_token_id_(pad_token_id) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
 }
@@ -109,25 +122,34 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
-    const auto n = input_ids.size();
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
+    const int32_t engine_len = infer_input_length(*encoder_, "input_ids");
+    const auto target_len =
+        engine_len > 0 ? static_cast<std::size_t>(engine_len) : input_ids.size();
+    const auto valid_len = std::min(input_ids.size(), target_len);
 
-    auto ids_copy = input_ids;
+    std::vector<int32_t> mask_i32(target_len, 0);
+    std::vector<float> mask_f32(target_len, 0.0f);
+    for (std::size_t i = 0; i < valid_len; ++i) {
+        mask_i32[i] = 1;
+        mask_f32[i] = 1.0f;
+    }
+
+    std::vector<int32_t> ids_copy(target_len, pad_token_id_);
+    std::copy_n(input_ids.begin(), valid_len, ids_copy.begin());
     Tensor ids_t;
     ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.shape = {static_cast<int64_t>(target_len)};
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
         mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(target_len)};
         mask_t.dtype = DType::kInt32;
     } else {
         mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(target_len)};
         mask_t.dtype = DType::kFloat32;
     }
 
