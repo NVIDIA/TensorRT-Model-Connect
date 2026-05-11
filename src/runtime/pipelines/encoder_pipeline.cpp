@@ -62,6 +62,12 @@ bool model_needs_fnet_static_padding(const std::string& model_id) {
     return model_id.find("fnet") != std::string::npos || model_id.find("FNet") != std::string::npos;
 }
 
+bool is_encoder_output_name(const std::string& name) {
+    return name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
+           name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
+           name.find("score") != std::string::npos;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -166,9 +172,7 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 
     EmbeddingResult result;
     for (auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
-            name.find("score") != std::string::npos) {
+        if (is_encoder_output_name(name)) {
             auto n = tensor.numel();
             result.data.resize(static_cast<std::size_t>(n));
             std::memcpy(result.data.data(), tensor.data, n * sizeof(float));
