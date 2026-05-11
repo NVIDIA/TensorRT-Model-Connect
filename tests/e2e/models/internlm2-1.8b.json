@@ -15,5 +15,6 @@
   "layer_atol": 0.05,
   "trust_remote_code": true,
   "legacy_dynamic_cache_compat": true,
-  "notes": "The model card's Transformers example uses a text-generation pipeline with a chat message containing 'Who are you?'. The legacy cache compatibility flag keeps the Hub remote-code reference runnable with Transformers 5.x."
+  "repair_rotary_inv_freq": true,
+  "notes": "The model card's Transformers example uses a text-generation pipeline with a chat message containing 'Who are you?'. The compatibility flags keep the Hub remote-code reference runnable with Transformers 5.x and restore InternLM2's non-persistent RoPE buffers after low-memory loading."
 }

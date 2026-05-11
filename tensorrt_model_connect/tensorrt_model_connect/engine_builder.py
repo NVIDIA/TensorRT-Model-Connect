@@ -432,52 +432,141 @@ def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return _detect_tokenizer_add_special_tokens(model_dir)
 
 
+def _inject_added_tokens_from_config(model_dir: Path) -> None:
+    tok_json_path = model_dir / "tokenizer.json"
+    tok_cfg_path = model_dir / "tokenizer_config.json"
+    if not tok_json_path.exists() or not tok_cfg_path.exists():
+        return
+    try:
+        tok_json = json.loads(tok_json_path.read_text(encoding="utf-8"))
+        tok_cfg = json.loads(tok_cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    added_decoder = tok_cfg.get("added_tokens_decoder", {})
+    if not isinstance(added_decoder, dict):
+        return
+
+    by_id = {}
+    for token in tok_json.get("added_tokens", []):
+        if isinstance(token, dict) and isinstance(token.get("id"), int):
+            by_id[token["id"]] = dict(token)
+
+    for raw_id, token in added_decoder.items():
+        try:
+            token_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(token, str):
+            content = token
+            token = {}
+        elif isinstance(token, dict):
+            content = token.get("content")
+        else:
+            continue
+        if not content:
+            continue
+        model = tok_json.get("model", {})
+        vocab = model.get("vocab")
+        if isinstance(vocab, list) and 0 <= token_id < len(vocab):
+            entry = vocab[token_id]
+            if isinstance(entry, list) and entry:
+                entry[0] = content
+        elif isinstance(vocab, dict):
+            vocab[content] = token_id
+        by_id[token_id] = {
+            "id": token_id,
+            "content": content,
+            "single_word": bool(token.get("single_word", False)),
+            "lstrip": bool(token.get("lstrip", False)),
+            "rstrip": bool(token.get("rstrip", False)),
+            "normalized": bool(token.get("normalized", False)),
+            "special": bool(token.get("special", False)),
+        }
+
+    if by_id:
+        tok_json["added_tokens"] = [
+            by_id[token_id] for token_id in sorted(by_id)
+        ]
+        tok_json_path.write_text(
+            json.dumps(tok_json, ensure_ascii=False), encoding="utf-8")
+
+
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
     always load the tokenizer natively (BPE / WordPiece / Unigram).
 
     Fallback chain:
-      1. AutoTokenizer(use_fast=False).save_pretrained() — works for most models
-      2. SentencePiece .spm → tokenizers.Unigram conversion — for Marian / NLLB
+      1. AutoTokenizer(use_fast=False).save_pretrained() -- works for most models
+      2. SentencePiece model -> tokenizers.Unigram conversion
     """
-    if (model_dir / "tokenizer.json").exists():
-        return
+    tok_json_path = model_dir / "tokenizer.json"
+    if tok_json_path.exists():
+        if not (model_dir / "tokenizer.model").exists():
+            _inject_added_tokens_from_config(model_dir)
+            return
+        try:
+            tok_json_path.unlink()
+        except OSError:
+            return
+
+    prefer_sentencepiece = (model_dir / "tokenizer.model").exists()
 
     # --- Attempt 1: standard HF slow → fast conversion ---
-    try:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
-        tok.save_pretrained(str(model_dir))
-        if (model_dir / "tokenizer.json").exists():
-            print("[trtmc-build] Generated tokenizer.json from slow tokenizer",
-                  file=sys.stderr)
-            return
-    except Exception:
-        pass
+    if not prefer_sentencepiece:
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(
+                str(model_dir), use_fast=False, trust_remote_code=True)
+            tok.save_pretrained(str(model_dir))
+            _inject_added_tokens_from_config(model_dir)
+            if (model_dir / "tokenizer.json").exists():
+                print("[trtmc-build] Generated tokenizer.json from slow tokenizer",
+                      file=sys.stderr)
+                return
+        except Exception:
+            pass
 
-    # --- Attempt 2: build from SentencePiece .spm + vocab.json ---
+    # --- Attempt 2: build from SentencePiece model + optional vocab.json ---
     # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
     # vocab.json (combined source+target vocabulary with IDs).  We build a
     # Unigram tokenizer.json using the full combined vocab (so IDs match the
     # TRT engine) with scores from the SPM model for source tokens and a
     # default low score for target-only tokens.
-    spm_candidates = list(model_dir.glob("*.spm"))
-    source_spm = model_dir / "source.spm"
-    spm_path = source_spm if source_spm.exists() else (spm_candidates[0] if spm_candidates else None)
+    spm_candidates = []
+    for pattern in ("*.spm", "*.model"):
+        for candidate in model_dir.glob(pattern):
+            if candidate not in spm_candidates:
+                spm_candidates.append(candidate)
+    preferred_spm = [
+        model_dir / "source.spm",
+        model_dir / "tokenizer.model",
+        model_dir / "spiece.model",
+    ]
+    spm_path = next((p for p in preferred_spm if p.exists()), None)
+    if spm_path is None and spm_candidates:
+        spm_path = spm_candidates[0]
     vocab_json_path = model_dir / "vocab.json"
     if spm_path is not None:
         try:
             import sentencepiece as spm_lib
-            from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders
+            from tokenizers import Tokenizer
             from tokenizers.models import Unigram
 
             sp = spm_lib.SentencePieceProcessor()
             sp.Load(str(spm_path))
+            pieces = sp.EncodeAsPieces("hello")
+            add_prefix_space = bool(pieces and pieces[0].startswith("\u2581"))
+            use_uniform_scores = (
+                spm_path.name == "tokenizer.model"
+                and not vocab_json_path.exists()
+            )
             # Build score lookup from SPM model
             spm_scores = {}
             for i in range(sp.GetPieceSize()):
-                spm_scores[sp.IdToPiece(i)] = sp.GetScore(i)
+                score = -1.0 if use_uniform_scores else sp.GetScore(i)
+                spm_scores[sp.IdToPiece(i)] = score
             min_score = min(spm_scores.values()) if spm_scores else 0.0
             default_score = min_score - 10.0  # worse than any real token
 
@@ -493,20 +582,36 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
                     vocab[tid] = (token, score)
             else:
                 # Fallback: use SPM vocab only
-                vocab = [(sp.IdToPiece(i), sp.GetScore(i)) for i in range(sp.GetPieceSize())]
+                vocab = [
+                    (sp.IdToPiece(i), spm_scores[sp.IdToPiece(i)])
+                    for i in range(sp.GetPieceSize())
+                ]
 
             unk_id = combined_vocab.get("<unk>", 0) if vocab_json_path.exists() else 0
 
             tokenizer = Tokenizer(Unigram(vocab, unk_id))
-            tokenizer.normalizer = normalizers.Sequence([
-                normalizers.Prepend(prepend="\u2581"),
-                normalizers.Replace(" ", "\u2581"),
-            ])
-            tokenizer.pre_tokenizer = pre_tokenizers.Sequence([])
-            tokenizer.decoder = decoders.Metaspace()
 
             out_path = str(model_dir / "tokenizer.json")
             tokenizer.save(out_path)
+            tok_json = json.loads((model_dir / "tokenizer.json").read_text(
+                encoding="utf-8"))
+            metaspace = "\u2581"
+            tok_json["normalizer"] = None
+            tok_json["pre_tokenizer"] = {
+                "type": "Metaspace",
+                "replacement": metaspace,
+                "add_prefix_space": add_prefix_space,
+                "prepend_scheme": "always" if add_prefix_space else "never",
+            }
+            tok_json["decoder"] = {
+                "type": "Metaspace",
+                "replacement": metaspace,
+                "add_prefix_space": add_prefix_space,
+                "prepend_scheme": "always" if add_prefix_space else "never",
+            }
+            (model_dir / "tokenizer.json").write_text(
+                json.dumps(tok_json, ensure_ascii=False), encoding="utf-8")
+            _inject_added_tokens_from_config(model_dir)
             print(f"[trtmc-build] Generated tokenizer.json from {spm_path.name} "
                   f"({len(vocab)} tokens)", file=sys.stderr)
             return

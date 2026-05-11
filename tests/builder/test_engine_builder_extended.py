@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -149,8 +151,77 @@ class TestEnsureTokenizerJson:
         with patch.dict("sys.modules", {"transformers": mock_transformers}):
             _ensure_tokenizer_json(tmp_path)
 
+        mock_transformers.AutoTokenizer.from_pretrained.assert_called_once_with(
+            str(tmp_path), use_fast=False, trust_remote_code=True)
         assert (tmp_path / "tokenizer.json").exists()
         assert json.loads((tmp_path / "tokenizer.json").read_text()) == {"generated": True}
+
+    def test_generates_from_tokenizer_model_and_added_tokens(self, tmp_path):
+        """SentencePiece tokenizer.model fallback preserves HF added token ids."""
+        (tmp_path / "tokenizer.model").write_text("fake")
+        (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+            "added_tokens_decoder": {
+                "7": {
+                    "content": "<|im_start|>",
+                    "special": True,
+                    "single_word": False,
+                    "lstrip": False,
+                    "rstrip": False,
+                    "normalized": False,
+                }
+            }
+        }))
+
+        class FakeSentencePieceProcessor:
+            def Load(self, _path):
+                return True
+
+            def EncodeAsPieces(self, text):
+                assert text == "hello"
+                return ["hello"]
+
+            def GetPieceSize(self):
+                return 2
+
+            def IdToPiece(self, idx):
+                return ["<unk>", "hello"][idx]
+
+            def GetScore(self, _idx):
+                return 0.0
+
+        class FakeTokenizer:
+            def __init__(self, _model):
+                pass
+
+            def save(self, path):
+                Path(path).write_text(json.dumps({"model": {"vocab": []}}))
+
+        fake_sentencepiece = types.SimpleNamespace(
+            SentencePieceProcessor=FakeSentencePieceProcessor)
+        fake_tokenizers = types.SimpleNamespace(Tokenizer=FakeTokenizer)
+        fake_models = types.SimpleNamespace(
+            Unigram=lambda vocab, unk_id: {"vocab": vocab, "unk_id": unk_id})
+
+        with patch.dict(sys.modules, {
+            "transformers": None,
+            "sentencepiece": fake_sentencepiece,
+            "tokenizers": fake_tokenizers,
+            "tokenizers.models": fake_models,
+        }):
+            _ensure_tokenizer_json(tmp_path)
+
+        tok_json = json.loads((tmp_path / "tokenizer.json").read_text())
+        assert tok_json["pre_tokenizer"]["type"] == "Metaspace"
+        assert tok_json["pre_tokenizer"]["add_prefix_space"] is False
+        assert tok_json["added_tokens"] == [{
+            "id": 7,
+            "content": "<|im_start|>",
+            "single_word": False,
+            "lstrip": False,
+            "rstrip": False,
+            "normalized": False,
+            "special": True,
+        }]
 
     def test_transformers_import_fails_gracefully(self, tmp_path):
         """When transformers is not installed, no error is raised."""

@@ -90,7 +90,8 @@ def mock_repo(tmp_path):
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
         {"name": "internlm2-1.8b", "family": "internlm", "runtime_strategy": "decoder_kv_cache",
-         "hf_id": "internlm/internlm2-math-plus-1_8b", "legacy_dynamic_cache_compat": True},
+         "hf_id": "internlm/internlm2-math-plus-1_8b", "legacy_dynamic_cache_compat": True,
+         "repair_rotary_inv_freq": True},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -617,6 +618,121 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_legacy_dynamic_cache_compat"
         assert refined.models == ["internlm2-1.8b"]
 
+    def test_hf_transformers_rotary_repair_diff_can_be_refined(self, imap):
+        """RoPE inv_freq repair narrows to opt-in manifests."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++def _rotary_inv_freq_repair_script(enabled: bool) -> str:
++    if not enabled:
++        return ""
++    return \"\"\"
++def _repair_rotary_inv_freq_buffers(model):
++    import sys
++    import torch
++    repaired = 0
++    for module in model.modules():
++        rotary = getattr(module, "rotary_emb", None)
++        inv_freq = getattr(rotary, "inv_freq", None)
++        if not hasattr(rotary, "base") or not hasattr(rotary, "dim"):
++            continue
++        expected = 1.0 / (float(rotary.base) ** (torch.arange(0, dim, 2) / float(dim)))
++        current = inv_freq.detach().float()
++        needs_repair = not torch.isfinite(current).all()
++        if needs_repair:
++            rotary.inv_freq = expected.to(dtype=inv_freq.dtype)
++            repaired += 1
++        print(f"repaired rotary inv_freq buffers: {repaired}", file=sys.stderr)
++rotary_inv_freq_repair_script = textwrap.indent(
++    _rotary_inv_freq_repair_script(bool(case.metadata.get("repair_rotary_inv_freq", False)))
++if {bool(case.metadata.get("repair_rotary_inv_freq", False))!r}:
++    _repair_rotary_inv_freq_buffers(model)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py", broad, diff_text, imap)
+        assert refined.rule == "harness_reference_rotary_inv_freq_repair"
+        assert refined.models == ["internlm2-1.8b"]
+
+    def test_hf_transformers_internlm_opt_in_diff_can_be_refined(self, imap):
+        """Combined InternLM HF-reference fixes still narrow to the opt-in model."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++        def _get_attr(obj, names):
++            for name in names:
++                value = getattr(obj, name, None)
++                if value is not None:
++                    return value
++            return None
++        def _to_legacy_cache(self):
++            if hasattr(self, "key_cache") and hasattr(self, "value_cache"):
++                return tuple(zip(self.key_cache, self.value_cache))
++            if hasattr(self, "layers"):
++                legacy = []
++                for layer in self.layers:
++                    key_states = _get_attr(layer, ("keys", "key_cache"))
++                    value_states = _get_attr(layer, ("values", "value_cache"))
++                    legacy.append((key_states, value_states))
++                return tuple(legacy)
++            return tuple(tuple(layer_past[:2]) for layer_past in self)
++def _rotary_inv_freq_repair_script(enabled: bool) -> str:
++    \"\"\"Return subprocess code that restores non-persistent RoPE buffers.\"\"\"
++    if not enabled:
++        return ""
++    return \"\"\"
++def _repair_rotary_inv_freq_buffers(model):
++    import sys
++    import torch
++    repaired = 0
++    for module in model.modules():
++        rotary = getattr(module, "rotary_emb", None)
++        inv_freq = getattr(rotary, "inv_freq", None)
++        if not hasattr(rotary, "base") or not hasattr(rotary, "dim"):
++            continue
++        dim = int(rotary.dim)
++        if dim <= 0:
++            continue
++        expected = 1.0 / (
++            float(rotary.base)
++            ** (
++                torch.arange(
++                    0,
++                    dim,
++                    2,
++                    dtype=torch.float32,
++                    device=inv_freq.device,
++                )
++                / float(dim)
++            )
++        )
++        current = inv_freq.detach().float()
++        needs_repair = (
++            tuple(inv_freq.shape) != tuple(expected.shape)
++            or not torch.isfinite(current).all()
++            or torch.max(torch.abs(current - expected)).item() > 1e-3
++        )
++        if needs_repair:
++            rotary.inv_freq = expected.to(dtype=inv_freq.dtype)
++            repaired += 1
++    if repaired:
++        print(f"repaired rotary inv_freq buffers: {repaired}", file=sys.stderr)
++rotary_inv_freq_repair_script = textwrap.indent(
++    _rotary_inv_freq_repair_script(bool(case.metadata.get("repair_rotary_inv_freq", False)))
++{rotary_inv_freq_repair_script}
++if {bool(case.metadata.get("repair_rotary_inv_freq", False))!r}:
++    _repair_rotary_inv_freq_buffers(model)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py", broad, diff_text, imap)
+        assert refined.rule == (
+            "harness_reference_legacy_dynamic_cache_compat_and_rotary_inv_freq_repair"
+        )
+        assert refined.models == ["internlm2-1.8b"]
+
     def test_test_e2e_entrypoint(self, imap):
         """tests/test_e2e.py -> ALL models."""
         match = test_impact.classify_file("tests/test_e2e.py", imap)
@@ -770,6 +886,58 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/t
         assert refined.rule == "shared_builder_diffusion_tokenizer"
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
+
+    def test_engine_builder_sentencepiece_tokenizer_model_diff_can_be_refined(self, imap):
+        """InternLM tokenizer.model fallback narrows to opt-in legacy-cache manifests."""
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
+@@ -1 +1 @@
++def _inject_added_tokens_from_config(model_dir: Path) -> None:
++    added_decoder = tok_cfg.get("added_tokens_decoder", {})
++        tok_json["added_tokens"] = [by_id[token_id] for token_id in sorted(by_id)]
++        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False, trust_remote_code=True)
++    for pattern in ("*.spm", "*.model"):
++        model_dir / "tokenizer.model",
++        model_dir / "spiece.model",
++            pieces = sp.EncodeAsPieces("hello")
++            add_prefix_space = bool(pieces and pieces[0].startswith("\\u2581"))
++            tok_json["pre_tokenizer"] = {"type": "Metaspace", "add_prefix_space": add_prefix_space}
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "shared_builder_sentencepiece_tokenizer_model"
+        assert refined.models == ["internlm2-1.8b"]
+
+    @pytest.mark.parametrize("path", [
+        "src/runtime/core/chat_template.cpp",
+        "src/runtime/core/chat_template.h",
+        "src/tokenizer/unigram_tokenizer.cpp",
+    ])
+    def test_cpp_internlm_chat_tokenizer_diff_can_be_refined(self, imap, path):
+        """InternLM ChatML/SentencePiece C++ fixes should not fan out to every model."""
+        diff_text = """
+diff --git a/src/tokenizer/unigram_tokenizer.cpp b/src/tokenizer/unigram_tokenizer.cpp
+@@ -1 +1 @@
++    kChatMLWithBos,
++        return ChatTemplateFormat::kChatMLWithBos;
++        return "<s><|im_start|>user\\n" + prompt + "<|im_end|>\\n<|im_start|>assistant\\n";
++        auto segments = split_added_tokens(normalized);
++    std::vector<Segment> split_added_tokens(const std::string& text) const
++    void encode_normal_segment(const std::string& text, std::vector<int32_t>& ids) const
++        std::string processed = metaspace_pre_tokenize(text, mAddPrefixSpace);
++                mAddedTokenPatterns.push_back({content, tok_id});
++                if (tok.value("special", false)) mDecodeSkipIds.insert(tok_id);
+"""
+        broad = test_impact.classify_file(path, imap)
+        refined = test_impact.maybe_refine_match_with_diff(path, broad, diff_text, imap)
+        assert refined.rule == "cpp_internlm_chat_tokenizer"
+        assert refined.models == ["internlm2-1.8b"]
 
     def test_torchtrt_compiler_tokenizer_diff_can_be_refined(self, mock_repo):
         """Torch-TRT tokenizer metadata changes narrow to Torch-TRT tokenizer users."""

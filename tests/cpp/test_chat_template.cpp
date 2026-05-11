@@ -39,6 +39,14 @@ static void test_detect_chatml() {
     check(fmt == trtmc::ChatTemplateFormat::kChatML, "chatml detection");
 }
 
+static void test_detect_chatml_with_bos() {
+    std::string tpl = "{{ bos_token }}{% for message in messages %}{{'<|im_start|>' + "
+                      "message['role'] + '\\n' + message['content'] + '<|im_end|>' + "
+                      "'\\n'}}{% endfor %}";
+    auto fmt = trtmc::detect_chat_template_format(tpl);
+    check(fmt == trtmc::ChatTemplateFormat::kChatMLWithBos, "chatml bos detection");
+}
+
 static void test_detect_mistral() {
     std::string tpl = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' "
                       "%}[INST] {{ message['content'] }} [/INST]{% endif %}{% endfor %}";
@@ -93,6 +101,13 @@ static void test_apply_chatml_no_thinking() {
           "chatml no-thinking application");
 }
 
+static void test_apply_chatml_with_bos_no_thinking_ignored() {
+    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kChatMLWithBos,
+                                             "Who are you?", false);
+    check(result == "<s><|im_start|>user\nWho are you?<|im_end|>\n<|im_start|>assistant\n",
+          "chatml bos no-thinking application");
+}
+
 static void test_apply_mistral() {
     auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kMistral, "hello");
     check(result == "[INST] hello [/INST]", "mistral application");
@@ -126,6 +141,7 @@ int main() {
     // Detection
     test_detect_empty();
     test_detect_chatml();
+    test_detect_chatml_with_bos();
     test_detect_mistral();
     test_detect_phi();
     test_detect_gemma();
@@ -136,6 +152,7 @@ int main() {
     test_apply_none();
     test_apply_chatml();
     test_apply_chatml_no_thinking();
+    test_apply_chatml_with_bos_no_thinking_ignored();
     test_apply_mistral();
     test_apply_phi();
     test_apply_gemma();

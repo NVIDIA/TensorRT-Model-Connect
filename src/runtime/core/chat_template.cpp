@@ -27,6 +27,8 @@ static constexpr std::array<FormatMarker, 8> kDetectTable = {{
 ChatTemplateFormat detect_chat_template_format(const std::string& tpl) {
     if (tpl.empty())
         return ChatTemplateFormat::kNone;
+    if (tpl.find("<|im_start|>") != std::string::npos && tpl.find("bos_token") != std::string::npos)
+        return ChatTemplateFormat::kChatMLWithBos;
     for (const auto& entry : kDetectTable) {
         if (tpl.find(entry.marker) != std::string::npos)
             return entry.format;
@@ -64,6 +66,8 @@ std::string apply_chat_template(ChatTemplateFormat format, const std::string& pr
     switch (format) {
     case ChatTemplateFormat::kChatML:
         return apply_chatml(prompt, enable_thinking);
+    case ChatTemplateFormat::kChatMLWithBos:
+        return "<s><|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
     case ChatTemplateFormat::kMistral:
         return "[INST] " + prompt + " [/INST]";
     case ChatTemplateFormat::kPhi:

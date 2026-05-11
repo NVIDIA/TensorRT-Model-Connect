@@ -17,8 +17,7 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
+void check(bool condition, const std::string& name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
@@ -27,10 +26,8 @@ void check(bool condition, const std::string& name)
     }
 }
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -117,8 +114,36 @@ static const char* kUnigramNoSpecialJson = R"({
   }
 })";
 
-int main()
-{
+// InternLM-style SentencePiece: no dummy prefix, newline is a real token, and
+// ChatML markers are added tokens over unused SentencePiece ids.
+static const char* kUnigramNoPrefixAddedJson = R"({
+  "model": {
+    "type": "Unigram",
+    "unk_id": 0,
+    "vocab": [
+      ["<unk>", 0.0],
+      ["user", -1.0],
+      ["\n", -1.0],
+      ["Who", -1.0],
+      ["\u2581are", -1.0],
+      ["\u2581you", -1.0],
+      ["?", -1.0],
+      ["[UNUSED_TOKEN_1]", 0.0],
+      ["[UNUSED_TOKEN_2]", 0.0]
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "\u2581",
+    "add_prefix_space": false
+  },
+  "added_tokens": [
+    {"id": 7, "content": "<|im_start|>", "special": true},
+    {"id": 8, "content": "<|im_end|>", "special": true}
+  ]
+})";
+
+int main() {
     std::cerr << "Unigram Tokenizer Unit Tests\n\n";
 
     // ════════════════════════════════════════════════════════════
@@ -133,22 +158,32 @@ int main()
 
         // Invalid JSON
         bool threw = false;
-        try { trtmc::CreateUnigramTokenizer("bad", 3, false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer("bad", 3, false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_invalid_json");
 
         // BPE type rejected
         const char* bpe = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_bpe_type");
 
         // WordPiece type rejected
-        const char* wp = R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
+        const char* wp =
+            R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_wordpiece_type");
     }
 
@@ -188,6 +223,18 @@ int main()
 
         // Empty
         check_ids(tok->encode(""), {}, "encode_empty");
+    }
+
+    {
+        std::cerr << "\n=== Encoding (added tokens and newlines) ===\n";
+
+        std::string json(kUnigramNoPrefixAddedJson);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
+
+        check_ids(tok->encode("<|im_start|>user\nWho are you?<|im_end|>"), {7, 1, 2, 3, 4, 5, 6, 8},
+                  "encode_chatml_added_tokens_newline");
+        check(tok->decode({7, 1, 2, 3, 4, 5, 6, 8}) == "user\nWho are you?",
+              "decode_skips_added_special_tokens");
     }
 
     // ════════════════════════════════════════════════════════════
@@ -237,8 +284,7 @@ int main()
 
         auto rt = [&](const std::string& input) {
             auto decoded = tok->decode(tok->encode(input));
-            check(decoded == input,
-                  "roundtrip '" + input + "' -> '" + decoded + "'");
+            check(decoded == input, "roundtrip '" + input + "' -> '" + decoded + "'");
         };
 
         rt("hello");

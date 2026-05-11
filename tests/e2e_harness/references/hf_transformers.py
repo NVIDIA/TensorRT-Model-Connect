@@ -66,14 +66,83 @@ def _install_legacy_dynamic_cache_compat():
         DynamicCache.from_legacy_cache = _from_legacy_cache
 
     if not hasattr(DynamicCache, "to_legacy_cache"):
+        def _get_attr(obj, names):
+            for name in names:
+                value = getattr(obj, name, None)
+                if value is not None:
+                    return value
+            return None
+
         def _to_legacy_cache(self):
-            return tuple((key_states, value_states)
-                         for key_states, value_states in self)
+            if hasattr(self, "key_cache") and hasattr(self, "value_cache"):
+                return tuple(zip(self.key_cache, self.value_cache))
+            if hasattr(self, "layers"):
+                legacy = []
+                for layer in self.layers:
+                    key_states = _get_attr(layer, ("keys", "key_cache"))
+                    value_states = _get_attr(layer, ("values", "value_cache"))
+                    legacy.append((key_states, value_states))
+                return tuple(legacy)
+            return tuple(tuple(layer_past[:2]) for layer_past in self)
 
         DynamicCache.to_legacy_cache = _to_legacy_cache
 
 
 _install_legacy_dynamic_cache_compat()
+"""
+
+
+def _rotary_inv_freq_repair_script(enabled: bool) -> str:
+    """Return subprocess code that restores non-persistent RoPE buffers."""
+    if not enabled:
+        return ""
+    return """
+def _repair_rotary_inv_freq_buffers(model):
+    import sys
+    import torch
+
+    repaired = 0
+    for module in model.modules():
+        rotary = getattr(module, "rotary_emb", None)
+        if rotary is None:
+            continue
+        inv_freq = getattr(rotary, "inv_freq", None)
+        if inv_freq is None:
+            continue
+        if not hasattr(rotary, "base") or not hasattr(rotary, "dim"):
+            continue
+
+        dim = int(rotary.dim)
+        if dim <= 0:
+            continue
+        expected = 1.0 / (
+            float(rotary.base)
+            ** (
+                torch.arange(
+                    0,
+                    dim,
+                    2,
+                    dtype=torch.float32,
+                    device=inv_freq.device,
+                )
+                / float(dim)
+            )
+        )
+        current = inv_freq.detach().float()
+        needs_repair = (
+            tuple(inv_freq.shape) != tuple(expected.shape)
+            or not torch.isfinite(current).all()
+            or torch.max(torch.abs(current - expected)).item() > 1e-3
+        )
+        if needs_repair:
+            rotary.inv_freq = expected.to(dtype=inv_freq.dtype)
+            repaired += 1
+
+    if repaired:
+        print(
+            f"repaired rotary inv_freq buffers: {repaired}",
+            file=sys.stderr,
+        )
 """
 
 
@@ -179,6 +248,12 @@ class HfTransformersReference:
             ).strip(),
             " " * 12,
         )
+        rotary_inv_freq_repair_script = textwrap.indent(
+            _rotary_inv_freq_repair_script(
+                bool(case.metadata.get("repair_rotary_inv_freq", False))
+            ).strip(),
+            " " * 12,
+        )
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
@@ -198,6 +273,7 @@ class HfTransformersReference:
                 return t.detach().float().cpu().numpy()
 
 {legacy_cache_compat_script}
+{rotary_inv_freq_repair_script}
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
@@ -229,6 +305,8 @@ class HfTransformersReference:
                 model = AutoModelForSeq2SeqLM.from_pretrained(model_ref, **load_kwargs)
             else:
                 model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
+            if {bool(case.metadata.get("repair_rotary_inv_freq", False))!r}:
+                _repair_rotary_inv_freq_buffers(model)
             model.eval()
 
             ids_tensor = torch.tensor([input_ids], dtype=torch.long)

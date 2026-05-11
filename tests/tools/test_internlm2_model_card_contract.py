@@ -9,6 +9,7 @@ from tests import test_e2e
 from tests.e2e_harness.manifest_loader import load_manifest
 from tests.e2e_harness.references.hf_transformers import (
     _legacy_dynamic_cache_compat_script,
+    _rotary_inv_freq_repair_script,
 )
 
 
@@ -27,7 +28,9 @@ def test_internlm2_manifest_uses_model_card_chat_contract() -> None:
     assert raw["prompt"] == MODEL_CARD_PROMPT
     assert raw["trust_remote_code"] is True
     assert raw["legacy_dynamic_cache_compat"] is True
+    assert raw["repair_rotary_inv_freq"] is True
     assert case.metadata["legacy_dynamic_cache_compat"] is True
+    assert case.metadata["repair_rotary_inv_freq"] is True
 
 
 def test_internlm2_legacy_cache_compat_is_opt_in() -> None:
@@ -39,6 +42,23 @@ def test_internlm2_legacy_cache_compat_is_opt_in() -> None:
     assert "from_legacy_cache" in compat
     assert "to_legacy_cache" in compat
     assert "past_key_values is None" in compat
+    assert "key_cache" in compat
+    assert "value_cache" in compat
+    assert "layers" in compat
+    assert "for key_states, value_states in self" not in compat
+
+
+def test_internlm2_rotary_inv_freq_repair_is_opt_in() -> None:
+    assert _rotary_inv_freq_repair_script(False) == ""
+
+    compat = _rotary_inv_freq_repair_script(True)
+
+    assert "rotary_emb" in compat
+    assert "inv_freq" in compat
+    assert "rotary.base" in compat
+    assert "rotary.dim" in compat
+    assert "torch.arange" in compat
+    assert "1e-3" in compat
 
 
 def test_internlm2_is_not_globally_waived() -> None:

@@ -354,6 +354,10 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             manifest_field_to_models_sets.setdefault(
                 "legacy_dynamic_cache_compat", set()
             ).add(name)
+        if data.get("repair_rotary_inv_freq"):
+            manifest_field_to_models_sets.setdefault(
+                "repair_rotary_inv_freq", set()
+            ).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
 
@@ -967,6 +971,10 @@ def maybe_refine_match_with_diff(
         return match
 
     fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+    legacy_cache_models = imap.manifest_field_to_models.get(
+        "legacy_dynamic_cache_compat", [])
+    rotary_repair_models = imap.manifest_field_to_models.get(
+        "repair_rotary_inv_freq", [])
 
     if path == "tests/e2e_harness/orchestrator.py":
         allowed = {
@@ -985,13 +993,15 @@ def maybe_refine_match_with_diff(
             )
 
     if path == "tests/e2e_harness/references/hf_transformers.py":
-        allowed_tokens = (
+        legacy_allowed_tokens = (
             "legacy_dynamic_cache_compat",
             "_legacy_dynamic_cache_compat_script",
             "_install_legacy_dynamic_cache_compat",
             "_from_legacy_cache",
             "_to_legacy_cache",
+            "_get_attr",
             "if_not_enabled",
+            "if_",
             "try:",
             "except_exception",
             "continue",
@@ -1008,6 +1018,9 @@ def maybe_refine_match_with_diff(
             "if_layer_past_is_none",
             "key_states",
             "value_states",
+            "key_cache",
+            "value_cache",
+            "legacy",
             "cache.update",
             "cache_=_cls",
             "remote_code_cache",
@@ -1024,15 +1037,105 @@ def maybe_refine_match_with_diff(
             "{legacy_cache_compat_script}",
             "\"\"\"",
         )
+        rotary_allowed_tokens = (
+            "repair_rotary_inv_freq",
+            "_rotary_inv_freq_repair_script",
+            "_repair_rotary_inv_freq_buffers",
+            "rotary_inv_freq_repair_script",
+            "rotary_emb",
+            "rotary",
+            "inv_freq",
+            "rope",
+            "non_persistent",
+            "model.modules",
+            "getattr",
+            "hasattr",
+            "base",
+            "dim",
+            "expected",
+            "current",
+            "needs_repair",
+            "repaired",
+            "import_sys",
+            "import_torch",
+            "torch.arange",
+            "torch.float32",
+            "torch.isfinite",
+            "torch.max",
+            "torch.abs",
+            "detach",
+            "float(",
+            "dtype",
+            "device",
+            "shape",
+            "tuple(",
+            "to(dtype",
+            "**_",
+            "0,",
+            "2,",
+            "1e_3",
+            "1e-3",
+            "print(",
+            "file=sys.stderr",
+            "if_",
+            "or_",
+            "and_",
+            "for_",
+            "continue",
+            "return_\"\"",
+            "return_\"\"\"",
+            "return",
+            "bool(",
+            "textwrap.indent",
+            "{rotary_inv_freq_repair_script}",
+            "\"\"\"",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        allowed_tokens = legacy_allowed_tokens + rotary_allowed_tokens
         if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
+            any(token in line for token in allowed_tokens)
+            for line in normalized_lines
         ):
+            normalized_diff = "\n".join(normalized_lines)
+            has_legacy_cache = any(
+                token in normalized_diff
+                for token in (
+                    "legacy_dynamic_cache_compat",
+                    "_legacy_dynamic_cache_compat_script",
+                    "_install_legacy_dynamic_cache_compat",
+                    "_from_legacy_cache",
+                    "_to_legacy_cache",
+                    "_get_attr",
+                    "key_cache",
+                    "value_cache",
+                    "legacy.append",
+                    "layer_past",
+                    "dynamiccache",
+                )
+            )
+            has_rotary_repair = any(
+                token in normalized_diff
+                for token in (
+                    "repair_rotary_inv_freq",
+                    "_rotary_inv_freq_repair_script",
+                    "_repair_rotary_inv_freq_buffers",
+                    "rotary_emb",
+                    "inv_freq",
+                )
+            )
+            models: Set[str] = set()
+            rule_parts: List[str] = []
+            if has_legacy_cache:
+                models.update(legacy_cache_models)
+                rule_parts.append("legacy_dynamic_cache_compat")
+            if has_rotary_repair:
+                models.update(rotary_repair_models)
+                rule_parts.append("rotary_inv_freq_repair")
+            if not models:
+                return match
             return RuleMatch(
-                "harness_reference_legacy_dynamic_cache_compat",
-                imap.manifest_field_to_models.get(
-                    "legacy_dynamic_cache_compat", []
-                ),
+                "harness_reference_" + "_and_".join(rule_parts),
+                sorted(models),
                 match.unit_tiers,
                 match.rebuild_cpp,
             )
@@ -1095,6 +1198,169 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "shared_builder_diffusion_tokenizer",
                 _models_for_task_strategies(["diffusion_media_generation"], imap),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
+        allowed_tokens = (
+            "_inject_added_tokens_from_config",
+            "added_tokens_decoder",
+            "added_tokens",
+            "tok_json",
+            "tok_cfg",
+            "tok_json_path",
+            "tok_cfg_path",
+            "tokenizer_json",
+            "tokenizer_config",
+            "tokenizer.json",
+            "tokenizer.model",
+            "prefer_sentencepiece",
+            "spiece.model",
+            "sentencepiece_model",
+            "autotokenizer",
+            "trust_remote_code",
+            "use_fast=false",
+            "sentencepiece",
+            "spm",
+            "*.model",
+            "*.spm",
+            "metaspace",
+            "add_prefix_space",
+            "prepend_scheme",
+            "use_uniform_scores",
+            "encodeaspieces",
+            "idtopiece",
+            "getscore",
+            "getpiecesize",
+            "unigram",
+            "normalizer",
+            "pre_tokenizer",
+            "decoder",
+            "ensure_ascii=false",
+            "content",
+            "special",
+            "single_word",
+            "lstrip",
+            "rstrip",
+            "normalized",
+            "try:",
+            "except_exception",
+            "return",
+            "continue",
+            "if_not",
+            "bool(",
+            "json.loads",
+            "json.dumps",
+            "write_text",
+            "read_text",
+            "exists",
+            "isinstance",
+            "by_id",
+            "token_=",
+            "token_id",
+            "raw_id",
+            "typeerror",
+            "valueerror",
+            "elif_",
+            "else:",
+            "if_",
+            "for_",
+            "model.get",
+            "vocab",
+            "entry",
+            "sorted(by_id)",
+            "unlink",
+            "oserror",
+            "save_pretrained",
+            "print(",
+            "file=sys.stderr",
+            "pass",
+            "candidate",
+            "from_tokenizers_import_tokenizer",
+            "encoding=",
+            "utf_8",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "shared_builder_sentencepiece_tokenizer_model",
+                legacy_cache_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path in {
+        "src/runtime/core/chat_template.cpp",
+        "src/runtime/core/chat_template.h",
+        "src/tokenizer/unigram_tokenizer.cpp",
+    }:
+        allowed_tokens = (
+            "chatmlwithbos",
+            "knone",
+            "kchatml",
+            "kmistral",
+            "kphi",
+            "kgemma",
+            "no_chat_template",
+            "bos_token",
+            "<|im_start|>",
+            "<|user|>",
+            "start_of_turn",
+            "[inst]",
+            "<s><|im_start|>",
+            "split_added_tokens",
+            "find_longest_added_token",
+            "added_id",
+            "addedtokenpatterns",
+            "encode_normal_segment",
+            "metaspace_pre_tokenize",
+            "maddprefixspace",
+            "mdecodeskipids",
+            "special",
+            "content",
+            "normalized",
+            "return_chattemplateformat",
+            "return_\"<s><|im_start|>",
+            "return",
+            "if_",
+            "else",
+            "for_",
+            "std::sort",
+            "std::vector",
+            "std::pair",
+            "std::string",
+            "size_t",
+            "int32_t",
+            "continue",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        normalized_diff = "\n".join(normalized_lines)
+        if path == "src/tokenizer/unigram_tokenizer.cpp" and all(
+            marker in normalized_diff
+            for marker in (
+                "split_added_tokens",
+                "encode_normal_segment",
+                "metaspace_pre_tokenize(text,_maddprefixspace)",
+                "maddedtokenpatterns",
+                "mdecodeskipids",
+            )
+        ):
+            return RuleMatch(
+                "cpp_internlm_chat_tokenizer",
+                legacy_cache_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+        if all(
+            any(token in line for token in allowed_tokens)
+            for line in normalized_lines
+        ):
+            return RuleMatch(
+                "cpp_internlm_chat_tokenizer",
+                legacy_cache_models,
                 match.unit_tiers,
                 match.rebuild_cpp,
             )

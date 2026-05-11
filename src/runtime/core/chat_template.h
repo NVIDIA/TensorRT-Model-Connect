@@ -10,11 +10,12 @@ namespace trtmc {
 
 /// Known chat template formats, auto-detected from tokenizer_config.json.
 enum class ChatTemplateFormat {
-    kNone,    ///< No chat template -- pass prompt through unchanged.
-    kChatML,  ///< <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
-    kMistral, ///< <s>[INST] {prompt} [/INST]
-    kPhi,     ///< <|user|>\n{prompt}<|end|>\n<|assistant|>\n
-    kGemma,   ///< <start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n
+    kNone,          ///< No chat template -- pass prompt through unchanged.
+    kChatML,        ///< <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+    kChatMLWithBos, ///< <s><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+    kMistral,       ///< <s>[INST] {prompt} [/INST]
+    kPhi,           ///< <|user|>\n{prompt}<|end|>\n<|assistant|>\n
+    kGemma,         ///< <start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n
     kLlama3, ///< <|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n
     kNemotron, ///< <extra_id_0>System\n\n<extra_id_1>User\n{prompt}\n<extra_id_1>Assistant\n
     kNemotronH, ///< <SPECIAL_10>System\n\n<SPECIAL_11>User\n{prompt}\n<SPECIAL_11>Assistant\n<think>\n

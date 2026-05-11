@@ -17,33 +17,38 @@ namespace {
 
 // ─── UTF-8 helpers ───
 
-inline char32_t utf8_to_char32(const std::string& s, size_t& pos)
-{
+inline char32_t utf8_to_char32(const std::string& s, size_t& pos) {
     unsigned char c = static_cast<unsigned char>(s[pos]);
-    if (c < 0x80) { ++pos; return static_cast<char32_t>(c); }
+    if (c < 0x80) {
+        ++pos;
+        return static_cast<char32_t>(c);
+    }
     if ((c & 0xE0) == 0xC0 && pos + 1 < s.size()) {
         char32_t cp = (static_cast<char32_t>(c & 0x1F) << 6) |
                       static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F);
-        pos += 2; return cp;
+        pos += 2;
+        return cp;
     }
     if ((c & 0xF0) == 0xE0 && pos + 2 < s.size()) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 6) |
                       static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F);
-        pos += 3; return cp;
+        pos += 3;
+        return cp;
     }
     if ((c & 0xF8) == 0xF0 && pos + 3 < s.size()) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F) << 6) |
                       static_cast<char32_t>(static_cast<unsigned char>(s[pos + 3]) & 0x3F);
-        pos += 4; return cp;
+        pos += 4;
+        return cp;
     }
-    ++pos; return 0xFFFD;
+    ++pos;
+    return 0xFFFD;
 }
 
-inline std::string char32_to_utf8(char32_t cp)
-{
+inline std::string char32_to_utf8(char32_t cp) {
     std::string r;
     if (cp <= 0x7F) {
         r.push_back(static_cast<char>(cp));
@@ -64,13 +69,16 @@ inline std::string char32_to_utf8(char32_t cp)
 }
 
 // Return the byte length of the UTF-8 codepoint starting at s[pos].
-inline size_t utf8_char_len(const std::string& s, size_t pos)
-{
+inline size_t utf8_char_len(const std::string& s, size_t pos) {
     unsigned char c = static_cast<unsigned char>(s[pos]);
-    if (c < 0x80) return 1;
-    if ((c & 0xE0) == 0xC0) return 2;
-    if ((c & 0xF0) == 0xE0) return 3;
-    if ((c & 0xF8) == 0xF0) return 4;
+    if (c < 0x80)
+        return 1;
+    if ((c & 0xE0) == 0xC0)
+        return 2;
+    if ((c & 0xF0) == 0xE0)
+        return 3;
+    if ((c & 0xF8) == 0xF0)
+        return 4;
     return 1;
 }
 
@@ -86,34 +94,39 @@ inline size_t utf8_char_len(const std::string& s, size_t pos)
 // 2. Whitespace normalization (various Unicode spaces → regular space)
 // This is sufficient for most practical text inputs.
 
-inline bool is_control(char32_t cp)
-{
-    if (cp == '\t' || cp == '\n' || cp == '\r') return false;
+inline bool is_control(char32_t cp) {
+    if (cp == '\t' || cp == '\n' || cp == '\r')
+        return false;
     return (cp < 0x20) || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F);
 }
 
-struct UnicodeRange { char32_t lo, hi; };
+struct UnicodeRange {
+    char32_t lo, hi;
+};
 constexpr UnicodeRange kUnicodeSpaces[] = {
-    {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A},
-    {0x2028, 0x2029}, {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
+    {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A}, {0x2028, 0x2029},
+    {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
 };
 
-inline bool is_unicode_space(char32_t cp)
-{
+inline bool is_unicode_space(char32_t cp) {
     for (const auto& r : kUnicodeSpaces)
-        if (cp >= r.lo && cp <= r.hi) return true;
+        if (cp >= r.lo && cp <= r.hi)
+            return true;
     return false;
 }
 
-std::string precompiled_normalize(const std::string& text)
-{
+std::string precompiled_normalize(const std::string& text) {
     std::string result;
     result.reserve(text.size());
     size_t pos = 0;
     while (pos < text.size()) {
         char32_t cp = utf8_to_char32(text, pos);
-        if (is_control(cp)) continue;
-        if (is_unicode_space(cp)) { result += ' '; continue; }
+        if (is_control(cp))
+            continue;
+        if (is_unicode_space(cp)) {
+            result += ' ';
+            continue;
+        }
         result += char32_to_utf8(cp);
     }
     return result;
@@ -124,27 +137,7 @@ std::string precompiled_normalize(const std::string& text)
 
 static const std::string kMetaspaceChar = "\xe2\x96\x81"; // ▁ U+2581
 
-inline bool is_ws(char c)
-{
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-std::vector<std::string> whitespace_split(const std::string& text)
-{
-    std::vector<std::string> words;
-    size_t i = 0;
-    while (i < text.size()) {
-        while (i < text.size() && is_ws(text[i])) ++i;
-        if (i >= text.size()) break;
-        size_t start = i;
-        while (i < text.size() && !is_ws(text[i])) ++i;
-        words.push_back(text.substr(start, i - start));
-    }
-    return words;
-}
-
-std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_space)
-{
+std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_space) {
     std::string result;
     result.reserve(text.size() + 8);
     if (add_prefix_space && !text.empty() && text[0] != ' ') {
@@ -164,16 +157,15 @@ std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_spac
 
 struct TrieNode {
     std::unordered_map<char, int> children;
-    int token_id = -1;   // -1 = not a token end
+    int token_id = -1; // -1 = not a token end
     float score = 0.0f;
 };
 
 class Trie {
-public:
+  public:
     Trie() { mNodes.emplace_back(); } // root node
 
-    void insert(const std::string& token, int id, float score)
-    {
+    void insert(const std::string& token, int id, float score) {
         int node = 0;
         for (char c : token) {
             auto it = mNodes[node].children.find(c);
@@ -192,27 +184,28 @@ public:
 
     // Find all tokens that match a prefix of text starting at offset.
     // Returns vector of (token_id, byte_length, score).
-    struct Match { int token_id; size_t length; float score; };
+    struct Match {
+        int token_id;
+        size_t length;
+        float score;
+    };
 
-    void find_prefixes(const std::string& text, size_t offset,
-                       std::vector<Match>& out) const
-    {
+    void find_prefixes(const std::string& text, size_t offset, std::vector<Match>& out) const {
         out.clear();
         int node = 0;
         for (size_t i = offset; i < text.size(); ++i) {
             char c = text[i];
             auto it = mNodes[node].children.find(c);
-            if (it == mNodes[node].children.end()) break;
+            if (it == mNodes[node].children.end())
+                break;
             node = it->second;
             if (mNodes[node].token_id >= 0) {
-                out.push_back({mNodes[node].token_id,
-                               i - offset + 1,
-                               mNodes[node].score});
+                out.push_back({mNodes[node].token_id, i - offset + 1, mNodes[node].score});
             }
         }
     }
 
-private:
+  private:
     std::vector<TrieNode> mNodes;
 };
 
@@ -224,13 +217,10 @@ struct ViterbiNode {
     size_t prev_pos; // byte position of previous node
 };
 
-std::vector<int32_t> viterbi_encode(
-    const std::string& text,
-    const Trie& trie,
-    int32_t unk_id,
-    float unk_score)
-{
-    if (text.empty()) return {};
+std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, int32_t unk_id,
+                                    float unk_score) {
+    if (text.empty())
+        return {};
 
     size_t n = text.size();
     // best[i] = best path score to reach byte position i
@@ -240,7 +230,8 @@ std::vector<int32_t> viterbi_encode(
     std::vector<Trie::Match> matches;
 
     for (size_t i = 0; i < n; ++i) {
-        if (best[i].score == -std::numeric_limits<float>::infinity()) continue;
+        if (best[i].score == -std::numeric_limits<float>::infinity())
+            continue;
 
         trie.find_prefixes(text, i, matches);
 
@@ -287,44 +278,42 @@ std::vector<int32_t> viterbi_encode(
 // ─── UnigramTokenizer ───
 
 class UnigramTokenizer final : public ITokenizer {
-public:
-    static std::unique_ptr<UnigramTokenizer> Create(
-        const char* json_data, std::size_t json_size, bool add_special_tokens)
-    {
+  public:
+    static std::unique_ptr<UnigramTokenizer> Create(const char* json_data, std::size_t json_size,
+                                                    bool add_special_tokens) {
         auto tok = std::unique_ptr<UnigramTokenizer>(new UnigramTokenizer());
         tok->mAddSpecialTokens = add_special_tokens;
         tok->parse_tokenizer_json(json_data, json_size);
         return tok;
     }
 
-    std::vector<int32_t> encode(const std::string& text) const override
-    {
+    std::vector<int32_t> encode(const std::string& text) const override {
         if (text.empty()) {
             return mAddSpecialTokens ? make_special_frame({}) : std::vector<int32_t>{};
         }
 
-        // Normalize
         std::string normalized = mUsePrecompiled ? precompiled_normalize(text) : text;
 
-        // Pre-tokenize: WhitespaceSplit → Metaspace
-        auto words = whitespace_split(normalized);
         std::vector<int32_t> ids;
-        for (size_t i = 0; i < words.size(); ++i) {
-            // Metaspace: prepend ▁ to each word
-            std::string processed = kMetaspaceChar + words[i];
-            auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
-            ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+        auto segments = split_added_tokens(normalized);
+        for (const auto& seg : segments) {
+            if (seg.added_id >= 0) {
+                ids.push_back(seg.added_id);
+            } else {
+                encode_normal_segment(seg.text, ids);
+            }
         }
 
-        if (mAddSpecialTokens) ids = make_special_frame(ids);
+        if (mAddSpecialTokens)
+            ids = make_special_frame(ids);
         return ids;
     }
 
-    std::string decode(const std::vector<int32_t>& ids) const override
-    {
+    std::string decode(const std::vector<int32_t>& ids) const override {
         std::string result;
         for (int32_t id : ids) {
-            if (mDecodeSkipIds.count(id)) continue;
+            if (mDecodeSkipIds.count(id))
+                continue;
             std::string token = token_for_id(id);
             result += token;
         }
@@ -332,31 +321,77 @@ public:
         return decode_metaspace(result);
     }
 
-    int32_t id_for_token(std::string_view token) const override
-    {
+    int32_t id_for_token(std::string_view token) const override {
         auto it = mTokenToId.find(std::string(token));
         return it != mTokenToId.end() ? it->second : -1;
     }
 
-    std::string token_for_id(int32_t id) const override
-    {
+    std::string token_for_id(int32_t id) const override {
         if (id >= 0 && static_cast<size_t>(id) < mIdToToken.size()) {
             return mIdToToken[id];
         }
         return "";
     }
 
-private:
+  private:
     UnigramTokenizer() = default;
 
-    static std::string decode_metaspace(const std::string& text)
-    {
+    struct Segment {
+        std::string text;
+        int32_t added_id; // -1 means normal text.
+    };
+
+    std::pair<int32_t, size_t> find_longest_added_token(const std::string& text, size_t pos) const {
+        int32_t best_id = -1;
+        size_t best_len = 0;
+        for (const auto& [content, id] : mAddedTokenPatterns) {
+            if (content.size() > best_len && pos + content.size() <= text.size() &&
+                text.compare(pos, content.size(), content) == 0) {
+                best_id = id;
+                best_len = content.size();
+            }
+        }
+        return {best_id, best_len};
+    }
+
+    std::vector<Segment> split_added_tokens(const std::string& text) const {
+        std::vector<Segment> segments;
+        if (mAddedTokenPatterns.empty()) {
+            segments.push_back({text, -1});
+            return segments;
+        }
+        size_t pos = 0;
+        while (pos < text.size()) {
+            auto [best_id, best_len] = find_longest_added_token(text, pos);
+            if (best_id >= 0) {
+                segments.push_back({text.substr(pos, best_len), best_id});
+                pos += best_len;
+            } else {
+                if (segments.empty() || segments.back().added_id >= 0)
+                    segments.push_back({"", -1});
+                segments.back().text.push_back(text[pos]);
+                ++pos;
+            }
+        }
+        return segments;
+    }
+
+    void encode_normal_segment(const std::string& text, std::vector<int32_t>& ids) const {
+        if (text.empty())
+            return;
+        std::string processed = metaspace_pre_tokenize(text, mAddPrefixSpace);
+        auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
+        ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+    }
+
+    static std::string decode_metaspace(const std::string& text) {
         std::string result;
         size_t pos = 0;
         while (pos < text.size()) {
-            if (pos + kMetaspaceChar.size() <= text.size()
-                && text.compare(pos, kMetaspaceChar.size(), kMetaspaceChar) == 0) {
-                if (!result.empty()) result += ' ';
+            if (pos + kMetaspaceChar.size() <= text.size() &&
+                text.compare(pos, kMetaspaceChar.size(), kMetaspaceChar) == 0) {
+                if (!result.empty())
+                    result += ' ';
                 pos += kMetaspaceChar.size();
             } else {
                 result += text[pos];
@@ -366,25 +401,24 @@ private:
         return result;
     }
 
-    std::vector<int32_t> make_special_frame(std::vector<int32_t> ids) const
-    {
+    std::vector<int32_t> make_special_frame(std::vector<int32_t> ids) const {
         std::vector<int32_t> result;
-        if (mBosId >= 0) result.push_back(mBosId);
+        if (mBosId >= 0)
+            result.push_back(mBosId);
         result.insert(result.end(), ids.begin(), ids.end());
-        if (mEosId >= 0) result.push_back(mEosId);
+        if (mEosId >= 0)
+            result.push_back(mEosId);
         return result;
     }
 
     // ─── JSON parsing ───
 
-    void parse_tokenizer_json(const char* json_data, std::size_t json_size)
-    {
+    void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
         nlohmann::json j;
         try {
             j = nlohmann::json::parse(json_data, json_data + json_size);
         } catch (const std::exception& e) {
-            throw std::runtime_error(
-                std::string("Failed to parse tokenizer.json: ") + e.what());
+            throw std::runtime_error(std::string("Failed to parse tokenizer.json: ") + e.what());
         }
 
         validate_model(j);
@@ -397,8 +431,7 @@ private:
         resolve_special_ids();
     }
 
-    static void validate_model(const nlohmann::json& j)
-    {
+    static void validate_model(const nlohmann::json& j) {
         if (!j.contains("model"))
             throw std::runtime_error("Invalid tokenizer.json: missing model");
 
@@ -425,8 +458,7 @@ private:
             throw std::runtime_error("Invalid tokenizer.json: missing model.vocab");
     }
 
-    void parse_vocab(const nlohmann::json& j)
-    {
+    void parse_vocab(const nlohmann::json& j) {
         auto& vocab = j["model"]["vocab"];
         mIdToToken.resize(vocab.size());
         mUnkId = j["model"].value("unk_id", 0);
@@ -444,13 +476,13 @@ private:
         // UNK score: must be worse than ANY real vocab token for Viterbi
         float min_score = 0.0f;
         for (float s : mScores) {
-            if (s < min_score) min_score = s;
+            if (s < min_score)
+                min_score = s;
         }
         mUnkScore = min_score - 10.0f;
     }
 
-    void build_trie()
-    {
+    void build_trie() {
         for (size_t i = 0; i < mIdToToken.size(); ++i) {
             const auto& token = mIdToToken[i];
             if (!token.empty()) {
@@ -459,9 +491,9 @@ private:
         }
     }
 
-    void parse_normalizer(const nlohmann::json& j)
-    {
-        if (!j.contains("normalizer") || j["normalizer"].is_null()) return;
+    void parse_normalizer(const nlohmann::json& j) {
+        if (!j.contains("normalizer") || j["normalizer"].is_null())
+            return;
         auto& norm = j["normalizer"];
         std::string ntype = norm.value("type", "");
         if (ntype == "Precompiled") {
@@ -481,9 +513,9 @@ private:
         }
     }
 
-    void parse_pre_tokenizer(const nlohmann::json& j)
-    {
-        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null()) return;
+    void parse_pre_tokenizer(const nlohmann::json& j) {
+        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null())
+            return;
         auto& pt = j["pre_tokenizer"];
         std::string ptype = pt.value("type", "");
 
@@ -502,9 +534,9 @@ private:
         }
     }
 
-    void parse_added_tokens(const nlohmann::json& j)
-    {
-        if (!j.contains("added_tokens")) return;
+    void parse_added_tokens(const nlohmann::json& j) {
+        if (!j.contains("added_tokens"))
+            return;
         for (auto& tok : j["added_tokens"]) {
             int32_t tok_id = tok.value("id", -1);
             std::string content = tok.value("content", "");
@@ -515,62 +547,74 @@ private:
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
+                mAddedTokenPatterns.push_back({content, tok_id});
+                if (tok.value("special", false))
+                    mDecodeSkipIds.insert(tok_id);
             }
         }
+        std::sort(mAddedTokenPatterns.begin(), mAddedTokenPatterns.end(),
+                  [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     }
 
     // Extract BOS/EOS from TemplateProcessing "single" array
-    void extract_template_bos_eos(const nlohmann::json& pp)
-    {
-        if (!pp.contains("single") || !pp["single"].is_array()) return;
+    void extract_template_bos_eos(const nlohmann::json& pp) {
+        if (!pp.contains("single") || !pp["single"].is_array())
+            return;
         for (auto& item : pp["single"]) {
-            if (!item.contains("SpecialToken")) continue;
+            if (!item.contains("SpecialToken"))
+                continue;
             std::string tok_str = item["SpecialToken"].value("id", "");
             auto it = mTokenToId.find(tok_str);
-            if (it == mTokenToId.end()) continue;
-            if (mBosId < 0) mBosId = it->second;
-            else mEosId = it->second;
+            if (it == mTokenToId.end())
+                continue;
+            if (mBosId < 0)
+                mBosId = it->second;
+            else
+                mEosId = it->second;
         }
     }
 
     // Extract BOS/EOS from RobertaProcessing cls/sep arrays
-    static int32_t extract_pp_id(const nlohmann::json& pp, const char* key)
-    {
+    static int32_t extract_pp_id(const nlohmann::json& pp, const char* key) {
         if (pp.contains(key) && pp[key].is_array() && pp[key].size() >= 2)
             return pp[key][1].get<int32_t>();
         return -1;
     }
 
-    void parse_post_processor(const nlohmann::json& j)
-    {
-        if (!j.contains("post_processor") || j["post_processor"].is_null()) return;
+    void parse_post_processor(const nlohmann::json& j) {
+        if (!j.contains("post_processor") || j["post_processor"].is_null())
+            return;
         auto& pp = j["post_processor"];
         std::string ptype = pp.value("type", "");
 
-        if (ptype == "TemplateProcessing") extract_template_bos_eos(pp);
+        if (ptype == "TemplateProcessing")
+            extract_template_bos_eos(pp);
         if (ptype == "RobertaProcessing") {
             mBosId = extract_pp_id(pp, "cls");
             mEosId = extract_pp_id(pp, "sep");
         }
     }
 
-    void resolve_special_ids()
-    {
+    void resolve_special_ids() {
         // Fallback: try common token names
         auto find_id = [this](const std::string& a, const std::string& b) -> int32_t {
             auto it = mTokenToId.find(a);
-            if (it != mTokenToId.end()) return it->second;
+            if (it != mTokenToId.end())
+                return it->second;
             it = mTokenToId.find(b);
             return it != mTokenToId.end() ? it->second : -1;
         };
 
-        if (mBosId < 0) mBosId = find_id("<s>", "[CLS]");
-        if (mEosId < 0) mEosId = find_id("</s>", "[SEP]");
+        if (mBosId < 0)
+            mBosId = find_id("<s>", "[CLS]");
+        if (mEosId < 0)
+            mEosId = find_id("</s>", "[SEP]");
         int32_t padId = find_id("<pad>", "[PAD]");
 
         // Build decode skip set
         for (int32_t id : {mBosId, mEosId, padId}) {
-            if (id >= 0) mDecodeSkipIds.insert(id);
+            if (id >= 0)
+                mDecodeSkipIds.insert(id);
         }
     }
 
@@ -580,6 +624,7 @@ private:
     std::vector<float> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
+    std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
     Trie mTrie;
 
     int32_t mUnkId = 0;
@@ -594,13 +639,10 @@ private:
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateUnigramTokenizer(
-    const char* tokenizer_json_data,
-    std::size_t tokenizer_json_size,
-    bool add_special_tokens)
-{
-    return UnigramTokenizer::Create(
-        tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+std::unique_ptr<ITokenizer> CreateUnigramTokenizer(const char* tokenizer_json_data,
+                                                   std::size_t tokenizer_json_size,
+                                                   bool add_special_tokens) {
+    return UnigramTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 
 } // namespace trtmc
