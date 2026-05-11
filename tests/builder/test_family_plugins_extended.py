@@ -512,7 +512,6 @@ class TestDebertaPlugin:
 
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, intermediate, max_pos):
-        head_dim = hidden // heads
         t = {}
         t["deberta.embeddings.word_embeddings.weight"] = _rand(vocab, hidden)
         t["deberta.embeddings.LayerNorm.weight"] = _rand(hidden)
@@ -782,6 +781,8 @@ class TestDPRPlugin:
             t[f"{p}.output.LayerNorm.weight"] = _rand(hidden)
             t[f"{p}.output.LayerNorm.bias"] = _rand(hidden)
 
+        t["ctx_encoder.bert_model.pooler.dense.weight"] = _rand(hidden, hidden)
+        t["ctx_encoder.bert_model.pooler.dense.bias"] = _rand(hidden)
         return t
 
     def test_load_weights_keys(self, tmp_path):
@@ -807,6 +808,8 @@ class TestDPRPlugin:
         assert "embedding" in weights
         assert "position_embedding" in weights
         assert "embed_norm" in weights
+        assert "pooler_w" in weights
+        assert "pooler_bias" in weights
 
         for i in range(self.LAYERS):
             for key in ("w_q", "w_k", "w_v"):

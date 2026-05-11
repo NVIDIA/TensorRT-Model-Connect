@@ -315,6 +315,8 @@ class HfTransformersReference:
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
+        contract_config = case.metadata.get("contract_config", {})
+        auto_class = contract_config.get("auto_class", "AutoModel")
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -325,9 +327,15 @@ class HfTransformersReference:
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
+            auto_class = {auto_class!r}
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+            if auto_class == 'DPRContextEncoder':
+                from transformers import DPRContextEncoderTokenizer
+                tokenizer = DPRContextEncoderTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
 
             # Load model — try AutoModel first, fall back to base model
             # for specialized wrappers (DPR, etc.) that don't return
@@ -337,16 +345,22 @@ class HfTransformersReference:
                 model_ref, trust_remote_code=trust_remote_code)
             model_type = getattr(config, 'model_type', '')
 
-            if model_type == 'dpr':
-                # DPR wraps BERT under ctx_encoder.bert_model or
-                # question_encoder.bert_model prefix.  AutoModel loads
-                # the wrong class (DPRQuestionEncoder) with missing weights.
-                # Load as DPRContextEncoder and extract the inner BERT.
+            use_dpr_pooler = False
+            if auto_class == 'DPRContextEncoder':
+                # Match the model card: DPRContextEncoder returns the passage
+                # embedding through pooler_output.
                 from transformers import DPRContextEncoder
-                _dpr = DPRContextEncoder.from_pretrained(
+                model = DPRContextEncoder.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code,
                     torch_dtype={torch_dtype_expr})
-                model = _dpr.ctx_encoder.bert_model
+                use_dpr_pooler = True
+            elif model_type == 'dpr':
+                # Fallback for legacy DPR manifests without contract metadata.
+                from transformers import DPRContextEncoder
+                model = DPRContextEncoder.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code,
+                    torch_dtype={torch_dtype_expr})
+                use_dpr_pooler = True
             else:
                 model = AutoModel.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code,
@@ -355,10 +369,15 @@ class HfTransformersReference:
 
             inputs = tokenizer(prompt, return_tensors="pt")
             with torch.no_grad():
-                outputs = model(**inputs)
+                outputs = (
+                    model(input_ids=inputs["input_ids"])
+                    if use_dpr_pooler else model(**inputs)
+                )
 
             # CLS token embedding from last_hidden_state
-            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+            if use_dpr_pooler and hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+                cls_embedding = outputs.pooler_output[0].float().cpu().numpy().tolist()
+            elif hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
                 cls_embedding = outputs.last_hidden_state[0, 0].float().cpu().numpy().tolist()
             else:
                 first_out = outputs[0]

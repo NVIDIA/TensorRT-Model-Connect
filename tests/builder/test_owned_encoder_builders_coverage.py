@@ -183,7 +183,7 @@ def _make_fake_trt() -> types.SimpleNamespace:
         ReduceOperation=types.SimpleNamespace(AVG="avg"),
         UnaryOperation=types.SimpleNamespace(SQRT="sqrt", RECIP="recip"),
         MatrixOperation=types.SimpleNamespace(NONE="none", TRANSPOSE="transpose"),
-        ActivationType=types.SimpleNamespace(SIGMOID="sigmoid"),
+        ActivationType=types.SimpleNamespace(SIGMOID="sigmoid", TANH="tanh"),
         AttentionNormalizationOp=types.SimpleNamespace(SOFTMAX="softmax"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
@@ -619,6 +619,48 @@ def test_build_encoder_engine_success_passes_rel_pos_bias_and_activation(monkeyp
     assert builder.config.pool_limits == [("workspace", 1 << 30)]
     assert builder.config.cleared_flags == ["tf32"]
     assert [t.name for t in builder.network.outputs] == ["hidden_states"]
+
+
+@pytest.mark.unit
+def test_build_encoder_engine_can_mark_pooler_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intent: verify DPR-style pooler output is exposed as the engine output."""
+    fake_trt = _make_fake_trt()
+    mod = _import_with_fake_trt("tensorrt_model_connect.encoder_builder", fake_trt)
+
+    monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
+    monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("pool_mm"))
+    monkeypatch.setattr(mod.graph_ops, "add_bias_sum", _fake_tensor_fn("pool_bias"))
+    monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))
+    monkeypatch.setattr(mod, "_add_encoder_layer", _fake_tensor_fn("layer"))
+
+    config = types.SimpleNamespace(
+        hidden_size=4,
+        vocab_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=6,
+        rms_norm_eps=1e-5,
+        hidden_act="gelu",
+        raw={"type_vocab_size": 2},
+    )
+    weights = {
+        "embedding": np.zeros((8, 4), dtype=np.float32),
+        "position_embedding": np.zeros((4, 4), dtype=np.float32),
+        "token_type_embedding": np.zeros((2, 4), dtype=np.float32),
+        "embed_norm": np.ones((4,), dtype=np.float32),
+        "embed_norm_beta": np.zeros((4,), dtype=np.float32),
+        "pooler_w": np.zeros((4, 4), dtype=np.float32),
+        "pooler_bias": np.zeros((4,), dtype=np.float32),
+    }
+
+    plan = mod.build_encoder_engine(
+        config, weights, max_seq_length=4, output_pooler=True)
+
+    assert plan == b"engine-plan"
+    builder = fake_trt.Builder.last_instance
+    assert [t.name for t in builder.network.outputs] == ["pooler_output"]
+    assert any(call[0] == "add_slice" for call in builder.network.calls)
+    assert any(call[0] == "add_activation" for call in builder.network.calls)
 
 
 @pytest.mark.unit

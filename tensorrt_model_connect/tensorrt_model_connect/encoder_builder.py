@@ -37,6 +37,7 @@ def build_encoder_engine(
     weights: WeightDict,
     max_seq_length: int,
     *,
+    output_pooler: bool = False,
     verbose: bool = False,
 ) -> bytes:
     """Build a TRT engine plan for a BERT-style encoder.
@@ -45,6 +46,9 @@ def build_encoder_engine(
         config: Model architecture from config.json.
         weights: Loaded weight dict from BERT plugin.
         max_seq_length: Maximum sequence length the engine is compiled for.
+        output_pooler: Mark the BERT-style pooler output instead of the full
+            hidden-state matrix. This matches DPRContextEncoder's public
+            embedding contract.
         verbose: Print TRT builder logs.
 
     Returns:
@@ -189,7 +193,12 @@ def build_encoder_engine(
     # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
-    hidden_state.name = "hidden_states"
+    if output_pooler:
+        hidden_state = _add_pooler_output(
+            network, hidden_state, hidden, weights)
+        hidden_state.name = "pooler_output"
+    else:
+        hidden_state.name = "hidden_states"
     network.mark_output(hidden_state)
 
     # -------------------------------------------------------------------
@@ -222,6 +231,27 @@ def _add_seq_layer_norm(
     """
     return graph_ops.add_layer_norm_native(
         network, inp, hidden_size, gamma, beta, eps)
+
+
+def _add_pooler_output(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    hidden_size: int,
+    weights: WeightDict,
+) -> trt.ITensor:
+    """Apply HF BertPooler: tanh(Dense(hidden_states[0]))."""
+    if "pooler_w" not in weights or "pooler_bias" not in weights:
+        raise ValueError("Pooler output requested but pooler weights are missing")
+
+    cls_slice = network.add_slice(
+        hidden, start=(0, 0), shape=(1, hidden_size), stride=(1, 1))
+    pooled = graph_ops.add_matmul_rhs_constant(
+        network, cls_slice.get_output(0), hidden_size, hidden_size,
+        weights["pooler_w"])
+    pooled = graph_ops.add_bias_sum(
+        network, pooled, hidden_size, weights["pooler_bias"])
+    return network.add_activation(
+        pooled, trt.ActivationType.TANH).get_output(0)
 
 
 def _add_encoder_layer(

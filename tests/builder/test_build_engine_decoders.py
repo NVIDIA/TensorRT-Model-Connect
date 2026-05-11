@@ -256,6 +256,8 @@ class TestDPRBuildEngine:
             t[f"{p}.output.dense.bias"] = _rand(hidden)
             t[f"{p}.output.LayerNorm.weight"] = _rand(hidden)
             t[f"{p}.output.LayerNorm.bias"] = _rand(hidden)
+        t["ctx_encoder.bert_model.pooler.dense.weight"] = _rand(hidden, hidden)
+        t["ctx_encoder.bert_model.pooler.dense.bias"] = _rand(hidden)
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):

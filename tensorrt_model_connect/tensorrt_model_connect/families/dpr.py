@@ -76,8 +76,6 @@ class DprPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        intermediate = config.intermediate_size
         max_pos = config.max_position_embeddings
         type_vocab_size = config.raw.get("type_vocab_size", 2)
 
@@ -193,6 +191,7 @@ class DprPlugin:
         return build_encoder_engine(
             config, weights,
             max_seq_length=max_cache_length,
+            output_pooler=True,
             verbose=verbose)
 
 
