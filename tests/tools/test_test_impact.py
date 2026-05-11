@@ -541,6 +541,13 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
+    def test_model_specific_harness_plugin(self, imap):
+        """Model-specific plugins should only select their owning model."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/plugins/nemotron_h_model_card.py", imap)
+        assert match.rule == "harness_plugin_model"
+        assert match.models == ["nemotron-h-nano-9b"]
+
     def test_harness_threshold_profile(self, imap):
         """Diffusion threshold profiles should stay scoped to diffusion models."""
         match = test_impact.classify_file(

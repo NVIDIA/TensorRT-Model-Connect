@@ -171,6 +171,11 @@ PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
     "tts": ["text_to_audio"],
 }
 
+# E2E contract plugin filename (stem) -> exact model names
+PLUGIN_MODEL_NAMES: Dict[str, List[str]] = {
+    "nemotron_h_model_card": ["nemotron-h-nano-9b"],
+}
+
 # E2E reference filename (stem) -> task_strategies
 REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "hf_transformers": [
@@ -702,6 +707,9 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         plugin_stem = m.group(1)
         if plugin_stem == "__init__":
             return RuleMatch("harness_plugin_init", list(imap.all_model_names), unit_tiers, rebuild)
+        model_names = PLUGIN_MODEL_NAMES.get(plugin_stem, [])
+        if model_names:
+            return RuleMatch("harness_plugin_model", model_names, unit_tiers, rebuild)
         task_strategies = PLUGIN_TASK_STRATEGIES.get(plugin_stem, [])
         if task_strategies:
             return RuleMatch(

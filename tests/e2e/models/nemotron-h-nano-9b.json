@@ -5,11 +5,18 @@
   "bundle": "nemotron-h-nano-9b.trtfb",
   "family": "nemotron_h",
   "runtime_strategy": "hybrid_mamba_attention",
-  "reference_backend": "none",
+  "reference_backend": "invariant_only",
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "max_new_tokens": 10,
+  "prompt": "Write a haiku about GPUs",
+  "max_new_tokens": 32,
+  "reference_family": "nemotron_h_no_think_model_card",
+  "user_contract": "chat_response",
+  "threshold_overrides": {
+    "contract_min_output_chars": 12,
+    "contract_min_haiku_lines": 2
+  },
   "logit_atol": 0.005,
   "layer_atol": 0.1,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "test_note": "Uses the Nemotron-H model-card Case 2 no-thinking chat example with max_new_tokens=32 and validates user-visible haiku behavior."
 }
