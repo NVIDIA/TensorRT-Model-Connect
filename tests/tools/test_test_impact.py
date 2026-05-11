@@ -1027,6 +1027,26 @@ class TestCoverageMapIntegration:
         assert result.cpp_tests == []
         assert result.fallback_tiers == []
 
+    def test_changed_tools_test_selected_directly_without_coverage_map(self, imap):
+        """A changed tools test file should run directly instead of all Python tests."""
+        result = test_impact.analyze_impact(
+            ["tests/tools/test_z_image_model_card_contract.py"], imap,
+        )
+
+        assert result.tools_tests == ["tests/tools/test_z_image_model_card_contract.py"]
+        assert result.builder_tests == []
+        assert result.fallback_tiers == []
+
+    def test_changed_tools_test_suppresses_tools_fallback(self, imap):
+        """Coverage-map fallback should not force full tools tier for the test file itself."""
+        result = test_impact.analyze_impact(
+            ["tests/tools/test_z_image_model_card_contract.py"], imap,
+            coverage_map={},
+        )
+
+        assert result.tools_tests == ["tests/tools/test_z_image_model_card_contract.py"]
+        assert "tools" not in result.fallback_tiers
+
     def test_json_output_includes_test_lists(self, imap):
         """JSON output includes builder_tests, cpp_tests, fallback_tiers."""
         result = test_impact.ImpactResult(
