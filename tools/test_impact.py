@@ -1105,6 +1105,43 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
+    if path == "src/tokenizer/unigram_tokenizer.cpp":
+        allowed_tokens = (
+            "cctype",
+            "ascii_lowercase",
+            "tolower",
+            "unsigned_char",
+            "mlowercase",
+            "lowercase",
+            "parse_normalizer_node",
+            "parse_normalizer",
+            "normalizer",
+            "normalizers",
+            "sequence",
+            "precompiled_normalize",
+            "precompiled",
+            "prepend",
+            "museprecompiled",
+            "maddprefixspace",
+            "normalized",
+            "result",
+            "stype",
+            "norm.is_null",
+            "if_(c",
+            "else",
+            "text",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "cpp_unigram_lowercase_normalizer",
+                ["albert-base"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tests/e2e/waives.txt":
         models = []
         for line in lines:

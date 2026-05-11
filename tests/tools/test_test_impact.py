@@ -327,6 +327,27 @@ class TestCppScope:
         assert match.rule == "cpp_source"
         assert len(match.models) == len(imap.all_model_names)
 
+    def test_unigram_lowercase_diff_can_be_refined(self, imap):
+        """Unigram Lowercase normalizer support narrows to ALBERT coverage."""
+        diff_text = """
+diff --git a/src/tokenizer/unigram_tokenizer.cpp b/src/tokenizer/unigram_tokenizer.cpp
+@@ -1 +1 @@
++#include <cctype>
++std::string ascii_lowercase(const std::string& text)
++    for (unsigned char c : text) {
++            result.push_back(static_cast<char>(std::tolower(c)));
++        } else if (ntype == "Lowercase") {
++            mLowercase = true;
++                parse_normalizer_node(sub);
++        if (mLowercase) normalized = ascii_lowercase(normalized);
++    bool mLowercase = false;
+"""
+        broad = test_impact.classify_file("src/tokenizer/unigram_tokenizer.cpp", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/tokenizer/unigram_tokenizer.cpp", broad, diff_text, imap)
+        assert refined.rule == "cpp_unigram_lowercase_normalizer"
+        assert refined.models == ["albert-base"]
+
     def test_cpp_pipeline_scope(self, imap):
         """text_generation_pipeline.cpp -> only decoder models."""
         match = test_impact.classify_file(
