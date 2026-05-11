@@ -2235,6 +2235,7 @@ def add_alibi_mask_4d(
     cache_position_indices: trt.ITensor,
     num_heads: int,
     target_dtype: trt.DataType | None = None,
+    alibi_bias_scale: float = 1.0,
 ) -> trt.ITensor:
     """Build a per-head ALiBi additive mask for native IAttention.
 
@@ -2245,6 +2246,9 @@ def add_alibi_mask_4d(
         cache_position_indices: [cache_rows] key positions for cached rows.
         target_dtype: Optional dtype for the returned mask. Defaults to
             ``mask_2d.dtype``.
+        alibi_bias_scale: Optional scalar applied to the ALiBi bias before it
+            is added to the attention mask. Falcon scales ``QK + alibi`` by
+            the attention scale; Bloom leaves the ALiBi bias unscaled.
 
     Returns:
         [1, H, Sq, K] additive mask containing both ``mask_2d`` and
@@ -2297,6 +2301,13 @@ def add_alibi_mask_4d(
         slopes_4d.get_output(0), rel_4d.get_output(0),
         trt.ElementWiseOperation.PROD)
     alibi_bias_t = alibi_bias.get_output(0)
+    if alibi_bias_scale != 1.0:
+        scale_t = add_constant(
+            network, (1, 1, 1, 1),
+            np.array([[[[alibi_bias_scale]]]], dtype=np.float32),
+            dtype=np.float32)
+        alibi_bias_t = network.add_elementwise(
+            alibi_bias_t, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
     mask_4d = add_2d_mask_to_4d(network, mask_2d)
     out_dtype = target_dtype or mask_4d.dtype

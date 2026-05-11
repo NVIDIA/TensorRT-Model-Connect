@@ -243,6 +243,7 @@ class FalconPlugin:
             mlp_type="gelu_fc",
             position_type=position_type,
             activation="gelu_new",
+            scale_alibi_bias=use_alibi,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 

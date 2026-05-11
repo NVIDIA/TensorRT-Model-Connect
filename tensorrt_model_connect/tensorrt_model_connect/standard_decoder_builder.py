@@ -61,6 +61,7 @@ def build_standard_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    scale_alibi_bias: bool = False,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -85,6 +86,9 @@ def build_standard_decoder_engine(
             rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
             Most models use this (True, default). GPT-Neo does NOT scale (False).
+        scale_alibi_bias: Whether ALiBi bias should be multiplied by the same
+            attention scale as QK. Falcon scales ``QK + alibi``; Bloom keeps
+            the ALiBi term unscaled.
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -134,6 +138,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            scale_alibi_bias=scale_alibi_bias,
             verbose=verbose,
         )
 
@@ -313,6 +318,7 @@ def build_standard_decoder_engine(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    alibi_bias_scale = attn_scale if scale_alibi_bias else 1.0
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
     # ---------------------------------------------------------------
@@ -417,6 +423,7 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             alibi_slopes_tensor=alibi_slopes_tensor,
             alibi_indices_tensor=alibi_indices_tensor,
+            alibi_bias_scale=alibi_bias_scale,
             dtype=work_np_dtype,
             quant_ctx=quant_ctx,
             cos_half_tensor=cos_half_tensor,
@@ -549,6 +556,7 @@ def _add_decoder_layer(
     parallel_residual: bool = False,
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
+    alibi_bias_scale: float = 1.0,
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     cos_half_tensor: trt.ITensor | None = None,
@@ -574,6 +582,7 @@ def _add_decoder_layer(
         norm_type=norm_type, position_type=position_type,
         alibi_slopes_tensor=alibi_slopes_tensor,
         alibi_indices_tensor=alibi_indices_tensor,
+        alibi_bias_scale=alibi_bias_scale,
         dtype=dtype,
         quant_ctx=quant_ctx,
         layer_prefix=prefix,

@@ -13,10 +13,16 @@ Intent: Validate the Falcon family plugin weight loading including LayerNorm wit
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from Falcon's HF layout, LayerNorm biases are loaded, and FC MLP keys (dense_h_to_4h/dense_4h_to_h) resolve to fc1/fc2.
 """
+from pathlib import Path
+
 import numpy as np
 
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
+from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FALCON_PLUGIN_SOURCE = REPO_ROOT / "tensorrt_model_connect/tensorrt_model_connect/families/falcon.py"
 
 
 class FalconPluginTester(FamilyPluginTester):
@@ -195,3 +201,17 @@ class TestFalconEngine(FamilyPluginTestMixin):
             assert f"layer.{i}.w_gate" not in weights, (
                 f"Layer {i} has w_gate — should use FC MLP, not SwiGLU"
             )
+
+    def test_rw_alibi_bias_scaled_with_attention_logits(self):
+        """Falcon-RW scales QK and ALiBi together in the HF attention path."""
+        source = FALCON_PLUGIN_SOURCE.read_text(encoding="utf-8")
+
+        assert 'position_type = "alibi" if use_alibi else "rope"' in source
+        assert "scale_alibi_bias=use_alibi" in source
+
+    def test_rope_falcon_does_not_enable_alibi_scaling(self):
+        """Falcon-3 RoPE builds should not opt into ALiBi-specific scaling."""
+        source = FALCON_PLUGIN_SOURCE.read_text(encoding="utf-8")
+
+        assert "use_alibi = config.raw.get(\"alibi\", False)" in source
+        assert "scale_alibi_bias=True" not in source

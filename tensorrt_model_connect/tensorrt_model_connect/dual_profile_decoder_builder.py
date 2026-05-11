@@ -219,6 +219,7 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    scale_alibi_bias: bool = False,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
 ) -> bytes:
@@ -226,7 +227,7 @@ def build_dual_profile_decoder_engine(
 
     ``norm_type`` / ``mlp_type`` / ``position_type`` / ``activation`` /
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
-    ``scale_attn_weights`` mirror the same parameters on
+    ``scale_attn_weights`` / ``scale_alibi_bias`` mirror the same parameters on
     ``build_standard_decoder_engine``.
 
     ``quant_ctx`` (optional) routes every projection matmul through
@@ -420,6 +421,7 @@ def build_dual_profile_decoder_engine(
 
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    alibi_bias_scale = attn_scale if scale_alibi_bias else 1.0
 
     # Quantization-aware matmul (passes weight_name through to QuantContext).
     matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
@@ -455,7 +457,8 @@ def build_dual_profile_decoder_engine(
         mask_4d = graph_ops.add_alibi_mask_4d(
             network, attention_mask_work, position_id,
             alibi_slopes_tensor, alibi_cache_positions_fp32,
-            num_heads, target_dtype=work_trt_dtype)
+            num_heads, target_dtype=work_trt_dtype,
+            alibi_bias_scale=alibi_bias_scale)
     else:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
 

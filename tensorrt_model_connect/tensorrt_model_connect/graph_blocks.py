@@ -153,6 +153,7 @@ def add_attention_block(
     position_type: str = "rope",
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
+    alibi_bias_scale: float = 1.0,
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
@@ -278,6 +279,7 @@ def add_attention_block(
                 alibi_slopes_tensor,
                 alibi_indices_tensor,
                 num_heads,
+                alibi_bias_scale=alibi_bias_scale,
             )
         else:
             mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
