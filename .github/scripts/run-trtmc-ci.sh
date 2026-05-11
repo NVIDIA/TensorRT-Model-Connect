@@ -238,26 +238,29 @@ run_python_builder_tests() {
     fi
   fi
 
-  local builder_tests=""
+  local selected_tests_file="coverage/python-selected-tests.txt"
   if [ "${FULL_E2E:-false}" != "true" ]; then
-    builder_tests=$(python3 -c "
-import json, sys
+    python3 -c "
+import json
 d = json.load(open('impact.json'))
-tests = d.get('builder_tests', [])
-fallback = d.get('fallback_tiers', [])
-if 'builder' in fallback or not tests:
-    sys.exit(0)
-print(' or '.join(tests))
-" 2>/dev/null) || true
+tests = d.get('builder_tests', []) + d.get('tools_tests', [])
+fallback = set(d.get('fallback_tiers', []))
+if fallback.intersection({'builder', 'tools'}):
+    tests = []
+for test in tests:
+    print(test)
+" > "$selected_tests_file"
   fi
 
   local cov_args="--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
-  if [ -n "$builder_tests" ]; then
-    echo "Selective builder tests: $builder_tests"
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+  if [ -s "$selected_tests_file" ]; then
+    mapfile -t selected_python_tests < "$selected_tests_file"
+    echo "Selective Python tests:"
+    printf '  %s\n' "${selected_python_tests[@]}"
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest "${selected_python_tests[@]}" -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
-      -k "$builder_tests" -n auto $cov_args
+      -n auto $cov_args
   else
     echo "Running all builder + tools tests"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
