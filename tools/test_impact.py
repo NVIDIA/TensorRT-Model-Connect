@@ -171,6 +171,11 @@ PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
     "tts": ["text_to_audio"],
 }
 
+# E2E contract plugin filename (stem) -> exact model names
+PLUGIN_MODEL_NAMES: Dict[str, List[str]] = {
+    "deepseek_ocr_model_card": ["deepseek-ocr-l0"],
+}
+
 # E2E reference filename (stem) -> task_strategies
 REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "hf_transformers": [
@@ -702,6 +707,9 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         plugin_stem = m.group(1)
         if plugin_stem == "__init__":
             return RuleMatch("harness_plugin_init", list(imap.all_model_names), unit_tiers, rebuild)
+        model_names = PLUGIN_MODEL_NAMES.get(plugin_stem, [])
+        if model_names:
+            return RuleMatch("harness_plugin_model", model_names, unit_tiers, rebuild)
         task_strategies = PLUGIN_TASK_STRATEGIES.get(plugin_stem, [])
         if task_strategies:
             return RuleMatch(
@@ -1056,6 +1064,54 @@ def maybe_refine_match_with_diff(
                 "torchtrt_compiler_tokenizer",
                 _models_for_runtime_strategies(
                     ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tensorrt_model_connect/tensorrt_model_connect/debug_runner.py":
+        allowed_tokens = (
+            "pad_center_chw",
+            "preprocess_pad_center_chw",
+            "image_path",
+            "fixed_image_size",
+            "image_mean",
+            "image_std",
+            "interpolation",
+            "_kwargs",
+            "np.ndarray",
+            "aspect_ratio",
+            "center_pad",
+            "mean_color",
+            "pil",
+            "image.open",
+            "rgb",
+            "img.size",
+            "scale",
+            "new_w",
+            "new_h",
+            "resize",
+            "pad_color",
+            "padded",
+            "x_off",
+            "y_off",
+            "paste",
+            "img_np",
+            "np.array",
+            "mean",
+            "std",
+            "transpose",
+            "float32",
+            "temporal",
+            "np_tile",
+            "return_result",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "shared_debug_runner_pad_center_chw",
+                ["deepseek-ocr-l0"],
                 match.unit_tiers,
                 match.rebuild_cpp,
             )

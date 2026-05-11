@@ -6,14 +6,23 @@
   "family": "deepseek_ocr",
   "runtime_strategy": "vision_language",
   "ci_tier": "l0_only",
-  "reference_family": "ocr_markdown",
+  "reference_family": "deepseek_ocr_model_card",
   "user_contract": "ocr_text",
   "max_cache_length": 4096,
-  "prompt": "Extract the text from this image.",
+  "prompt": "<|grounding|>Convert the document to markdown.",
   "max_new_tokens": 80,
+  "threshold_overrides": {
+    "contract_min_output_chars": 24,
+    "contract_min_expected_fragments": 2
+  },
+  "ocr_expected_fragments": [
+    "DeepSeek-OCR-2 family plugin",
+    "Standard MHA",
+    "DeepSeek-V2-style language decoder"
+  ],
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
   "trust_remote_code": true,
   "reference_backend": "invariant_only",
-  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, invariant comparator, OCR text artifact contract, and full cache budget with shorter decode budget."
+  "notes": "MR L0 repro for DeepSeek-OCR. Uses the model-card document-to-markdown OCR prompt; the image token is supplied by the VL runtime --image path."
 }

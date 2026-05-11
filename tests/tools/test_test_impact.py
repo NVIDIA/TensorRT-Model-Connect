@@ -541,6 +541,13 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
+    def test_model_specific_harness_plugin(self, imap):
+        """Model-specific contract plugins should only select their model."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/plugins/deepseek_ocr_model_card.py", imap)
+        assert match.rule == "harness_plugin_model"
+        assert match.models == ["deepseek-ocr-l0"]
+
     def test_harness_threshold_profile(self, imap):
         """Diffusion threshold profiles should stay scoped to diffusion models."""
         match = test_impact.classify_file(
@@ -675,6 +682,56 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
             "tests/e2e/waives.txt", broad, diff_text, imap)
         assert refined.rule == "e2e_waives_model_lines"
         assert refined.models == ["flux-schnell"]
+
+    def test_debug_runner_pad_center_chw_diff_can_be_refined(self, imap):
+        """pad_center_chw debug-runner support is DeepSeek-OCR scoped."""
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/debug_runner.py b/tensorrt_model_connect/tensorrt_model_connect/debug_runner.py
+@@ -1 +1 @@
++def _preprocess_pad_center_chw(
++    image_path: str,
++    fixed_image_size: int = 448,
++    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
++    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
++    interpolation: str = "bicubic",
++    **_kwargs: Any,
++) -> np.ndarray:
++    \"\"\"Aspect-ratio-preserving resize + center-pad with mean color: [C, H, W].\"\"\"
++    from PIL import Image
++    resample = _resolve_pil_interpolation(interpolation)
++    img = Image.open(image_path).convert("RGB")
++    w, h = img.size
++    scale = min(fixed_image_size / w, fixed_image_size / h)
++    new_w = max(1, int(w * scale))
++    new_h = max(1, int(h * scale))
++    img = img.resize((new_w, new_h), resample)
++    pad_color = tuple(int(float(value) * 255.0) for value in image_mean[:3])
++    padded = Image.new("RGB", (fixed_image_size, fixed_image_size), pad_color)
++    x_off = (fixed_image_size - new_w) // 2
++    y_off = (fixed_image_size - new_h) // 2
++    padded.paste(img, (x_off, y_off))
++    img_np = np.array(padded, dtype=np.float32) / 255.0
++    mean = np.array(image_mean, dtype=np.float32)
++    std = np.array(image_std, dtype=np.float32)
++    img_np = (img_np - mean) / std
++    return img_np.transpose(2, 0, 1).astype(np.float32)
++      "pad_center_chw":      [C, H, W] aspect-preserving resize + center mean-pad
++    if preprocessor_type == "pad_center_chw":
++        result = _preprocess_pad_center_chw(image_path, **kwargs)
++        if temporal > 1 and result.shape[0] < temporal * 3:
++        result = np.tile(result, (temporal, 1, 1))
++        return result
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/debug_runner.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/debug_runner.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "shared_debug_runner_pad_center_chw"
+        assert refined.models == ["deepseek-ocr-l0"]
 
 
 class TestDiffAwareBuilderRefinement:

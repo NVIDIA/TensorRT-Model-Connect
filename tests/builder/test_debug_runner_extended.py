@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import struct
 import warnings
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -702,6 +702,29 @@ class TestPreprocessImageDispatch:
         assert result.shape == (3, 64, 64)
         assert result.dtype == np.float32
 
+    def test_pad_center_chw_dispatch(self, tmp_path):
+        """pad_center_chw returns centered mean-color padding like C++."""
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
+
+        from PIL import Image
+        img = Image.new("RGB", (8, 4), color=(255, 0, 0))
+        img_path = str(tmp_path / "wide.jpg")
+        img.save(img_path)
+
+        result = preprocess_image_for_trt(
+            img_path,
+            preprocessor_type="pad_center_chw",
+            fixed_image_size=8,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+        )
+
+        assert result.shape == (3, 8, 8)
+        assert result.dtype == np.float32
+        pad_pixel = float(int(0.5 * 255.0))
+        expected_pad = (pad_pixel / 255.0 - 0.5) / 0.5
+        np.testing.assert_allclose(result[0, 0, :], expected_pad, atol=0.05)
+
 
 # ---------------------------------------------------------------------------
 # _resolve_pil_interpolation
@@ -775,8 +798,8 @@ class TestVLTrtRunnerConfigLoading:
         path = self._make_vl_bundle(tmp_path, config, preproc)
 
         # Mock TrtRunner and VisionTrtRunner constructors so we don't need TRT
-        with patch("tensorrt_model_connect.debug_runner.TrtRunner") as MockTrt, \
-             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner") as MockVision:
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"), \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(path)
 
         assert runner.image_token_id == 151655
@@ -1048,8 +1071,6 @@ class TestTrtRunnerWithEngine:
         attention_size = 8
         max_cache_length = 4
         vocab_size = 16
-        hidden_size = 8
-
         logger = trt.Logger(trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network()
@@ -1058,14 +1079,14 @@ class TestTrtRunnerWithEngine:
         config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
+        network.add_input("token_id", trt.int32, (1,))
+        network.add_input("position_id", trt.int32, (1,))
+        network.add_input(
             "attention_mask", trt.float32, (1, max_cache_length + 1))
 
-        cache_k_0 = network.add_input(
+        network.add_input(
             "cache_k_0", trt.float32, (max_cache_length, attention_size))
-        cache_v_0 = network.add_input(
+        network.add_input(
             "cache_v_0", trt.float32, (max_cache_length, attention_size))
 
         # Simple pass-through: logits = zeros(1, vocab_size)
