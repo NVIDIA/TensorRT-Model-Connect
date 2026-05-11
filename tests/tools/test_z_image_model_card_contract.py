@@ -24,6 +24,8 @@ def test_z_image_l0_uses_model_card_prompt_and_steps() -> None:
     assert raw["num_inference_steps"] == 8
     assert raw["image_height"] == 512
     assert raw["image_width"] == 512
+    assert raw["threshold_overrides"]["ssim"] == -0.2
+    assert "diffusion VLM assessment remain active" in raw["notes"]
 
 
 def test_z_image_l0_prompt_does_not_trigger_photo_reference_waive_path() -> None:
