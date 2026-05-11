@@ -663,6 +663,152 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_vl_generated_only_decode"
         assert refined.models == ["internvl3-8b"]
 
+    def test_harness_orchestrator_builder_opt_diff_can_be_refined(self, mock_repo):
+        """Builder-opt plumbing narrows orchestrator scope to opted-in manifests."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "fnet-base.json",
+            {
+                "name": "fnet-base",
+                "family": "fnet",
+                "runtime_strategy": "encoder_only",
+                "hf_id": "google/fnet-base",
+                "builder_optimization_level": 0,
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.py
+@@ -1 +1 @@
++_BUILDER_OPT_ENV = "TRTMC_BUILDER_OPTIMIZATION_LEVEL"
++_TIMING_CACHE_PATH_ENV = "TRTMC_TRT_TIMING_CACHE_PATH"
++    _apply_build_env_overrides(case, env)
++def _apply_build_env_overrides(case: E2ECase, env: dict[str, str]) -> None:
++    \"\"\"Apply manifest-scoped build env overrides to one bundle subprocess.\"\"\"
++    level = case.metadata.get("builder_optimization_level")
++    if level is None:
++        return
++    opt_level = int(level)
++    env[_BUILDER_OPT_ENV] = str(opt_level)
++    timing_cache_path = env.get(_TIMING_CACHE_PATH_ENV)
++    if not timing_cache_path:
++        return
++    path = Path(timing_cache_path)
++    replacement = f"opt{opt_level}"
++    new_stem = re.sub(r"opt(?:default|\\d+)", replacement, path.stem, count=1)
++    if new_stem == path.stem:
++        new_stem = f"{path.stem}-{replacement}"
++    env[_TIMING_CACHE_PATH_ENV] = str(path.with_name(f"{new_stem}{path.suffix}"))
++    builder_opt = case.metadata.get("builder_optimization_level")
++    if builder_opt is not None:
++        build_parts.insert(0, f"{_BUILDER_OPT_ENV}={int(builder_opt)}")
+"""
+        broad = test_impact.classify_file("tests/e2e_harness/orchestrator.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
+        assert refined.rule == "harness_shared_builder_optimization_level"
+        assert refined.models == ["fnet-base"]
+
+    def test_fnet_encoder_pipeline_diff_can_be_refined(self, mock_repo):
+        """FNet-guarded encoder padding narrows shared encoder scope."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "fnet-base.json",
+            {
+                "name": "fnet-base",
+                "family": "fnet",
+                "runtime_strategy": "encoder_only",
+                "hf_id": "google/fnet-base",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/src/runtime/pipelines/encoder_pipeline.cpp b/src/runtime/pipelines/encoder_pipeline.cpp
+@@ -1 +1 @@
++int32_t infer_input_length(const TrtModule& module, const std::string& input_name) {
++        if (info.name != input_name || info.shape.empty())
++            continue;
++        const int64_t len = info.shape.back();
++        if (len > 0)
++            return static_cast<int32_t>(len);
++    return 0;
++bool model_needs_fnet_static_padding(const std::string& model_id) {
++    return model_id.find("fnet") != std::string::npos;
++    const int32_t engine_len =
++        model_needs_fnet_static_padding(model_id_) ? infer_input_length(*encoder_, "input_ids") : 0;
++    const auto target_len =
++    const auto valid_len = std::min(input_ids.size(), target_len);
++    std::vector<int32_t> mask_i32(target_len, 0);
++    std::vector<float> mask_f32(target_len, 0.0f);
++    std::vector<int32_t> ids_copy(target_len, pad_token_id_);
++    std::copy_n(input_ids.begin(), valid_len, ids_copy.begin());
+"""
+        broad = test_impact.classify_file("src/runtime/pipelines/encoder_pipeline.cpp", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/runtime/pipelines/encoder_pipeline.cpp", broad, diff_text, imap)
+        assert refined.rule == "fnet_scoped_encoder_padding"
+        assert refined.models == ["fnet-base"]
+
+    def test_fnet_reference_diff_can_be_refined(self, mock_repo):
+        """FNet-only HF reference tokenization narrows reference scope."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "fnet-base.json",
+            {
+                "name": "fnet-base",
+                "family": "fnet",
+                "runtime_strategy": "encoder_only",
+                "hf_id": "google/fnet-base",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++            tokenizer_kwargs = {{"return_tensors": "pt"}}
++            if model_type == 'fnet':
++                tokenizer_kwargs.update({{
++                    "padding": "max_length",
++                    "truncation": True,
++                    "max_length": getattr(config, "max_position_embeddings", 512),
++                }})
++            inputs = tokenizer(prompt, **tokenizer_kwargs)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py", broad, diff_text, imap)
+        assert refined.rule == "fnet_scoped_encoder_padding"
+        assert refined.models == ["fnet-base"]
+
+    def test_manifest_loader_builder_opt_diff_can_be_refined(self, mock_repo):
+        """Builder-opt metadata plumbing narrows manifest_loader scope."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "fnet-base.json",
+            {
+                "name": "fnet-base",
+                "family": "fnet",
+                "runtime_strategy": "encoder_only",
+                "hf_id": "google/fnet-base",
+                "builder_optimization_level": 0,
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_loader.py
+@@ -1 +1 @@
++        "builder_optimization_level",
++    if "builder_optimization_level" in manifest:
++        meta["builder_optimization_level"] = manifest["builder_optimization_level"]
++    for field_name in ("max_new_tokens", "max_cache_length", "builder_optimization_level"):
+"""
+        broad = test_impact.classify_file("tests/e2e_harness/manifest_loader.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/manifest_loader.py", broad, diff_text, imap)
+        assert refined.rule == "harness_manifest_builder_optimization_level"
+        assert refined.models == ["fnet-base"]
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """

@@ -101,10 +101,11 @@ class RecordingModule final : public trtmc::ITrtModule {
     std::vector<float> output_{0.1F, 0.2F, 0.3F, 0.4F, 0.5F, 0.6F, 0.7F, 0.8F};
 };
 
-void test_encoder_padding_uses_configured_pad_token() {
+void test_fnet_padding_uses_configured_pad_token() {
     auto module = std::make_unique<RecordingModule>(trtmc::DType::kInt32);
     auto* raw = module.get();
-    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "fnet", 3);
+    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "google/fnet-base",
+                                    3);
 
     auto result = pipeline.encode_ids({4, 14275});
 
@@ -114,10 +115,11 @@ void test_encoder_padding_uses_configured_pad_token() {
           "padding: int32 mask marks real tokens");
 }
 
-void test_encoder_padding_uses_float_mask_when_engine_expects_float() {
+void test_fnet_padding_uses_float_mask_when_engine_expects_float() {
     auto module = std::make_unique<RecordingModule>(trtmc::DType::kFloat32);
     auto* raw = module.get();
-    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "fnet", 3);
+    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "google/fnet-base",
+                                    3);
 
     pipeline.encode_ids({4});
 
@@ -126,10 +128,11 @@ void test_encoder_padding_uses_float_mask_when_engine_expects_float() {
           "float mask: mask marks real tokens");
 }
 
-void test_encoder_input_truncates_to_engine_length() {
+void test_fnet_input_truncates_to_engine_length() {
     auto module = std::make_unique<RecordingModule>(trtmc::DType::kInt32);
     auto* raw = module.get();
-    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "fnet", 3);
+    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "google/fnet-base",
+                                    3);
 
     pipeline.encode_ids({1, 2, 3, 4, 5});
 
@@ -138,12 +141,25 @@ void test_encoder_input_truncates_to_engine_length() {
           "truncate: mask stays full for real tokens");
 }
 
+void test_non_fnet_input_keeps_runtime_length() {
+    auto module = std::make_unique<RecordingModule>(trtmc::DType::kInt32);
+    auto* raw = module.get();
+    trtmc::EncoderPipeline pipeline(std::move(module), "encoder_only", nullptr, "bert-base", 3);
+
+    pipeline.encode_ids({4, 14275});
+
+    check((raw->seen_ids == std::vector<int32_t>{4, 14275}), "non-fnet: ids keep runtime length");
+    check((raw->seen_mask_i32 == std::vector<int32_t>{1, 1}),
+          "non-fnet: mask keeps runtime length");
+}
+
 } // namespace
 
 int main() {
-    test_encoder_padding_uses_configured_pad_token();
-    test_encoder_padding_uses_float_mask_when_engine_expects_float();
-    test_encoder_input_truncates_to_engine_length();
+    test_fnet_padding_uses_configured_pad_token();
+    test_fnet_padding_uses_float_mask_when_engine_expects_float();
+    test_fnet_input_truncates_to_engine_length();
+    test_non_fnet_input_keeps_runtime_length();
 
     if (failures > 0) {
         std::cerr << failures << " failures\n";

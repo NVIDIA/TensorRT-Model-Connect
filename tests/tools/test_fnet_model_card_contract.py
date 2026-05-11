@@ -16,6 +16,7 @@ def test_fnet_manifest_matches_model_card_feature_example() -> None:
     assert manifest["family"] == "fnet"
     assert manifest["runtime_strategy"] == "encoder_only"
     assert manifest["max_cache_length"] == 512
+    assert manifest["builder_optimization_level"] == 0
     assert manifest["prompt"] == "Replace me by any text you'd like."
     assert manifest["max_new_tokens"] == 0
     assert manifest["threshold_overrides"]["cls_embedding_cosine"] >= 0.95

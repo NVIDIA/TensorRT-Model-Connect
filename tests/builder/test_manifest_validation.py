@@ -67,6 +67,17 @@ class TestManifestValidation:
         with pytest.raises(TypeError, match="max_cache_length"):
             _validate_manifest(data, "test.json")
 
+    def test_wrong_type_builder_optimization_level(self, tmp_path):
+        """builder_optimization_level must be an int, not bool."""
+        data = {
+            "name": "test",
+            "hf_id": "org/m",
+            "family": "qwen",
+            "builder_optimization_level": True,
+        }
+        with pytest.raises(TypeError, match="builder_optimization_level"):
+            _validate_manifest(data, "test.json")
+
     def test_unknown_runtime_strategy_warns(self, tmp_path):
         """Unknown runtime_strategy should emit a warning."""
         data = {
@@ -240,6 +251,18 @@ class TestManifestValidation:
         assert case.metadata["precision"] == "bf16"
         assert case.metadata["quantization"]["format"] == "fp8"
         assert case.metadata["quantization"]["scale_artifact"] == "scales/qwen3-fp8.json"
+
+    def test_builder_optimization_level_propagates_to_metadata(self, tmp_path):
+        """Manifest-scoped TensorRT builder level should reach build metadata."""
+        path = self._write_manifest(tmp_path, {
+            "name": "fnet-test",
+            "hf_id": "google/fnet-base",
+            "family": "fnet",
+            "runtime_strategy": "encoder_only",
+            "builder_optimization_level": 0,
+        })
+        case = load_manifest(path)
+        assert case.metadata["builder_optimization_level"] == 0
 
     def test_skip_comparison_populates_metadata(self, tmp_path):
         """skip_comparison should set skip_comparison_reason without setting skip_reason."""

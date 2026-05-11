@@ -58,6 +58,10 @@ int32_t infer_input_length(const TrtModule& module, const std::string& input_nam
     return 0;
 }
 
+bool model_needs_fnet_static_padding(const std::string& model_id) {
+    return model_id.find("fnet") != std::string::npos || model_id.find("FNet") != std::string::npos;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -122,7 +126,8 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
-    const int32_t engine_len = infer_input_length(*encoder_, "input_ids");
+    const int32_t engine_len =
+        model_needs_fnet_static_padding(model_id_) ? infer_input_length(*encoder_, "input_ids") : 0;
     const auto target_len =
         engine_len > 0 ? static_cast<std::size_t>(engine_len) : input_ids.size();
     const auto valid_len = std::min(input_ids.size(), target_len);

@@ -452,6 +452,7 @@ def _build_metadata(manifest: dict) -> dict:
         "stages", "comparison_profile", "threshold_overrides", "determinism",
         "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
+        "builder_optimization_level",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -476,6 +477,9 @@ def _build_metadata(manifest: dict) -> dict:
     # (e.g. --method torchtrt for torch-trt models vs raw TRT default).
     if "build_args" in manifest:
         meta["build_args"] = manifest["build_args"]
+
+    if "builder_optimization_level" in manifest:
+        meta["builder_optimization_level"] = manifest["builder_optimization_level"]
 
     return meta
 
@@ -564,7 +568,7 @@ def _validate_manifest(raw: dict, path: str) -> None:
             )
 
     # 3. Type checks for int fields
-    for field_name in ("max_new_tokens", "max_cache_length"):
+    for field_name in ("max_new_tokens", "max_cache_length", "builder_optimization_level"):
         if field_name in raw:
             val = raw[field_name]
             if not isinstance(val, int) or isinstance(val, bool):

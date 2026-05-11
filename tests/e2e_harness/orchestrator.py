@@ -52,6 +52,9 @@ from .registry import get_comparator, get_contract_plugin, get_reference, get_ru
 
 logger = logging.getLogger(__name__)
 
+_BUILDER_OPT_ENV = "TRTMC_BUILDER_OPTIMIZATION_LEVEL"
+_TIMING_CACHE_PATH_ENV = "TRTMC_TRT_TIMING_CACHE_PATH"
+
 _TRTMC_TIMING_RE = re.compile(
     r"^\[trtmc\.timing\]\s+"
     r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
@@ -325,6 +328,7 @@ def _resolve_bundle(
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()
     env = os.environ.copy()
+    _apply_build_env_overrides(case, env)
     if ctx.build_profile and ctx.build_profile != "base":
         cmd.extend(["--active-python-profile", ctx.build_profile])
     build_timing_path: Path | None = None
@@ -387,6 +391,27 @@ def _resolve_bundle(
         return None, elapsed, msg, build_info
 
     return str(bundle_path), elapsed, "", build_info
+
+
+def _apply_build_env_overrides(case: E2ECase, env: dict[str, str]) -> None:
+    """Apply manifest-scoped build env overrides to one bundle subprocess."""
+    level = case.metadata.get("builder_optimization_level")
+    if level is None:
+        return
+
+    opt_level = int(level)
+    env[_BUILDER_OPT_ENV] = str(opt_level)
+
+    timing_cache_path = env.get(_TIMING_CACHE_PATH_ENV)
+    if not timing_cache_path:
+        return
+
+    path = Path(timing_cache_path)
+    replacement = f"opt{opt_level}"
+    new_stem = re.sub(r"opt(?:default|\d+)", replacement, path.stem, count=1)
+    if new_stem == path.stem:
+        new_stem = f"{path.stem}-{replacement}"
+    env[_TIMING_CACHE_PATH_ENV] = str(path.with_name(f"{new_stem}{path.suffix}"))
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +662,9 @@ def _build_repro_commands(
         build_parts.extend(["--method", build_method])
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
+    builder_opt = case.metadata.get("builder_optimization_level")
+    if builder_opt is not None:
+        build_parts.insert(0, f"{_BUILDER_OPT_ENV}={int(builder_opt)}")
     repro["build_bundle"] = " ".join(build_parts)
 
     # TRT inference command (task-specific C++ binary entrypoint)

@@ -6,6 +6,7 @@
   "family": "fnet",
   "runtime_strategy": "encoder_only",
   "max_cache_length": 512,
+  "builder_optimization_level": 0,
   "prompt": "Replace me by any text you'd like.",
   "max_new_tokens": 0,
   "logit_atol": 0.001,

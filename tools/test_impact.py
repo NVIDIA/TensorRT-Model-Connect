@@ -350,6 +350,9 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
             e2e_data_file_to_models_sets.setdefault(
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
+        if "builder_optimization_level" in data:
+            manifest_field_to_models_sets.setdefault(
+                "builder_optimization_level", set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
 
@@ -940,6 +943,59 @@ def maybe_refine_match_with_diff(
         return match
 
     fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+    builder_opt_models = imap.manifest_field_to_models.get(
+        "builder_optimization_level", [])
+    fnet_models = imap.family_to_models.get("fnet", [])
+
+    if path in {
+        "src/runtime/pipelines/encoder_pipeline.cpp",
+        "src/runtime/pipelines/encoder_pipeline.h",
+        "src/runtime/plugins/encoder_plugin.cpp",
+        "tests/e2e_harness/references/hf_transformers.py",
+    }:
+        allowed_tokens = (
+            "fnet",
+            "model_needs_fnet_static_padding",
+            "model_type_==_'fnet'",
+            "tokenizer_kwargs",
+            "padding",
+            "truncation",
+            "max_length",
+            "max_position_embeddings",
+            "pad_token_id",
+            "#include",
+            "algorithm",
+            "json_helpers",
+            "model_id",
+            "engine_len",
+            "input_ids",
+            "shape",
+            "len",
+            "return",
+            "continue",
+            "module.input_info",
+            "target_len",
+            "valid_len",
+            "mask_i32",
+            "mask_f32",
+            "ids_copy",
+            "copy_n",
+            "attention_mask",
+            "extract_json_int",
+            "model_id_str",
+            "model_id_",
+            "std::string",
+        )
+        if fnet_models and all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "fnet_scoped_encoder_padding",
+                fnet_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
 
     if path == "tests/e2e_harness/orchestrator.py":
         allowed = {
@@ -955,6 +1011,36 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "harness_shared_fp8_scales", fp8_models,
                 match.unit_tiers, match.rebuild_cpp,
+            )
+        allowed_tokens = (
+            "_builder_opt_env",
+            "_timing_cache_path_env",
+            "builder_optimization_level",
+            "builder_opt",
+            "apply_build_env_overrides",
+            "manifest_scoped_build_env",
+            "timing_cache",
+            "opt_level",
+            "replacement",
+            "new_stem",
+            "path_stem",
+            "level",
+            "return",
+            "re_sub",
+            "re.sub",
+            "with_name",
+            "env[",
+            "int(",
+        )
+        if builder_opt_models and all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_shared_builder_optimization_level",
+                builder_opt_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
             )
 
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
@@ -1061,6 +1147,23 @@ def maybe_refine_match_with_diff(
             )
 
     if path == "tests/e2e_harness/manifest_loader.py":
+        allowed_tokens = (
+            "builder_optimization_level",
+            "meta[",
+            "manifest[",
+            "field_name",
+        )
+        if builder_opt_models and all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_manifest_builder_optimization_level",
+                builder_opt_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
         allowed_tokens = (
             "reference_min_pixel_std_for_ratio",
             "min_reference_std_ratio",
