@@ -17,8 +17,7 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
+void check(bool condition, const std::string& name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
@@ -27,10 +26,8 @@ void check(bool condition, const std::string& name)
     }
 }
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -143,8 +140,7 @@ static const char* kUnigramLowercaseJson = R"({
   }
 })";
 
-int main()
-{
+int main() {
     std::cerr << "Unigram Tokenizer Unit Tests\n\n";
 
     // ════════════════════════════════════════════════════════════
@@ -159,22 +155,32 @@ int main()
 
         // Invalid JSON
         bool threw = false;
-        try { trtmc::CreateUnigramTokenizer("bad", 3, false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer("bad", 3, false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_invalid_json");
 
         // BPE type rejected
         const char* bpe = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_bpe_type");
 
         // WordPiece type rejected
-        const char* wp = R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
+        const char* wp =
+            R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_wordpiece_type");
     }
 
@@ -274,8 +280,7 @@ int main()
 
         auto rt = [&](const std::string& input) {
             auto decoded = tok->decode(tok->encode(input));
-            check(decoded == input,
-                  "roundtrip '" + input + "' -> '" + decoded + "'");
+            check(decoded == input, "roundtrip '" + input + "' -> '" + decoded + "'");
         };
 
         rt("hello");
