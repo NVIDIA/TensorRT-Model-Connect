@@ -39,6 +39,44 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _legacy_dynamic_cache_compat_script(enabled: bool) -> str:
+    """Return subprocess code for old Hub remote-code cache APIs."""
+    if not enabled:
+        return ""
+    return """
+def _install_legacy_dynamic_cache_compat():
+    try:
+        from transformers import DynamicCache
+    except Exception:
+        return
+
+    if not hasattr(DynamicCache, "from_legacy_cache"):
+        @classmethod
+        def _from_legacy_cache(cls, past_key_values):
+            cache = cls()
+            if past_key_values is None:
+                return cache
+            for layer_idx, layer_past in enumerate(past_key_values):
+                if layer_past is None:
+                    continue
+                key_states, value_states = layer_past[:2]
+                cache.update(key_states, value_states, layer_idx)
+            return cache
+
+        DynamicCache.from_legacy_cache = _from_legacy_cache
+
+    if not hasattr(DynamicCache, "to_legacy_cache"):
+        def _to_legacy_cache(self):
+            return tuple((key_states, value_states)
+                         for key_states, value_states in self)
+
+        DynamicCache.to_legacy_cache = _to_legacy_cache
+
+
+_install_legacy_dynamic_cache_compat()
+"""
+
+
 def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     """Return a model-family prompt that preserves one image placeholder."""
     lower_id = hf_id.lower()
@@ -135,6 +173,12 @@ class HfTransformersReference:
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
         enable_thinking = contract_config.get("enable_thinking", True)
+        legacy_cache_compat_script = textwrap.indent(
+            _legacy_dynamic_cache_compat_script(
+                bool(case.metadata.get("legacy_dynamic_cache_compat", False))
+            ).strip(),
+            " " * 12,
+        )
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
@@ -152,6 +196,8 @@ class HfTransformersReference:
 
             def _np(t):
                 return t.detach().float().cpu().numpy()
+
+{legacy_cache_compat_script}
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)

@@ -5,10 +5,15 @@
   "bundle": "internlm2-1.8b.trtfb",
   "family": "internlm",
   "runtime_strategy": "decoder_kv_cache",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
+  "description": "InternLM2-Math-Plus 1.8B using the Hugging Face model-card chat prompt",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
+  "prompt": "Who are you?",
   "max_new_tokens": 20,
   "logit_atol": 0.001,
   "layer_atol": 0.05,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "legacy_dynamic_cache_compat": true,
+  "notes": "The model card's Transformers example uses a text-generation pipeline with a chat message containing 'Who are you?'. The legacy cache compatibility flag keeps the Hub remote-code reference runnable with Transformers 5.x."
 }

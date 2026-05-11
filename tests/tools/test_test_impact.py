@@ -89,6 +89,8 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "internlm2-1.8b", "family": "internlm", "runtime_strategy": "decoder_kv_cache",
+         "hf_id": "internlm/internlm2-math-plus-1_8b", "legacy_dynamic_cache_compat": True},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -117,6 +119,8 @@ def mock_repo(tmp_path):
     _write_family(families_dir, "segformer",
                   "from ..config import C\nfrom ..graph_ops import conv\n")
     _write_family(families_dir, "mixtral",
+                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family(families_dir, "internlm",
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
 
     # Placeholder source files
@@ -255,8 +259,8 @@ class TestSpecializedBuilder:
         match = test_impact.classify_file(
             "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py", imap)
         assert match.rule == "specialized_builder"
-        # qwen, llama, qwen_vl, bark, mixtral import standard_decoder_builder
-        expected_families = {"qwen", "llama", "qwen_vl", "bark", "mixtral"}
+        # qwen, llama, qwen_vl, bark, mixtral, internlm import standard_decoder_builder
+        expected_families = {"qwen", "llama", "qwen_vl", "bark", "mixtral", "internlm"}
         expected_models = set()
         for fam in expected_families:
             expected_models.update(imap.family_to_models.get(fam, []))
@@ -585,6 +589,33 @@ class TestHarness:
         )
         assert match.rule == "harness_reference"
         assert "patchtst-granite-official" in match.models
+
+    def test_hf_transformers_legacy_cache_diff_can_be_refined(self, imap):
+        """Legacy DynamicCache compat narrows to opt-in manifests."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++def _legacy_dynamic_cache_compat_script(enabled: bool) -> str:
++    if not enabled:
++        return ""
++    def _install_legacy_dynamic_cache_compat():
++        from transformers import DynamicCache
++        if not hasattr(DynamicCache, "from_legacy_cache"):
++            def _from_legacy_cache(cls, past_key_values):
++                cache.update(key_states, value_states, layer_idx)
++                return cache
++        if not hasattr(DynamicCache, "to_legacy_cache"):
++            def _to_legacy_cache(self):
++                return tuple((key_states, value_states) for key_states, value_states in self)
++legacy_cache_compat_script = textwrap.indent(
++    _legacy_dynamic_cache_compat_script(bool(case.metadata.get("legacy_dynamic_cache_compat", False)))
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py", broad, diff_text, imap)
+        assert refined.rule == "harness_reference_legacy_dynamic_cache_compat"
+        assert refined.models == ["internlm2-1.8b"]
 
     def test_test_e2e_entrypoint(self, imap):
         """tests/test_e2e.py -> ALL models."""

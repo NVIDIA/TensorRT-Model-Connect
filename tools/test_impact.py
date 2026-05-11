@@ -350,6 +350,10 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
             e2e_data_file_to_models_sets.setdefault(
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
+        if data.get("legacy_dynamic_cache_compat"):
+            manifest_field_to_models_sets.setdefault(
+                "legacy_dynamic_cache_compat", set()
+            ).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
 
@@ -955,6 +959,59 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "harness_shared_fp8_scales", fp8_models,
                 match.unit_tiers, match.rebuild_cpp,
+            )
+
+    if path == "tests/e2e_harness/references/hf_transformers.py":
+        allowed_tokens = (
+            "legacy_dynamic_cache_compat",
+            "_legacy_dynamic_cache_compat_script",
+            "_install_legacy_dynamic_cache_compat",
+            "_from_legacy_cache",
+            "_to_legacy_cache",
+            "if_not_enabled",
+            "try:",
+            "except_exception",
+            "continue",
+            "def_",
+            "for_",
+            "@classmethod",
+            "bool(",
+            "dynamiccache",
+            "from_legacy_cache",
+            "to_legacy_cache",
+            "past_key_values",
+            "if_past_key_values_is_none",
+            "layer_past",
+            "if_layer_past_is_none",
+            "key_states",
+            "value_states",
+            "cache.update",
+            "cache_=_cls",
+            "remote_code_cache",
+            "textwrap.indent",
+            "return_\"\"",
+            "return_\"\"\"",
+            "return",
+            "return_cache",
+            "return_tuple",
+            "hasattr",
+            "setattr",
+            ").strip()",
+            "\"_\"_*_12",
+            "{legacy_cache_compat_script}",
+            "\"\"\"",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_reference_legacy_dynamic_cache_compat",
+                imap.manifest_field_to_models.get(
+                    "legacy_dynamic_cache_compat", []
+                ),
+                match.unit_tiers,
+                match.rebuild_cpp,
             )
 
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
