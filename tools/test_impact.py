@@ -455,6 +455,23 @@ def _models_for_task_strategies(
     return sorted(models)
 
 
+def _models_with_stage_comparison_modes(
+    imap: ImpactMap,
+    modes: Set[str],
+) -> List[str]:
+    models: List[str] = []
+    for model, metadata in imap.model_metadata.items():
+        stages = metadata.get("stages")
+        if not isinstance(stages, list):
+            continue
+        if any(
+            isinstance(stage, dict) and stage.get("comparison_mode") in modes
+            for stage in stages
+        ):
+            models.append(model)
+    return sorted(models)
+
+
 def _apply_l0_replacements(
     models: List[str],
     imap: ImpactMap,
@@ -1059,6 +1076,47 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers,
                 match.rebuild_cpp,
             )
+
+    if path == "tests/e2e_harness/comparators/text.py":
+        allowed_tokens = (
+            "_logit_parity_composite_rule",
+            "logit_parity_composite_rule",
+            "logit_parity_mode",
+            "comparison_mode",
+            "logit_only",
+            "logit_parity",
+            "normalized_text_edit_distance",
+            "cosine_p5",
+            "rel_l2_p95",
+            "agreement",
+            "stable_top1",
+            "unstable_topk",
+            "text_gating",
+            "text_ok",
+            "token_level_ok",
+            "ned_hard_fail_threshold",
+            "else:",
+            "composite_rule",
+            "_composite_rule",
+            "reported_only",
+            "not_gated",
+            "decoded_text",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            logit_parity_models = _models_with_stage_comparison_modes(
+                imap,
+                {"logit_only", "logit_parity"},
+            )
+            if logit_parity_models:
+                return RuleMatch(
+                    "harness_comparator_text_logit_parity_mode",
+                    logit_parity_models,
+                    match.unit_tiers,
+                    match.rebuild_cpp,
+                )
 
     if path == "tests/e2e_harness/manifest_loader.py":
         allowed_tokens = (

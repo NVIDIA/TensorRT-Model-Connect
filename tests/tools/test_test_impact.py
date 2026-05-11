@@ -634,6 +634,52 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
 
+    def test_text_comparator_logit_parity_diff_can_be_refined(self, mock_repo):
+        """Logit-parity text comparator changes narrow to logit-parity stages."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "qwen3-moe-tiny-random.json",
+            {
+                "name": "qwen3-moe-tiny-random",
+                "family": "qwen",
+                "runtime_strategy": "decoder_moe",
+                "hf_id": "Q/Q3-MoE-tiny",
+                "stages": [
+                    {
+                        "name": "full_generation",
+                        "required": True,
+                        "comparison_mode": "logit_parity",
+                    },
+                ],
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/comparators/text.py b/tests/e2e_harness/comparators/text.py
+@@ -1 +1 @@
++_LOGIT_PARITY_COMPOSITE_RULE = (
++    "decoded text is reported but not gated"
++logit_parity_mode = stage.comparison_mode in {
++    "logit_only",
++    "logit_parity",
++if logit_parity_mode:
++    text_ok = True
++    metrics["normalized_text_edit_distance"].note = (
++        "reported only; stage comparison_mode disables text gating"
++text_ok = metrics["normalized_text_edit_distance"].passed
++ned_hard_fail_threshold = 0.65
++if token_level_ok and ned < ned_hard_fail_threshold:
++    text_ok = True
++composite_rule=(
++    _LOGIT_PARITY_COMPOSITE_RULE if logit_parity_mode else _COMPOSITE_RULE
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/comparators/text.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/comparators/text.py", broad, diff_text, imap)
+        assert refined.rule == "harness_comparator_text_logit_parity_mode"
+        assert refined.models == ["qwen3-moe-tiny-random"]
+
     def test_hf_vl_generated_only_decode_diff_can_be_refined(self, imap):
         """VL generated-only decode fallback is scoped to InternVL3-8B."""
         diff_text = """
