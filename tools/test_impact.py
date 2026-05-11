@@ -1080,10 +1080,13 @@ def maybe_refine_match_with_diff(
 
     if path == "tests/e2e/waives.txt":
         models = []
+        stale_waive_lines = []
         for line in lines:
             fields = line.split()
             if fields and fields[0] in imap.all_model_names_set:
                 models.append(fields[0])
+            elif len(fields) >= 2 and fields[1].upper() in {"SKIP", "XFAIL"}:
+                stale_waive_lines.append(fields[0])
         if models:
             return RuleMatch(
                 "e2e_waives_model_lines",
@@ -1091,6 +1094,8 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers,
                 match.rebuild_cpp,
             )
+        if stale_waive_lines and len(stale_waive_lines) == len(lines):
+            return RuleMatch("e2e_waives_stale_lines", [], [], False)
 
     return match
 

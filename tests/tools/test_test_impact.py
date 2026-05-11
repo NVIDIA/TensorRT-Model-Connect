@@ -647,6 +647,20 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
         assert refined.rule == "e2e_waives_model_lines"
         assert refined.models == ["flux-schnell"]
 
+    def test_stale_waives_diff_has_no_e2e_impact(self, imap):
+        """Removing a waive for a non-existent case should not fan out E2E."""
+        diff_text = """
+diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
+@@ -1 +1 @@
+-eagle-embed-vl-1b-v2 SKIP (stale HF repo 404 waive)
+-eagle-rerank-vl-1b-v2 SKIP (stale HF repo 404 waive)
+"""
+        broad = test_impact.classify_file("tests/e2e/waives.txt", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e/waives.txt", broad, diff_text, imap)
+        assert refined.rule == "e2e_waives_stale_lines"
+        assert refined.models == []
+
 
 class TestDiffAwareBuilderRefinement:
     def test_cli_fp8_diff_can_be_refined(self, imap):
