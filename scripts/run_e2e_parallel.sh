@@ -199,16 +199,6 @@ SCHEDULE_ARGS=(
     --workers-per-gpu "$WORKERS_PER_GPU"
     --split-exclusive-phases
 )
-for arg in "${EXTRA_ARGS[@]}"; do
-    case "$arg" in
-        --e2e-skip-waived-xfail)
-            SCHEDULE_ARGS+=(--skip-waived-xfail --waives tests/e2e/waives.txt)
-            ;;
-        --e2e-skip-non-gating)
-            SCHEDULE_ARGS+=(--skip-non-gating)
-            ;;
-    esac
-done
 echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" "${SCHEDULE_ARGS[@]}" \
     > "$SCHEDULE_JSON"
 

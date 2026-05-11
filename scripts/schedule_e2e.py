@@ -39,7 +39,6 @@ _EXCLUSIVE_GPU_RESOURCE = "exclusive_gpu"
 _SMALL_TEST_WEIGHT = 90.0
 _LARGE_TEST_WEIGHT = 300.0
 _EXCLUSIVE_GPU_TEST_WEIGHT = 900.0
-_QUICK_SKIP_TEST_WEIGHT = 1.0
 _TIMING_ESTIMATES_FILE = "timing_estimates.json"
 
 
@@ -137,57 +136,6 @@ def _default_timing_estimates_path(manifest_dir: Path) -> Path:
     return manifest_dir.parent / _TIMING_ESTIMATES_FILE
 
 
-def _load_waived_models(waives_path: Path | None, actions: set[str]) -> set[str]:
-    if waives_path is None or not waives_path.is_file():
-        return set()
-
-    waived: set[str] = set()
-    for line in waives_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 2)
-        if len(parts) < 2:
-            continue
-        action = parts[1].upper()
-        if action not in actions:
-            continue
-        name = parts[0].split("/", 1)[-1]
-        waived.add(name)
-    return waived
-
-
-def _non_gating_success_manifest(manifest: dict) -> bool:
-    if manifest.get("skip_comparison"):
-        return True
-    reference_backend = str(manifest.get("reference_backend", "") or "")
-    reference_family = str(manifest.get("reference_family", "") or "")
-    return (
-        reference_backend == "none"
-        or (reference_backend == "invariant_only" and reference_family == "ocr_markdown")
-    )
-
-
-def _quick_skip_models(
-    test_ids: list[str],
-    manifests: dict[str, dict],
-    waives_path: Path | None = None,
-    skip_waived_xfail: bool = False,
-    skip_non_gating: bool = False,
-) -> set[str]:
-    models = {_model_name_from_test_id(tid) for tid in test_ids}
-    quick_skip: set[str] = set()
-    if skip_waived_xfail:
-        quick_skip.update(models & _load_waived_models(waives_path, {"XFAIL"}))
-    if skip_non_gating:
-        quick_skip.update(
-            name
-            for name in models
-            if _non_gating_success_manifest(manifests.get(name, {}))
-        )
-    return quick_skip
-
-
 def _model_name_from_test_id(test_id: str) -> str:
     match = re.search(r"\[(.+?)\]", test_id)
     return match.group(1) if match else ""
@@ -214,11 +162,8 @@ def _test_weight(
     test_id: str,
     manifests: dict[str, dict],
     timing_estimates: dict[str, float] | None = None,
-    quick_skip_models: set[str] | None = None,
 ) -> float:
     name = _model_name_from_test_id(test_id)
-    if quick_skip_models and name in quick_skip_models:
-        return _QUICK_SKIP_TEST_WEIGHT
     if timing_estimates and name in timing_estimates:
         return timing_estimates[name]
 
@@ -234,14 +179,13 @@ def _estimated_gpu_loads(
     assignments: dict[str, list[list[str]]],
     manifest_dir: Path,
     timing_estimates: dict[str, float] | None = None,
-    quick_skip_models: set[str] | None = None,
 ) -> dict[int, int]:
     """Estimate per-GPU schedule load for phase-aware balancing."""
     manifests = _load_manifests(manifest_dir)
     loads: dict[int, int] = {}
     for gpu_id, workers in assignments.items():
         loads[int(gpu_id)] = int(sum(
-            _test_weight(test_id, manifests, timing_estimates, quick_skip_models)
+            _test_weight(test_id, manifests, timing_estimates)
             for worker in workers
             for test_id in worker
         ))
@@ -260,7 +204,6 @@ def schedule(
     workers_per_gpu: int,
     gpu_load_offsets: dict[int, int] | None = None,
     timing_estimates: dict[str, float] | None = None,
-    quick_skip_models: set[str] | None = None,
 ) -> dict[str, list[list[str]]]:
     """Produce balanced GPU×worker assignments.
 
@@ -293,7 +236,7 @@ def schedule(
             small_tests.append(tid)
 
     def weight(tid: str) -> float:
-        return _test_weight(tid, manifests, timing_estimates, quick_skip_models)
+        return _test_weight(tid, manifests, timing_estimates)
 
     # Reserve whole GPUs for exclusive tests. This keeps high-memory build
     # cases from colliding with unrelated workers while preserving parallelism
@@ -360,7 +303,6 @@ def schedule_phases(
     num_gpus: int,
     workers_per_gpu: int,
     timing_estimates: dict[str, float] | None = None,
-    quick_skip_models: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Schedule exclusive-GPU tests before shared tests.
 
@@ -382,10 +324,9 @@ def schedule_phases(
             num_gpus=num_gpus,
             workers_per_gpu=1,
             timing_estimates=timing_estimates,
-            quick_skip_models=quick_skip_models,
         )
         exclusive_gpu_loads = _estimated_gpu_loads(
-            exclusive_schedule, manifest_dir, timing_estimates, quick_skip_models)
+            exclusive_schedule, manifest_dir, timing_estimates)
         phases.append({
             "name": "exclusive_gpu",
             "schedule": exclusive_schedule,
@@ -400,7 +341,6 @@ def schedule_phases(
                 workers_per_gpu=workers_per_gpu,
                 gpu_load_offsets=exclusive_gpu_loads,
                 timing_estimates=timing_estimates,
-                quick_skip_models=quick_skip_models,
             ),
         })
     return phases
@@ -433,22 +373,6 @@ def main() -> None:
         default=None,
         help="JSON model-name to estimated seconds mapping",
     )
-    parser.add_argument(
-        "--waives",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent / "tests" / "e2e" / "waives.txt",
-        help="E2E waives file used for quick-skip scheduling",
-    )
-    parser.add_argument(
-        "--skip-waived-xfail",
-        action="store_true",
-        help="treat XFAIL waived tests as quick skips in the schedule",
-    )
-    parser.add_argument(
-        "--skip-non-gating",
-        action="store_true",
-        help="treat smoke-only/non-gating tests as quick skips in the schedule",
-    )
     args = parser.parse_args()
     timing_estimates_path = (
         args.timing_estimates
@@ -462,14 +386,6 @@ def main() -> None:
     if not test_ids:
         print("ERROR: No test IDs on stdin.", file=sys.stderr)
         sys.exit(1)
-    manifests = _load_manifests(args.manifest_dir)
-    quick_skip_models = _quick_skip_models(
-        test_ids,
-        manifests,
-        waives_path=args.waives,
-        skip_waived_xfail=args.skip_waived_xfail,
-        skip_non_gating=args.skip_non_gating,
-    )
 
     if args.split_exclusive_phases:
         phases = schedule_phases(
@@ -478,7 +394,6 @@ def main() -> None:
             args.num_gpus,
             args.workers_per_gpu,
             timing_estimates=timing_estimates,
-            quick_skip_models=quick_skip_models,
         )
         print(
             f"Schedule: {len(test_ids)} tests across {args.num_gpus} GPUs "
@@ -489,11 +404,6 @@ def main() -> None:
             print(
                 f"  Timing estimates: {timing_estimates_path} "
                 f"({len(timing_estimates)} models)",
-                file=sys.stderr,
-            )
-        if quick_skip_models:
-            print(
-                f"  Quick-skip weighting: {len(quick_skip_models)} models",
                 file=sys.stderr,
             )
         for phase in phases:
@@ -514,7 +424,6 @@ def main() -> None:
                 schedule_for_phase,
                 args.manifest_dir,
                 timing_estimates,
-                quick_skip_models,
             )
         json.dump({"phases": phases}, sys.stdout, indent=2)
         sys.stdout.write("\n")
@@ -526,7 +435,6 @@ def main() -> None:
         args.num_gpus,
         args.workers_per_gpu,
         timing_estimates=timing_estimates,
-        quick_skip_models=quick_skip_models,
     )
 
     print(f"Schedule: {len(test_ids)} tests across {args.num_gpus} GPUs "
@@ -537,13 +445,7 @@ def main() -> None:
             f"({len(timing_estimates)} models)",
             file=sys.stderr,
         )
-    if quick_skip_models:
-        print(
-            f"  Quick-skip weighting: {len(quick_skip_models)} models",
-            file=sys.stderr,
-        )
-    _print_schedule_summary(
-        assignments, args.manifest_dir, timing_estimates, quick_skip_models)
+    _print_schedule_summary(assignments, args.manifest_dir, timing_estimates)
 
     # Output JSON to stdout
     json.dump(assignments, sys.stdout, indent=2)
@@ -554,7 +456,6 @@ def _print_schedule_summary(
     assignments: dict[str, list[list[str]]],
     manifest_dir: Path,
     timing_estimates: dict[str, float] | None = None,
-    quick_skip_models: set[str] | None = None,
 ) -> None:
     """Print a human-readable schedule summary to stderr."""
     total_large = 0
@@ -575,8 +476,7 @@ def _print_schedule_summary(
                     n_exclusive += 1
                 if classify_size(manifest) == "large":
                     n_large += 1
-                estimated += _test_weight(
-                    tid, manifests, timing_estimates, quick_skip_models)
+                estimated += _test_weight(tid, manifests, timing_estimates)
         n_small = n_tests - n_large
         total_large += n_large
         total_small += n_small

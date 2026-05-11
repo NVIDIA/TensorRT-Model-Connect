@@ -153,21 +153,6 @@ def _load_waives(platform: str = "") -> dict[str, tuple[str, str]]:
     return waives
 
 
-def _non_gating_success_reason(case) -> str:
-    """Return why a case cannot produce a green validation result today."""
-    skip_comparison = case.metadata.get("skip_comparison_reason", "")
-    if skip_comparison:
-        return f"comparison skipped by manifest: {skip_comparison}"
-    if case.reference_backend == "none":
-        return "no reference backend is configured"
-    if (
-        case.reference_backend == "invariant_only"
-        and case.reference_family == "ocr_markdown"
-    ):
-        return "OCR invariant-only reference cannot validate text output"
-    return ""
-
-
 # ---------------------------------------------------------------------------
 # Parametrization
 # ---------------------------------------------------------------------------
@@ -255,8 +240,6 @@ def test_e2e(case_name: str, request) -> None:
         if action == "SKIP":
             pytest.skip(reason)
         elif action == "XFAIL":
-            if config.getoption("--e2e-skip-waived-xfail", default=False):
-                pytest.skip(f"XFAIL waived in this run: {reason}")
             request.node.add_marker(
                 pytest.mark.xfail(reason=reason, strict=False))
 
@@ -269,10 +252,6 @@ def test_e2e(case_name: str, request) -> None:
     skip_reason = case.metadata.get("skip_reason", "")
     if skip_reason:
         pytest.skip(skip_reason)
-    if config.getoption("--e2e-skip-non-gating", default=False):
-        non_gating_reason = _non_gating_success_reason(case)
-        if non_gating_reason:
-            pytest.skip(f"Non-gating E2E case skipped in this run: {non_gating_reason}")
 
     # Build run context
     artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"

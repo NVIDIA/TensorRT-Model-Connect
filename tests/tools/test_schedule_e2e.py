@@ -172,31 +172,6 @@ def test_phase_schedule_offsets_large_shared_work_by_exclusive_load(tmp_path: Pa
     assert shared_counts == {"0": 2, "1": 1, "2": 6}
 
 
-def test_quick_skip_models_include_waived_and_non_gating_cases(tmp_path: Path) -> None:
-    _write_manifest(tmp_path, "waived-model")
-    _write_manifest(tmp_path, "smoke-model", skip_comparison="shape mismatch")
-    _write_manifest(tmp_path, "green-model")
-    waives = tmp_path / "waives.txt"
-    waives.write_text("waived-model XFAIL known broken\n", encoding="utf-8")
-
-    manifests = schedule_e2e._load_manifests(tmp_path)
-    quick_skip = schedule_e2e._quick_skip_models(
-        [_test_id("waived-model"), _test_id("smoke-model"), _test_id("green-model")],
-        manifests,
-        waives_path=waives,
-        skip_waived_xfail=True,
-        skip_non_gating=True,
-    )
-
-    assert quick_skip == {"waived-model", "smoke-model"}
-    assert schedule_e2e._test_weight(
-        _test_id("waived-model"),
-        manifests,
-        timing_estimates={"waived-model": 1000},
-        quick_skip_models=quick_skip,
-    ) == 1.0
-
-
 def test_large_and_small_tests_are_balanced_across_even_worker_count(tmp_path: Path) -> None:
     large_names = [f"large-{idx}" for idx in range(8)]
     small_names = [f"small-{idx}" for idx in range(8)]

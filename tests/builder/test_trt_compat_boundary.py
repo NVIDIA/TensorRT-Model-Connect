@@ -151,3 +151,105 @@ def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):
         ("set_memory_pool_limit", "workspace", 1024),
         ("add_matrix_multiply", "lhs", "none", "rhs", "transpose"),
     ]
+
+
+def test_trt_compat_applies_builder_env_and_persists_timing_cache(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+    cache_path = tmp_path / "trt.cache"
+
+    class FakeLogger:
+        WARNING = 1
+
+        def __init__(self, level):
+            self.level = level
+
+    class FakeNetwork:
+        pass
+
+    class FakeTimingCache:
+        def __init__(self, payload=b""):
+            self.payload = bytearray(payload)
+
+        def serialize(self):
+            return bytes(self.payload)
+
+        def combine(self, input_cache, ignore_mismatch):
+            calls.append(("combine", bytes(input_cache.payload), ignore_mismatch))
+            self.payload.extend(input_cache.payload)
+            return True
+
+    class FakeConfig:
+        def __init__(self):
+            self.builder_optimization_level = -1
+            self.max_num_tactics = -1
+            self.avg_timing_iterations = -1
+            self.timing_cache = None
+
+        def create_timing_cache(self, payload):
+            calls.append(("create_timing_cache", bytes(payload)))
+            return FakeTimingCache(payload)
+
+        def set_timing_cache(self, cache, ignore_mismatch):
+            calls.append(("set_timing_cache", ignore_mismatch))
+            self.timing_cache = cache
+            return True
+
+        def get_timing_cache(self):
+            calls.append(("get_timing_cache",))
+            return self.timing_cache
+
+    class FakeBuilder:
+        def __init__(self, logger):
+            self.logger = logger
+
+        def create_network(self, flags=0):
+            return FakeNetwork()
+
+        def create_builder_config(self):
+            return FakeConfig()
+
+        def build_serialized_network(self, network, config):
+            assert isinstance(network, FakeNetwork)
+            assert isinstance(config, FakeConfig)
+            calls.append((
+                "build_config",
+                config.builder_optimization_level,
+                config.max_num_tactics,
+                config.avg_timing_iterations,
+            ))
+            config.timing_cache.payload.extend(b"built")
+            return b"plan"
+
+    class FakeRuntime:
+        pass
+
+    fake_trt = types.ModuleType("tensorrt")
+    fake_trt.__version__ = "10.16.1.11"
+    fake_trt.Logger = FakeLogger
+    fake_trt.Builder = FakeBuilder
+    fake_trt.Runtime = FakeRuntime
+    fake_trt.IBuilder = FakeBuilder
+    fake_trt.INetworkDefinition = FakeNetwork
+    fake_trt.IBuilderConfig = FakeConfig
+    fake_trt.IRuntime = FakeRuntime
+
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    monkeypatch.setattr(trt_compat, "_module", None)
+    monkeypatch.setattr(trt_compat, "_backend_module_name", "tensorrt")
+    monkeypatch.setattr(trt_compat, "_backend_label", "TensorRT")
+    monkeypatch.setenv("TRTMC_TRT_TIMING_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("TRTMC_BUILDER_OPTIMIZATION_LEVEL", "1")
+    monkeypatch.setenv("TRTMC_MAX_NUM_TACTICS", "8")
+    monkeypatch.setenv("TRTMC_AVG_TIMING_ITERATIONS", "1")
+
+    trt = trt_compat.get_trt()
+    builder = trt.Builder(trt.Logger(trt.Logger.WARNING))
+    plan = builder.build_serialized_network(
+        builder.create_network(), builder.create_builder_config())
+
+    assert plan == b"plan"
+    assert cache_path.read_bytes() == b"built"
+    assert ("build_config", 1, 8, 1) in calls
+    assert ("create_timing_cache", b"") in calls
+    assert ("set_timing_cache", True) in calls
+    assert ("get_timing_cache",) in calls

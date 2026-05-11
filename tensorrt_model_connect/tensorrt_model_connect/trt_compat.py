@@ -9,8 +9,10 @@ truth.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import importlib
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -23,6 +25,12 @@ _RTX_MODULE = "tensorrt_rtx"
 _backend_module_name = _STANDARD_MODULE
 _backend_label = "TensorRT"
 _module: ModuleType | None = None
+
+_TIMING_CACHE_PATH_ENV = "TRTMC_TRT_TIMING_CACHE_PATH"
+_TIMING_CACHE_DIR_ENV = "TRTMC_TRT_TIMING_CACHE_DIR"
+_BUILDER_OPT_LEVEL_ENV = "TRTMC_BUILDER_OPTIMIZATION_LEVEL"
+_MAX_NUM_TACTICS_ENV = "TRTMC_MAX_NUM_TACTICS"
+_AVG_TIMING_ITERATIONS_ENV = "TRTMC_AVG_TIMING_ITERATIONS"
 
 
 def configure_backend(*, rtx: bool = False) -> None:
@@ -194,6 +202,129 @@ def unwrap(value: Any) -> Any:
     return value
 
 
+def _optional_int_env(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
+def _set_optional_builder_int(config: Any, attr: str, env_name: str) -> None:
+    value = _optional_int_env(env_name)
+    if value is not None and hasattr(config, attr):
+        setattr(config, attr, value)
+
+
+def _apply_builder_config_env(config: Any) -> None:
+    _set_optional_builder_int(
+        config, "builder_optimization_level", _BUILDER_OPT_LEVEL_ENV)
+    _set_optional_builder_int(config, "max_num_tactics", _MAX_NUM_TACTICS_ENV)
+    _set_optional_builder_int(
+        config, "avg_timing_iterations", _AVG_TIMING_ITERATIONS_ENV)
+
+
+def _sanitize_cache_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "tensorrt"
+
+
+def _timing_cache_path() -> Path | None:
+    explicit = os.environ.get(_TIMING_CACHE_PATH_ENV)
+    if explicit and explicit.strip():
+        return Path(explicit)
+
+    cache_dir = os.environ.get(_TIMING_CACHE_DIR_ENV)
+    if not cache_dir or not cache_dir.strip():
+        return None
+
+    version = _sanitize_cache_name(tensorrt_version() or "unknown")
+    opt_level = os.environ.get(_BUILDER_OPT_LEVEL_ENV, "default")
+    opt_level = _sanitize_cache_name(opt_level)
+    return Path(cache_dir) / f"{_backend_module_name}-{version}-opt{opt_level}.cache"
+
+
+@contextmanager
+def _locked_cache(path: Path):
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        locked = False
+        try:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            locked = True
+        except (ImportError, OSError):
+            pass
+        try:
+            yield
+        finally:
+            if locked:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+
+class _TimingCacheState:
+    def __init__(self, path: Path, cache: Any):
+        self.path = path
+        self.cache = cache
+
+
+def _attach_timing_cache(config: Any) -> _TimingCacheState | None:
+    path = _timing_cache_path()
+    if path is None:
+        return None
+    if not hasattr(config, "create_timing_cache") or not hasattr(config, "set_timing_cache"):
+        return None
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = path.read_bytes() if path.is_file() else b""
+        cache = config.create_timing_cache(payload)
+        if config.set_timing_cache(cache, True):
+            return _TimingCacheState(path, cache)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _serialize_cache(cache: Any) -> bytes | None:
+    if cache is None or not hasattr(cache, "serialize"):
+        return None
+    payload = cache.serialize()
+    if payload is None:
+        return None
+    return bytes(payload)
+
+
+def _save_timing_cache(config: Any, state: _TimingCacheState | None) -> None:
+    if state is None:
+        return
+    try:
+        cache = config.get_timing_cache() if hasattr(config, "get_timing_cache") else state.cache
+        if cache is None:
+            cache = state.cache
+        state.path.parent.mkdir(parents=True, exist_ok=True)
+        with _locked_cache(state.path):
+            if state.path.is_file() and hasattr(config, "create_timing_cache"):
+                current_payload = state.path.read_bytes()
+                if current_payload and hasattr(cache, "combine"):
+                    current_cache = config.create_timing_cache(current_payload)
+                    cache.combine(current_cache, True)
+            payload = _serialize_cache(cache)
+            if payload is None:
+                return
+            tmp_path = state.path.with_name(
+                f".{state.path.name}.{os.getpid()}.tmp")
+            tmp_path.write_bytes(payload)
+            os.replace(tmp_path, state.path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return
+
+
 def _wrap_result(value: Any, module: ModuleType | Any | None = None) -> Any:
     module = module or load_module()
     try:
@@ -247,6 +378,18 @@ class _BuilderProxy(_HandleProxy):
             self._raw.create_builder_config(),
             self._trt_module,
         )
+
+    def build_serialized_network(self, network: Any, config: Any) -> Any:
+        raw_config = unwrap(config)
+        _apply_builder_config_env(raw_config)
+        timing_cache = _attach_timing_cache(raw_config)
+        try:
+            return _wrap_result(
+                self._raw.build_serialized_network(unwrap(network), raw_config),
+                self._trt_module,
+            )
+        finally:
+            _save_timing_cache(raw_config, timing_cache)
 
 
 class _NetworkProxy(_HandleProxy):
