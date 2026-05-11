@@ -345,7 +345,6 @@ if len(models) > 10:
   fi
 
   export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
-  export TRTMC_MAX_NUM_TACTICS="${TRTMC_MAX_NUM_TACTICS:-4}"
   configure_e2e_timing_cache
 
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
