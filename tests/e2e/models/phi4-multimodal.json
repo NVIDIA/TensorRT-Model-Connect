@@ -6,10 +6,11 @@
   "family": "phi4_multimodal",
   "runtime_strategy": "vision_language",
   "max_cache_length": 384,
-  "prompt": "Describe this image.",
+  "prompt": "What is shown in this image?",
   "max_new_tokens": 30,
   "logit_atol": 0.01,
   "layer_atol": 0.1,
   "trust_remote_code": true,
-  "test_image": "tests/e2e/data/test_img.jpeg"
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "notes": "Model card uses AutoProcessor with prompt '<|user|><|image_1|>What is shown in this image?<|end|><|assistant|>'. The centralized waive remains until TRTMC implements Phi-4 dynamic-HD vision preprocessing, vision LoRA merging, and a wired vision engine."
 }

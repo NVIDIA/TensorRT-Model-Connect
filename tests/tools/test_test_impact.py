@@ -676,6 +676,28 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
         assert refined.rule == "e2e_waives_model_lines"
         assert refined.models == ["flux-schnell"]
 
+    def test_hf_transformers_phi4_prompt_diff_can_be_refined(self, imap):
+        """Phi-4-only HF reference prompt fallback narrows to Phi-4."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++    if "phi-4" in lower_id and "multimodal" in lower_id:
++        return f"<|user|><|image_1|>{prompt}<|end|><|assistant|>"
+-                    "<|image_pad|>", "<|vision_start|>", "<image>"
++                    "<|image_pad|>", "<|vision_start|>", "<image>",
++                    "<|image_1|>", "<|endoftext10|>"
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_phi4_multimodal"
+        assert refined.models == ["phi4-multimodal"]
+
 
 class TestDiffAwareBuilderRefinement:
     def test_cli_fp8_diff_can_be_refined(self, imap):

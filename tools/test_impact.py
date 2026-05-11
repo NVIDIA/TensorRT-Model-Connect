@@ -957,6 +957,31 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
+    if path == "tests/e2e_harness/references/hf_transformers.py":
+        allowed_tokens = (
+            "phi-4",
+            "multimodal",
+            "image_1",
+            "endoftext10",
+            "image_pad",
+            "vision_start",
+            "image",
+            "assistant",
+            "vl_fallback_prompt",
+            "image_placeholder",
+            "marker",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_reference_phi4_multimodal",
+                ["phi4-multimodal"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
         allowed_tokens = ("fp8_scales", "save_fp8_scales")
         if all(

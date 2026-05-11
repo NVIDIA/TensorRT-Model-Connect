@@ -46,6 +46,8 @@ def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
         return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
     if "internvl" in lower_id:
         return f"<IMG_CONTEXT>\n{prompt}"
+    if "phi-4" in lower_id and "multimodal" in lower_id:
+        return f"<|user|><|image_1|>{prompt}<|end|><|assistant|>"
     return prompt
 
 
@@ -1199,7 +1201,8 @@ class HfTransformersReference:
                 if not isinstance(text_input, str):
                     raise TypeError("processor.apply_chat_template did not return text")
                 if not any(marker in text_input for marker in (
-                    "<|image_pad|>", "<|vision_start|>", "<image>"
+                    "<|image_pad|>", "<|vision_start|>", "<image>",
+                    "<|image_1|>", "<|endoftext10|>"
                 )):
                     raise ValueError("chat template produced no image placeholder")
                 inputs = processor(
