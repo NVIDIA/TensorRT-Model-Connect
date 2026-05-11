@@ -5,13 +5,16 @@
   "family": "qwen",
   "runtime_strategy": "decoder_kv_cache",
   "build_backend": "torch_trt",
+  "reference_family": "qwen25_base_model_card",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
   "precision": "fp16",
-  "prompt": "The largest ocean on Earth is",
-  "max_new_tokens": 20,
+  "prompt": "Who are you?",
+  "max_new_tokens": 40,
   "logit_atol": 1e-2,
   "build_args": {
     "backend": "torchtrt",
     "max_cache_length": 256
-  }
+  },
+  "notes": "Matches the Qwen/Qwen2.5-0.5B model-card Transformers example: one user chat message rendered through tokenizer.apply_chat_template(add_generation_prompt=True), greedy generation, max_new_tokens=40."
 }
