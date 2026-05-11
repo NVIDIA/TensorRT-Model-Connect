@@ -154,6 +154,25 @@ def imap(mock_repo):
 
 
 class TestFamilyPlugin:
+    def test_manifest_uses_declared_model_name_when_file_stem_differs(self, mock_repo):
+        """nllb-200.json should select its declared model name."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "nllb-200.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "family": "m2m_100",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "hf_id": "facebook/nllb-200-distilled-600M",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        match = test_impact.classify_file("tests/e2e/models/nllb-200.json", imap)
+
+        assert match.rule == "manifest"
+        assert match.models == ["nllb-200-distilled-600m"]
+
     def test_family_only_change(self, imap):
         """families/qwen.py -> exactly qwen models."""
         match = test_impact.classify_file(
@@ -541,6 +560,39 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
+    def test_translation_plugin_scopes_to_translation_contract(self, mock_repo):
+        """plugins/translation.py should select translation contracts, not all text models."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "nllb-200.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "family": "m2m_100",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "reference_family": "seq2seq_translation",
+                "user_contract": "translation",
+                "translation_source_lang": "eng_Latn",
+                "translation_target_lang": "fra_Latn",
+                "translation_forced_bos_token": "fra_Latn",
+            },
+        )
+        _write_json(
+            models_dir / "bart-base.json",
+            {
+                "name": "bart-base",
+                "family": "bart",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "hf_id": "facebook/bart-base",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        match = test_impact.classify_file(
+            "tests/e2e_harness/plugins/translation.py", imap)
+
+        assert match.rule == "harness_plugin_translation"
+        assert match.models == ["nllb-200-distilled-600m"]
+
     def test_harness_threshold_profile(self, imap):
         """Diffusion threshold profiles should stay scoped to diffusion models."""
         match = test_impact.classify_file(
@@ -675,6 +727,126 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
             "tests/e2e/waives.txt", broad, diff_text, imap)
         assert refined.rule == "e2e_waives_model_lines"
         assert refined.models == ["flux-schnell"]
+
+    def test_hf_transformers_translation_lang_diff_can_be_refined(self, mock_repo):
+        """HF reference language-token plumbing should select translation contracts only."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "nllb-200.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "family": "m2m_100",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "reference_family": "seq2seq_translation",
+                "user_contract": "translation",
+                "translation_source_lang": "eng_Latn",
+                "translation_target_lang": "fra_Latn",
+                "translation_forced_bos_token": "fra_Latn",
+            },
+        )
+        _write_json(
+            models_dir / "bart-base.json",
+            {
+                "name": "bart-base",
+                "family": "bart",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "hf_id": "facebook/bart-base",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++        src_lang = contract_config.get("src_lang")
++        tgt_lang = contract_config.get("tgt_lang")
++        forced_bos_token = contract_config.get("forced_bos_token")
+-            tokenizer = AutoTokenizer.from_pretrained(
+-                model_ref, trust_remote_code=trust_remote_code)
++            tokenizer_kwargs = {"trust_remote_code": trust_remote_code}
++            if src_lang:
++                tokenizer_kwargs["src_lang"] = src_lang
++            if tgt_lang:
++                tokenizer_kwargs["tgt_lang"] = tgt_lang
++            tokenizer = AutoTokenizer.from_pretrained(model_ref, **tokenizer_kwargs)
++                    generate_kwargs = {}
++                    forced_id = tokenizer.convert_tokens_to_ids(forced_bos_token)
++                    generate_kwargs["forced_bos_token_id"] = forced_id
+-                        do_sample=False, num_beams=1)
++                        do_sample=False, num_beams=1, **generate_kwargs)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py", broad, diff_text, imap)
+
+        assert refined.rule == "harness_reference_translation_lang_tokens"
+        assert refined.models == ["nllb-200-distilled-600m"]
+
+    def test_seq2seq_plugin_translation_lang_diff_can_be_refined(self, mock_repo):
+        """Seq2seq language-token runtime plumbing should not rerun unrelated seq2seq models."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "nllb-200.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "family": "m2m_100",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "reference_family": "seq2seq_translation",
+                "user_contract": "translation",
+                "translation_source_lang": "eng_Latn",
+                "translation_target_lang": "fra_Latn",
+                "translation_forced_bos_token": "fra_Latn",
+            },
+        )
+        _write_json(
+            models_dir / "bart-base.json",
+            {
+                "name": "bart-base",
+                "family": "bart",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "hf_id": "facebook/bart-base",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/src/runtime/plugins/seq2seq_plugin.cpp b/src/runtime/plugins/seq2seq_plugin.cpp
+@@ -1 +1 @@
+-                    int32_t pad_token_id, cudaStream_t stream,
++                    int32_t pad_token_id, int32_t source_lang_token_id,
++                    int32_t forced_bos_token_id, cudaStream_t stream,
++          source_lang_token_id_(source_lang_token_id), forced_bos_token_id_(forced_bos_token_id),
+-        // Add BOS/EOS if the native tokenizer didn't
+-        if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
++        if (source_lang_token_id_ >= 0) {
++            if (!ids.empty() && ids.front() == bos_token_id_)
++                ids.erase(ids.begin());
++            if (ids.empty() || ids.front() != source_lang_token_id_)
++                ids.insert(ids.begin(), source_lang_token_id_);
++        } else if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_)) {
+-            int32_t next = select_argmax_token(logits);
++            int32_t next = (step == 0 && forced_bos_token_id_ >= 0)
++                               ? forced_bos_token_id_
++                               : select_argmax_token(logits);
+-            output_ids.push_back(next);
++            if (!(step == 0 && forced_bos_token_id_ >= 0))
++                output_ids.push_back(next);
++    int32_t source_lang_token_id_;
++    int32_t forced_bos_token_id_;
++        int32_t source_lang_token_id = extract_json_int(json, "source_lang_token_id", -1);
++        int32_t forced_bos_token_id = extract_json_int(json, "forced_bos_token_id", -1);
+-            bos_token_id, pad_token_id, stream, std::move(tok), ctx.bundle.info.model_id);
++            bos_token_id, pad_token_id, source_lang_token_id, forced_bos_token_id, stream,
++            std::move(tok), ctx.bundle.info.model_id);
+"""
+        broad = test_impact.classify_file(
+            "src/runtime/plugins/seq2seq_plugin.cpp", imap)
+        assert "bart-base" in broad.models
+
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/runtime/plugins/seq2seq_plugin.cpp", broad, diff_text, imap)
+
+        assert refined.rule == "cpp_seq2seq_translation_lang_tokens"
+        assert refined.models == ["nllb-200-distilled-600m"]
 
 
 class TestDiffAwareBuilderRefinement:

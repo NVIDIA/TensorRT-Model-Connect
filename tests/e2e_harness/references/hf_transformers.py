@@ -135,6 +135,9 @@ class HfTransformersReference:
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
         enable_thinking = contract_config.get("enable_thinking", True)
+        src_lang = contract_config.get("src_lang")
+        tgt_lang = contract_config.get("tgt_lang")
+        forced_bos_token = contract_config.get("forced_bos_token")
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
@@ -149,12 +152,19 @@ class HfTransformersReference:
             text_path = {text_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
+            src_lang = {src_lang!r}
+            tgt_lang = {tgt_lang!r}
+            forced_bos_token = {forced_bos_token!r}
 
             def _np(t):
                 return t.detach().float().cpu().numpy()
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+            tokenizer_kwargs = {{"trust_remote_code": trust_remote_code}}
+            if src_lang:
+                tokenizer_kwargs["src_lang"] = src_lang
+            if tgt_lang:
+                tokenizer_kwargs["tgt_lang"] = tgt_lang
+            tokenizer = AutoTokenizer.from_pretrained(model_ref, **tokenizer_kwargs)
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:
@@ -191,9 +201,15 @@ class HfTransformersReference:
             with torch.no_grad():
                 if is_seq2seq:
                     # Encoder-decoder: use model.generate() for greedy decoding
+                    generate_kwargs = {{}}
+                    if forced_bos_token:
+                        forced_id = tokenizer.convert_tokens_to_ids(forced_bos_token)
+                        if forced_id is None or forced_id < 0:
+                            raise RuntimeError(f"Unknown forced BOS token: {{forced_bos_token}}")
+                        generate_kwargs["forced_bos_token_id"] = forced_id
                     output_ids = model.generate(
                         ids_tensor, max_new_tokens=max_new_tokens,
-                        do_sample=False, num_beams=1)
+                        do_sample=False, num_beams=1, **generate_kwargs)
                     generated_token_ids = output_ids[0].tolist()
                     # Re-run to get logits for each decoder step
                     decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)

@@ -25,12 +25,14 @@ class Seq2SeqPipeline final : public IPipeline {
                     std::unique_ptr<IInferenceState> state, int32_t hidden_size,
                     int32_t num_decoder_layers, int32_t max_source_length,
                     int32_t decoder_start_token_id, int32_t eos_token_id, int32_t bos_token_id,
-                    int32_t pad_token_id, cudaStream_t stream,
+                    int32_t pad_token_id, int32_t source_lang_token_id,
+                    int32_t forced_bos_token_id, cudaStream_t stream,
                     std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_source_length_(max_source_length), decoder_start_token_id_(decoder_start_token_id),
           eos_token_id_(eos_token_id), bos_token_id_(bos_token_id), pad_token_id_(pad_token_id),
+          source_lang_token_id_(source_lang_token_id), forced_bos_token_id_(forced_bos_token_id),
           stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
         if (!encoder_ || !encoder_->ok())
             throw std::runtime_error("Seq2SeqPipeline: invalid encoder");
@@ -89,9 +91,14 @@ class Seq2SeqPipeline final : public IPipeline {
         if (ids.empty())
             return {{}, 0};
 
-        // Add BOS/EOS if the native tokenizer didn't
-        if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
+        if (source_lang_token_id_ >= 0) {
+            if (!ids.empty() && ids.front() == bos_token_id_)
+                ids.erase(ids.begin());
+            if (ids.empty() || ids.front() != source_lang_token_id_)
+                ids.insert(ids.begin(), source_lang_token_id_);
+        } else if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_)) {
             ids.insert(ids.begin(), bos_token_id_);
+        }
         if (eos_token_id_ >= 0 && (ids.empty() || ids.back() != eos_token_id_))
             ids.push_back(eos_token_id_);
 
@@ -153,10 +160,13 @@ class Seq2SeqPipeline final : public IPipeline {
         int32_t current_token = decoder_start_token_id_;
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             run_decoder_step(current_token, logits);
-            int32_t next = select_argmax_token(logits);
+            int32_t next = (step == 0 && forced_bos_token_id_ >= 0)
+                               ? forced_bos_token_id_
+                               : select_argmax_token(logits);
             if (next == eos_token_id_)
                 break;
-            output_ids.push_back(next);
+            if (!(step == 0 && forced_bos_token_id_ >= 0))
+                output_ids.push_back(next);
             current_token = next;
         }
         return output_ids;
@@ -190,6 +200,8 @@ class Seq2SeqPipeline final : public IPipeline {
     int32_t eos_token_id_;
     int32_t bos_token_id_;
     int32_t pad_token_id_;
+    int32_t source_lang_token_id_;
+    int32_t forced_bos_token_id_;
     int32_t actual_enc_len_{0};
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
@@ -220,6 +232,8 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
         int32_t eos_token_id = (ctx.config.id_eos >= 0) ? ctx.config.id_eos : 2;
         int32_t bos_token_id = (ctx.config.id_bos >= 0) ? ctx.config.id_bos : -1;
         int32_t pad_token_id = extract_json_int(json, "pad_token_id", 1);
+        int32_t source_lang_token_id = extract_json_int(json, "source_lang_token_id", -1);
+        int32_t forced_bos_token_id = extract_json_int(json, "forced_bos_token_id", -1);
         cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
@@ -230,7 +244,8 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
         return std::make_unique<Seq2SeqPipeline>(
             std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(state),
             ctx.config.hidden_size, dl, max_source_length, decoder_start_token_id, eos_token_id,
-            bos_token_id, pad_token_id, stream, std::move(tok), ctx.bundle.info.model_id);
+            bos_token_id, pad_token_id, source_lang_token_id, forced_bos_token_id, stream,
+            std::move(tok), ctx.bundle.info.model_id);
     }
 };
 

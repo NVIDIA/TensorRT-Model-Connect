@@ -1,6 +1,6 @@
 """Contract test plugin for translation and seq2seq text-to-text models."""
 from __future__ import annotations
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
+from ..contracts import MetricResult
 from .base import (normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail)
 
 
@@ -16,15 +16,28 @@ class TranslationPlugin:
     )
 
     def configure_reference(self, case):
+        config = dict(case.metadata.get("contract_config", {}))
+        for src_key, dst_key in (
+            ("translation_source_lang", "src_lang"),
+            ("translation_target_lang", "tgt_lang"),
+            ("translation_forced_bos_token", "forced_bos_token"),
+        ):
+            value = case.metadata.get(src_key)
+            if value:
+                config[dst_key] = value
+
         if case.reference_family == "translation_chat_template":
             prompt = case.inputs.get("prompt", "")
             already_formatted = any(m in prompt for m in self._PRE_FORMATTED_MARKERS)
-            return {"use_chat_template": not already_formatted}
+            config["use_chat_template"] = not already_formatted
+            return config
         if case.reference_family == "seq2seq_translation":
-            return {"auto_class": "AutoModelForSeq2SeqLM"}
+            config["auto_class"] = "AutoModelForSeq2SeqLM"
+            return config
         if case.reference_family == "seq2seq_text2text":
-            return {"auto_class": "AutoModelForSeq2SeqLM"}
-        return {}
+            config["auto_class"] = "AutoModelForSeq2SeqLM"
+            return config
+        return config
 
     def verify(self, trt_output, ref_output, case, threshold):
         prompt = case.inputs.get("prompt", "")

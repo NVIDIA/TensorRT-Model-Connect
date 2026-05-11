@@ -166,6 +166,7 @@ PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
     "diffusion": ["diffusion_media_generation"],
     "vl_qa": ["vision_language_generation"],
     "multimodal_chat": ["omni_multimodal"],
+    "translation": ["text_generation_causal"],
     "time_series_regression": ["neural_operator"],
     "time_series_classification": ["neural_operator"],
     "tts": ["text_to_audio"],
@@ -209,6 +210,19 @@ _ORCHESTRATOR_MODULES = {
     "debug_runner", "diffusion_runner",
 }
 
+_TRANSLATION_MANIFEST_FIELDS = (
+    "translation_source_lang",
+    "translation_target_lang",
+    "translation_forced_bos_token",
+)
+
+_TRANSLATION_CONTRACT_KEYS = (
+    "user_contract:translation",
+    "reference_family:seq2seq_translation",
+    "reference_family:translation_chat_template",
+    "reference_family:seq2seq_text2text",
+)
+
 # Patterns for files that never affect E2E or unit tests
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
@@ -246,6 +260,7 @@ class ImpactMap:
     all_model_names_set: Set[str]
     core_models: List[str]
     model_metadata: Dict[str, Dict]
+    manifest_path_to_models: Dict[str, List[str]]
     builder_to_families: Dict[str, List[str]]       # parent module -> families
     manifest_field_to_models: Dict[str, List[str]]
     e2e_data_file_to_models: Dict[str, List[str]]
@@ -317,6 +332,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     all_model_names: List[str] = []
     core_models: List[str] = []
     model_metadata: Dict[str, Dict] = {}
+    manifest_path_to_models: Dict[str, List[str]] = {}
     l0_replacement_by_model: Dict[str, str] = {}
 
     for manifest_path in sorted(models_dir.glob("*.json")):
@@ -332,6 +348,9 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
 
         all_model_names.append(name)
         model_metadata[name] = data
+        manifest_path_to_models[
+            manifest_path.relative_to(repo_root).as_posix()
+        ] = [name]
 
         if family:
             family_to_models.setdefault(family, []).append(name)
@@ -345,6 +364,15 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         l0_replacement = data.get("l0_replacement")
         if isinstance(l0_replacement, str) and l0_replacement:
             l0_replacement_by_model[name] = l0_replacement
+        for manifest_key in ("user_contract", "reference_family"):
+            value = data.get(manifest_key)
+            if isinstance(value, str) and value:
+                manifest_field_to_models_sets.setdefault(
+                    f"{manifest_key}:{value}", set()).add(name)
+        for manifest_key in _TRANSLATION_MANIFEST_FIELDS:
+            value = data.get(manifest_key)
+            if isinstance(value, str) and value:
+                manifest_field_to_models_sets.setdefault(manifest_key, set()).add(name)
         fp8_scales = data.get("fp8_scales")
         if isinstance(fp8_scales, str) and fp8_scales:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
@@ -389,6 +417,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         all_model_names_set=set(all_model_names),
         core_models=sorted(core_models),
         model_metadata=model_metadata,
+        manifest_path_to_models=manifest_path_to_models,
         builder_to_families=builder_to_families,
         manifest_field_to_models={
             key: sorted(models)
@@ -453,6 +482,20 @@ def _models_for_task_strategies(
     for ts in task_strategies:
         models.update(imap.task_strategy_to_models.get(ts, []))
     return sorted(models)
+
+
+def _models_for_manifest_fields(fields: List[str], imap: ImpactMap) -> List[str]:
+    models: Set[str] = set()
+    for manifest_key in fields:
+        models.update(imap.manifest_field_to_models.get(manifest_key, []))
+    return sorted(models)
+
+
+def _translation_contract_models(imap: ImpactMap) -> List[str]:
+    return _models_for_manifest_fields(
+        [*_TRANSLATION_CONTRACT_KEYS, *_TRANSLATION_MANIFEST_FIELDS],
+        imap,
+    )
 
 
 def _apply_l0_replacements(
@@ -527,7 +570,9 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     m = re.match(r"tests/e2e/models/(.+)\.json$", path)
     if m:
         name = m.group(1)
-        models = [name] if name in imap.all_model_names_set else []
+        models = imap.manifest_path_to_models.get(path)
+        if models is None:
+            models = [name] if name in imap.all_model_names_set else []
         return RuleMatch("manifest", models, unit_tiers, rebuild)
 
     # Rule 1: Family plugin (not __init__ or base)
@@ -702,6 +747,15 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         plugin_stem = m.group(1)
         if plugin_stem == "__init__":
             return RuleMatch("harness_plugin_init", list(imap.all_model_names), unit_tiers, rebuild)
+        if plugin_stem == "translation":
+            models = _translation_contract_models(imap)
+            if models:
+                return RuleMatch(
+                    "harness_plugin_translation",
+                    models,
+                    unit_tiers,
+                    rebuild,
+                )
         task_strategies = PLUGIN_TASK_STRATEGIES.get(plugin_stem, [])
         if task_strategies:
             return RuleMatch(
@@ -940,6 +994,7 @@ def maybe_refine_match_with_diff(
         return match
 
     fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+    translation_models = _translation_contract_models(imap)
 
     if path == "tests/e2e_harness/orchestrator.py":
         allowed = {
@@ -1101,6 +1156,61 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "harness_reference_vl_generated_only_decode",
                 ["internvl3-8b"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tests/e2e_harness/references/hf_transformers.py" and translation_models:
+        allowed_tokens = (
+            "src_lang",
+            "tgt_lang",
+            "forced_bos_token",
+            "tokenizer_kwargs",
+            "trust_remote_code",
+            "from_pretrained",
+            "generate_kwargs",
+            "forced_id",
+            "convert_tokens_to_ids",
+            "forced_bos_token_id",
+            "do_sample=false",
+            "num_beams=1",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_reference_translation_lang_tokens",
+                translation_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "src/runtime/plugins/seq2seq_plugin.cpp" and translation_models:
+        allowed_tokens = (
+            "source_lang_token_id",
+            "forced_bos_token_id",
+            "pad_token_id",
+            "cudaStream_t",
+            "bos_token_id",
+            "add_bos",
+            "ids.empty",
+            "ids.front",
+            "ids.erase",
+            "ids.insert",
+            "int32_t_next",
+            "select_argmax_token",
+            "output_ids.push_back",
+            "step_==_0",
+            "std::move(tok)",
+        )
+        if all(
+            any(token.lower() in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "cpp_seq2seq_translation_lang_tokens",
+                translation_models,
                 match.unit_tiers,
                 match.rebuild_cpp,
             )

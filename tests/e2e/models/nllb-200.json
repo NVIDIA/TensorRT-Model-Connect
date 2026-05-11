@@ -4,9 +4,16 @@
   "bundle": "nllb-200-distilled-600m.trtfb",
   "family": "m2m_100",
   "runtime_strategy": "seq2seq_encoder_decoder",
+  "reference_family": "seq2seq_translation",
+  "user_contract": "translation",
   "max_cache_length": 256,
-  "prompt": "The house is wonderful.",
+  "prompt": "UN Chief says there is no military solution in Syria",
   "max_new_tokens": 20,
   "logit_atol": 0.001,
-  "skip": "M2M-100 encoder-decoder weight mapping needs debugging (cosine=0.30)"
+  "translation_source_lang": "eng_Latn",
+  "translation_target_lang": "fra_Latn",
+  "translation_forced_bos_token": "fra_Latn",
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.20
+  }
 }

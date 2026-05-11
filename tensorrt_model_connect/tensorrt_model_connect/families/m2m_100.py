@@ -39,6 +39,13 @@ from .. import graph_blocks
 
 trt = trt_compat.get_trt()
 
+_NLLB_MODEL_CARD_SOURCE_LANG = "eng_Latn"
+_NLLB_MODEL_CARD_TARGET_LANG = "fra_Latn"
+_NLLB_MODEL_CARD_LANG_TOKEN_IDS = {
+    _NLLB_MODEL_CARD_SOURCE_LANG: 256047,
+    _NLLB_MODEL_CARD_TARGET_LANG: 256057,
+}
+
 def _make_sinusoidal_pos_embed(num_positions: int, embedding_dim: int,
                                  padding_idx: int = 1) -> np.ndarray:
     """Compute sinusoidal positional embeddings (matches M2M100SinusoidalPositionalEmbedding)."""
@@ -323,7 +330,7 @@ class M2M100Plugin:
         enc_layers = raw.get("encoder_layers", config.num_hidden_layers)
         dec_layers = raw.get("decoder_layers", config.num_hidden_layers)
         decoder_start_token_id = raw.get("decoder_start_token_id", 2)
-        return {
+        vl_config = {
             "encoder_layers": enc_layers,
             "decoder_layers": dec_layers,
             "max_source_length": 128,
@@ -332,6 +339,16 @@ class M2M100Plugin:
             "has_vision_engine": True,
             "is_encoder_decoder": True,
         }
+        if str(raw.get("tokenizer_class", "")).lower() == "nllbtokenizer":
+            vl_config.update({
+                "source_lang_token": _NLLB_MODEL_CARD_SOURCE_LANG,
+                "target_lang_token": _NLLB_MODEL_CARD_TARGET_LANG,
+                "source_lang_token_id": _NLLB_MODEL_CARD_LANG_TOKEN_IDS[
+                    _NLLB_MODEL_CARD_SOURCE_LANG],
+                "forced_bos_token_id": _NLLB_MODEL_CARD_LANG_TOKEN_IDS[
+                    _NLLB_MODEL_CARD_TARGET_LANG],
+            })
+        return vl_config
 
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
