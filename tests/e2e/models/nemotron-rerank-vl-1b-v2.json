@@ -5,15 +5,26 @@
   "bundle": "nemotron-rerank-vl-1b-v2.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "reranking",
+  "reference_family": "vl_rerank",
+  "user_contract": "ranking_order",
   "max_cache_length": 256,
   "inputs": {
-    "prompt": "What is the capital of France?",
-    "document": "Paris is the capital and most populous city of France."
+    "prompt": "Which planet is known as the Red Planet?",
+    "documents": [
+      "Venus is often called Earth's twin because of its similar size and proximity.",
+      "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
+      "Jupiter, the largest planet in our solar system, has a prominent red spot.",
+      "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+    ]
   },
-  "prompt": "What is the capital of France?",
   "max_new_tokens": 1,
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": true,
-  "skip_comparison": "trtmc rerank returns a single (prompt, document) relevance score while the HF AutoModelForSequenceClassification reference returns a logits list — the harness has no comparator for that shape yet, so TRT runs but comparison is skipped"
+  "threshold_overrides": {
+    "contract_ranking_agreement": 1.0,
+    "pairwise_ordering_agreement": 1.0,
+    "kendall_tau": 1.0,
+    "spearman_rho": 1.0
+  }
 }

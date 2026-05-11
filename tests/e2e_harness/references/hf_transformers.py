@@ -606,37 +606,76 @@ class HfTransformersReference:
     def _run_reranking_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run HF model for reranking and return scores."""
+        """Run HF cross-encoder reranking and return one score per document."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_rerank.json")
 
         prompt = case.inputs.get("prompt", "query: test")
+        documents = case.inputs.get("documents")
+        if documents is None:
+            document = case.inputs.get("document", "")
+            documents = [document] if document else []
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            from transformers import AutoModelForSequenceClassification, AutoProcessor, AutoTokenizer
 
             hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
             prompt = {prompt!r}
+            documents = {documents!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
+            torch_dtype = {torch_dtype_expr}
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSequenceClassification.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype={torch_dtype_expr})
+                model_ref, trust_remote_code=trust_remote_code,
+                torch_dtype=torch_dtype)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model.to(device)
             model.eval()
 
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True,
-                               truncation=True)
+            examples = [
+                {{"question": prompt, "doc_text": doc, "doc_image": ""}}
+                for doc in documents
+            ]
+
+            try:
+                processor = AutoProcessor.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code,
+                    max_input_tiles=6, use_thumbnail=True,
+                    rerank_max_length=8192)
+                if not hasattr(processor, "process_queries_documents_crossencoder"):
+                    raise AttributeError("processor has no cross-encoder helper")
+                inputs = processor.process_queries_documents_crossencoder(examples)
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                texts = [
+                    f"question:{{prompt}}   passage:{{doc}}"
+                    for doc in documents
+                ]
+                inputs = tokenizer(
+                    texts, return_tensors="pt", padding=True, truncation=True)
+
+            inputs = {{
+                key: value.to(device) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }}
             with torch.no_grad():
                 outputs = model(**inputs)
-            scores = outputs.logits[0].float().cpu().tolist()
+            logits = outputs.logits.detach().float().cpu()
+            if logits.ndim == 2 and logits.shape[-1] == 1:
+                scores = logits[:, 0].tolist()
+            elif logits.ndim == 2:
+                scores = logits[:, -1].tolist()
+            else:
+                scores = logits.reshape(-1).tolist()
             result = {{"scores": scores}}
             with open(output_path, "w") as f:
                 json.dump(result, f)

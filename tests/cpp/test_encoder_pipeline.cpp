@@ -441,7 +441,7 @@ static void test_encoder_rerank() {
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtmc::EncoderPipeline pipeline(std::move(module), "rerank", tokenizer);
 
-    // rerank() concatenates query + " [SEP] " + document, encodes, returns data[0]
+    // rerank() applies the supported cross-encoder text template and returns data[0]
     float score = pipeline.rerank("query", "doc");
     // Score is a float (from engine constant output = 0.1f at index 0)
     check(score >= -1e6f && score <= 1e6f, "rerank: returns a finite float");

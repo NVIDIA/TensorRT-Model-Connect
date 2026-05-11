@@ -100,7 +100,9 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
 float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    std::string combined = query + " [SEP] " + document;
+    // Match the text-only reranking template documented by the supported
+    // Nemotron rerank cross-encoder model card.
+    std::string combined = "question:" + query + "   passage:" + document;
     auto ids = tokenizer_->encode(combined);
     auto result = encode_ids(ids);
     return result.data.empty() ? 0.0f : result.data[0];
