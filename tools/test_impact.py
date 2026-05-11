@@ -1078,6 +1078,33 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
+    if path == "tests/e2e_harness/references/hf_transformers.py":
+        allowed_tokens = (
+            "decode_vl_generated_text",
+            "vl_generation",
+            "generated_ids",
+            "generated_text",
+            "input_len",
+            "token_count",
+            "decode_token_ids",
+            "processor.decode",
+            "skip_special_tokens",
+            "strip",
+            "if_text",
+            "return_text",
+            "hf_transformers",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_reference_vl_generated_only_decode",
+                ["internvl3-8b"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tests/e2e/waives.txt":
         models = []
         for line in lines:

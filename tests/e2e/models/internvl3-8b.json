@@ -5,6 +5,8 @@
   "bundle": "internvl3-8b-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
   "ci_tier": "nightly_only",
   "l0_replacement": "internvl3-2b",
   "l0_replacement_reason": "InternVL3-8B is scale coverage; internvl3-2b keeps the InternVL3 VL path for MR L0.",
@@ -19,5 +21,6 @@
     "token_agreement_rate": 0.2,
     "normalized_text_edit_distance": 0.7,
     "vision_embedding_cosine": 0.9
-  }
+  },
+  "notes": "InternVL3 HF model-card behavior uses AutoProcessor.apply_chat_template for an image+text message. The HF reference decodes generated text with a fallback for VL generate() implementations that return generated-only token IDs."
 }

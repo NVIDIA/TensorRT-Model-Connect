@@ -49,6 +49,20 @@ def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     return prompt
 
 
+def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
+    """Decode VL generation whether generate() returns full ids or generated ids only."""
+    token_count = len(generated_ids)
+
+    def _decode_token_ids(token_ids) -> str:
+        return processor.decode(token_ids, skip_special_tokens=True).strip()
+
+    if input_len > 0 and token_count > input_len:
+        text = _decode_token_ids(generated_ids[input_len:])
+        if text:
+            return text
+    return _decode_token_ids(generated_ids)
+
+
 def _resolve_cached_model_ref(hf_id: str) -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
@@ -1094,6 +1108,9 @@ class HfTransformersReference:
             import sys, torch
             from transformers import AutoProcessor
             from PIL import Image
+            from tests.e2e_harness.references.hf_transformers import (
+                _decode_vl_generated_text,
+            )
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -1159,8 +1176,7 @@ class HfTransformersReference:
 
             # Decode only the generated portion (after input)
             input_len = inputs.get("input_ids", torch.tensor([])).shape[-1]
-            gen_ids = generated_ids[0][input_len:]
-            text = processor.decode(gen_ids, skip_special_tokens=True)
+            text = _decode_vl_generated_text(processor, generated_ids[0], input_len)
 
             with open(text_path, "w") as f:
                 f.write(text)

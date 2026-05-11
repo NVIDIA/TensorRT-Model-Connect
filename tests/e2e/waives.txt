@@ -8,7 +8,6 @@ dpr-ctx-encoder           XFAIL  (DPR embedding cosine below minimum contract fl
 falcon-rw-1b             XFAIL  (ALiBi attention numerical divergence — TRT logit rel_l2 1.7x, needs investigation)
 fnet-base                 XFAIL  (encoder representation parity below minimum contract floor; DFT approximation gap needs validation follow-up)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
-internvl3-8b              XFAIL  (HF VL reference generated empty text; VL QA parity must not downgrade to non-empty TRT output)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
 nemotron-h-nano-9b       XFAIL  (TRT-only: HF reference needs mamba-ssm which is not installed; build+inference verified, no parity comparison)
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)

@@ -634,6 +634,35 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
 
+    def test_hf_vl_generated_only_decode_diff_can_be_refined(self, imap):
+        """VL generated-only decode fallback is scoped to InternVL3-8B."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
++    token_count = len(generated_ids)
++    def _decode_token_ids(token_ids) -> str:
++        return processor.decode(token_ids, skip_special_tokens=True).strip()
++    if input_len > 0 and token_count > input_len:
++        text = _decode_token_ids(generated_ids[input_len:])
++            return text
++    return _decode_token_ids(generated_ids)
++            from tests.e2e_harness.references.hf_transformers import (
++                _decode_vl_generated_text,
++            )
++            text = _decode_vl_generated_text(processor, generated_ids[0], input_len)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_vl_generated_only_decode"
+        assert refined.models == ["internvl3-8b"]
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """
