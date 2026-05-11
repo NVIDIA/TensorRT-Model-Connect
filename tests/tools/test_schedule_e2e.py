@@ -302,7 +302,7 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
 
     assert completed.returncode == 0, completed.stdout
     assert "=== E2E pipelined phases: exclusive_gpu -> shared ===" in completed.stdout
-    assert "Workers planned: 4" in completed.stdout
+    assert "Workers planned:" in completed.stdout
     assert "gpu0-exclusive_gpu-w0" in completed.stdout
     assert "gpu1-shared-w0" in completed.stdout
 
@@ -311,7 +311,30 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
         "exclusive_gpu",
         "shared",
     ]
-    assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 4
+    exclusive_phase, shared_phase = schedule["phases"]
+    exclusive_tests = {
+        test
+        for gpu_workers in exclusive_phase["schedule"].values()
+        for worker_tests in gpu_workers
+        for test in worker_tests
+    }
+    shared_tests = {
+        test
+        for gpu_workers in shared_phase["schedule"].values()
+        for worker_tests in gpu_workers
+        for test in worker_tests
+    }
+    assert exclusive_tests == {
+        "tests/test_e2e.py::test_e2e[flux-2-dev-l0]",
+        "tests/test_e2e.py::test_e2e[flux-schnell-l0]",
+    }
+    assert shared_tests == {
+        "tests/test_e2e.py::test_e2e[albert-base]",
+        "tests/test_e2e.py::test_e2e[bert-base-uncased]",
+        "tests/test_e2e.py::test_e2e[gpt2-125m]",
+        "tests/test_e2e.py::test_e2e[opt-125m]",
+    }
+    assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
 
 
 def test_qwen35_is_marked_exclusive_gpu() -> None:
