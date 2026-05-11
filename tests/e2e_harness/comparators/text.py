@@ -43,6 +43,11 @@ _COMPOSITE_RULE = (
     "AND (agreement >= T OR (stable_top1 >= T AND unstable_topk >= T)) "
     "AND ned <= hard_fail"
 )
+_LOGIT_PARITY_COMPOSITE_RULE = (
+    "(cosine_p5 >= T OR rel_l2_p95 <= T) "
+    "AND (agreement >= T OR (stable_top1 >= T AND unstable_topk >= T)); "
+    "decoded text is reported but not gated"
+)
 
 # If the model echoes the prompt, allow a modest amount of non-text preamble
 # (warnings/logs) before the prompt appears in stdout.
@@ -443,10 +448,20 @@ class TextComparator:
             )
         )
 
-        text_ok = metrics["normalized_text_edit_distance"].passed
-        ned_hard_fail_threshold = 0.65
-        if token_level_ok and ned < ned_hard_fail_threshold:
+        logit_parity_mode = stage.comparison_mode in {
+            "logit_only",
+            "logit_parity",
+        }
+        if logit_parity_mode:
             text_ok = True
+            metrics["normalized_text_edit_distance"].note = (
+                "reported only; stage comparison_mode disables text gating"
+            )
+        else:
+            text_ok = metrics["normalized_text_edit_distance"].passed
+            ned_hard_fail_threshold = 0.65
+            if token_level_ok and ned < ned_hard_fail_threshold:
+                text_ok = True
 
         passed = logit_quality_ok and token_level_ok and text_ok
 
@@ -461,7 +476,9 @@ class TextComparator:
             stage_name=stage.name,
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            composite_rule=_COMPOSITE_RULE,
+            composite_rule=(
+                _LOGIT_PARITY_COMPOSITE_RULE if logit_parity_mode else _COMPOSITE_RULE
+            ),
             message=message,
         )
 

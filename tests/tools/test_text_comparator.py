@@ -251,3 +251,39 @@ def test_reference_prompt_phrase_in_generated_text_is_not_stripped() -> None:
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["token_agreement_rate"].passed
     assert result.metrics["normalized_text_edit_distance"].passed
+
+
+def test_logit_parity_mode_does_not_gate_on_decoded_text() -> None:
+    """Tiny random model text can be meaningless while logits still define parity."""
+    logits = np.array(
+        [
+            [0.0, 1.0, -1.0],
+            [0.0, 2.0, -2.0],
+            [0.0, 3.0, -3.0],
+        ],
+        dtype=np.float32,
+    )
+
+    trt = StageOutput(
+        stage_name="full_generation",
+        data={"prompt": "Question?"},
+        text="Question? ErrorMessage ErrorMessage",
+        logits=logits,
+    )
+    ref = StageOutput(
+        stage_name="full_generation",
+        data={},
+        text="unrelated random continuation",
+        logits=logits.copy(),
+    )
+
+    result = TextComparator().compare(
+        trt=trt,
+        ref=ref,
+        threshold=_default_thresholds(),
+        stage=StageSpec(name="full_generation", comparison_mode="logit_parity"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert not result.metrics["normalized_text_edit_distance"].passed
+    assert "not gated" in result.composite_rule

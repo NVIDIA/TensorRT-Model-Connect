@@ -13,7 +13,13 @@
   "logit_atol": 0.01,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "skip_comparison": "tiny random Qwen3-MoE is an MR L0 build and runtime smoke test; HF text parity is not meaningful",
+  "stages": [
+    {
+      "name": "full_generation",
+      "required": true,
+      "comparison_mode": "logit_parity"
+    }
+  ],
   "metadata": {
     "single_process_debug_generation": true
   },
