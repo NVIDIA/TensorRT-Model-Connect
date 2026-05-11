@@ -25,9 +25,9 @@ class Seq2SeqPipeline final : public IPipeline {
                     std::unique_ptr<IInferenceState> state, int32_t hidden_size,
                     int32_t num_decoder_layers, int32_t max_source_length,
                     int32_t decoder_start_token_id, int32_t eos_token_id, int32_t bos_token_id,
-                    int32_t pad_token_id, int32_t source_lang_token_id,
-                    int32_t forced_bos_token_id, cudaStream_t stream,
-                    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                    int32_t pad_token_id, int32_t source_lang_token_id, int32_t forced_bos_token_id,
+                    cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                    std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_source_length_(max_source_length), decoder_start_token_id_(decoder_start_token_id),
@@ -91,17 +91,32 @@ class Seq2SeqPipeline final : public IPipeline {
         if (ids.empty())
             return {{}, 0};
 
+        normalize_encoder_tokens(ids);
+        return pad_encoder_input(ids);
+    }
+
+    void normalize_encoder_tokens(std::vector<int32_t>& ids) const {
         if (source_lang_token_id_ >= 0) {
-            if (!ids.empty() && ids.front() == bos_token_id_)
-                ids.erase(ids.begin());
-            if (ids.empty() || ids.front() != source_lang_token_id_)
-                ids.insert(ids.begin(), source_lang_token_id_);
-        } else if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_)) {
-            ids.insert(ids.begin(), bos_token_id_);
+            apply_source_lang_prefix(ids);
+            return;
         }
+        if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
+            ids.insert(ids.begin(), bos_token_id_);
         if (eos_token_id_ >= 0 && (ids.empty() || ids.back() != eos_token_id_))
             ids.push_back(eos_token_id_);
+    }
 
+    void apply_source_lang_prefix(std::vector<int32_t>& ids) const {
+        if (!ids.empty() && ids.front() == bos_token_id_)
+            ids.erase(ids.begin());
+        if (ids.empty() || ids.front() != source_lang_token_id_)
+            ids.insert(ids.begin(), source_lang_token_id_);
+        if (eos_token_id_ >= 0 && (ids.empty() || ids.back() != eos_token_id_))
+            ids.push_back(eos_token_id_);
+    }
+
+    std::pair<std::vector<int32_t>, int32_t>
+    pad_encoder_input(const std::vector<int32_t>& ids) const {
         int32_t copy_len = std::min(static_cast<int32_t>(ids.size()), max_source_length_);
         std::vector<int32_t> padded(static_cast<std::size_t>(max_source_length_), pad_token_id_);
         std::copy_n(ids.begin(), copy_len, padded.begin());
@@ -160,9 +175,8 @@ class Seq2SeqPipeline final : public IPipeline {
         int32_t current_token = decoder_start_token_id_;
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             run_decoder_step(current_token, logits);
-            int32_t next = (step == 0 && forced_bos_token_id_ >= 0)
-                               ? forced_bos_token_id_
-                               : select_argmax_token(logits);
+            int32_t next = (step == 0 && forced_bos_token_id_ >= 0) ? forced_bos_token_id_
+                                                                    : select_argmax_token(logits);
             if (next == eos_token_id_)
                 break;
             if (!(step == 0 && forced_bos_token_id_ >= 0))
