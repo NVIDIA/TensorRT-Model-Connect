@@ -13,12 +13,14 @@
   "max_new_tokens": 80,
   "threshold_overrides": {
     "contract_min_output_chars": 24,
-    "contract_min_expected_fragments": 2
+    "contract_min_expected_fragments": 3
   },
   "ocr_expected_fragments": [
-    "DeepSeek-OCR-2 family plugin",
-    "Standard MHA",
-    "DeepSeek-V2-style language decoder"
+    "Architecture",
+    "Standard Q/K/V/O",
+    "RoPE",
+    "Dense SwiGLU MLP",
+    "Layers 1-11"
   ],
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",

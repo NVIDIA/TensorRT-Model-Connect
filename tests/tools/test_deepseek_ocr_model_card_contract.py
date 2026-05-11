@@ -28,9 +28,11 @@ def _case() -> E2ECase:
         },
         metadata={
             "ocr_expected_fragments": [
-                "DeepSeek-OCR-2 family plugin",
-                "Standard MHA",
-                "DeepSeek-V2-style language decoder",
+                "Architecture",
+                "Standard Q/K/V/O",
+                "RoPE",
+                "Dense SwiGLU MLP",
+                "Layers 1-11",
             ]
         },
     )
@@ -68,8 +70,11 @@ def test_manifest_uses_model_card_document_markdown_prompt() -> None:
 
 def test_deepseek_ocr_contract_accepts_expected_ocr_fragments() -> None:
     text = (
-        "DeepSeek-OCR-2 family plugin - Standard MHA and MoE with shared experts.\n"
-        "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder."
+        "Architecture:\n"
+        "- Attention: Standard Q/K/V/O (no biases, no GQA - heads == kv_heads)\n"
+        "- RoPE: Standard rotary position embeddings\n"
+        "- Layer 0: Dense SwiGLU MLP (intermediate_size=6848)\n"
+        "- Layers 1-11:"
     )
     result = plugin.verify(
         _full_generation(text),
