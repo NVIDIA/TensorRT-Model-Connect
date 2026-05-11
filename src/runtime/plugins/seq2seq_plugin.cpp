@@ -58,6 +58,8 @@ class Seq2SeqPipeline final : public IPipeline {
             if (ptr)
                 cudaFree(ptr);
         }
+        if (encoder_mask_device_)
+            cudaFree(encoder_mask_device_);
     }
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override {
@@ -84,18 +86,12 @@ class Seq2SeqPipeline final : public IPipeline {
             return {};
 
         run_encoder(padded, copy_len);
-        void* enc_out = encoder_->device_ptr("encoder_output");
-        if (!enc_out)
-            throw std::runtime_error("Seq2SeqPipeline: no encoder_output");
+        setup_cross_attention();
+        state_->reset();
+        state_->bind_to(*decoder_);
 
         EmbeddingResult result;
-        result.dim = hidden_size_;
-        result.data.resize(static_cast<std::size_t>(hidden_size_));
-        auto status = cudaMemcpy(result.data.data(), enc_out,
-                                 static_cast<std::size_t>(hidden_size_) * sizeof(float),
-                                 cudaMemcpyDeviceToHost);
-        if (status != cudaSuccess)
-            throw std::runtime_error("Seq2SeqPipeline: failed to copy encoder CLS embedding");
+        run_decoder_feature_step(decoder_start_token_id_, result);
         return result;
     }
 
@@ -159,11 +155,20 @@ class Seq2SeqPipeline final : public IPipeline {
             cudaMemcpy(cross_k_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
             cudaMemcpy(cross_v_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
         }
+        std::vector<float> enc_mask_host(static_cast<std::size_t>(max_source_length_), -1e9f);
+        for (int32_t i = 0; i < actual_enc_len_; ++i)
+            enc_mask_host[static_cast<std::size_t>(i)] = 0.0f;
+        const auto mask_bytes =
+            static_cast<std::size_t>(max_source_length_) * sizeof(float);
+        if (!encoder_mask_device_)
+            cudaMalloc(&encoder_mask_device_, mask_bytes);
+        cudaMemcpy(encoder_mask_device_, enc_mask_host.data(), mask_bytes, cudaMemcpyHostToDevice);
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             std::string s = "_" + std::to_string(i);
             decoder_->bind_external("cross_k" + s, cross_k_ptrs_[static_cast<std::size_t>(i)]);
             decoder_->bind_external("cross_v" + s, cross_v_ptrs_[static_cast<std::size_t>(i)]);
         }
+        decoder_->bind_external("encoder_mask", encoder_mask_device_);
     }
 
     std::vector<int32_t> run_decoder(int32_t max_new_tokens) {
@@ -201,6 +206,28 @@ class Seq2SeqPipeline final : public IPipeline {
         state_->advance();
     }
 
+    void run_decoder_feature_step(int32_t token_id, EmbeddingResult& result) {
+        Tensor token_tensor;
+        token_tensor.data = &token_id;
+        token_tensor.shape = {1};
+        token_tensor.dtype = DType::kInt32;
+        TensorMap inputs;
+        inputs["token_id"] = token_tensor;
+        state_->prepare_step(inputs);
+        TensorMap outputs = decoder_->forward(inputs);
+        auto it = outputs.find("decoder_hidden");
+        if (it == outputs.end())
+            throw std::runtime_error("Seq2SeqPipeline: no decoder_hidden output");
+        result.dim = hidden_size_;
+        result.data.resize(static_cast<std::size_t>(hidden_size_));
+        const auto bytes = static_cast<std::size_t>(hidden_size_) * sizeof(float);
+        if (static_cast<std::size_t>(it->second.numel()) <
+            static_cast<std::size_t>(hidden_size_))
+            throw std::runtime_error("Seq2SeqPipeline: decoder_hidden output is too small");
+        std::memcpy(result.data.data(), it->second.data, bytes);
+        state_->advance();
+    }
+
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
     std::unique_ptr<IInferenceState> state_;
@@ -218,6 +245,7 @@ class Seq2SeqPipeline final : public IPipeline {
     std::vector<void*> cross_k_ptrs_;
     std::vector<void*> cross_v_ptrs_;
     std::size_t cross_kv_bytes_{0};
+    void* encoder_mask_device_{nullptr};
 };
 
 class Seq2SeqPlugin final : public IPipelinePlugin {

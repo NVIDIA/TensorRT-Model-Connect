@@ -197,6 +197,7 @@ class BartPlugin:
         for i in range(dec_layers):
             cross_k_inputs.append(network.add_input(graph_ops.layer_tensor_name("cross_k", i), trt.float32, (max_enc_seq, hidden)))
             cross_v_inputs.append(network.add_input(graph_ops.layer_tensor_name("cross_v", i), trt.float32, (max_enc_seq, hidden)))
+        encoder_mask = network.add_input("encoder_mask", trt.float32, (max_enc_seq,))
 
         embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
         pos_embed_np = weights["dec_pos_embedding"]
@@ -227,7 +228,8 @@ class BartPlugin:
                 network=network, hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
                 cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
-                attention_mask=attention_mask, eps=config.rms_norm_eps,
+                attention_mask=attention_mask, encoder_mask=encoder_mask,
+                eps=config.rms_norm_eps,
                 weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length, max_enc_seq=max_enc_seq)
@@ -236,6 +238,9 @@ class BartPlugin:
             present_v_outputs.append(result["present_v"])
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        hidden_state.name = "decoder_hidden"
+        network.mark_output(hidden_state)
 
         logits = graph_ops.add_matmul_rhs_constant(network, hidden_state, hidden, vocab, weights["w_out"])
         logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
@@ -361,7 +366,7 @@ def _build_bart_encoder(config, weights, *, max_cache_length=256, verbose=False)
 
 
 def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v,
-    attention_mask, eps, weights, prefix,
+    attention_mask, encoder_mask, eps, weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length, max_enc_seq):
     attention_size = hidden_size
     attention_window = max_cache_length + 1
@@ -401,10 +406,13 @@ def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross
     ck_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"]), attention_size, weights[f"{prefix}.cross_b_k"])
     cv_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"]), attention_size, weights[f"{prefix}.cross_b_v"])
 
+    enc_mask_4d = network.add_shuffle(encoder_mask)
+    enc_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
     ccf = graph_ops.add_attention_from_rows(
         network, cq, ck_proj, cv_proj,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=max_enc_seq)
+        q_seq=1, kv_seq=max_enc_seq,
+        mask=enc_mask_4d.get_output(0))
     ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]), hidden_size, weights[f"{prefix}.cross_b_o"])
     # Residual + post-norm
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
