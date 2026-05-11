@@ -928,6 +928,58 @@ def _normalize_diff_line(line: str) -> str:
     return re.sub(r"[-\s]+", "_", line.lower())
 
 
+_FALCON_ALIBI_SCALE_PATHS = {
+    "tensorrt_model_connect/tensorrt_model_connect/dual_profile_decoder_builder.py",
+    "tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py",
+    "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py",
+    "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py",
+}
+
+_FALCON_ALIBI_SCALE_ALLOWED_LINES = {
+    "scale_alibi_bias: bool = False,",
+    "``scale_attn_weights`` mirror the same parameters on",
+    "``scale_attn_weights`` / ``scale_alibi_bias`` mirror the same parameters on",
+    "scale_alibi_bias: Whether ALiBi bias should be multiplied by the same",
+    "attention scale as QK. Falcon scales ``QK + alibi``; Bloom keeps",
+    "the ALiBi term unscaled.",
+    "scale_alibi_bias=scale_alibi_bias,",
+    "alibi_bias_scale = attn_scale if scale_alibi_bias else 1.0",
+    "num_heads, target_dtype=work_trt_dtype)",
+    "num_heads, target_dtype=work_trt_dtype,",
+    "alibi_bias_scale=alibi_bias_scale)",
+    "alibi_bias_scale: float = 1.0,",
+    "alibi_bias_scale=alibi_bias_scale,",
+    "alibi_bias_scale: Optional scalar applied to the ALiBi bias before it",
+    "is added to the attention mask. Falcon scales ``QK + alibi`` by",
+    "the attention scale; Bloom leaves the ALiBi bias unscaled.",
+    "if alibi_bias_scale != 1.0:",
+    "scale_t = add_constant(",
+    "network, (1, 1, 1, 1),",
+    "np.array([[[[alibi_bias_scale]]]], dtype=np.float32),",
+    "dtype=np.float32)",
+    "alibi_bias_t = network.add_elementwise(",
+    "alibi_bias_t, scale_t, trt.ElementWiseOperation.PROD).get_output(0)",
+}
+
+
+def _falcon_alibi_scale_models(imap: ImpactMap) -> List[str]:
+    return sorted(
+        model for model in imap.family_to_models.get("falcon", [])
+        if model == "falcon-rw-1b"
+    )
+
+
+def _is_falcon_alibi_scale_diff(path: str, lines: List[str], imap: ImpactMap) -> bool:
+    """Return true for the narrowly scoped Falcon ALiBi scaling plumbing diff."""
+    if path not in _FALCON_ALIBI_SCALE_PATHS:
+        return False
+    if not _falcon_alibi_scale_models(imap):
+        return False
+    if not any("alibi_bias_scale" in line or "scale_alibi_bias" in line for line in lines):
+        return False
+    return all(line in _FALCON_ALIBI_SCALE_ALLOWED_LINES for line in lines)
+
+
 def maybe_refine_match_with_diff(
     path: str,
     match: RuleMatch,
@@ -940,6 +992,14 @@ def maybe_refine_match_with_diff(
         return match
 
     fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+
+    if _is_falcon_alibi_scale_diff(path, lines, imap):
+        return RuleMatch(
+            "shared_builder_falcon_alibi_scale",
+            _falcon_alibi_scale_models(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
 
     if path == "tests/e2e_harness/orchestrator.py":
         allowed = {

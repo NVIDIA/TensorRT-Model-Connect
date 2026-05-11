@@ -790,6 +790,82 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt
             "qwen2.5-0.5b-torchtrt",
         }
 
+    def test_falcon_alibi_shared_builder_diff_can_be_refined(self, mock_repo):
+        """Falcon-only ALiBi scaling plumbing should not select every model."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        families_dir = (
+            mock_repo / "tensorrt_model_connect" /
+            "tensorrt_model_connect" / "families")
+        _write_json(
+            models_dir / "falcon-rw-1b.json",
+            {
+                "name": "falcon-rw-1b",
+                "family": "falcon",
+                "runtime_strategy": "decoder_kv_cache",
+                "hf_id": "tiiuae/falcon-rw-1b",
+            },
+        )
+        _write_family(
+            families_dir, "falcon",
+            "from ..standard_decoder_builder import build\nfrom ..config import C\n",
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        cases = {
+            "tensorrt_model_connect/tensorrt_model_connect/dual_profile_decoder_builder.py": """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/dual_profile_decoder_builder.py b/tensorrt_model_connect/tensorrt_model_connect/dual_profile_decoder_builder.py
+@@ -1 +1 @@
++    scale_alibi_bias: bool = False,
+-    ``scale_attn_weights`` mirror the same parameters on
++    ``scale_attn_weights`` / ``scale_alibi_bias`` mirror the same parameters on
++    alibi_bias_scale = attn_scale if scale_alibi_bias else 1.0
+-            num_heads, target_dtype=work_trt_dtype)
++            num_heads, target_dtype=work_trt_dtype,
++            alibi_bias_scale=alibi_bias_scale)
+""",
+            "tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py": """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py b/tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py
+@@ -1 +1 @@
++    alibi_bias_scale: float = 1.0,
++                alibi_bias_scale=alibi_bias_scale,
+""",
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/graph_ops.py b/tensorrt_model_connect/tensorrt_model_connect/graph_ops.py
+@@ -1 +1 @@
++    alibi_bias_scale: float = 1.0,
++        alibi_bias_scale: Optional scalar applied to the ALiBi bias before it
++            is added to the attention mask. Falcon scales ``QK + alibi`` by
++            the attention scale; Bloom leaves the ALiBi bias unscaled.
++    if alibi_bias_scale != 1.0:
++        scale_t = add_constant(
++            network, (1, 1, 1, 1),
++            np.array([[[[alibi_bias_scale]]]], dtype=np.float32),
++            dtype=np.float32)
++        alibi_bias_t = network.add_elementwise(
++            alibi_bias_t, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+""",
+            "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py": """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py b/tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py
+@@ -1 +1 @@
++    scale_alibi_bias: bool = False,
++        scale_alibi_bias: Whether ALiBi bias should be multiplied by the same
++            attention scale as QK. Falcon scales ``QK + alibi``; Bloom keeps
++            the ALiBi term unscaled.
++            scale_alibi_bias=scale_alibi_bias,
++    alibi_bias_scale = attn_scale if scale_alibi_bias else 1.0
++            alibi_bias_scale=alibi_bias_scale,
++    alibi_bias_scale: float = 1.0,
++        alibi_bias_scale=alibi_bias_scale,
+""",
+        }
+
+        for path, diff_text in cases.items():
+            broad = test_impact.classify_file(path, imap)
+            refined = test_impact.maybe_refine_match_with_diff(
+                path, broad, diff_text, imap,
+            )
+            assert refined.rule == "shared_builder_falcon_alibi_scale"
+            assert refined.models == ["falcon-rw-1b"]
+
 
 # ---------------------------------------------------------------------------
 # Aggregation / cap tests
