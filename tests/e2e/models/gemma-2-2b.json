@@ -3,12 +3,16 @@
   "trace_id": "IT-E2E-GMA2-01",
   "hf_id": "google/gemma-2-2b-it",
   "bundle": "gemma-2-2b.trtfb",
+  "gated": true,
   "family": "gemma",
   "runtime_strategy": "decoder_kv_cache",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
-  "prompt": "What is 2 + 2? Answer with just the number.",
-  "max_new_tokens": 10,
+  "prompt": "Write a hello world program",
+  "max_new_tokens": 64,
   "logit_atol": 0.001,
   "layer_atol": 0.05,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "notes": "Gemma 2 instruct model-card behavior uses tokenizer.apply_chat_template with add_generation_prompt=True; the chat_instruct_template contract applies that template to both HF reference and C++ runtime."
 }
