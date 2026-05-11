@@ -78,6 +78,27 @@ class Seq2SeqPipeline final : public IPipeline {
         return out;
     }
 
+    EmbeddingResult encode(const std::string& text) override {
+        auto [padded, copy_len] = prepare_encoder_input(text);
+        if (copy_len == 0)
+            return {};
+
+        run_encoder(padded, copy_len);
+        void* enc_out = encoder_->device_ptr("encoder_output");
+        if (!enc_out)
+            throw std::runtime_error("Seq2SeqPipeline: no encoder_output");
+
+        EmbeddingResult result;
+        result.dim = hidden_size_;
+        result.data.resize(static_cast<std::size_t>(hidden_size_));
+        auto status = cudaMemcpy(result.data.data(), enc_out,
+                                 static_cast<std::size_t>(hidden_size_) * sizeof(float),
+                                 cudaMemcpyDeviceToHost);
+        if (status != cudaSuccess)
+            throw std::runtime_error("Seq2SeqPipeline: failed to copy encoder CLS embedding");
+        return result;
+    }
+
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "Seq2SeqPipeline"; }
 

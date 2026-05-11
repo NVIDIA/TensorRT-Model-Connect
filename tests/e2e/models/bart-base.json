@@ -4,15 +4,14 @@
   "bundle": "bart-base.trtfb",
   "family": "bart",
   "runtime_strategy": "seq2seq_encoder_decoder",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
-  "logit_atol": 1e-3,
+  "prompt": "Hello, my dog is cute",
   "threshold_overrides": {
-    "logit_cosine_p5": 0.0,
-    "logit_rel_l2_p95": 999.0,
-    "token_agreement_rate": 0.0,
-    "stable_top1_match_rate": 0.0,
-    "unstable_topk_hit_rate": 0.0
-  }
+    "cls_embedding_cosine": 0.99,
+    "cls_embedding_l2": 10.0
+  },
+  "notes": "facebook/bart-base model card uses BartTokenizer + BartModel for feature extraction and reads outputs.last_hidden_state."
 }
