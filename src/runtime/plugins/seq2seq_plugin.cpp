@@ -158,8 +158,7 @@ class Seq2SeqPipeline final : public IPipeline {
         std::vector<float> enc_mask_host(static_cast<std::size_t>(max_source_length_), -1e9f);
         for (int32_t i = 0; i < actual_enc_len_; ++i)
             enc_mask_host[static_cast<std::size_t>(i)] = 0.0f;
-        const auto mask_bytes =
-            static_cast<std::size_t>(max_source_length_) * sizeof(float);
+        const auto mask_bytes = static_cast<std::size_t>(max_source_length_) * sizeof(float);
         if (!encoder_mask_device_)
             cudaMalloc(&encoder_mask_device_, mask_bytes);
         cudaMemcpy(encoder_mask_device_, enc_mask_host.data(), mask_bytes, cudaMemcpyHostToDevice);
@@ -221,8 +220,7 @@ class Seq2SeqPipeline final : public IPipeline {
         result.dim = hidden_size_;
         result.data.resize(static_cast<std::size_t>(hidden_size_));
         const auto bytes = static_cast<std::size_t>(hidden_size_) * sizeof(float);
-        if (static_cast<std::size_t>(it->second.numel()) <
-            static_cast<std::size_t>(hidden_size_))
+        if (static_cast<std::size_t>(it->second.numel()) < static_cast<std::size_t>(hidden_size_))
             throw std::runtime_error("Seq2SeqPipeline: decoder_hidden output is too small");
         std::memcpy(result.data.data(), it->second.data, bytes);
         state_->advance();
