@@ -62,8 +62,15 @@ prepare_shared_directories
 configure_e2e_timing_cache() {
   local cache_root="${TRTMC_STORAGE_ROOT:-${ENGINE_DIR:-.}}"
   local opt_level="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-default}"
+  local cache_suffix="opt${opt_level}"
+  if [ -n "${TRTMC_MAX_NUM_TACTICS:-}" ]; then
+    cache_suffix="${cache_suffix}-tactics${TRTMC_MAX_NUM_TACTICS}"
+  fi
+  if [ -n "${TRTMC_AVG_TIMING_ITERATIONS:-}" ]; then
+    cache_suffix="${cache_suffix}-avg${TRTMC_AVG_TIMING_ITERATIONS}"
+  fi
   if [ -z "${TRTMC_TRT_TIMING_CACHE_PATH:-}" ]; then
-    export TRTMC_TRT_TIMING_CACHE_PATH="${cache_root%/}/trt-timing-cache/tensorrt-opt${opt_level}.cache"
+    export TRTMC_TRT_TIMING_CACHE_PATH="${cache_root%/}/trt-timing-cache/tensorrt-${cache_suffix}.cache"
   fi
   mkdir -p "$(dirname "$TRTMC_TRT_TIMING_CACHE_PATH")"
   echo "TRTMC_TRT_TIMING_CACHE_PATH=${TRTMC_TRT_TIMING_CACHE_PATH}"
@@ -338,6 +345,7 @@ if len(models) > 10:
   fi
 
   export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
+  export TRTMC_MAX_NUM_TACTICS="${TRTMC_MAX_NUM_TACTICS:-4}"
   configure_e2e_timing_cache
 
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
