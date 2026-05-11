@@ -203,6 +203,29 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
 }
 
+# Native tokenizer implementations are shared C++ files. Use representative
+# model-card E2E contracts for the tokenizer format instead of selecting the
+# full model fleet.
+TOKENIZER_CPP_MODEL_SCOPES: Dict[str, List[str]] = {
+    "src/tokenizer/unigram_tokenizer.cpp": [
+        "albert-base",
+        "camembert-base",
+        "canary-1b-v2",
+        "gemma-2-2b",
+        "marian-en-ru",
+        "nllb-200-distilled-600m",
+        "pixart-sigma-1024-l0",
+        "t5-small",
+        "xglm-564m",
+        "xlm-roberta-base",
+    ],
+}
+
+CHAT_TEMPLATE_REFERENCE_FAMILIES = {
+    "chat_instruct_template",
+    "translation_chat_template",
+}
+
 # Orchestrator modules in tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
@@ -455,6 +478,18 @@ def _models_for_task_strategies(
     return sorted(models)
 
 
+def _models_for_named_models(model_names: List[str], imap: ImpactMap) -> List[str]:
+    return sorted(name for name in model_names if name in imap.all_model_names_set)
+
+
+def _models_for_reference_families(reference_families: Set[str], imap: ImpactMap) -> List[str]:
+    models: List[str] = []
+    for name, metadata in imap.model_metadata.items():
+        if metadata.get("reference_family") in reference_families:
+            models.append(name)
+    return sorted(models)
+
+
 def _apply_l0_replacements(
     models: List[str],
     imap: ImpactMap,
@@ -645,6 +680,24 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             "cpp_scoped_helper",
             _drop_fp8_scale_models(imap.path_scope_overrides[path], imap),
             unit_tiers, rebuild,
+        )
+
+    # Rule 6c: Native tokenizer implementation with known tokenizer-family scope
+    if path in TOKENIZER_CPP_MODEL_SCOPES:
+        return RuleMatch(
+            "cpp_tokenizer",
+            _models_for_named_models(TOKENIZER_CPP_MODEL_SCOPES[path], imap),
+            unit_tiers,
+            rebuild,
+        )
+
+    # Rule 6d: Shared chat-template formatter used by chat-template contracts
+    if path in {"src/runtime/core/chat_template.cpp", "src/runtime/core/chat_template.h"}:
+        return RuleMatch(
+            "cpp_chat_template",
+            _models_for_reference_families(CHAT_TEMPLATE_REFERENCE_FAMILIES, imap),
+            unit_tiers,
+            rebuild,
         )
 
     # Rule 7: Any other C++ source/header

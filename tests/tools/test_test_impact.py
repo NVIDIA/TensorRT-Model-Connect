@@ -89,6 +89,8 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "gemma-2-2b", "family": "gemma", "runtime_strategy": "decoder_kv_cache",
+         "hf_id": "google/gemma", "reference_family": "chat_instruct_template"},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -372,6 +374,22 @@ class TestCppScope:
         assert "flux-2-dev" in match.models
         assert "flux-2-dev-fp8" not in match.models
         assert "qwen3-0.6b" not in match.models
+
+    def test_unigram_tokenizer_scope(self, imap):
+        """unigram_tokenizer.cpp -> known Unigram tokenizer users, not every model."""
+        match = test_impact.classify_file("src/tokenizer/unigram_tokenizer.cpp", imap)
+        assert match.rule == "cpp_tokenizer"
+        assert match.rebuild_cpp is True
+        assert "gemma-2-2b" in match.models
+        assert "qwen3-0.6b" not in match.models
+        assert len(match.models) < len(imap.all_model_names)
+
+    def test_chat_template_scope(self, imap):
+        """chat_template.cpp -> chat-template contracts, not every model."""
+        match = test_impact.classify_file("src/runtime/core/chat_template.cpp", imap)
+        assert match.rule == "cpp_chat_template"
+        assert match.rebuild_cpp is True
+        assert match.models == ["gemma-2-2b"]
 
 
 # ---------------------------------------------------------------------------

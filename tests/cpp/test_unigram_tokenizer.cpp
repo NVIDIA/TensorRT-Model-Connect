@@ -17,8 +17,7 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
+void check(bool condition, const std::string& name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
@@ -27,10 +26,8 @@ void check(bool condition, const std::string& name)
     }
 }
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -117,8 +114,35 @@ static const char* kUnigramNoSpecialJson = R"({
   }
 })";
 
-int main()
-{
+// Gemma-style tokenizer shape: Unigram vocab plus added special tokens that
+// appear literally in the model-card chat template.
+static const char* kGemmaStyleUnigramJson = R"({
+  "model": {
+    "type": "Unigram",
+    "unk_id": null,
+    "vocab": [
+      ["<unk>", 0.0],
+      ["\u2581user", -1.0],
+      ["\u2581model", -1.0],
+      ["\u2581hello", -1.0],
+      ["\u2581world", -1.0],
+      ["\u2581program", -1.0]
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "\u2581",
+    "add_prefix_space": true
+  },
+  "added_tokens": [
+    {"id": 6, "content": "<bos>", "special": true},
+    {"id": 7, "content": "<eos>", "special": true},
+    {"id": 8, "content": "<start_of_turn>", "special": true},
+    {"id": 9, "content": "<end_of_turn>", "special": true}
+  ]
+})";
+
+int main() {
     std::cerr << "Unigram Tokenizer Unit Tests\n\n";
 
     // ════════════════════════════════════════════════════════════
@@ -133,22 +157,32 @@ int main()
 
         // Invalid JSON
         bool threw = false;
-        try { trtmc::CreateUnigramTokenizer("bad", 3, false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer("bad", 3, false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_invalid_json");
 
         // BPE type rejected
         const char* bpe = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_bpe_type");
 
         // WordPiece type rejected
-        const char* wp = R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
+        const char* wp =
+            R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_wordpiece_type");
     }
 
@@ -237,8 +271,7 @@ int main()
 
         auto rt = [&](const std::string& input) {
             auto decoded = tok->decode(tok->encode(input));
-            check(decoded == input,
-                  "roundtrip '" + input + "' -> '" + decoded + "'");
+            check(decoded == input, "roundtrip '" + input + "' -> '" + decoded + "'");
         };
 
         rt("hello");
@@ -256,6 +289,32 @@ int main()
         auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
         check(tok != nullptr, "autodetect_unigram");
         check_ids(tok->encode("hello"), {1}, "autodetect_encode");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // 8. Gemma-style added special tokens
+    // ════════════════════════════════════════════════════════════
+    {
+        std::cerr << "\n=== Gemma-style added specials ===\n";
+
+        std::string json(kGemmaStyleUnigramJson);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
+        check(tok != nullptr, "gemma_style_create_with_null_unk_id");
+
+        check_ids(
+            tok->encode("<bos><start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n"),
+            {6, 8, 1, 3, 9, 8, 2}, "gemma_style_chat_template_encode");
+
+        auto unknown = tok->encode("mystery");
+        check(!unknown.empty() && unknown.front() == 0,
+              "gemma_style_null_unk_id_resolves_to_unk_token");
+
+        check(tok->decode({6, 8, 1, 3, 9, 8, 2}) == "user hello model",
+              "gemma_style_decode_filters_specials");
+
+        auto tok_with_frame = trtmc::CreateUnigramTokenizer(json.data(), json.size(), true);
+        check_ids(tok_with_frame->encode("<bos><start_of_turn>user\nhello"), {6, 8, 1, 3},
+                  "gemma_style_does_not_duplicate_literal_bos");
     }
 
     // ════════════════════════════════════════════════════════════
