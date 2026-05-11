@@ -9,16 +9,16 @@
   "ci_tier": "l0_only",
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
-  "description": "Z-Image-Turbo L0 representative at 512px with full cache and step count",
+  "description": "Z-Image-Turbo L0 representative at 512px with the model-card Diffusers prompt",
   "build_args": {
     "max_cache_length": 256
   },
-  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+  "test_prompt": "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
   "test_type": "diffusion",
   "image_height": 512,
   "image_width": 512,
   "video_num_frames": 1,
-  "num_inference_steps": 4,
+  "num_inference_steps": 8,
   "stages": [
     {
       "name": "end_to_end",
@@ -29,5 +29,5 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, and 4-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
+  "notes": "MR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, and the model-card Diffusers prompt/8-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
 }
