@@ -131,8 +131,8 @@ static void test_apply_nemotron_h() {
 }
 
 static void test_apply_nemotron_h_no_thinking() {
-    auto result = trtmc::apply_chat_template(
-        trtmc::ChatTemplateFormat::kNemotronH, "Write a haiku", false);
+    auto result =
+        trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronH, "Write a haiku", false);
     check(result == "<SPECIAL_10>System\n\n<SPECIAL_11>User\nWrite a haiku\n<SPECIAL_11>Assistant\n"
                     "<think>\n\n</think>\n\n",
           "nemotron-h no-thinking application");
