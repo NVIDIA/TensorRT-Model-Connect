@@ -223,6 +223,14 @@ print('|'.join(tests))
   fi
 }
 
+write_skipped_python_coverage() {
+  local reason="${1:-Skipped}"
+  echo '<?xml version="1.0" ?><coverage version="7.6" timestamp="0" lines-valid="0" lines-covered="0" line-rate="1.0" branches-valid="0" branches-covered="0" branch-rate="1.0" complexity="0"><packages/></coverage>' > coverage/python-cobertura.xml
+  echo "PYTHON_COVERAGE_LINE=100.00%"
+  echo "PYTHON_COVERAGE_BRANCH=100.00%"
+  echo "$reason" > coverage/python-coverage.txt
+}
+
 run_python_builder_tests() {
   python -m pip install --disable-pip-version-check --quiet "pytest-cov>=6.0"
   mkdir -p coverage
@@ -230,10 +238,7 @@ run_python_builder_tests() {
   if [ "${FULL_E2E:-false}" != "true" ]; then
     if ! python3 -c "import json; d=json.load(open('impact.json')); tiers=d['unit_tiers']; exit(0 if 'builder' in tiers or 'tools' in tiers else 1)"; then
       echo "Skipping: neither builder nor tools tier affected by this change"
-      echo '<?xml version="1.0" ?><coverage version="7.6" timestamp="0" lines-valid="0" lines-covered="0" line-rate="1.0" branches-valid="0" branches-covered="0" branch-rate="1.0" complexity="0"><packages/></coverage>' > coverage/python-cobertura.xml
-      echo "PYTHON_COVERAGE_LINE=100.00%"
-      echo "PYTHON_COVERAGE_BRANCH=100.00%"
-      echo "Skipped" > coverage/python-coverage.txt
+      write_skipped_python_coverage "Skipped: neither builder nor tools tier affected"
       return 0
     fi
   fi
@@ -252,7 +257,16 @@ for test in tests:
 " > "$selected_tests_file"
   fi
 
-  local cov_args="--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
+  local python_coverage_required="true"
+  if [ "${FULL_E2E:-false}" != "true" ] && [ -s "$selected_tests_file" ]; then
+    python_coverage_required="false"
+    echo "Skipping Python package coverage gate: selected Python subset does not produce global package coverage"
+  fi
+
+  local cov_args=()
+  if [ "$python_coverage_required" = "true" ]; then
+    cov_args=(--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml)
+  fi
   if [ -s "$selected_tests_file" ]; then
     mapfile -t selected_python_tests < "$selected_tests_file"
     echo "Selective Python tests:"
@@ -260,13 +274,18 @@ for test in tests:
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest "${selected_python_tests[@]}" -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
-      -n auto $cov_args
+      -n auto "${cov_args[@]}"
   else
     echo "Running all builder + tools tests"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
-      -n auto $cov_args
+      -n auto "${cov_args[@]}"
+  fi
+
+  if [ "$python_coverage_required" != "true" ]; then
+    write_skipped_python_coverage "Skipped: selected Python subset does not produce global package coverage"
+    return 0
   fi
 
   python -m coverage report --show-missing 2>/dev/null | tee coverage/python-coverage.txt || true
