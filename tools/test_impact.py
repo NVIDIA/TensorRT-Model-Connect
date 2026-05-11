@@ -787,6 +787,21 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
 # ---------------------------------------------------------------------------
 
 
+def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], List[str]]:
+    """Return changed Python unit-test files that pytest can run directly."""
+    builder_tests: Set[str] = set()
+    tools_tests: Set[str] = set()
+    for raw_path in changed_files:
+        path = raw_path.replace("\\", "/").strip("/")
+        if not path.endswith(".py"):
+            continue
+        if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
+            builder_tests.add(path)
+        elif path.startswith("tests/tools/"):
+            tools_tests.add(path)
+    return sorted(builder_tests), sorted(tools_tests)
+
+
 def analyze_impact(
     changed_files: List[str],
     imap: ImpactMap,
@@ -847,6 +862,14 @@ def analyze_impact(
         cpp_tests = sel.cpp_tests
         tools_tests = sel.tools_tests
         fallback_tiers = sel.fallback_tiers
+
+    direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
+    if direct_builder_tests:
+        builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
+        fallback_tiers = [tier for tier in fallback_tiers if tier != "builder"]
+    if direct_tools_tests:
+        tools_tests = sorted(set(tools_tests).union(direct_tools_tests))
+        fallback_tiers = [tier for tier in fallback_tiers if tier != "tools"]
 
     return ImpactResult(
         e2e_models=e2e_models,
