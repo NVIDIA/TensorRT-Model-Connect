@@ -118,12 +118,10 @@ bool TrtModuleImpl::attach_distributed_communicator() {
 bool TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEntry& entry) {
     if (!ctx_ || !entry.d_ptr)
         return false;
-    const bool ok = entry.is_input
-        ? ctx_->setInputTensorAddress(name.c_str(), entry.d_ptr)
-        : ctx_->setOutputTensorAddress(name.c_str(), entry.d_ptr);
+    const bool ok = entry.is_input ? ctx_->setInputTensorAddress(name.c_str(), entry.d_ptr)
+                                   : ctx_->setOutputTensorAddress(name.c_str(), entry.d_ptr);
     if (!ok) {
-        std::cerr << "[trt_module] Failed to bind "
-                  << (entry.is_input ? "input" : "output")
+        std::cerr << "[trt_module] Failed to bind " << (entry.is_input ? "input" : "output")
                   << " tensor address for '" << name << "'\n";
     }
     return ok;
@@ -256,10 +254,10 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
-        alloc_dims = engine->getProfileShape(
-            name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
-        init_dims = engine->getProfileShape(
-            name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kOPT);
+        alloc_dims =
+            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        init_dims =
+            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 
     std::vector<int64_t> shape;
@@ -316,9 +314,8 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         // For dynamic engines, query the context for inferred output shape
         // (based on the max input shapes set by the caller).
         // For static engines, use the engine shape directly.
-        nvinfer1::Dims out_dims =
-            has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
-                                : engine->getTensorShape(name.c_str());
+        nvinfer1::Dims out_dims = has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
+                                                      : engine->getTensorShape(name.c_str());
 
         std::vector<int64_t> shape;
         std::size_t nbytes = compute_alloc_bytes(out_dims, dtype, shape);
