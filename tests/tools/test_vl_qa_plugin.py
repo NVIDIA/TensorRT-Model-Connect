@@ -111,9 +111,10 @@ def test_vl_qa_ocr_required_substrings_are_real_contract() -> None:
             stage_name="full_generation",
             data={
                 "generated_text": (
-                    "DeepSeek-OCR-2 family plugin\n"
-                    "Architecture:\n"
-                    "- Vision: SAM ViT-B + Qwen2 encoder"
+                    "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style "
+                    "language decoder. Unlike the full DeepSeek-V2 which uses "
+                    "Multi-head Latent Attention (MLA), OCR-2 uses standard "
+                    "Llama-style multi-head attention."
                 )
             },
             metadata={"returncode": 0},
@@ -122,9 +123,9 @@ def test_vl_qa_ocr_required_substrings_are_real_contract() -> None:
             stage_name="full_generation",
             data={
                 "required_substrings": [
-                    "DeepSeek-OCR-2 family plugin",
-                    "Architecture:",
-                    "Vision: SAM ViT-B + Qwen2 encoder",
+                    "DeepSeek-OCR-2 is a VL model",
+                    "Multi-head Latent Attention (MLA)",
+                    "OCR-2 uses standard Llama-style multi-head attention",
                 ]
             },
         ),
@@ -158,6 +159,37 @@ def test_vl_qa_ocr_required_substrings_fail_when_missing() -> None:
 
     assert result.status == StageStatus.FAILED.value
     assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
+
+
+def test_vl_qa_ocr_rejects_architecture_only_output() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "generated_text": (
+                    "Architecture:\n\n"
+                    "Attention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)\n"
+                    "RoPE:Standard rotary position embeddings\n"
+                    "Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)"
+                )
+            },
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "required_substrings": [
+                    "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder",
+                    "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA)",
+                ]
+            },
+        ),
+        _case(reference_family="ocr_markdown", reference_backend="golden_snapshot"),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert "DeepSeek-OCR-2 is a VL model" in result.message
 
 
 def test_vl_qa_accepts_single_word_answer_inside_reference_sentence() -> None:

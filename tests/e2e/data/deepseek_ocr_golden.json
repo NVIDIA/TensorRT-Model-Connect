@@ -1,12 +1,11 @@
 {
   "text": "",
   "required_substrings": [
-    "Architecture:",
-    "Standard Q/K/V/O",
-    "rotary position embeddings",
-    "Dense SwiGLU MLP",
-    "RMSNorm",
-    "SAM ViT-B + Qwen2 encoder"
+    "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder",
+    "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA)",
+    "OCR-2 uses standard Llama-style multi-head attention",
+    "MLP layers use DeepSeek-V2 MoE with shared experts",
+    "dense SwiGLU for earlier layers"
   ],
   "source_image": "tests/e2e/data/orc_test_img.jpeg"
 }
