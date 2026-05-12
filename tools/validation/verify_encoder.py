@@ -3,12 +3,14 @@
 
 Usage (inside trtmc-magpie container):
     source .venv/bin/activate
-    python3 /tmp/verify_encoder.py
+    python3 tools/validation/verify_encoder.py
 """
 
 import ctypes
 import sys
 import time
+from pathlib import Path
+
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -65,7 +67,8 @@ print(f"Reference: {seq_len} tokens, output shape {ref_output.shape}")
 # 2. Load plugin and weights from NeMo archive
 # ---------------------------------------------------------------------------
 
-sys.path.insert(0, ".")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "tensorrt_model_connect"))
 from tensorrt_model_connect.families.magpie_tts import MagpieTTSPlugin
 from tensorrt_model_connect.config import ModelConfig
 

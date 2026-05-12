@@ -8,7 +8,7 @@
 
 这是一份单独、完整、可向老板直接汇报的文档。
 
-它整合并替代了当前 `todo/` 目录下与 E2E / CI / 参考真值 / 多模态 diff 测试相关的工作文档，目的是把原来分散在多份 markdown 中的信息，收敛成一份可以从头读到尾的统一方案。
+它整合并替代了当前 `docs/context/plans/` 目录下与 E2E / CI / 参考真值 / 多模态 diff 测试相关的工作文档，目的是把原来分散在多份 markdown 中的信息，收敛成一份可以从头读到尾的统一方案。
 
 这份文档重点回答七个问题:
 
@@ -1755,7 +1755,7 @@ fixture 必须满足:
 
 ---
 
-## 17. 本文档与 `todo/` 其它文件的关系
+## 17. 本文档与 `docs/context/plans/` 其它文件的关系
 
 ### 17.1 本文档直接整合的 E2E/CI 相关文档
 
@@ -1771,9 +1771,9 @@ fixture 必须满足:
 
 这些文档可以保留作工作记录，但今后不应再作为对外汇报的主文档。
 
-### 17.2 `todo/` 中其它非 E2E 文档
+### 17.2 `docs/context/plans/` 中其它非 E2E 文档
 
-`todo/` 目录里还有一批与 runtime / plugin architecture / migration 相关的文档，例如:
+`docs/context/plans/` 目录里还有一批与 runtime / plugin architecture / migration 相关的文档，例如:
 
 - `MR2-todo.md`
 - `MR2-worklog.md`
@@ -1805,6 +1805,6 @@ fixture 必须满足:
 
 建议把这份文档作为今后 E2E CI 讨论的唯一入口。
 
-后续新的细节更新，原则上都应直接回收进这份文档，而不是继续在 `todo/` 下新增并列的“老板版”“完整版”“typed 版”“framework 版”。
+后续新的细节更新，原则上都应直接回收进这份文档，而不是继续在 `docs/context/plans/` 下新增并列的“老板版”“完整版”“typed 版”“framework 版”。
 
 这样团队才能真正拥有单一事实来源。

@@ -12,6 +12,7 @@ title: Source Layout
 | `src/runtime/core/` | Device tensors, caches, samplers, CUDA helpers, schedulers. |
 | `src/runtime/domains/` | Modality-specific helpers and generation plans. |
 | `src/runtime/plugins/` | Runtime strategy plugins. |
+| `src/runtime/plugins/tvm_ffi/` | TVM-FFI TensorRT bridge plugin and module loader. |
 | `src/runtime/pipelines/` | Concrete `IPipeline` implementations. |
 | `src/runtime/registry/` | Pipeline factory, registry, and base config parsing. |
 | `src/tokenizer/` | Native tokenizers. |
@@ -24,6 +25,11 @@ title: Source Layout
 | `tests/e2e_harness/` | E2E orchestration, runners, references, comparators, thresholds. |
 | `tests/tools/` | Tooling tests. |
 | `tools/` | Diff, profiling, performance, coverage, and report tools. |
+| `tools/validation/` | Manual validation probes that are not part of the normal CI tool surface. |
 | `scripts/` | Build, cache warmup, E2E scheduling, and scaffolding scripts. |
 | `cmake/` | CMake manifests and generated registration templates. |
+| `cmake/trtmc_core_sources.cmake` | Owned source list for the `trtmc_core` target. |
+| `docs/context/plans/` | Historical plans and design worklogs. |
+| `docs/context/reports/` | Historical investigation and verification reports. |
+| `docs/context/model-links/` | Model discovery/link lists used as project context. |
 | `website/` | Docusaurus user documentation site. |

@@ -131,100 +131,22 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
+include(cmake/trtmc_core_sources.cmake)
 add_library(trtmc_core
-  src/bundle/bundle_format.cpp
-  src/bundle/bundle_view.cpp
-  src/cabi/api/trtmc_c.cpp
-  # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
-  src/runtime/core/trt_common.cpp
-  src/runtime/core/gpu_matmul.cpp
-  src/runtime/core/cuda_common.cpp
-  src/runtime/backend/backend_loader.cpp
-  src/runtime/backend/trt_version.cpp
-  src/runtime/core/trt_engine_lifecycle.cpp
-  src/runtime/core/trt_decode_runtime.cpp
-  src/runtime/core/sampler.cpp
-  src/runtime/core/device_kv_cache.cpp
-  src/runtime/core/device_tensor.cpp
-  src/runtime/core/kv_cache.cpp
-  src/runtime/core/triattention_kv_cache.cpp
-  src/runtime/core/recurrent_state.cpp
-  src/runtime/core/chat_template.cpp
-  src/runtime/core/flow_match_euler_scheduler.cpp
-  src/runtime/core/stb_impl.cpp
-  # Domain-specific components
-  src/runtime/domains/multimodal/image_preprocessor.cpp
-  src/runtime/domains/multimodal/vision_engine.cpp
-  src/runtime/domains/audio/audio_types.cpp
-  src/runtime/domains/audio/mel_spectrogram.cpp
-  src/runtime/domains/audio/audio_bundle_validation.cpp
-  src/runtime/domains/diffusion/diffusion_preprocessor.cpp
-  src/tokenizer/vocab_tokenizer.cpp
-  src/tokenizer/ipa_tokenizer.cpp
-  src/tokenizer/bpe_tokenizer.cpp
-  src/tokenizer/wordpiece_tokenizer.cpp
-  src/tokenizer/unigram_tokenizer.cpp
-  # Utilities
-  src/utils/data_dir.cpp
-  src/utils/text_parsers.cpp
-  src/utils/json_helpers.cpp
-  src/utils/wav_reader.cpp
-  src/utils/image_reader.cpp
-  src/runtime/core/hybrid_state.cpp
-  # Config (schema registry + layered resolution + CLI surface + schemas)
-  src/runtime/config/schema_registry.cpp
-  src/runtime/config/config_bundle.cpp
-  src/runtime/config/cli_support.cpp
+  ${TRTMC_CORE_SOURCES}
   ${TRTMC_CONFIG_SCHEMA_REGISTRATION_SOURCE}
   ${TRTMC_CONFIG_SCHEMA_SOURCES}
-  # Registry (factory + plugin dispatch)
-  src/runtime/registry/pipeline_factory.cpp
-  src/runtime/registry/pipeline_registry.cpp
-  src/runtime/registry/pipeline_plugin.cpp
-  # Plugin shared helpers
-  src/runtime/plugins/shared/plugin_helpers.cpp
-  src/runtime/plugins/shared/diffusion_helpers.cpp
-  src/runtime/plugins/shared/audio_helpers.cpp
   ${TRTMC_PIPELINE_PLUGIN_REGISTRATION_SOURCE}
   ${TRTMC_PIPELINE_PLUGIN_SOURCES}
-  # Pipeline implementations
-  src/runtime/pipelines/text_generation_pipeline.cpp
-  src/runtime/pipelines/recurrent_pipeline.cpp
-  src/runtime/pipelines/encoder_pipeline.cpp
-  src/runtime/pipelines/patchtst_pipeline.cpp
-  src/runtime/pipelines/patchtsmixer_pipeline.cpp
-  src/runtime/pipelines/timesfm_pipeline.cpp
-  src/runtime/pipelines/chronos_bolt_pipeline.cpp
-  src/runtime/pipelines/segment_pipeline.cpp
-  src/runtime/pipelines/sam_pipeline.cpp
-  src/runtime/pipelines/vl_pipeline.cpp
-  src/runtime/pipelines/flux_pipeline.cpp
-  src/runtime/pipelines/ltx_video_pipeline.cpp
-  src/runtime/pipelines/wan_pipeline.cpp
-  src/runtime/pipelines/z_image_pipeline.cpp
-  src/runtime/pipelines/whisper_pipeline.cpp
-  src/runtime/pipelines/rnnt_pipeline.cpp
-  src/runtime/pipelines/bark_pipeline.cpp
-  src/runtime/pipelines/magpie_pipeline.cpp
-  src/runtime/pipelines/speech_pipeline.cpp
-  src/runtime/pipelines/omni_pipeline.cpp
-  src/runtime/pipelines/pixart_pipeline.cpp
-  src/runtime/pipelines/pixart_torchtrt_pipeline.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
   target_sources(trtmc_core PRIVATE
-    src/runtime/domains/audio/magpie_kernels.cu
-    src/runtime/core/argmax_kernel.cu
-    src/runtime/core/sparse_multinomial_kernel.cu
-    src/runtime/core/triattention_kernels.cu
+    ${TRTMC_CUDA_KERNEL_SOURCES}
   )
   set_source_files_properties(
-    src/runtime/domains/audio/magpie_kernels.cu
-    src/runtime/core/argmax_kernel.cu
-    src/runtime/core/sparse_multinomial_kernel.cu
-    src/runtime/core/triattention_kernels.cu
+    ${TRTMC_CUDA_KERNEL_SOURCES}
     PROPERTIES LANGUAGE CUDA
   )
   target_include_directories(trtmc_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -363,7 +285,7 @@ if(TRTMC_ENABLE_TVM_FFI)
   if(TRTMC_TVM_FFI_INCLUDE_DIR AND TRTMC_TVM_FFI_LIBRARY)
     set(_trtmc_has_tvm_ffi TRUE)
     target_sources(trtmc_core PRIVATE
-      src/plugins/tvm_ffi_module_loader.cpp
+      ${TRTMC_TVM_FFI_MODULE_LOADER_SOURCE}
     )
     target_compile_definitions(trtmc_core PUBLIC TRTMC_HAS_TVM_FFI=1)
     target_include_directories(trtmc_core SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
@@ -382,9 +304,8 @@ endif()
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
 if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   add_library(trtmc_tvm_ffi_plugin SHARED
-    src/plugins/tvm_ffi_kernel_plugin.cpp
-    src/plugins/tvm_ffi_kernel_creator.cpp
-    src/plugins/tvm_ffi_module_loader.cpp
+    ${TRTMC_TVM_FFI_PLUGIN_SOURCES}
+    ${TRTMC_TVM_FFI_MODULE_LOADER_SOURCE}
     src/utils/json_helpers.cpp
   )
   target_include_directories(trtmc_tvm_ffi_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -418,8 +339,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   if(_trtmc_has_tvm_ffi)
     target_sources(trtmc_backend_trt PRIVATE
-      src/plugins/tvm_ffi_kernel_plugin.cpp
-      src/plugins/tvm_ffi_kernel_creator.cpp
+      ${TRTMC_TVM_FFI_PLUGIN_SOURCES}
     )
     target_include_directories(trtmc_backend_trt SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtmc_backend_trt PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
@@ -479,8 +399,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
     )
     if(_trtmc_has_tvm_ffi)
       target_sources(trtmc_backend_rtx PRIVATE
-        src/plugins/tvm_ffi_kernel_plugin.cpp
-        src/plugins/tvm_ffi_kernel_creator.cpp
+        ${TRTMC_TVM_FFI_PLUGIN_SOURCES}
       )
       target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
       target_link_libraries(trtmc_backend_rtx PRIVATE ${TRTMC_TVM_FFI_LIBRARY})

@@ -52,9 +52,9 @@ TRT void* device pointers + known shapes/dtypes
 
 ### Deliverables
 
-- [ ] `src/plugins/tvm_ffi_kernel_plugin.h` — IPluginV3 + Core + Build + Runtime
-- [ ] `src/plugins/tvm_ffi_kernel_plugin.cpp` — implementation
-- [ ] `src/plugins/tvm_ffi_kernel_creator.cpp` — IPluginCreatorV3One registration
+- [ ] `src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_plugin.h` — IPluginV3 + Core + Build + Runtime
+- [ ] `src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_plugin.cpp` — implementation
+- [ ] `src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_creator.cpp` — IPluginCreatorV3One registration
 - [ ] CMake: find/link `libtvm_ffi`, compile plugin sources, register plugin .so
 - [ ] `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py`: `add_tvm_ffi_kernel()` helper
 - [ ] `tests/cpp/test_tvm_ffi_plugin.cpp` — dummy kernel round-trip through TRT engine
@@ -140,8 +140,8 @@ find_library(TVM_FFI_LIBRARY tvm_ffi
 
 if(TVM_FFI_INCLUDE_DIR AND TVM_FFI_LIBRARY)
   target_sources(trtmc_core PRIVATE
-    src/plugins/tvm_ffi_kernel_plugin.cpp
-    src/plugins/tvm_ffi_kernel_creator.cpp)
+    src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_plugin.cpp
+    src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_creator.cpp)
   target_include_directories(trtmc_core PRIVATE ${TVM_FFI_INCLUDE_DIR})
   target_link_libraries(trtmc_core PRIVATE ${TVM_FFI_LIBRARY})
   target_compile_definitions(trtmc_core PRIVATE TRTMC_HAS_TVM_FFI=1)
@@ -303,4 +303,3 @@ Plugin `enqueue()` resolves: try `name.smXX` first, fall back to `name`.
 | Phase 4: CUDA Tile + cross-platform | 3–5 days | Phase 1 |
 
 Phases 2, 3, and 4 are independent after Phase 1 and can be parallelized.
-

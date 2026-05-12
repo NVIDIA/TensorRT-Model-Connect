@@ -2,7 +2,7 @@
 
 #if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
-#include "plugins/tvm_ffi_kernel_plugin.h"
+#include "runtime/plugins/tvm_ffi/tvm_ffi_kernel_plugin.h"
 
 #include "utils/json_helpers.h"
 

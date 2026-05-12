@@ -338,7 +338,7 @@ Composition: merge both branches. The `graph_ops.py` changes are additive functi
 
 ## C++ Plugin Infrastructure (Unchanged)
 
-The TVM-FFI bridge plugin (`src/plugins/tvm_ffi_kernel_plugin.cpp`) is stable infrastructure. It:
+The TVM-FFI bridge plugin (`src/runtime/plugins/tvm_ffi/tvm_ffi_kernel_plugin.cpp`) is stable infrastructure. It:
 
 - Accepts any TVM-FFI function by name via `kernel_name` plugin field
 - Marshals TRT tensors to DLTensors for the TVM-FFI call

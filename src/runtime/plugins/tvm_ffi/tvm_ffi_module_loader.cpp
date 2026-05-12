@@ -2,7 +2,7 @@
 
 #if TRTMC_HAS_TVM_FFI
 
-#include "plugins/tvm_ffi_module_loader.h"
+#include "runtime/plugins/tvm_ffi/tvm_ffi_module_loader.h"
 
 #include <cstring>
 #include <iostream>

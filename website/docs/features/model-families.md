@@ -17,7 +17,7 @@ Family plugins can:
 
 ## Raw TRT families
 
-Raw TRT family plugins live in `tensorrt_model_connect/tensorrt_model_connect/families/`. The current checkout has 64 plugins.
+Raw TRT family plugins live in `tensorrt_model_connect/tensorrt_model_connect/families/`. The current checkout has 65 plugins.
 
 Common raw TRT groups:
 

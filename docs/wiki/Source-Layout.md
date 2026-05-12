@@ -14,8 +14,11 @@ path listed here exists in the source tree.
 | `tensorrt_model_connect/` | Python builder package |
 | `tests/` | All test suites (C++, Python builder, tools, E2E) |
 | `tools/` | Diff test framework, perf comparison, complexity checker |
+| `tools/validation/` | Manual validation probes outside the standard CI tool surface |
 | `scripts/` | Infrastructure and utility scripts |
-| `docs/wiki/` | Architecture and design documentation |
+| `cmake/` | CMake manifests and generated registration templates |
+| `docs/` | Architecture docs, plans, reports, and project context |
+| `website/` | Docusaurus user documentation site |
 
 ---
 
@@ -72,19 +75,11 @@ path listed here exists in the source tree.
 |------|---------|
 | `trtmc_c.cpp` | C ABI entry: `trtmc_create_pipeline()`, `trtmc_create_pipeline_ex()`, `trtmc_last_error()`, `trtmc_version()`, `trtmc_has_trt()` |
 
-### `src/cabi/config/`
-
-| File | Purpose |
-|------|---------|
-| `fast_path_config.h` | `FastPathModelConfig` struct (all runtime strategy fields) |
-| `fast_path_config.cpp` | JSON parsing into `FastPathModelConfig` |
-
 ### `src/cabi/bundle/`
 
-| File | Purpose |
-|------|---------|
-| `bundle_helpers.h` | `BundleSections` struct, tokenizer/engine extraction |
-| `bundle_helpers.cpp` | Bundle section extraction implementation |
+Bundle extraction notes for the C ABI surface. Runtime extraction logic now
+lives with the bundle reader and plugin helpers instead of a separate C ABI
+implementation directory.
 
 ### `src/runtime/backend/`
 
@@ -133,8 +128,12 @@ Self-registering pipeline plugins. Each plugin handles one or more `runtime_stra
 | `whisper_plugin.cpp` | `speech_to_text` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
 | `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
+| `cmake/trtmc_core_sources.cmake` | `trtmc_core` source ownership manifest |
 
 Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (ITrtModule loading via backend, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
+
+Optional TVM-FFI TensorRT bridge code lives under `src/runtime/plugins/tvm_ffi/`
+so all runtime plugin implementations stay under one ownership tree.
 
 ### `src/runtime/pipelines/`
 
@@ -435,7 +434,7 @@ Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 
-72 test executables. Plain `main()` programs with `check(condition, name)`
+91 test executables. Plain `main()` programs with `check(condition, name)`
 helpers. Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
 
 Covers: bundle format, tokenizers (vocab, HF Python), text/JSON parsers,
@@ -462,7 +461,7 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-84 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
+108 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
 `family`, `runtime_strategy`, `prompt`, `max_new_tokens`, and optional
 fields like `logit_atol`, `trust_remote_code`, `skip`.
 
