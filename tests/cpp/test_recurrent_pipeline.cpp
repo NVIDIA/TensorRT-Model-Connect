@@ -17,7 +17,7 @@
 // (for pure SSM) and HybridStateManager (for attention+SSM).
 // =============================================================================
 
-#include "runtime/pipelines/recurrent_pipeline.h"
+#include "runtime/models/recurrent/pipeline.h"
 #include "trtmc/runtime/hybrid_state.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/recurrent_state.h"

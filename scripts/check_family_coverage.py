@@ -30,8 +30,12 @@ MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 def discover_plugin_names() -> set[str]:
     """Scan family plugin .py files with AST to extract plugin name attrs."""
     names: set[str] = set()
-    for py_file in sorted(FAMILIES_DIR.glob("*.py")):
-        if py_file.name.startswith("_") or py_file.stem == "base":
+    plugin_files = list(FAMILIES_DIR.glob("*.py"))
+    plugin_files.extend(FAMILIES_DIR.glob("*/plugin.py"))
+    for py_file in sorted(plugin_files):
+        if py_file.name.startswith("_") or py_file.stem in {"__init__", "base"}:
+            continue
+        if any(part.startswith("_") for part in py_file.relative_to(FAMILIES_DIR).parts[:-1]):
             continue
         try:
             tree = ast.parse(py_file.read_text(), filename=str(py_file))
@@ -91,7 +95,7 @@ def main() -> int:
     exempt = plugin_names & _EXEMPT_PLUGINS
     uncovered = plugin_names - set(manifest_families) - _EXEMPT_PLUGINS
 
-    print(f"=== Family Plugin E2E Coverage Report ===")
+    print("=== Family Plugin E2E Coverage Report ===")
     print(f"Total plugins discovered: {len(plugin_names)}")
     print(f"Covered by E2E manifest: {len(covered)}")
     if exempt:

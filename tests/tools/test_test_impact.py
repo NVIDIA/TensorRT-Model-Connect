@@ -35,6 +35,13 @@ def _write_family(families_dir: Path, name: str, imports: str) -> None:
     (families_dir / f"{name}.py").write_text(imports, encoding="utf-8")
 
 
+def _write_family_package(families_dir: Path, name: str, files: dict[str, str]) -> None:
+    family_dir = families_dir / name
+    family_dir.mkdir()
+    for rel_path, content in files.items():
+        (family_dir / rel_path).write_text(content, encoding="utf-8")
+
+
 @pytest.fixture
 def mock_repo(tmp_path):
     """Create a minimal mock repo with manifests and family plugins."""
@@ -44,6 +51,11 @@ def mock_repo(tmp_path):
     families_dir.mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "text_generation").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "vision_language").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "flux").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "pixart").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "domains" / "diffusion").mkdir(parents=True)
     (tmp_path / "include" / "trtmc").mkdir(parents=True)
@@ -91,6 +103,11 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "chronos-bolt-small", "family": "chronos_bolt",
+         "runtime_strategy": "chronos_bolt_torchtrt",
+         "hf_id": "amazon/chronos-bolt-small", "core": True},
+        {"name": "convbert-base", "family": "convbert", "runtime_strategy": "encoder_only",
+         "hf_id": "YituTech/conv-bert-base"},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -120,6 +137,15 @@ def mock_repo(tmp_path):
                   "from ..config import C\nfrom ..graph_ops import conv\n")
     _write_family(families_dir, "mixtral",
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family_package(
+        families_dir,
+        "convbert",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .builder import build_convbert_encoder_engine\n",
+            "builder.py": "from ... import graph_ops\n",
+        },
+    )
 
     # Placeholder source files
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "standard_decoder_builder.py").write_text("")
@@ -128,13 +154,42 @@ def mock_repo(tmp_path):
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "checkpoint_mapper.py").write_text("")
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "graph_ops.py").write_text("")
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "strategies").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "pipelines" / "flux_pipeline.cpp").write_text(
+    (tmp_path / "src" / "runtime" / "models" / "text_generation" / "MODEL.toml").write_text(
+        'runtime_strategies = ["decoder_kv_cache", "decoder_moe"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "vision_language" / "MODEL.toml").write_text(
+        'runtime_strategies = ["vision_language"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "flux" / "MODEL.toml").write_text(
+        'runtime_strategies = ["diffusion_flux"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "flux" / "pipeline.cpp").write_text(
         '#include "runtime/core/gpu_matmul.h"\n'
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
         encoding="utf-8",
     )
-    (tmp_path / "src" / "runtime" / "pipelines" / "pixart_pipeline.cpp").write_text(
+    (tmp_path / "src" / "runtime" / "models" / "pixart" / "MODEL.toml").write_text(
+        'runtime_strategies = ["diffusion_pixart"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "pixart" / "pipeline.cpp").write_text(
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "MODEL.toml").write_text(
+        'runtime_strategies = ["chronos_bolt_torchtrt"]\n'
+        'task_strategy = "neural_operator"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "plugin.cpp").write_text(
+        '#include "runtime/models/chronos_bolt/pipeline.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "pipeline.cpp").write_text(
+        '#include "runtime/models/chronos_bolt/pipeline.h"\n',
         encoding="utf-8",
     )
     (tmp_path / "tests" / "e2e" / "data" / "flux2-fp8-scales.json").write_text(
@@ -157,23 +212,23 @@ def imap(mock_repo):
 
 class TestFamilyPlugin:
     def test_family_only_change(self, imap):
-        """families/qwen.py -> exactly qwen models."""
+        """families/qwen/plugin.py -> exactly qwen models."""
         match = test_impact.classify_file(
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
-        assert match.rule == "family_plugin"
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py", imap)
+        assert match.rule == "family_package"
         assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
 
     def test_family_isolation(self, imap):
-        """families/qwen.py does NOT affect llama models."""
+        """families/qwen/plugin.py does NOT affect llama models."""
         match = test_impact.classify_file(
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py", imap)
         assert "llama-7b" not in match.models
 
     def test_family_with_no_manifest(self, imap):
-        """A family .py with no manifest -> empty models, no crash."""
+        """A family package with no manifest -> empty models, no crash."""
         match = test_impact.classify_file(
-            "tensorrt_model_connect/tensorrt_model_connect/families/nonexistent_family.py", imap)
-        assert match.rule == "family_plugin"
+            "tensorrt_model_connect/tensorrt_model_connect/families/nonexistent_family/plugin.py", imap)
+        assert match.rule == "family_package"
         assert match.models == []
 
     def test_family_base_all_models(self, imap):
@@ -189,6 +244,20 @@ class TestFamilyPlugin:
             "tensorrt_model_connect/tensorrt_model_connect/families/__init__.py", imap)
         assert match.rule == "family_base"
         assert len(match.models) == len(imap.all_model_names)
+
+    def test_family_package_file(self, imap):
+        """families/convbert/builder.py -> exactly ConvBERT models."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/families/convbert/builder.py", imap)
+        assert match.rule == "family_package"
+        assert match.models == ["convbert-base"]
+
+    def test_family_package_plugin(self, imap):
+        """families/convbert/plugin.py uses the package folder as its impact boundary."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/families/convbert/plugin.py", imap)
+        assert match.rule == "family_package"
+        assert match.models == ["convbert-base"]
 
     def test_torchtrt_family_only_change(self, mock_repo):
         """Torch-TRT family plugin change maps only to that family's manifests."""
@@ -264,6 +333,16 @@ class TestSpecializedBuilder:
             expected_models.update(imap.family_to_models.get(fam, []))
         assert set(match.models) == expected_models
 
+    def test_shared_builder_implementation(self, imap):
+        """families/_shared/standard_decoder_builder.py uses import-scanned scope."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/families/_shared/standard_decoder_builder.py",
+            imap,
+        )
+        assert match.rule == "specialized_builder"
+        assert "qwen3-0.6b" in match.models
+        assert "bert-base" not in match.models
+
     def test_encoder_builder(self, imap):
         """encoder_builder.py -> only bert family."""
         match = test_impact.classify_file(
@@ -278,11 +357,11 @@ class TestSpecializedBuilder:
 
 
 class TestCppScope:
-    def test_cpp_plugin_scope(self, imap):
-        """decoder_plugin.cpp -> only decoder_kv_cache/decoder_moe models."""
+    def test_cpp_runtime_text_generation_scope(self, imap):
+        """text_generation runtime model files -> only decoder models."""
         match = test_impact.classify_file(
-            "src/runtime/plugins/decoder_plugin.cpp", imap)
-        assert match.rule == "cpp_plugin"
+            "src/runtime/models/text_generation/plugin.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
         assert match.rebuild_cpp is True
         # Should include qwen, llama (kv_cache) and mixtral (moe)
         assert "qwen3-0.6b" in match.models
@@ -291,11 +370,11 @@ class TestCppScope:
         assert "bert-base" not in match.models
         assert "flux-schnell" not in match.models
 
-    def test_cpp_plugin_vl(self, imap):
-        """vl_plugin.cpp -> only vision_language models."""
+    def test_cpp_runtime_vision_language_scope(self, imap):
+        """vision_language runtime model files -> only vision_language models."""
         match = test_impact.classify_file(
-            "src/runtime/plugins/vl_plugin.cpp", imap)
-        assert match.rule == "cpp_plugin"
+            "src/runtime/models/vision_language/plugin.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
         assert set(match.models) == {"qwen25vl-3b"}
 
     def test_cpp_shared_audio(self, imap):
@@ -330,30 +409,45 @@ class TestCppScope:
         assert len(match.models) == len(imap.all_model_names)
 
     def test_cpp_pipeline_scope(self, imap):
-        """text_generation_pipeline.cpp -> only decoder models."""
+        """text_generation pipeline.cpp -> only decoder models."""
         match = test_impact.classify_file(
-            "src/runtime/pipelines/text_generation_pipeline.cpp", imap)
-        assert match.rule == "cpp_pipeline"
+            "src/runtime/models/text_generation/pipeline.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
         assert "qwen3-0.6b" in match.models
         assert "bert-base" not in match.models
 
     def test_flux_pipeline_runtime_scope_uses_non_fp8_l0_representative(self, imap):
-        """flux_pipeline.cpp is runtime-only, so FLUX.2 BF16 covers FP8 contract."""
+        """flux pipeline.cpp is runtime-only, so FLUX.2 BF16 covers FP8 contract."""
         match = test_impact.classify_file(
-            "src/runtime/pipelines/flux_pipeline.cpp", imap)
-        assert match.rule == "cpp_pipeline_flux_runtime"
+            "src/runtime/models/flux/pipeline.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
         assert "flux-2-dev" in match.models
         assert "flux-schnell" in match.models
         assert "flux-2-dev-fp8" not in match.models
 
     def test_flux_plugin_runtime_scope_uses_non_fp8_l0_representative(self, imap):
-        """flux_plugin.cpp is runtime-only, so it does not duplicate FP8 builder coverage."""
+        """flux plugin.cpp is runtime-only, so it does not duplicate FP8 builder coverage."""
         match = test_impact.classify_file(
-            "src/runtime/plugins/flux_plugin.cpp", imap)
-        assert match.rule == "cpp_plugin_flux_runtime"
+            "src/runtime/models/flux/plugin.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
         assert "flux-2-dev" in match.models
         assert "flux-schnell" in match.models
         assert "flux-2-dev-fp8" not in match.models
+
+    def test_cpp_runtime_model_scope(self, imap):
+        """src/runtime/models/<strategy> files are scoped by MODEL.toml."""
+        match = test_impact.classify_file(
+            "src/runtime/models/chronos_bolt/plugin.cpp", imap)
+        assert match.rule == "cpp_runtime_model"
+        assert match.rebuild_cpp is True
+        assert match.models == ["chronos-bolt-small"]
+
+    def test_cpp_runtime_model_manifest_scope(self, imap):
+        """MODEL.toml itself is model-runtime scoped."""
+        match = test_impact.classify_file(
+            "src/runtime/models/chronos_bolt/MODEL.toml", imap)
+        assert match.rule == "cpp_runtime_model"
+        assert match.models == ["chronos-bolt-small"]
 
     def test_scoped_cpp_helper_gpu_matmul(self, imap):
         """gpu_matmul.cpp -> only the pipelines that reference it."""
@@ -509,7 +603,7 @@ class TestUnitTiers:
     def test_builder_source_implies_unit_tier(self, imap):
         """Python builder source change implies 'builder' unit tier."""
         match = test_impact.classify_file(
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py", imap)
         assert "builder" in match.unit_tiers
 
 
@@ -856,8 +950,8 @@ class TestAggregation:
     def test_multiple_families(self, imap):
         """Multiple family changes -> union of models."""
         result = test_impact.analyze_impact([
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py",
-            "tensorrt_model_connect/tensorrt_model_connect/families/llama.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/llama/plugin.py",
         ], imap)
         assert "qwen3-0.6b" in result.e2e_models
         assert "llama-7b" in result.e2e_models
@@ -866,7 +960,7 @@ class TestAggregation:
     def test_cap_not_applied_when_under(self, imap):
         """Cap not applied when affected models <= cap."""
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap, cap=5)
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap, cap=5)
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["qwen3-0.6b", "qwen3-4b"]
 
@@ -887,7 +981,7 @@ class TestAggregation:
     def test_mixed_impact(self, imap):
         """Family plugin + unit test -> models + unit tier."""
         result = test_impact.analyze_impact([
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py",
             "tests/builder/test_config.py",
         ], imap)
         assert "qwen3-0.6b" in result.e2e_models
@@ -904,7 +998,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap)
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap)
 
         assert result.e2e_models == ["qwen3-0.6b"]
         assert result.l0_replacements == [{
@@ -923,7 +1017,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap,
             e2e_suite="nightly",
         )
 
@@ -1033,12 +1127,12 @@ class TestCoverageMapIntegration:
     def test_impact_result_has_test_lists(self, imap):
         """ImpactResult with coverage map includes per-tier test lists."""
         coverage_map = {
-            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py": [
                 "tests/builder/test_engine_qwen.py::TestQwen::test_plugin",
             ],
         }
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap,
             coverage_map=coverage_map,
         )
         assert "tests/builder/test_engine_qwen.py::TestQwen::test_plugin" in result.builder_tests
@@ -1048,7 +1142,7 @@ class TestCoverageMapIntegration:
         """File not in coverage map triggers tier fallback."""
         coverage_map = {"tensorrt_model_connect/tensorrt_model_connect/config.py": ["tests/builder/test_config.py::test_a"]}
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap,
             coverage_map=coverage_map,
         )
         assert "builder" in result.fallback_tiers
@@ -1056,7 +1150,7 @@ class TestCoverageMapIntegration:
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
-            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"], imap,
         )
         assert result.builder_tests == []
         assert result.cpp_tests == []

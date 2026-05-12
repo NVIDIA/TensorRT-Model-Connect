@@ -52,14 +52,38 @@ def _make_fake_trt_base() -> types.SimpleNamespace:
     )
 
 
+_SHARED_BUILDER_MODULES = {
+    "tensorrt_model_connect.encodec_builder": (
+        "tensorrt_model_connect.families._shared.encodec_builder"
+    ),
+    "tensorrt_model_connect.encoder_builder": (
+        "tensorrt_model_connect.families._shared.encoder_builder"
+    ),
+    "tensorrt_model_connect.onnx_vision_builder": (
+        "tensorrt_model_connect.families._shared.onnx_vision_builder"
+    ),
+}
+
+
+def _drop_imported_module(module_name: str) -> None:
+    sys.modules.pop(module_name, None)
+    package_name, _, attribute_name = module_name.rpartition(".")
+    package = sys.modules.get(package_name)
+    if package is not None and hasattr(package, attribute_name):
+        delattr(package, attribute_name)
+
+
 def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace | None = None):
     if fake_trt is None:
         fake_trt = _make_fake_trt_base()
     # Remove cached modules that may have imported with a different trt object.
-    sys.modules.pop(module_name, None)
+    _drop_imported_module(module_name)
+    shared_module_name = _SHARED_BUILDER_MODULES.get(module_name)
+    if shared_module_name is not None:
+        _drop_imported_module(shared_module_name)
     if module_name.endswith("encoder_builder"):
-        sys.modules.pop("tensorrt_model_connect.graph_ops", None)
-        sys.modules.pop("tensorrt_model_connect.graph_blocks", None)
+        _drop_imported_module("tensorrt_model_connect.graph_ops")
+        _drop_imported_module("tensorrt_model_connect.graph_blocks")
     with patch.dict(sys.modules, {"tensorrt": fake_trt}):
         return importlib.import_module(module_name)
 

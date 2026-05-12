@@ -165,7 +165,7 @@ all device buffers at construction and provides forward pass modes:
 
 ## Autoregressive Generation Loop (C++)
 
-`TextGenerationPipeline::generate()` in `src/runtime/pipelines/text_generation_pipeline.cpp`:
+`TextGenerationPipeline::generate()` in `src/runtime/models/text_generation/pipeline.cpp`:
 
 ```
 generate(prompt, cfg):

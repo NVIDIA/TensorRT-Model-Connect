@@ -1,4 +1,4 @@
-#include "runtime/pipelines/ltx_video_pipeline.h"
+#include "runtime/models/ltx_video/pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 
 #if TRTMC_HAS_TRT

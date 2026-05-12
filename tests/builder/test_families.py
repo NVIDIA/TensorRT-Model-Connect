@@ -44,7 +44,17 @@ def _discover_plugin_names_from_filesystem() -> set[str]:
     ]
 
     for families_dir in plugin_dirs:
-        for py_file in sorted(families_dir.glob("*.py")):
+        py_files = [
+            path
+            for path in families_dir.glob("*.py")
+            if not path.name.startswith("_") and path.stem != "base"
+        ]
+        py_files.extend(
+            path
+            for path in families_dir.glob("*/plugin.py")
+            if not path.parent.name.startswith("_")
+        )
+        for py_file in sorted(py_files):
             if py_file.name.startswith("_") or py_file.stem == "base":
                 continue
             try:

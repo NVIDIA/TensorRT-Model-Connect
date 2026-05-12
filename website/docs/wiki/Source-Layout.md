@@ -108,55 +108,37 @@ Factory, registry, and base config parsing for plugin dispatch.
 | `pipeline_registry.cpp` | Singleton registry mapping strategy strings to `IPipelinePlugin` instances |
 | `pipeline_plugin.cpp` | `parse_base_config()` — universal base config from bundle JSON |
 
-### `src/runtime/plugins/`
+### `src/runtime/models/`
 
-Self-registering pipeline plugins. Each plugin handles one or more `runtime_strategy` values, parses strategy-specific config, loads TRT engines and tokenizers, and returns a fully constructed pipeline.
+Model-owned runtime implementations. Each folder carries its plugin source,
+pipeline source when needed, and a `MODEL.toml` manifest mapping that folder to
+one or more `runtime_strategy` values. This keeps the C++ runtime code for a
+strategy family in one place.
 
-| File | Strategies |
-|------|-----------|
-| `bark_plugin.cpp` | `text_to_audio_bark` |
-| `decoder_plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
-| `encoder_plugin.cpp` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
-| `flux_plugin.cpp` | `diffusion_flux` |
-| `hybrid_plugin.cpp` | `hybrid_mamba_attention` |
-| `magpie_plugin.cpp` | `text_to_audio_magpie` |
-| `marian_plugin.cpp` | `marian_translation` |
-| `object_detection_plugin.cpp` | `object_detection` |
-| `omni_plugin.cpp` | `omni_multimodal` |
-| `rwkv_plugin.cpp` | `rwkv_recurrent` |
-| `segmentation_plugin.cpp` | `segmentation`, `prompted_segmentation` |
-| `seq2seq_plugin.cpp` | `seq2seq_encoder_decoder` |
-| `speech_plugin.cpp` | `speech_to_speech` |
-| `ssm_plugin.cpp` | `ssm_recurrent` |
-| `t5_plugin.cpp` | `text_to_text` |
-| `vl_plugin.cpp` | `vision_language` |
-| `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
-| `whisper_plugin.cpp` | `speech_to_text` |
-| `zimage_plugin.cpp` | `diffusion_zimage` |
-| `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
+| Folder | Strategies | Pipeline class |
+|------|-----------|---------------|
+| `text_generation/` | `decoder_kv_cache`, `decoder_moe` | `TextGenerationPipeline` |
+| `recurrent/` | `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | `RecurrentPipeline` |
+| `encoder/` | `encoder_only`, `embedding`, `reranking`, `neural_operator`, `object_detection` | `EncoderPipeline` |
+| `vision_language/` | `vision_language` | `VLPipeline` |
+| `segmentation/` | `segmentation`, `prompted_segmentation` | `SegmentPipeline`, `SamPipeline` |
+| `whisper/` | `speech_to_text` | `WhisperPipeline` |
+| `bark/` | `text_to_audio_bark` | `BarkPipeline` |
+| `magpie/` | `text_to_audio_magpie` | `MagpiePipeline` |
+| `speech/` | `speech_to_speech` | `SpeechPipeline` |
+| `omni/` | `omni_multimodal` | `OmniPipeline` |
+| `t5/` | `text_to_text` | inline plugin pipeline |
+| `marian/` | `marian_translation` | inline plugin pipeline |
+| `seq2seq/` | `seq2seq_encoder_decoder` | inline plugin pipeline |
+| `flux/` | `diffusion_flux` | `FluxPipeline` |
+| `wan/` | `diffusion_wan`, `diffusion_pixart` | `WanPipeline` |
+| `z_image/` | `diffusion_zimage` | `ZImagePipeline` |
+| `patchtst/`, `patchtsmixer/`, `timesfm/`, `chronos_bolt/` | time-series strategies | family-specific pipelines |
+| `pixart/`, `pixart_torchtrt/`, `ltx_video/` | image/video diffusion strategies | family-specific pipelines |
 
-Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (ITrtModule loading via backend, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
-
-### `src/runtime/pipelines/`
-
-Concrete pipeline implementations. One class per file, fully isolated — modifying one pipeline never affects another.
-
-| File | Pipeline class | Modality |
-|------|---------------|----------|
-| `text_generation_pipeline.h/cpp` | `TextGenerationPipeline` | Decoder-only LLMs, MoE |
-| `recurrent_pipeline.h/cpp` | `RecurrentPipeline` (+ `IStateManager`, `RecurrentStateManager`, `HybridStateManager`) | Mamba, RWKV, Hybrid |
-| `vl_pipeline.h/cpp` | `VLPipeline` | Vision-language (Qwen VL, InternVL, Phi4) |
-| `encoder_pipeline.h/cpp` | `EncoderPipeline` | BERT, embedding, reranking |
-| `segment_pipeline.h/cpp` | `SegmentPipeline` | SegFormer segmentation |
-| `sam_pipeline.h/cpp` | `SamPipeline` | SAM prompted segmentation |
-| `whisper_pipeline.h/cpp` | `WhisperPipeline` | Speech-to-text |
-| `bark_pipeline.h/cpp` | `BarkPipeline` | Text-to-audio (Bark) |
-| `magpie_pipeline.h/cpp` | `MagpiePipeline` | Text-to-audio (Magpie TTS) |
-| `speech_pipeline.h/cpp` | `SpeechPipeline` | Speech-to-speech (PersonaPlex) |
-| `omni_pipeline.h/cpp` | `OmniPipeline` | Omni multimodal |
-| `flux_pipeline.h/cpp` | `FluxPipeline` | FLUX text-to-image |
-| `wan_pipeline.h/cpp` | `WanPipeline` | Wan/PixArt text-to-video |
-| `z_image_pipeline.h/cpp` | `ZImagePipeline` | Z-Image text-to-image |
+Shared helpers remain in `src/runtime/plugins/shared/`: `plugin_helpers.h/cpp`
+(ITrtModule loading via backend, tokenizer creation, KV-dim),
+`diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
 
 ### `src/runtime/core/`
 

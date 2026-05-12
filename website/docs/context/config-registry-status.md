@@ -218,7 +218,7 @@ imports, `cli.py`, and all internal imports updated.
   - Schema declared in Python + C++ (4 fields: step_trace_path,
     step_trace_start_pos, step_trace_end_pos, step_trace_topk).
     Session/platform only (debug knobs, no build-time baking).
-  - `src/runtime/pipelines/text_generation_pipeline.cpp` env-var
+  - `src/runtime/models/text_generation/pipeline.cpp` env-var
     initializer in `step_trace_config()` deleted. New public entry
     point `apply_text_trace_config_from_registry(path, start, end,
     topk)` mutates the process-wide static (same observable shape as
@@ -624,7 +624,7 @@ Commit chain:
       TRTMC_MAGPIE_FINISHED_LIMIT, TRTMC_MAGPIE_SEED (runtime, in
       magpie_pipeline.cpp).
     * TRTMC_MAGPIE_MAX_SOURCE_POS (build-time, in
-      tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py).
+      tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts/plugin.py).
 - C++ side: `MagpieTTSConfig` gains `seed` (int64_t). `apply_env_overrides`
   shrinks to a single RNG-seed statement (all other fields arrive
   pre-populated from the registry via magpie_plugin). The file-scope
@@ -747,17 +747,17 @@ Commit chain:
   unbounded), step_trace_topk (int32, ≥1, default 8). Session /
   platform layers only; these are debug knobs.
 - Schema manifest entry added (third schema file).
-- `src/runtime/pipelines/text_generation_pipeline.cpp`:
+- `src/runtime/models/text_generation/pipeline.cpp`:
   * Deleted the env-var initializer inside `step_trace_config()`;
     replaced the old lazy-static-from-env pattern with a
     `mutable_step_trace_config()` + external `apply_text_trace_config_from_registry(path, start, end, topk)` entry point.
   * `env_int_or_default` helper deleted (only call site was the
     step-trace init). `env_flag_set` retained: two unmigrated env
     vars (`TRTMC_DISABLE_CUDA_GRAPH`, `TRTMC_GPU_ARGMAX`) still use it.
-- `src/runtime/pipelines/text_generation_pipeline.h`: new forward-
+- `src/runtime/models/text_generation/pipeline.h`: new forward-
   declared `apply_text_trace_config_from_registry(...)` at namespace
   scope, so decoder_plugin can call without cross-file fragility.
-- `src/runtime/plugins/decoder_plugin.cpp`:
+- `src/runtime/models/text_generation/plugin.cpp`:
   * Includes `trtmc/config/config_bundle.h` (needed for templated
     `ctx.runtime_config->get<T>(...)` calls against the now-complete
     type; forward declaration in pipeline_plugin.h was insufficient).
@@ -820,7 +820,7 @@ Commit chain:
 - Commit: pending end-of-tick.
 - Next tick (12) — Cluster C (`text_trace.*`). Inventory:
   `TRTMC_TEXT_STEP_TRACE_PATH`, plus any sibling step-trace env vars
-  read in `src/runtime/pipelines/text_generation_pipeline.cpp`.
+  read in `src/runtime/models/text_generation/pipeline.cpp`.
   Similar shape to Cluster A but smaller (2-3 fields). The main piece
   of work is plumbing the resolved values from the text-generation
   pipeline constructor — they're session-level knobs, so all layers
@@ -855,7 +855,7 @@ Commit chain:
     keep precedence for unset fields.
   * All ~20 scattered `triattention_*_enabled()` call sites rewritten
     to read `config_.<field>` directly.
-- `src/runtime/plugins/decoder_plugin.cpp`:
+- `src/runtime/models/text_generation/plugin.cpp`:
   * Single call site updated to pass `ctx.runtime_config` through to
     `parse_triattention_bundle_config`.
 - Gates: full build clean with `-Wall -Wextra -Wpedantic`. All 7

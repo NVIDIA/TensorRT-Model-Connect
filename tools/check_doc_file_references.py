@@ -176,20 +176,27 @@ def _get_actual_counts(repo_root: Path) -> dict:
     # Family plugins (excluding __init__.py and base.py)
     families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     if families_dir.is_dir():
+        flat_plugins = [
+            f for f in families_dir.iterdir()
+            if f.is_file() and f.suffix == ".py" and f.name not in ("__init__.py", "base.py")
+        ]
+        package_plugins = [
+            d / "plugin.py" for d in families_dir.iterdir()
+            if d.is_dir() and not d.name.startswith("_") and (d / "plugin.py").is_file()
+        ]
         counts["family_plugins"] = len(
-            [
-                f
-                for f in os.listdir(families_dir)
-                if f.endswith(".py") and f not in ("__init__.py", "base.py")
-            ]
+            flat_plugins + package_plugins
         )
     else:
         counts["family_plugins"] = 0
 
-    # Total family dir .py files (for "N Python files in the families directory" claims)
+    # Total family .py files (for "N Python files in the families directory" claims)
     if families_dir.is_dir():
         counts["families_total_py"] = len(
-            [f for f in os.listdir(families_dir) if f.endswith(".py")]
+            [
+                p for p in families_dir.rglob("*.py")
+                if "__pycache__" not in p.parts
+            ]
         )
     else:
         counts["families_total_py"] = 0

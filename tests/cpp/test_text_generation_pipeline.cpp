@@ -20,7 +20,7 @@
 // For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
-#include "runtime/pipelines/text_generation_pipeline.h"
+#include "runtime/models/text_generation/pipeline.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -96,7 +96,7 @@ class SequenceSampler final : public trtmc::ISampler {
     explicit SequenceSampler(std::vector<int32_t> tokens) : tokens_(std::move(tokens)) {}
 
     trtmc::SampleResult sample(const float* logits, int32_t vocab_size,
-                              const trtmc::SamplingParams& params) override {
+                               const trtmc::SamplingParams& params) override {
         (void)logits;
         (void)vocab_size;
         trtmc::SampleResult result;
@@ -178,7 +178,7 @@ static void test_pipeline_construction() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::TextGenConfig cfg;
@@ -205,7 +205,7 @@ static void test_generate_stops_at_eos() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::TextGenConfig cfg;
@@ -240,7 +240,7 @@ static void test_generate_max_tokens() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::TextGenConfig cfg;
@@ -287,7 +287,7 @@ static void test_zero_max_tokens() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::TextGenConfig cfg;
@@ -315,7 +315,7 @@ static void test_stop_on_boxed_answer() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
     auto tokenizer = std::make_shared<MockTokenizer>();
     auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
@@ -326,7 +326,7 @@ static void test_stop_on_boxed_answer() {
     cfg.has_position_input = false;
 
     trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
-                                          tokenizer, "mock", std::move(sampler));
+                                           tokenizer, "mock", std::move(sampler));
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;

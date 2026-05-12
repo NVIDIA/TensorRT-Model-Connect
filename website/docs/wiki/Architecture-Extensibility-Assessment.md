@@ -4,7 +4,7 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` plus one manifest entry in `cmake/trtmc_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ model runtime folder in `src/runtime/models/`. New strategy/state types require a new model runtime folder plus one manifest entry in `cmake/trtmc_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
@@ -62,19 +62,19 @@ Write a Python family plugin that composes the shared builders (`t5_encoder_buil
 
 ### Different state management (done for Mamba/SSM/RWKV/Hybrid)
 
-The C++ runtime supports multiple state management patterns via the plugin registry. Each plugin in `src/runtime/plugins/` exposes a manifest-listed registrar for one or more `runtime_strategy` strings. The current runtime plugin set registers the strategy keys listed below:
-- `decoder_kv_cache` / `decoder_moe` -> `decoder_plugin.cpp` -> `TextGenerationPipeline` + `KvCache`
-- `ssm_recurrent` -> `ssm_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
-- `rwkv_recurrent` -> `rwkv_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
-- `hybrid_mamba_attention` -> `hybrid_plugin.cpp` -> `RecurrentPipeline` + `HybridStateManager`
-- `vision_language` -> `vl_plugin.cpp` -> `VLPipeline`
-- `diffusion_flux`/`diffusion_wan`/`diffusion_zimage`/`diffusion_pixart` -> separate plugin files
+The C++ runtime supports multiple state management patterns via the plugin registry. Each model runtime folder in `src/runtime/models/` exposes a manifest-listed registrar for one or more `runtime_strategy` strings. 25 strategies are currently registered across model-owned plugin files:
+- `decoder_kv_cache` / `decoder_moe` -> `text_generation/plugin.cpp` -> `TextGenerationPipeline` + `KvCache`
+- `ssm_recurrent` -> `recurrent/ssm_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
+- `rwkv_recurrent` -> `recurrent/rwkv_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
+- `hybrid_mamba_attention` -> `recurrent/hybrid_plugin.cpp` -> `RecurrentPipeline` + `HybridStateManager`
+- `vision_language` -> `vision_language/plugin.cpp` -> `VLPipeline`
+- `diffusion_flux`/`diffusion_wan`/`diffusion_zimage`/`diffusion_pixart` -> separate model runtime folders
 
 New state types require:
-1. A new plugin `.cpp` file in `src/runtime/plugins/` implementing `IPipelinePlugin`
+1. A new model runtime folder under `src/runtime/models/` with a plugin `.cpp` implementing `IPipelinePlugin`
 2. Manifest registration via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`
 3. A source/symbol entry in `cmake/trtmc_pipeline_plugins.cmake`
-4. A new or existing pipeline class in `src/runtime/pipelines/`
+4. A new or existing pipeline class in that model runtime folder
 
 No edits to `pipeline_factory.cpp` are needed -- the registry handles dispatch automatically.
 
@@ -161,7 +161,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - `flux_plugin.cpp`: Plugin for `diffusion_flux`. Constructs `FluxPipeline`.
 - `zimage_plugin.cpp`: Plugin for `diffusion_zimage`. Constructs `ZImagePipeline`.
 - Shared diffusion helpers in `src/runtime/plugins/shared/diffusion_helpers.h/cpp`.
-- Pipeline implementations in `src/runtime/pipelines/wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp`.
+- Pipeline implementations in `src/runtime/models/wan/pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp`.
 - `DiffusionConfig`, `PreprocessorWeights` in `src/runtime/domains/diffusion/diffusion_types.h`.
 - `FlowMatchEulerScheduler` in `src/runtime/core/flow_match_euler_scheduler.cpp`.
 

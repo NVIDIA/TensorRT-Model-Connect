@@ -88,7 +88,11 @@ class TestQuantizationSharedCoreBoundary:
             assert "/families/" not in rel_path
 
     def test_shared_core_does_not_import_concrete_family_modules(self):
-        import_re = re.compile(r"from\s+\.\.families\b|from\s+\.families\b|import\s+.*families")
+        import_re = re.compile(
+            r"from\s+\.\.families(?!\._shared\b)"
+            r"|from\s+\.families(?!\._shared\b)"
+            r"|import\s+.*families(?!\._shared\b)"
+        )
         for rel_path in SHARED_CORE_FILES:
             text = _read(rel_path)
             assert import_re.search(text) is None, rel_path
@@ -103,7 +107,7 @@ class TestQuantizationSharedCoreBoundary:
 
 class TestFamilyLocalQuantHooks:
     def test_qwen_quant_policy_lives_in_family_plugin(self):
-        text = _read("tensorrt_model_connect/tensorrt_model_connect/families/qwen.py")
+        text = _read("tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py")
         assert "def quant_exclude_patterns" in text
         assert "def quant_adapter" in text
 

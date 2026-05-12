@@ -381,7 +381,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
         Key files:
         - `src/runtime/core/argmax_kernel.cu` — GPU reduction kernel
         - `src/runtime/core/sampler.cpp` — GpuGreedySampler
-        - `src/runtime/pipelines/text_generation_pipeline.cpp` — run_step_device()
+        - `src/runtime/models/text_generation/pipeline.cpp` — run_step_device()
 
         **Benchmark with both enabled:**
         ```bash

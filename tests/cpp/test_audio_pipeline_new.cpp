@@ -68,11 +68,11 @@
 #include "runtime/domains/audio/whisper_config.h"
 #include "runtime/domains/audio/whisper_cross_kv_apply.h"
 #include "runtime/domains/audio/whisper_cross_kv_plan.h"
-#include "runtime/pipelines/bark_pipeline.h"
-#include "runtime/pipelines/magpie_pipeline.h"
-#include "runtime/pipelines/omni_pipeline.h"
-#include "runtime/pipelines/speech_pipeline.h"
-#include "runtime/pipelines/whisper_pipeline.h"
+#include "runtime/models/bark/pipeline.h"
+#include "runtime/models/magpie/pipeline.h"
+#include "runtime/models/omni/pipeline.h"
+#include "runtime/models/speech/pipeline.h"
+#include "runtime/models/whisper/pipeline.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -272,9 +272,9 @@ static void test_whisper_transcribe() {
     mel_fb.data.assign(201 * 80, 0.1f);
 
     trtmc::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
-                                   /*hidden_size=*/4, /*num_decoder_layers=*/0, std::move(mel_fb),
-                                   /*mel_n_fft=*/400, /*mel_hop_length=*/160,
-                                   /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
+                                    /*hidden_size=*/4, /*num_decoder_layers=*/0, std::move(mel_fb),
+                                    /*mel_n_fft=*/400, /*mel_hop_length=*/160,
+                                    /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
 
     check(std::string(pipeline.pipeline_type()) == "WhisperPipeline", "whisper pipeline_type");
 
@@ -316,7 +316,7 @@ static void test_whisper_constructor_validates_encoder() {
     bool threw = false;
     try {
         trtmc::WhisperPipeline pipeline(nullptr, std::move(decoder), std::move(cache), wcfg, 4, 0,
-                                       std::move(mel_fb), 400, 160, 1, 16000, stream);
+                                        std::move(mel_fb), 400, 160, 1, 16000, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -371,9 +371,9 @@ static void test_whisper_with_cross_kv() {
     // num_decoder_layers=1: constructor allocates cross_k_ptrs_[0] and cross_v_ptrs_[0]
     // setup_cross_attention calls apply_whisper_cross_kv_plan with layer_count=1
     trtmc::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
-                                   /*hidden_size=*/4, /*num_decoder_layers=*/1, std::move(mel_fb),
-                                   /*mel_n_fft=*/400, /*mel_hop_length=*/160,
-                                   /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
+                                    /*hidden_size=*/4, /*num_decoder_layers=*/1, std::move(mel_fb),
+                                    /*mel_n_fft=*/400, /*mel_hop_length=*/160,
+                                    /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
 
     check(std::string(pipeline.pipeline_type()) == "WhisperPipeline",
           "whisper cross-kv: pipeline_type");
@@ -455,7 +455,7 @@ static void test_bark_generate_audio() {
     std::vector<float> coarse_embed(11 * 4, 0.1f);
 
     trtmc::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
-                                std::move(coarse_cache), sem_embed, coarse_embed, bcfg, stream);
+                                 std::move(coarse_cache), sem_embed, coarse_embed, bcfg, stream);
 
     check(std::string(pipeline.pipeline_type()) == "BarkPipeline", "bark pipeline_type");
 
@@ -493,8 +493,8 @@ static void test_bark_constructor_validates_semantic() {
     bool threw = false;
     try {
         trtmc::BarkPipeline pipeline(nullptr, std::move(coarse), std::move(sem_cache),
-                                    std::move(coarse_cache), sem_embed, coarse_embed,
-                                    trtmc::BarkConfig{}, stream);
+                                     std::move(coarse_cache), sem_embed, coarse_embed,
+                                     trtmc::BarkConfig{}, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -529,8 +529,8 @@ static void test_bark_constructor_validates_embed() {
         std::vector<float> empty_embed;
         std::vector<float> coarse_embed(44, 0.1f);
         trtmc::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
-                                    std::move(coarse_cache), empty_embed, coarse_embed,
-                                    trtmc::BarkConfig{}, stream);
+                                     std::move(coarse_cache), empty_embed, coarse_embed,
+                                     trtmc::BarkConfig{}, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -587,7 +587,7 @@ static void test_speech_validates_temporal() {
         cudaStreamCreate(&stream);
         trtmc::SpeechConfig cfg;
         trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream,
-                               nullptr, "x");
+                                nullptr, "x");
         check(false, "null temporal should throw");
         cudaStreamDestroy(stream);
     } catch (const std::exception&) {
@@ -623,10 +623,10 @@ static void test_omni_pipeline_construction() {
     trtmc::OmniConfig cfg;
 
     trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache),
-                                /*talker=*/nullptr,
-                                /*talker_cache=*/nullptr,
-                                /*code2wav=*/nullptr, cfg, stream,
-                                /*tokenizer=*/nullptr, "test-omni");
+                                 /*talker=*/nullptr,
+                                 /*talker_cache=*/nullptr,
+                                 /*code2wav=*/nullptr, cfg, stream,
+                                 /*tokenizer=*/nullptr, "test-omni");
 
     check(std::string(pipeline.pipeline_type()) == "OmniPipeline", "OmniPipeline: pipeline_type");
     check(std::string(pipeline.model_id()) == "test-omni", "OmniPipeline: model_id");
@@ -654,8 +654,8 @@ static void test_omni_generate_audio() {
     trtmc::OmniConfig cfg;
 
     trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, nullptr,
-                                nullptr, cfg, stream, std::make_shared<OmniFixedTokenizer>(),
-                                "test-omni-gen");
+                                 nullptr, cfg, stream, std::make_shared<OmniFixedTokenizer>(),
+                                 "test-omni-gen");
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
@@ -678,7 +678,7 @@ static void test_omni_validates_thinker() {
         cudaStreamCreate(&stream);
         trtmc::OmniConfig cfg;
         trtmc::OmniPipeline p(nullptr, nullptr, nullptr, nullptr, nullptr, cfg, stream, nullptr,
-                             "x");
+                              "x");
         check(false, "null thinker should throw");
         cudaStreamDestroy(stream);
     } catch (const std::exception&) {

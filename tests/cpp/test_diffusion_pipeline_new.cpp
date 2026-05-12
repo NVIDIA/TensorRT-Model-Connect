@@ -25,9 +25,9 @@
 // For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
-#include "runtime/pipelines/flux_pipeline.h"
-#include "runtime/pipelines/wan_pipeline.h"
-#include "runtime/pipelines/z_image_pipeline.h"
+#include "runtime/models/flux/pipeline.h"
+#include "runtime/models/wan/pipeline.h"
+#include "runtime/models/z_image/pipeline.h"
 
 #include <cstdint>
 #include <iostream>
@@ -105,7 +105,7 @@ static void test_flux_with_custom_config() {
     cfg.patch_size = {1, 2, 2}; // ph=2, pw=2
 
     trtmc::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtmc::PreprocessorWeights{}, nullptr,
-                                nullptr, "test-flux-custom");
+                                 nullptr, "test-flux-custom");
 
     check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
           "FluxPipeline custom config pipeline_type");

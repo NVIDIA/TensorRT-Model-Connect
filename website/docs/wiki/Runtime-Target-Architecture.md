@@ -58,11 +58,12 @@ Key files:
 | `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
 | `include/trtmc/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
 | `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
-| `src/runtime/plugins/*.cpp` | Manifest-registered plugin files (25 strategies) |
+| `src/runtime/models/*/plugin.cpp` | Manifest-registered model plugin files |
+| `src/runtime/models/*/pipeline.h/*.cpp` | Concrete model-owned `IPipeline` implementations |
+| `src/runtime/models/*/MODEL.toml` | Runtime strategy ownership manifests |
 | `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
 | `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/cabi/api/trtmc_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
-| `src/runtime/pipelines/*.h/*.cpp` | 14 concrete `IPipeline` implementations |
 
 ## 3. Design Details (Implemented)
 
@@ -120,9 +121,10 @@ struct BaseConfig {
 };
 ```
 
-### 3.4 Self-Contained Plugins
+### 3.4 Self-Contained Model Runtime Folders
 
-Each plugin is a single `.cpp` file in `src/runtime/plugins/` that:
+Each model runtime folder in `src/runtime/models/` owns its plugin source,
+pipeline source when needed, and `MODEL.toml` strategy manifest. The plugin:
 
 - Exposes a manifest-listed registrar function
 - Parses strategy-specific config from raw JSON in `create()`
@@ -131,27 +133,24 @@ Each plugin is a single `.cpp` file in `src/runtime/plugins/` that:
 - Returns a fully constructed `IPipeline`
 
 ```text
-src/runtime/plugins/
-  decoder_plugin.cpp          # decoder_kv_cache, decoder_moe
-  ssm_plugin.cpp              # ssm_recurrent
-  rwkv_plugin.cpp             # rwkv_recurrent
-  hybrid_plugin.cpp           # hybrid_mamba_attention
-  encoder_plugin.cpp          # encoder_only, embedding, reranking, neural_operator
-  vl_plugin.cpp               # vision_language
-  segmentation_plugin.cpp     # segmentation, prompted_segmentation
-  object_detection_plugin.cpp # object_detection
-  whisper_plugin.cpp          # speech_to_text
-  bark_plugin.cpp             # text_to_audio_bark
-  magpie_plugin.cpp           # text_to_audio_magpie
-  speech_plugin.cpp           # speech_to_speech
-  omni_plugin.cpp             # omni_multimodal
-  t5_plugin.cpp               # text_to_text
-  marian_plugin.cpp           # marian_translation
-  seq2seq_plugin.cpp          # seq2seq_encoder_decoder
-  flux_plugin.cpp             # diffusion_flux
-  wan_plugin.cpp              # diffusion_wan, diffusion_pixart
-  zimage_plugin.cpp           # diffusion_zimage
-  shared/                     # plugin_helpers, diffusion_helpers, audio_helpers
+src/runtime/models/
+  text_generation/            # decoder_kv_cache, decoder_moe
+  recurrent/                  # ssm_recurrent, rwkv_recurrent, hybrid_mamba_attention
+  encoder/                    # encoder_only, embedding, reranking, neural_operator, object_detection
+  vision_language/            # vision_language
+  segmentation/               # segmentation, prompted_segmentation
+  whisper/                    # speech_to_text
+  bark/                       # text_to_audio_bark
+  magpie/                     # text_to_audio_magpie
+  speech/                     # speech_to_speech
+  omni/                       # omni_multimodal
+  t5/                         # text_to_text
+  marian/                     # marian_translation
+  seq2seq/                    # seq2seq_encoder_decoder
+  flux/                       # diffusion_flux
+  wan/                        # diffusion_wan, diffusion_pixart
+  z_image/                    # diffusion_zimage
+src/runtime/plugins/shared/   # plugin_helpers, diffusion_helpers, audio_helpers
 ```
 
 ## 4. Migration History
@@ -172,7 +171,7 @@ All phases have been **completed**.
 
 ### Phase 3: Migrate strategies to plugins -- DONE
 
-- All 25 strategies migrated to manifest-registered plugin files in `src/runtime/plugins/`.
+- All 25 strategies migrated to manifest-registered model folders in `src/runtime/models/`.
 - Shared helpers factored into `src/runtime/plugins/shared/`.
 
 ### Phase 4: Simplify pipeline_factory.cpp -- DONE

@@ -268,7 +268,7 @@ classDiagram
 - `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` -- helper macro for manifest registration functions.
 - `BaseConfig` -- universal ~10-field config struct parsed by `parse_base_config()`.
 - `PipelineContext` -- non-owning struct passed to each plugin: `{bundle, config, config_json, hf_python, bundle_path}`.
-- 20 concrete plugin files in `src/runtime/plugins/` register 25 strategies total.
+- Model runtime folders in `src/runtime/models/` register 25 strategies total.
 
 ---
 
@@ -315,7 +315,7 @@ classDiagram
 |---|---|
 | **Files** | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp`, `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`, `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | **Purpose** | Sole creation path for all pipelines. `PipelineFactory::from_bundle()` reads a `.trtfb`, parses `BaseConfig`, and delegates to the registry-resolved `IPipelinePlugin`. |
-| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each plugin (in `src/runtime/plugins/`) handles one or more strategies and exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`. The current runtime plugin set registers the strategies in the mapping below. |
+| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each model runtime folder in `src/runtime/models/` handles one or more strategies and exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`. 25 strategies are registered across model-owned plugin files. |
 | **Strategy mapping** | `decoder_kv_cache`/`decoder_moe` -> `TextGenerationPipeline`; `ssm_recurrent`/`rwkv_recurrent`/`hybrid_mamba_attention` -> `RecurrentPipeline`; `encoder_only`/`embedding`/`reranking`/`neural_operator` -> `EncoderPipeline`; `vision_language` -> `VLPipeline`; `segmentation` -> `SegmentPipeline`; `prompted_segmentation` -> `SamPipeline`; `object_detection` -> `EncoderPipeline`; `speech_to_text` -> `WhisperPipeline`; `text_to_audio_bark` -> `BarkPipeline`; `text_to_audio_magpie` -> `MagpiePipeline`; `speech_to_speech` -> `SpeechPipeline`; `omni_multimodal` -> `OmniPipeline`; `text_to_text` -> `T5Pipeline`; `marian_translation` -> `MarianPipeline`; `seq2seq_encoder_decoder` -> `Seq2SeqPipeline`; `diffusion_flux` -> `FluxPipeline`; `diffusion_wan`/`diffusion_pixart` -> `WanPipeline`; `diffusion_zimage` -> `ZImagePipeline`. |
 
 ### UD-MOD-01: TRT Module
@@ -358,7 +358,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/text_generation_pipeline.h`, `src/runtime/pipelines/text_generation_pipeline.cpp` |
+| **Files** | `src/runtime/models/text_generation/pipeline.h`, `src/runtime/models/text_generation/pipeline.cpp` |
 | **Purpose** | Serves all decoder-only LLMs (Qwen, LLaMA, Mistral, GPT-2, etc.) and MoE decoders (Mixtral, Phi-MoE). Composes TrtModule + KvCache + ITokenizer. Runs prefill->decode loop with greedy argmax. |
 | **Key API** | `generate()` (text in, `TextResult` out), `generate_ids()` (token IDs in/out for testing). |
 
@@ -366,7 +366,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/recurrent_pipeline.h`, `src/runtime/pipelines/recurrent_pipeline.cpp` |
+| **Files** | `src/runtime/models/recurrent/pipeline.h`, `src/runtime/models/recurrent/pipeline.cpp` |
 | **Purpose** | Serves Mamba, RWKV, and Hybrid (Nemotron-H) models. Uses `IInferenceState` to abstract between pure recurrent (`RecurrentState`) and hybrid attention+recurrent (`HybridState`). |
 | **Key API** | Same `generate()` / `generate_ids()` interface as TextGenerationPipeline. |
 | **State implementations** | `RecurrentState`: SSM/RWKV state (no mask, position tracked internally). `HybridState`: composes `KvCache` + `RecurrentState` (has mask, position from KvCache). Both implement `IInferenceState`. |
@@ -375,7 +375,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/vl_pipeline.h`, `src/runtime/pipelines/vl_pipeline.cpp` |
+| **Files** | `src/runtime/models/vision_language/pipeline.h`, `src/runtime/models/vision_language/pipeline.cpp` |
 | **Purpose** | Vision-language generation (Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4). Composes text decoder TrtModule + optional vision encoder TrtModule + KvCache + ITokenizer + image preprocessor. |
 | **Key API** | `generate(prompt, cfg)` for text-only, `generate(prompt, pixels, h, w, cfg)` for image+text. Vision encoder runs on preprocessed pixels, features are injected at image token positions during prefill. |
 
@@ -383,7 +383,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/encoder_pipeline.h`, `src/runtime/pipelines/encoder_pipeline.cpp` |
+| **Files** | `src/runtime/models/encoder/pipeline.h`, `src/runtime/models/encoder/pipeline.cpp` |
 | **Purpose** | Single-pass encoder models: BERT (`encode()`), embedding models (`embed()`), reranking models (`rerank()`), neural operators, and object detection. `SegmentPipeline` and `SamPipeline` are in separate files (`segment_pipeline.h/cpp`, `sam_pipeline.h/cpp`). |
 | **Key API** | Mode-driven: `mode_` string selects which IPipeline method is active ("encoder_only", "embedding", "reranking"). |
 
@@ -391,15 +391,15 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/whisper_pipeline.h/cpp`, `bark_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp` |
+| **Files** | `src/runtime/models/whisper/pipeline.h/cpp`, `bark_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp` |
 | **Purpose** | Five audio pipeline classes. `WhisperPipeline` (`transcribe()`), `BarkPipeline` (`generate_audio()`), `MagpiePipeline` (`generate_audio()`), `SpeechPipeline` (`speak()`), and `OmniPipeline` (`generate_audio()` -- three-stage: thinker->talker->code2wav). |
-| **Plugin dispatch** | Each audio strategy has its own plugin file in `src/runtime/plugins/`: `whisper_plugin.cpp`, `bark_plugin.cpp`, `magpie_plugin.cpp`, `speech_plugin.cpp`, `omni_plugin.cpp`. Plugins use shared helpers from `src/runtime/plugins/shared/audio_helpers.h`. Audio config types and seam headers live in `src/runtime/domains/audio/`. |
+| **Plugin dispatch** | Each audio strategy has its own model runtime folder in `src/runtime/models/`: `whisper/`, `bark/`, `magpie/`, `speech/`, `omni/`. Plugins use shared helpers from `src/runtime/plugins/shared/audio_helpers.h`. Audio config types and seam headers live in `src/runtime/domains/audio/`. |
 
 ### UD-PIP-DIFF-01: Diffusion Pipelines
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `src/runtime/pipelines/wan_pipeline.cpp`, `src/runtime/pipelines/flux_pipeline.cpp`, `src/runtime/pipelines/z_image_pipeline.cpp` |
+| **Files** | `src/runtime/models/flux/pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `src/runtime/models/wan/pipeline.cpp`, `src/runtime/models/flux/pipeline.cpp`, `src/runtime/models/z_image/pipeline.cpp` |
 | **Purpose** | Three diffusion pipelines, all using TrtModule directly. `WanPipeline` (T5 + denoiser + 3D VAE for text-to-video), `FluxPipeline` (T5 + CLIP + denoiser + VAE for text-to-image), `ZImagePipeline` (Qwen3 text encoder + denoiser + VAE for text-to-image). |
 | **Key API** | `generate_image(prompt, cfg)` returns `ImageResult`. All use `FlowMatchEulerScheduler` for noise scheduling. |
 | **Supporting types** | `src/runtime/domains/diffusion/diffusion_types.h` (`DiffusionConfig`, `PreprocessorWeights`, `VideoResult`), `src/runtime/domains/diffusion/diffusion_math.h` (math helpers). |
@@ -436,35 +436,35 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/whisper_config.h`, `src/runtime/domains/audio/whisper_cross_kv_apply.h`, `src/runtime/domains/audio/whisper_cross_kv_plan.h`, `src/runtime/domains/audio/whisper_decode_policy.h`, `src/runtime/domains/audio/whisper_host_plan.h`, `src/runtime/plugins/whisper_plugin.cpp` |
+| **Files** | `src/runtime/domains/audio/whisper_config.h`, `src/runtime/domains/audio/whisper_cross_kv_apply.h`, `src/runtime/domains/audio/whisper_cross_kv_plan.h`, `src/runtime/domains/audio/whisper_decode_policy.h`, `src/runtime/domains/audio/whisper_host_plan.h`, `src/runtime/models/whisper/plugin.cpp` |
 | **Purpose** | Whisper speech-to-text domain types and pipeline plugin. Config, cross-attention KV plan, host plan for two-stage (encode + decode) inference, and decode policy for stopping criteria. Plugin constructs `WhisperPipeline`. |
 
 ### UD-AUD-BARK-01: Bark Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/bark_config.h`, `src/runtime/domains/audio/bark_generation_plan.h`, `src/runtime/plugins/bark_plugin.cpp` |
+| **Files** | `src/runtime/domains/audio/bark_config.h`, `src/runtime/domains/audio/bark_generation_plan.h`, `src/runtime/models/bark/plugin.cpp` |
 | **Purpose** | Bark text-to-audio domain types and pipeline plugin. Generation plan configures the three-stage autoregressive codebook pipeline. Plugin constructs `BarkPipeline`. |
 
 ### UD-AUD-MAGPIE-01: Magpie TTS Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/magpie_codec_plan.h`, `src/runtime/domains/audio/magpie_decode_policy.h`, `src/runtime/domains/audio/magpie_decoder_plan.h`, `src/runtime/domains/audio/magpie_text_completion_policy.h`, `src/runtime/domains/audio/magpie_kernels.cu`, `src/runtime/domains/audio/magpie_kernels.h`, `src/runtime/plugins/magpie_plugin.cpp` |
+| **Files** | `src/runtime/domains/audio/magpie_codec_plan.h`, `src/runtime/domains/audio/magpie_decode_policy.h`, `src/runtime/domains/audio/magpie_decoder_plan.h`, `src/runtime/domains/audio/magpie_text_completion_policy.h`, `src/runtime/domains/audio/magpie_kernels.cu`, `src/runtime/domains/audio/magpie_kernels.h`, `src/runtime/models/magpie/plugin.cpp` |
 | **Purpose** | Magpie neural TTS domain types and pipeline plugin. Codec plan configures audio codec parameters, decode policy governs autoregressive stopping, decoder plan orchestrates multi-step generation. Custom CUDA kernels accelerate audio processing. Plugin constructs `MagpiePipeline`. |
 
 ### UD-AUD-SPEECH-01: Speech-to-Speech Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/speech_delay_cache.h`, `src/runtime/domains/audio/speech_depth_plan.h`, `src/runtime/domains/audio/speech_generation_policy.h`, `src/runtime/domains/audio/speech_mimi_decode_plan.h`, `src/runtime/domains/audio/speech_runtime_plan.h`, `src/runtime/domains/audio/speech_temporal_embed_plan.h`, `src/runtime/domains/audio/speech_waveform_postprocess.h`, `src/runtime/plugins/speech_plugin.cpp` |
+| **Files** | `src/runtime/domains/audio/speech_delay_cache.h`, `src/runtime/domains/audio/speech_depth_plan.h`, `src/runtime/domains/audio/speech_generation_policy.h`, `src/runtime/domains/audio/speech_mimi_decode_plan.h`, `src/runtime/domains/audio/speech_runtime_plan.h`, `src/runtime/domains/audio/speech_temporal_embed_plan.h`, `src/runtime/domains/audio/speech_waveform_postprocess.h`, `src/runtime/models/speech/plugin.cpp` |
 | **Purpose** | PersonaPlex speech-to-speech domain types and pipeline plugin. Delay cache manages temporal audio buffering, depth plan configures multi-depth codec decoding, MIMI decode plan handles neural audio codec, temporal embed plan manages time embeddings, and waveform postprocess produces final audio output. Plugin constructs `SpeechPipeline`. |
 
 ### UD-AUD-OMNI-01: Omni Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/omni_audio_plan.h`, `src/runtime/plugins/omni_plugin.cpp` |
+| **Files** | `src/runtime/domains/audio/omni_audio_plan.h`, `src/runtime/models/omni/plugin.cpp` |
 | **Purpose** | Omni multimodal domain types and pipeline plugin. Audio plan configures the thinker-talker-code2wav three-stage pipeline. Plugin constructs `OmniPipeline`. |
 
 ### UD-AUD-COMMON-01: Audio Common Utilities
@@ -478,21 +478,21 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/ssm_plugin.cpp` |
+| **Files** | `src/runtime/models/recurrent/ssm_plugin.cpp` |
 | **Purpose** | SSM/Mamba pipeline plugin. Constructs `RecurrentPipeline` with `RecurrentState` (conv_state + ssm_state specs). Handles `ssm_recurrent` strategy. |
 
 ### UD-REC-RWKV-01: RWKV Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/rwkv_plugin.cpp` |
+| **Files** | `src/runtime/models/recurrent/rwkv_plugin.cpp` |
 | **Purpose** | RWKV pipeline plugin. Constructs `RecurrentPipeline` with `RecurrentState` (5 state specs per layer: attn_state, ff_state, num_state, den_state, max_state). Handles `rwkv_recurrent` strategy. |
 
 ### UD-REC-HYBRID-01: Hybrid Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/hybrid_plugin.cpp` |
+| **Files** | `src/runtime/models/recurrent/hybrid_plugin.cpp` |
 | **Purpose** | Hybrid (Mamba + Attention) pipeline plugin for Nemotron-H. Constructs `RecurrentPipeline` with `HybridState` wrapping both `KvCache` (attention layers) and `RecurrentState` (Mamba layers). Handles `hybrid_mamba_attention` strategy. |
 
 ### UD-REC-COMMON-01: Recurrent Common Contracts
@@ -513,35 +513,35 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/multimodal/vl_decode_policy.h`, `src/runtime/plugins/vl_plugin.cpp`, `src/runtime/pipelines/vl_pipeline.h/cpp` |
+| **Files** | `src/runtime/domains/multimodal/vl_decode_policy.h`, `src/runtime/models/vision_language/plugin.cpp`, `src/runtime/models/vision_language/pipeline.h/cpp` |
 | **Purpose** | VL decode policy and pipeline plugin. Decode policy governs vision feature injection into text decoder at image token positions and autoregressive generation stopping. Plugin constructs `VLPipeline`. |
 
 ### UD-SEG-01: Segmentation Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/perception/segmentation_postprocess_seam.h`, `src/runtime/domains/perception/segmentation_preprocess_seam.h`, `src/runtime/plugins/segmentation_plugin.cpp`, `src/runtime/pipelines/segment_pipeline.h/cpp` |
+| **Files** | `src/runtime/domains/perception/segmentation_postprocess_seam.h`, `src/runtime/domains/perception/segmentation_preprocess_seam.h`, `src/runtime/models/segmentation/plugin.cpp`, `src/runtime/models/segmentation/segment_pipeline.h/cpp` |
 | **Purpose** | SegFormer semantic segmentation domain types and pipeline plugin. Preprocess seam handles image resize/normalize, postprocess seam handles argmax class selection and colorization. Plugin constructs `SegmentPipeline`. |
 
 ### UD-SAM-01: SAM Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/perception/sam_image_preprocess_seam.h`, `src/runtime/domains/perception/sam_output_selection.h`, `src/runtime/domains/perception/sam_postprocess_seam.h`, `src/runtime/domains/perception/sam_prompt_seam.h`, `src/runtime/plugins/segmentation_plugin.cpp`, `src/runtime/pipelines/sam_pipeline.h/cpp` |
+| **Files** | `src/runtime/domains/perception/sam_image_preprocess_seam.h`, `src/runtime/domains/perception/sam_output_selection.h`, `src/runtime/domains/perception/sam_postprocess_seam.h`, `src/runtime/domains/perception/sam_prompt_seam.h`, `src/runtime/models/segmentation/plugin.cpp`, `src/runtime/models/segmentation/sam_pipeline.h/cpp` |
 | **Purpose** | SAM (Segment Anything Model) two-stage domain types. Seams handle image preprocessing, prompt encoding, output mask selection, and postprocessing. Plugin (shared with segmentation) constructs `SamPipeline`. |
 
 ### UD-DET-01: Object Detection Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/object_detection_plugin.cpp` |
+| **Files** | `src/runtime/models/encoder/object_detection_plugin.cpp` |
 | **Purpose** | Object detection pipeline plugin. Constructs `EncoderPipeline` configured for detection mode. Handles `object_detection` strategy. |
 
 ### UD-NOP-01: Neural Operator Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/encoder_plugin.cpp` |
+| **Files** | `src/runtime/models/encoder/plugin.cpp` |
 | **Purpose** | Neural operator (FNO) support via the encoder plugin. The `neural_operator` strategy is one of four strategies handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline`. |
 
 ### UD-DIFF-HELPER-01: Diffusion Helpers
@@ -562,14 +562,14 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/encoder_plugin.cpp`, `src/runtime/pipelines/encoder_pipeline.h/cpp` |
+| **Files** | `src/runtime/models/encoder/plugin.cpp`, `src/runtime/models/encoder/pipeline.h/cpp` |
 | **Purpose** | Embedding extraction for encoder models (Eagle-embed). The `embedding` strategy is handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline` with `embed()` mode for dense vector embedding via single-pass inference with mean pooling. |
 
 ### UD-ENC-RERANK-01: Reranking Support
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/encoder_plugin.cpp`, `src/runtime/pipelines/encoder_pipeline.h/cpp` |
+| **Files** | `src/runtime/models/encoder/plugin.cpp`, `src/runtime/models/encoder/pipeline.h/cpp` |
 | **Purpose** | Reranking for cross-encoder models (Eagle-rerank). The `reranking` strategy is handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline` with `rerank()` mode for query-document scoring. |
 
 ### UD-UTIL-MEDIA-01: Media I/O Utilities
@@ -620,7 +620,7 @@ classDiagram
 | `UD-DET-01` | -- | `object_detection_plugin.cpp` | `EncoderPipeline` |
 | `UD-NOP-01` | -- | `encoder_plugin.cpp` | `EncoderPipeline` |
 
-### Encoder Strategies (via `src/runtime/plugins/encoder_plugin.cpp`)
+### Encoder Strategies (via `src/runtime/models/encoder/plugin.cpp`)
 
 | UD ID | Strategy | Pipeline mode |
 |---|---|---|

@@ -1,0 +1,522 @@
+"""M2M-100/NLLB family plugin -- encoder-decoder multilingual translation model.
+
+M2M-100/NLLB is an encoder-decoder transformer for multilingual translation:
+  - Encoder: token embeddings + sinusoidal positional encoding -> N self-attention
+             layers (ReLU MLP) -> encoder output [seq_len, d_model]
+  - Decoder: autoregressive text generation with causal self-attention (KV cache)
+             + cross-attention to encoder output + ReLU MLP
+  - Uses LayerNorm (not RMSNorm), ReLU activation, sinusoidal positional embeddings
+  - scale_embedding: True (embeddings multiplied by sqrt(d_model))
+  - model_type: "m2m_100", architectures: ["M2M100ForConditionalGeneration"]
+  - Shared embedding: encoder, decoder, and lm_head all share the same weight
+
+Cross-attention design:
+  Same as Whisper -- cross_k/cross_v inputs to the decoder engine are the RAW
+  encoder output (same tensor copied to all layers). The per-layer K/V projections
+  are baked into the decoder TRT graph.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+from tensorrt_model_connect import trt_compat
+
+from ...config import ModelConfig
+from ...checkpoint_mapper import (
+    WeightDict,
+    _open_safetensors,
+    _load_tensor,
+    _has_tensor,
+    _transpose_2d,
+)
+from ... import graph_ops
+from ... import graph_blocks
+
+
+trt = trt_compat.get_trt()
+
+def _make_sinusoidal_pos_embed(num_positions: int, embedding_dim: int,
+                                 padding_idx: int = 1) -> np.ndarray:
+    """Compute sinusoidal positional embeddings (matches M2M100SinusoidalPositionalEmbedding)."""
+    half_dim = embedding_dim // 2
+    emb = math.log(10000) / (half_dim - 1)
+    emb = np.exp(np.arange(half_dim, dtype=np.float32) * -emb)
+    emb = np.arange(num_positions, dtype=np.float32)[:, None] * emb[None, :]
+    result = np.concatenate([np.sin(emb), np.cos(emb)], axis=-1)
+    if embedding_dim % 2 == 1:
+        result = np.concatenate([result, np.zeros((num_positions, 1), dtype=np.float32)], axis=-1)
+    if padding_idx is not None:
+        result[padding_idx] = 0.0
+    return result
+
+
+class M2M100Plugin:
+    name = "m2m_100"
+    runtime_strategy = "seq2seq_encoder_decoder"
+
+    def matches(self, model_type: str) -> bool:
+        return model_type.lower() in ("m2m_100", "nllb")
+
+    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+        model_dir_path = Path(model_dir)
+        readers = _open_safetensors(model_dir_path)
+        raw = config.raw
+        hidden = config.hidden_size
+        enc_layers = raw.get("encoder_layers", config.num_hidden_layers)
+        dec_layers = raw.get("decoder_layers", config.num_hidden_layers)
+        enc_heads = raw.get("encoder_attention_heads", config.num_attention_heads)
+        dec_heads = raw.get("decoder_attention_heads", config.num_attention_heads)
+        enc_ffn = raw.get("encoder_ffn_dim", config.intermediate_size)
+        dec_ffn = raw.get("decoder_ffn_dim", config.intermediate_size)
+        max_position_embeddings = raw.get("max_position_embeddings", 1024)
+        padding_idx = raw.get("pad_token_id", 1)
+        scale_embedding = raw.get("scale_embedding", True)
+
+        weights = WeightDict()
+        weights["_enc_layers"] = enc_layers
+        weights["_dec_layers"] = dec_layers
+        weights["_enc_heads"] = enc_heads
+        weights["_dec_heads"] = dec_heads
+        weights["_enc_ffn"] = enc_ffn
+        weights["_dec_ffn"] = dec_ffn
+        weights["_max_position_embeddings"] = max_position_embeddings
+        weights["_padding_idx"] = padding_idx
+        weights["_scale_embedding"] = scale_embedding
+
+        # Shared embedding table -- used by encoder, decoder, and lm_head.
+        # In safetensors, it may be stored as lm_head.weight.
+        if _has_tensor(readers, "model.shared.weight"):
+            shared_embed = _load_tensor(readers, "model.shared.weight").astype(np.float32)
+        elif _has_tensor(readers, "lm_head.weight"):
+            shared_embed = _load_tensor(readers, "lm_head.weight").astype(np.float32)
+        elif _has_tensor(readers, "model.decoder.embed_tokens.weight"):
+            shared_embed = _load_tensor(readers, "model.decoder.embed_tokens.weight").astype(np.float32)
+        else:
+            raise RuntimeError("Cannot find shared embedding table")
+        weights["shared_embedding"] = shared_embed
+
+        # Sinusoidal positional embeddings (computed, not loaded from weights).
+        # offset=2 in HF: num_positions = max_position_embeddings + offset
+        offset = 2
+        num_positions = max_position_embeddings + offset
+        pos_embed = _make_sinusoidal_pos_embed(num_positions, hidden, padding_idx)
+        weights["sinusoidal_pos_embed"] = pos_embed
+
+        # Encoder layers
+        for i in range(enc_layers):
+            hf = f"model.encoder.layers.{i}"
+            pfx = f"enc_layer.{i}"
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"enc_{proj}")
+                weights[f"{pfx}.b_{proj}"] = _load_tensor(
+                    readers, f"{hf}.self_attn.{proj}_proj.bias").astype(np.float32)
+            weights[f"{pfx}.w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "enc_o")
+            weights[f"{pfx}.b_o"] = _load_tensor(
+                readers, f"{hf}.self_attn.out_proj.bias").astype(np.float32)
+            weights[f"{pfx}.attn_norm"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.bias").astype(np.float32)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc1.weight"), "enc_fc1")
+            weights[f"{pfx}.b_fc1"] = _load_tensor(
+                readers, f"{hf}.fc1.bias").astype(np.float32)
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc2.weight"), "enc_fc2")
+            weights[f"{pfx}.b_fc2"] = _load_tensor(
+                readers, f"{hf}.fc2.bias").astype(np.float32)
+            weights[f"{pfx}.ffn_norm"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.ffn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.bias").astype(np.float32)
+
+        weights["enc_final_norm"] = _load_tensor(
+            readers, "model.encoder.layer_norm.weight").astype(np.float32)
+        weights["enc_final_norm_beta"] = _load_tensor(
+            readers, "model.encoder.layer_norm.bias").astype(np.float32)
+
+        # Decoder layers
+        for i in range(dec_layers):
+            hf = f"model.decoder.layers.{i}"
+            pfx = f"layer.{i}"
+            # Self-attention
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"dec_{proj}")
+                weights[f"{pfx}.{proj}_bias"] = _load_tensor(
+                    readers, f"{hf}.self_attn.{proj}_proj.bias").astype(np.float32)
+            weights[f"{pfx}.w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "dec_o")
+            weights[f"{pfx}.o_bias"] = _load_tensor(
+                readers, f"{hf}.self_attn.out_proj.bias").astype(np.float32)
+            weights[f"{pfx}.input_norm"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.input_norm_beta"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.bias").astype(np.float32)
+            # Cross-attention
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.cross_w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.encoder_attn.{proj}_proj.weight"), f"xattn_{proj}")
+                weights[f"{pfx}.cross_b_{proj}"] = _load_tensor(
+                    readers, f"{hf}.encoder_attn.{proj}_proj.bias").astype(np.float32)
+            weights[f"{pfx}.cross_w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.encoder_attn.out_proj.weight"), "xattn_o")
+            weights[f"{pfx}.cross_b_o"] = _load_tensor(
+                readers, f"{hf}.encoder_attn.out_proj.bias").astype(np.float32)
+            weights[f"{pfx}.cross_attn_norm"] = _load_tensor(
+                readers, f"{hf}.encoder_attn_layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.cross_attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.encoder_attn_layer_norm.bias").astype(np.float32)
+            # MLP
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc1.weight"), "dec_fc1")
+            weights[f"{pfx}.fc1_bias"] = _load_tensor(
+                readers, f"{hf}.fc1.bias").astype(np.float32)
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc2.weight"), "dec_fc2")
+            weights[f"{pfx}.fc2_bias"] = _load_tensor(
+                readers, f"{hf}.fc2.bias").astype(np.float32)
+            weights[f"{pfx}.post_attn_norm"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.post_attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.bias").astype(np.float32)
+
+        weights["final_norm"] = _load_tensor(
+            readers, "model.decoder.layer_norm.weight").astype(np.float32)
+        weights["final_norm_beta"] = _load_tensor(
+            readers, "model.decoder.layer_norm.bias").astype(np.float32)
+
+        # LM head (tied to shared embedding)
+        if _has_tensor(readers, "lm_head.weight"):
+            weights["w_out"] = _transpose_2d(
+                _load_tensor(readers, "lm_head.weight"), "lm_head")
+        else:
+            weights["w_out"] = _transpose_2d(shared_embed.copy(), "lm_head_tied")
+
+        return weights
+
+    def build_engine(self, config: ModelConfig, weights: WeightDict,
+                     max_cache_length: int, *, verbose: bool = False,
+                     debug_layer_outputs: bool = False) -> bytes:
+        """Build the DECODER TRT engine (with cross-attention to encoder output)."""
+        dec_layers = weights["_dec_layers"]
+        dec_heads = weights["_dec_heads"]
+        dec_ffn = weights["_dec_ffn"]
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        head_dim = hidden // dec_heads
+        attention_window = max_cache_length + 1
+        scale_embedding = weights["_scale_embedding"]
+        embed_scale = math.sqrt(hidden) if scale_embedding else 1.0
+
+        # Use a fixed max_source_length for cross-attention.
+        # This determines the encoder output dimension the decoder cross-attends to.
+        max_source_length = 128
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+        token_id = network.add_input("token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+
+        cache_k_inputs, cache_v_inputs = [], []
+        for i in range(dec_layers):
+            cache_k_inputs.append(network.add_input(
+                graph_ops.layer_tensor_name("cache_k", i), trt.float32, (max_cache_length, hidden)))
+            cache_v_inputs.append(network.add_input(
+                graph_ops.layer_tensor_name("cache_v", i), trt.float32, (max_cache_length, hidden)))
+
+        # Cross-attention inputs: raw encoder output
+        cross_k_inputs, cross_v_inputs = [], []
+        for i in range(dec_layers):
+            cross_k_inputs.append(network.add_input(
+                graph_ops.layer_tensor_name("cross_k", i), trt.float32,
+                (max_source_length, hidden)))
+            cross_v_inputs.append(network.add_input(
+                graph_ops.layer_tensor_name("cross_v", i), trt.float32,
+                (max_source_length, hidden)))
+
+        # Decoder embedding + positional encoding
+        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
+
+        # Sinusoidal positional embeddings — shift table so 0-based position_id
+        # from KvCache maps to the correct M2M-100 position (offset by padding_idx+1=2).
+        padding_idx = weights["_padding_idx"]
+        pos_embed_np = weights["sinusoidal_pos_embed"]
+        dec_pos_table = pos_embed_np[padding_idx + 1:]
+        pos_embedding_table = graph_ops.add_constant(network, dec_pos_table.shape, dec_pos_table)
+
+        # Embed token + scale + add positional encoding
+        token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
+        if embed_scale != 1.0:
+            scale_const = graph_ops.add_constant(network, (1, 1),
+                np.array([embed_scale], dtype=np.float32))
+            token_embed = network.add_elementwise(
+                token_embed, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
+        pos_embed = network.add_gather(pos_embedding_table, position_id, 0).get_output(0)
+        hidden_state = network.add_elementwise(
+            token_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
+
+        present_k_outputs, present_v_outputs = [], []
+        for layer_idx in range(dec_layers):
+            prefix = f"layer.{layer_idx}"
+            result = _add_m2m100_decoder_layer(
+                network=network, hidden=hidden_state,
+                cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
+                cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
+                attention_mask=attention_mask, eps=config.rms_norm_eps,
+                weights=weights, prefix=prefix,
+                hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
+                ffn_dim=dec_ffn, max_cache_length=max_cache_length,
+                max_source_length=max_source_length)
+            hidden_state = result["hidden"]
+            present_k_outputs.append(result["present_k"])
+            present_v_outputs.append(result["present_v"])
+
+        # Final norm + LM head
+        hidden_state = graph_ops.add_layer_norm_native(
+            network, hidden_state, hidden,
+            weights["final_norm"], weights["final_norm_beta"],
+            config.rms_norm_eps)
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, vocab, weights["w_out"])
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        logits.name = "logits"
+        network.mark_output(logits)
+
+        for i in range(dec_layers):
+            present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
+            present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(present_k_outputs[i])
+            network.mark_output(present_v_outputs[i])
+
+        if verbose:
+            print(f"[trtmc-build] Building M2M-100 decoder ({dec_layers}L, h={hidden}, "
+                  f"heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})",
+                  file=sys.stderr)
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT decoder engine build failed")
+        return bytes(plan)
+
+    def build_vision_engine(self, model_dir: str, config: ModelConfig,
+                            weights: WeightDict, *, verbose: bool = False) -> bytes | None:
+        """Build the text ENCODER TRT engine (stored as vision_engine_plan in the bundle)."""
+        return _build_m2m100_encoder(config, weights, verbose=verbose)
+
+    def get_vl_config(self, config: ModelConfig) -> dict | None:
+        """Inject encoder-decoder config into bundle config.json."""
+        raw = config.raw
+        enc_layers = raw.get("encoder_layers", config.num_hidden_layers)
+        dec_layers = raw.get("decoder_layers", config.num_hidden_layers)
+        decoder_start_token_id = raw.get("decoder_start_token_id", 2)
+        return {
+            "encoder_layers": enc_layers,
+            "decoder_layers": dec_layers,
+            "max_source_length": 128,
+            "decoder_start_token_id": decoder_start_token_id,
+            "scale_embedding": raw.get("scale_embedding", True),
+            "has_vision_engine": True,
+            "is_encoder_decoder": True,
+        }
+
+
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
+        """Override top-level config fields for the C++ runtime.
+
+        M2M-100 uses decoder_attention_heads / encoder_attention_heads instead of
+        num_attention_heads. The C++ BaseConfig parser needs num_attention_heads.
+        """
+        raw = config.raw
+        dec_heads = raw.get("decoder_attention_heads", config.num_attention_heads)
+        return {
+            "num_attention_heads": dec_heads,
+            "num_key_value_heads": dec_heads,
+        }
+
+def _build_m2m100_encoder(config, weights, *, verbose=False):
+    """Build M2M-100 text encoder TRT engine."""
+    enc_layers = weights["_enc_layers"]
+    enc_heads = weights["_enc_heads"]
+    enc_ffn = weights["_enc_ffn"]
+    hidden = config.hidden_size
+    vocab = config.vocab_size
+    max_source_length = 128
+    scale_embedding = weights["_scale_embedding"]
+    embed_scale = math.sqrt(hidden) if scale_embedding else 1.0
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    tc = builder.create_builder_config()
+    tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    tc.clear_flag(trt.BuilderFlag.TF32)
+
+    # Input: token IDs [max_source_length]
+    input_ids = network.add_input("input_ids", trt.int32, (max_source_length,))
+
+    # Embedding lookup + scale
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
+    hs = network.add_gather(embedding_table, input_ids, 0).get_output(0)
+    # hs shape: [max_source_length, hidden]
+
+    if embed_scale != 1.0:
+        scale_const = graph_ops.add_constant(network, (1, 1),
+            np.array([embed_scale], dtype=np.float32))
+        hs = network.add_elementwise(
+            hs, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
+
+    # Add sinusoidal positional encoding.
+    # Position IDs for encoder: offset positions starting from padding_idx+1=2.
+    # For a sequence of length max_source_length, positions are [2, 3, ..., max_source_length+1].
+    padding_idx = weights["_padding_idx"]
+    pos_embed_np = weights["sinusoidal_pos_embed"]
+    # Extract positions [2..max_source_length+1] from the full table
+    enc_pos = pos_embed_np[padding_idx + 1:padding_idx + 1 + max_source_length].copy()
+    enc_pos_const = graph_ops.add_constant(network, (max_source_length, hidden), enc_pos)
+    hs = network.add_elementwise(
+        hs, enc_pos_const, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # Encoder layers
+    for li in range(enc_layers):
+        pfx = f"enc_layer.{li}"
+        normed = graph_ops.add_layer_norm_native(
+            network, hs, hidden,
+            weights[f"{pfx}.attn_norm"], weights[f"{pfx}.attn_norm_beta"],
+            config.rms_norm_eps)
+        attn = graph_ops.add_self_attention_block(
+            network, normed,
+            w_q=weights[f"{pfx}.w_q"], w_k=weights[f"{pfx}.w_k"],
+            w_v=weights[f"{pfx}.w_v"], w_o=weights[f"{pfx}.w_o"],
+            hidden_size=hidden, num_heads=enc_heads,
+            seq_length=max_source_length,
+            q_bias=weights[f"{pfx}.b_q"], k_bias=weights[f"{pfx}.b_k"],
+            v_bias=weights[f"{pfx}.b_v"], o_bias=weights[f"{pfx}.b_o"])
+        hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
+        n2 = graph_ops.add_layer_norm_native(
+            network, hs, hidden,
+            weights[f"{pfx}.ffn_norm"], weights[f"{pfx}.ffn_norm_beta"],
+            config.rms_norm_eps)
+        fc1 = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(network, n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"]),
+            enc_ffn, weights[f"{pfx}.b_fc1"])
+        act = graph_ops.add_activation(network, fc1, "relu")
+        fc2 = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"]),
+            hidden, weights[f"{pfx}.b_fc2"])
+        hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+
+    hs = graph_ops.add_layer_norm_native(
+        network, hs, hidden,
+        weights["enc_final_norm"], weights["enc_final_norm_beta"],
+        config.rms_norm_eps)
+    hs.name = "encoder_output"
+    network.mark_output(hs)
+
+    if verbose:
+        print(f"[trtmc-build] Building M2M-100 encoder ({enc_layers}L, h={hidden}, "
+              f"heads={enc_heads}, src_len={max_source_length})", file=sys.stderr)
+    plan = builder.build_serialized_network(network, tc)
+    if plan is None:
+        raise RuntimeError("TensorRT encoder engine build failed")
+    return bytes(plan)
+
+
+def _add_m2m100_decoder_layer(*, network, hidden, cache_k, cache_v,
+    cross_k, cross_v, attention_mask, eps,
+    weights, prefix, hidden_size, num_heads, head_dim, ffn_dim,
+    max_cache_length, max_source_length):
+    """Single M2M-100 decoder layer: self-attn + cross-attn + relu MLP."""
+    attention_size = hidden_size
+    attention_window = max_cache_length + 1
+
+    # --- Self-attention ---
+    normed = graph_ops.add_layer_norm_native(
+        network, hidden, hidden_size,
+        weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"],
+        eps)
+    q = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"]),
+        attention_size, weights[f"{prefix}.q_bias"])
+    k = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_k"]),
+        attention_size, weights[f"{prefix}.k_bias"])
+    v = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_v"]),
+        attention_size, weights[f"{prefix}.v_bias"])
+    present_k, present_v = k, v
+
+    kr = network.add_shuffle(k)
+    kr.reshape_dims = (1, attention_size)
+    vr = network.add_shuffle(v)
+    vr.reshape_dims = (1, attention_size)
+    ak = network.add_concatenation([cache_k, kr.get_output(0)])
+    ak.axis = 0
+    av = network.add_concatenation([cache_v, vr.get_output(0)])
+    av.axis = 0
+
+    m4 = network.add_shuffle(attention_mask)
+    m4.reshape_dims = (1, 1, 1, attention_window)
+    cf = graph_ops.add_attention_from_rows(
+        network, q, ak.get_output(0), av.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=attention_window,
+        mask=m4.get_output(0))
+    sa = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"]),
+        hidden_size, weights[f"{prefix}.o_bias"])
+    psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # --- Cross-attention ---
+    cn = graph_ops.add_layer_norm_native(
+        network, psa, hidden_size,
+        weights[f"{prefix}.cross_attn_norm"],
+        weights[f"{prefix}.cross_attn_norm_beta"], eps)
+    cq = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, cn, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"]),
+        attention_size, weights[f"{prefix}.cross_b_q"])
+    ck_proj = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"]),
+        attention_size, weights[f"{prefix}.cross_b_k"])
+    cv_proj = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"]),
+        attention_size, weights[f"{prefix}.cross_b_v"])
+
+    ccf = graph_ops.add_attention_from_rows(
+        network, cq, ck_proj, cv_proj,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=max_source_length)
+    ca = graph_ops.add_bias_sum(network,
+        graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]),
+        hidden_size, weights[f"{prefix}.cross_b_o"])
+    pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # --- ReLU MLP ---
+    fn = graph_ops.add_layer_norm_native(
+        network, pca, hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        weights[f"{prefix}.post_attn_norm_beta"], eps)
+    mlp = graph_blocks.add_gelu_fc_mlp(
+        network, fn, weights=weights, prefix=prefix,
+        hidden_size=hidden_size, mlp_size=ffn_dim, activation="relu")
+    out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
+    return {"hidden": out, "present_k": present_k, "present_v": present_v}
+
+
+plugin = M2M100Plugin()

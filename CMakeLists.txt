@@ -188,28 +188,28 @@ add_library(trtmc_core
   ${TRTMC_PIPELINE_PLUGIN_REGISTRATION_SOURCE}
   ${TRTMC_PIPELINE_PLUGIN_SOURCES}
   # Pipeline implementations
-  src/runtime/pipelines/text_generation_pipeline.cpp
-  src/runtime/pipelines/recurrent_pipeline.cpp
-  src/runtime/pipelines/encoder_pipeline.cpp
-  src/runtime/pipelines/patchtst_pipeline.cpp
-  src/runtime/pipelines/patchtsmixer_pipeline.cpp
-  src/runtime/pipelines/timesfm_pipeline.cpp
-  src/runtime/pipelines/chronos_bolt_pipeline.cpp
-  src/runtime/pipelines/segment_pipeline.cpp
-  src/runtime/pipelines/sam_pipeline.cpp
-  src/runtime/pipelines/vl_pipeline.cpp
-  src/runtime/pipelines/flux_pipeline.cpp
-  src/runtime/pipelines/ltx_video_pipeline.cpp
-  src/runtime/pipelines/wan_pipeline.cpp
-  src/runtime/pipelines/z_image_pipeline.cpp
-  src/runtime/pipelines/whisper_pipeline.cpp
-  src/runtime/pipelines/rnnt_pipeline.cpp
-  src/runtime/pipelines/bark_pipeline.cpp
-  src/runtime/pipelines/magpie_pipeline.cpp
-  src/runtime/pipelines/speech_pipeline.cpp
-  src/runtime/pipelines/omni_pipeline.cpp
-  src/runtime/pipelines/pixart_pipeline.cpp
-  src/runtime/pipelines/pixart_torchtrt_pipeline.cpp
+  src/runtime/models/text_generation/pipeline.cpp
+  src/runtime/models/recurrent/pipeline.cpp
+  src/runtime/models/encoder/pipeline.cpp
+  src/runtime/models/patchtst/pipeline.cpp
+  src/runtime/models/patchtsmixer/pipeline.cpp
+  src/runtime/models/timesfm/pipeline.cpp
+  src/runtime/models/chronos_bolt/pipeline.cpp
+  src/runtime/models/segmentation/segment_pipeline.cpp
+  src/runtime/models/segmentation/sam_pipeline.cpp
+  src/runtime/models/vision_language/pipeline.cpp
+  src/runtime/models/flux/pipeline.cpp
+  src/runtime/models/ltx_video/pipeline.cpp
+  src/runtime/models/wan/pipeline.cpp
+  src/runtime/models/z_image/pipeline.cpp
+  src/runtime/models/whisper/pipeline.cpp
+  src/runtime/models/rnnt/pipeline.cpp
+  src/runtime/models/bark/pipeline.cpp
+  src/runtime/models/magpie/pipeline.cpp
+  src/runtime/models/speech/pipeline.cpp
+  src/runtime/models/omni/pipeline.cpp
+  src/runtime/models/pixart/pipeline.cpp
+  src/runtime/models/pixart_torchtrt/pipeline.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available

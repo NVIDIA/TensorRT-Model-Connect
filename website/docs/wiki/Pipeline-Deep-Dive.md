@@ -136,7 +136,7 @@ caches, and returning a fully constructed pipeline.
 Plugins expose a registrar function via the registry macro:
 
 ```cpp
-// In decoder_plugin.cpp, inside namespace trtmc:
+// In src/runtime/models/text_generation/plugin.cpp, inside namespace trtmc:
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
                                          "decoder_kv_cache", "decoder_moe");
 ```
@@ -147,39 +147,39 @@ defines the function expected by the manifest-generated registrar source.
 `cmake/trtmc_pipeline_plugins.cmake` generates the source that calls every
 listed registrar explicitly.
 
-### 25 Registered Strategies (20 plugin files, 14 pipeline implementations)
+### 25 Registered Strategies (model-owned plugin files)
 
-| Strategy | Plugin file | Pipeline class |
+| Strategy | Model runtime plugin | Pipeline class |
 |----------|------------|----------------|
-| `decoder_kv_cache` | `decoder_plugin.cpp` | `TextGenerationPipeline` |
-| `decoder_moe` | `decoder_plugin.cpp` | `TextGenerationPipeline` |
-| `ssm_recurrent` | `ssm_plugin.cpp` | `RecurrentPipeline` |
-| `rwkv_recurrent` | `rwkv_plugin.cpp` | `RecurrentPipeline` |
-| `hybrid_mamba_attention` | `hybrid_plugin.cpp` | `RecurrentPipeline` |
-| `encoder_only` | `encoder_plugin.cpp` | `EncoderPipeline` |
-| `embedding` | `encoder_plugin.cpp` | `EncoderPipeline` |
-| `reranking` | `encoder_plugin.cpp` | `EncoderPipeline` |
-| `neural_operator` | `encoder_plugin.cpp` | `EncoderPipeline` |
-| `vision_language` | `vl_plugin.cpp` | `VLPipeline` |
-| `segmentation` | `segmentation_plugin.cpp` | `SegmentPipeline` |
-| `prompted_segmentation` | `segmentation_plugin.cpp` | `SamPipeline` |
-| `object_detection` | `object_detection_plugin.cpp` | `EncoderPipeline` |
-| `speech_to_text` | `whisper_plugin.cpp` | `WhisperPipeline` |
-| `text_to_audio_bark` | `bark_plugin.cpp` | `BarkPipeline` |
-| `text_to_audio_magpie` | `magpie_plugin.cpp` | `MagpiePipeline` |
-| `speech_to_speech` | `speech_plugin.cpp` | `SpeechPipeline` |
-| `omni_multimodal` | `omni_plugin.cpp` | `OmniPipeline` |
-| `text_to_text` | `t5_plugin.cpp` | `T5Pipeline` |
-| `marian_translation` | `marian_plugin.cpp` | `MarianPipeline` |
-| `seq2seq_encoder_decoder` | `seq2seq_plugin.cpp` | `Seq2SeqPipeline` |
-| `diffusion_flux` | `flux_plugin.cpp` | `FluxPipeline` |
-| `diffusion_wan` | `wan_plugin.cpp` | `WanPipeline` |
-| `diffusion_pixart` | `wan_plugin.cpp` | `WanPipeline` |
-| `diffusion_zimage` | `zimage_plugin.cpp` | `ZImagePipeline` |
+| `decoder_kv_cache` | `text_generation/plugin.cpp` | `TextGenerationPipeline` |
+| `decoder_moe` | `text_generation/plugin.cpp` | `TextGenerationPipeline` |
+| `ssm_recurrent` | `recurrent/ssm_plugin.cpp` | `RecurrentPipeline` |
+| `rwkv_recurrent` | `recurrent/rwkv_plugin.cpp` | `RecurrentPipeline` |
+| `hybrid_mamba_attention` | `recurrent/hybrid_plugin.cpp` | `RecurrentPipeline` |
+| `encoder_only` | `encoder/plugin.cpp` | `EncoderPipeline` |
+| `embedding` | `encoder/plugin.cpp` | `EncoderPipeline` |
+| `reranking` | `encoder/plugin.cpp` | `EncoderPipeline` |
+| `neural_operator` | `encoder/plugin.cpp` | `EncoderPipeline` |
+| `vision_language` | `vision_language/plugin.cpp` | `VLPipeline` |
+| `segmentation` | `segmentation/plugin.cpp` | `SegmentPipeline` |
+| `prompted_segmentation` | `segmentation/plugin.cpp` | `SamPipeline` |
+| `object_detection` | `encoder/object_detection_plugin.cpp` | `EncoderPipeline` |
+| `speech_to_text` | `whisper/plugin.cpp` | `WhisperPipeline` |
+| `text_to_audio_bark` | `bark/plugin.cpp` | `BarkPipeline` |
+| `text_to_audio_magpie` | `magpie/plugin.cpp` | `MagpiePipeline` |
+| `speech_to_speech` | `speech/plugin.cpp` | `SpeechPipeline` |
+| `omni_multimodal` | `omni/plugin.cpp` | `OmniPipeline` |
+| `text_to_text` | `t5/plugin.cpp` | `T5Pipeline` |
+| `marian_translation` | `marian/plugin.cpp` | `MarianPipeline` |
+| `seq2seq_encoder_decoder` | `seq2seq/plugin.cpp` | `Seq2SeqPipeline` |
+| `diffusion_flux` | `flux/plugin.cpp` | `FluxPipeline` |
+| `diffusion_wan` | `wan/plugin.cpp` | `WanPipeline` |
+| `diffusion_pixart` | `wan/plugin.cpp` | `WanPipeline` |
+| `diffusion_zimage` | `z_image/plugin.cpp` | `ZImagePipeline` |
 
-All plugin files are in `src/runtime/plugins/`. Pipeline implementations are
-in `src/runtime/pipelines/`, except for `T5Pipeline`, `MarianPipeline`, and
-`Seq2SeqPipeline` which are defined inline in their respective plugin files.
+Runtime plugin and pipeline files live together under `src/runtime/models/`.
+`T5Pipeline`, `MarianPipeline`, and `Seq2SeqPipeline` remain inline in their
+respective model plugin files.
 
 If `runtime_strategy` is empty (old bundles), it defaults to `"decoder_kv_cache"`.
 If no plugin is registered for the strategy string, `PipelineFactory::from_bundle()`
@@ -189,9 +189,9 @@ throws `std::runtime_error` listing all available strategies.
 
 ## 4. Per-Plugin Pipeline Construction
 
-Each plugin in `src/runtime/plugins/` is a self-contained file that implements
-`IPipelinePlugin::create()`. The plugin parses its own strategy-specific config
-from the raw JSON, extracts the bundle sections it needs via
+Each model runtime folder in `src/runtime/models/` is self-contained. Its
+plugin implements `IPipelinePlugin::create()`, parses its own strategy-specific
+config from the raw JSON, extracts the bundle sections it needs via
 `find_section(ctx.bundle, "section_name")`, loads TRT engines, creates
 tokenizers and caches, and returns a fully constructed pipeline.
 
@@ -224,8 +224,8 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - Returns `RecurrentPipeline(..., "HybridPipeline", ...)`.
 
 **Key files:**
-- `src/runtime/pipelines/text_generation_pipeline.h` -- `TextGenerationPipeline`
-- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
+- `src/runtime/models/text_generation/pipeline.h` -- `TextGenerationPipeline`
+- `src/runtime/models/recurrent/pipeline.h` -- `RecurrentPipeline`
 - `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
 - `include/trtmc/runtime/hybrid_state.h` -- `HybridState` (KvCache + RecurrentState)
 - `include/trtmc/runtime/kv_cache.h` -- `KvCache`
@@ -248,9 +248,9 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - Returns `EncoderPipeline` configured for detection mode.
 
 **Key files:**
-- `src/runtime/pipelines/vl_pipeline.h` -- `VLPipeline`, `VLConfig`
-- `src/runtime/pipelines/segment_pipeline.h` -- `SegmentPipeline`
-- `src/runtime/pipelines/sam_pipeline.h` -- `SamPipeline`
+- `src/runtime/models/vision_language/pipeline.h` -- `VLPipeline`, `VLConfig`
+- `src/runtime/models/segmentation/segment_pipeline.h` -- `SegmentPipeline`
+- `src/runtime/models/segmentation/sam_pipeline.h` -- `SamPipeline`
 - `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
 
 ### 4.3 Diffusion Plugins
@@ -268,8 +268,8 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - Returns `ZImagePipeline(text_encoder, denoiser, vae, config, weights, z_weights, tokenizer, model_id, hf_python, bundle_path)`.
 
 **Key files:**
-- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`
-- `src/runtime/pipelines/wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` -- implementations
+- `src/runtime/models/flux/pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`
+- `src/runtime/models/wan/pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` -- implementations
 - `src/runtime/domains/diffusion/diffusion_types.h` -- `DiffusionConfig`, `PreprocessorWeights`
 - `src/runtime/plugins/shared/diffusion_helpers.h` -- shared diffusion loading
 
@@ -292,7 +292,7 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - Returns `OmniPipeline(thinker, thinker_cache, talker, talker_cache, code2wav, config, stream, tokenizer, model_id)`.
 
 **Key files:**
-- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`
+- `src/runtime/models/whisper/pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`
 - `src/runtime/plugins/shared/audio_helpers.h` -- shared audio loading helpers
 - `src/runtime/domains/audio/` -- audio config types and seam headers
 
@@ -311,8 +311,8 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - Defines `Seq2SeqPipeline` inline (generic encoder-decoder).
 
 **Key files:**
-- `src/runtime/pipelines/encoder_pipeline.h` -- `EncoderPipeline`
-- `src/runtime/pipelines/encoder_pipeline.cpp` -- implementations
+- `src/runtime/models/encoder/pipeline.h` -- `EncoderPipeline`
+- `src/runtime/models/encoder/pipeline.cpp` -- implementations
 
 ---
 
@@ -595,13 +595,13 @@ each plugin reads only the fields it requires.
 | Plugin shared helpers | `src/runtime/plugins/shared/plugin_helpers.h`, `.cpp` |
 | Plugin source/anchor manifest | `cmake/trtmc_pipeline_plugins.cmake` |
 | IPipeline interface | `include/trtmc/pipeline.h` |
-| TextGenerationPipeline | `src/runtime/pipelines/text_generation_pipeline.h`, `.cpp` |
-| RecurrentPipeline | `src/runtime/pipelines/recurrent_pipeline.h`, `.cpp` |
-| VLPipeline | `src/runtime/pipelines/vl_pipeline.h`, `.cpp` |
-| Diffusion pipelines | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `.cpp` |
-| Audio pipelines | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`, `.cpp` |
-| Segment/SAM pipelines | `src/runtime/pipelines/segment_pipeline.h`, `sam_pipeline.h`, `.cpp` |
-| Encoder pipelines | `src/runtime/pipelines/encoder_pipeline.h`, `.cpp` |
+| TextGenerationPipeline | `src/runtime/models/text_generation/pipeline.h`, `.cpp` |
+| RecurrentPipeline | `src/runtime/models/recurrent/pipeline.h`, `.cpp` |
+| VLPipeline | `src/runtime/models/vision_language/pipeline.h`, `.cpp` |
+| Diffusion pipelines | `src/runtime/models/flux/pipeline.h`, `src/runtime/models/wan/pipeline.h`, `src/runtime/models/z_image/pipeline.h`, `src/runtime/models/pixart/pipeline.h`, `.cpp` |
+| Audio pipelines | `src/runtime/models/whisper/pipeline.h`, `src/runtime/models/bark/pipeline.h`, `src/runtime/models/magpie/pipeline.h`, `src/runtime/models/speech/pipeline.h`, `src/runtime/models/omni/pipeline.h`, `.cpp` |
+| Segment/SAM pipelines | `src/runtime/models/segmentation/segment_pipeline.h`, `sam_pipeline.h`, `.cpp` |
+| Encoder pipelines | `src/runtime/models/encoder/pipeline.h`, `.cpp` |
 | TrtModule | `include/trtmc/runtime/trt_module.h`, `src/runtime/backend/trt_module_impl.cpp` |
 | KvCache | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
 | RecurrentState | `include/trtmc/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |

@@ -2,7 +2,8 @@
 """Scaffold a new model family plugin.
 
 Downloads the model's config.json, detects architecture features, and generates
-a plugin file in tensorrt_model_connect/tensorrt_model_connect/families/<family>.py.
+a flat family package in
+tensorrt_model_connect/tensorrt_model_connect/families/<family>/.
 
 Usage:
     python3 scripts/new_family.py \
@@ -20,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import textwrap
 from pathlib import Path
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
@@ -127,9 +127,9 @@ def generate_plugin(family_name: str, model_type: str, features: dict,
         "",
         "from __future__ import annotations",
         "",
-        "from ..config import ModelConfig",
-        "from ..checkpoint_mapper import WeightDict, load_standard_weights",
-        "from ..standard_decoder_builder import build_standard_decoder_engine",
+        "from ...config import ModelConfig",
+        "from ...checkpoint_mapper import WeightDict, load_standard_weights",
+        "from ...standard_decoder_builder import build_standard_decoder_engine",
         "",
     ]
     if notes_block:
@@ -182,7 +182,7 @@ def main():
 
     # 2. Detect features
     features = detect_features(cfg)
-    print(f"Detected features:", file=sys.stderr)
+    print("Detected features:", file=sys.stderr)
     for k, v in sorted(features.items()):
         if isinstance(v, list):
             print(f"  {k}: {v}", file=sys.stderr)
@@ -194,13 +194,38 @@ def main():
                              args.hf_repo)
 
     # 4. Write file
-    out_path = FAMILIES_DIR / f"{args.family_name}.py"
-    if out_path.exists():
-        print(f"ERROR: {out_path} already exists. Remove it first or choose a "
+    out_dir = FAMILIES_DIR / args.family_name
+    out_path = out_dir / "plugin.py"
+    init_path = out_dir / "__init__.py"
+    if out_dir.exists():
+        print(f"ERROR: {out_dir} already exists. Remove it first or choose a "
               "different --family-name.", file=sys.stderr)
         sys.exit(1)
 
+    out_dir.mkdir()
     out_path.write_text(source)
+    init_path.write_text(
+        f'"""{args.family_name} family package."""\n\n'
+        "from __future__ import annotations\n\n"
+        "import sys\n"
+        "import types\n\n"
+        "from . import plugin as _plugin\n\n"
+        "globals().update({\n"
+        "    _name: _value\n"
+        "    for _name, _value in vars(_plugin).items()\n"
+        "    if not _name.startswith(\"__\")\n"
+        "})\n\n"
+        "__all__ = [\n"
+        "    _name for _name in globals()\n"
+        "    if not _name.startswith(\"__\") and _name != \"_plugin\"\n"
+        "]\n\n\n"
+        "class _FamilyModule(types.ModuleType):\n"
+        "    def __setattr__(self, name, value):\n"
+        "        super().__setattr__(name, value)\n"
+        "        if not name.startswith(\"__\") and name != \"_plugin\":\n"
+        "            setattr(_plugin, name, value)\n\n\n"
+        "sys.modules[__name__].__class__ = _FamilyModule\n"
+    )
     print(f"\nGenerated: {out_path}", file=sys.stderr)
 
     # 5. Print next steps

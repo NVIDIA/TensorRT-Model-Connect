@@ -22,9 +22,9 @@
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
-#include "runtime/pipelines/encoder_pipeline.h"
-#include "runtime/pipelines/sam_pipeline.h"
-#include "runtime/pipelines/segment_pipeline.h"
+#include "runtime/models/encoder/pipeline.h"
+#include "runtime/models/segmentation/sam_pipeline.h"
+#include "runtime/models/segmentation/segment_pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 

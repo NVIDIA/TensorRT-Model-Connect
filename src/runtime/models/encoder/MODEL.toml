@@ -1,0 +1,1 @@
+runtime_strategies = ["encoder_only", "embedding", "reranking", "neural_operator", "object_detection"]

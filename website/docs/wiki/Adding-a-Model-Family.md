@@ -31,7 +31,7 @@ See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed
 
 ## Manual Path
 
-Adding support for a new HuggingFace model family manually is a Python task in `tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ plugin in `src/runtime/plugins/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing plugin handles.
+Adding support for a new HuggingFace model family manually is a Python task in `tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ model runtime folder in `src/runtime/models/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing model folder handles.
 
 ## Prerequisites
 
@@ -65,7 +65,7 @@ python3 scripts/new_family.py \
   --family-name phi
 
 # 2. Review the generated plugin (customize if needed)
-$EDITOR tensorrt_model_connect/tensorrt_model_connect/families/phi.py
+$EDITOR tensorrt_model_connect/tensorrt_model_connect/families/phi/plugin.py
 
 # 3. Validate end-to-end (build + diff_logits + diff_layers + runner parity)
 ./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
@@ -151,7 +151,7 @@ def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
     return weights
 ```
 
-Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `tensorrt_model_connect/tensorrt_model_connect/families/phi.py` for an example.
+Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `tensorrt_model_connect/tensorrt_model_connect/families/phi/plugin.py` for an example.
 
 ### Step 3: Validate
 

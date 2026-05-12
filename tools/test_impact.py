@@ -9,8 +9,8 @@ Usage:
     python3 tools/test_impact.py [--base REF] [--head REF] [--json] [--verbose]
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
-    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/plugins/decoder_plugin.cpp
-    python3 tools/test_impact.py --files tensorrt_model_connect/tensorrt_model_connect/families/qwen.py --cap 15
+    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/text_generation/plugin.cpp
+    python3 tools/test_impact.py --files tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py --cap 15
 """
 
 import argparse
@@ -81,7 +81,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "patchtst_plugin": ["patchtst_torchtrt"],
     "patchtsmixer_plugin": ["patchtsmixer_torchtrt"],
     "timesfm_plugin": ["timesfm_torchtrt"],
-    "chronos_bolt_plugin": ["chronos_bolt_torchtrt"],
     "segmentation_plugin": ["segmentation", "prompted_segmentation"],
     "object_detection_plugin": ["object_detection"],
     "omni_plugin": ["omni_multimodal"],
@@ -118,7 +117,6 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "patchtst_pipeline": ["patchtst_torchtrt"],
     "patchtsmixer_pipeline": ["patchtsmixer_torchtrt"],
     "timesfm_pipeline": ["timesfm_torchtrt"],
-    "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
     "flux_pipeline": ["diffusion_flux"],
     "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
@@ -248,6 +246,7 @@ class ImpactMap:
     core_models: List[str]
     model_metadata: Dict[str, Dict]
     builder_to_families: Dict[str, List[str]]       # parent module -> families
+    cpp_runtime_model_strategies: Dict[str, List[str]]
     manifest_field_to_models: Dict[str, List[str]]
     e2e_data_file_to_models: Dict[str, List[str]]
     path_scope_overrides: Dict[str, List[str]]
@@ -272,26 +271,39 @@ class ImpactResult:
 # ---------------------------------------------------------------------------
 
 
+def _iter_family_python_files(families_dir: Path) -> List[tuple[str, Path]]:
+    """Return (family_name, python_file) for flat modules and package layouts."""
+    files: List[tuple[str, Path]] = []
+    for py_file in sorted(families_dir.glob("*.py")):
+        name = py_file.stem
+        if name in ("__init__", "base"):
+            continue
+        files.append((name, py_file))
+    for family_dir in sorted(path for path in families_dir.iterdir() if path.is_dir()):
+        if family_dir.name.startswith("_"):
+            continue
+        for py_file in sorted(family_dir.glob("*.py")):
+            files.append((family_dir.name, py_file))
+    return files
+
+
 def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
     """Build reverse index: parent_module -> [family_names that import it].
 
     Only returns entries for *_builder modules (excluding orchestrators).
     """
     reverse: Dict[str, Set[str]] = {}
-    for py_file in sorted(families_dir.glob("*.py")):
-        name = py_file.stem
-        if name in ("__init__", "base"):
-            continue
+    for name, py_file in _iter_family_python_files(families_dir):
         try:
             content = py_file.read_text(encoding="utf-8")
         except OSError:
             continue
-        # from ..module_name import ...
-        for m in re.finditer(r"from\s+\.\.(\w+)\s+import", content):
+        # from ..module_name import ... / from ...module_name import ...
+        for m in re.finditer(r"from\s+\.+(\w+)\s+import", content):
             module = m.group(1)
             reverse.setdefault(module, set()).add(name)
-        # from .. import module_name
-        for m in re.finditer(r"from\s+\.\.\s+import\s+([\w,\s]+)", content):
+        # from .. import module_name / from ... import module_name
+        for m in re.finditer(r"from\s+\.+\s+import\s+([\w,\s]+)", content):
             for mod in m.group(1).split(","):
                 mod = mod.strip()
                 if mod:
@@ -304,11 +316,37 @@ def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
     return filtered
 
 
+def _parse_runtime_model_manifest(manifest_path: Path) -> List[str]:
+    """Parse the tiny MODEL.toml runtime strategy list without extra deps."""
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    match = re.search(r"runtime_strategies\s*=\s*\[([^\]]*)\]", text)
+    if match:
+        return re.findall(r'"([^"]+)"', match.group(1))
+    match = re.search(r'runtime_strategy\s*=\s*"([^"]+)"', text)
+    return [match.group(1)] if match else []
+
+
+def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
+    """Build src/runtime/models/<name>/MODEL.toml -> runtime strategies map."""
+    scoped: Dict[str, List[str]] = {}
+    if not models_dir.is_dir():
+        return scoped
+    for manifest_path in sorted(models_dir.glob("*/MODEL.toml")):
+        strategies = _parse_runtime_model_manifest(manifest_path)
+        if strategies:
+            scoped[manifest_path.parent.name] = sorted(set(strategies))
+    return scoped
+
+
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
     families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
+    runtime_models_dir = repo_root / "src" / "runtime" / "models"
 
     family_to_models: Dict[str, List[str]] = {}
     strategy_to_models: Dict[str, List[str]] = {}
@@ -353,6 +391,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
+    cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
 
     def _models_for_scoped_strategies(strategies: Set[str]) -> List[str]:
         models: Set[str] = set()
@@ -368,9 +407,9 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             "diffusion_denoising_step_seam.h"
         ),
     }
-    if pipelines_dir.is_dir():
-        for path, token in scoped_cpp_tokens.items():
-            strategies: Set[str] = set()
+    for path, token in scoped_cpp_tokens.items():
+        strategies: Set[str] = set()
+        if pipelines_dir.is_dir():
             for cpp_file in sorted(pipelines_dir.glob("*.cpp")):
                 try:
                     content = cpp_file.read_text(encoding="utf-8")
@@ -379,8 +418,19 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 if token not in content:
                     continue
                 strategies.update(CPP_PIPELINE_STRATEGIES.get(cpp_file.stem, []))
-            if strategies:
-                path_scope_overrides[path] = _models_for_scoped_strategies(strategies)
+        if runtime_models_dir.is_dir():
+            for cpp_file in sorted(runtime_models_dir.glob("*/*.cpp")):
+                try:
+                    content = cpp_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if token not in content:
+                    continue
+                strategies.update(
+                    cpp_runtime_model_strategies.get(cpp_file.parent.name, [])
+                )
+        if strategies:
+            path_scope_overrides[path] = _models_for_scoped_strategies(strategies)
 
     return ImpactMap(
         family_to_models=family_to_models,
@@ -391,6 +441,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         core_models=sorted(core_models),
         model_metadata=model_metadata,
         builder_to_families=builder_to_families,
+        cpp_runtime_model_strategies=cpp_runtime_model_strategies,
         manifest_field_to_models={
             key: sorted(models)
             for key, models in manifest_field_to_models_sets.items()
@@ -531,14 +582,41 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         models = [name] if name in imap.all_model_names_set else []
         return RuleMatch("manifest", models, unit_tiers, rebuild)
 
-    # Rule 1: Family plugin (not __init__ or base)
+    # Rule 1: Shared family builder internals keep the package root thin but
+    # still use the same import-scan ownership map as compatibility shims.
+    m = re.match(
+        r"tensorrt_model_connect/tensorrt_model_connect/families/_shared/(\w+)\.py$",
+        path,
+    )
+    if m:
+        module_name = m.group(1)
+        if (module_name.endswith("_builder")
+                and module_name not in _ORCHESTRATOR_MODULES
+                and module_name in imap.builder_to_families):
+            families = imap.builder_to_families[module_name]
+            models: Set[str] = set()
+            for fam in families:
+                models.update(imap.family_to_models.get(fam, []))
+            if models:
+                return RuleMatch("specialized_builder", sorted(models), unit_tiers, rebuild)
+        return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
+
+    # Rule 1a: Family package file. A flat per-family folder is an ownership
+    # boundary: any file under families/<family>/ affects that family's models.
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/(\w+)/.+\.py$", path)
+    if m:
+        family = m.group(1)
+        models = imap.family_to_models.get(family, [])
+        return RuleMatch("family_package", sorted(models), unit_tiers, rebuild)
+
+    # Rule 1b: Family plugin (not __init__ or base)
     m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/(\w+)\.py$", path)
     if m and m.group(1) not in ("__init__", "base"):
         family = m.group(1)
         models = imap.family_to_models.get(family, [])
         return RuleMatch("family_plugin", sorted(models), unit_tiers, rebuild)
 
-    # Rule 1b: Family __init__.py or base.py -> ALL models
+    # Rule 1c: Top-level family __init__.py or base.py -> ALL models
     m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/((__init__|base)\.py)$", path)
     if m:
         return RuleMatch("family_base", list(imap.all_model_names), unit_tiers, rebuild)
@@ -587,7 +665,23 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path.startswith("tensorrt_model_connect/"):
         return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 4: C++ plugin
+    # Rule 4: C++ model-runtime folder. MODEL.toml declares runtime_strategy
+    # ownership so impact selection does not depend on plugin/pipeline names.
+    m = re.match(r"src/runtime/models/([^/]+)/.+$", path)
+    if m:
+        model_folder = m.group(1)
+        strategies = imap.cpp_runtime_model_strategies.get(model_folder, [])
+        if strategies:
+            return RuleMatch(
+                "cpp_runtime_model",
+                _drop_fp8_scale_models(
+                    _models_for_runtime_strategies(strategies, imap), imap),
+                unit_tiers,
+                rebuild,
+            )
+        return RuleMatch("cpp_runtime_model_unknown", list(imap.all_model_names), unit_tiers, rebuild)
+
+    # Rule 5: C++ plugin
     m = re.match(r"src/runtime/plugins/(\w+)\.cpp$", path)
     if m:
         plugin_stem = m.group(1)
@@ -606,7 +700,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         # Unknown plugin -> all models (safety)
         return RuleMatch("cpp_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 5: C++ pipeline
+    # Rule 6: C++ pipeline
     m = re.match(r"src/runtime/pipelines/(\w+)\.(h|cpp)$", path)
     if m:
         pipeline_stem = m.group(1)
@@ -624,7 +718,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("cpp_pipeline_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 6: Shared C++ helpers
+    # Rule 7: Shared C++ helpers
     m = re.match(r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$", path)
     if m:
         helper_stem = m.group(1)
@@ -640,7 +734,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("cpp_shared_helper_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 6b: Scoped C++ helper/source used by a subset of pipelines
+    # Rule 7b: Scoped C++ helper/source used by a subset of pipelines
     if path in imap.path_scope_overrides:
         return RuleMatch(
             "cpp_scoped_helper",
@@ -648,11 +742,11 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             unit_tiers, rebuild,
         )
 
-    # Rule 7: Any other C++ source/header
+    # Rule 8: Any other C++ source/header
     if path.startswith("src/") or path.startswith("include/"):
         return RuleMatch("cpp_source", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8a: E2E runner
+    # Rule 9a: E2E runner
     m = re.match(r"tests/e2e_harness/runners/(\w+)\.py$", path)
     if m:
         runner_stem = m.group(1)
@@ -667,7 +761,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_runner_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8b: E2E comparator
+    # Rule 9b: E2E comparator
     m = re.match(r"tests/e2e_harness/comparators/(\w+)\.py$", path)
     if m:
         comp_stem = m.group(1)
@@ -682,7 +776,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_comparator_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8c: E2E reference
+    # Rule 9c: E2E reference
     m = re.match(r"tests/e2e_harness/references/(\w+)\.py$", path)
     if m:
         ref_stem = m.group(1)
@@ -697,7 +791,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_reference_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8d: E2E contract plugin
+    # Rule 9d: E2E contract plugin
     m = re.match(r"tests/e2e_harness/plugins/(\w+)\.py$", path)
     if m:
         plugin_stem = m.group(1)
@@ -713,7 +807,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8e: E2E threshold profiles
+    # Rule 9e: E2E threshold profiles
     m = re.match(r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$", path)
     if m:
         profile_stem = m.group(1)
@@ -727,15 +821,15 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_threshold_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8f: Any other E2E harness file
+    # Rule 9f: Any other E2E harness file
     if path.startswith("tests/e2e_harness/"):
         return RuleMatch("harness_shared", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 9: test_e2e.py or conftest.py
+    # Rule 10: test_e2e.py or conftest.py
     if path in ("tests/test_e2e.py", "tests/conftest.py"):
         return RuleMatch("e2e_entrypoint", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 9b: E2E runner/scheduler scripts affect every selected model.
+    # Rule 10b: E2E runner/scheduler scripts affect every selected model.
     if path in {
         "scripts/run_e2e_parallel.sh",
         "scripts/schedule_e2e.py",
@@ -748,7 +842,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path == "tests/e2e/waives.txt":
         return RuleMatch("e2e_waives", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 10: Unit test directories (no E2E)
+    # Rule 11: Unit test directories (no E2E)
     if path.startswith("tests/builder/"):
         return RuleMatch("unit_builder", [], unit_tiers, rebuild)
     if path.startswith("tests/cpp/"):
@@ -758,16 +852,16 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path.startswith("tests/torchtrt_builder/"):
         return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
 
-    # Rule 11: CMake / build system — triggers C++ rebuild + unit tests
+    # Rule 12: CMake / build system — triggers C++ rebuild + unit tests
     # but no E2E models; actual model impact comes from the source files.
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
         return RuleMatch("cmake", [], unit_tiers, rebuild)
 
-    # Rule 11b: E2E data file referenced by manifests
+    # Rule 12b: E2E data file referenced by manifests
     if path in imap.e2e_data_file_to_models:
         return RuleMatch("e2e_data_file", imap.e2e_data_file_to_models[path], unit_tiers, rebuild)
 
-    # Rule 11c: FP8 weight generation script — affects all models with fp8_scales manifests
+    # Rule 12c: FP8 weight generation script — affects all models with fp8_scales manifests
     if path == "scripts/_gen_fp8_bf16.py":
         return RuleMatch(
             "fp8_gen_script",
@@ -775,7 +869,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             [], False,
         )
 
-    # Rule 12: Non-code files (no impact)
+    # Rule 13: Non-code files (no impact)
     if path.startswith("tools/") or path.startswith("scripts/"):
         return RuleMatch("no_impact", [], [], False)
     for pattern in _NO_IMPACT_PATTERNS:
@@ -1268,17 +1362,23 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
         repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families"
     )
 
-    # 1. Every family in a manifest has a corresponding .py plugin file
+    def _family_plugin_exists(family: str) -> bool:
+        return any((
+            (families_dir / f"{family}.py").exists(),
+            (families_dir / family / "__init__.py").exists(),
+            (torchtrt_families_dir / f"{family}.py").exists(),
+            (torchtrt_families_dir / family / "__init__.py").exists(),
+        ))
+
+    # 1. Every family in a manifest has a corresponding plugin module/package
     for family in imap.family_to_models:
-        raw_plugin_file = families_dir / f"{family}.py"
-        torchtrt_plugin_file = torchtrt_families_dir / f"{family}.py"
-        if not raw_plugin_file.exists() and not torchtrt_plugin_file.exists():
+        if not _family_plugin_exists(family):
             errors.append(
-                f"Family '{family}' in manifests has no plugin file: "
-                f"{raw_plugin_file} or {torchtrt_plugin_file}"
+                f"Family '{family}' in manifests has no plugin module or package under "
+                f"{families_dir} or {torchtrt_families_dir}"
             )
 
-    # 2. Every family plugin .py has at least one manifest (warn only)
+    # 2. Every family plugin module/package has at least one manifest (warn only)
     if families_dir.is_dir():
         for py_file in sorted(families_dir.glob("*.py")):
             name = py_file.stem
@@ -1286,6 +1386,12 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
                 continue
             if name not in imap.family_to_models:
                 warnings.append(f"Family plugin '{name}.py' has no manifests using it")
+        for family_dir in sorted(path for path in families_dir.iterdir() if path.is_dir()):
+            name = family_dir.name
+            if name.startswith("_") or not (family_dir / "__init__.py").exists():
+                continue
+            if name not in imap.family_to_models:
+                warnings.append(f"Family package '{name}/' has no manifests using it")
 
     # 3. Core model set covers all distinct task_strategies
     core_task_strategies: Set[str] = set()

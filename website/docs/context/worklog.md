@@ -372,7 +372,7 @@ mismatch, not an engine bug.
 - `src/cabi/config/fast_path_config.h` — added `text_seq_len` field
 - `src/cabi/config/fast_path_config.cpp` — parse `text_seq_len` from config JSON
 - `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
-- `tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
+- `tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v/plugin.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
 - `tensorrt_model_connect/tensorrt_model_connect/schedulers/flow_match_euler.py` — match HF sigma schedule
 - `scripts/hf_tokenizer.py` — `add_special_tokens=True`
 - `tools/debug_diffusion_pipeline.py` — new: 9-step automated comparison
@@ -605,7 +605,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-17 — Add Nemotron-4 Family + NVIDIA Model Entries (22 → 23 families, 19 → 25 E2E models)
 
-- **Nemotron-4 plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/nemotron.py`)
+- **Nemotron-4 plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/nemotron/plugin.py`)
   - Matches `model_type == "nemotron"` (NVIDIA Nemotron-4 / Minitron).
   - NemotronLayerNorm1P: LayerNorm with bias + gamma offset (+1 to stored weight, matching HF's `self.weight + 1`).
   - 2-projection MLP (up_proj → squared ReLU → down_proj), no gate projection. Maps to `gelu_fc` builder MLP type with `relu2` activation.
@@ -627,22 +627,22 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Add GPT-Neo, CodeGen, BLOOM, Mixtral Families (18 → 22)
 
-- **GPT-Neo plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/gpt_neo.py`)
+- **GPT-Neo plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/gpt_neo/plugin.py`)
   - Matches `model_type == "gpt_neo"` (EleutherAI/gpt-neo-125m).
   - Learned positions, LayerNorm, GELU, separate Q/K/V Linear projections, Conv1D MLP (like GPT-2), tied embeddings.
   - Local/global attention alternation ignored (causal mask handles it).
 
-- **CodeGen plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/codegen.py`)
+- **CodeGen plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/codegen/plugin.py`)
   - Matches `model_type == "codegen"` (Salesforce/codegen-350M-mono).
   - GPT-J-like: parallel residual, partial RoPE (`rotary_dim / head_dim`), fused QKV, single LayerNorm per block.
   - `lm_head.bias` support (new in standard builder).
 
-- **BLOOM plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/bloom.py`)
+- **BLOOM plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/bloom/plugin.py`)
   - Matches `model_type == "bloom"` (bigscience/bloom-560m).
   - ALiBi position encoding (new `position_type="alibi"` in builder).
   - Embedding LayerNorm, fused QKV with per-head interleaving (like GPT-NeoX), all biases, tied embeddings.
 
-- **Mixtral plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mixtral.py`)
+- **Mixtral plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mixtral/plugin.py`)
   - Matches `model_type == "mixtral"` (mistralai/Mixtral-8x7B-v0.1).
   - Custom MoE builder adapted from `phi_moe.py`, standard top-k softmax routing (not SparseMixer).
   - RMSNorm + RoPE + GQA attention, `runtime_strategy="decoder_moe"`.
@@ -703,7 +703,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Mamba/SSM Support with Recurrent State Runtime
 
-- **Mamba family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mamba.py`)
+- **Mamba family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mamba/plugin.py`)
   - Matches `model_type == "mamba"`.
   - Custom graph builder: selective scan, causal conv1d with cached state, input-dependent discretization.
   - Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs.
@@ -726,7 +726,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Phi-MoE Family Plugin (Mixture of Experts)
 
-- **Phi-MoE family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi_moe.py`)
+- **Phi-MoE family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi_moe/plugin.py`)
   - Matches `model_type == "phimoe"`.
   - SparseMixer routing: independent masked softmax over all expert logits (not standard top-k), top-2 selection.
   - Custom graph builder: router + 16 expert SwiGLU MLPs with gather/scatter dispatch.
@@ -761,18 +761,18 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Granite + InternLM2 Family Plugins
 
-- **Granite family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/granite.py`)
+- **Granite family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/granite/plugin.py`)
   - Matches `model_type` starting with `granite`.
   - Absorbs four Granite-specific multipliers (embedding, attention, residual, logits) into weight tensors at load time.
   - Standard decoder builder used without modification after multiplier absorption.
 
-- **InternLM2 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/internlm.py`)
+- **InternLM2 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/internlm/plugin.py`)
   - Matches `model_type` starting with `internlm`.
   - Handles fused wqkv projection splitting and non-standard key names (tok_embeddings, attention.wqkv, feed_forward.w1/w2/w3, etc.).
 
 ## 2026-02-16 — Phi-3 Family Plugin + Shared Script Hardening
 
-- **Phi-3 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi.py`)
+- **Phi-3 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi/plugin.py`)
   - Matches `model_type` starting with `phi3` or `phi`.
   - Handles fused QKV projection splitting (`qkv_proj` -> separate Q, K, V).
   - Handles fused gate-up projection splitting (`gate_up_proj` -> separate gate, up).

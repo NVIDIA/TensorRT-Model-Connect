@@ -27,7 +27,7 @@
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
-#include "runtime/pipelines/vl_pipeline.h"
+#include "runtime/models/vision_language/pipeline.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -134,7 +134,7 @@ static void test_vl_text_only() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -169,7 +169,7 @@ static void test_vl_text_only_max_tokens() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -229,7 +229,7 @@ static void test_vl_validates_cache() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
 
     trtmc::VLConfig cfg;
     cfg.has_position_input = false;
@@ -261,7 +261,7 @@ static void test_vl_config_sync() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -297,7 +297,7 @@ static void test_vl_zero_max_tokens() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -333,7 +333,7 @@ static void test_vl_no_tokenizer_throws() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -381,7 +381,7 @@ static void test_vl_generate_with_image_no_encoder() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -394,7 +394,7 @@ static void test_vl_generate_with_image_no_encoder() {
 
     // No vision encoder -> !vision_encoder_ -> early return to text-only path (line 113)
     trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
-                              tokenizer);
+                               tokenizer);
 
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
                                0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
@@ -444,7 +444,7 @@ static void test_vl_generate_with_vision_encoder() {
     auto tokenizer = std::make_shared<VLFixedTokenizer>(); // encodes as {1, 2, 3}
 
     trtmc::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
-                              stream, tokenizer);
+                               stream, tokenizer);
 
     // Provide a 2x2 RGB image (float pixels in [0,1], will be converted and resized to 4x4)
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
@@ -546,7 +546,7 @@ static void test_vl_generate_with_embed_decoder() {
     auto tokenizer = std::make_shared<VLFixedTokenizer>(); // encodes as {1, 2, 3}
 
     trtmc::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
-                              stream, tokenizer);
+                               stream, tokenizer);
 
     // 2x2 RGB image float pixels in [0,1]
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.4f, 0.4f, 0.4f,
@@ -578,7 +578,7 @@ static void test_vl_generate_with_tokenizer() {
     cudaStreamCreate(&stream);
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+                                                          engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
     trtmc::VLConfig cfg;
@@ -590,7 +590,7 @@ static void test_vl_generate_with_tokenizer() {
     auto tokenizer = std::make_shared<VLFixedTokenizer>();
 
     trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
-                              tokenizer);
+                               tokenizer);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;

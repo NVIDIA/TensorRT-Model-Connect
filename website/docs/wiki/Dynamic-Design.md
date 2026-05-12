@@ -136,7 +136,7 @@ sequenceDiagram
 
 ## 3. Text Generation Request Flow
 
-Entry point: `TextGenerationPipeline::generate()` in `src/runtime/pipelines/text_generation_pipeline.cpp`.
+Entry point: `TextGenerationPipeline::generate()` in `src/runtime/models/text_generation/pipeline.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -181,8 +181,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/text_generation_pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
-- `src/runtime/pipelines/text_generation_pipeline.h` -- class declaration
+- `src/runtime/models/text_generation/pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
+- `src/runtime/models/text_generation/pipeline.h` -- class declaration
 - `src/runtime/core/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
 - `src/runtime/backend/trt_module_impl.cpp` -- `forward()`, `forward_async()`, `bind_external()`
 
@@ -216,16 +216,16 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
+- `src/runtime/models/recurrent/pipeline.h` -- `RecurrentPipeline`
 - `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
-- `src/runtime/pipelines/recurrent_pipeline.cpp` -- `generate()`, `run_step()`
+- `src/runtime/models/recurrent/pipeline.cpp` -- `generate()`, `run_step()`
 - `include/trtmc/runtime/recurrent_state.h` -- `RecurrentState` class
 
 ---
 
 ## 5. Vision-Language Generation Flow
 
-Entry point: `VLPipeline::generate()` in `src/runtime/pipelines/vl_pipeline.cpp`.
+Entry point: `VLPipeline::generate()` in `src/runtime/models/vision_language/pipeline.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -264,15 +264,15 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/vl_pipeline.h` -- `VLPipeline`, `VLConfig`
-- `src/runtime/pipelines/vl_pipeline.cpp` -- `generate()`, `generate_vl_from_ids()`, `run_vision_encoder()`
+- `src/runtime/models/vision_language/pipeline.h` -- `VLPipeline`, `VLConfig`
+- `src/runtime/models/vision_language/pipeline.cpp` -- `generate()`, `generate_vl_from_ids()`, `run_vision_encoder()`
 - `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
 
 ---
 
 ## 6. Diffusion Generation Flow (WanPipeline)
 
-Entry point: `WanPipeline::generate_image()` in `src/runtime/pipelines/wan_pipeline.cpp`.
+Entry point: `WanPipeline::generate_image()` in `src/runtime/models/wan/pipeline.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -307,10 +307,10 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `WanPipeline`, `FluxPipeline`, `ZImagePipeline`
-- `src/runtime/pipelines/wan_pipeline.cpp` -- `generate_image()`, denoising loop, VAE decode
-- `src/runtime/pipelines/flux_pipeline.cpp` -- FLUX-specific RoPE, timestep embedding, dual tokenizer
-- `src/runtime/pipelines/z_image_pipeline.cpp` -- Z-Image patchify, caption projection
+- `src/runtime/models/flux/pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `WanPipeline`, `FluxPipeline`, `ZImagePipeline`
+- `src/runtime/models/wan/pipeline.cpp` -- `generate_image()`, denoising loop, VAE decode
+- `src/runtime/models/flux/pipeline.cpp` -- FLUX-specific RoPE, timestep embedding, dual tokenizer
+- `src/runtime/models/z_image/pipeline.cpp` -- Z-Image patchify, caption projection
 - `src/runtime/core/flow_match_euler_scheduler.cpp` -- scheduler implementation
 
 ---
@@ -336,9 +336,9 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/bark_pipeline.h/cpp` -- `BarkPipeline`
-- `src/runtime/pipelines/whisper_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp`
-- `src/runtime/plugins/bark_plugin.cpp`, `whisper_plugin.cpp`, `magpie_plugin.cpp`, `speech_plugin.cpp`, `omni_plugin.cpp`
+- `src/runtime/models/bark/pipeline.h/cpp` -- `BarkPipeline`
+- `src/runtime/models/whisper/pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp`
+- `src/runtime/models/bark/plugin.cpp`, `whisper_plugin.cpp`, `magpie_plugin.cpp`, `speech_plugin.cpp`, `omni_plugin.cpp`
 - `src/runtime/domains/audio/bark_config.h`, `bark_generation_plan.h`
 
 ---
@@ -370,8 +370,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/omni_pipeline.h/cpp` -- `OmniPipeline`, `OmniConfig`
-- `src/runtime/plugins/omni_plugin.cpp` -- `OmniPlugin`
+- `src/runtime/models/omni/pipeline.h/cpp` -- `OmniPipeline`, `OmniConfig`
+- `src/runtime/models/omni/plugin.cpp` -- `OmniPlugin`
 
 ---
 

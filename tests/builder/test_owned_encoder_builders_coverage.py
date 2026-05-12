@@ -196,14 +196,40 @@ def _make_fake_trt() -> types.SimpleNamespace:
     )
 
 
+_SHARED_BUILDER_MODULES = {
+    "tensorrt_model_connect.clip_encoder_builder": (
+        "tensorrt_model_connect.families._shared.clip_encoder_builder"
+    ),
+    "tensorrt_model_connect.encoder_builder": (
+        "tensorrt_model_connect.families._shared.encoder_builder"
+    ),
+    "tensorrt_model_connect.qwen3_encoder_builder": (
+        "tensorrt_model_connect.families._shared.qwen3_encoder_builder"
+    ),
+    "tensorrt_model_connect.t5_encoder_builder": (
+        "tensorrt_model_connect.families._shared.t5_encoder_builder"
+    ),
+}
+
+
+def _drop_imported_module(module_name: str) -> None:
+    sys.modules.pop(module_name, None)
+    package_name, _, attribute_name = module_name.rpartition(".")
+    package = sys.modules.get(package_name)
+    if package is not None and hasattr(package, attribute_name):
+        delattr(package, attribute_name)
+
+
 def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace):
     """Import a tensorrt_model_connect module while tensorrt is mocked."""
     for mod_name in (
         module_name,
+        _SHARED_BUILDER_MODULES.get(module_name),
         "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
-        sys.modules.pop(mod_name, None)
+        if mod_name is not None:
+            _drop_imported_module(mod_name)
     with patch.dict(sys.modules, {"tensorrt": fake_trt}):
         return importlib.import_module(module_name)
 
@@ -222,11 +248,12 @@ def _import_qwen3_with_fake_trt(fake_trt: types.SimpleNamespace):
 
     for mod_name in (
         "tensorrt_model_connect.qwen3_encoder_builder",
+        _SHARED_BUILDER_MODULES["tensorrt_model_connect.qwen3_encoder_builder"],
         "tensorrt_model_connect.checkpoint_mapper",
         "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
-        sys.modules.pop(mod_name, None)
+        _drop_imported_module(mod_name)
     with patch.dict(sys.modules, {"tensorrt": fake_trt, "tensorrt_model_connect.checkpoint_mapper": fake_cm}):
         return importlib.import_module("tensorrt_model_connect.qwen3_encoder_builder")
 
