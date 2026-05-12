@@ -1,0 +1,20 @@
+{
+  "name": "trtmc-agent-skills",
+  "interface": {
+    "displayName": "TensorRT-Model-Connect Skills"
+  },
+  "plugins": [
+    {
+      "name": "trtmc-agent-skills",
+      "source": {
+        "source": "local",
+        "path": "./plugins/trtmc-agent-skills"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_USE"
+      },
+      "category": "Development"
+    }
+  ]
+}

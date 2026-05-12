@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Git Messages"
+  short_description: "Draft clear commit and PR messages"
+  default_prompt: "Use $write-git-messages to draft a commit message and PR description from this diff."

@@ -1,6 +1,11 @@
 # Skills
 
-Project-specific Claude Code skills. Each skill is a `SKILL.md` file in its own subdirectory.
+Project-specific agent skills. Each skill is a `SKILL.md` file in its own
+subdirectory.
+
+Codex-discoverable skills are packaged in
+`plugins/trtmc-agent-skills/skills/` and registered by
+`.agents/plugins/marketplace.json`.
 
 | Skill | Purpose |
 |-------|---------|

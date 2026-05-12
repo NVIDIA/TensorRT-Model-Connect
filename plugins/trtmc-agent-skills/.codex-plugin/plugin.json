@@ -1,0 +1,29 @@
+{
+  "name": "trtmc-agent-skills",
+  "version": "0.1.0",
+  "description": "Repo-local Codex skills for TensorRT-Model-Connect developer workflows.",
+  "repository": "https://github.com/NVIDIA/TensorRT-Model-Connect",
+  "keywords": [
+    "codex",
+    "skills",
+    "git",
+    "pull-requests",
+    "developer-workflow"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "TensorRT-Model-Connect Skills",
+    "shortDescription": "Repo skills for commit and PR workflows",
+    "longDescription": "Installs TensorRT-Model-Connect Codex skills that help developers operate consistently in this repository.",
+    "developerName": "NVIDIA",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $write-git-messages to draft a PR message from my diff."
+    ],
+    "brandColor": "#76B900"
+  }
+}

@@ -24,3 +24,15 @@
 - Keep GitHub Pages dedicated to the documentation website.
 - Do not publish CI reports to GitHub Pages unless the user explicitly changes
   that decision.
+
+## Repo Skills
+
+- Codex skills packaged for this repo are registered through
+  `.agents/plugins/marketplace.json`.
+- The `trtmc-agent-skills` plugin is marked `INSTALLED_BY_DEFAULT` and exposes
+  repo-local skills from `plugins/trtmc-agent-skills/skills/`.
+- Use `$write-git-messages` when drafting or reviewing commit messages, PR
+  titles, PR descriptions, squash merge messages, or rebase message text.
+- If `$write-git-messages` is not listed in the active runtime skills, load
+  `plugins/trtmc-agent-skills/skills/write-git-messages/SKILL.md` directly and
+  follow it.

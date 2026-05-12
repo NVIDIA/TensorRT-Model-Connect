@@ -101,6 +101,11 @@ tests/torchtrt_e2e/models/*.json
 !.gitignore
 !.gitlab-ci.yml
 !.dockerignore
+!.agents/
+!.agents/plugins/
+!.agents/plugins/marketplace.json
+!plugins/trtmc-agent-skills/.codex-plugin/
+!plugins/trtmc-agent-skills/.codex-plugin/**
 config
 HEAD
 hooks
