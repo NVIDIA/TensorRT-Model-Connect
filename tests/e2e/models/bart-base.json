@@ -5,7 +5,7 @@
   "family": "bart",
   "runtime_strategy": "seq2seq_encoder_decoder",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
+  "prompt": "The quick brown fox jumps over the lazy dog.",
   "max_new_tokens": 20,
   "logit_atol": 1e-3,
   "threshold_overrides": {

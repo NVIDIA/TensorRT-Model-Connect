@@ -30,7 +30,8 @@ class CausalContinuationPlugin:
             )
 
         prompt = case.inputs.get("prompt", "")
-        if case.reference_family == "seq2seq_base_weak":
+        is_seq2seq_base = case.reference_family == "seq2seq_base_weak"
+        if is_seq2seq_base:
             trt_text = normalize_text(trt_output.text or "")
             ref_text = normalize_text(ref_output.text or "")
         else:
@@ -59,9 +60,28 @@ class CausalContinuationPlugin:
             "ned": MetricResult(value=ned, threshold=ned_threshold, operator="<=", passed=ned <= ned_threshold),
             "prefix_match": MetricResult(value=1.0 if prefix_match else 0.0, threshold=1.0, operator="==", passed=prefix_match, note=f"first {prefix_len} chars"),
         }
+        if is_seq2seq_base:
+            metrics["non_empty_trt_text"] = MetricResult(
+                value=1.0 if trt_text else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=bool(trt_text),
+                note="visible TRT reconstruction text",
+            )
+            metrics["non_empty_reference_text"] = MetricResult(
+                value=1.0 if ref_text else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=bool(ref_text),
+                note="visible HF reconstruction text",
+            )
 
         passed = ned <= ned_threshold
-        rule = "ned <= threshold (continuation parity)"
+        rule = (
+            "seq2seq reconstruction parity against HF reference"
+            if is_seq2seq_base
+            else "ned <= threshold (continuation parity)"
+        )
         if passed:
             return make_pass("full_generation", metrics, rule)
         return make_fail("full_generation", metrics, rule, f"Continuation diverged: NED={ned:.3f}")
