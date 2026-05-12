@@ -1,7 +1,7 @@
 """Contract test plugin for chat/instruct models."""
 from __future__ import annotations
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
-from .base import (ContractTestPlugin, normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail, make_error)
+from ..contracts import MetricResult
+from .base import normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail
 
 class ChatInstructPlugin:
     reference_families = ["chat_instruct_template", "chat_qwen3_posttrained"]
@@ -22,6 +22,24 @@ class ChatInstructPlugin:
 
     def verify(self, trt_output, ref_output, case, threshold):
         prompt = case.inputs.get("prompt", "")
+        contract_config = case.metadata.get("contract_config", {})
+        if contract_config.get("enable_thinking") is False:
+            raw_trt = trt_output.text or ""
+            if "<think>" in raw_trt:
+                return make_fail(
+                    "full_generation",
+                    {
+                        "thinking_suppressed": MetricResult(
+                            value=0.0,
+                            threshold=1.0,
+                            operator="==",
+                            passed=False,
+                            note="no-thinking output must not contain <think>",
+                        )
+                    },
+                    message="TRT emitted a thinking block with thinking disabled",
+                )
+
         trt_answer = normalize_text(extract_answer(trt_output, prompt))
         ref_answer = normalize_text(extract_answer(ref_output, prompt))
 

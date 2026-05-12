@@ -241,6 +241,15 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
     return rgc;
 }
 
+void apply_recurrent_chat_template_format(const BundleFile& bundle, RecurrentGenConfig& rgc) {
+    auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
+    if (tok_cfg_sec == nullptr || tok_cfg_sec->empty())
+        return;
+    const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
+    const std::string chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+    rgc.chat_template_format = detect_chat_template_format(chat_tpl);
+}
+
 // Section data conversion.
 
 std::vector<float> section_to_floats(const std::vector<char>* sec) {

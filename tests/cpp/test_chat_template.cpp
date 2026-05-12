@@ -67,6 +67,14 @@ static void test_detect_llama3() {
     check(fmt == trtmc::ChatTemplateFormat::kLlama3, "llama3 detection");
 }
 
+static void test_detect_nemotron_h() {
+    std::string tpl = "{% if add_generation_prompt %}<SPECIAL_10>System\n"
+                      "<SPECIAL_11>User\n{{ message.content }}\n"
+                      "<SPECIAL_11>Assistant\n<think>{% endif %}";
+    auto fmt = trtmc::detect_chat_template_format(tpl);
+    check(fmt == trtmc::ChatTemplateFormat::kNemotronH, "nemotron-h detection");
+}
+
 static void test_detect_unknown() {
     auto fmt = trtmc::detect_chat_template_format("some random jinja template");
     check(fmt == trtmc::ChatTemplateFormat::kNone, "unknown -> kNone");
@@ -116,7 +124,14 @@ static void test_apply_llama3() {
           "llama3 application");
 }
 
-// no-thinking only affects ChatML
+static void test_apply_nemotron_h_no_thinking() {
+    auto result =
+        trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronH, "hello", false);
+    check(result == "<SPECIAL_10>System\n\n<SPECIAL_11>User\nhello\n"
+                    "<SPECIAL_11>Assistant\n<think></think>",
+          "nemotron-h no-thinking application");
+}
+
 static void test_apply_mistral_no_thinking_ignored() {
     auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kMistral, "hello", false);
     check(result == "[INST] hello [/INST]", "mistral no-thinking ignored");
@@ -130,6 +145,7 @@ int main() {
     test_detect_phi();
     test_detect_gemma();
     test_detect_llama3();
+    test_detect_nemotron_h();
     test_detect_unknown();
 
     // Application
@@ -140,6 +156,7 @@ int main() {
     test_apply_phi();
     test_apply_gemma();
     test_apply_llama3();
+    test_apply_nemotron_h_no_thinking();
     test_apply_mistral_no_thinking_ignored();
 
     if (failures > 0) {

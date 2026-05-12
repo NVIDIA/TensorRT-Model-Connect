@@ -97,6 +97,9 @@ DType cache_dtype_from_precision(const std::string& precision);
 // Build a RecurrentGenConfig from model config fields.
 RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg);
 
+// Populate recurrent chat-template metadata from tokenizer_config.json.
+void apply_recurrent_chat_template_format(const BundleFile& bundle, RecurrentGenConfig& rgc);
+
 // Reinterpret a raw char section as a vector of floats.
 std::vector<float> section_to_floats(const std::vector<char>* sec);
 

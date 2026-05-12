@@ -3,6 +3,7 @@
 // RecurrentPipeline: Mamba, RWKV, and Hybrid models.
 // Uses IStateManager to abstract recurrent vs KV cache state.
 
+#include "runtime/core/chat_template.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/recurrent_state.h"
@@ -23,6 +24,7 @@ struct RecurrentGenConfig {
     int32_t id_bos{0};
     int32_t id_eos{0};
     bool has_position_input{false};
+    ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
 };
 
 class RecurrentPipeline final : public IPipeline {

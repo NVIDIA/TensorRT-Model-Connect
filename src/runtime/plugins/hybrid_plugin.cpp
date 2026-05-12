@@ -60,6 +60,7 @@ class HybridPlugin final : public IPipelinePlugin {
         auto hybrid = std::make_unique<HybridState>(std::move(cache), std::move(ssm));
         auto rgc = make_recurrent_gen_config(ctx.config);
         rgc.has_position_input = loaded.module->has_input("position_id");
+        apply_recurrent_chat_template_format(ctx.bundle, rgc);
 
         return std::make_unique<RecurrentPipeline>(std::move(loaded.module), std::move(hybrid), rgc,
                                                    stream, "HybridPipeline", std::move(tokenizer),

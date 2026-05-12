@@ -7,7 +7,6 @@ dpr-ctx-encoder           XFAIL  (DPR embedding cosine below minimum contract fl
 fnet-base                 XFAIL  (encoder representation parity below minimum contract floor; DFT approximation gap needs validation follow-up)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
-nemotron-h-nano-9b       XFAIL  (TRT-only: HF reference needs mamba-ssm which is not installed; build+inference verified, no parity comparison)
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 qwen2.5-0.5b-torchtrt    XFAIL  (Torch-TensorRT bundle build depends on TRT-LLM plugins not supported by the CUDA 13 CI image)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)

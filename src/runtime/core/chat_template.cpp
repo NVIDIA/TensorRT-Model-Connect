@@ -55,7 +55,7 @@ static std::string apply_llama3(const std::string& prompt, bool enable_thinking)
 static std::string apply_nemotron_h(const std::string& prompt, bool enable_thinking) {
     std::string r =
         "<SPECIAL_10>System\n\n<SPECIAL_11>User\n" + prompt + "\n<SPECIAL_11>Assistant\n";
-    r += enable_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+    r += enable_thinking ? "<think>\n" : "<think></think>";
     return r;
 }
 

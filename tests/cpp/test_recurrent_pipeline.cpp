@@ -32,6 +32,9 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 static int failures = 0;
@@ -44,6 +47,37 @@ static void check(bool condition, const char* test_name) {
 }
 
 static trtmc::TrtLogger g_logger;
+
+class RecordingTokenizer final : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string& text) const override {
+        last_text = text;
+        return {1, 0};
+    }
+
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        std::string out;
+        for (int32_t id : ids)
+            out += token_for_id(id);
+        return out;
+    }
+
+    int32_t id_for_token(std::string_view token) const override {
+        if (token == "<bos>")
+            return 1;
+        if (token == "Paris")
+            return 2;
+        return 0;
+    }
+
+    std::string token_for_id(int32_t id) const override {
+        if (id == 2)
+            return "Paris";
+        return "";
+    }
+
+    mutable std::string last_text;
+};
 
 // Mock decoder: token_id[1] → logits[4] = constant [0.1, 0.2, 0.9, 0.3]
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
@@ -223,6 +257,54 @@ static void test_hybrid_pipeline() {
     cudaStreamDestroy(stream);
 }
 
+static void test_generate_applies_chat_template() {
+    auto engine = build_mock_decoder();
+    if (!engine) {
+        std::cerr << "SKIP: can't build engine\n";
+        return;
+    }
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
+    std::vector<trtmc::RecurrentState::TensorSpec> specs = {
+        {"conv_state", {12}},
+        {"ssm_state", {32}},
+    };
+    auto rs = std::make_unique<trtmc::RecurrentState>(1, specs, stream);
+
+    trtmc::RecurrentGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_bos = 1;
+    cfg.id_eos = 2;
+    cfg.chat_template_format = trtmc::ChatTemplateFormat::kNemotronH;
+
+    auto tokenizer = std::make_shared<RecordingTokenizer>();
+    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
+                                     "MambaPipeline", tokenizer);
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    gen_cfg.use_chat_template = true;
+    gen_cfg.enable_thinking = false;
+    auto result = pipeline.generate("What is the capital of France?", gen_cfg);
+
+    check(result.text == "Paris", "chat template: generated text decodes");
+    check(tokenizer->last_text.find("<SPECIAL_10>System\n\n<SPECIAL_11>User\n") !=
+              std::string::npos,
+          "chat template: nemotron-h prefix");
+    check(tokenizer->last_text.find("What is the capital of France?") != std::string::npos,
+          "chat template: prompt retained");
+    check(tokenizer->last_text.find("<think></think>") != std::string::npos,
+          "chat template: no-thinking block is closed inline");
+    check(tokenizer->last_text.find("<think>\n") == std::string::npos,
+          "chat template: no thinking newline sentinel");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_argmax_recurrent() {
     std::vector<float> v = {-1.0f, 5.0f, 3.0f};
     check(trtmc::RecurrentPipeline::argmax(v) == 1, "argmax = 1");
@@ -233,6 +315,7 @@ int main() {
     test_mamba_pipeline();
     test_rwkv_pipeline();
     test_hybrid_pipeline();
+    test_generate_applies_chat_template();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

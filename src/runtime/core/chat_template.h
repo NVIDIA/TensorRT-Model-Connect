@@ -27,8 +27,8 @@ ChatTemplateFormat detect_chat_template_format(const std::string& jinja_template
 /// Apply chat template to a user prompt.
 /// @param format  The detected template format.
 /// @param prompt  The user's raw prompt text.
-/// @param enable_thinking  If false AND format is kChatML, append <think>\n\n</think>\n\n
-///                         after the assistant prefix (Qwen3 non-thinking mode).
+/// @param enable_thinking  If false, emit the family-specific no-thinking
+///                         marker after the assistant prefix when supported.
 /// @return The formatted prompt string ready for tokenization.
 std::string apply_chat_template(ChatTemplateFormat format, const std::string& prompt,
                                 bool enable_thinking = true);
