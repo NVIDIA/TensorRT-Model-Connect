@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect.config import ModelConfig
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
+from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
