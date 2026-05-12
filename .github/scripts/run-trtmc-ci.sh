@@ -382,8 +382,7 @@ if len(models) > 10:
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
-  run_with_timeout "${SELECTIVE_E2E_TIMEOUT:-4h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
-  run_diffusion_vlm_assessment
+  run_e2e_with_diffusion_vlm "${SELECTIVE_E2E_TIMEOUT:-4h}" "${args[@]}"
 }
 
 run_full_e2e() {
@@ -408,8 +407,33 @@ run_full_e2e() {
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
-  run_with_timeout "${FULL_E2E_TIMEOUT:-6h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
+  run_e2e_with_diffusion_vlm "${FULL_E2E_TIMEOUT:-6h}" "${args[@]}"
+}
+
+run_e2e_with_diffusion_vlm() {
+  local timeout_limit="$1"
+  shift
+  local e2e_rc=0
+  local vlm_rc=0
+
+  set +e
+  run_with_timeout "$timeout_limit" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "$@"
+  e2e_rc=$?
+  set -e
+
+  if [ "$e2e_rc" -ne 0 ]; then
+    echo "E2E exited with code ${e2e_rc}; still attempting diffusion VLM assessment before returning that status."
+  fi
+
+  set +e
   run_diffusion_vlm_assessment
+  vlm_rc=$?
+  set -e
+
+  if [ "$e2e_rc" -ne 0 ]; then
+    return "$e2e_rc"
+  fi
+  return "$vlm_rc"
 }
 
 run_diffusion_vlm_assessment() {

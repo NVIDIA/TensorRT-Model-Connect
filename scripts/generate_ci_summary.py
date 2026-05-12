@@ -5,13 +5,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 
 
 _STATUS_ORDER = ("fail", "error", "skip", "pass")
 _PASS_STATUSES = {"pass", "passed", "success", "succeeded"}
+_PYTEST_TO_RESULT_STATUS = {
+    "PASSED": "pass",
+    "XPASS": "pass",
+    "FAILED": "fail",
+    "ERROR": "error",
+    "SKIPPED": "skip",
+    "XFAIL": "skip",
+}
+_TEST_CASE_RE = re.compile(r"test_e2e\[([^\]]+)\]")
+_CONSOLE_OUTCOME_RE = re.compile(
+    r"tests/test_e2e\.py::test_e2e\[([^\]]+)\]\s+"
+    r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
+)
 _METRIC_PRIORITY = (
     "logit_cosine_p5",
     "token_agreement_rate",
@@ -45,6 +60,135 @@ def _load_results(artifacts_dir: Path) -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"WARNING: skipping {result_path}: {exc}", file=sys.stderr)
     return results
+
+
+def _e2e_root_from_artifacts_dir(artifacts_dir: Path) -> Path:
+    if artifacts_dir.name == "artifacts":
+        return artifacts_dir.parent
+    return artifacts_dir
+
+
+def _extract_case_name(text: str) -> str:
+    match = _TEST_CASE_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def _clean_pytest_reason(reason: str) -> str:
+    text = reason.strip()
+    while text.startswith("(") and text.endswith(")") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _junit_files(e2e_root: Path) -> list[Path]:
+    worker_files = sorted(e2e_root.glob("junit-gpu*.xml"))
+    if worker_files:
+        return worker_files
+    merged = e2e_root / "junit.xml"
+    return [merged] if merged.is_file() else []
+
+
+def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
+    outcomes: dict[str, dict[str, str]] = {}
+
+    for xml_path in _junit_files(e2e_root):
+        try:
+            root = ET.parse(xml_path).getroot()
+        except (ET.ParseError, OSError) as exc:
+            print(f"WARNING: skipping {xml_path}: {exc}", file=sys.stderr)
+            continue
+        for testcase in root.iter("testcase"):
+            case_name = _extract_case_name(
+                " ".join(
+                    str(testcase.attrib.get(key, ""))
+                    for key in ("classname", "name")
+                )
+            )
+            if not case_name:
+                continue
+            status = "PASSED"
+            reason = ""
+            source = xml_path.name
+            failure = testcase.find("failure")
+            error = testcase.find("error")
+            skipped = testcase.find("skipped")
+            if error is not None:
+                status = "ERROR"
+                reason = error.attrib.get("message", "") or (error.text or "")
+            elif failure is not None:
+                status = "FAILED"
+                reason = failure.attrib.get("message", "") or (failure.text or "")
+            elif skipped is not None:
+                skip_type = skipped.attrib.get("type", "")
+                status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
+                reason = skipped.attrib.get("message", "") or (skipped.text or "")
+            outcomes[case_name] = {
+                "pytest_status": status,
+                "reason": _clean_pytest_reason(reason),
+                "source": source,
+            }
+
+    for log_path in sorted(e2e_root.glob("console-*.log")):
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            print(f"WARNING: skipping {log_path}: {exc}", file=sys.stderr)
+            continue
+        for line in lines:
+            match = _CONSOLE_OUTCOME_RE.search(line)
+            if not match:
+                continue
+            case_name, status, rest = match.groups()
+            reason = _clean_pytest_reason(rest.split("[", 1)[0])
+            if status in {"XPASS", "XFAIL"} or case_name not in outcomes:
+                outcomes[case_name] = {
+                    "pytest_status": status,
+                    "reason": reason,
+                    "source": log_path.name,
+                }
+
+    return outcomes
+
+
+def _merge_pytest_outcomes(
+    results: list[dict[str, Any]],
+    outcomes: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for result in results:
+        item = dict(result)
+        case_name = str(item.get("case_name") or "")
+        if case_name:
+            seen.add(case_name)
+        if case_name in outcomes:
+            item["_pytest_outcome"] = outcomes[case_name]
+        merged.append(item)
+
+    for case_name, outcome in sorted(outcomes.items()):
+        if case_name in seen:
+            continue
+        status = _PYTEST_TO_RESULT_STATUS.get(
+            outcome.get("pytest_status", ""), "error")
+        merged.append(
+            {
+                "case_name": case_name,
+                "status": status,
+                "failure_type": "pytest_failed"
+                if status in {"fail", "error"} else None,
+                "case_config": {},
+                "stages": {
+                    "pytest": {
+                        "status": status,
+                        "message": outcome.get("reason", ""),
+                        "metrics": {},
+                    }
+                },
+                "_summary_only": True,
+                "_pytest_outcome": outcome,
+            }
+        )
+    return merged
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -84,6 +228,11 @@ def _total_time(result: dict[str, Any]) -> str:
 
 
 def _failure_note(result: dict[str, Any]) -> str:
+    pytest_outcome = result.get("_pytest_outcome")
+    if result.get("_summary_only") and isinstance(pytest_outcome, dict):
+        status = pytest_outcome.get("pytest_status", "pytest")
+        reason = pytest_outcome.get("reason", "")
+        return f"{status}: {reason}" if reason else str(status)
     failure_type = result.get("failure_type")
     if failure_type:
         return str(failure_type)
@@ -111,6 +260,30 @@ def _case_row(result: dict[str, Any], include_failure: bool = False) -> str:
     ]
     if include_failure:
         cols.insert(4, _md(_failure_note(result)))
+    return "| " + " | ".join(cols) + " |"
+
+
+def _pytest_status(result: dict[str, Any]) -> str:
+    outcome = result.get("_pytest_outcome")
+    if not isinstance(outcome, dict):
+        return ""
+    return str(outcome.get("pytest_status") or "")
+
+
+def _pytest_reason(result: dict[str, Any]) -> str:
+    outcome = result.get("_pytest_outcome")
+    if not isinstance(outcome, dict):
+        return ""
+    return str(outcome.get("reason") or "")
+
+
+def _pytest_row(result: dict[str, Any]) -> str:
+    cols = [
+        _md(result.get("case_name", "unknown")),
+        _md(_pytest_status(result)),
+        _md(_status(result)),
+        _md(_pytest_reason(result)),
+    ]
     return "| " + " | ".join(cols) + " |"
 
 
@@ -186,6 +359,23 @@ def render_summary(
             lines.append(f"\nShowing {max_rows} of {len(failures)} non-passing cases.")
         lines.append("")
 
+    waived = [r for r in results if _pytest_status(r) in {"XFAIL", "XPASS"}]
+    if waived:
+        lines.append("### Pytest Waive Outcomes")
+        rows = [
+            _pytest_row(r)
+            for r in sorted(
+                waived,
+                key=lambda item: (
+                    _pytest_status(item) != "XPASS",
+                    str(item.get("case_name", "")),
+                ),
+            )
+        ]
+        lines.extend(_render_table(
+            ["Model", "Pytest Status", "Result Status", "Reason"], rows))
+        lines.append("")
+
     timed = [r for r in results if _total_time_seconds(r) is not None]
     if timed:
         lines.append("### Slowest E2E Cases")
@@ -218,6 +408,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     results = _load_results(args.artifacts_dir)
+    outcomes = _load_pytest_outcomes(_e2e_root_from_artifacts_dir(args.artifacts_dir))
+    results = _merge_pytest_outcomes(results, outcomes)
     print(
         render_summary(
             results=results,
