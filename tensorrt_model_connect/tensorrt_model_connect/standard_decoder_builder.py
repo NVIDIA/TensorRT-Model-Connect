@@ -61,6 +61,7 @@ def build_standard_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    alibi_bias_scale: float = 1.0,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -85,6 +86,9 @@ def build_standard_decoder_engine(
             rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
             Most models use this (True, default). GPT-Neo does NOT scale (False).
+        alibi_bias_scale: Extra scale applied to ALiBi slopes before building
+            the additive attention mask. BLOOM leaves ALiBi unscaled while
+            Falcon scales ALiBi with the same factor as QK scores.
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -134,6 +138,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
         )
 
@@ -298,7 +303,7 @@ def build_standard_decoder_engine(
         position_embed_table = graph_ops.add_constant(
             network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
     elif position_type == "alibi":
-        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
+        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads) * float(alibi_bias_scale)
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
             alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)

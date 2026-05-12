@@ -5,7 +5,6 @@
 albert-base               XFAIL  (encoder representation parity below minimum contract floor; threshold override no longer counts as green validation)
 bart-base                 XFAIL  (seq2seq-base weak contract produced empty TRT continuation against non-empty HF output)
 dpr-ctx-encoder           XFAIL  (DPR embedding cosine below minimum contract floor; old negative threshold masked the parity gap)
-falcon-rw-1b             XFAIL  (ALiBi attention numerical divergence — TRT logit rel_l2 1.7x, needs investigation)
 fnet-base                 XFAIL  (encoder representation parity below minimum contract floor; DFT approximation gap needs validation follow-up)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)

@@ -13,8 +13,13 @@ Intent: Validate the Falcon family plugin weight loading including LayerNorm wit
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from Falcon's HF layout, LayerNorm biases are loaded, and FC MLP keys (dense_h_to_4h/dense_4h_to_h) resolve to fc1/fc2.
 """
-import numpy as np
+import sys
+import types
 
+import numpy as np
+import pytest
+
+from tensorrt_model_connect.config import ModelConfig
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
@@ -128,6 +133,52 @@ class FalconPluginTester(FamilyPluginTester):
 
 class TestFalconEngine(FamilyPluginTestMixin):
     tester_class = FalconPluginTester
+
+    def test_rw_alibi_bias_uses_falcon_logit_scale(self, monkeypatch):
+        """Validate Falcon-RW ALiBi is scaled like HF Falcon attention logits.
+
+        Intention:
+            HF Falcon adds ALiBi to raw QK attention scores and then scales the
+            combined logits by 1/sqrt(head_dim). TRT native attention scales QK
+            before applying the additive mask, so the Falcon plugin must
+            pre-scale ALiBi slopes to keep the same logit contract.
+
+        Setup:
+            Monkeypatch the shared decoder builder, build a tiny ALiBi Falcon
+            config, and verify the plugin forwards the expected ALiBi scale and
+            exact GELU activation.
+        """
+        fake_trt = types.ModuleType("tensorrt")
+        monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+        from tensorrt_model_connect import trt_compat
+        monkeypatch.setattr(trt_compat, "_module", None)
+        from tensorrt_model_connect.families import falcon as falcon_module
+
+        captured = {}
+
+        def fake_build_standard_decoder_engine(*args, **kwargs):
+            captured.update(kwargs)
+            return b"plan"
+
+        monkeypatch.setattr(
+            falcon_module,
+            "build_standard_decoder_engine",
+            fake_build_standard_decoder_engine,
+        )
+        config = ModelConfig.create_tiny(
+            "falcon",
+            hidden_size=16,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            alibi=True,
+        )
+
+        plan = falcon_module.plugin.build_engine(config, {}, 8)
+
+        assert plan == b"plan"
+        assert captured["position_type"] == "alibi"
+        assert captured["activation"] == "gelu"
+        assert captured["alibi_bias_scale"] == pytest.approx(0.5)
 
     def test_layernorm_beta_present(self, tester, tmp_path):
         """Validate that Falcon includes LayerNorm bias (beta) weights.

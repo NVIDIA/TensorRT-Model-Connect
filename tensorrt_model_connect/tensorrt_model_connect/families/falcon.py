@@ -235,6 +235,12 @@ class FalconPlugin:
         # Falcon-RW models use ALiBi; Falcon-3 uses RoPE
         use_alibi = config.raw.get("alibi", False)
         position_type = "alibi" if use_alibi else "rope"
+        alibi_bias_scale = (
+            float(1.0 / np.sqrt(max(config.head_dim, 1)))
+            if use_alibi
+            else 1.0
+        )
+        activation = config.raw.get("activation") or config.hidden_act or "gelu"
 
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
@@ -242,7 +248,8 @@ class FalconPlugin:
             norm_type="layernorm",
             mlp_type="gelu_fc",
             position_type=position_type,
-            activation="gelu_new",
+            activation=activation,
+            alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 
