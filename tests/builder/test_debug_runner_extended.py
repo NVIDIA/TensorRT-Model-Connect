@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import struct
 import warnings
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -800,8 +800,8 @@ class TestVLTrtRunnerConfigLoading:
         path = self._make_vl_bundle(tmp_path, config, preproc)
 
         # Mock TrtRunner and VisionTrtRunner constructors so we don't need TRT
-        with patch("tensorrt_model_connect.debug_runner.TrtRunner") as MockTrt, \
-             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner") as MockVision:
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"), \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(path)
 
         assert runner.image_token_id == 151655
@@ -1073,7 +1073,6 @@ class TestTrtRunnerWithEngine:
         attention_size = 8
         max_cache_length = 4
         vocab_size = 16
-        hidden_size = 8
 
         logger = trt.Logger(trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -1083,15 +1082,12 @@ class TestTrtRunnerWithEngine:
         config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, max_cache_length + 1))
+        network.add_input("token_id", trt.int32, (1,))
+        network.add_input("position_id", trt.int32, (1,))
+        network.add_input("attention_mask", trt.float32, (1, max_cache_length + 1))
 
-        cache_k_0 = network.add_input(
-            "cache_k_0", trt.float32, (max_cache_length, attention_size))
-        cache_v_0 = network.add_input(
-            "cache_v_0", trt.float32, (max_cache_length, attention_size))
+        network.add_input("cache_k_0", trt.float32, (max_cache_length, attention_size))
+        network.add_input("cache_v_0", trt.float32, (max_cache_length, attention_size))
 
         # Simple pass-through: logits = zeros(1, vocab_size)
         # Use a constant for logits output
