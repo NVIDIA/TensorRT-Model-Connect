@@ -1,0 +1,13 @@
+{
+  "text": "Architecture:\n\nAttention:Standard Q/K/V/O (no biases, no GQA -- heads == kv_heads)\n\nRoPE:Standard rotary position embeddings\n\nLayer 0:Dense SwiGLU MLP (intermediate_size=6848)\n\nLayers 1-11:MoE (64 experts, top-6, intermediate=896) + shared experts (2, intermediate=896)\n\nNorm:RMSNorm",
+  "required_substrings": [
+    "Architecture:",
+    "Attention:Standard Q/K/V/O",
+    "RoPE:Standard rotary position embeddings",
+    "Layer 0:Dense SwiGLU MLP",
+    "Layers 1-11:MoE",
+    "Norm:RMS"
+  ],
+  "source_image": "tests/e2e/data/orc_test_img.jpeg",
+  "contract_scope": "L0 short decode validates the visible Architecture section of the OCR fixture."
+}

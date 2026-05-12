@@ -16,7 +16,7 @@
   "trust_remote_code": true,
   "reference_backend": "golden_snapshot",
   "metadata": {
-    "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_golden.json"
+    "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_l0_golden.json"
   },
-  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, golden OCR text contract, and full cache budget with shorter decode budget."
+  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
 }

@@ -107,9 +107,47 @@ class VLQAPlugin:
         is_ocr = case.reference_family == "ocr_markdown"
         required_substrings = ref_output.data.get("required_substrings", [])
         if is_ocr and required_substrings:
+            if not ref_text:
+                metrics = {
+                    "reference_text_present": MetricResult(
+                        value=0.0,
+                        threshold=1.0,
+                        operator="==",
+                        passed=False,
+                        note="OCR golden snapshot exposes human-readable reference text"),
+                }
+                return make_fail(
+                    "full_generation",
+                    metrics,
+                    "OCR golden snapshot includes visible reference text",
+                    "OCR golden snapshot must include human-readable reference text")
+
+            ref_hits, ref_missing = _normalized_substring_hits(ref_text, required_substrings)
+            if ref_missing:
+                metrics = {
+                    "reference_contract_substrings": MetricResult(
+                        value=float(ref_hits),
+                        threshold=float(len(required_substrings)),
+                        operator="==",
+                        passed=False,
+                        note="required OCR substrings visible in reference text"),
+                }
+                return make_fail(
+                    "full_generation",
+                    metrics,
+                    "OCR required substrings are visible in reference text",
+                    "OCR golden snapshot hides required text from the report: "
+                    + ", ".join(ref_missing))
+
             hits, missing = _normalized_substring_hits(trt_text, required_substrings)
             passed = not missing
             metrics = {
+                "reference_contract_substrings": MetricResult(
+                    value=float(len(required_substrings)),
+                    threshold=float(len(required_substrings)),
+                    operator="==",
+                    passed=True,
+                    note="required OCR substrings visible in reference text"),
                 "required_ocr_substrings": MetricResult(
                     value=float(hits),
                     threshold=float(len(required_substrings)),
