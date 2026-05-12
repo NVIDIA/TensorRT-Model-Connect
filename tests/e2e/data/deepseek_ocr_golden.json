@@ -1,0 +1,12 @@
+{
+  "text": "",
+  "required_substrings": [
+    "Architecture:",
+    "Standard Q/K/V/O",
+    "rotary position embeddings",
+    "Dense SwiGLU MLP",
+    "RMSNorm",
+    "SAM ViT-B + Qwen2 encoder"
+  ],
+  "source_image": "tests/e2e/data/orc_test_img.jpeg"
+}

@@ -2460,6 +2460,41 @@ def _preprocess_aspect_preserve_chw(
     return img_np.transpose(2, 0, 1).astype(np.float32)
 
 
+def _preprocess_pad_center_chw(
+    image_path: str,
+    fixed_image_size: int = 448,
+    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
+    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
+    interpolation: str = "bicubic",
+    **_kwargs: Any,
+) -> np.ndarray:
+    """Aspect-ratio-preserving resize + centered zero-pad: [C, H, W]."""
+    from PIL import Image
+
+    resample = _resolve_pil_interpolation(interpolation)
+    img = Image.open(image_path).convert("RGB")
+
+    w, h = img.size
+    scale = fixed_image_size / max(w, h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    img = img.resize((new_w, new_h), resample)
+
+    padded = Image.new("RGB", (fixed_image_size, fixed_image_size), (0, 0, 0))
+    left = (fixed_image_size - new_w) // 2
+    top = (fixed_image_size - new_h) // 2
+    padded.paste(img, (left, top))
+
+    img_np = np.array(padded, dtype=np.float32) / 255.0
+
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    return img_np.transpose(2, 0, 1).astype(np.float32)
+
+
 def preprocess_image_for_trt(
     image_path: str,
     preprocessor_type: str = "qwen_merge_group",
@@ -2472,6 +2507,7 @@ def preprocess_image_for_trt(
       "simple_chw":          [C, H, W] standard resize + normalize
       "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
       "aspect_preserve_chw": [C, H, W] aspect-preserving resize + zero-pad
+      "pad_center_chw":      [C, H, W] aspect-preserving resize + centered zero-pad
     """
     temporal = kwargs.get("temporal_patch_size", 1)
     if preprocessor_type == "simple_chw":
@@ -2486,6 +2522,11 @@ def preprocess_image_for_trt(
         return result
     if preprocessor_type == "aspect_preserve_chw":
         result = _preprocess_aspect_preserve_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return result
+    if preprocessor_type == "pad_center_chw":
+        result = _preprocess_pad_center_chw(image_path, **kwargs)
         if temporal > 1 and result.shape[0] < temporal * 3:
             result = np.tile(result, (temporal, 1, 1))
         return result

@@ -38,6 +38,15 @@ def _reference_is_invariant_only(case, ref_output: StageOutput) -> bool:
     )
 
 
+def _normalized_substring_hits(text: str, substrings: list[str]) -> tuple[int, list[str]]:
+    normalized = normalize_text(text)
+    missing = [
+        expected for expected in substrings
+        if normalize_text(expected) not in normalized
+    ]
+    return len(substrings) - len(missing), missing
+
+
 class VLQAPlugin:
     reference_families = ["vl_instruct_qa", "ocr_markdown"]
     user_contract = "vl_answer"
@@ -53,10 +62,10 @@ class VLQAPlugin:
 
         # vision_encode: invariant check only (no text to compare)
         if stage == "vision_encode":
-            passed = trt_output.data.get("passed", False)
-            # Also accept if data is non-empty (some runners just return metrics)
-            if not passed and trt_output.data:
-                passed = "metrics" in trt_output.data or not trt_output.data.get("error")
+            returncode = trt_output.metadata.get("returncode")
+            passed = bool(trt_output.data.get("passed", False))
+            if returncode not in (None, 0):
+                passed = False
             metrics = {
                 "vision_encode_ok": MetricResult(
                     value=1.0 if passed else 0.0, threshold=1.0, operator="==",
@@ -83,6 +92,40 @@ class VLQAPlugin:
         trt_text = trt_output.data.get("generated_text", trt_output.text or "")
         ref_text = ref_output.data.get("text", ref_output.text or "")
 
+        returncode = trt_output.metadata.get("returncode")
+        if returncode not in (None, 0):
+            metrics = {
+                "trt_returncode_ok": MetricResult(
+                    value=float(returncode), threshold=0.0, operator="==",
+                    passed=False, note="TRT generation subprocess exit code"),
+            }
+            return make_fail(
+                "full_generation", metrics,
+                "TRT generation subprocess must exit cleanly",
+                f"TRT generation failed with return code {returncode}")
+
+        is_ocr = case.reference_family == "ocr_markdown"
+        required_substrings = ref_output.data.get("required_substrings", [])
+        if is_ocr and required_substrings:
+            hits, missing = _normalized_substring_hits(trt_text, required_substrings)
+            passed = not missing
+            metrics = {
+                "required_ocr_substrings": MetricResult(
+                    value=float(hits),
+                    threshold=float(len(required_substrings)),
+                    operator="==",
+                    passed=passed,
+                    note="required OCR substrings present in TRT output"),
+            }
+            if passed:
+                return make_pass(
+                    "full_generation", metrics,
+                    "required OCR substrings present")
+            return make_fail(
+                "full_generation", metrics,
+                "required OCR substrings present",
+                "TRT OCR output missing expected text: " + ", ".join(missing))
+
         if not ref_text:
             has_output = len(normalize_text(trt_text)) > 0
             metrics = {
@@ -103,7 +146,6 @@ class VLQAPlugin:
             return make_fail("full_generation", metrics, "invariant: non-empty output",
                             "Reference produced empty VL/OCR text; parity is unvalidated")
 
-        is_ocr = case.reference_family == "ocr_markdown"
         trt_answer = normalize_text(extract_answer(
             StageOutput(stage_name=stage, text=trt_text), prompt))
         ref_answer = normalize_text(extract_answer(

@@ -702,6 +702,31 @@ class TestPreprocessImageDispatch:
         assert result.shape == (3, 64, 64)
         assert result.dtype == np.float32
 
+    def test_pad_center_chw_dispatch_centers_padding(self, tmp_path):
+        """pad_center_chw preserves aspect ratio and centers the padded image."""
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
+
+        from PIL import Image
+        img = Image.new("RGB", (100, 50), color=(255, 0, 0))
+        img_path = str(tmp_path / "wide.png")
+        img.save(img_path)
+
+        result = preprocess_image_for_trt(
+            img_path,
+            preprocessor_type="pad_center_chw",
+            fixed_image_size=100,
+            image_mean=(0.0, 0.0, 0.0),
+            image_std=(1.0, 1.0, 1.0),
+            interpolation="nearest",
+        )
+
+        assert result.shape == (3, 100, 100)
+        assert result.dtype == np.float32
+        assert result[0, 24, 50] == 0.0
+        assert result[0, 25, 50] == 1.0
+        assert result[1, 25, 50] == 0.0
+        assert result[2, 25, 50] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # _resolve_pil_interpolation

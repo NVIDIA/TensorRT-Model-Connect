@@ -14,6 +14,9 @@
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
   "trust_remote_code": true,
-  "reference_backend": "invariant_only",
-  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, invariant comparator, OCR text artifact contract, and full cache budget with shorter decode budget."
+  "reference_backend": "golden_snapshot",
+  "metadata": {
+    "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_golden.json"
+  },
+  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, golden OCR text contract, and full cache budget with shorter decode budget."
 }

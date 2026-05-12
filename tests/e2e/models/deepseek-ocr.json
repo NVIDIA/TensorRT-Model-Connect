@@ -14,6 +14,11 @@
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
   "trust_remote_code": true,
-  "reference_backend": "invariant_only",
-  "notes": "HF reference broken: DeepSeek-OCR-2 custom code imports LlamaFlashAttention2 removed in transformers 5.x. TRT pipeline still validated via invariant checks."
+  "reference_backend": "golden_snapshot",
+  "reference_family": "ocr_markdown",
+  "user_contract": "ocr_text",
+  "metadata": {
+    "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_golden.json"
+  },
+  "notes": "HF reference broken: DeepSeek-OCR-2 custom code imports LlamaFlashAttention2 removed in transformers 5.x. TRT pipeline is validated against golden OCR text from tests/e2e/data/orc_test_img.jpeg."
 }

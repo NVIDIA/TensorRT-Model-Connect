@@ -73,6 +73,93 @@ def test_vl_qa_invariant_only_reference_is_skipped_not_green() -> None:
     assert result.status == StageStatus.SKIPPED.value
 
 
+def test_vl_qa_vision_encode_nonzero_returncode_fails() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(
+            stage_name="vision_encode",
+            data={"passed": False, "metrics": {"vision_pass": True}},
+            metadata={"returncode": 1},
+        ),
+        StageOutput(stage_name="vision_encode", data={}),
+        _case(),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert not result.metrics["vision_encode_ok"].passed
+
+
+def test_vl_qa_full_generation_nonzero_returncode_fails() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"generated_text": "White"},
+            metadata={"returncode": 1},
+        ),
+        StageOutput(stage_name="full_generation", data={"text": "White"}),
+        _case(),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert "return code 1" in result.message
+
+
+def test_vl_qa_ocr_required_substrings_are_real_contract() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "generated_text": (
+                    "DeepSeek-OCR-2 family plugin\n"
+                    "Architecture:\n"
+                    "- Vision: SAM ViT-B + Qwen2 encoder"
+                )
+            },
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "required_substrings": [
+                    "DeepSeek-OCR-2 family plugin",
+                    "Architecture:",
+                    "Vision: SAM ViT-B + Qwen2 encoder",
+                ]
+            },
+        ),
+        _case(reference_family="ocr_markdown", reference_backend="golden_snapshot"),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert result.metrics["required_ocr_substrings"].passed
+
+
+def test_vl_qa_ocr_required_substrings_fail_when_missing() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"generated_text": "DeepSeek-OCR-2 family plugin"},
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "required_substrings": [
+                    "DeepSeek-OCR-2 family plugin",
+                    "Vision: SAM ViT-B + Qwen2 encoder",
+                ]
+            },
+        ),
+        _case(reference_family="ocr_markdown", reference_backend="golden_snapshot"),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
+
+
 def test_vl_qa_accepts_single_word_answer_inside_reference_sentence() -> None:
     result = VLQAPlugin().verify(
         StageOutput(stage_name="full_generation", data={"generated_text": "White"}),
