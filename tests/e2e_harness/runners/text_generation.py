@@ -43,6 +43,15 @@ _TRTMC_LOAD_TIMING_RE = re.compile(
     r"load_deserialize_ms=(?P<load_deserialize_ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
+_TRT_RUNTIME_ERROR_RE = re.compile(
+    r"(?im)^.*("
+    r"\[trt\]\s+ERROR:"
+    r"|IExecutionContext::enqueueV3:\s+Error Code"
+    r"|Internal Error:\s+MyelinCheckException"
+    r"|Cuda Runtime"
+    r"|illegal memory access"
+    r").*$"
+)
 
 
 def _extract_trtmc_timing(stderr: str) -> dict[str, float]:
@@ -72,6 +81,11 @@ def _extract_trtmc_load_timing(stderr: str) -> dict[str, float]:
         except ValueError:
             continue
     return {"trt_load_deserialize_s": total_ms / 1000.0} if found else {}
+
+
+def _detect_trt_runtime_error(stderr: str) -> str:
+    match = _TRT_RUNTIME_ERROR_RE.search(stderr or "")
+    return match.group(0).strip() if match else ""
 
 
 class TextGenerationCausalRunner:
@@ -158,9 +172,11 @@ class TextGenerationCausalRunner:
 
         data = {
             "cpp_text": cpp_text,
-            "cpp_returncode": cpp_meta.get("returncode", -1),
+            "cpp_returncode": cpp_meta.get("effective_returncode", cpp_meta.get("returncode", -1)),
             "prompt": prompt,
         }
+        if cpp_meta.get("runtime_error_detected"):
+            data["cpp_runtime_error"] = cpp_meta["runtime_error_detected"]
         if logits_path:
             data["logits_path"] = logits_path
 
@@ -297,7 +313,14 @@ class TextGenerationCausalRunner:
         }
         meta.update(_extract_trtmc_timing(result.stderr))
         meta.update(_extract_trtmc_load_timing(result.stderr))
-        if result.returncode != 0:
+        runtime_error = _detect_trt_runtime_error(result.stderr)
+        if runtime_error:
+            meta["runtime_error_detected"] = runtime_error
+            if result.returncode == 0:
+                meta["effective_returncode"] = -1
+                meta["error"] = "TensorRT runtime error detected in stderr"
+
+        if result.returncode != 0 or runtime_error:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "", "cpp_binary")
             meta["stderr_truncated"] = truncated

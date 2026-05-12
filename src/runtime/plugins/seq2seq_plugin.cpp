@@ -215,7 +215,9 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, "engine_plan"), "seq2seq decoder", opts);
         int32_t decoder_layers = extract_json_int(json, "decoder_layers", ctx.config.num_layers);
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
-        int32_t max_source_length = extract_json_int(json, "max_source_length", 128);
+        int32_t max_source_length = extract_json_int(
+            json, "max_source_length",
+            extract_json_int(json, "max_source_positions", ctx.config.max_cache_length));
         int32_t decoder_start_token_id = extract_json_int(json, "decoder_start_token_id", 2);
         int32_t eos_token_id = (ctx.config.id_eos >= 0) ? ctx.config.id_eos : 2;
         int32_t bos_token_id = (ctx.config.id_bos >= 0) ? ctx.config.id_bos : -1;

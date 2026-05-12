@@ -39,3 +39,35 @@ def test_seq2seq_weak_reference_prompt_text_is_not_stripped_to_empty() -> None:
 
     assert result.status == StageStatus.FAILED.value
     assert result.metrics["ned"].value == 1.0
+
+
+def test_seq2seq_weak_trt_prompt_text_is_not_stripped_to_empty() -> None:
+    result = CausalContinuationPlugin().verify(
+        StageOutput(stage_name="full_generation", text="The capital of France is"),
+        StageOutput(stage_name="full_generation", text="The capital of France is"),
+        _case(reference_family="seq2seq_base_weak"),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert result.metrics["ned"].value == 0.0
+
+
+def test_continuation_reports_cpp_runtime_error() -> None:
+    result = CausalContinuationPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "cpp_returncode": -1,
+                "cpp_runtime_error": "[trt] ERROR: IExecutionContext::enqueueV3",
+            },
+            text="The capital of France is",
+        ),
+        StageOutput(stage_name="full_generation", text="The capital of France is"),
+        _case(reference_family="seq2seq_base_weak"),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert result.status == StageStatus.ERROR.value
+    assert "cpp_returncode=-1" in result.message
+    assert "enqueueV3" in result.message

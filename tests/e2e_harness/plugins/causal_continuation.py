@@ -1,7 +1,7 @@
 """Contract test plugin for base causal LM continuation and code completion."""
 from __future__ import annotations
 
-from ..contracts import MetricResult
+from ..contracts import CompareResult, MetricResult, StageStatus
 from .base import normalize_text, strip_prompt_echo, levenshtein_ned, make_pass, make_fail
 
 class CausalContinuationPlugin:
@@ -13,11 +13,28 @@ class CausalContinuationPlugin:
         return {}
 
     def verify(self, trt_output, ref_output, case, threshold):
+        cpp_rc = (trt_output.data or {}).get("cpp_returncode")
+        if cpp_rc not in (None, 0):
+            metrics = {
+                "cpp_returncode_ok": MetricResult(
+                    value=0.0, threshold=1.0, operator="==", passed=False,
+                    note=f"cpp_returncode={cpp_rc}"),
+            }
+            detail = (trt_output.data or {}).get("cpp_runtime_error")
+            suffix = f": {detail}" if detail else ""
+            return CompareResult(
+                stage_name="full_generation",
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
+                message=f"TRT C++ run failed (cpp_returncode={cpp_rc}){suffix}",
+            )
+
         prompt = case.inputs.get("prompt", "")
-        trt_text = normalize_text(strip_prompt_echo(trt_output.text or "", prompt))
         if case.reference_family == "seq2seq_base_weak":
+            trt_text = normalize_text(trt_output.text or "")
             ref_text = normalize_text(ref_output.text or "")
         else:
+            trt_text = normalize_text(strip_prompt_echo(trt_output.text or "", prompt))
             ref_text = normalize_text(strip_prompt_echo(ref_output.text or "", prompt))
 
         if not trt_text and not ref_text:
