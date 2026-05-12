@@ -94,8 +94,8 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool
             throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
                                      e.what());
         }
-        std::cerr << "[trtmc] Native BPE unavailable (" << e.what() << "), falling back to HF Python"
-                  << std::endl;
+        std::cerr << "[trtmc] Native BPE unavailable (" << e.what()
+                  << "), falling back to HF Python" << std::endl;
     }
     return nullptr;
 }

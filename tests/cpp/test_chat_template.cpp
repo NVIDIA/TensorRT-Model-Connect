@@ -125,8 +125,7 @@ static void test_apply_llama3() {
 }
 
 static void test_apply_nemotron_h_no_thinking() {
-    auto result =
-        trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronH, "hello", false);
+    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronH, "hello", false);
     check(result == "<SPECIAL_10>System\n\n<SPECIAL_11>User\nhello\n"
                     "<SPECIAL_11>Assistant\n<think></think>",
           "nemotron-h no-thinking application");

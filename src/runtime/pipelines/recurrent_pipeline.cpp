@@ -155,11 +155,14 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
     if (prof_steps_ > 0) {
         std::cerr << std::setprecision(2);
         std::cerr << "[trtmc-perf] Per-step breakdown (avg over " << prof_steps_ << " steps):\n";
-        std::cerr << "[trtmc-perf]   prepare_step:  " << (prof_prepare_ms_ / prof_steps_) << " ms\n";
-        std::cerr << "[trtmc-perf]   forward (TRT): " << (prof_forward_ms_ / prof_steps_) << " ms\n";
+        std::cerr << "[trtmc-perf]   prepare_step:  " << (prof_prepare_ms_ / prof_steps_)
+                  << " ms\n";
+        std::cerr << "[trtmc-perf]   forward (TRT): " << (prof_forward_ms_ / prof_steps_)
+                  << " ms\n";
         std::cerr << "[trtmc-perf]   logits copy:   " << (prof_logits_copy_ms_ / prof_steps_)
                   << " ms\n";
-        std::cerr << "[trtmc-perf]   state advance: " << (prof_advance_ms_ / prof_steps_) << " ms\n";
+        std::cerr << "[trtmc-perf]   state advance: " << (prof_advance_ms_ / prof_steps_)
+                  << " ms\n";
 
         std::size_t output_bytes = 0;
         for (const auto& info : decoder_->output_info()) {

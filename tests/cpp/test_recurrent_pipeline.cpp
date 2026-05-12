@@ -119,7 +119,7 @@ static void test_mamba_pipeline() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
 
     // Mamba: 2 state specs, 1 layer
     std::vector<trtmc::RecurrentState::TensorSpec> specs = {
@@ -133,7 +133,7 @@ static void test_mamba_pipeline() {
     cfg.id_eos = 2; // argmax=2=eos
 
     trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
-                                     "MambaPipeline");
+                                      "MambaPipeline");
     check(std::string(pipeline.pipeline_type()) == "MambaPipeline", "mamba name");
 
     trtmc::GenerateConfig gen_cfg;
@@ -158,7 +158,7 @@ static void test_rwkv_pipeline() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
 
     // RWKV: 5 state specs, 2 layers
     std::vector<trtmc::RecurrentState::TensorSpec> specs = {
@@ -171,7 +171,8 @@ static void test_rwkv_pipeline() {
     cfg.vocab_size = 4;
     cfg.id_eos = 99; // never hit
 
-    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream, "RwkvPipeline");
+    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
+                                      "RwkvPipeline");
     check(std::string(pipeline.pipeline_type()) == "RwkvPipeline", "rwkv name");
 
     trtmc::GenerateConfig gen_cfg;
@@ -244,7 +245,7 @@ static void test_hybrid_pipeline() {
     cfg.has_position_input = true;
 
     trtmc::RecurrentPipeline pipeline(std::move(module), std::move(hybrid), cfg, stream,
-                                     "HybridPipeline");
+                                      "HybridPipeline");
     check(std::string(pipeline.pipeline_type()) == "HybridPipeline", "hybrid name");
 
     trtmc::GenerateConfig gen_cfg;
@@ -268,7 +269,7 @@ static void test_generate_applies_chat_template() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     std::vector<trtmc::RecurrentState::TensorSpec> specs = {
         {"conv_state", {12}},
         {"ssm_state", {32}},
@@ -283,7 +284,7 @@ static void test_generate_applies_chat_template() {
 
     auto tokenizer = std::make_shared<RecordingTokenizer>();
     trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
-                                     "MambaPipeline", tokenizer);
+                                      "MambaPipeline", tokenizer);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
