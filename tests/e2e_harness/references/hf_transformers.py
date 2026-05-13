@@ -39,6 +39,14 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _reference_generation_mode(case: E2ECase) -> str:
+    """Return the text-generation reference mode requested by a contract plugin."""
+    contract_config = case.metadata.get("contract_config", {})
+    if not isinstance(contract_config, dict):
+        return ""
+    return str(contract_config.get("reference_generation_mode", "") or "")
+
+
 def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     """Return a model-family prompt that preserves one image placeholder."""
     lower_id = hf_id.lower()
@@ -135,6 +143,7 @@ class HfTransformersReference:
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
         enable_thinking = contract_config.get("enable_thinking", True)
+        reference_generation_mode = _reference_generation_mode(case)
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
@@ -153,6 +162,7 @@ class HfTransformersReference:
             text_path = {text_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
+            reference_generation_mode = {reference_generation_mode!r}
 
             def _np(t):
                 return t.detach().float().cpu().numpy()
@@ -210,37 +220,58 @@ class HfTransformersReference:
                         all_logits.append(_np(outputs.logits[0, i]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
                 else:
-                    # Decoder-only: step-by-step autoregressive
-                    outputs = model(ids_tensor)
-                    prefill_logits = _np(outputs.logits[0])
-                    for i in range(len(input_ids)):
-                        all_logits.append(prefill_logits[i])
-
-                    gen_ids = list(input_ids)
-                    generated_token_ids = []
-                    eos_id = getattr(tokenizer, "eos_token_id", None)
-                    for _ in range(max_new_tokens):
-                        next_token = int(np.argmax(all_logits[-1]))
-                        generated_token_ids.append(next_token)
-                        if eos_id is not None and next_token == eos_id:
-                            break
-                        gen_ids.append(next_token)
-                        ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+                    if reference_generation_mode == "hf_generate":
+                        attention_mask = torch.ones_like(ids_tensor)
+                        output_ids = model.generate(
+                            ids_tensor,
+                            attention_mask=attention_mask,
+                            max_new_tokens=max_new_tokens,
+                            do_sample=False,
+                            num_beams=1,
+                            pad_token_id=getattr(tokenizer, "eos_token_id", None),
+                        )
+                        full_ids = output_ids[0].tolist()
+                        if len(full_ids) >= len(input_ids):
+                            generated_token_ids = full_ids[len(input_ids):]
+                        else:
+                            generated_token_ids = full_ids
+                    else:
+                        # Decoder-only: step-by-step autoregressive
                         outputs = model(ids_tensor)
-                        all_logits.append(_np(outputs.logits[0, -1]))
+                        prefill_logits = _np(outputs.logits[0])
+                        for i in range(len(input_ids)):
+                            all_logits.append(prefill_logits[i])
+
+                        gen_ids = list(input_ids)
+                        generated_token_ids = []
+                        eos_id = getattr(tokenizer, "eos_token_id", None)
+                        for _ in range(max_new_tokens):
+                            next_token = int(np.argmax(all_logits[-1]))
+                            generated_token_ids.append(next_token)
+                            if eos_id is not None and next_token == eos_id:
+                                break
+                            gen_ids.append(next_token)
+                            ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+                            outputs = model(ids_tensor)
+                            all_logits.append(_np(outputs.logits[0, -1]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
 
             with open(text_path, "w") as f:
                 f.write(text)
 
-            # Pad and save logits
-            max_len = max(l.shape[0] for l in all_logits)
-            padded = np.zeros((len(all_logits), max_len), dtype=np.float32)
-            for i, l in enumerate(all_logits):
-                padded[i, :l.shape[0]] = l
-            np.save(logits_path, padded)
-
-            print(f"OK steps={{len(all_logits)}} vocab={{max_len}}")
+            if all_logits:
+                # Pad and save logits
+                max_len = max(l.shape[0] for l in all_logits)
+                padded = np.zeros((len(all_logits), max_len), dtype=np.float32)
+                for i, l in enumerate(all_logits):
+                    padded[i, :l.shape[0]] = l
+                np.save(logits_path, padded)
+                print(f"OK steps={{len(all_logits)}} vocab={{max_len}}")
+            else:
+                vocab_size = getattr(getattr(model, "config", None), "vocab_size", None)
+                if vocab_size is None:
+                    vocab_size = len(tokenizer)
+                print(f"OK generated_steps={{len(generated_token_ids)}} vocab={{vocab_size}}")
         """)
 
         python = ctx.reference_python_path() or sys.executable

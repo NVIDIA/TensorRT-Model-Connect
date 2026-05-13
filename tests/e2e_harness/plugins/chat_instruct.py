@@ -25,6 +25,8 @@ class ChatInstructPlugin:
             "use_chat_template": not already_formatted,
             "enable_thinking": enable_thinking,
         }
+        if case.name == "internlm2-1.8b":
+            config["reference_generation_mode"] = "hf_generate"
         return config
 
     def verify(self, trt_output, ref_output, case, threshold):

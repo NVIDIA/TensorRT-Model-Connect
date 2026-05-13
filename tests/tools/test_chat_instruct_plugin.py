@@ -51,4 +51,5 @@ def test_internlm_config_does_not_request_thinking_suppression() -> None:
     assert ChatInstructPlugin().configure_reference(case) == {
         "use_chat_template": True,
         "enable_thinking": True,
+        "reference_generation_mode": "hf_generate",
     }
