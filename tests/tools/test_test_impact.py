@@ -663,6 +663,35 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_vl_generated_only_decode"
         assert refined.models == ["internvl3-8b"]
 
+    def test_hf_dpr_context_encoder_diff_can_be_refined(self, imap):
+        """DPR-only reference routing should not select every HF model."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
+-            tokenizer = AutoTokenizer.from_pretrained(
+-                model_ref, trust_remote_code=trust_remote_code)
++                # AutoTokenizer/AutoModel route this context checkpoint through
++                # the DPR question classes in transformers 5.x. Use the
++                # context fast tokenizer so HF sees the same token ids as the
++                # tokenizer.json bundled into the TRT artifact.
++                from transformers import DPRContextEncoder, DPRContextEncoderTokenizerFast
++                tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(
++                    model_ref, trust_remote_code=trust_remote_code)
++                model = _dpr.ctx_encoder.bert_model
++                tokenizer = AutoTokenizer.from_pretrained(
++                    model_ref, trust_remote_code=trust_remote_code)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_dpr_context_encoder"
+        assert refined.models == ["dpr-ctx-encoder"]
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """

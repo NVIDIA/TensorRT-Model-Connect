@@ -1103,6 +1103,39 @@ def maybe_refine_match_with_diff(
             )
 
     if path == "tests/e2e_harness/references/hf_transformers.py":
+        dpr_tokens = (
+            "dpr",
+            "dprcontextencoder",
+            "dprcontextencodertokenizerfast",
+            "ctx_encoder",
+            "bert_model",
+            "autotokenizer.from_pretrained",
+            "automodel.from_pretrained",
+            "model_type",
+            "context",
+            "tokenizer",
+            "same_token_ids",
+            "tokenizer.json",
+            "trt_artifact",
+            "question_classes",
+            "wrong_class",
+            "dprquestionencoder",
+            "model_ref",
+            "trust_remote_code",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        if (
+            all(any(token in line for token in dpr_tokens) for line in normalized_lines)
+            and any("dprcontextencodertokenizerfast" in line for line in normalized_lines)
+            and any("dprcontextencoder" in line for line in normalized_lines)
+        ):
+            return RuleMatch(
+                "harness_reference_dpr_context_encoder",
+                ["dpr-ctx-encoder"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
         allowed_tokens = (
             "decode_vl_generated_text",
             "vl_generation",
