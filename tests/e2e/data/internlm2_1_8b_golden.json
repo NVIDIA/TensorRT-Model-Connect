@@ -1,0 +1,4 @@
+{
+  "text": "2 + 2 = 4\nThe answer is $\\boxed{4}$.",
+  "contract_scope": "InternLM2 L0 math prompt golden reference. The remote-code HF generation path is not a reliable CI oracle under the current Transformers cache semantics."
+}

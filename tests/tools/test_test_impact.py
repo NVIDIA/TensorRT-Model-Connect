@@ -68,7 +68,8 @@ def mock_repo(tmp_path):
         {"name": "llama-7b", "family": "llama", "runtime_strategy": "decoder_kv_cache",
          "hf_id": "meta/llama-7b"},
         {"name": "bert-base", "family": "bert", "runtime_strategy": "encoder_only",
-         "hf_id": "bert-base", "core": True},
+         "hf_id": "bert-base", "core": True,
+         "golden_snapshot_path": "tests/e2e/data/bert_golden.json"},
         {"name": "whisper-tiny-fp16", "family": "whisper", "runtime_strategy": "speech_to_text",
          "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
@@ -465,6 +466,13 @@ class TestE2EDataFiles:
             "tests/e2e/data/flux2-fp8-scales.json", imap)
         assert match.rule == "e2e_data_file"
         assert match.models == ["flux-2-dev-fp8"]
+
+    def test_golden_snapshot_maps_to_manifest_users(self, imap):
+        """Golden snapshots should map to manifests that reference them."""
+        match = test_impact.classify_file(
+            "tests/e2e/data/bert_golden.json", imap)
+        assert match.rule == "e2e_data_file"
+        assert match.models == ["bert-base"]
 
 
 # ---------------------------------------------------------------------------

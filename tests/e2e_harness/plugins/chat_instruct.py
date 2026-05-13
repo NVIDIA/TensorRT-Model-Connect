@@ -3,6 +3,11 @@ from __future__ import annotations
 from ..contracts import MetricResult
 from .base import normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail
 
+
+def _normalize_chat_answer(text: str) -> str:
+    """Normalize model text after removing SentencePiece word-boundary markers."""
+    return normalize_text(text.replace("▁", " "))
+
 class ChatInstructPlugin:
     reference_families = ["chat_instruct_template", "chat_qwen3_posttrained"]
     user_contract = "chat_response"
@@ -49,8 +54,8 @@ class ChatInstructPlugin:
                     message="TRT emitted a thinking block with thinking disabled",
                 )
 
-        trt_answer = normalize_text(extract_answer(trt_output, prompt))
-        ref_answer = normalize_text(extract_answer(ref_output, prompt))
+        trt_answer = _normalize_chat_answer(extract_answer(trt_output, prompt))
+        ref_answer = _normalize_chat_answer(extract_answer(ref_output, prompt))
 
         if not trt_answer:
             return make_fail("full_generation", {}, message="TRT produced empty response")

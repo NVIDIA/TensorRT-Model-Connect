@@ -44,6 +44,24 @@ def test_chat_instruct_accepts_golden_answer_without_thinking() -> None:
     assert result.metrics["exact_match"].passed
 
 
+def test_chat_instruct_normalizes_sentencepiece_markers() -> None:
+    result = ChatInstructPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            text="2\u2581+\u25812\u2581=\u25814\nThe\u2581answer\u2581is\u2581$\\boxed{4}$.",
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            text="2 + 2 = 4\nThe answer is $\\boxed{4}$.",
+        ),
+        _case(),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert result.metrics["exact_match"].passed
+
+
 def test_internlm_config_does_not_request_thinking_suppression() -> None:
     case = _case()
     case.name = "internlm2-1.8b"

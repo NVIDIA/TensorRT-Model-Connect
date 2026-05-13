@@ -351,6 +351,15 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
             e2e_data_file_to_models_sets.setdefault(
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
+        golden_snapshot_path = data.get("golden_snapshot_path")
+        if isinstance(golden_snapshot_path, str) and golden_snapshot_path:
+            manifest_field_to_models_sets.setdefault(
+                "golden_snapshot_path", set()).add(name)
+            normalized_snapshot_path = golden_snapshot_path.replace("\\", "/").strip("/")
+            if "/" not in normalized_snapshot_path:
+                normalized_snapshot_path = f"tests/e2e/data/{normalized_snapshot_path}"
+            e2e_data_file_to_models_sets.setdefault(
+                normalized_snapshot_path, set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
 
@@ -1352,6 +1361,7 @@ def maybe_refine_match_with_diff(
 
     if path == "tests/e2e_harness/plugins/chat_instruct.py":
         internlm_chat_tokens = (
+            "_normalize_chat_answer",
             "case.name",
             "chatml",
             "config",
@@ -1362,13 +1372,16 @@ def maybe_refine_match_with_diff(
             "helper",
             "hf",
             "internlm2",
+            "normalize_text",
             "no_thinking",
             "prompts",
             "qwen_style",
+            "sentencepiece",
             "thinking",
             "trt",
             "true",
             "use_chat_template",
+            "replace",
         )
         normalized_lines = [_normalize_diff_line(line) for line in lines]
         if all(any(token in line for token in internlm_chat_tokens)

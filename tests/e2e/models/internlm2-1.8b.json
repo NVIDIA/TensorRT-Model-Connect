@@ -5,6 +5,8 @@
   "bundle": "internlm2-1.8b.trtfb",
   "family": "internlm",
   "runtime_strategy": "decoder_kv_cache",
+  "reference_backend": "golden_snapshot",
+  "golden_snapshot_path": "tests/e2e/data/internlm2_1_8b_golden.json",
   "max_cache_length": 256,
   "prompt": "What is 2 + 2?",
   "max_new_tokens": 20,
