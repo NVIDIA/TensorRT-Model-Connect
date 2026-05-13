@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tests.e2e_harness.references.hf_transformers import (
     _decode_vl_generated_text,
+    _encoder_tokenizer_kwargs,
     _vl_fallback_prompt,
 )
 
@@ -31,6 +32,18 @@ def test_internvl_fallback_prompt_includes_image_placeholder() -> None:
 
 def test_non_vl_fallback_prompt_is_unchanged() -> None:
     assert _vl_fallback_prompt("Qwen/Qwen3-0.6B", "Hello") == "Hello"
+
+
+def test_fnet_encoder_reference_uses_static_length_padding() -> None:
+    assert _encoder_tokenizer_kwargs("fnet", 256) == {
+        "padding": "max_length",
+        "max_length": 256,
+        "truncation": True,
+    }
+
+
+def test_non_fnet_encoder_reference_keeps_tokenizer_defaults() -> None:
+    assert _encoder_tokenizer_kwargs("bert", 256) == {}
 
 
 def test_vl_decode_uses_generated_suffix_for_full_sequences() -> None:

@@ -11,10 +11,9 @@
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "notes": "FNet with 2D DFT via matrix multiplication; larger TRT-HF delta expected due to DFT approximation",
+  "notes": "FNet encoder parity with static-length tokenization: TRT pads to the engine input length and HF reference uses the same max_length contract.",
   "core": false,
   "threshold_overrides": {
-    "cls_embedding_cosine": 0.6,
-    "cls_embedding_l2": 10.0
+    "cls_embedding_cosine": 0.99
   }
 }

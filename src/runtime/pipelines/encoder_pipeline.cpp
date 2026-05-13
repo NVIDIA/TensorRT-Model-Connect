@@ -1,5 +1,6 @@
 #include "runtime/pipelines/encoder_pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -44,6 +45,55 @@ bool engine_mask_is_int32(const TrtModule& module) {
         if (info.name == "attention_mask")
             return info.dtype == DType::kInt32;
     return false;
+}
+
+int64_t static_input_length(const TrtModule& module, const std::string& name) {
+    if (module.input_is_dynamic(name))
+        return 0;
+    for (const auto& info : module.input_info()) {
+        if (info.name == name && !info.shape.empty() && info.shape.back() > 0)
+            return info.shape.back();
+    }
+    return 0;
+}
+
+int32_t pad_token_id(const std::shared_ptr<ITokenizer>& tokenizer) {
+    if (!tokenizer)
+        return 0;
+    for (const auto* token : {"[PAD]", "<pad>"}) {
+        const int32_t id = tokenizer->id_for_token(token);
+        if (id >= 0)
+            return id;
+    }
+    return 0;
+}
+
+struct EncoderInputBuffers {
+    std::vector<int32_t> ids;
+    std::vector<int32_t> mask_i32;
+    std::vector<float> mask_f32;
+    int64_t tensor_len{0};
+};
+
+EncoderInputBuffers prepare_encoder_inputs(const std::vector<int32_t>& input_ids,
+                                           int64_t static_len, int32_t pad_id) {
+    const auto input_len = input_ids.size();
+    if (static_len > 0 && input_len > static_cast<std::size_t>(static_len))
+        throw std::runtime_error("EncoderPipeline: input length exceeds static engine length");
+
+    const std::size_t tensor_len =
+        static_len > 0 ? static_cast<std::size_t>(static_len) : input_len;
+    const std::size_t valid_len = std::min(input_len, tensor_len);
+
+    EncoderInputBuffers buffers;
+    buffers.ids.assign(tensor_len, pad_id);
+    buffers.mask_i32.assign(tensor_len, 0);
+    buffers.mask_f32.assign(tensor_len, 0.0f);
+    std::copy_n(input_ids.begin(), valid_len, buffers.ids.begin());
+    std::fill_n(buffers.mask_i32.begin(), valid_len, 1);
+    std::fill_n(buffers.mask_f32.begin(), valid_len, 1.0f);
+    buffers.tensor_len = static_cast<int64_t>(tensor_len);
+    return buffers;
 }
 
 } // namespace
@@ -109,25 +159,22 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
-    const auto n = input_ids.size();
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
-
-    auto ids_copy = input_ids;
+    auto buffers = prepare_encoder_inputs(input_ids, static_input_length(*encoder_, "input_ids"),
+                                          pad_token_id(tokenizer_));
     Tensor ids_t;
-    ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.data = buffers.ids.data();
+    ids_t.shape = {buffers.tensor_len};
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
-        mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.data = buffers.mask_i32.data();
+        mask_t.shape = {buffers.tensor_len};
         mask_t.dtype = DType::kInt32;
     } else {
-        mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.data = buffers.mask_f32.data();
+        mask_t.shape = {buffers.tensor_len};
         mask_t.dtype = DType::kFloat32;
     }
 

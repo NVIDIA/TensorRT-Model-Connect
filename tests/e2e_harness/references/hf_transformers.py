@@ -39,6 +39,16 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _encoder_tokenizer_kwargs(model_type: str, max_cache_length: object) -> dict:
+    if model_type == "fnet" and isinstance(max_cache_length, int) and max_cache_length > 0:
+        return {
+            "padding": "max_length",
+            "max_length": max_cache_length,
+            "truncation": True,
+        }
+    return {}
+
+
 def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     """Return a model-family prompt that preserves one image placeholder."""
     lower_id = hf_id.lower()
@@ -369,6 +379,8 @@ class HfTransformersReference:
         output_path = str(Path(model_dir) / "hf_encoder.json")
 
         prompt = case.inputs.get("prompt", "Hello world")
+        max_cache_length = case.inputs.get("max_cache_length")
+        fnet_tokenizer_kwargs = _encoder_tokenizer_kwargs("fnet", max_cache_length)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id)
@@ -381,6 +393,8 @@ class HfTransformersReference:
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
             prompt = {prompt!r}
+            max_cache_length = {max_cache_length!r}
+            fnet_tokenizer_kwargs = {fnet_tokenizer_kwargs!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
@@ -391,6 +405,7 @@ class HfTransformersReference:
             config = AutoConfig.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
             model_type = getattr(config, 'model_type', '')
+            tokenizer_kwargs = fnet_tokenizer_kwargs if model_type == 'fnet' else {{}}
 
             if model_type == 'dpr':
                 # AutoTokenizer/AutoModel route this context checkpoint through
@@ -412,7 +427,7 @@ class HfTransformersReference:
                     torch_dtype={torch_dtype_expr})
             model.eval()
 
-            inputs = tokenizer(prompt, return_tensors="pt")
+            inputs = tokenizer(prompt, return_tensors="pt", **tokenizer_kwargs)
             with torch.no_grad():
                 outputs = model(**inputs)
 

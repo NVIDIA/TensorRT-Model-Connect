@@ -2,7 +2,6 @@
 # Format: model-name  SKIP|XFAIL  (reason)
 # Platform-specific: GB300/model-name  XFAIL  (reason)
 
-fnet-base                 XFAIL  (encoder representation parity below minimum contract floor; DFT approximation gap needs validation follow-up)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
