@@ -862,6 +862,36 @@ class TestRenderDiffusionModel:
         assert "4.5000" in html
         assert "same main subject" in html
 
+    def test_vlm_assessment_shows_waived_gate(self):
+        mod = _import_report()
+        r = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+        )
+        r["vlm_assessment"] = {
+            "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+            "vlm_judgment": {
+                "semantic_similarity_0_to_5": 4,
+                "trt_prompt_alignment_0_to_5": 4,
+                "hf_prompt_alignment_0_to_5": 5,
+                "trt_visual_quality_0_to_5": 4,
+                "hf_visual_quality_0_to_5": 5,
+                "is_regression": False,
+                "vlm_gate": {
+                    "failed": True,
+                    "waived": True,
+                    "waive_reason": "XFAIL allows reference-only VLM gate failure",
+                    "reasons": [
+                        "HF reference description suggests non-photo/stylized output"
+                    ],
+                },
+            },
+        }
+        html = mod.render_diffusion_model(r)
+        assert "<strong>Gate:</strong> WAIVED" in html
+        assert "XFAIL allows reference-only VLM gate failure" in html
+        assert "HF reference description suggests non-photo/stylized output" in html
+
     def test_load_all_results_attaches_vlm_assessment(self, tmp_path):
         mod = _import_report()
         artifacts_dir = tmp_path / "artifacts"

@@ -1135,8 +1135,16 @@ def _render_diffusion_vlm_assessment(result: Dict[str, Any]) -> str:
         gate = {}
 
     gate_failed = bool(gate.get("failed", False))
-    gate_label = "FAIL" if gate_failed else "PASS"
-    gate_cls = "vlm-fail" if gate_failed else "vlm-pass"
+    gate_waived = bool(gate.get("waived", False))
+    if gate_failed and gate_waived:
+        gate_label = "WAIVED"
+        gate_cls = "vlm-waived"
+    elif gate_failed:
+        gate_label = "FAIL"
+        gate_cls = "vlm-fail"
+    else:
+        gate_label = "PASS"
+        gate_cls = "vlm-pass"
     reasons = gate.get("reasons") or []
     if isinstance(reasons, list):
         reason_text = (
@@ -1156,6 +1164,7 @@ def _render_diffusion_vlm_assessment(result: Dict[str, Any]) -> str:
         ("TRT relative to HF", judgment.get("trt_relative_to_hf", "")),
         ("Regression", judgment.get("is_regression", "")),
         ("Gate", gate_label),
+        ("Waiver", gate.get("waive_reason", "") if gate_waived else ""),
         ("Reason", reason_text or judgment.get("reason", "")),
     ]
     table_rows = "\n".join(
@@ -1685,6 +1694,7 @@ summary:hover { background: #f8fafc; }
 .vlm-assessment { margin: 12px 0; padding: 10px; border: 1px solid #e2e8f0;
   border-radius: 6px; background: #f8fafc; }
 .vlm-pass { color: #166534; }
+.vlm-waived { color: #92400e; }
 .vlm-fail { color: #991b1b; }
 .vlm-table { width: 100%; border-collapse: collapse; margin: 6px 0;
   font-size: 0.9em; }
