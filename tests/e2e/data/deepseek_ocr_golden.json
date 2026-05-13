@@ -1,11 +1,12 @@
 {
-  "text": "DeepSeek-OCR-2 family plugin -- Standard MHA + MoE with shared experts.\n\nDeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA), OCR-2 uses standard Llama-style multi-head attention (use_mla=False). The MLP layers use DeepSeek-V2 MoE with shared experts for layers >= first_k_dense_replace, and dense SwiGLU for earlier layers.\n\nArchitecture:\n- Attention: Standard Q/K/V/O (no biases, no GQA -- heads == kv_heads)\n- RoPE: Standard rotary position embeddings\n- Layer 0: Dense SwiGLU MLP (intermediate_size=6848)\n- Layers 1-11: MoE (64 experts, top-6, intermediate=896) + shared experts (2, intermediate=896)\n- Norm: RMSNorm\n- Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)",
+  "text": "Architecture:\n\nAttention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)\n\nRoPE:Standard rotary position embeddings\n\nLayer 0:Dense SwiGLU MLP (intermediate_size=6848)\n\nLayers 1-11:MoE (64 experts,top-6,intermediate=896)+ shared experts (2,\n\nNorm:RMSNorm\n\nVision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)",
   "required_substrings": [
-    "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder",
-    "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA)",
-    "OCR-2 uses standard Llama-style multi-head attention",
-    "MLP layers use DeepSeek-V2 MoE with shared experts",
-    "dense SwiGLU for earlier layers"
+    "Architecture",
+    "Attention:Standard Q/K/V/O",
+    "RoPE:Standard rotary position embeddings",
+    "Layer 0:Dense SwiGLU MLP",
+    "Layers 1-11:MoE",
+    "Vision: SAM ViT-B + Qwen2 encoder"
   ],
   "source_image": "tests/e2e/data/orc_test_img.jpeg"
 }

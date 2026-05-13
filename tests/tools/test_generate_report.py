@@ -132,6 +132,14 @@ def _write_result(tmp_path: Path, name: str, result: Dict[str, Any]) -> Path:
     return model_dir
 
 
+def _write_junit(e2e_root: Path, body: str) -> None:
+    e2e_root.mkdir(parents=True, exist_ok=True)
+    (e2e_root / "junit-gpu0-shared-w0.xml").write_text(
+        f'<?xml version="1.0" encoding="utf-8"?><testsuite>{body}</testsuite>',
+        encoding="utf-8",
+    )
+
+
 def _make_tiny_png(path: Path) -> None:
     """Write a minimal valid 1x1 red PNG file."""
     # Minimal PNG: 8-byte sig + IHDR + IDAT + IEND
@@ -261,6 +269,39 @@ class TestLoadAllResults:
         _write_result(tmp_path, "m1", _make_result(name="m1"))
         results = mod.load_all_results(tmp_path)
         assert results[0]["_artifact_dir"] == str(tmp_path / "m1")
+
+    def test_xfail_result_is_rendered_as_waived_skip(self, tmp_path):
+        mod = _import_report()
+        e2e_root = tmp_path / "e2e_artifacts"
+        artifacts_dir = e2e_root / "artifacts"
+        _write_result(
+            artifacts_dir,
+            "fnet-base",
+            _make_result(
+                name="fnet-base",
+                status="fail",
+                failure_type="compare_fail",
+            ),
+        )
+        _write_junit(
+            e2e_root,
+            """
+            <testcase classname="tests.test_e2e" name="test_e2e[fnet-base]">
+              <skipped type="pytest.xfail" message="(known representation parity gap)" />
+            </testcase>
+            """,
+        )
+
+        results = mod.load_all_results(artifacts_dir)
+        assert results[0]["status"] == "skip"
+        assert results[0]["_raw_status"] == "fail"
+
+        html = mod.render_report(results)
+        assert "0 Failed" in html
+        assert "1 Skipped" in html
+        assert "Pytest outcome: <strong>XFAIL</strong>" in html
+        assert "known representation parity gap" in html
+        assert "Failure type: <strong>compare_fail</strong>" not in html
 
 
 # ---------------------------------------------------------------------------

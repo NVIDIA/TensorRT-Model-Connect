@@ -49,6 +49,16 @@ def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     return prompt
 
 
+def _vl_prompt_has_image_placeholder(text: str) -> bool:
+    """Return true when a rendered VL prompt still carries an image placeholder."""
+    return any(marker in text for marker in (
+        "<|image_pad|>",
+        "<|vision_start|>",
+        "<image>",
+        "<IMG_CONTEXT>",
+    ))
+
+
 def _normalize_vl_prompt_guard(text: str) -> str:
     """Normalize decoded VL text for prompt-only reference detection."""
     normalized = " ".join(str(text or "").split()).strip().lower()
@@ -1194,6 +1204,7 @@ class HfTransformersReference:
             from PIL import Image
             from tests.e2e_harness.references.hf_transformers import (
                 _decode_vl_generated_text,
+                _vl_prompt_has_image_placeholder,
             )
 
             hf_id = {hf_id!r}
@@ -1244,9 +1255,7 @@ class HfTransformersReference:
                     messages, tokenize=False, add_generation_prompt=True)
                 if not isinstance(text_input, str):
                     raise TypeError("processor.apply_chat_template did not return text")
-                if not any(marker in text_input for marker in (
-                    "<|image_pad|>", "<|vision_start|>", "<image>"
-                )):
+                if not _vl_prompt_has_image_placeholder(text_input):
                     raise ValueError("chat template produced no image placeholder")
                 inputs = processor(
                     text=text_input, images=image, return_tensors="pt")

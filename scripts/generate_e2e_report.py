@@ -23,6 +23,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 # Maximum file size to embed inline (10 MB).
 _MAX_EMBED_BYTES = 10 * 1024 * 1024
@@ -48,6 +49,15 @@ _TRTMC_ENGINE_TIMING_RE = re.compile(
     r"execute_ms=(?P<ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
+_TEST_CASE_RE = re.compile(r"test_e2e\[([^\]]+)\]")
+_CONSOLE_OUTCOME_RE = re.compile(
+    r"tests/test_e2e\.py::test_e2e\[([^\]]+)\]\s+"
+    r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
+)
+_PYTEST_TO_RESULT_STATUS = {
+    "XFAIL": "skip",
+    "XPASS": "pass",
+}
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -94,8 +104,101 @@ def load_all_results(artifacts_dir: Path) -> List[Dict[str, Any]]:
                 results.append(data)
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"WARNING: skipping {rj}: {exc}", file=sys.stderr)
+    _apply_pytest_waive_outcomes(results, artifacts_dir)
     _attach_diffusion_vlm_assessments(results, artifacts_dir)
     return results
+
+
+def _e2e_root_from_artifacts_dir(artifacts_dir: Path) -> Path:
+    if artifacts_dir.name == "artifacts":
+        return artifacts_dir.parent
+    return artifacts_dir
+
+
+def _extract_case_name(text: str) -> str:
+    match = _TEST_CASE_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def _clean_pytest_reason(reason: str) -> str:
+    text = reason.strip()
+    while text.startswith("(") and text.endswith(")") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _junit_files(e2e_root: Path) -> List[Path]:
+    worker_files = sorted(e2e_root.glob("junit-gpu*.xml"))
+    if worker_files:
+        return worker_files
+    merged = e2e_root / "junit.xml"
+    return [merged] if merged.is_file() else []
+
+
+def _load_pytest_waive_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
+    outcomes: Dict[str, Dict[str, str]] = {}
+
+    for xml_path in _junit_files(e2e_root):
+        try:
+            root = ET.parse(xml_path).getroot()
+        except (ET.ParseError, OSError) as exc:
+            print(f"WARNING: skipping {xml_path}: {exc}", file=sys.stderr)
+            continue
+        for testcase in root.iter("testcase"):
+            case_name = _extract_case_name(
+                " ".join(str(testcase.attrib.get(key, ""))
+                         for key in ("classname", "name"))
+            )
+            if not case_name:
+                continue
+            skipped = testcase.find("skipped")
+            if skipped is None or skipped.attrib.get("type", "") != "pytest.xfail":
+                continue
+            outcomes[case_name] = {
+                "pytest_status": "XFAIL",
+                "reason": _clean_pytest_reason(
+                    skipped.attrib.get("message", "") or (skipped.text or "")),
+                "source": xml_path.name,
+            }
+
+    for log_path in sorted(e2e_root.glob("console-*.log")):
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            print(f"WARNING: skipping {log_path}: {exc}", file=sys.stderr)
+            continue
+        for line in lines:
+            match = _CONSOLE_OUTCOME_RE.search(line)
+            if not match:
+                continue
+            case_name, status, rest = match.groups()
+            if status not in {"XFAIL", "XPASS"}:
+                continue
+            outcomes[case_name] = {
+                "pytest_status": status,
+                "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
+                "source": log_path.name,
+            }
+
+    return outcomes
+
+
+def _apply_pytest_waive_outcomes(
+    results: List[Dict[str, Any]], artifacts_dir: Path
+) -> None:
+    outcomes = _load_pytest_waive_outcomes(_e2e_root_from_artifacts_dir(artifacts_dir))
+    if not outcomes:
+        return
+    for result in results:
+        case_name = str(result.get("case_name") or "")
+        outcome = outcomes.get(case_name)
+        if not outcome:
+            continue
+        result["_pytest_outcome"] = outcome
+        status = outcome.get("pytest_status", "")
+        if status in _PYTEST_TO_RESULT_STATUS:
+            result["_raw_status"] = result.get("status")
+            result["status"] = _PYTEST_TO_RESULT_STATUS[status]
 
 
 def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -1426,8 +1529,18 @@ def render_model_section(
 
     # Failure info
     body_parts = []
+    pytest_outcome = result.get("_pytest_outcome")
+    pytest_status = ""
+    if isinstance(pytest_outcome, dict):
+        pytest_status = str(pytest_outcome.get("pytest_status") or "")
+        pytest_reason = str(pytest_outcome.get("reason") or "")
+        note = f"Pytest outcome: <strong>{_esc(pytest_status)}</strong>"
+        if pytest_reason:
+            note += f" &mdash; {_esc(pytest_reason)}"
+        body_parts.append(f'<p class="waive-info">{note}</p>')
+
     failure_type = result.get("failure_type")
-    if failure_type:
+    if failure_type and pytest_status != "XFAIL":
         body_parts.append(
             f'<p class="failure-info">Failure type: '
             f"<strong>{_esc(failure_type)}</strong></p>"
@@ -1664,6 +1777,7 @@ summary:hover { background: #f8fafc; }
   font-variant-numeric: tabular-nums; }
 .model-body { padding: 12px 16px; }
 .failure-info { color: #dc2626; margin-bottom: 8px; }
+.waive-info { color: #92400e; margin-bottom: 8px; }
 .text-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
   margin: 8px 0; }
 .text-col pre { background: #f1f5f9; padding: 12px; border-radius: 6px;

@@ -219,11 +219,11 @@ def test_vl_qa_ocr_required_substrings_fail_when_missing() -> None:
     assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
 
 
-def test_vl_qa_ocr_rejects_architecture_only_output() -> None:
+def test_vl_qa_ocr_rejects_missing_contracted_architecture_output() -> None:
     ref_text = (
-        "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. "
-        "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA), "
-        "Architecture: Attention: Standard Q/K/V/O."
+        "Architecture:\n"
+        "- Attention: Standard Q/K/V/O.\n"
+        "- Vision: SAM ViT-B + Qwen2 encoder."
     )
     result = VLQAPlugin().verify(
         StageOutput(
@@ -233,7 +233,6 @@ def test_vl_qa_ocr_rejects_architecture_only_output() -> None:
                     "Architecture:\n\n"
                     "Attention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)\n"
                     "RoPE:Standard rotary position embeddings\n"
-                    "Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)"
                 )
             },
             metadata={"returncode": 0},
@@ -243,8 +242,9 @@ def test_vl_qa_ocr_rejects_architecture_only_output() -> None:
             data={
                 "text": ref_text,
                 "required_substrings": [
-                    "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder",
-                    "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA)",
+                    "Architecture",
+                    "Attention: Standard Q/K/V/O",
+                    "Vision: SAM ViT-B + Qwen2 encoder",
                 ]
             },
         ),
@@ -253,7 +253,7 @@ def test_vl_qa_ocr_rejects_architecture_only_output() -> None:
     )
 
     assert result.status == StageStatus.FAILED.value
-    assert "DeepSeek-OCR-2 is a VL model" in result.message
+    assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
 
 
 def test_vl_qa_accepts_single_word_answer_inside_reference_sentence() -> None:

@@ -192,6 +192,11 @@ def _merge_pytest_outcomes(
 
 
 def _status(result: dict[str, Any]) -> str:
+    outcome = result.get("_pytest_outcome")
+    if isinstance(outcome, dict):
+        pytest_status = str(outcome.get("pytest_status") or "")
+        if pytest_status in {"XFAIL", "XPASS"}:
+            return _PYTEST_TO_RESULT_STATUS[pytest_status]
     return str(result.get("status") or "error").lower()
 
 
@@ -345,7 +350,10 @@ def render_summary(
     lines.extend(_render_table(["Status", "Count"], count_rows))
     lines.append("")
 
-    failures = [r for r in results if _status(r) not in _PASS_STATUSES]
+    failures = [
+        r for r in results
+        if _status(r) not in _PASS_STATUSES and _pytest_status(r) != "XFAIL"
+    ]
     if failures:
         lines.append("### Failures")
         rows = [_case_row(r, include_failure=True) for r in sorted(failures, key=_sort_key)[:max_rows]]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from tests.e2e_harness.references.hf_transformers import (
     _decode_vl_generated_text,
     _vl_fallback_prompt,
+    _vl_prompt_has_image_placeholder,
 )
 
 
@@ -31,6 +32,12 @@ def test_internvl_fallback_prompt_includes_image_placeholder() -> None:
 
 def test_non_vl_fallback_prompt_is_unchanged() -> None:
     assert _vl_fallback_prompt("Qwen/Qwen3-0.6B", "Hello") == "Hello"
+
+
+def test_vl_prompt_placeholder_guard_accepts_internvl_marker() -> None:
+    assert _vl_prompt_has_image_placeholder(
+        "<|im_start|>user\n<IMG_CONTEXT>\nDescribe it<|im_end|>"
+    )
 
 
 def test_vl_decode_uses_generated_suffix_for_full_sequences() -> None:

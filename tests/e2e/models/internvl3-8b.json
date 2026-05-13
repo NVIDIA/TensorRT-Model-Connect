@@ -5,6 +5,7 @@
   "bundle": "internvl3-8b-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "reference_backend": "golden_snapshot",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
   "ci_tier": "nightly_only",
@@ -17,10 +18,13 @@
   "layer_atol": 0.05,
   "test_image": "tests/e2e/data/test_img.jpeg",
   "trust_remote_code": false,
+  "metadata": {
+    "golden_snapshot_path": "tests/e2e/data/internvl3_8b_golden.json"
+  },
   "threshold_overrides": {
     "token_agreement_rate": 0.2,
     "normalized_text_edit_distance": 0.7,
     "vision_embedding_cosine": 0.9
   },
-  "notes": "InternVL3 HF model-card behavior uses AutoProcessor.apply_chat_template for an image+text message. The HF reference decodes generated text with a fallback for VL generate() implementations that return generated-only token IDs."
+  "notes": "InternVL3 HF reference emits EOS-only text for this fixture under the CI Transformers stack. Nightly scale coverage validates the stable one-word VL answer against a golden snapshot while internvl3-2b keeps the smaller InternVL path in MR L0."
 }

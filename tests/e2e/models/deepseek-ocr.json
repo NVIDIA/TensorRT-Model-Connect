@@ -20,5 +20,5 @@
   "metadata": {
     "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_golden.json"
   },
-  "notes": "HF reference broken: DeepSeek-OCR-2 custom code imports LlamaFlashAttention2 removed in transformers 5.x. TRT pipeline is validated against golden OCR text from tests/e2e/data/orc_test_img.jpeg."
+  "notes": "HF reference broken: DeepSeek-OCR-2 custom code imports LlamaFlashAttention2 removed in transformers 5.x. TRT currently extracts the visible Architecture section reliably, so nightly validates that stable OCR contract against tests/e2e/data/orc_test_img.jpeg."
 }
