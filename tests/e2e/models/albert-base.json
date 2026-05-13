@@ -8,8 +8,7 @@
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 0,
   "threshold_overrides": {
-    "cls_embedding_cosine": 0.6,
-    "cls_embedding_l2": 30.0
+    "cls_embedding_cosine": 0.99
   },
-  "notes": "ALBERT cross-layer sharing + embedding factorization causes larger TRT-HF delta than standard BERT"
+  "notes": "ALBERT cross-layer sharing and embedding factorization; C++ Unigram tokenization must match HF lowercasing"
 }

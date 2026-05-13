@@ -105,6 +105,29 @@ static const char* kUnigramJson = R"({
   }
 })";
 
+static const char* kUnigramLowercaseSequenceJson = R"({
+  "model": {
+    "type": "Unigram",
+    "unk_id": 0,
+    "vocab": [
+      ["<unk>", 0.0],
+      ["\u2581the", -1.0]
+    ]
+  },
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {"type": "Precompiled", "precompiled_charsmap": "unused"},
+      {"type": "Lowercase"}
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "\u2581",
+    "add_prefix_space": true
+  }
+})";
+
 // ─── Helper: build a string with specific bytes ───
 static std::string bytes(std::initializer_list<unsigned char> bs) {
     std::string s;
@@ -470,6 +493,14 @@ static void test_valid_multibyte_utf8() {
     }
 }
 
+static void test_unigram_sequence_lowercase_normalizer() {
+    std::string json(kUnigramLowercaseSequenceJson);
+    auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
+
+    auto ids = tok->encode("The");
+    check(ids.size() == 1 && ids[0] == 1, "uni_sequence_lowercase_normalizer");
+}
+
 int main() {
     // Malformed UTF-8
     test_bpe_malformed_utf8();
@@ -488,6 +519,9 @@ int main() {
 
     // Valid multi-byte UTF-8 (regression)
     test_valid_multibyte_utf8();
+
+    // Normalizer sequences
+    test_unigram_sequence_lowercase_normalizer();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

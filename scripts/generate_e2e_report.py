@@ -939,6 +939,60 @@ def _get_stage_text(stage_outputs: Dict[str, Any], prefix: str) -> Optional[str]
     return None
 
 
+def _flatten_numeric_preview(value: Any, limit: int = 16) -> Tuple[List[float], int, float]:
+    """Return the first numeric leaves, total numeric leaf count, and L2 sum."""
+    preview: List[float] = []
+    total = 0
+    sumsq = 0.0
+    stack = [value]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, (int, float)):
+            total += 1
+            sumsq += float(cur) * float(cur)
+            if len(preview) < limit:
+                preview.append(float(cur))
+        elif isinstance(cur, list):
+            stack.extend(reversed(cur))
+    return preview, total, sumsq
+
+
+def _get_stage_feature_output(
+    stage_outputs: Dict[str, Any], prefix: str
+) -> Optional[Tuple[str, Any]]:
+    """Extract a structured numeric feature output from a matching stage."""
+    feature_keys = ("cls_embedding", "embedding")
+    for key, val in stage_outputs.items():
+        if not key.startswith(prefix) or not isinstance(val, dict):
+            continue
+        data = val.get("data")
+        if not isinstance(data, dict):
+            continue
+        for feature_key in feature_keys:
+            if feature_key in data:
+                return feature_key, data[feature_key]
+    return None
+
+
+def _format_feature_output(feature: Optional[Tuple[str, Any]]) -> Optional[str]:
+    """Format an embedding/feature vector so generic reports show references."""
+    if feature is None:
+        return None
+    name, value = feature
+    preview, total, sumsq = _flatten_numeric_preview(value)
+    if total <= 0:
+        return f"{name}: (no numeric values)"
+
+    norm = sumsq ** 0.5
+    suffix = " ..." if total > len(preview) else ""
+    preview_text = ", ".join(f"{x:.6g}" for x in preview)
+    return (
+        f"{name} ({total} values)\n"
+        f"preview[0:{len(preview)}]: [{preview_text}{suffix}]\n"
+        f"l2_norm: {norm:.6g}"
+    )
+
+
 def render_text_model(result: Dict[str, Any]) -> str:
     """Render detail section for a text-generation model."""
     cc = result.get("case_config", {})
@@ -1314,12 +1368,18 @@ def render_generic_model(result: Dict[str, Any]) -> str:
     stage_outputs = result.get("stage_outputs", {})
     trt_text = _get_stage_text(stage_outputs, "trt_")
     ref_text = _get_stage_text(stage_outputs, "ref_")
+    trt_feature = _format_feature_output(
+        _get_stage_feature_output(stage_outputs, "trt_"))
+    ref_feature = _format_feature_output(
+        _get_stage_feature_output(stage_outputs, "ref_"))
 
     parts = []
     if prompt:
         parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
     if trt_text or ref_text:
         parts.append(_render_text_comparison(trt_text, ref_text))
+    elif trt_feature or ref_feature:
+        parts.append(_render_text_comparison(trt_feature, ref_feature))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))

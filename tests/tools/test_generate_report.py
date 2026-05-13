@@ -723,6 +723,35 @@ class TestRenderTextModel:
         assert "Paris" in html
 
 
+class TestRenderGenericModel:
+    """Tests for render_generic_model()."""
+
+    def test_shows_encoder_reference_feature_output(self):
+        mod = _import_report()
+        r = _make_result(
+            task_strategy="encoder_only_nlp",
+            family="albert",
+            stage_outputs={
+                "trt_full_inference": {
+                    "stage_name": "full_inference",
+                    "data": {"cls_embedding": [1.0, 2.0, 3.0]},
+                    "metadata": {},
+                },
+                "ref_full_inference": {
+                    "stage_name": "full_inference",
+                    "data": {"cls_embedding": [1.0, 2.0, 3.0]},
+                    "metadata": {},
+                },
+            },
+        )
+        html = mod.render_generic_model(r)
+        assert "TRT Output" in html
+        assert "Reference Output" in html
+        assert "cls_embedding (3 values)" in html
+        assert "preview[0:3]" in html
+        assert "l2_norm" in html
+
+
 class TestRenderVlModel:
     """Tests for render_vl_model()."""
 
