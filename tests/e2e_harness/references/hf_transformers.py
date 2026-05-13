@@ -340,9 +340,6 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
-
             # Load model — try AutoModel first, fall back to base model
             # for specialized wrappers (DPR, etc.) that don't return
             # last_hidden_state in the expected format.
@@ -352,16 +349,20 @@ class HfTransformersReference:
             model_type = getattr(config, 'model_type', '')
 
             if model_type == 'dpr':
-                # DPR wraps BERT under ctx_encoder.bert_model or
-                # question_encoder.bert_model prefix.  AutoModel loads
-                # the wrong class (DPRQuestionEncoder) with missing weights.
-                # Load as DPRContextEncoder and extract the inner BERT.
-                from transformers import DPRContextEncoder
+                # AutoTokenizer/AutoModel route this context checkpoint through
+                # the DPR question classes in transformers 5.x.  Use the
+                # context fast tokenizer so HF sees the same token ids as the
+                # tokenizer.json bundled into the TRT artifact.
+                from transformers import DPRContextEncoder, DPRContextEncoderTokenizerFast
+                tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
                 _dpr = DPRContextEncoder.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code,
                     torch_dtype={torch_dtype_expr})
                 model = _dpr.ctx_encoder.bert_model
             else:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
                 model = AutoModel.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code,
                     torch_dtype={torch_dtype_expr})

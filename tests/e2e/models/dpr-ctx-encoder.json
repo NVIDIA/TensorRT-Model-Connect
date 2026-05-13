@@ -8,8 +8,7 @@
   "prompt": "The capital of France is Paris",
   "max_new_tokens": 0,
   "threshold_overrides": {
-    "cls_embedding_cosine": -0.1,
-    "cls_embedding_l2": 35.0
+    "cls_embedding_cosine": 0.99
   },
-  "notes": "DPR CLS cosine=-0.05; DPR plugin weight prefix mapping produces fundamentally different hidden states from BertModel reference. Needs layer-by-layer debug."
+  "notes": "DPR context encoder compares the TRT tokenizer.json path against DPRContextEncoderTokenizerFast and the HF ctx_encoder BERT CLS embedding."
 }
