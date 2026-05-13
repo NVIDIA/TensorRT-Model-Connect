@@ -42,3 +42,9 @@ def test_load_waives_without_platform_ignores_prefixed_entries(monkeypatch, tmp_
     waives = test_e2e._load_waives()
 
     assert waives == {"model-shared": ("XFAIL", "shared waive")}
+
+
+def test_internlm2_is_not_globally_waived() -> None:
+    waives = test_e2e._load_waives()
+
+    assert "internlm2-1.8b" not in waives

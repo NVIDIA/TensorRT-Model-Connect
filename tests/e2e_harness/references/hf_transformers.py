@@ -139,6 +139,7 @@ class HfTransformersReference:
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
             from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+            from tensorrt_model_connect.transformers_compat import patch_legacy_dynamic_cache_api
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -152,6 +153,9 @@ class HfTransformersReference:
 
             def _np(t):
                 return t.detach().float().cpu().numpy()
+
+            if trust_remote_code:
+                patch_legacy_dynamic_cache_api()
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
