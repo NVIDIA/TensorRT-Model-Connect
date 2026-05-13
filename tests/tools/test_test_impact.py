@@ -617,6 +617,28 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
 
+    def test_warm_hf_cache_component_diff_can_be_refined(self, imap):
+        """Diffusers component-cache validation narrows to FP8 Diffusers coverage."""
+        diff_text = """
+diff --git a/scripts/warm_hf_cache.py b/scripts/warm_hf_cache.py
+@@ -1 +1 @@
++_DIFFUSERS_WEIGHT_COMPONENTS = {"text_encoder", "text_encoder_2", "transformer", "vae"}
++    if (snapshot_dir / "model_index.json").is_file():
++        return has_entrypoint and has_weights and not _diffusers_missing_weight_components(snapshot_dir)
++def _diffusers_missing_weight_components(snapshot_dir: pathlib.Path) -> list[str]:
++    model_index = json.loads(model_index_path.read_text())
++    required_components = sorted(name for name, value in model_index.items())
++def _is_diffusers_component_enabled(value: object) -> bool:
++def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
++    component_dir = snapshot_dir / component
++        "entrypoint or required local weight artifact")
+"""
+        broad = test_impact.classify_file("scripts/warm_hf_cache.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "scripts/warm_hf_cache.py", broad, diff_text, imap)
+        assert refined.rule == "e2e_warm_hf_cache_diffusers_components"
+        assert refined.models == ["flux-2-dev-fp8"]
+
     def test_manifest_loader_diffusion_threshold_diff_can_be_refined(self, imap):
         """Diffusion-only threshold plumbing in manifest_loader narrows scope."""
         diff_text = """

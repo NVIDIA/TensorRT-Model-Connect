@@ -981,6 +981,50 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
+    if path == "scripts/warm_hf_cache.py":
+        allowed_tokens = (
+            "component",
+            "component_dir",
+            "component_has_weight",
+            "controlnet",
+            "diffusers",
+            "diffusers_missing_weight_components",
+            "entrypoint_or_required_local_weight_artifact",
+            "has_weight",
+            "if_(",
+            "if_isinstance(value,_list)",
+            "if_value_is_none_or_value_is_false",
+            "image_encoder",
+            "is_diffusers_component_enabled",
+            "jsondecodeerror",
+            "model_index",
+            "path.is_file",
+            "required_components",
+            "required_local_weight_artifact",
+            "return_[",
+            "return_any",
+            "return_false",
+            "return_true",
+            "snapshot_dir",
+            "text_encoder",
+            "text_encoder_2",
+            "transformer",
+            "try:",
+            "unet",
+            "vae",
+            "weight",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "e2e_warm_hf_cache_diffusers_components",
+                fp8_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
         allowed_tokens = ("fp8_scales", "save_fp8_scales")
         if all(

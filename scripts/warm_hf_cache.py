@@ -88,6 +88,15 @@ _HF_ALLOW_PATTERNS = [
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
+_DIFFUSERS_WEIGHT_COMPONENTS = {
+    "controlnet",
+    "image_encoder",
+    "text_encoder",
+    "text_encoder_2",
+    "transformer",
+    "unet",
+    "vae",
+}
 _TTS_ASR_VERIFIER_MODEL = os.environ.get(
     "TRTMC_TTS_ASR_MODEL",
     "openai/whisper-large-v3-turbo",
@@ -229,7 +238,50 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
         for name in files
         for pattern in _WEIGHT_PATTERNS
     )
+    if (snapshot_dir / "model_index.json").is_file():
+        return has_entrypoint and has_weights and not _diffusers_missing_weight_components(
+            snapshot_dir
+        )
     return has_entrypoint and has_weights
+
+
+def _diffusers_missing_weight_components(snapshot_dir: pathlib.Path) -> list[str]:
+    model_index_path = snapshot_dir / "model_index.json"
+    try:
+        model_index = json.loads(model_index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ["model_index.json"]
+
+    required_components = sorted(
+        name for name, value in model_index.items()
+        if (
+            name in _DIFFUSERS_WEIGHT_COMPONENTS
+            and _is_diffusers_component_enabled(value)
+        )
+    )
+    return [
+        component for component in required_components
+        if not _component_has_weight(snapshot_dir, component)
+    ]
+
+
+def _is_diffusers_component_enabled(value: object) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, list) and all(item is None for item in value):
+        return False
+    return True
+
+
+def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
+    component_dir = snapshot_dir / component
+    if not component_dir.is_dir():
+        return False
+    return any(
+        path.is_file()
+        and any(fnmatch.fnmatch(path.name, pattern) for pattern in _WEIGHT_PATTERNS)
+        for path in component_dir.rglob("*")
+    )
 
 
 selective = filter_names is not None
@@ -261,7 +313,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
         if not _snapshot_has_required_files(pathlib.Path(local_dir)):
             raise RuntimeError(
                 "downloaded snapshot is still missing a config/model_index "
-                "entrypoint or local weight artifact")
+                "entrypoint or required local weight artifact")
         print(f"  [{i:3d}/{len(entries)}] {name}  OK")
     except HfHubHTTPError as e:
         print(f"  [{i:3d}/{len(entries)}] {name}  WARN (HTTP {e.response.status_code}): {e}")
