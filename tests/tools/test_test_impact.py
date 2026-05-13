@@ -726,6 +726,50 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_internlm_dynamic_cache_compat"
         assert refined.models == ["internlm2-1.8b"]
 
+    def test_hf_generate_reference_diff_can_be_refined(self, mock_repo):
+        """InternLM HF-generate reference mode is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm2",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++def _reference_generation_mode(case: E2ECase) -> str:
++    contract_config = case.metadata.get("contract_config", {})
++    return str(contract_config.get("reference_generation_mode", "") or "")
++        reference_generation_mode = _reference_generation_mode(case)
++            reference_generation_mode = {reference_generation_mode!r}
++                    if reference_generation_mode == "hf_generate":
++                        attention_mask = torch.ones_like(ids_tensor)
++                        output_ids = model.generate(
++                            ids_tensor,
++                            attention_mask=attention_mask,
++                            max_new_tokens=max_new_tokens,
++                            do_sample=False,
++                            num_beams=1,
++                            pad_token_id=getattr(tokenizer, "eos_token_id", None),
++                        )
++                        full_ids = output_ids[0].tolist()
++                        generated_token_ids = full_ids[len(input_ids):]
++                print(f"OK generated_steps={{len(generated_token_ids)}} vocab={{vocab_size}}")
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_internlm_generation_contract"
+        assert refined.models == ["internlm2-1.8b"]
+
     def test_internlm_tokenizer_export_diff_can_be_refined(self, mock_repo):
         """InternLM tokenizer ID export fix is scoped to InternLM."""
         _write_json(

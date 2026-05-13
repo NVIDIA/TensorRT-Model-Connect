@@ -1276,6 +1276,69 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers,
                 match.rebuild_cpp,
             )
+        internlm_generation_tokens = dynamic_cache_tokens + (
+            "all_logits",
+            "attention_mask",
+            "break",
+            "config",
+            "contract_config",
+            "contract_plugin",
+            "decoder_only",
+            "do_sample",
+            "dtype",
+            "else:",
+            "eos_id",
+            "false",
+            "full_ids",
+            "gen_ids",
+            "generated_steps",
+            "generated_token_ids",
+            "get(",
+            "hf_generate",
+            "ids_tensor",
+            "input_ids",
+            "isinstance",
+            "len(",
+            "logits",
+            "max_len",
+            "max_new_tokens",
+            "model.generate",
+            "next_token",
+            "np.argmax",
+            "np.save",
+            "num_beams",
+            "ones_like",
+            "output_ids",
+            "pad_token_id",
+            "padded",
+            "prefill_logits",
+            "reference_generation_mode",
+            "return",
+            "step_by_step",
+            "steps",
+            "text_generation",
+            "tokenizer",
+            "torch.long",
+            "torch.tensor",
+            "vocab",
+        )
+        if (
+            any(
+                "reference_generation_mode" in line or "hf_generate" in line
+                for line in normalized_lines
+            )
+            and all(
+                any(token in line for token in internlm_generation_tokens)
+                for line in normalized_lines
+            )
+        ):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "harness_reference_internlm_generation_contract",
+                models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
         if all(
             any(token in _normalize_diff_line(line) for token in allowed_tokens)
             for line in lines
