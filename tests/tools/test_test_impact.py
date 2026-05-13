@@ -73,6 +73,8 @@ def mock_repo(tmp_path):
          "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
+        {"name": "z-image-turbo", "family": "z_image", "runtime_strategy": "diffusion_zimage",
+         "hf_id": "Tongyi-MAI/Z-Image-Turbo"},
         {"name": "flux-2-dev", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX2"},
         {"name": "flux-2-dev-fp8", "family": "flux", "runtime_strategy": "diffusion_flux",
@@ -675,6 +677,19 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
             "tests/e2e/waives.txt", broad, diff_text, imap)
         assert refined.rule == "e2e_waives_model_lines"
         assert refined.models == ["flux-schnell"]
+
+    def test_diffusion_vlm_waives_diff_can_be_refined_to_named_model(self, imap):
+        """A VLM waiver change should only re-run the named diffusion model."""
+        diff_text = """
+diff --git a/tests/e2e/diffusion_vlm_waives.txt b/tests/e2e/diffusion_vlm_waives.txt
+@@ -1 +1 @@
+-z-image-turbo XFAIL (bad HF reference)
+"""
+        broad = test_impact.classify_file("tests/e2e/diffusion_vlm_waives.txt", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e/diffusion_vlm_waives.txt", broad, diff_text, imap)
+        assert refined.rule == "e2e_waives_model_lines"
+        assert refined.models == ["z-image-turbo"]
 
 
 class TestDiffAwareBuilderRefinement:

@@ -1,0 +1,9 @@
+# Diffusion VLM assessment waives.
+# Format: model-name  XFAIL  (reference-only VLM gate reason)
+#
+# These waives suppress only reference-quality VLM gate failures in
+# tools/evaluate_diffusion_vlm_similarity.py. They do not mark the pytest E2E
+# case as XFAIL.
+
+z-image-turbo            XFAIL  (HF diffusion reference is stylized/silhouette for a photo prompt)
+z-image-turbo-l0         XFAIL  (HF diffusion reference is stylized/silhouette for a photo prompt)

@@ -326,7 +326,7 @@ def main() -> int:
     parser.add_argument("--case", action="append", default=[],
                         help="Optional case name filter. May be passed more than once.")
     parser.add_argument("--waives", type=Path,
-                        help="Optional E2E waives file. XFAIL cases only suppress reference-only VLM gate failures.")
+                        help="Optional diffusion VLM waives file. XFAIL cases only suppress reference-only VLM gate failures.")
     args = parser.parse_args()
 
     pairs = _discover_pairs(args.artifacts_dir)

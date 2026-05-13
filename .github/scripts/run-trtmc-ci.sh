@@ -482,7 +482,7 @@ print(count)
       --model-id "${DIFFUSION_VLM_MODEL_ID:-Qwen/Qwen2.5-VL-3B-Instruct}" \
       --max-side "${DIFFUSION_VLM_MAX_SIDE:-512}" \
       --max-new-tokens "${DIFFUSION_VLM_MAX_NEW_TOKENS:-384}" \
-      --waives tests/e2e/waives.txt
+      --waives "${DIFFUSION_VLM_WAIVES_FILE:-tests/e2e/diffusion_vlm_waives.txt}"
 }
 
 generate_coverage_map() {

@@ -743,6 +743,11 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     }:
         return RuleMatch("e2e_runner_script", list(imap.all_model_names), unit_tiers, rebuild)
 
+    # Rule 9c: E2E waiver files affect report/test interpretation. Without
+    # diff context, re-run all models; diff-aware refinement narrows model rows.
+    if path in ("tests/e2e/waives.txt", "tests/e2e/diffusion_vlm_waives.txt"):
+        return RuleMatch("e2e_waives", list(imap.all_model_names), unit_tiers, rebuild)
+
     # Rule 10: Unit test directories (no E2E)
     if path.startswith("tests/builder/"):
         return RuleMatch("unit_builder", [], unit_tiers, rebuild)
@@ -1129,7 +1134,7 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
-    if path == "tests/e2e/waives.txt":
+    if path in ("tests/e2e/waives.txt", "tests/e2e/diffusion_vlm_waives.txt"):
         models = []
         for line in lines:
             fields = line.split()
