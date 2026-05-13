@@ -1423,6 +1423,29 @@ def render_model_section(
             f'<p class="failure-info">Failure type: '
             f"<strong>{_esc(failure_type)}</strong></p>"
         )
+    known_limitations = (
+        (cc.get("metadata") or {}).get("known_limitations") or []
+    )
+    if known_limitations:
+        rows = []
+        for item in known_limitations:
+            if isinstance(item, dict):
+                reason = item.get("reason", "")
+                source = item.get("source", "")
+            else:
+                reason = str(item)
+                source = ""
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(reason)}</td>"
+                f"<td>{_esc(source)}</td>"
+                "</tr>"
+            )
+        body_parts.append(
+            '<h3>Known Limitation</h3>'
+            '<table><thead><tr><th>Reason</th><th>Source</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+        )
 
     # Dispatch to modality renderer
     if modality == "text":

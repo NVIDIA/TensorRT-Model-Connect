@@ -326,6 +326,24 @@ class TestRenderReport:
         assert "FAIL" in html
         assert "1 Failed" in html
 
+    def test_waived_skip_known_limitation_is_visible(self):
+        mod = _import_report()
+        r = _make_result(name="phi4-multimodal", status="skip")
+        r["stage_outputs"] = {}
+        r["stages"] = {}
+        r["case_config"]["metadata"] = {
+            "known_limitations": [{
+                "reason": "phi4-multimodal remote code incompatible with transformers 5.x",
+                "source": "waives.txt",
+            }]
+        }
+
+        html = mod.render_report([r])
+
+        assert "Known Limitation" in html
+        assert "phi4-multimodal remote code incompatible with transformers 5.x" in html
+        assert "waives.txt" in html
+
     def test_multiple_models_all_present(self):
         mod = _import_report()
         results = [

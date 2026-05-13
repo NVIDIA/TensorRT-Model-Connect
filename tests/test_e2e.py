@@ -35,7 +35,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
+from tests.e2e_harness.artifact_sink import FileArtifactSink
+from tests.e2e_harness.contracts import E2EResult, E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 from tests.e2e_harness.python_profiles import (
@@ -232,21 +233,35 @@ def test_e2e(case_name: str, request) -> None:
     if case_name == "__no_models__":
         pytest.skip("No model manifests found")
 
-    # Apply waives before running
     config = request.config
+    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
+
+    # Load the case before waives so even skipped models can publish a
+    # human-readable result artifact into the HTML report.
+    case = get_case_by_name(case_name)
+    if case is None:
+        pytest.fail(f"Case not found: {case_name}")
+
+    # Apply waives before running
     waives = _load_waives(config.getoption("--e2e-platform", default=""))
     if case_name in waives:
         action, reason = waives[case_name]
         if action == "SKIP":
+            case.metadata.setdefault("known_limitations", []).append({
+                "reason": reason,
+                "source": "waives.txt",
+            })
+            sink = FileArtifactSink(artifacts_dir, case)
+            sink.finalize(E2EResult(
+                case_name=case.name,
+                status=E2EStatus.SKIP.value,
+                oracle_level=case.oracle_level,
+                determinism={"waive_skip": {"reason": reason}},
+            ))
             pytest.skip(reason)
         elif action == "XFAIL":
             request.node.add_marker(
                 pytest.mark.xfail(reason=reason, strict=False))
-
-    # Load the case
-    case = get_case_by_name(case_name)
-    if case is None:
-        pytest.fail(f"Case not found: {case_name}")
 
     # Honor manifest-level skip field
     skip_reason = case.metadata.get("skip_reason", "")
@@ -254,7 +269,6 @@ def test_e2e(case_name: str, request) -> None:
         pytest.skip(skip_reason)
 
     # Build run context
-    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
     base_python = _resolve_hf_python(config)
     profile_names = resolve_case_profile_names(case)
     profile_paths = resolve_case_python_profiles(case, base_python)
