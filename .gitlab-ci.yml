@@ -23,7 +23,7 @@ variables:
   GIT_STRATEGY: fetch
   PYTHONHASHSEED: "0"
   # Coverage gates: set to current measured levels as floor (measured 2026-03-12).
-  # Ratchet up as coverage improves. See docs/wiki/ISO-26262-Compliance.md §4.
+  # Ratchet up as coverage improves. See website/docs/wiki/ISO-26262-Compliance.md §4.
   #
   # Measured 2026-03-12 (unit tests only, no GPU/TRT tests):
   #   C++:    lines 40.1%, functions 54.3%, branches 23.4%

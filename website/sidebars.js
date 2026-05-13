@@ -65,6 +65,7 @@ const sidebars = {
         'features/model-families',
         'features/runtime-strategies',
         'features/quantization',
+        'features/sampling',
         'features/config-and-backends'
       ]
     },
@@ -84,7 +85,54 @@ const sidebars = {
       items: [
         'reference/source-layout',
         'reference/testing',
+        'reference/profiling',
+        'reference/e2e-l0-replacements',
         'reference/documentation-research'
+      ]
+    },
+    {
+      type: 'category',
+      label: 'Feature Context',
+      collapsed: true,
+      items: [
+        'context/triattention-native-cpp-worklog',
+        'context/config-registry-status',
+        'context/architecture-decision-records',
+        'context/worklog'
+      ]
+    },
+    {
+      type: 'category',
+      label: 'Operations',
+      collapsed: true,
+      items: [
+        'operations/ai-agent-system',
+        'operations/ai-local-pipeline',
+        'operations/ai-staging',
+        'operations/model-e2e-task-prompt'
+      ]
+    },
+    {
+      type: 'category',
+      label: 'Wiki Archive',
+      collapsed: true,
+      items: [
+        'wiki/Home',
+        'wiki/Architecture-Overview',
+        'wiki/Static-Design',
+        'wiki/Dynamic-Design',
+        'wiki/Pipeline-Deep-Dive',
+        'wiki/Source-Layout',
+        'wiki/Runtime-Target-Architecture',
+        'wiki/Testing-and-Validation',
+        'wiki/Traceability-Matrix',
+        'wiki/ISO-26262-Compliance',
+        'wiki/Adding-a-Model-Family',
+        'wiki/Architecture-Extensibility-Assessment',
+        'wiki/HF-vs-TRT-Comparison',
+        'wiki/TRT-Internals',
+        'wiki/FP8-Quantization-Guide',
+        'wiki/Agentic-Quantization-Core-Minimal-Plan'
       ]
     }
   ]

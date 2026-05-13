@@ -14,7 +14,7 @@ You are a documentation maintenance agent. Scan the repo for documentation drift
 and produce focused MRs to fix it. Three phases, each producing its own MR:
 
 1. **ADR Maintenance** — keep existing ADRs accurate
-2. **Wiki Drift Repair** — fix factual claims in `docs/wiki/*.md`
+2. **Wiki Drift Repair** — fix factual claims in `website/docs/wiki/*.md`
 3. **Traceability Audit** — fix gaps in the ARCH-*/UD-*/UT-*/IT-* trace system
 
 ## Execution Flow
@@ -27,8 +27,8 @@ Read the last scan SHA:
 
 ```bash
 LAST_SHA=""
-if [ -f docs/context/.last_scan_sha ]; then
-  LAST_SHA=$(cat docs/context/.last_scan_sha)
+if [ -f website/docs/context/.last_scan_sha ]; then
+  LAST_SHA=$(cat website/docs/context/.last_scan_sha)
 fi
 ```
 
@@ -51,8 +51,8 @@ CURRENT_SHA=$(git rev-parse HEAD)
 If `LAST_SHA` equals `CURRENT_SHA`, update the state file and exit:
 
 ```bash
-echo "$CURRENT_SHA" > docs/context/.last_scan_sha
-git add docs/context/.last_scan_sha
+echo "$CURRENT_SHA" > website/docs/context/.last_scan_sha
+git add website/docs/context/.last_scan_sha
 git commit -m "doc-sync: update scan marker (no changes)"
 ```
 
@@ -86,8 +86,8 @@ After all phases complete, update the scan marker:
 
 ```bash
 git checkout master  # or whatever branch we started on
-echo "$CURRENT_SHA" > docs/context/.last_scan_sha
-git add docs/context/.last_scan_sha
+echo "$CURRENT_SHA" > website/docs/context/.last_scan_sha
+git add website/docs/context/.last_scan_sha
 git commit -m "doc-sync: advance scan marker to $(echo $CURRENT_SHA | head -c 8)"
 git push origin HEAD
 ```
@@ -175,13 +175,13 @@ git checkout master
 
 ### What This Phase Does
 
-Scan all existing ADR files in `docs/context/adr/` and verify they are accurate
+Scan all existing ADR files in `website/docs/context/adr/` and verify they are accurate
 against the current codebase. This phase does NOT create new ADRs — that is
 `submit-gitlab-mr`'s job.
 
 ### Checks
 
-For each `.md` file in `docs/context/adr/` (excluding README.md):
+For each `.md` file in `website/docs/context/adr/` (excluding README.md):
 
 1. **Parse frontmatter** — extract `number`, `title`, `status`, `date`,
    `source_commits`, `superseded_by`.
@@ -223,7 +223,7 @@ For each `.md` file in `docs/context/adr/` (excluding README.md):
    If the commit is not an ancestor of HEAD (reverted or unmerged), mark the
    ADR as `Deprecated` with a note explaining why.
 
-8. **Index drift** — after all checks, rebuild `docs/context/adr/README.md`:
+8. **Index drift** — after all checks, rebuild `website/docs/context/adr/README.md`:
    - Read all ADR files, extract frontmatter
    - Sort by number
    - Write the index table:
@@ -258,7 +258,7 @@ For each `.md` file in `docs/context/adr/` (excluding README.md):
 
 ### What This Phase Does
 
-Scan all markdown files in `docs/wiki/` and fix every factual claim to match
+Scan all markdown files in `website/docs/wiki/` and fix every factual claim to match
 the current codebase. Auto-fix everything — the MR review is the human gate.
 
 ### Gathering Ground Truth
@@ -432,7 +432,7 @@ For each wiki page, read the current content, then apply these checks:
 
 #### All Remaining Wiki Pages
 
-For every other `.md` in `docs/wiki/`:
+For every other `.md` in `website/docs/wiki/`:
 
 1. **File path references** — verify all backtick-quoted paths exist.
 2. **Symbol references** — verify all backtick-quoted identifiers exist via grep.
@@ -489,7 +489,7 @@ Scan the entire trace ID system and fix all gaps. This is purely mechanical.
 
 **Step 1: Build the current matrix state.**
 
-Read `docs/wiki/Traceability-Matrix.md` and extract all trace IDs:
+Read `website/docs/wiki/Traceability-Matrix.md` and extract all trace IDs:
 - All `ARCH-*` IDs and their linked `UD-*`, `UT-*`, `IT-*` entries
 - All file paths referenced by each entry
 

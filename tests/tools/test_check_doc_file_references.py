@@ -83,7 +83,7 @@ def test_extract_path_references_captures_backtick_path_with_1_based_line_no() -
         "third line\n"
     )
 
-    refs = cdfr.extract_path_references(content, "docs/wiki/any.md")
+    refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
     assert refs == [(2, "src/runtime/plugins/decoder_plugin.cpp")]
 
@@ -94,7 +94,7 @@ def test_extract_path_references_skips_wildcard_glob() -> None:
     # filtered out so they do not trigger phantom-path errors.
     content = "intro\n`src/foo/*.cpp` is a glob pattern\nouter\n"
 
-    refs = cdfr.extract_path_references(content, "docs/wiki/any.md")
+    refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
     assert refs == []
 
@@ -105,7 +105,7 @@ def test_extract_path_references_skips_angle_bracket_placeholder() -> None:
     # can write `tools/<family>.py` without tripping the CI gate.
     content = "run `tools/<family>.py` to scaffold a new plugin\n"
 
-    refs = cdfr.extract_path_references(content, "docs/wiki/any.md")
+    refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
     assert refs == []
 
@@ -116,7 +116,7 @@ def test_extract_path_references_strips_trailing_punctuation() -> None:
     # look for "src/foo.cpp." (a phantom) instead of the real "src/foo.cpp".
     content = "The module `src/foo.cpp`. closes the paragraph.\n"
 
-    refs = cdfr.extract_path_references(content, "docs/wiki/any.md")
+    refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
     assert refs == [(1, "src/foo.cpp")]
     # And explicitly: no entry ends with a trailing dot.
@@ -130,7 +130,7 @@ def test_extract_path_references_h_cpp_shorthand_yields_two_entries_same_line() 
     # because they originated from the same textual occurrence.
     content = "header and source live together: `src/foo.h/cpp` on one line\n"
 
-    refs = cdfr.extract_path_references(content, "docs/wiki/any.md")
+    refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
     assert refs == [(1, "src/foo.h"), (1, "src/foo.cpp")]
     # The two entries share exactly one line number; guard the invariant.

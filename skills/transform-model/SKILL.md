@@ -18,16 +18,17 @@ Transform the given HF model to a torch-trt `.trtfb` bundle.
 
 1. **NEVER stop until comparison output exists.** You must produce a side-by-side comparison of HF reference output vs torch-trt output before reporting to the user.
 2. **Run everything in the container** via `docker exec <container>`. Never run GPU commands on the host.
-3. **Read docs first.** Before writing ANY wrapper code:
-   - Read `docs/torch-trt/TORCHTRT_TRANSFORM_GUIDE.md` (full playbook)
-   - Read `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md` (critical pitfalls)
-   - Read `docs/torch-trt/TORCHTRT_AGENT_GUIDE.md` (execution plan)
-4. **Log all work** in `docs/torch-trt/TORCHTRT_WORKLOG.md` — what was done, what failed, decisions made.
-5. **Log new issues** in `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md` if you discover any.
-6. **Keep changes minimal and scoped** to this model. Do not refactor unrelated code.
-7. **Do not relax thresholds** unless repeated evidence proves it is necessary.
-8. **Commit on your branch only.** Never push to master.
-9. **Max 10 fix iterations** before stopping and reporting the blocker.
+3. **Read current website docs and source first.** The legacy Torch-TRT
+   playbooks were removed; use `website/docs/features/model-families.md`,
+   `website/docs/features/runtime-strategies.md`, and the live
+   `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/`
+   source as ground truth.
+4. **Record work in the MR description** — what was done, what failed,
+   decisions made, and any newly discovered issues.
+5. **Keep changes minimal and scoped** to this model. Do not refactor unrelated code.
+6. **Do not relax thresholds** unless repeated evidence proves it is necessary.
+7. **Commit on your branch only.** Never push to master.
+8. **Max 10 fix iterations** before stopping and reporting the blocker.
 
 ## Workflow
 
@@ -48,10 +49,9 @@ different model variant, size, or version, update accordingly.
 After user confirmation:
 ```
 1. git checkout -b <branch> (or switch to it if it exists)
-2. Read docs/torch-trt/TORCHTRT_TRANSFORM_GUIDE.md
-3. Read docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md
-4. Identify model architecture type (decoder, encoder-only, diffusion, etc.)
-5. Check if a family plugin already exists in tensorrt_model_connect/tensorrt_model_connect/families/
+2. Read the website model-family/runtime-strategy docs and current Torch-TRT source
+3. Identify model architecture type (decoder, encoder-only, diffusion, etc.)
+4. Check if a family plugin already exists in tensorrt_model_connect/tensorrt_model_connect/families/
 ```
 
 ### Phase 2: Implement

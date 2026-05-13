@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY_DOC = REPO_ROOT / "docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md"
+POLICY_DOC = REPO_ROOT / "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md"
 
 SHARED_CORE_FILES = [
     "tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py",

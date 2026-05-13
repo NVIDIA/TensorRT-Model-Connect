@@ -734,7 +734,7 @@ that reads the raw JSON string.
 - Add `tests/cpp/test_pipeline_registry.cpp` — unit test for registry mechanics:
   register, lookup, unknown strategy error, legacy normalization
 - Update `CLAUDE.md` source layout and "Adding a new model family" section
-- Update `docs/wiki/` if applicable
+- Update `website/docs/wiki/` if applicable
 
 ## File Layout After Migration
 

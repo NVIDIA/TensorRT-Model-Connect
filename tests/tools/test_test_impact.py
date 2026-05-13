@@ -416,8 +416,8 @@ class TestSafetyNet:
 
 class TestNoImpact:
     def test_docs_no_impact(self, imap):
-        """docs/ -> no E2E tests."""
-        match = test_impact.classify_file("docs/wiki/README.md", imap)
+        """website/docs/ -> no E2E tests."""
+        match = test_impact.classify_file("website/docs/wiki/Home.md", imap)
         assert match.rule == "no_impact"
         assert match.models == []
 

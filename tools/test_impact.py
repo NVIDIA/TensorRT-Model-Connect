@@ -212,6 +212,7 @@ _ORCHESTRATOR_MODULES = {
 # Patterns for files that never affect E2E or unit tests
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
+    r"^website/",
     r"^\.gitignore$",
     r"^\.clang-format$",
     r"^\.editorconfig$",

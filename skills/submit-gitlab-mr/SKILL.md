@@ -66,14 +66,14 @@ existing families.
 1. **Determine the next ADR number:**
 
 ```bash
-LAST_NUM=$(ls docs/context/adr/[0-9]*.md 2>/dev/null | sort -V | tail -1 | grep -oP '\d{4}')
+LAST_NUM=$(ls website/docs/context/adr/[0-9]*.md 2>/dev/null | sort -V | tail -1 | grep -oP '\d{4}')
 NEXT_NUM=$(printf "%04d" $((10#${LAST_NUM:-0} + 1)))
 ```
 
 2. **Generate a slug** from the change (e.g., `registry-based-dispatch`,
    `t5-encoder-decoder-plugin`). Use lowercase, hyphens, max 50 chars.
 
-3. **Write the ADR** to `docs/context/adr/${NEXT_NUM}-${SLUG}.md`:
+3. **Write the ADR** to `website/docs/context/adr/${NEXT_NUM}-${SLUG}.md`:
 
 ```markdown
 ---
@@ -105,7 +105,7 @@ them here. Otherwise: "Not captured — review and add if known.">
 burden, performance characteristics. 2-4 sentences.>
 ```
 
-4. **Update the ADR index** — add a row to `docs/context/adr/README.md`:
+4. **Update the ADR index** — add a row to `website/docs/context/adr/README.md`:
 
 ```markdown
 | <NNNN> | <title> | Proposed | <YYYY-MM-DD> |
@@ -114,7 +114,7 @@ burden, performance characteristics. 2-4 sentences.>
 5. **Commit to the feature branch:**
 
 ```bash
-git add docs/context/adr/${NEXT_NUM}-${SLUG}.md docs/context/adr/README.md
+git add website/docs/context/adr/${NEXT_NUM}-${SLUG}.md website/docs/context/adr/README.md
 git commit -m "docs(adr): ADR-${NEXT_NUM} — <title>"
 ```
 

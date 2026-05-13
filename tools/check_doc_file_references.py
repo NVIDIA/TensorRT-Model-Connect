@@ -5,7 +5,7 @@ ISO 26262-6 §7.4.1 compliance gate: architecture docs must describe only
 implemented code. This tool catches phantom file references and stale counts.
 
 Usage:
-    python tools/check_doc_file_references.py [--strict] [docs/wiki/]
+    python tools/check_doc_file_references.py [--strict] [website/docs/wiki/]
 
 Exit codes:
     0: All checks passed
@@ -68,6 +68,7 @@ _PATH_PREFIXES = (
     "tools/",
     "scripts/",
     "docs/",
+    "website/",
 )
 
 # Regex: captures a path starting with one of the known prefixes.
@@ -386,8 +387,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "scan_dir",
         nargs="?",
-        default="docs/wiki/",
-        help="Directory to scan for .md files (default: docs/wiki/)",
+        default="website/docs/wiki/",
+        help="Directory to scan for .md files (default: website/docs/wiki/)",
     )
     parser.add_argument(
         "--repo-root",

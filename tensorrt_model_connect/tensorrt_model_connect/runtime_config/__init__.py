@@ -2,7 +2,7 @@
 
 Mirrors the C++ registry in ``include/trtmc/config/`` and
 ``src/runtime/config/``. The design contract is documented in
-``docs/context/2026-04-20-config-registry-status.md``:
+``website/docs/context/config-registry-status.md``:
 
     - Static init / module import: registers *schemas* only (metadata +
       defaults). No values.

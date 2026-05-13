@@ -1,5 +1,5 @@
 # CODEOWNERS — ISO 26262 organizational independence enforcement
-# See docs/wiki/ISO-26262-Compliance.md §5 for rationale.
+# See website/docs/wiki/ISO-26262-Compliance.md §5 for rationale.
 #
 # Rules:
 # 1. Architecture docs require independent review (not the code author)
@@ -8,9 +8,9 @@
 # 4. Safety-critical docs require two reviewers
 
 # Architecture and safety documentation — require independent review
-docs/wiki/                          @tensorrt-model-connect/architecture-reviewers
-docs/wiki/ISO-26262-Compliance.md   @tensorrt-model-connect/safety-manager
-docs/wiki/Traceability-Matrix.md    @tensorrt-model-connect/safety-manager
+website/docs/wiki/                          @tensorrt-model-connect/architecture-reviewers
+website/docs/wiki/ISO-26262-Compliance.md   @tensorrt-model-connect/safety-manager
+website/docs/wiki/Traceability-Matrix.md    @tensorrt-model-connect/safety-manager
 
 # C++ runtime — require code review
 src/                                @tensorrt-model-connect/runtime-reviewers
