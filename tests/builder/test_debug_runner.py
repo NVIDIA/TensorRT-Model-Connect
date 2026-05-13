@@ -94,6 +94,28 @@ class TestLoadEngineFromBundle:
         with pytest.raises(ValueError, match="Not a valid .trtfb bundle"):
             load_engine_from_bundle(str(path))
 
+    def test_named_engine_section(self, tmp_path):
+        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
+
+        header = {
+            "model_id": "test-model",
+            "max_cache_length": 128,
+            "num_layers": 4,
+        }
+        bundle = _make_bundle_bytes(
+            header,
+            engine_plan=b"SINGLE_PLAN",
+            extra_sections={"engine_plan_tp_rank1": b"TP_RANK1_PLAN"},
+        )
+
+        path = tmp_path / "tp.trtfb"
+        path.write_bytes(bundle)
+
+        plan, hdr = load_engine_from_bundle(
+            str(path), section_name="engine_plan_tp_rank1")
+        assert plan == b"TP_RANK1_PLAN"
+        assert hdr["model_id"] == "test-model"
+
 
 # ---------------------------------------------------------------------------
 # load_vision_engine_from_bundle
@@ -200,6 +222,32 @@ class TestBundleSectionUtils:
 
 
 class TestRunnerFromBundle:
+    def test_engine_section_and_communicator_forwarded(self, tmp_path):
+        from tensorrt_model_connect.debug_runner import runner_from_bundle
+
+        bundle = _make_bundle_bytes(
+            {"num_layers": 2, "max_cache_length": 128},
+            engine_plan=b"SINGLE_ENGINE",
+            extra_sections={"engine_plan_tp_rank1": b"RANK1_ENGINE"},
+        )
+
+        path = tmp_path / "tp_dispatch.trtfb"
+        path.write_bytes(bundle)
+
+        communicator = object()
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner",
+                   return_value="tp-runner") as mock_runner:
+            runner = runner_from_bundle(
+                str(path),
+                engine_section="engine_plan_tp_rank1",
+                distributed_communicator=communicator,
+            )
+
+        assert runner == "tp-runner"
+        kwargs = mock_runner.call_args.kwargs
+        assert kwargs["engine_plan"] == b"RANK1_ENGINE"
+        assert kwargs["distributed_communicator"] is communicator
+
     def test_triattention_bundle_uses_triattention_runner(self, tmp_path):
         from tensorrt_model_connect.debug_runner import runner_from_bundle
 

@@ -23,7 +23,8 @@ class TrtModuleImpl final : public ITrtModule {
     // Backend creates engine + context, passes them in.
     // The engine must outlive this module (caller manages lifetime via keep_alive).
     TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
-                  cudaStream_t stream, int32_t profile_idx = 0);
+                  cudaStream_t stream, int32_t profile_idx = 0,
+                  void* distributed_communicator = nullptr);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -78,6 +79,7 @@ class TrtModuleImpl final : public ITrtModule {
     nvinfer1::IExecutionContext* ctx_{nullptr};
     cudaStream_t stream_{nullptr};
     int32_t profile_idx_{0};
+    void* distributed_communicator_{nullptr};
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
@@ -107,6 +109,7 @@ class TrtModuleImpl final : public ITrtModule {
     void record_timed_enqueue();
     void recreate_context_with_profile();
     void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
+    bool attach_distributed_communicator();
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,

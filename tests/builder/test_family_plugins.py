@@ -132,6 +132,47 @@ class TestQwenPlugin:
         # w_out original [vocab, hidden] transposed to [hidden, vocab]
         assert weights["w_out"].shape == (self.HIDDEN, self.VOCAB)
 
+    def test_tensor_parallel_shards_qwen_projection_weights(self, tmp_path):
+        """TP shards attention/MLP inner dims and leaves replicated weights intact."""
+        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.parallel_config import (
+            ParallelConfig,
+            shard_standard_decoder_weights,
+        )
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors(
+            self.VOCAB, self.HIDDEN, 1, self.HEADS, self.KV_HEADS, self.MLP)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+        shard = shard_standard_decoder_weights(
+            cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=2, rank=1))
+
+        np.testing.assert_allclose(
+            shard["layer.0.w_q"], weights["layer.0.w_q"][:, self.HIDDEN // 2:])
+        np.testing.assert_allclose(
+            shard["layer.0.w_k"], weights["layer.0.w_k"][:, self.HIDDEN // 2:])
+        np.testing.assert_allclose(
+            shard["layer.0.w_o"], weights["layer.0.w_o"][self.HIDDEN // 2:, :])
+        np.testing.assert_allclose(
+            shard["layer.0.w_gate"], weights["layer.0.w_gate"][:, self.MLP // 2:])
+        np.testing.assert_allclose(
+            shard["layer.0.w_down"], weights["layer.0.w_down"][self.MLP // 2:, :])
+        np.testing.assert_allclose(shard["w_out"], weights["w_out"])
+        assert shard["_attention_size"] == self.HIDDEN // 2
+        assert shard["_kv_attention_size"] == self.HIDDEN // 2
+        assert shard["_mlp_size"] == self.MLP // 2
+
 
 # =========================================================================
 # 2. Gemma — gamma +1.0 offset, embedding scaling

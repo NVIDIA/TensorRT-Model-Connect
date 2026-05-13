@@ -23,6 +23,12 @@ from .triattention_export import (
     TriAttentionBundleConfig,
     export_triattention_stats_section,
 )
+from .parallel_config import (
+    ParallelConfig,
+    normalize_parallel_config,
+    rank_engine_section,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -576,6 +582,7 @@ def build_bundle(
     # the TRTMC_MAGPIE_MAX_SOURCE_POS env var; passed to families via
     # config.raw, same passthrough pattern.
     audio_magpie_max_source_positions: int = 0,
+    parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
 ) -> None:
@@ -588,6 +595,7 @@ def build_bundle(
         verbose: Print detailed logs.
     """
     _setup_trt_import(rtx)
+    parallel = normalize_parallel_config(parallel_config)
     try:
         print(
             f"[trtmc-build] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
@@ -617,7 +625,8 @@ def build_bundle(
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
-            build_timing=build_timing)
+            build_timing=build_timing,
+            parallel_config=parallel)
         return
 
     # 1. Parse config
@@ -766,19 +775,46 @@ def build_bundle(
         config.raw["_dynamic_kv_opt_length"] = max_cache_length
         config.raw["_dynamic_kv_profile_rows"] = dynamic_kv_profile_rows
 
-    print(f"[trtmc-build] Building TRT engine (cache={max_cache_length}) ...",
-          file=sys.stderr)
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(parallel)
+        if quant_ctx is not None:
+            raise ValueError("Tensor-parallel Qwen builds do not support quantization yet")
+        if not _call_supports_kwarg(plugin.build_engine, "parallel_config"):
+            raise ValueError(
+                f"Plugin {plugin.name} does not support tensor-parallel builds")
+        print(
+            f"[trtmc-build] Building tensor-parallel TRT engines "
+            f"(tp={parallel.tp_size}, cache={max_cache_length}) ...",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[trtmc-build] Building TRT engine (cache={max_cache_length}) ...",
+              file=sys.stderr)
     # Pass precision/quant_ctx only if the plugin accepts them (not all do).
     extra_kwargs = {}
     if _call_supports_kwarg(plugin.build_engine, 'precision'):
         extra_kwargs['precision'] = precision
     if _call_supports_kwarg(plugin.build_engine, 'quant_ctx'):
         extra_kwargs['quant_ctx'] = quant_ctx
+    if _call_supports_kwarg(plugin.build_engine, 'parallel_config'):
+        extra_kwargs['parallel_config'] = parallel
     engine_t0 = time.monotonic()
     try:
-        engine_plan = plugin.build_engine(
-            config, weights, max_cache_length, verbose=verbose,
-            **extra_kwargs)
+        tp_engine_plans: dict[int, bytes] = {}
+        if parallel.enabled:
+            for rank in range(parallel.tp_size):
+                rank_kwargs = dict(extra_kwargs)
+                rank_kwargs["parallel_config"] = parallel.for_rank(rank)
+                print(f"[trtmc-build]   rank {rank}/{parallel.tp_size} ...",
+                      file=sys.stderr)
+                tp_engine_plans[rank] = plugin.build_engine(
+                    config, weights, max_cache_length, verbose=verbose,
+                    **rank_kwargs)
+            engine_plan = tp_engine_plans[0]
+        else:
+            engine_plan = plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
     finally:
         engine_elapsed = time.monotonic() - engine_t0
         _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
@@ -869,7 +905,13 @@ def build_bundle(
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
-    sections = [BundleSection("engine_plan", engine_plan)]
+    if parallel.enabled:
+        sections = [
+            BundleSection(rank_engine_section(rank), plan)
+            for rank, plan in sorted(tp_engine_plans.items())
+        ]
+    else:
+        sections = [BundleSection("engine_plan", engine_plan)]
 
     # Add vision engine section if present
     if vision_plan is not None:
@@ -927,6 +969,7 @@ def build_bundle(
             cfg_dict["quantization"] = {"format": quantize}
         if triattention_cfg is not None:
             cfg_dict["triattention"] = triattention_cfg.to_dict()
+        cfg_dict.update(parallel.to_bundle_config_fields())
         if enable_dynamic_kv_cache:
             cfg_dict["dynamic_kv_cache"] = True
             cfg_dict["dynamic_kv_profile_rows"] = config.raw.get(
@@ -1040,10 +1083,16 @@ def _build_diffusion_bundle(
     rtx: bool = False,
     diffusion_overrides: dict | None = None,
     build_timing: dict | None = None,
+    parallel_config: ParallelConfig | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
     if build_timing is None:
         build_timing = _new_build_timing()
+    parallel = normalize_parallel_config(parallel_config)
+    if parallel.enabled:
+        raise NotImplementedError(
+            "Tensor-parallel diffusion builds are not implemented yet; "
+            "Qwen decoder TP is the active first target.")
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
@@ -1345,6 +1394,7 @@ def build(
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
     audio_magpie_max_source_positions: int = 0,
+    parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
 ) -> None:
@@ -1385,5 +1435,6 @@ def build(
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+                 parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path)

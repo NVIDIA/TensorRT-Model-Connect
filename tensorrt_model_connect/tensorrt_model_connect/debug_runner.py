@@ -8,6 +8,10 @@ Supports both standard decoder (KV cache) and Mamba/SSM (recurrent state).
 
 from __future__ import annotations
 
+import ctypes
+import os
+import tempfile
+import time
 import warnings
 from typing import Any
 
@@ -76,10 +80,12 @@ class TrtRunner:
         max_cache_length: int,
         num_layers: int,
         attention_size: int | None = None,
+        distributed_communicator: object | None = None,
     ):
         _require_trt_runtime()
         self.max_cache_length = max_cache_length
         self.num_layers = num_layers
+        self._distributed_communicator = distributed_communicator
 
         # Deserialize engine
         logger = trt.Logger(trt.Logger.WARNING)
@@ -88,6 +94,15 @@ class TrtRunner:
         if self.engine is None:
             raise RuntimeError("Failed to deserialize TRT engine")
         self.context = self.engine.create_execution_context()
+        if distributed_communicator is not None:
+            set_communicator = getattr(self.context, "set_communicator", None)
+            if set_communicator is None:
+                raise RuntimeError(
+                    "TensorRT distributed execution requires TRT 11.0+ "
+                    "IExecutionContext.set_communicator"
+                )
+            if not set_communicator(distributed_communicator):
+                raise RuntimeError("Failed to set TRT distributed communicator")
 
         # Dual-profile engines (built by build_dual_profile_decoder_engine)
         # carry one prefill profile (profile 0, Sq dynamic) followed by one
@@ -515,12 +530,14 @@ class TriAttentionTrtRunner(TrtRunner):
         triattention_config: TriAttentionRuntimeConfig,
         triattention_stats_payload: dict[str, Any],
         attention_size: int | None = None,
+        distributed_communicator: object | None = None,
     ):
         super().__init__(
             engine_plan=engine_plan,
             max_cache_length=max_cache_length,
             num_layers=num_layers,
             attention_size=attention_size,
+            distributed_communicator=distributed_communicator,
         )
         if triattention_config.kv_budget < 1:
             raise ValueError("TriAttention kv_budget must be >= 1")
@@ -1982,7 +1999,206 @@ class Seq2SeqTrtRunner:
             cudart.cudaStreamDestroy(self.stream)
 
 
-def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:
+_NCCL_UNIQUE_ID_BYTES = 128
+_NCCL_SUCCESS = 0
+
+
+class _NcclUniqueId(ctypes.Structure):
+    _fields_ = [("internal", ctypes.c_char * _NCCL_UNIQUE_ID_BYTES)]
+
+
+def _env_int(names: tuple[str, ...], default: int | None = None) -> int | None:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return default
+
+
+def _mpi_rank_info_from_env() -> tuple[int, int, int]:
+    rank = _env_int(("OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "RANK"), 0)
+    world_size = _env_int(
+        ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMIX_SIZE", "WORLD_SIZE"), 1)
+    local_rank = _env_int(
+        ("OMPI_COMM_WORLD_LOCAL_RANK", "MPI_LOCALRANKID", "SLURM_LOCALID", "LOCAL_RANK"),
+        rank,
+    )
+    return int(rank or 0), int(world_size or 1), int(local_rank or 0)
+
+
+def _default_nccl_rendezvous_path() -> str:
+    path = os.environ.get("TRTMC_NCCL_RENDEZVOUS")
+    if path:
+        return path
+    job_id = (
+        os.environ.get("OMPI_COMM_WORLD_JOBID")
+        or os.environ.get("PMIX_NAMESPACE")
+        or os.environ.get("SLURM_JOB_ID")
+        or f"pid{os.getppid()}"
+    )
+    safe_job_id = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in job_id)
+    return os.path.join(tempfile.gettempdir(), f"trtmc_nccl_{safe_job_id}.bin")
+
+
+def _load_nccl_library() -> ctypes.CDLL:
+    errors: list[str] = []
+    for name in ("libnccl.so.2", "libnccl.so"):
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError as exc:
+            errors.append(f"{name}: {exc}")
+    else:
+        raise RuntimeError("Unable to load NCCL library: " + "; ".join(errors))
+
+    lib.ncclGetUniqueId.argtypes = [ctypes.POINTER(_NcclUniqueId)]
+    lib.ncclGetUniqueId.restype = ctypes.c_int
+    lib.ncclCommInitRank.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_int,
+        _NcclUniqueId,
+        ctypes.c_int,
+    ]
+    lib.ncclCommInitRank.restype = ctypes.c_int
+    lib.ncclCommDestroy.argtypes = [ctypes.c_void_p]
+    lib.ncclCommDestroy.restype = ctypes.c_int
+    lib.ncclGetErrorString.argtypes = [ctypes.c_int]
+    lib.ncclGetErrorString.restype = ctypes.c_char_p
+    return lib
+
+
+def _nccl_error_string(lib: ctypes.CDLL, status: int) -> str:
+    try:
+        msg = lib.ncclGetErrorString(status)
+    except Exception:
+        msg = None
+    if msg:
+        return msg.decode("utf-8", errors="replace")
+    return f"NCCL error {status}"
+
+
+def _capsule_from_pointer(ptr: int):
+    pycapsule_new = ctypes.pythonapi.PyCapsule_New
+    pycapsule_new.restype = ctypes.py_object
+    pycapsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    return pycapsule_new(ctypes.c_void_p(ptr), None, None)
+
+
+class TensorParallelNcclGroup:
+    """Small NCCL group helper for TensorRT distributed debug execution.
+
+    The caller must destroy TRT execution contexts before closing this group.
+    """
+
+    def __init__(
+        self,
+        world_size: int | None = None,
+        rendezvous_path: str | None = None,
+        timeout_s: float = 60.0,
+        set_device: bool = True,
+    ):
+        _require_trt_runtime()
+        self.rank, detected_world_size, self.local_rank = _mpi_rank_info_from_env()
+        self.world_size = int(world_size or detected_world_size)
+        if self.world_size <= 1:
+            raise RuntimeError("TensorParallelNcclGroup requires world_size > 1")
+        if detected_world_size != self.world_size:
+            raise RuntimeError(
+                f"MPI world size {detected_world_size} does not match "
+                f"requested tensor parallel size {self.world_size}"
+            )
+        if self.rank < 0 or self.rank >= self.world_size:
+            raise RuntimeError(
+                f"MPI rank {self.rank} is outside world size {self.world_size}")
+
+        if set_device:
+            status = cudart.cudaSetDevice(self.local_rank)
+            _check_cuda(status[0] if isinstance(status, tuple) else status)
+
+        self.rendezvous_path = rendezvous_path or _default_nccl_rendezvous_path()
+        self._lib = _load_nccl_library()
+        self._comm = ctypes.c_void_p()
+        unique_id = self._exchange_unique_id(timeout_s=timeout_s)
+        self._check(
+            self._lib.ncclCommInitRank(
+                ctypes.byref(self._comm),
+                self.world_size,
+                unique_id,
+                self.rank,
+            ),
+            "ncclCommInitRank",
+        )
+        if not self._comm.value:
+            raise RuntimeError("NCCL returned a null communicator")
+        self._communicator_capsule = _capsule_from_pointer(int(self._comm.value))
+        self._closed = False
+
+    @property
+    def communicator(self):
+        """PyCapsule wrapping the ncclComm_t pointer for TensorRT Python."""
+        return self._communicator_capsule
+
+    def _check(self, status: int, op: str) -> None:
+        if int(status) != _NCCL_SUCCESS:
+            raise RuntimeError(f"{op} failed: {_nccl_error_string(self._lib, status)}")
+
+    def _exchange_unique_id(self, timeout_s: float) -> _NcclUniqueId:
+        path = self.rendezvous_path
+        if self.rank == 0:
+            unique_id = _NcclUniqueId()
+            self._check(self._lib.ncclGetUniqueId(ctypes.byref(unique_id)), "ncclGetUniqueId")
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp_path = f"{path}.tmp.{os.getpid()}"
+            with open(tmp_path, "wb") as f:
+                f.write(ctypes.string_at(ctypes.byref(unique_id), _NCCL_UNIQUE_ID_BYTES))
+            os.replace(tmp_path, path)
+            return unique_id
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                if len(data) == _NCCL_UNIQUE_ID_BYTES:
+                    unique_id = _NcclUniqueId()
+                    ctypes.memmove(ctypes.byref(unique_id), data, _NCCL_UNIQUE_ID_BYTES)
+                    return unique_id
+            except FileNotFoundError:
+                pass
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for NCCL rendezvous file {path!r}")
+            time.sleep(0.05)
+
+    def close(self) -> None:
+        if getattr(self, "_closed", True):
+            return
+        self._closed = True
+        if self._comm.value:
+            self._check(self._lib.ncclCommDestroy(self._comm), "ncclCommDestroy")
+            self._comm = ctypes.c_void_p()
+
+    def __enter__(self) -> "TensorParallelNcclGroup":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def load_engine_from_bundle(
+    bundle_path: str,
+    section_name: str = "engine_plan",
+) -> tuple[bytes, dict]:
     """Load engine plan bytes and metadata from a .trtfb bundle.
 
     Returns:
@@ -1998,14 +2214,21 @@ def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
-        engine_meta = sections.get("engine_plan", {})
+        engine_meta = sections.get(section_name)
+        if engine_meta is None:
+            raise KeyError(
+                f"Bundle {bundle_path!r} does not contain section {section_name!r}")
         f.seek(16 + header_len + engine_meta["offset"])
         engine_plan = f.read(engine_meta["size"])
 
     return engine_plan, header
 
 
-def runner_from_bundle(bundle_path: str) -> TrtRunner:
+def runner_from_bundle(
+    bundle_path: str,
+    engine_section: str = "engine_plan",
+    distributed_communicator: object | None = None,
+) -> TrtRunner:
     """Create the appropriate TrtRunner from a .trtfb bundle file.
 
     Dispatches to Seq2SeqTrtRunner, HybridTrtRunner, MambaTrtRunner,
@@ -2013,12 +2236,17 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
     bundle config.
     """
     config = load_config_from_bundle(bundle_path)
-    engine_plan, header = load_engine_from_bundle(bundle_path)
+    engine_plan, header = load_engine_from_bundle(bundle_path, section_name=engine_section)
     runtime_strategy = config.get("runtime_strategy", "decoder_kv_cache")
     num_layers = header.get("num_layers", config.get("num_hidden_layers", 1))
     tri_cfg = config.get("triattention", {}) or {}
 
     if runtime_strategy in ("seq2seq_encoder_decoder", "text_to_text", "marian_translation"):
+        if distributed_communicator is not None or engine_section != "engine_plan":
+            raise ValueError(
+                "Distributed engine section selection is only supported for "
+                "single-engine decoder runners"
+            )
         encoder_plan, _ = load_vision_engine_from_bundle(bundle_path)
         if encoder_plan is not None:
             dec_layers = config.get("decoder_layers", num_layers)
@@ -2033,6 +2261,11 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
             )
 
     if runtime_strategy == "hybrid_mamba_attention":
+        if distributed_communicator is not None or engine_section != "engine_plan":
+            raise ValueError(
+                "Distributed engine section selection is only supported for "
+                "standard decoder runners"
+            )
         num_mamba = config.get("num_mamba_layers", 0)
         num_attn = config.get("num_attention_layers", 0)
         return HybridTrtRunner(
@@ -2042,11 +2275,21 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
             num_attention_layers=num_attn,
         )
     if runtime_strategy == "ssm_recurrent":
+        if distributed_communicator is not None or engine_section != "engine_plan":
+            raise ValueError(
+                "Distributed engine section selection is only supported for "
+                "standard decoder runners"
+            )
         return MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
         )
     if runtime_strategy == "rwkv_recurrent":
+        if distributed_communicator is not None or engine_section != "engine_plan":
+            raise ValueError(
+                "Distributed engine section selection is only supported for "
+                "standard decoder runners"
+            )
         return RwkvTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
@@ -2067,12 +2310,14 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
             num_layers=num_layers,
             triattention_config=tri_runtime_cfg,
             triattention_stats_payload=tri_stats,
+            distributed_communicator=distributed_communicator,
         )
 
     return TrtRunner(
         engine_plan=engine_plan,
         max_cache_length=header["max_cache_length"],
         num_layers=num_layers,
+        distributed_communicator=distributed_communicator,
     )
 
 

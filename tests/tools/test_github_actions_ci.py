@@ -37,6 +37,9 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     assert "-e TRTMC_E2E_EXCLUDE_GPU0" in text
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
+    assert "-e TRTMC_MULTI_DEVICE_E2E" in text
+    assert "-e TRTMC_MULTI_DEVICE_VISIBLE_DEVICES" in text
+    assert "-e TRTMC_NCCL_LIB_DIR" in text
 
 
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
@@ -115,3 +118,24 @@ def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> Non
         maxsplit=1,
     )[1].split("fi", maxsplit=1)[0]
     assert "mkdir -p e2e_artifacts/artifacts" in zero_model_block
+
+
+def test_multi_device_e2e_is_gated_and_uses_dedicated_ci_stage() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'TRTMC_MULTI_DEVICE_E2E:-false' in script
+    assert "multi-device E2E requires TensorRT 11.0+" in script
+    assert "run_multi_device_e2e" in script
+    assert "multi-device-e2e)" in script
+    assert "e2e_multi_device_models.txt" in script
+    assert "ci_tier\", \"\")) == \"multi_device\"" in script
+    assert "python -m pytest" in script
+    assert "--junitxml=e2e_artifacts/junit-multi-device.xml" in script
+    assert "When CI has multi-GPU support for this stage" in script
+
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "TRTMC_MULTI_DEVICE_E2E:" in text
+        assert "TRTMC_MULTI_DEVICE_VISIBLE_DEVICES:" in text
+        assert "TRTMC_NCCL_LIB_DIR:" in text
+        assert "Multi-device E2E tests" in text
+        assert "run-gha-stage.sh multi-device-e2e" in text

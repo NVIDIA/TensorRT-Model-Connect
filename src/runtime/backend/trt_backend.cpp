@@ -71,7 +71,8 @@ class TrtBackend final : public IBackend {
             stream_owner = owned;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream);
+        auto module = std::make_unique<TrtModuleImpl>(
+            engine, ctx, stream, 0, options.distributed_communicator);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
@@ -82,6 +83,8 @@ class TrtBackend final : public IBackend {
             engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
         if (stream_owner)
             module->keep_alive(stream_owner);
+        if (options.distributed_owner)
+            module->keep_alive(options.distributed_owner);
 
         return module;
     }
@@ -110,12 +113,15 @@ class TrtBackend final : public IBackend {
             auto* ctx = engine->createExecutionContext();
             if (!ctx)
                 throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
+            auto mod = std::make_unique<TrtModuleImpl>(
+                engine.get(), ctx, stream, profile_idx, options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             mod->keep_alive(engine);
             if (stream_owner)
                 mod->keep_alive(stream_owner);
+            if (options.distributed_owner)
+                mod->keep_alive(options.distributed_owner);
             return mod;
         };
 
@@ -158,12 +164,15 @@ class TrtBackend final : public IBackend {
             auto* ctx = engine->createExecutionContext();
             if (!ctx)
                 throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
+            auto mod = std::make_unique<TrtModuleImpl>(
+                engine.get(), ctx, stream, profile_idx, options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             mod->keep_alive(engine);
             if (stream_owner)
                 mod->keep_alive(stream_owner);
+            if (options.distributed_owner)
+                mod->keep_alive(options.distributed_owner);
             out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
         }
         return out;

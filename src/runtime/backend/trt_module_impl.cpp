@@ -34,11 +34,18 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 // --- Construction ---
 
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
-                             cudaStream_t stream, int32_t profile_idx)
+                             cudaStream_t stream, int32_t profile_idx,
+                             void* distributed_communicator)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
+      distributed_communicator_(distributed_communicator),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
+    if (!attach_distributed_communicator()) {
+        delete ctx_;
+        ctx_ = nullptr;
+        return;
+    }
     if (profile_idx_ > 0) {
         if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
             std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
@@ -79,6 +86,11 @@ void TrtModuleImpl::recreate_context_with_profile() {
     ctx_ = engine_->createExecutionContext();
     if (!ctx_)
         throw std::runtime_error("[trt_module] Failed to recreate execution context");
+    if (!attach_distributed_communicator()) {
+        delete ctx_;
+        ctx_ = nullptr;
+        throw std::runtime_error("[trt_module] Failed to attach distributed communicator");
+    }
     if (engine_->getNbOptimizationProfiles() > 0) {
         if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
             delete ctx_;
@@ -87,6 +99,20 @@ void TrtModuleImpl::recreate_context_with_profile() {
         }
         cudaStreamSynchronize(stream_);
     }
+}
+
+bool TrtModuleImpl::attach_distributed_communicator() {
+    if (distributed_communicator_ == nullptr || ctx_ == nullptr)
+        return true;
+#if NV_TENSORRT_MAJOR >= 11
+    if (ctx_->setCommunicator(distributed_communicator_))
+        return true;
+    std::cerr << "[trt_module] Failed to set TRT distributed communicator\n";
+    return false;
+#else
+    std::cerr << "[trt_module] TensorRT distributed communicator requires TRT 11.0+\n";
+    return false;
+#endif
 }
 
 void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const BufferEntry& entry) {

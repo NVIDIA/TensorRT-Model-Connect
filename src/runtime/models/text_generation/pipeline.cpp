@@ -149,16 +149,20 @@ TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decode
                                                TextGenConfig config, cudaStream_t stream,
                                                std::shared_ptr<ITokenizer> tokenizer,
                                                std::string model_id_str,
-                                               std::unique_ptr<ISampler> sampler)
+                                               std::unique_ptr<ISampler> sampler,
+                                               std::shared_ptr<void> distributed_owner)
     : TextGenerationPipeline(single_decoder_context(std::move(decoder)), std::move(state),
                              std::move(config), stream, std::move(tokenizer),
-                             std::move(model_id_str), std::move(sampler)) {}
+                             std::move(model_id_str), std::move(sampler),
+                             /*prefill=*/nullptr, std::move(distributed_owner)) {}
 
 TextGenerationPipeline::TextGenerationPipeline(
     std::vector<DecoderContext> decoders, std::unique_ptr<IInferenceState> state,
     TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str, std::unique_ptr<ISampler> sampler, std::unique_ptr<TrtModule> prefill)
-    : decoders_(std::move(decoders)), prefill_(std::move(prefill)), state_(std::move(state)),
+    std::string model_id_str, std::unique_ptr<ISampler> sampler, std::unique_ptr<TrtModule> prefill,
+    std::shared_ptr<void> distributed_owner)
+    : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
+      prefill_(std::move(prefill)), state_(std::move(state)),
       config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),
       logits_output_name_(config_.logits_output_name) {

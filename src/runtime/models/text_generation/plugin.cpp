@@ -6,6 +6,7 @@
 #include "runtime/models/text_generation/pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <sstream>
 #include <vector>
 
@@ -29,6 +31,16 @@ struct KvCacheRuntimeSizing {
     std::uint64_t cache_bytes{0};
     bool override_applied{false};
     bool clamped_to_bundle_max{false};
+};
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+struct TensorParallelRuntime {
+    TensorParallelRuntimeConfig config;
+    DistributedRuntimeGroup group;
 };
 
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
@@ -75,6 +87,18 @@ bool cache_input_supports_runtime_rows(const TrtModule& module, const std::strin
             return true;
     }
     return false;
+}
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
 }
 
 std::string format_bytes(std::uint64_t bytes) {
@@ -168,7 +192,12 @@ class DecoderPlugin final : public IPipelinePlugin {
         TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
-        auto profile_modules = load_decoder_profile_modules(ctx);
+        TensorParallelRuntime tp_runtime;
+        tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        if (tp_runtime.config.enabled)
+            tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
+
+        auto profile_modules = load_decoder_profile_modules(ctx, tp_runtime);
         if (profile_modules.modules.empty())
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
@@ -202,7 +231,8 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         return std::make_unique<TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module));
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module),
+            tp_runtime.group.owner);
     }
 
   private:
@@ -220,10 +250,14 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static BackendProfileModules load_decoder_profile_modules(const PipelineContext& ctx) {
-        auto* plan = find_section(ctx.bundle, "engine_plan");
+    static BackendProfileModules load_decoder_profile_modules(
+        const PipelineContext& ctx, const TensorParallelRuntime& tp_runtime) {
+        const std::string section_name =
+            tp_runtime.config.enabled ? tp_engine_section_name(tp_runtime.group.rank)
+                                      : std::string("engine_plan");
+        auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
-            throw std::runtime_error("engine_plan section is missing");
+            throw std::runtime_error(section_name + " section is missing");
         if (ctx.backend == nullptr)
             throw std::runtime_error("No backend loaded");
 
@@ -238,16 +272,18 @@ class DecoderPlugin final : public IPipelinePlugin {
         ModuleCreateOptions opts;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
+        opts.distributed_communicator = tp_runtime.group.communicator;
+        opts.distributed_owner = tp_runtime.group.owner;
 
         const auto t0 = std::chrono::steady_clock::now();
         auto modules =
             ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
         const auto t1 = std::chrono::steady_clock::now();
         const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        log_trt_load_timing("engine_plan", load_ms, plan->size());
+        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
         for (auto& entry : modules.modules) {
-            entry.module->set_timing_label(entry.profile_idx == 0 ? "engine_plan:profile0"
-                                                                  : "engine_plan:decode");
+            entry.module->set_timing_label(entry.profile_idx == 0 ? section_name + ":profile0"
+                                                                  : section_name + ":decode");
         }
         return modules;
     }

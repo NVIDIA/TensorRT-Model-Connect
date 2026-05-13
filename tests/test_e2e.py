@@ -97,7 +97,8 @@ def _resolve_ld_library_path() -> str:
     except Exception:
         trt_lib_dir = ""
     base = os.environ.get("LD_LIBRARY_PATH", "")
-    parts = [p for p in [trt_lib_dir, "/usr/local/cuda/lib64", base] if p]
+    nccl_lib_dir = os.environ.get("TRTMC_NCCL_LIB_DIR", "")
+    parts = [p for p in [nccl_lib_dir, trt_lib_dir, "/usr/local/cuda/lib64", base] if p]
     return ":".join(parts)
 
 

@@ -132,9 +132,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
     cli_cfg = getattr(args, "config", None)
     cli_sets = getattr(args, "set_flags", None) or []
     resolved_bundle = None
+    parallel_config = None
     if cli_cfg or cli_sets:
         from .runtime_config import resolve_cli_config
         from .runtime_config.schemas import load_all as _load_schemas
+        from .parallel_config import parallel_config_from_bundle
         _load_schemas()
         try:
             resolved_bundle = resolve_cli_config(
@@ -147,6 +149,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 "audio_magpie", "max_source_positions"))
         except KeyError:
             audio_magpie_max_source_positions = 0
+        try:
+            parallel_config = parallel_config_from_bundle(resolved_bundle)
+        except (ValueError, KeyError) as exc:
+            print(f"Error resolving parallel config: {exc}", file=sys.stderr)
+            return 1
     else:
         audio_magpie_max_source_positions = 0
 
@@ -177,6 +184,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+            parallel_config=parallel_config,
             build_timing_path=getattr(args, "build_timing_json", None),
             diffusion_overrides={
                 key: value
@@ -400,13 +408,16 @@ def list_engine_sections(bundle_path: str) -> list[dict]:
 
     engines = []
     for name, meta in sections.items():
-        if not name.endswith("_plan") and name != "engine_plan":
+        is_tp_rank_plan = name.startswith("engine_plan_tp_rank")
+        if not name.endswith("_plan") and name != "engine_plan" and not is_tp_rank_plan:
             continue
         size_bytes = meta.get("size", 0)
 
         # Infer role from section name
         if name == "engine_plan":
             role = "primary"
+        elif is_tp_rank_plan:
+            role = name.replace("engine_plan_", "")
         elif "vision" in name:
             role = "vision"
         elif "text_encoder" in name:

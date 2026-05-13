@@ -20,6 +20,8 @@ struct ModuleCreateOptions {
     cudaStream_t stream{nullptr};       // nullptr = backend creates one
     const char* runtime_cache_path{""}; // RTX: JIT kernel cache file path
     bool cuda_graphs{false};            // RTX: whole-graph CUDA capture
+    void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
+    std::shared_ptr<void> distributed_owner; // keeps communicator alive
 };
 
 // Two modules created from a single engine, one per optimization profile.

@@ -142,6 +142,7 @@ add_library(trtmc_core
   src/runtime/backend/backend_loader.cpp
   src/runtime/backend/trt_version.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
+  src/runtime/core/distributed_runtime.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
   src/runtime/core/device_kv_cache.cpp
@@ -418,7 +419,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(trtmc_backend_trt PRIVATE
-    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS}
   )
   if(_trtmc_has_tvm_ffi)
     target_sources(trtmc_backend_trt PRIVATE

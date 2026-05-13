@@ -24,6 +24,7 @@ from tensorrt_model_connect import trt_compat
 from ... import graph_ops
 from ... import graph_blocks
 from ...config import ModelConfig
+from ...parallel_config import normalize_parallel_config
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 
 trt = trt_compat.get_trt()
@@ -66,6 +67,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
+    parallel_config=None,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -101,6 +103,7 @@ def build_standard_decoder_engine(
         Serialized engine plan bytes.
     """
     import os as _os
+    parallel = normalize_parallel_config(parallel_config)
     # Dispatch to the dual-profile builder by default (one engine, two
     # optimization profiles — Profile 0 = batched prefill, Profile 1 =
     # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
@@ -125,6 +128,10 @@ def build_standard_decoder_engine(
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
+    if parallel.enabled and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "Tensor-parallel decoder builds currently require the dual-profile "
+            "standard decoder path.")
     if not _dual_profile_disabled_for:
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
@@ -140,6 +147,7 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
+            parallel_config=parallel,
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)

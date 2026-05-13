@@ -75,11 +75,12 @@ class QwenPlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, parallel_config=None,
     ) -> bytes:
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose)
+            quant_ctx=quant_ctx, verbose=verbose,
+            parallel_config=parallel_config)
 
     def calibration_data(self, format_name: str) -> list[str] | None:
         return list(self._CALIBRATION_PROMPTS)

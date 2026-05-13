@@ -47,6 +47,11 @@ from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
 from ... import graph_blocks
+from ...parallel_config import (
+    add_all_reduce_sum,
+    normalize_parallel_config,
+    shard_standard_decoder_weights,
+)
 
 trt = trt_compat.get_trt()
 
@@ -222,6 +227,7 @@ def build_dual_profile_decoder_engine(
     alibi_bias_scale: float = 1.0,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
+    parallel_config=None,
 ) -> bytes:
     """Build a dual-profile prefill+decode engine with two optimization profiles.
 
@@ -244,6 +250,14 @@ def build_dual_profile_decoder_engine(
     can constrain their row count independently.
     """
     _supports_config(config, weights)
+    parallel = normalize_parallel_config(parallel_config)
+    if parallel.enabled:
+        if quant_ctx is not None:
+            raise ValueError("Tensor-parallel decoder builds do not support quantization yet")
+        if mlp_type != "swiglu":
+            raise NotImplementedError(
+                "Tensor-parallel decoder builds currently support SwiGLU MLPs only")
+        weights = shard_standard_decoder_weights(config, weights, parallel)
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -269,8 +283,9 @@ def build_dual_profile_decoder_engine(
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
-    num_heads = config.num_attention_heads
-    num_kv_heads = config.num_key_value_heads
+    tp_size = parallel.tp_size if parallel.enabled else 1
+    num_heads = config.num_attention_heads // tp_size
+    num_kv_heads = config.num_key_value_heads // tp_size
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
@@ -544,6 +559,8 @@ def build_dual_profile_decoder_engine(
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
+        if parallel.enabled:
+            attn_out = add_all_reduce_sum(network, attn_out, parallel.tp_size)
         o_bias = weights.get(f"{prefix}.o_bias")
         if o_bias is not None:
             attn_out = graph_ops.add_bias_sum(
@@ -582,6 +599,8 @@ def build_dual_profile_decoder_engine(
                 network, norm2,
                 matmul=matmul, weights=weights, prefix=prefix,
                 hidden=hidden, mlp_size=mlp_size)
+        if parallel.enabled:
+            mlp_out = add_all_reduce_sum(network, mlp_out, parallel.tp_size)
 
         # Final residual.
         if parallel_residual:

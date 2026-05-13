@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -201,12 +202,53 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
         return False, f"Module check failed in {phase} profile: {exc}"
 
 
+def _check_command_available(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
+    """Check that a required command is available on PATH."""
+    command = str(req.args.get("command", "") or "")
+    if not command:
+        return False, "Command name not specified"
+    path = shutil.which(command)
+    if path:
+        return True, f"Command found: {path}"
+    return False, f"Command not found on PATH: {command}"
+
+
+def _visible_gpu_count() -> int | None:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible and visible.lower() not in {"all", "void", "none"}:
+        devices = [part.strip() for part in visible.split(",") if part.strip()]
+        return len(devices)
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _check_gpu_count_min(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
+    """Check that enough GPUs are visible for a multi-device E2E case."""
+    required = int(req.args.get("count", req.args.get("min_count", 0)) or 0)
+    if required <= 0:
+        return False, "GPU count requirement not specified"
+    count = _visible_gpu_count()
+    if count is None:
+        return False, "GPU count check failed"
+    if count >= required:
+        return True, f"Visible GPUs: {count} >= {required}"
+    return False, f"Visible GPUs: {count} < {required} required"
+
+
 _PREFLIGHT_CHECKERS = {
     "binary_exists": _check_binary_exists,
     "gpu_memory_min_gb": _check_gpu_memory,
     "hf_auth_token_present": _check_hf_auth,
     "asset_exists": _check_asset_exists,
     "python_module_available": _check_python_module,
+    "command_available": _check_command_available,
+    "gpu_count_min": _check_gpu_count_min,
 }
 
 
@@ -300,6 +342,7 @@ def _resolve_bundle(
             cmd.extend([cli_arg, str(value)])
     if build_method:
         cmd.extend(["--method", build_method])
+    _append_manifest_config_args(cmd, build_args)
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
@@ -585,7 +628,14 @@ def _validate_trt_runtime_path(
     for command_argv, stderr_texts, returncode in payloads:
         executable = command_argv[0] if command_argv else ""
         executable_name = Path(executable).name if executable else ""
-        if ctx.binary_path and executable == ctx.binary_path:
+        command_names = {Path(part).name for part in command_argv if part}
+        command_contains_binary = bool(
+            ctx.binary_path and (
+                ctx.binary_path in command_argv
+                or Path(ctx.binary_path).name in command_names
+            )
+        )
+        if ctx.binary_path and (executable == ctx.binary_path or command_contains_binary):
             combined_payload_stderr = "\n".join(stderr_texts)
             if returncode not in (None, 0) and _NEW_RUNTIME_MARKER not in combined_payload_stderr \
                     and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr:
@@ -639,6 +689,7 @@ def _build_repro_commands(
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))
     if build_method:
         build_parts.extend(["--method", build_method])
+    _append_manifest_config_args(build_parts, case.metadata.get("build_args", {}))
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
@@ -783,6 +834,15 @@ def _build_repro_commands(
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python and task_strategy != "neural_operator":
             infer_parts.extend(["--hf-python", runtime_cli_python])
+        distributed = case.metadata.get("distributed_runtime", {})
+        if isinstance(distributed, dict) and distributed.get("enabled"):
+            launcher = str(distributed.get("launcher", "mpirun") or "mpirun")
+            world_size = int(distributed.get("world_size", distributed.get("tp_size", 2)) or 2)
+            launcher_args = distributed.get("launcher_args")
+            if isinstance(launcher_args, list):
+                infer_parts = [launcher] + [str(arg) for arg in launcher_args] + infer_parts
+            else:
+                infer_parts = [launcher, "--tag-output", "-np", str(world_size)] + infer_parts
         repro["trt_inference"] = " ".join(infer_parts)
 
     # Rerun this exact test case
@@ -848,6 +908,36 @@ def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
     if backend == "auto":
         return None
     return None
+
+
+def _iter_manifest_config_sets(build_args: dict[str, Any]) -> list[str]:
+    """Translate manifest build_args config overrides to repeated CLI --set tokens."""
+    values = build_args.get("set", build_args.get("sets", []))
+    tokens: list[str] = []
+    if isinstance(values, str):
+        tokens.append(values)
+    elif isinstance(values, list):
+        tokens.extend(str(item) for item in values)
+
+    config_overrides = build_args.get("config_overrides", {})
+    if isinstance(config_overrides, dict):
+        for key, value in config_overrides.items():
+            tokens.append(f"{key}={value}")
+
+    parallel = build_args.get("parallel", {})
+    if isinstance(parallel, dict):
+        for key, value in parallel.items():
+            tokens.append(f"parallel.{key}={value}")
+
+    return [token for token in tokens if token]
+
+
+def _append_manifest_config_args(cmd: list[str], build_args: dict[str, Any]) -> None:
+    config_path = build_args.get("config")
+    if config_path:
+        cmd.extend(["--config", str(config_path)])
+    for token in _iter_manifest_config_sets(build_args):
+        cmd.extend(["--set", token])
 
 
 def _load_build_timing(path: Path | None) -> dict[str, Any]:
