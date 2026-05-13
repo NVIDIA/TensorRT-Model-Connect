@@ -102,7 +102,10 @@ RUN TRT_LIB=$(python3 -c \
     ldconfig
 
 # ── Environment ─────────────────────────────────────────────────────────────
-# Pre-compute paths so cmake / runtime find TRT without manual exports
+# Pre-compute paths so cmake / runtime find TRT without manual exports.
+# The ARG defaults preserve the GB300 image behavior. A100 x86 TRT11 helper
+# scripts override them to reuse this dependency stack without a copied
+# Dockerfile.
 ARG TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ARG TRTMC_CUBLAS_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
