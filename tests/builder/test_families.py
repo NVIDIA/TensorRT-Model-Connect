@@ -368,6 +368,9 @@ _POSITIVE_MATCH_CASES = [
     ("pixart", "pixart"),
     ("pixart_sigma", "pixart"),
     ("pixart_alpha", "pixart"),
+    # ELF Flow (diffusion text generation)
+    ("elf", "elf_flow"),
+    ("embedded_language_flow", "elf_flow"),
     # DeepSeek OCR (matches deepseek_vl_v2 model_type)
     ("deepseek_vl_v2", "deepseek_ocr"),
     # MagpieTTS (encoder-decoder TTS)

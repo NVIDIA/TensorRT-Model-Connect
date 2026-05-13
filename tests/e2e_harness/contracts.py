@@ -118,6 +118,8 @@ class ReferenceFamily(enum.Enum):
     # --- Diffusion ---
     DIFFUSERS_IMAGE_GEN = "diffusers_image_gen"
     DIFFUSERS_VIDEO_GEN = "diffusers_video_gen"
+    ELF_UNCONDITIONAL_TEXT = "elf_unconditional_text"
+    ELF_CONDITIONAL_TEXT = "elf_conditional_text"
 
     # --- Time series ---
     TIME_SERIES_POINT_FORECAST = "time_series_point_forecast"
@@ -143,6 +145,7 @@ class ArtifactType(enum.Enum):
     WAVEFORM = "waveform"
     IMAGE = "image"
     VIDEO_FRAMES = "video_frames"
+    TEXT_SAMPLES = "text_samples"
     LOGITS = "logits"
     SCORE = "score"
     RANKING = "ranking"
@@ -167,6 +170,7 @@ class ComparisonMode(enum.Enum):
     DETECTION_MATCH = "detection_match"
     MEDIA_SIMILARITY = "media_similarity"
     SEMANTIC_JUDGMENT = "semantic_judgment"
+    TEXT_QUALITY_METRICS = "text_quality_metrics"
     INVARIANT_CHECK = "invariant_check"
 
 
@@ -207,6 +211,7 @@ class UserContract(enum.Enum):
     OCR_TEXT = "ocr_text"
     DIFFUSION_IMAGE = "diffusion_image"
     DIFFUSION_VIDEO = "diffusion_video"
+    DIFFUSION_TEXT_GENERATION = "diffusion_text_generation"
 
     # --- Time series ---
     TIME_SERIES_POINT_FORECAST = "time_series_point_forecast"
@@ -795,13 +800,17 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "z-image-turbo": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     # 5.26 DIFFUSERS_VIDEO_GEN
     "wan21-t2v-1.3b": ReferenceFamily.DIFFUSERS_VIDEO_GEN.value,
-    # 5.27 TIME_SERIES_POINT_FORECAST
+    # 5.27 ELF diffusion text generation
+    "elf-b-owt-l0": ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value,
+    "elf-b-xsum-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
+    "elf-b-de-en-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
+    # 5.28 TIME_SERIES_POINT_FORECAST
     "patchtst-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
     "patchtsmixer-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
     "timesfm-2.0-500m-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    # 5.28 TIME_SERIES_QUANTILE_FORECAST
+    # 5.29 TIME_SERIES_QUANTILE_FORECAST
     "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
-    # 5.29 TIME_SERIES_REGRESSION
+    # 5.30 TIME_SERIES_REGRESSION
     "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
 }
 
@@ -834,6 +843,8 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: UserContract.DIFFUSION_IMAGE.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: UserContract.DIFFUSION_VIDEO.value,
+    ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: UserContract.DIFFUSION_TEXT_GENERATION.value,
+    ReferenceFamily.ELF_CONDITIONAL_TEXT.value: UserContract.DIFFUSION_TEXT_GENERATION.value,
     ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: UserContract.TIME_SERIES_POINT_FORECAST.value,
     ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: UserContract.TIME_SERIES_QUANTILE_FORECAST.value,
     ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: UserContract.TIME_SERIES_CLASSIFICATION.value,
@@ -869,6 +880,8 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
+    ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: ComparisonMode.TEXT_QUALITY_METRICS.value,
+    ReferenceFamily.ELF_CONDITIONAL_TEXT.value: ComparisonMode.TEXT_QUALITY_METRICS.value,
     ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
     ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
     ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
@@ -899,6 +912,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "patchtsmixer_torchtrt": "neural_operator",
     "timesfm_torchtrt": "neural_operator",
     "chronos_bolt_torchtrt": "neural_operator",
+    "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",      # legacy alias
     "diffusion_flux": "diffusion_media_generation",
     "diffusion_ltx": "diffusion_media_generation",

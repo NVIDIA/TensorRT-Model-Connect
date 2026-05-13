@@ -644,7 +644,46 @@ def _build_repro_commands(
         image = (case.inputs.get("image") or case.inputs.get("test_image")
                  or case.inputs.get("image_path"))
         task_strategy = case.task_strategy or ""
-        if task_strategy == "neural_operator":
+        if task_strategy == "diffusion_text_generation":
+            infer_parts = [
+                ctx.binary_path, "run", bundle_path,
+                "--prompt", _shell_quote(
+                    case.inputs.get("prompt")
+                    or case.inputs.get("source_text")
+                    or case.inputs.get("condition_text")
+                    or ""
+                ),
+                "--output", "/tmp/trtmc_elf_samples.jsonl",
+            ]
+            if "max_new_tokens" in case.inputs:
+                infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
+            if int(case.inputs.get("num_samples", 1)) > 1:
+                infer_parts.extend(["--num-samples", str(case.inputs["num_samples"])])
+            num_steps = case.inputs.get("num_sampling_steps", case.inputs.get("num_steps"))
+            if num_steps is not None:
+                infer_parts.extend(["--num-steps", str(num_steps)])
+            self_cond = case.inputs.get("self_cond_cfg_scale", case.inputs.get("guidance_scale"))
+            if self_cond is not None:
+                infer_parts.extend(["--guidance-scale", str(self_cond)])
+            if "cfg_scale" in case.inputs:
+                infer_parts.extend(["--cfg-scale", str(case.inputs["cfg_scale"])])
+            if "sde_gamma" in case.inputs:
+                infer_parts.extend(["--sde-gamma", str(case.inputs["sde_gamma"])])
+            if "seed" in case.inputs:
+                infer_parts.extend(["--seed", str(case.inputs["seed"])])
+            condition_latents = (
+                case.inputs.get("condition_latents_raw")
+                or case.inputs.get("condition_latents_path")
+            )
+            condition_mask = (
+                case.inputs.get("condition_mask_raw")
+                or case.inputs.get("condition_mask_path")
+            )
+            if condition_latents:
+                infer_parts.extend(["--condition-latents-raw", str(condition_latents)])
+            if condition_mask:
+                infer_parts.extend(["--condition-mask-raw", str(condition_mask)])
+        elif task_strategy == "neural_operator":
             infer_parts = [ctx.binary_path, "solve", bundle_path]
             branch_input = case.inputs.get("branch_input")
             trunk_input = case.inputs.get("trunk_input")

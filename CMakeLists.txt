@@ -195,6 +195,7 @@ add_library(trtmc_core
   src/runtime/models/patchtsmixer/pipeline.cpp
   src/runtime/models/timesfm/pipeline.cpp
   src/runtime/models/chronos_bolt/pipeline.cpp
+  src/runtime/models/elf_flow/pipeline.cpp
   src/runtime/models/segmentation/segment_pipeline.cpp
   src/runtime/models/segmentation/sam_pipeline.cpp
   src/runtime/models/vision_language/pipeline.cpp
@@ -611,6 +612,7 @@ trtmc_add_test(test_text_generation_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_text_generation_pipeline PRIVATE trtmc_backend_trt)
 endif()
+trtmc_add_test(test_elf_flow_pipeline)
 trtmc_add_test(test_recurrent_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_backend_trt)

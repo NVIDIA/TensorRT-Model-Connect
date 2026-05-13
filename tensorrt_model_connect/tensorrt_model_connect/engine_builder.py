@@ -73,6 +73,12 @@ _HF_ALLOW_PATTERNS = [
     "model.safetensors-*.safetensors",
     "model.safetensors.index.json",
     "pytorch_model.bin",
+    "*.yml",
+    "*.yaml",
+    "checkpoint_*",
+    "checkpoint_*/**",
+    "model.npz",
+    "elf_params.npz",
     "tokenizer.json",
     "tokenizer_config.json",
     "vocab.json",
@@ -234,6 +240,31 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
+def _is_elf_model_dir(path: Path) -> bool:
+    """Return True for the official ELF YAML + checkpoint directory layout."""
+    if not path.is_dir():
+        return False
+    has_checkpoint = any(path.glob("checkpoint_*")) or any(
+        (path / name).exists() for name in ("model.npz", "elf_params.npz")
+    )
+    if not has_checkpoint:
+        return False
+    for yaml_path in [*path.glob("*.yaml"), *path.glob("*.yml")]:
+        try:
+            import yaml  # type: ignore[import-untyped]
+
+            data = yaml.safe_load(yaml_path.read_text()) or {}
+        except Exception:
+            continue
+        if isinstance(data, dict) and str(data.get("model", "")).upper().replace("_", "-") in {
+            "ELF-B",
+            "ELF-M",
+            "ELF-L",
+        }:
+            return True
+    return False
+
+
 def _resolve_model(model_id_or_path: str) -> str:
     """Resolve a HuggingFace repo ID or local path to a local directory.
 
@@ -242,7 +273,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     Handles .nemo archives by extracting config and creating a synthetic dir.
     """
     local = Path(model_id_or_path)
-    if local.is_dir() and _is_hf_model_dir(local):
+    if local.is_dir() and (_is_hf_model_dir(local) or _is_elf_model_dir(local)):
         return str(local)
 
     # Handle .nemo archives (NeMo models like MagpieTTS)
@@ -786,6 +817,8 @@ def build_bundle(
         compile_before_extra = _build_timing_phase(build_timing, "trt_compile_s")
         try:
             build_extra_kwargs = {"verbose": verbose}
+            if _call_supports_kwarg(build_extra, "precision"):
+                build_extra_kwargs["precision"] = precision
             if _call_supports_kwarg(build_extra, "build_timing"):
                 build_extra_kwargs["build_timing"] = build_timing
             extra_engines = build_extra(
@@ -868,8 +901,86 @@ def build_bundle(
         # Use max_cache_length as max_seq_length for encoder
         pass
 
-    # Embed tokenizer + config files.
-    # For config.json, inject runtime_strategy if the plugin provides one.
+    def make_runtime_config_json(source: bytes | None) -> bytes:
+        cfg_dict = json.loads(source) if source is not None else dict(config.raw)
+        runtime_strategy = getattr(plugin, "runtime_strategy", None)
+        if runtime_strategy:
+            cfg_dict["runtime_strategy"] = runtime_strategy
+        elif triattention_cfg is not None:
+            cfg_dict["runtime_strategy"] = "decoder_kv_cache"
+        cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
+        cfg_dict["trt_version"] = trt_version
+        if trt_abi:
+            cfg_dict["trt_abi"] = trt_abi
+        cfg_dict["precision"] = precision
+        cfg_dict["tokenizer_add_special_tokens"] = int(
+            tokenizer_add_special_tokens)
+        if quant_plan is not None:
+            cfg_dict["quantization"] = quant_plan.as_config_dict()
+        elif quantize:
+            cfg_dict["quantization"] = {"format": quantize}
+        if triattention_cfg is not None:
+            cfg_dict["triattention"] = triattention_cfg.to_dict()
+        if enable_dynamic_kv_cache:
+            cfg_dict["dynamic_kv_cache"] = True
+            cfg_dict["dynamic_kv_profile_rows"] = config.raw.get(
+                "_dynamic_kv_profile_rows", [max_cache_length]
+            )
+        embed_input = getattr(plugin, "embed_input", False)
+        if embed_input:
+            cfg_dict["embed_input"] = True
+        if vision_plan is not None:
+            cfg_dict["has_vision_engine"] = True
+        # Inject VL config from plugin (image_token_id, prompt template, etc.)
+        get_vl_config = getattr(plugin, 'get_vl_config', None)
+        if get_vl_config is not None:
+            vl_cfg = get_vl_config(config)
+            if vl_cfg is not None:
+                cfg_dict.update(vl_cfg)
+        # Inject segmentation config from plugin
+        get_seg_config = getattr(plugin, 'get_segmentation_config', None)
+        if get_seg_config is not None:
+            seg_cfg = get_seg_config(config)
+            if seg_cfg is not None:
+                cfg_dict.update(seg_cfg)
+        # Inject detection config from plugin
+        get_det_config = getattr(plugin, 'get_detection_config', None)
+        if get_det_config is not None:
+            det_cfg = get_det_config(config)
+            if det_cfg is not None:
+                cfg_dict.update(det_cfg)
+        # Inject audio config from plugin
+        get_audio_config = getattr(plugin, 'get_audio_config', None)
+        if get_audio_config is not None:
+            audio_cfg = get_audio_config(config)
+            if audio_cfg is not None:
+                cfg_dict.update(audio_cfg)
+        # Inject generic config overrides from plugin.
+        # Build the final dict so overrides appear FIRST in the
+        # serialized JSON.  The C++ fast_path_config parser uses
+        # flat text search (text.find) which picks up the first
+        # occurrence of a key.  For models with nested configs
+        # (e.g. Qwen3-Omni thinker_config.text_config) the nested
+        # copy of "hidden_size" etc. would otherwise shadow the
+        # top-level value.
+        get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
+        if get_overrides is not None:
+            overrides = get_overrides(config)
+            if overrides is not None:
+                # Put overrides first, then original dict.  Dict
+                # union preserves insertion order; overrides keys
+                # appear before any nested dicts.
+                merged = dict(overrides)
+                merged.update(cfg_dict)
+                # Ensure overrides win for top-level keys.
+                merged.update(overrides)
+                cfg_dict = merged
+        return json.dumps(cfg_dict, indent=2).encode("utf-8")
+
+    # Embed tokenizer + config files. If the source model is a GitHub ELF
+    # directory with only train_*.yml, synthesize config.json for the C++
+    # runtime from the parsed ModelConfig.
+    embedded_config_json = False
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "vocab.json", "merges.txt", "special_tokens_map.json",
                      "tokenizer.model", "preprocessor_config.json"):
@@ -878,81 +989,11 @@ def build_bundle(
             data = file_path.read_bytes()
             # Inject runtime_strategy and VL fields into config.json.
             if filename == "config.json":
-                cfg_dict = json.loads(data)
-                runtime_strategy = getattr(plugin, "runtime_strategy", None)
-                if runtime_strategy:
-                    cfg_dict["runtime_strategy"] = runtime_strategy
-                elif triattention_cfg is not None:
-                    cfg_dict["runtime_strategy"] = "decoder_kv_cache"
-                cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
-                cfg_dict["trt_version"] = trt_version
-                if trt_abi:
-                    cfg_dict["trt_abi"] = trt_abi
-                cfg_dict["precision"] = precision
-                cfg_dict["tokenizer_add_special_tokens"] = int(
-                    tokenizer_add_special_tokens)
-                if quant_plan is not None:
-                    cfg_dict["quantization"] = quant_plan.as_config_dict()
-                elif quantize:
-                    cfg_dict["quantization"] = {"format": quantize}
-                if triattention_cfg is not None:
-                    cfg_dict["triattention"] = triattention_cfg.to_dict()
-                if enable_dynamic_kv_cache:
-                    cfg_dict["dynamic_kv_cache"] = True
-                    cfg_dict["dynamic_kv_profile_rows"] = config.raw.get(
-                        "_dynamic_kv_profile_rows", [max_cache_length]
-                    )
-                embed_input = getattr(plugin, "embed_input", False)
-                if embed_input:
-                    cfg_dict["embed_input"] = True
-                if vision_plan is not None:
-                    cfg_dict["has_vision_engine"] = True
-                # Inject VL config from plugin (image_token_id, prompt template, etc.)
-                get_vl_config = getattr(plugin, 'get_vl_config', None)
-                if get_vl_config is not None:
-                    vl_cfg = get_vl_config(config)
-                    if vl_cfg is not None:
-                        cfg_dict.update(vl_cfg)
-                # Inject segmentation config from plugin
-                get_seg_config = getattr(plugin, 'get_segmentation_config', None)
-                if get_seg_config is not None:
-                    seg_cfg = get_seg_config(config)
-                    if seg_cfg is not None:
-                        cfg_dict.update(seg_cfg)
-                # Inject detection config from plugin
-                get_det_config = getattr(plugin, 'get_detection_config', None)
-                if get_det_config is not None:
-                    det_cfg = get_det_config(config)
-                    if det_cfg is not None:
-                        cfg_dict.update(det_cfg)
-                # Inject audio config from plugin
-                get_audio_config = getattr(plugin, 'get_audio_config', None)
-                if get_audio_config is not None:
-                    audio_cfg = get_audio_config(config)
-                    if audio_cfg is not None:
-                        cfg_dict.update(audio_cfg)
-                # Inject generic config overrides from plugin.
-                # Build the final dict so overrides appear FIRST in the
-                # serialized JSON.  The C++ fast_path_config parser uses
-                # flat text search (text.find) which picks up the first
-                # occurrence of a key.  For models with nested configs
-                # (e.g. Qwen3-Omni thinker_config.text_config) the nested
-                # copy of "hidden_size" etc. would otherwise shadow the
-                # top-level value.
-                get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
-                if get_overrides is not None:
-                    overrides = get_overrides(config)
-                    if overrides is not None:
-                        # Put overrides first, then original dict.  Dict
-                        # union preserves insertion order; overrides keys
-                        # appear before any nested dicts.
-                        merged = dict(overrides)
-                        merged.update(cfg_dict)
-                        # Ensure overrides win for top-level keys.
-                        merged.update(overrides)
-                        cfg_dict = merged
-                data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+                data = make_runtime_config_json(data)
+                embedded_config_json = True
             sections.append(BundleSection(filename, data))
+    if not embedded_config_json:
+        sections.append(BundleSection("config.json", make_runtime_config_json(None)))
 
     # Package FFI kernel .so files into the bundle
     if kernel_artifacts:

@@ -91,14 +91,21 @@ struct TextEmbedding {
 
 struct GenerateConfig {
     int32_t max_new_tokens{128};
+    int32_t num_samples{1}; // non-AR generators: number of independent samples to emit
     float temperature{1.0f};
     int32_t top_k{1};  // 1 = greedy unless top_p is active; <=0 = no top-k limit
     float top_p{1.0f}; // 1.0 = disabled, 0.0 = greedy, (0,1) = nucleus
     float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     int32_t seed{-1};
-    float guidance_scale{-1.0f};        // diffusion
-    int32_t num_steps{-1};              // diffusion
-    std::vector<float> initial_latents; // diffusion: optional packed initial latents
+    float guidance_scale{-1.0f};          // diffusion; ELF uses this as self-conditioning CFG scale
+    float cfg_scale{-1.0f};               // conditional CFG scale; <0 uses model default
+    int32_t num_steps{-1};                // diffusion
+    float sde_gamma{-1.0f};               // diffusion/flow matching; <0 uses model default
+    std::vector<float> initial_latents;   // diffusion: optional packed initial latents
+    std::vector<float> condition_latents; // ELF: [max_length, text_encoder_dim] cond seq
+    std::vector<float> condition_mask;    // ELF: [max_length], >0 marks fixed cond tokens
+    std::vector<float> sampling_steps;    // ELF: optional upstream t_steps [num_steps + 1]
+    std::vector<float> sde_noises;        // ELF: optional scaled eps [num_steps - 1, L, D]
     int32_t eos_token_id{-1};
     int32_t tail_frames{0};           // speech-to-speech: extra frames after input
     bool use_chat_template{false};    ///< Apply chat template before tokenization

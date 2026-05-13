@@ -70,7 +70,17 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_path;
+    std::string initial_latents_raw;
+    std::string condition_latents_raw;
+    std::string condition_mask_raw;
+    std::string sampling_steps_raw;
+    std::string sde_noise_raw;
     int max_new_tokens{0};
+    int num_samples{1};
+    int num_steps{-1};
+    float guidance_scale{-1.0F};
+    float cfg_scale{-1.0F};
+    float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
     bool show_help{false};
     bool parse_error{false};
@@ -172,6 +182,51 @@ CliArgs parse_args(int argc, const char** argv) {
             args.max_new_tokens = std::atoi(argv[++i]);
             continue;
         }
+        if (arg == "--num-samples") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.num_samples = std::max(1, std::atoi(argv[++i]));
+            continue;
+        }
+        if (arg == "--num-steps") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.num_steps = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--guidance-scale") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--cfg-scale") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--sde-gamma") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.sde_gamma = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
         if (arg == "--hf-python") {
             if (i + 1 >= argc) {
                 args.parse_error = true;
@@ -222,6 +277,51 @@ CliArgs parse_args(int argc, const char** argv) {
                 return args;
             }
             args.output_path = argv[++i];
+            continue;
+        }
+        if (arg == "--condition-latents-raw") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.condition_latents_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--initial-latents-raw") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.initial_latents_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--condition-mask-raw") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.condition_mask_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--sampling-steps-raw") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.sampling_steps_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--sde-noise-raw") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.sde_noise_raw = argv[++i];
             continue;
         }
         if (arg == "--threshold" || arg == "--score-threshold") {
@@ -289,8 +389,8 @@ static void test_run_max_tokens() {
 // Mechanism: Calls parse(), checks no parse error and hf_python=="/usr/bin/python3".
 // -----------------------------------------------------------------------------
 static void test_hf_python_flag() {
-    auto args =
-        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
+    auto args = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
     check(!args.parse_error, "hf-python no parse error");
     check(args.hf_python == "/usr/bin/python3", "hf-python value");
 }
@@ -373,12 +473,51 @@ static void test_unknown_command_errors() {
 //   and no parse error occurred.
 // -----------------------------------------------------------------------------
 static void test_all_run_flags_combined() {
-    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "10",
-                       "--hf-python", "/usr/bin/python3", "--kv-cache-size", "2GiB"});
+    auto args = parse({"trtmc",
+                       "run",
+                       "bundle.trtfb",
+                       "--prompt",
+                       "hello",
+                       "--max-new-tokens",
+                       "10",
+                       "--num-samples",
+                       "3",
+                       "--num-steps",
+                       "32",
+                       "--guidance-scale",
+                       "3.0",
+                       "--cfg-scale",
+                       "2.0",
+                       "--sde-gamma",
+                       "1.5",
+                       "--initial-latents-raw",
+                       "z.bin",
+                       "--condition-latents-raw",
+                       "cond.bin",
+                       "--condition-mask-raw",
+                       "mask.bin",
+                       "--sampling-steps-raw",
+                       "steps.bin",
+                       "--sde-noise-raw",
+                       "eps.bin",
+                       "--hf-python",
+                       "/usr/bin/python3",
+                       "--kv-cache-size",
+                       "2GiB"});
     check(!args.parse_error, "combined flags no parse error");
     check(args.model_or_bundle == "bundle.trtfb", "combined bundle path");
     check(args.prompt == "hello", "combined prompt");
     check(args.max_new_tokens == 10, "combined max_new_tokens");
+    check(args.num_samples == 3, "combined num_samples");
+    check(args.num_steps == 32, "combined num_steps");
+    check(args.guidance_scale == 3.0F, "combined guidance_scale");
+    check(args.cfg_scale == 2.0F, "combined cfg_scale");
+    check(args.sde_gamma == 1.5F, "combined sde_gamma");
+    check(args.initial_latents_raw == "z.bin", "combined initial_latents_raw");
+    check(args.condition_latents_raw == "cond.bin", "combined condition_latents_raw");
+    check(args.condition_mask_raw == "mask.bin", "combined condition_mask_raw");
+    check(args.sampling_steps_raw == "steps.bin", "combined sampling_steps_raw");
+    check(args.sde_noise_raw == "eps.bin", "combined sde_noise_raw");
     check(args.hf_python == "/usr/bin/python3", "combined hf-python");
     check(args.kv_cache_size_bytes == (2ULL * 1024ULL * 1024ULL * 1024ULL),
           "combined kv-cache-size");

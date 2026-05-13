@@ -2,7 +2,11 @@
 //
 // Usage:
 //   trtmc run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--benchmark N]
-//                        [--warmup N] [--hf-python PATH]
+//                        [--warmup N] [--num-samples N] [--num-steps N]
+//                        [--guidance-scale S] [--cfg-scale S] [--sde-gamma S]
+//                        [--initial-latents-raw PATH] [--condition-latents-raw PATH]
+//                        [--condition-mask-raw PATH] [--sampling-steps-raw PATH]
+//                        [--sde-noise-raw PATH] [--output samples.jsonl] [--hf-python PATH]
 //   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
@@ -46,6 +50,10 @@ struct CliArgs {
     std::string image_path;
     std::string output_dir;
     std::string initial_latents_raw;
+    std::string condition_latents_raw;
+    std::string condition_mask_raw;
+    std::string sampling_steps_raw;
+    std::string sde_noise_raw;
     std::string document;
     std::string audio_in;
     std::string audio_out;
@@ -57,6 +65,7 @@ struct CliArgs {
     float point_y{0.5F};
     bool is_foreground{true};
     int max_new_tokens{0};
+    int num_samples{1};
     int benchmark{0}; // >0: run N timed iterations after warmup
     int warmup{1};    // number of warmup iterations before timing
     float temperature{1.0F};
@@ -66,6 +75,7 @@ struct CliArgs {
     int seed{-1};
     int num_steps{-1};
     float guidance_scale{-1.0F};
+    float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
     bool greedy{false};
@@ -159,7 +169,11 @@ void print_usage() {
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
-           "[--kv-cache-size SIZE] [--chat-template] [--no-thinking]\n"
+           "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
+           "[--num-samples N] [--num-steps N] [--guidance-scale S] [--cfg-scale S] "
+           "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
+           "[--condition-mask-raw PATH] [--sampling-steps-raw PATH] [--sde-noise-raw PATH] "
+           "[--output samples.jsonl]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
@@ -246,6 +260,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.max_new_tokens = std::atoi(argv[++i]);
             continue;
         }
+        if (arg == "--num-samples" && need_value(arg)) {
+            args.num_samples = std::max(1, std::atoi(argv[++i]));
+            continue;
+        }
         if (arg == "--benchmark" && need_value(arg)) {
             args.benchmark = std::atoi(argv[++i]);
             continue;
@@ -317,12 +335,32 @@ CliArgs parse_args(int argc, char** argv) {
             args.initial_latents_raw = argv[++i];
             continue;
         }
+        if (arg == "--condition-latents-raw" && need_value(arg)) {
+            args.condition_latents_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--condition-mask-raw" && need_value(arg)) {
+            args.condition_mask_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--sampling-steps-raw" && need_value(arg)) {
+            args.sampling_steps_raw = argv[++i];
+            continue;
+        }
+        if (arg == "--sde-noise-raw" && need_value(arg)) {
+            args.sde_noise_raw = argv[++i];
+            continue;
+        }
         if (arg == "--num-steps" && need_value(arg)) {
             args.num_steps = std::atoi(argv[++i]);
             continue;
         }
         if (arg == "--guidance-scale" && need_value(arg)) {
             args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--sde-gamma" && need_value(arg)) {
+            args.sde_gamma = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
@@ -497,6 +535,55 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
     return values;
 }
 
+std::string json_escape(const std::string& text) {
+    std::ostringstream out;
+    for (unsigned char ch : text) {
+        switch (ch) {
+        case '"':
+            out << "\\\"";
+            break;
+        case '\\':
+            out << "\\\\";
+            break;
+        case '\b':
+            out << "\\b";
+            break;
+        case '\f':
+            out << "\\f";
+            break;
+        case '\n':
+            out << "\\n";
+            break;
+        case '\r':
+            out << "\\r";
+            break;
+        case '\t':
+            out << "\\t";
+            break;
+        default:
+            if (ch < 0x20U) {
+                out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                    << static_cast<int>(ch) << std::dec << std::setfill(' ');
+            } else {
+                out << static_cast<char>(ch);
+            }
+            break;
+        }
+    }
+    return out.str();
+}
+
+void write_text_sample_jsonl(std::ostream& out, int32_t id, const trtmc::TextResult& result) {
+    out << "{\"id\":" << id << ",\"generated\":\"" << json_escape(result.text)
+        << "\",\"token_ids\":[";
+    for (std::size_t i = 0; i < result.token_ids.size(); ++i) {
+        if (i > 0)
+            out << ',';
+        out << result.token_ids[i];
+    }
+    out << "]}\n";
+}
+
 int cmd_run(const CliArgs& args) {
     if (args.bundle_path.empty()) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
@@ -509,11 +596,17 @@ int cmd_run(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    const std::string prompt = args.prompt.empty() ? "Hello" : args.prompt;
+    const std::string ptype = pipeline->pipeline_type();
+    const std::string prompt =
+        args.prompt.empty() && ptype != "ElfFlowPipeline" ? "Hello" : args.prompt;
     trtmc::GenerateConfig cfg;
-    cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
+    cfg.max_new_tokens =
+        args.max_new_tokens > 0 ? args.max_new_tokens : (ptype == "ElfFlowPipeline" ? 0 : 20);
+    cfg.num_samples = args.num_samples;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
+    cfg.cfg_scale = args.cfg_scale;
+    cfg.sde_gamma = args.sde_gamma;
     cfg.use_chat_template = args.chat_template;
     cfg.enable_thinking = !args.no_thinking;
     cfg.temperature = args.greedy ? 0.0F : args.temperature;
@@ -521,9 +614,53 @@ int cmd_run(const CliArgs& args) {
     cfg.min_p = args.min_p;
     cfg.top_k = args.top_k;
     cfg.seed = args.seed;
+    if (!args.initial_latents_raw.empty()) {
+        std::string error;
+        auto latents = read_float32_raw_file(args.initial_latents_raw, error);
+        if (!latents) {
+            std::cerr << "Error: failed to read --initial-latents-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.initial_latents = std::move(*latents);
+    }
+    if (!args.condition_latents_raw.empty()) {
+        std::string error;
+        auto latents = read_float32_raw_file(args.condition_latents_raw, error);
+        if (!latents) {
+            std::cerr << "Error: failed to read --condition-latents-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.condition_latents = std::move(*latents);
+    }
+    if (!args.condition_mask_raw.empty()) {
+        std::string error;
+        auto mask = read_float32_raw_file(args.condition_mask_raw, error);
+        if (!mask) {
+            std::cerr << "Error: failed to read --condition-mask-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.condition_mask = std::move(*mask);
+    }
+    if (!args.sampling_steps_raw.empty()) {
+        std::string error;
+        auto steps = read_float32_raw_file(args.sampling_steps_raw, error);
+        if (!steps) {
+            std::cerr << "Error: failed to read --sampling-steps-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.sampling_steps = std::move(*steps);
+    }
+    if (!args.sde_noise_raw.empty()) {
+        std::string error;
+        auto noise = read_float32_raw_file(args.sde_noise_raw, error);
+        if (!noise) {
+            std::cerr << "Error: failed to read --sde-noise-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.sde_noises = std::move(*noise);
+    }
 
     // Detect diffusion pipelines — they use generate_image(), not generate().
-    const std::string ptype = pipeline->pipeline_type();
     const bool is_diffusion =
         (ptype.find("Diffusion") != std::string::npos || ptype.find("Flux") != std::string::npos ||
          ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos ||
@@ -614,9 +751,43 @@ int cmd_run(const CliArgs& args) {
         print_text_timing(result);
         std::cout << result.text << '\n';
     } else {
-        auto result = pipeline->generate(prompt, cfg);
-        print_text_timing(result);
-        std::cout << result.text << '\n';
+        const int samples = std::max(1, cfg.num_samples);
+        if (!cfg.initial_latents.empty() && samples > 1) {
+            std::cerr << "Error: --initial-latents-raw can only be used with one sample\n";
+            return EXIT_FAILURE;
+        }
+
+        std::ofstream jsonl_file;
+        std::ostream* jsonl_out = nullptr;
+        if (!args.output_dir.empty()) {
+            auto out_path = std::filesystem::path(args.output_dir);
+            auto parent = out_path.parent_path();
+            if (!parent.empty())
+                std::filesystem::create_directories(parent);
+            jsonl_file.open(out_path, std::ios::out | std::ios::trunc);
+            if (!jsonl_file) {
+                std::cerr << "Error: failed to open " << args.output_dir << " for writing\n";
+                return EXIT_FAILURE;
+            }
+            jsonl_out = &jsonl_file;
+        } else if (samples > 1) {
+            jsonl_out = &std::cout;
+        }
+
+        for (int i = 0; i < samples; ++i) {
+            trtmc::GenerateConfig sample_cfg = cfg;
+            if (cfg.seed >= 0)
+                sample_cfg.seed = cfg.seed + i;
+            auto result = pipeline->generate(prompt, sample_cfg);
+            print_text_timing(result);
+            if (jsonl_out) {
+                write_text_sample_jsonl(*jsonl_out, i, result);
+            } else {
+                std::cout << result.text << '\n';
+            }
+        }
+        if (jsonl_file.is_open())
+            std::cout << "Saved " << args.output_dir << " (" << samples << " samples)\n";
     }
     return EXIT_SUCCESS;
 }

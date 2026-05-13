@@ -93,6 +93,14 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_torchtrt']."
     },
+    "elf_flow": {
+      "task_strategy": "diffusion_text_generation",
+      "cli_commands": ["run", "solve"],
+      "runner_class": "tests.e2e_harness.runners.diffusion_text_generation.DiffusionTextGenerationRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion_text_generation.DiffusionTextGenerationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['elf_flow']."
+    },
     "object_detection": {
       "task_strategy": "object_detection",
       "cli_commands": ["detect"],

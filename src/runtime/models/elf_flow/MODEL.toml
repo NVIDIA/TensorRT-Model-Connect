@@ -1,0 +1,2 @@
+runtime_strategies = ["elf_flow"]
+task_strategy = "diffusion_text_generation"

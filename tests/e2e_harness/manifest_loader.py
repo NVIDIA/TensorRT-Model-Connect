@@ -54,6 +54,7 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
     "prompted_segmentation": "hf_transformers",
     "object_detection": "hf_transformers",
     "diffusion_media_generation": "hf_diffusers",
+    "diffusion_text_generation": "invariant_only",
     "torchtrt_diffusion": "torchtrt_diffusers",
     "embedding": "hf_transformers",
     "reranking": "hf_transformers",
@@ -109,6 +110,9 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
         {"name": "dit_step", "required": False},
         {"name": "vae_decode", "required": False},
         {"name": "end_to_end", "required": True},
+    ],
+    "diffusion_text_generation": [
+        {"name": "decoded_text", "required": True},
     ],
     "embedding": [
         {"name": "full_inference", "required": True},
@@ -532,6 +536,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "patchtsmixer_torchtrt",
     "timesfm_torchtrt",
     "chronos_bolt_torchtrt",
+    "elf_flow",
 })
 
 

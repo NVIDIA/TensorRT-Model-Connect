@@ -50,6 +50,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "patchtsmixer_torchtrt": "neural_operator",
     "timesfm_torchtrt": "neural_operator",
     "chronos_bolt_torchtrt": "neural_operator",
+    "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
     "diffusion_ltx": "diffusion_media_generation",
@@ -81,6 +82,8 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "patchtst_plugin": ["patchtst_torchtrt"],
     "patchtsmixer_plugin": ["patchtsmixer_torchtrt"],
     "timesfm_plugin": ["timesfm_torchtrt"],
+    "chronos_bolt_plugin": ["chronos_bolt_torchtrt"],
+    "elf_flow_plugin": ["elf_flow"],
     "segmentation_plugin": ["segmentation", "prompted_segmentation"],
     "object_detection_plugin": ["object_detection"],
     "omni_plugin": ["omni_multimodal"],
@@ -117,6 +120,8 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "patchtst_pipeline": ["patchtst_torchtrt"],
     "patchtsmixer_pipeline": ["patchtsmixer_torchtrt"],
     "timesfm_pipeline": ["timesfm_torchtrt"],
+    "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
+    "elf_flow_pipeline": ["elf_flow"],
     "flux_pipeline": ["diffusion_flux"],
     "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
@@ -135,6 +140,7 @@ RUNNER_TASK_STRATEGIES: Dict[str, List[str]] = {
     "vision_language": ["vision_language_generation"],
     "audio_speech": ["speech_to_text", "text_to_audio", "speech_to_speech"],
     "diffusion": ["diffusion_media_generation"],
+    "diffusion_text_generation": ["diffusion_text_generation"],
     "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
     "embedding": ["embedding"],
     "reranking": ["reranking"],
@@ -155,6 +161,7 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
     "reranking": ["reranking"],
     "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
     "diffusion": ["diffusion_media_generation"],
+    "diffusion_text_generation": ["diffusion_text_generation"],
     "omni": ["omni_multimodal"],
     "neural_operator": ["neural_operator"],
 }
@@ -167,6 +174,7 @@ PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
     "time_series_regression": ["neural_operator"],
     "time_series_classification": ["neural_operator"],
     "tts": ["text_to_audio"],
+    "elf_diffusion_text": ["diffusion_text_generation"],
 }
 
 # E2E reference filename (stem) -> task_strategies
