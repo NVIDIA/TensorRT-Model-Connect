@@ -38,18 +38,15 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
-def test_github_stage_wrapper_exports_diffusion_vlm_waives_file() -> None:
+def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    assert "-e DIFFUSION_VLM_WAIVES_FILE" in text
+    assert "DIFFUSION_VLM_WAIVES_FILE" not in text
 
 
-def test_diffusion_vlm_uses_dedicated_waives_file_by_default() -> None:
+def test_diffusion_vlm_gate_failures_are_not_waived() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert (
-        '${DIFFUSION_VLM_WAIVES_FILE:-tests/e2e/diffusion_vlm_waives.txt}'
-        in text
-    )
-    assert "--waives tests/e2e/waives.txt" not in text
+    assert "DIFFUSION_VLM_WAIVES_FILE" not in text
+    assert "--waives" not in text
 
 
 def test_shared_setup_action_creates_hf_cache_dirs() -> None:

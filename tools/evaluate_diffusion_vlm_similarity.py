@@ -35,7 +35,8 @@ _GATE_RULE = (
     "fail if semantic_similarity_0_to_5 < 3.0, "
     "trt_prompt_alignment_0_to_5 < 3.0, trt_visual_quality_0_to_5 < 2.5, "
     "hf_prompt_alignment_0_to_5 < 3.0, hf_visual_quality_0_to_5 < 3.0, "
-    "is_regression is true, or the HF reference is invalid for a photo prompt"
+    "is_regression is true, or the HF reference is invalid for a photo prompt; "
+    "VLM gate failures always fail CI"
 )
 
 _PHOTO_PROMPT_TERMS = ("photo", "photograph", "photorealistic", "realistic")
@@ -43,13 +44,7 @@ _NON_PHOTO_DESCRIPTION_TERMS = (
     "cartoon", "drawing", "illustration", "painting", "sketch", "stylized",
     "silhouette",
 )
-_REFERENCE_ONLY_GATE_PREFIXES = (
-    "HF reference",
-    "hf_prompt_alignment_0_to_5",
-    "hf_visual_quality_0_to_5",
-    "missing hf_prompt_alignment_0_to_5",
-    "missing hf_visual_quality_0_to_5",
-)
+_INVALID_REFERENCE_SCORE_CAP = 2.0
 
 
 def _load_image(path: Path, max_side: int) -> Any:
@@ -163,6 +158,57 @@ def _mentions_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in lowered for term in terms)
 
 
+def _photo_reference_invalid(judgment: dict[str, Any], prompt: str) -> bool:
+    hf_description = str(judgment.get("hf_description") or "")
+    return bool(
+        prompt
+        and _mentions_any(prompt, _PHOTO_PROMPT_TERMS)
+        and _mentions_any(hf_description, _NON_PHOTO_DESCRIPTION_TERMS)
+    )
+
+
+def _normalize_judgment_consistency(
+    judgment: dict[str, Any], prompt: str = "",
+) -> dict[str, Any]:
+    """Make structured scores consistent with the VLM's own descriptions."""
+    if not _photo_reference_invalid(judgment, prompt):
+        return judgment
+
+    normalized = dict(judgment)
+    normalized.setdefault(
+        "judgment_consistency_note",
+        "HF reference description is non-photo/stylized for a photo prompt.",
+    )
+    for key in ("hf_prompt_alignment_0_to_5", "hf_visual_quality_0_to_5"):
+        value = _as_float(normalized.get(key))
+        if value is None or value > _INVALID_REFERENCE_SCORE_CAP:
+            if key in normalized:
+                normalized.setdefault(f"{key}_original", normalized[key])
+            normalized[key] = _INVALID_REFERENCE_SCORE_CAP
+
+    trt_alignment = _as_float(normalized.get("trt_prompt_alignment_0_to_5"))
+    trt_quality = _as_float(normalized.get("trt_visual_quality_0_to_5"))
+    trt_description = str(normalized.get("trt_description") or "")
+    trt_is_acceptable_photo = (
+        trt_alignment is not None
+        and trt_alignment >= 3.0
+        and trt_quality is not None
+        and trt_quality >= 2.5
+        and not _mentions_any(trt_description, _NON_PHOTO_DESCRIPTION_TERMS)
+    )
+    if trt_is_acceptable_photo:
+        relative = str(normalized.get("trt_relative_to_hf") or "").strip().lower()
+        if relative != "better":
+            if "trt_relative_to_hf" in normalized:
+                normalized.setdefault(
+                    "trt_relative_to_hf_original",
+                    normalized["trt_relative_to_hf"],
+                )
+            normalized["trt_relative_to_hf"] = "better"
+
+    return normalized
+
+
 def _apply_gate(judgment: dict[str, Any], prompt: str = "") -> dict[str, Any]:
     reasons = []
     similarity = _as_float(judgment.get("semantic_similarity_0_to_5"))
@@ -202,12 +248,7 @@ def _apply_gate(judgment: dict[str, Any], prompt: str = "") -> dict[str, Any]:
     elif bool(is_regression):
         reasons.append("is_regression is true")
 
-    hf_description = str(judgment.get("hf_description") or "")
-    if (
-        prompt
-        and _mentions_any(prompt, _PHOTO_PROMPT_TERMS)
-        and _mentions_any(hf_description, _NON_PHOTO_DESCRIPTION_TERMS)
-    ):
+    if _photo_reference_invalid(judgment, prompt):
         reasons.append(
             "HF reference description suggests non-photo/stylized output for a photo prompt")
 
@@ -216,28 +257,6 @@ def _apply_gate(judgment: dict[str, Any], prompt: str = "") -> dict[str, Any]:
         "rule": _GATE_RULE,
         "reasons": reasons,
     }
-
-
-def _gate_failure_is_reference_only(gate: dict[str, Any]) -> bool:
-    reasons = [str(reason) for reason in gate.get("reasons") or []]
-    return bool(reasons) and all(
-        reason.startswith(_REFERENCE_ONLY_GATE_PREFIXES)
-        for reason in reasons
-    )
-
-
-def _load_xfail_waives(path: Path | None) -> set[str]:
-    if path is None or not path.is_file():
-        return set()
-    waives: set[str] = set()
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        parts = line.split(None, 2)
-        if len(parts) >= 2 and parts[1].upper() == "XFAIL":
-            waives.add(parts[0].split("/", 1)[-1])
-    return waives
 
 
 def _judge_pair(
@@ -270,6 +289,9 @@ Do not mark lower detail than the HF reference alone as a regression.
 Score Image 2 independently as a reference: wrong primary subject count, missing primary
 subjects, obvious artifacts, or non-photo/stylized/silhouette output for a photo prompt
 must reduce its prompt-alignment and visual-quality scores.
+Set "trt_relative_to_hf" from prompt alignment plus visual quality, not just shared
+objects. If Image 2 is non-photo/stylized/silhouette for a photo prompt and Image 1 is
+a normal photo-like rendering of the prompt, set "trt_relative_to_hf" to "better".
 
 Return only JSON with these keys:
 {{
@@ -306,7 +328,7 @@ Keep "reason" under 30 words."""
     generated = generated[:, inputs.input_ids.shape[1]:]
     answer = processor.batch_decode(
         generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    judged = _parse_json(answer.strip())
+    judged = _normalize_judgment_consistency(_parse_json(answer.strip()), prompt=prompt)
     judged["vlm_gate"] = _apply_gate(judged, prompt=prompt)
     return {**pair, "vlm_judgment": judged}
 
@@ -326,8 +348,10 @@ def main() -> int:
     parser.add_argument("--case", action="append", default=[],
                         help="Optional case name filter. May be passed more than once.")
     parser.add_argument("--waives", type=Path,
-                        help="Optional diffusion VLM waives file. XFAIL cases only suppress reference-only VLM gate failures.")
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.waives:
+        print("Ignoring deprecated --waives; diffusion VLM gate failures fail CI.")
 
     pairs = _discover_pairs(args.artifacts_dir)
     if args.case:
@@ -353,7 +377,6 @@ def main() -> int:
 
     results = []
     any_gate_failed = False
-    xfail_waives = _load_xfail_waives(args.waives)
     for pair in pairs:
         result = _judge_pair(
             model, processor, args.device, pair,
@@ -362,23 +385,14 @@ def main() -> int:
         judgment = result["vlm_judgment"]
         gate = judgment.get("vlm_gate", {})
         gate_failed = bool(gate.get("failed"))
-        gate_waived = (
-            gate_failed
-            and result["case_name"] in xfail_waives
-            and _gate_failure_is_reference_only(gate)
-        )
-        if gate_waived:
-            gate["waived"] = True
-            gate["waive_reason"] = "XFAIL allows reference-only VLM gate failure"
-        any_gate_failed = any_gate_failed or (gate_failed and not gate_waived)
+        any_gate_failed = any_gate_failed or gate_failed
         print(
             f"{result['case_name']}: similarity="
             f"{judgment.get('semantic_similarity_0_to_5')} "
             f"trt_quality={judgment.get('trt_visual_quality_0_to_5')} "
             f"hf_quality={judgment.get('hf_visual_quality_0_to_5')} "
             f"regression={judgment.get('is_regression')} "
-            f"gate_failed={gate.get('failed')} "
-            f"gate_waived={gate.get('waived', False)}")
+            f"gate_failed={gate.get('failed')}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({

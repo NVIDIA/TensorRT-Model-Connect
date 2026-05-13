@@ -186,6 +186,8 @@ def test_get_diffusion_config_uses_correct_latent_math() -> None:
     assert dc["diffusion_backend_type"] == "z_image_2d"
     assert dc["video_height"] == 1024
     assert dc["video_width"] == 768
+    assert dc["num_inference_steps"] == 9
+    assert dc["guidance_scale"] == 0.0
     assert dc["scale_factor_spatial"] == zimg_mod.plugin._VAE_SCALE_FACTOR
     assert dc["dit_num_layers"] == zimg_mod.plugin._DIT_NUM_LAYERS
 

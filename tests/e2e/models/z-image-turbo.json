@@ -18,10 +18,11 @@
   "image_height": 1024,
   "image_width": 1024,
   "video_num_frames": 1,
-  "num_inference_steps": 4,
+  "num_inference_steps": 9,
+  "guidance_scale": 0.0,
   "min_pixel_mean": 0.15,
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "Z-Image-Turbo: Qwen3 text encoder + ZImage DiT (unified attention, tanh-gated AdaLN) + AutoencoderKL VAE. Flow matching scheduler with shift=3.0."
+  "notes": "Z-Image-Turbo: Qwen3 text encoder + ZImage DiT (unified attention, tanh-gated AdaLN) + AutoencoderKL VAE. Uses the Turbo recipe with guidance_scale=0.0 and 9 scheduler steps, which produce 8 DiT forwards. Flow matching scheduler with shift=3.0."
 }

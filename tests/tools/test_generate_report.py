@@ -903,7 +903,7 @@ class TestRenderDiffusionModel:
         assert "4.5000" in html
         assert "same main subject" in html
 
-    def test_vlm_assessment_shows_waived_gate(self):
+    def test_vlm_assessment_shows_failed_gate_even_if_artifact_has_legacy_waive(self):
         mod = _import_report()
         r = _make_result(
             name="model-diff",
@@ -929,8 +929,8 @@ class TestRenderDiffusionModel:
             },
         }
         html = mod.render_diffusion_model(r)
-        assert "<strong>Gate:</strong> WAIVED" in html
-        assert "XFAIL allows reference-only VLM gate failure" in html
+        assert "<strong>Gate:</strong> FAIL" in html
+        assert "XFAIL allows reference-only VLM gate failure" not in html
         assert "HF reference description suggests non-photo/stylized output" in html
 
     def test_load_all_results_attaches_vlm_assessment(self, tmp_path):

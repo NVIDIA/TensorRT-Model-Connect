@@ -355,6 +355,7 @@ frames_dir = {frames_dir!r}
 seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
 ltx_guidance_scale = {float(case.inputs.get("guidance_scale", 3.0))}
 wan_guidance_scale = {float(case.inputs.get("guidance_scale", 5.0))}
+z_image_guidance_scale = {float(case.inputs.get("guidance_scale", 0.0))}
 ltx_initial_latents_raw = {ltx_initial_latents_raw!r}
 
 if family in ("flux",):
@@ -384,12 +385,14 @@ if family in ("flux",):
     frames = output.images
 elif family in ("z_image",):
     from diffusers import DiffusionPipeline
-    pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
+    pipe = DiffusionPipeline.from_pretrained(
+        model_ref, torch_dtype=torch.bfloat16, low_cpu_mem_usage=False)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
         num_inference_steps=num_steps,
         height=image_height, width=image_width,
+        guidance_scale=z_image_guidance_scale,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images

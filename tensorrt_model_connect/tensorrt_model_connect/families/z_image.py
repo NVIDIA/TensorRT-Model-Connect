@@ -224,7 +224,7 @@ class ZImagePlugin:
         return {
             "diffusion_backend_type": "z_image_2d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": 4,
+            "num_inference_steps": 9,
             "guidance_scale": 0.0,
             "flow_shift": 3.0,  # HF scheduler shift=3.0 (use_dynamic_shifting=False)
             "video_height": image_height,

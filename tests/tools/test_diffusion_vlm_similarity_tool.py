@@ -5,8 +5,7 @@ import json
 from tools.evaluate_diffusion_vlm_similarity import (
     _apply_gate,
     _discover_pairs,
-    _gate_failure_is_reference_only,
-    _load_xfail_waives,
+    _normalize_judgment_consistency,
     _parse_json,
 )
 
@@ -67,49 +66,49 @@ def test_vlm_similarity_gate_fails_explicit_regression():
 
 
 def test_vlm_similarity_gate_fails_silhouette_reference_for_photo_prompt():
-    result = _apply_gate({
+    judgment = _normalize_judgment_consistency({
+        "trt_description": "A cat sitting on a windowsill at sunset.",
+        "semantic_similarity_0_to_5": 4.0,
+        "trt_prompt_alignment_0_to_5": 4.0,
+        "trt_visual_quality_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 5.0,
+        "hf_visual_quality_0_to_5": 5.0,
+        "trt_relative_to_hf": "similar",
+        "is_regression": False,
+        "hf_description": "A silhouette of a cat sitting on a windowsill.",
+    }, prompt="A photo of a cat sitting on a windowsill at sunset")
+    result = _apply_gate(
+        judgment,
+        prompt="A photo of a cat sitting on a windowsill at sunset",
+    )
+
+    assert result["failed"]
+    assert judgment["trt_relative_to_hf"] == "better"
+    assert judgment["trt_relative_to_hf_original"] == "similar"
+    assert judgment["hf_prompt_alignment_0_to_5"] == 2.0
+    assert judgment["hf_visual_quality_0_to_5"] == 2.0
+    assert any("photo prompt" in reason for reason in result["reasons"])
+
+
+def test_vlm_similarity_gate_passes_when_photo_reference_is_fixed():
+    judgment = _normalize_judgment_consistency({
+        "trt_description": "A cat sitting on a windowsill at sunset.",
+        "hf_description": "A photo of a cat sitting on a windowsill at sunset.",
         "semantic_similarity_0_to_5": 4.0,
         "trt_prompt_alignment_0_to_5": 4.0,
         "trt_visual_quality_0_to_5": 4.0,
         "hf_prompt_alignment_0_to_5": 4.0,
         "hf_visual_quality_0_to_5": 4.0,
+        "trt_relative_to_hf": "similar",
         "is_regression": False,
-        "hf_description": "A silhouette of a cat sitting on a windowsill.",
     }, prompt="A photo of a cat sitting on a windowsill at sunset")
-
-    assert result["failed"]
-    assert any("photo prompt" in reason for reason in result["reasons"])
-
-
-def test_vlm_reference_only_gate_failure_can_be_waived(tmp_path):
-    waives = tmp_path / "waives.txt"
-    waives.write_text(
-        "z-image-turbo-l0 XFAIL (bad HF reference)\n"
-        "other-model SKIP (not an xfail)\n",
-        encoding="utf-8",
+    result = _apply_gate(
+        judgment,
+        prompt="A photo of a cat sitting on a windowsill at sunset",
     )
-    gate = {
-        "failed": True,
-        "reasons": [
-            "HF reference description suggests non-photo/stylized output for a photo prompt",
-        ],
-    }
 
-    assert "z-image-turbo-l0" in _load_xfail_waives(waives)
-    assert "other-model" not in _load_xfail_waives(waives)
-    assert _gate_failure_is_reference_only(gate)
-
-
-def test_vlm_trt_gate_failure_is_not_reference_only():
-    gate = {
-        "failed": True,
-        "reasons": [
-            "trt_visual_quality_0_to_5=1.00 < 2.5",
-            "HF reference description suggests non-photo/stylized output for a photo prompt",
-        ],
-    }
-
-    assert not _gate_failure_is_reference_only(gate)
+    assert not result["failed"]
+    assert judgment["trt_relative_to_hf"] == "similar"
 
 
 def test_parse_json_normalizes_internvl_quality_key_typo():
