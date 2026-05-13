@@ -981,6 +981,42 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
+    if path == "tests/test_e2e.py":
+        allowed_tokens = (
+            "artifact",
+            "artifacts_dir",
+            "case_name",
+            "case_is_none",
+            "e2eresult",
+            "e2estatus",
+            "e2estatus.skip.value",
+            "fileartifactsink",
+            "get_case_by_name",
+            "human_readable_result",
+            "load_the_case",
+            "known_limitations",
+            "load_the_case_before_waives",
+            "oracle_level",
+            "pytest.fail",
+            "pytest.skip",
+            "reason",
+            "runcontext",
+            "source",
+            "stagestatus",
+            "waive_skip",
+            "waives",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "e2e_entrypoint_phi4_waive_skip_artifact",
+                ["phi4-multimodal"] if "phi4-multimodal" in imap.all_model_names_set else [],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
         allowed_tokens = ("fp8_scales", "save_fp8_scales")
         if all(

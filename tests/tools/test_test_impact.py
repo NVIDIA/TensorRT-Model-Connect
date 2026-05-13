@@ -89,6 +89,8 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "phi4-multimodal", "family": "phi", "runtime_strategy": "decoder_kv_cache",
+         "hf_id": "microsoft/Phi-4-multimodal-instruct"},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -118,6 +120,8 @@ def mock_repo(tmp_path):
                   "from ..config import C\nfrom ..graph_ops import conv\n")
     _write_family(families_dir, "mixtral",
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family(families_dir, "phi",
+                  "from ..config import C\n")
 
     # Placeholder source files
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "standard_decoder_builder.py").write_text("")
@@ -616,6 +620,32 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
             "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
+
+    def test_waive_skip_artifact_diff_can_be_refined_to_phi4(self, imap):
+        """Waive-skip artifact plumbing narrows to the Phi4 visible-contract PR."""
+        diff_text = """
+diff --git a/tests/test_e2e.py b/tests/test_e2e.py
+@@ -1 +1 @@
++from tests.e2e_harness.artifact_sink import FileArtifactSink
++from tests.e2e_harness.contracts import E2EResult
++    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
++    # Load the case before waives so even skipped models can publish a
++    # human-readable result artifact into the HTML report.
++            case.metadata.setdefault("known_limitations", []).append({
++                "reason": reason,
++                "source": "waives.txt",
++            sink = FileArtifactSink(artifacts_dir, case)
++            sink.finalize(E2EResult(
++                status=E2EStatus.SKIP.value,
++                oracle_level=case.oracle_level,
++                determinism={"waive_skip": {"reason": reason}},
++            pytest.skip(reason)
+"""
+        broad = test_impact.classify_file("tests/test_e2e.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/test_e2e.py", broad, diff_text, imap)
+        assert refined.rule == "e2e_entrypoint_phi4_waive_skip_artifact"
+        assert refined.models == ["phi4-multimodal"]
 
     def test_manifest_loader_diffusion_threshold_diff_can_be_refined(self, imap):
         """Diffusion-only threshold plumbing in manifest_loader narrows scope."""
