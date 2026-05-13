@@ -635,6 +635,7 @@ diff --git a/src/tokenizer/bpe_tokenizer.cpp b/src/tokenizer/bpe_tokenizer.cpp
 +                // Gemma uses a top-level Split(" ", MergedWithPrevious)
 +                // around a SentencePiece-style BPE vocab.
 +                mUsePreTokenizer = false;
++                return;
 +            } else {
 +                throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
 +            }

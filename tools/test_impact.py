@@ -992,6 +992,7 @@ def maybe_refine_match_with_diff(
             "musepretokenizer",
             "pattern",
             "pre_tokenizer",
+            "return",
             "sentencepiece",
             "split",
             "string",
