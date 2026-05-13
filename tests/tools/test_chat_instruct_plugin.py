@@ -42,3 +42,13 @@ def test_chat_instruct_accepts_golden_answer_without_thinking() -> None:
 
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["exact_match"].passed
+
+
+def test_internlm_config_does_not_request_thinking_suppression() -> None:
+    case = _case()
+    case.name = "internlm2-1.8b"
+
+    assert ChatInstructPlugin().configure_reference(case) == {
+        "use_chat_template": True,
+        "enable_thinking": True,
+    }

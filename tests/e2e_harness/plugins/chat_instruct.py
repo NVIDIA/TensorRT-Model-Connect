@@ -17,7 +17,14 @@ class ChatInstructPlugin:
         prompt = case.inputs.get("prompt", "")
         # Skip chat template if the prompt already contains chat tokens
         already_formatted = any(m in prompt for m in self._PRE_FORMATTED_MARKERS)
-        config = {"use_chat_template": not already_formatted, "enable_thinking": False}
+        # InternLM2's ChatML template has no thinking-control field. Passing
+        # --no-thinking would append a Qwen-style thinking block in the C++
+        # helper, making TRT and HF prompts diverge before the model runs.
+        enable_thinking = True if case.name == "internlm2-1.8b" else False
+        config = {
+            "use_chat_template": not already_formatted,
+            "enable_thinking": enable_thinking,
+        }
         return config
 
     def verify(self, trt_output, ref_output, case, threshold):

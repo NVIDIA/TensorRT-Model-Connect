@@ -138,8 +138,11 @@ class HfTransformersReference:
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
-            from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
-            from tensorrt_model_connect.transformers_compat import patch_legacy_dynamic_cache_api
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+            from tensorrt_model_connect.transformers_compat import (
+                patch_legacy_dynamic_cache_api,
+                remap_token_ids_to_model_vocab,
+            )
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -157,6 +160,9 @@ class HfTransformersReference:
             if trust_remote_code:
                 patch_legacy_dynamic_cache_api()
 
+            _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
+            is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
+
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
             if use_chat_template:
@@ -173,15 +179,13 @@ class HfTransformersReference:
                     input_ids = tokenizer.encode(prompt)
             else:
                 input_ids = tokenizer.encode(prompt)
+            input_ids = remap_token_ids_to_model_vocab(
+                tokenizer, model_ref, input_ids, getattr(_cfg, "vocab_size", None))
 
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
                 "torch_dtype": {torch_dtype_expr},
             }}
-            # Detect encoder-decoder models by checking config
-            from transformers import AutoConfig
-            _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
-            is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
 
             if is_seq2seq:
                 model = AutoModelForSeq2SeqLM.from_pretrained(model_ref, **load_kwargs)

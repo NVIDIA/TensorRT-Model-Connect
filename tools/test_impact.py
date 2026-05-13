@@ -1013,6 +1013,42 @@ def maybe_refine_match_with_diff(
             )
 
     if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
+        internlm_tokenizer_tokens = (
+            "autotokenizer",
+            "config.json",
+            "else_none",
+            "except_exception",
+            "from_.transformers_compat_import_patch_tokenizer_json_special_token_ids",
+            "if_isinstance",
+            "if_original_tokenizer_config",
+            "if_tokenizer_config_path",
+            "json.loads",
+            "model_dir",
+            "original_tokenizer_config",
+            "pass",
+            "patch_tokenizer_json_special_token_ids",
+            "str(model_dir)",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "tokenizer_config_path",
+            "trust_remote_code",
+            "try:",
+            "use_fast=false",
+            "vocab_size",
+            "write_text",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        if all(any(token in line for token in internlm_tokenizer_tokens)
+               for line in normalized_lines):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "shared_builder_internlm_tokenizer_ids",
+                models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
         allowed_tokens = (
             "detect_diffusion_tokenizer_add_special_tokens",
             "detect_tokenizer_add_special_tokens",
@@ -1044,34 +1080,87 @@ def maybe_refine_match_with_diff(
             )
 
     if path == "tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py":
-        dynamic_cache_tokens = (
+        internlm_compat_tokens = (
+            "added_id",
+            "added_tokens",
+            "added_tokens_decoder",
+            "added_vocab",
             "annotations",
+            "bool",
             "cache",
+            "changed",
             "classmethod",
+            "config.vocab_size",
+            "content",
+            "continue",
+            "crashes",
+            "data",
+            "del_vocab",
+            "dict",
             "dynamiccache",
+            "embedding",
+            "ensure_ascii",
             "except_exception",
+            "feeding",
             "from_legacy_cache",
             "generation",
+            "get_added_vocab",
             "get_max_cache_shape",
             "get_max_length",
             "hasattr",
             "idempotent",
+            "in_vocab",
+            "isinstance",
+            "json",
             "legacy",
+            "list",
+            "model_id",
+            "model_ref",
+            "model_vocab",
+            "none",
+            "normalized",
+            "old_token",
+            "out_of_vocab",
             "past_key_values",
             "patch_legacy_dynamic_cache_api",
+            "patch_tokenizer_json_special_token_ids",
+            "path",
+            "read_text",
             "remote_code",
+            "remap",
+            "remap_token_ids_to_model_vocab",
+            "reserved",
+            "rewritten",
             "return",
+            "seen_model_ids",
             "shim",
+            "single_word",
+            "special",
+            "special_token_model_ids",
+            "str",
+            "token_id",
+            "token_ids",
+            "tokenizer",
+            "tokenizer_config",
+            "tokenizer_config.json",
+            "tokenizer_config_path",
+            "tokenizer_json",
+            "tokens",
             "transformers",
             "trusted",
             "try:",
+            "typeerror",
+            "valueerror",
+            "vocab",
+            "vocab_size",
+            "write_text",
         )
         normalized_lines = [
             _normalize_diff_line(line) for line in lines
             if _normalize_diff_line(line) not in {'"""', "if_(", "):"}
         ]
         if normalized_lines and all(
-            any(token in line for token in dynamic_cache_tokens)
+            any(token in line for token in internlm_compat_tokens)
             for line in normalized_lines
         ):
             models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
@@ -1158,9 +1247,22 @@ def maybe_refine_match_with_diff(
             "hf_transformers",
         )
         dynamic_cache_tokens = (
+            "_cfg",
+            "autoconfig",
+            "automodelforcausallm",
+            "automodelforseq2seqlm",
+            "autotokenizer",
+            "detect_encoder_decoder",
+            "getattr",
+            "input_ids",
+            "is_encoder_decoder",
+            "is_seq2seq",
             "patch_legacy_dynamic_cache_api",
+            "remap_token_ids_to_model_vocab",
+            "tokenizer",
             "transformers_compat",
             "trust_remote_code",
+            "vocab_size",
         )
         normalized_lines = [_normalize_diff_line(line) for line in lines]
         if all(
@@ -1181,6 +1283,37 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "harness_reference_vl_generated_only_decode",
                 ["internvl3-8b"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tests/e2e_harness/plugins/chat_instruct.py":
+        internlm_chat_tokens = (
+            "case.name",
+            "chatml",
+            "config",
+            "c++",
+            "diverge",
+            "enable_thinking",
+            "false",
+            "helper",
+            "hf",
+            "internlm2",
+            "no_thinking",
+            "prompts",
+            "qwen_style",
+            "thinking",
+            "trt",
+            "true",
+            "use_chat_template",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        if all(any(token in line for token in internlm_chat_tokens)
+               for line in normalized_lines):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "harness_plugin_chat_instruct_internlm_prompt_config",
+                models,
                 match.unit_tiers,
                 match.rebuild_cpp,
             )

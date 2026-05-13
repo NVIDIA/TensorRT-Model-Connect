@@ -23,6 +23,7 @@ from .triattention_export import (
     TriAttentionBundleConfig,
     export_triattention_stats_section,
 )
+from .transformers_compat import patch_tokenizer_json_special_token_ids
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -447,9 +448,30 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
     # --- Attempt 1: standard HF slow → fast conversion ---
     try:
         from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
+        tokenizer_config_path = model_dir / "tokenizer_config.json"
+        original_tokenizer_config = (
+            tokenizer_config_path.read_text()
+            if tokenizer_config_path.exists()
+            else None
+        )
+        tok = AutoTokenizer.from_pretrained(
+            str(model_dir), use_fast=False, trust_remote_code=True)
         tok.save_pretrained(str(model_dir))
+        if original_tokenizer_config is not None:
+            tokenizer_config_path.write_text(original_tokenizer_config)
         if (model_dir / "tokenizer.json").exists():
+            vocab_size = None
+            try:
+                config = json.loads((model_dir / "config.json").read_text())
+                vocab_size = config.get("vocab_size")
+            except Exception:
+                pass
+            if isinstance(vocab_size, int):
+                patch_tokenizer_json_special_token_ids(
+                    model_dir / "tokenizer.json",
+                    model_dir / "tokenizer_config.json",
+                    vocab_size,
+                )
             print("[trtmc-build] Generated tokenizer.json from slow tokenizer",
                   file=sys.stderr)
             return

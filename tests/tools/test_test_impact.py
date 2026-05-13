@@ -726,6 +726,78 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_internlm_dynamic_cache_compat"
         assert refined.models == ["internlm2-1.8b"]
 
+    def test_internlm_tokenizer_export_diff_can_be_refined(self, mock_repo):
+        """InternLM tokenizer ID export fix is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm2",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
+@@ -1 +1 @@
++from .transformers_compat import patch_tokenizer_json_special_token_ids
++        tokenizer_config_path = model_dir / "tokenizer_config.json"
++        tok = AutoTokenizer.from_pretrained(
++            str(model_dir), use_fast=False, trust_remote_code=True)
++        if isinstance(vocab_size, int):
++            patch_tokenizer_json_special_token_ids(
++                model_dir / "tokenizer.json",
++                model_dir / "tokenizer_config.json",
++                vocab_size,
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+            imap,
+        )
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "shared_builder_internlm_tokenizer_ids"
+        assert refined.models == ["internlm2-1.8b"]
+
+    def test_chat_instruct_internlm_prompt_config_diff_can_be_refined(
+        self, mock_repo
+    ):
+        """InternLM chat prompt config is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm2",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/plugins/chat_instruct.py b/tests/e2e_harness/plugins/chat_instruct.py
+@@ -1 +1 @@
++        # InternLM2's ChatML template has no thinking-control field.
++        # --no-thinking would append a Qwen-style thinking block in the C++
++        # helper, making TRT and HF prompts diverge before the model runs.
++        enable_thinking = True if case.name == "internlm2-1.8b" else False
++        config = {
++            "use_chat_template": not already_formatted,
++            "enable_thinking": enable_thinking,
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/plugins/chat_instruct.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/plugins/chat_instruct.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_plugin_chat_instruct_internlm_prompt_config"
+        assert refined.models == ["internlm2-1.8b"]
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """
