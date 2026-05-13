@@ -1043,6 +1043,45 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
+    if path == "tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py":
+        dynamic_cache_tokens = (
+            "annotations",
+            "cache",
+            "classmethod",
+            "dynamiccache",
+            "except_exception",
+            "from_legacy_cache",
+            "generation",
+            "get_max_cache_shape",
+            "get_max_length",
+            "hasattr",
+            "idempotent",
+            "legacy",
+            "past_key_values",
+            "patch_legacy_dynamic_cache_api",
+            "remote_code",
+            "return",
+            "shim",
+            "transformers",
+            "trusted",
+            "try:",
+        )
+        normalized_lines = [
+            _normalize_diff_line(line) for line in lines
+            if _normalize_diff_line(line) not in {'"""', "if_(", "):"}
+        ]
+        if normalized_lines and all(
+            any(token in line for token in dynamic_cache_tokens)
+            for line in normalized_lines
+        ):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "shared_builder_internlm_dynamic_cache_compat",
+                models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py":
         allowed_tokens = (
             "detect_tokenizer_add_special_tokens",
@@ -1118,6 +1157,23 @@ def maybe_refine_match_with_diff(
             "return_text",
             "hf_transformers",
         )
+        dynamic_cache_tokens = (
+            "patch_legacy_dynamic_cache_api",
+            "transformers_compat",
+            "trust_remote_code",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        if all(
+            any(token in line for token in dynamic_cache_tokens)
+            for line in normalized_lines
+        ):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "harness_reference_internlm_dynamic_cache_compat",
+                models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
         if all(
             any(token in _normalize_diff_line(line) for token in allowed_tokens)
             for line in lines

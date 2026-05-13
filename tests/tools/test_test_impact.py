@@ -663,6 +663,69 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_vl_generated_only_decode"
         assert refined.models == ["internvl3-8b"]
 
+    def test_transformers_compat_dynamic_cache_diff_can_be_refined(self, mock_repo):
+        """InternLM DynamicCache compatibility shim is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm2",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py b/tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py
+@@ -0,0 +1,9 @@
++def patch_legacy_dynamic_cache_api() -> None:
++    from transformers.cache_utils import DynamicCache
++    if not hasattr(DynamicCache, "from_legacy_cache"):
++        DynamicCache.from_legacy_cache = from_legacy_cache
++    if not hasattr(DynamicCache, "get_max_length"):
++        DynamicCache.get_max_length = get_max_length
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py",
+            imap,
+        )
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/transformers_compat.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "shared_builder_internlm_dynamic_cache_compat"
+        assert refined.models == ["internlm2-1.8b"]
+
+    def test_hf_dynamic_cache_patch_diff_can_be_refined(self, mock_repo):
+        """HF reference DynamicCache patch is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm2",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++            from tensorrt_model_connect.transformers_compat import patch_legacy_dynamic_cache_api
++            if trust_remote_code:
++                patch_legacy_dynamic_cache_api()
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_internlm_dynamic_cache_compat"
+        assert refined.models == ["internlm2-1.8b"]
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """
