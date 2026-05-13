@@ -1524,7 +1524,8 @@ int main() {
         }
 
         // Without special tokens: no BOS/EOS
-        auto tok_ns = trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
+        auto tok_ns =
+            trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
         {
             auto ids = tok_ns->encode("hello");
             check(!ids.empty() && ids[0] != 200 && ids.back() != 202,
