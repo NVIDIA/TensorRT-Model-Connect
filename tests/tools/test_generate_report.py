@@ -326,6 +326,24 @@ class TestRenderReport:
         assert "FAIL" in html
         assert "1 Failed" in html
 
+    def test_manifest_skip_known_limitation_is_visible(self):
+        mod = _import_report()
+        r = _make_result(name="nllb-200-distilled-600m", status="skip")
+        r["stage_outputs"] = {}
+        r["stages"] = {}
+        r["case_config"]["metadata"] = {
+            "known_limitations": [{
+                "reason": "M2M-100 encoder-decoder weight mapping needs debugging",
+                "source": "v1_skip_migration",
+            }]
+        }
+
+        html = mod.render_report([r])
+
+        assert "Known Limitation" in html
+        assert "M2M-100 encoder-decoder weight mapping needs debugging" in html
+        assert "v1_skip_migration" in html
+
     def test_multiple_models_all_present(self):
         mod = _import_report()
         results = [

@@ -285,3 +285,15 @@ class TestManifestValidation:
         case_full = load_manifest(path_full)
         assert case_full.metadata["skip_reason"] == "broken"
         assert "skip_comparison_reason" not in case_full.metadata
+
+    def test_skip_manifest_records_known_limitation(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "nllb-test",
+            "skip": "reference path still under repair",
+        })
+        case = load_manifest(path)
+
+        assert case.metadata["known_limitations"] == [{
+            "reason": "reference path still under repair",
+            "source": "v1_skip_migration",
+        }]

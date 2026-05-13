@@ -35,7 +35,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
+from tests.e2e_harness.artifact_sink import FileArtifactSink
+from tests.e2e_harness.contracts import E2EResult, E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 from tests.e2e_harness.python_profiles import (
@@ -248,13 +249,22 @@ def test_e2e(case_name: str, request) -> None:
     if case is None:
         pytest.fail(f"Case not found: {case_name}")
 
-    # Honor manifest-level skip field
+    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
+
+    # Honor manifest-level skip field, but still persist a result artifact so
+    # the HTML report shows a human-readable contract for the missing reference.
     skip_reason = case.metadata.get("skip_reason", "")
     if skip_reason:
+        sink = FileArtifactSink(artifacts_dir, case)
+        sink.finalize(E2EResult(
+            case_name=case.name,
+            status=E2EStatus.SKIP.value,
+            oracle_level=case.oracle_level,
+            determinism={"manifest_skip": {"reason": skip_reason}},
+        ))
         pytest.skip(skip_reason)
 
     # Build run context
-    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
     base_python = _resolve_hf_python(config)
     profile_names = resolve_case_profile_names(case)
     profile_paths = resolve_case_python_profiles(case, base_python)
