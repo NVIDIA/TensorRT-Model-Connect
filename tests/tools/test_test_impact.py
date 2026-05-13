@@ -69,6 +69,8 @@ def mock_repo(tmp_path):
          "hf_id": "meta/llama-7b"},
         {"name": "bert-base", "family": "bert", "runtime_strategy": "encoder_only",
          "hf_id": "bert-base", "core": True},
+        {"name": "fnet-base", "family": "fnet", "runtime_strategy": "encoder_only",
+         "hf_id": "google/fnet-base"},
         {"name": "whisper-tiny-fp16", "family": "whisper", "runtime_strategy": "speech_to_text",
          "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
@@ -103,6 +105,8 @@ def mock_repo(tmp_path):
     _write_family(families_dir, "llama",
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
     _write_family(families_dir, "bert",
+                  "from ..encoder_builder import build\nfrom ..config import C\n")
+    _write_family(families_dir, "fnet",
                   "from ..encoder_builder import build\nfrom ..config import C\n")
     _write_family(families_dir, "whisper",
                   "from ..config import C\nfrom ..graph_ops import rope\n")
@@ -265,11 +269,11 @@ class TestSpecializedBuilder:
         assert set(match.models) == expected_models
 
     def test_encoder_builder(self, imap):
-        """encoder_builder.py -> only bert family."""
+        """encoder_builder.py -> encoder-builder families."""
         match = test_impact.classify_file(
             "tensorrt_model_connect/tensorrt_model_connect/encoder_builder.py", imap)
         assert match.rule == "specialized_builder"
-        assert set(match.models) == {"bert-base"}
+        assert set(match.models) == {"bert-base", "fnet-base"}
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +701,82 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         )
         assert refined.rule == "harness_reference_dpr_context_encoder"
         assert refined.models == ["dpr-ctx-encoder"]
+
+    def test_hf_fnet_static_padding_diff_can_be_refined(self, imap):
+        """FNet reference tokenization changes should only run fnet-base."""
+        diff_text = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++def _encoder_tokenizer_kwargs(model_type: str, max_cache_length: object) -> dict:
++    if model_type == "fnet" and isinstance(max_cache_length, int) and max_cache_length > 0:
++            "padding": "max_length",
++            "max_length": max_cache_length,
++            "truncation": True,
++        return {}
++        max_cache_length = case.inputs.get("max_cache_length")
++        fnet_tokenizer_kwargs = _encoder_tokenizer_kwargs("fnet", max_cache_length)
++            max_cache_length = {max_cache_length!r}
++            fnet_tokenizer_kwargs = {fnet_tokenizer_kwargs!r}
++            tokenizer_kwargs = fnet_tokenizer_kwargs if model_type == 'fnet' else {{}}
+-            inputs = tokenizer(prompt, return_tensors="pt")
++            inputs = tokenizer(prompt, return_tensors="pt", **tokenizer_kwargs)
+"""
+        broad = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "harness_reference_fnet_static_padding"
+        assert refined.models == ["fnet-base"]
+
+    def test_encoder_pipeline_static_padding_diff_can_be_refined(self, imap):
+        """Static encoder padding runtime changes should only run fnet-base."""
+        diff_text = """
+diff --git a/src/runtime/pipelines/encoder_pipeline.cpp b/src/runtime/pipelines/encoder_pipeline.cpp
+@@ -1 +1 @@
++#include <algorithm>
++int64_t static_input_length(const TrtModule& module, const std::string& name) {
++    if (module.input_is_dynamic(name))
++        return 0;
++    for (const auto& info : module.input_info()) {
++        if (info.name == name && !info.shape.empty() && info.shape.back() > 0)
++            return info.shape.back();
++int32_t pad_token_id(const std::shared_ptr<ITokenizer>& tokenizer) {
++        const int32_t id = tokenizer->id_for_token(token);
++struct EncoderInputBuffers {
++    std::vector<int32_t> ids;
++    std::vector<int32_t> mask_i32;
++    std::vector<float> mask_f32;
++    int64_t tensor_len{0};
++EncoderInputBuffers prepare_encoder_inputs(const std::vector<int32_t>& input_ids,
++                                           int64_t static_len, int32_t pad_id) {
++    const auto input_len = input_ids.size();
++        throw std::runtime_error("EncoderPipeline: input length exceeds static engine length");
++    const std::size_t valid_len = std::min(input_len, tensor_len);
++    EncoderInputBuffers buffers;
++    std::copy_n(input_ids.begin(), valid_len, buffers.ids.begin());
++    std::fill_n(buffers.mask_i32.begin(), valid_len, 1);
++    std::fill_n(buffers.mask_f32.begin(), valid_len, 1.0f);
++    return buffers;
+-    auto ids_copy = input_ids;
++    auto buffers = prepare_encoder_inputs(input_ids, static_input_length(*encoder_, "input_ids"),
++                                          pad_token_id(tokenizer_));
+-    ids_t.data = ids_copy.data();
++    ids_t.data = buffers.ids.data();
++    ids_t.shape = {buffers.tensor_len};
++    mask_t.data = buffers.mask_i32.data();
++    mask_t.shape = {buffers.tensor_len};
++    mask_t.data = buffers.mask_f32.data();
++    mask_t.shape = {buffers.tensor_len};
+"""
+        broad = test_impact.classify_file("src/runtime/pipelines/encoder_pipeline.cpp", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/runtime/pipelines/encoder_pipeline.cpp", broad, diff_text, imap)
+        assert refined.rule == "cpp_pipeline_fnet_static_padding"
+        assert refined.models == ["fnet-base"]
 
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""

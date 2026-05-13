@@ -1142,6 +1142,32 @@ def maybe_refine_match_with_diff(
             )
 
         allowed_tokens = (
+            "encoder_tokenizer_kwargs",
+            "fnet",
+            "fnet_tokenizer_kwargs",
+            "inputs_=_tokenizer",
+            "max_cache_length",
+            "max_length",
+            "model_type",
+            "padding",
+            "return_{}",
+            "return_{",
+            "return_tensors",
+            "tokenizer_kwargs",
+            "truncation",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_reference_fnet_static_padding",
+                ["fnet-base"] if "fnet-base" in imap.all_model_names_set else [],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+        allowed_tokens = (
             "decode_vl_generated_text",
             "vl_generation",
             "generated_ids",
@@ -1190,6 +1216,51 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "harness_reference_vl_generated_only_decode",
                 ["internvl3-8b"],
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "src/runtime/pipelines/encoder_pipeline.cpp":
+        allowed_tokens = (
+            "#include_<algorithm>",
+            "buffers",
+            "copy_n",
+            "encoderinputbuffers",
+            "encoderpipeline:_input_length_exceeds_static_engine_length",
+            "ids_copy",
+            "ids_t",
+            "id_for_token",
+            "id_>=",
+            "input_ids",
+            "input_info",
+            "input_is_dynamic",
+            "input_len",
+            "mask_f32",
+            "mask_i32",
+            "mask_t",
+            "pad_token_id",
+            "prepare_encoder_inputs",
+            "return_0",
+            "return_buffers",
+            "return_id",
+            "shape.back",
+            "std::vector<int32_t>_ids",
+            "static_input_length",
+            "static_len",
+            "std::fill_n",
+            "std::min",
+            "tensor_len",
+            "<pad>",
+            "tokenizer",
+            "valid_len",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "cpp_pipeline_fnet_static_padding",
+                ["fnet-base"] if "fnet-base" in imap.all_model_names_set else [],
                 match.unit_tiers,
                 match.rebuild_cpp,
             )
