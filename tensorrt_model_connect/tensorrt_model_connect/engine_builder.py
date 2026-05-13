@@ -888,7 +888,13 @@ def build_bundle(
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     # Skip for non-text models (segmentation, audio) that don't use tokenizers.
     runtime_strategy = getattr(plugin, "runtime_strategy", "")
-    if runtime_strategy not in ("segmentation", "neural_operator", "object_detection", "prompted_segmentation"):
+    if runtime_strategy not in (
+        "segmentation",
+        "neural_operator",
+        "object_detection",
+        "prompted_segmentation",
+        "image_classification",
+    ):
         tokenizer_json_t0 = time.monotonic()
         _ensure_tokenizer_json(model_dir_path)
         _add_build_timing(

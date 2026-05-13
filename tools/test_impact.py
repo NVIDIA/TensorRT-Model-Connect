@@ -41,6 +41,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
+    "image_classification": "image_classification",
     "object_detection": "object_detection",
     "embedding": "embedding",
     "reranking": "reranking",
@@ -113,6 +114,7 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     # Segmentation pipelines — separate files, not part of encoder_pipeline:
     "segment_pipeline": ["segmentation"],
     "sam_pipeline": ["prompted_segmentation"],
+    "image_classification_pipeline": ["image_classification"],
     "encoder_pipeline": [
         "encoder_only", "embedding", "reranking", "neural_operator",
         "object_detection",
@@ -141,6 +143,7 @@ RUNNER_TASK_STRATEGIES: Dict[str, List[str]] = {
     "audio_speech": ["speech_to_text", "text_to_audio", "speech_to_speech"],
     "diffusion": ["diffusion_media_generation"],
     "diffusion_text_generation": ["diffusion_text_generation"],
+    "image_classification": ["image_classification"],
     "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
     "embedding": ["embedding"],
     "reranking": ["reranking"],
@@ -160,6 +163,7 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
     "embedding": ["embedding"],
     "reranking": ["reranking"],
     "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
+    "image_classification": ["image_classification"],
     "diffusion": ["diffusion_media_generation"],
     "diffusion_text_generation": ["diffusion_text_generation"],
     "omni": ["omni_multimodal"],
@@ -182,7 +186,8 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "hf_transformers": [
         "text_generation_causal", "vision_language_generation", "text_to_audio",
         "speech_to_text", "encoder_only_nlp", "embedding", "reranking",
-        "segmentation", "prompted_segmentation", "object_detection",
+        "segmentation", "prompted_segmentation", "image_classification",
+        "object_detection",
     ],
     "hf_diffusers": ["diffusion_media_generation"],
     "torch_reference": ["speech_to_speech", "omni_multimodal", "neural_operator"],

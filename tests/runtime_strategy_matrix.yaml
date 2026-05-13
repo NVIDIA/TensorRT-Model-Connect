@@ -125,6 +125,14 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['prompted_segmentation']."
     },
+    "image_classification": {
+      "task_strategy": "image_classification",
+      "cli_commands": ["classify"],
+      "runner_class": "tests.e2e_harness.runners.image_classification.ImageClassificationRunner",
+      "comparator_class": "tests.e2e_harness.comparators.image_classification.ImageClassificationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['image_classification']."
+    },
     "reranking": {
       "task_strategy": "reranking",
       "cli_commands": ["rerank"],

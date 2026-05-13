@@ -200,11 +200,16 @@ class ModelConfig:
                     rope_theta = 10000.0
         rope_theta = float(rope_theta)
 
+        architecture = d.get("architecture", "")
+        architectures = d.get("architectures", [])
+        if not architectures and architecture:
+            architectures = [architecture]
+
         return ModelConfig(
-            model_type=d.get("model_type", ""),
-            architectures=d.get("architectures", []),
+            model_type=d.get("model_type", "") or architecture,
+            architectures=architectures,
             vocab_size=d.get("vocab_size", 0),
-            hidden_size=hidden_size,
+            hidden_size=hidden_size or d.get("num_features", 0),
             intermediate_size=intermediate,
             num_hidden_layers=num_layers,
             num_attention_heads=num_heads,

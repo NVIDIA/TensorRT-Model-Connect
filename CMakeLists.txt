@@ -198,6 +198,7 @@ add_library(trtmc_core
   src/runtime/models/elf_flow/pipeline.cpp
   src/runtime/models/segmentation/segment_pipeline.cpp
   src/runtime/models/segmentation/sam_pipeline.cpp
+  src/runtime/models/timm_vit/pipeline.cpp
   src/runtime/models/vision_language/pipeline.cpp
   src/runtime/models/flux/pipeline.cpp
   src/runtime/models/ltx_video/pipeline.cpp

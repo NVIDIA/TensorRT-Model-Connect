@@ -357,6 +357,9 @@ _POSITIVE_MATCH_CASES = [
     ("nemotron_hybrid", "nemotron_h"),
     # SAM (prompted segmentation)
     ("sam", "sam"),
+    # timm Vision Transformer (image classification)
+    ("vit_base_patch16_224", "timm_vit"),
+    ("timm_vit", "timm_vit"),
     # Phi-4 Multimodal
     ("phi4_multimodal", "phi4_multimodal"),
     # FLUX (diffusion T2I)

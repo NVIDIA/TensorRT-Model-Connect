@@ -85,6 +85,7 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "vision_language",
     "segmentation",
     "prompted_segmentation",
+    "image_classification",
     "object_detection",
     "neural_operator",
     "text_to_audio",
@@ -729,6 +730,11 @@ def _build_repro_commands(
                 ctx.binary_path, "segment", bundle_path,
                 "--image", str(image or ""),
                 "--output", "/tmp/trtmc_segmentation.png",
+            ]
+        elif task_strategy == "image_classification":
+            infer_parts = [
+                ctx.binary_path, "classify", bundle_path,
+                "--image", str(image or ""),
             ]
         else:
             infer_parts = [

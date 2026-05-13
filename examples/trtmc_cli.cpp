@@ -10,6 +10,7 @@
 //   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
+//   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc inspect         <bundle.trtfb>
 //   trtmc version
 
@@ -178,6 +179,7 @@ void print_usage() {
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\n"
+           "  trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
            "[--max-new-tokens N] [--hf-python PATH]\n"
            "  trtmc serve-audio     <bundle.trtfb> [--chunk-frames N] [--max-new-tokens N] "
@@ -224,10 +226,10 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    static const char* known_cmds[] = {"run",         "inspect",        "generate-video", "segment",
-                                       "segment-sam", "generate-audio", "serve-audio",    "encode",
-                                       "embed",       "rerank",         "solve",          "speak",
-                                       "transcribe",  nullptr};
+    static const char* known_cmds[] = {"run",         "inspect",    "generate-video", "segment",
+                                       "segment-sam", "classify",   "generate-audio", "serve-audio",
+                                       "encode",      "embed",      "rerank",         "solve",
+                                       "speak",       "transcribe", nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {
@@ -914,6 +916,98 @@ int cmd_segment(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+std::vector<float> preprocess_classification_image(const trtmc::io::LoadedImage& image) {
+    constexpr int32_t target = 224;
+    constexpr float crop_pct = 0.9F;
+    const int32_t resize_short = static_cast<int32_t>(static_cast<float>(target) / crop_pct + 0.5F);
+    const float mean[3] = {0.5F, 0.5F, 0.5F};
+    const float stdv[3] = {0.5F, 0.5F, 0.5F};
+
+    int32_t resized_h = resize_short;
+    int32_t resized_w = resize_short;
+    if (image.height <= image.width) {
+        resized_h = resize_short;
+        resized_w =
+            std::max(1, static_cast<int32_t>(
+                            static_cast<float>(image.width) * resize_short / image.height + 0.5F));
+    } else {
+        resized_w = resize_short;
+        resized_h =
+            std::max(1, static_cast<int32_t>(
+                            static_cast<float>(image.height) * resize_short / image.width + 0.5F));
+    }
+
+    const int32_t crop_y = std::max(0, (resized_h - target) / 2);
+    const int32_t crop_x = std::max(0, (resized_w - target) / 2);
+    std::vector<float> chw(static_cast<std::size_t>(3) * target * target);
+
+    for (int32_t y = 0; y < target; ++y) {
+        const int32_t ry = crop_y + y;
+        const int32_t src_y =
+            std::min(image.height - 1,
+                     static_cast<int32_t>(static_cast<float>(ry) * image.height / resized_h));
+        for (int32_t x = 0; x < target; ++x) {
+            const int32_t rx = crop_x + x;
+            const int32_t src_x =
+                std::min(image.width - 1,
+                         static_cast<int32_t>(static_cast<float>(rx) * image.width / resized_w));
+            const auto src_idx = static_cast<std::size_t>((src_y * image.width + src_x) * 3);
+            for (int32_t c = 0; c < 3; ++c) {
+                const float val = (image.pixels[src_idx + c] - mean[c]) / stdv[c];
+                chw[static_cast<std::size_t>(c) * target * target +
+                    static_cast<std::size_t>(y) * target + x] = val;
+            }
+        }
+    }
+    return chw;
+}
+
+int cmd_classify(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty()) {
+        std::cerr << "Error: classify requires bundle + --image\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+
+    auto chw_pixels = preprocess_classification_image(image);
+    constexpr int32_t target = 224;
+
+    trtmc::ClassificationResult result;
+    if (args.benchmark > 0) {
+        const int warmup_n = std::max(0, args.warmup);
+        const int bench_n = args.benchmark;
+        for (int i = 0; i < warmup_n; ++i)
+            result = pipeline->classify(chw_pixels.data(), target, target);
+
+        std::vector<double> times;
+        times.reserve(static_cast<std::size_t>(bench_n));
+        for (int i = 0; i < bench_n; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            result = pipeline->classify(chw_pixels.data(), target, target);
+            const auto t1 = std::chrono::steady_clock::now();
+            times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        const double mean = std::accumulate(times.begin(), times.end(), 0.0) /
+                            static_cast<double>(std::max(1, bench_n));
+        std::cerr << std::fixed << std::setprecision(6) << "[trtmc.benchmark] classify_ms=" << mean
+                  << " iterations=" << bench_n << " warmup=" << warmup_n << '\n';
+    } else {
+        result = pipeline->classify(chw_pixels.data(), target, target);
+    }
+
+    std::cout << "{"
+              << "\"top_class\":" << result.top_class << ","
+              << "\"top_score\":" << std::setprecision(8) << result.top_score << ","
+              << "\"num_classes\":" << result.logits.size() << "}\n";
+    return EXIT_SUCCESS;
+}
+
 int write_sam_overlay(const trtmc::PromptedSegmentationResult& result,
                       const trtmc::io::LoadedImage& image, const std::string& path) {
     if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty() ||
@@ -1412,6 +1506,8 @@ int main(int argc, char** argv) {
             return cmd_segment(args);
         if (args.command == "segment-sam")
             return cmd_segment_sam(args);
+        if (args.command == "classify")
+            return cmd_classify(args);
         if (args.command == "generate-audio")
             return cmd_generate_audio(args);
         if (args.command == "serve-audio")

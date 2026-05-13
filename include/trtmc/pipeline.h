@@ -84,6 +84,12 @@ struct PromptedSegmentationResult {
     int32_t width{0};
 };
 
+struct ClassificationResult {
+    std::vector<float> logits; // [num_classes]
+    int32_t top_class{-1};
+    float top_score{0.0F};
+};
+
 struct TextEmbedding {
     std::vector<float> data;
     std::vector<int64_t> shape;
@@ -278,6 +284,14 @@ class IPipeline {
         (void)is_foreground;
         throw std::runtime_error(std::string(pipeline_type()) +
                                  " does not support segment_prompted()");
+    }
+
+    // -- Image classification --
+    virtual ClassificationResult classify(const float* pixels, int32_t height, int32_t width) {
+        (void)pixels;
+        (void)height;
+        (void)width;
+        throw std::runtime_error(std::string(pipeline_type()) + " does not support classify()");
     }
 
     // -- Encoder-only hidden states (BERT) --

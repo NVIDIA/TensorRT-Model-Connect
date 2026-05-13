@@ -20,6 +20,7 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/chronos_bolt/plugin.cpp|register_chronos_bolt_plugin"
   "models/elf_flow/plugin.cpp|register_elf_flow_plugin"
   "models/segmentation/plugin.cpp|register_segmentation_plugin"
+  "models/timm_vit/plugin.cpp|register_timm_vit_plugin"
   "models/encoder/object_detection_plugin.cpp|register_object_detection_plugin"
   "models/vision_language/plugin.cpp|register_vl_plugin"
   "models/whisper/plugin.cpp|register_whisper_plugin"

@@ -70,6 +70,7 @@ harness_shared tests/e2e_harness/registry.py # shared E2E harness surface; broad
 harness_shared tests/e2e_harness/result_schema.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/test_orchestrator_phases.py # shared E2E harness surface; broad E2E impact is intentional
 no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
 no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
 no_impact scripts/_mk_fp8_bf16_bundle.py # developer utility script; no CI test impact is intentional
@@ -157,6 +158,7 @@ no_impact tools/diff_vl.py # developer utility script; no CI test impact is inte
 no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
 no_impact tools/layer_profiler.py # developer utility script; no CI test impact is intentional
+no_impact tools/make_elf_replay_artifact.py # developer utility script; no CI test impact is intentional
 no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test impact is intentional
 no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
 no_impact tools/perf_compare_all.py # developer utility script; no CI test impact is intentional
@@ -165,6 +167,7 @@ no_impact tools/perf_compare_torchtrt.py # developer utility script; no CI test 
 no_impact tools/perf_utils.py # developer utility script; no CI test impact is intentional
 no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional
 no_impact tools/profile_report.py # developer utility script; no CI test impact is intentional
+no_impact tools/prepare_elf_model_dir.py # developer utility script; no CI test impact is intentional
 no_impact tools/sol_estimate.py # developer utility script; no CI test impact is intentional
 no_impact tools/test_graph_ops.py # developer utility script; no CI test impact is intentional
 no_impact tools/test_impact.py # developer utility script; no CI test impact is intentional
@@ -172,8 +175,10 @@ no_impact tools/test_impact_fallback_allowlist.txt # validation metadata; no CI 
 no_impact tools/test_runner_parity.py # developer utility script; no CI test impact is intentional
 no_impact tools/tool_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/trtmc_profile.py # developer utility script; no CI test impact is intentional
+no_impact tools/validate_elf_replay_artifact.py # developer utility script; no CI test impact is intentional
 no_impact tools/validate_dit.py # developer utility script; no CI test impact is intentional
 no_impact tools/validate_t5.py # developer utility script; no CI test impact is intentional
+no_impact tools/validation/timm_vit/benchmark_trt_paths.py # developer validation helper; no CI test impact is intentional
 shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional

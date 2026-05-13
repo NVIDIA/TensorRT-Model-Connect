@@ -58,7 +58,18 @@ def add_matmul_rhs_constant(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
-    rhs = add_constant(network, (lhs_width, rhs_width), rhs_weights, dtype=dtype)
+    rank = len(tuple(lhs.shape))
+    rhs_shape = (
+        (lhs_width, rhs_width)
+        if rank <= 2
+        else (1,) * (rank - 2) + (lhs_width, rhs_width)
+    )
+    rhs = add_constant(
+        network,
+        rhs_shape,
+        np.asarray(rhs_weights).reshape(rhs_shape),
+        dtype=dtype,
+    )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
@@ -74,8 +85,11 @@ def add_bias_sum(
     bias: np.ndarray,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Element-wise add a [1, width] bias."""
-    bias_t = add_constant(network, (1, width), bias, dtype=dtype)
+    """Element-wise add a bias broadcast over all non-feature axes."""
+    rank = len(tuple(inp.shape))
+    bias_shape = (width,) if rank <= 1 else (1,) * (rank - 1) + (width,)
+    bias_t = add_constant(
+        network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
     bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
     s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
     return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
@@ -449,9 +463,11 @@ def add_gelu_new(
     fp16, runtime trt_dtype is bfloat16) or any other non-matching combo.
     """
     target_dtype = inp.dtype
+    const_shape = (1,) * max(1, len(tuple(inp.shape)))
 
     def _const(name, value):
-        c = add_constant(network, (1, 1), np.array([value], dtype=np.float32), dtype=dtype)
+        c = add_constant(
+            network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
         return _cast_back_to_trt_dtype(network, c, target_dtype)
 
     # x^3
@@ -499,9 +515,11 @@ def add_gelu_erf(
     documented on ``add_gelu_new``.
     """
     target_dtype = inp.dtype
+    const_shape = (1,) * max(1, len(tuple(inp.shape)))
 
     def _const(value):
-        c = add_constant(network, (1, 1), np.array([value], dtype=np.float32), dtype=dtype)
+        c = add_constant(
+            network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
         return _cast_back_to_trt_dtype(network, c, target_dtype)
 
     inv_sqrt2 = _const(1.0 / np.sqrt(2.0))
@@ -2062,14 +2080,19 @@ def add_layer_norm_native(
         eps:         Numerical stability epsilon (scalar, not a tensor).
         dtype:       Storage dtype for gamma/beta constants before TRT cast.
     """
-    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=dtype)
-    beta_t = add_constant(network, (1, hidden_size), beta, dtype=dtype)
+    rank = len(tuple(inp.shape))
+    param_shape = (
+        (hidden_size,) if rank <= 1 else (1,) * (rank - 1) + (hidden_size,)
+    )
+    gamma_t = add_constant(
+        network, param_shape, np.asarray(gamma).reshape(param_shape), dtype=dtype)
+    beta_t = add_constant(
+        network, param_shape, np.asarray(beta).reshape(param_shape), dtype=dtype)
     gamma_t = _cast_back_to_trt_dtype(network, gamma_t, inp.dtype)
     beta_t = _cast_back_to_trt_dtype(network, beta_t, inp.dtype)
-    # axesMask bit i selects axis i as a reduction axis.
-    # For a [..., H] tensor the hidden dim is the last axis.
-    # With rank-2 input [1, H], axis 1 → mask = 1 << 1 = 2.
-    norm = network.add_normalization_v2(inp, gamma_t, beta_t, 1 << 1)
+    # axesMask bit i selects axis i as a reduction axis. The normalized
+    # hidden dimension is always the last axis for [*, hidden_size] tensors.
+    norm = network.add_normalization_v2(inp, gamma_t, beta_t, 1 << (rank - 1))
     norm.epsilon = eps
     norm.compute_precision = trt.float32
     return norm.get_output(0)

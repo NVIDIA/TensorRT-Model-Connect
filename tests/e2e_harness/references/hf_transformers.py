@@ -367,6 +367,8 @@ class HfTransformersReference:
             return self._run_speech_to_text_ref(case, stage, ctx)
         if task == "object_detection":
             return self._run_object_detection_ref(case, stage, ctx)
+        if task == "image_classification":
+            return self._run_image_classification_ref(case, stage, ctx)
         raise ValueError(
             f"full_inference not implemented for task_strategy={task!r}")
 
@@ -576,6 +578,114 @@ class HfTransformersReference:
         return StageOutput(
             stage_name=stage.name, data=data, timing_s=elapsed,
             metadata={"returncode": result.returncode})
+
+    def _run_image_classification_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run timm image classification as the reference oracle."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_image_classification.json")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        hf_id = case.hf_id
+
+        script = textwrap.dedent(f"""\
+            import json
+            from pathlib import Path
+
+            import numpy as np
+            import timm
+            import torch
+            from PIL import Image
+
+            hf_id = {hf_id!r}
+            image_path = {image_path!r}
+            output_path = {output_path!r}
+
+            target = 224
+            crop_pct = 0.9
+            resize_short = int(target / crop_pct + 0.5)
+            image = Image.open(image_path).convert("RGB")
+            width, height = image.size
+            if height <= width:
+                resized_h = resize_short
+                resized_w = max(1, int(width * resize_short / height + 0.5))
+            else:
+                resized_w = resize_short
+                resized_h = max(1, int(height * resize_short / width + 0.5))
+
+            image = image.resize((resized_w, resized_h), Image.Resampling.NEAREST)
+            left = max(0, (resized_w - target) // 2)
+            top = max(0, (resized_h - target) // 2)
+            image = image.crop((left, top, left + target, top + target))
+            arr = np.asarray(image, dtype=np.float32) / 255.0
+            arr = (arr - 0.5) / 0.5
+            chw = np.transpose(arr, (2, 0, 1))[None, ...].copy()
+
+            model_ref = f"hf-hub:{{hf_id}}"
+            try:
+                model = timm.create_model(model_ref, pretrained=True)
+            except Exception:
+                model = timm.create_model(f"hf_hub:{{hf_id}}", pretrained=True)
+            model.eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+
+            with torch.no_grad():
+                tensor = torch.from_numpy(chw).to(device)
+                logits = model(tensor)[0].float().cpu().numpy()
+
+            top_class = int(np.argmax(logits))
+            result = {{
+                "top_class": top_class,
+                "top_score": float(logits[top_class]),
+                "num_classes": int(logits.shape[0]),
+            }}
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+
+        t0 = time.monotonic()
+        result = subprocess.run(
+            [python, "-c", script],
+            capture_output=True, text=True, timeout=900, env=env,
+        )
+        elapsed = time.monotonic() - t0
+
+        if result.returncode != 0:
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_image_classification", case.name)
+            msg = (
+                f"HF image classification failed for {case.name} "
+                f"(rc={result.returncode}):\n{truncated}"
+            )
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
+
+        data = {}
+        if Path(output_path).is_file():
+            data = json.loads(Path(output_path).read_text())
+
+        return StageOutput(
+            stage_name=stage.name,
+            data=data,
+            timing_s=elapsed,
+            metadata={
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+        )
 
     def _run_segmentation_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext

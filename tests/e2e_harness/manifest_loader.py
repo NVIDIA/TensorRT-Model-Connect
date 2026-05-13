@@ -52,6 +52,7 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
     "speech_to_speech": "torch_reference",
     "segmentation": "hf_transformers",
     "prompted_segmentation": "hf_transformers",
+    "image_classification": "hf_transformers",
     "object_detection": "hf_transformers",
     "diffusion_media_generation": "hf_diffusers",
     "diffusion_text_generation": "invariant_only",
@@ -100,6 +101,9 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
         {"name": "full_inference", "required": True},
     ],
     "prompted_segmentation": [
+        {"name": "full_inference", "required": True},
+    ],
+    "image_classification": [
         {"name": "full_inference", "required": True},
     ],
     "object_detection": [
@@ -270,6 +274,13 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
         reqs.append(PreflightRequirement(
             kind="python_module_available",
             args={"module": "chronos", "phase": "build"},
+            gating=True,
+        ))
+
+    if task_strategy == "image_classification":
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "timm", "phase": "reference"},
             gating=True,
         ))
 
@@ -522,6 +533,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_pixart_torchtrt",
     "segmentation",
     "prompted_segmentation",
+    "image_classification",
     "encoder_only",
     "embedding",
     "reranking",

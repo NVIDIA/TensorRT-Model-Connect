@@ -115,6 +115,9 @@ class ReferenceFamily(enum.Enum):
     SEGMENTATION_SEGFORMER = "segmentation_segformer"
     PROMPTED_SEGMENTATION_SAM = "prompted_segmentation_sam"
 
+    # --- Image classification ---
+    IMAGE_CLASSIFICATION = "image_classification"
+
     # --- Diffusion ---
     DIFFUSERS_IMAGE_GEN = "diffusers_image_gen"
     DIFFUSERS_VIDEO_GEN = "diffusers_video_gen"
@@ -205,6 +208,7 @@ class UserContract(enum.Enum):
     SPEECH_RESPONSE = "speech_response"
     SEGMENTATION_MASK = "segmentation_mask"
     PROMPTED_MASK = "prompted_mask"
+    IMAGE_CLASSIFICATION = "image_classification"
     EMBEDDING_VECTOR = "embedding_vector"
     RANKING_ORDER = "ranking_order"
     VL_ANSWER = "vl_answer"
@@ -819,6 +823,8 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "segformer-b0-ade": ReferenceFamily.SEGMENTATION_SEGFORMER.value,
     # 5.24 PROMPTED_SEGMENTATION_SAM
     "sam-vit-base": ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value,
+    # 5.24a IMAGE_CLASSIFICATION
+    "timm-vit-base-p16-224-augreg-in21k-ft-in1k": ReferenceFamily.IMAGE_CLASSIFICATION.value,
     # 5.25 DIFFUSERS_IMAGE_GEN
     "flux-schnell": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     "flux-2-dev": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
@@ -867,6 +873,7 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.S2S_PERSONAPLEX.value: UserContract.SPEECH_RESPONSE.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: UserContract.SEGMENTATION_MASK.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
+    ReferenceFamily.IMAGE_CLASSIFICATION.value: UserContract.IMAGE_CLASSIFICATION.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: UserContract.DIFFUSION_IMAGE.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: UserContract.DIFFUSION_VIDEO.value,
     ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: UserContract.DIFFUSION_TEXT_GENERATION.value,
@@ -904,6 +911,7 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.S2S_PERSONAPLEX.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
+    ReferenceFamily.IMAGE_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: ComparisonMode.TEXT_QUALITY_METRICS.value,
@@ -929,6 +937,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
+    "image_classification": "image_classification",
     "object_detection": "object_detection",
     "embedding": "embedding",
     "reranking": "reranking",
