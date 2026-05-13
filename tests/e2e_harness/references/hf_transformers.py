@@ -49,7 +49,47 @@ def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     return prompt
 
 
-def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
+def _normalize_vl_prompt_guard(text: str) -> str:
+    """Normalize decoded VL text for prompt-only reference detection."""
+    normalized = " ".join(str(text or "").split()).strip().lower()
+    for marker in (
+        "<img_context>",
+        "<image>",
+        "<|image_pad|>",
+        "<|vision_start|>",
+        "<|vision_end|>",
+    ):
+        normalized = normalized.replace(marker, " ")
+    return " ".join(normalized.split()).strip()
+
+
+def _is_prompt_only_vl_text(text: str, prompt_texts: tuple[str, ...]) -> bool:
+    """Return true when decoded VL text contains only the input prompt/template."""
+    normalized_text = _normalize_vl_prompt_guard(text)
+    if not normalized_text:
+        return True
+
+    for prompt_text in prompt_texts:
+        normalized_prompt = _normalize_vl_prompt_guard(prompt_text)
+        if not normalized_prompt:
+            continue
+        if normalized_text == normalized_prompt:
+            return True
+        if normalized_text.startswith(normalized_prompt):
+            tail = normalized_text[len(normalized_prompt):].strip(" :")
+            if tail in {"", "assistant", "answer"}:
+                return True
+        if normalized_text.endswith(normalized_prompt):
+            return True
+    return False
+
+
+def _decode_vl_generated_text(
+    processor,
+    generated_ids,
+    input_len: int,
+    prompt_texts: tuple[str, ...] = (),
+) -> str:
     """Decode VL generation whether generate() returns full ids or generated ids only."""
     token_count = len(generated_ids)
 
@@ -58,9 +98,13 @@ def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
 
     if input_len > 0 and token_count > input_len:
         text = _decode_token_ids(generated_ids[input_len:])
-        if text:
+        if text and not _is_prompt_only_vl_text(text, prompt_texts):
             return text
-    return _decode_token_ids(generated_ids)
+
+    text = _decode_token_ids(generated_ids)
+    if text and not _is_prompt_only_vl_text(text, prompt_texts):
+        return text
+    return ""
 
 
 def _resolve_cached_model_ref(hf_id: str) -> str:
@@ -1193,6 +1237,7 @@ class HfTransformersReference:
                     {{"type": "text", "text": prompt}},
                 ]}}
             ]
+            text_input = ""
             try:
                 text_input = processor.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True)
@@ -1215,7 +1260,15 @@ class HfTransformersReference:
 
             # Decode only the generated portion (after input)
             input_len = inputs.get("input_ids", torch.tensor([])).shape[-1]
-            text = _decode_vl_generated_text(processor, generated_ids[0], input_len)
+            text = _decode_vl_generated_text(
+                processor,
+                generated_ids[0],
+                input_len,
+                (prompt, fallback_text, text_input),
+            )
+            if not text.strip():
+                raise RuntimeError(
+                    "HF VL reference produced empty or prompt-only generated text")
 
             with open(text_path, "w") as f:
                 f.write(text)

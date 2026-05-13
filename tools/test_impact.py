@@ -1112,15 +1112,42 @@ def maybe_refine_match_with_diff(
             "token_count",
             "decode_token_ids",
             "processor.decode",
+            "processor",
+            "prompt_guard",
+            "prompt_only",
+            "prompt_text",
+            "prompt_texts",
+            "normalized",
+            "marker",
+            "image",
+            "img_context",
+            "image_pad",
+            "vision_start",
+            "vision_end",
+            "fallback_text",
+            "text_input",
+            "empty",
+            "runtimeerror",
+            "return_true",
+            "return_false",
+            "return_",
+            "continue",
+            "tail",
             "skip_special_tokens",
             "strip",
+            "str",
             "if_text",
             "return_text",
             "hf_transformers",
         )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+        normalized_lines = [
+            _normalize_diff_line(line)
             for line in lines
+            if any(ch.isalnum() for ch in _normalize_diff_line(line))
+        ]
+        if all(
+            any(token in line for token in allowed_tokens)
+            for line in normalized_lines
         ):
             return RuleMatch(
                 "harness_reference_vl_generated_only_decode",

@@ -643,14 +643,18 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
 +    token_count = len(generated_ids)
 +    def _decode_token_ids(token_ids) -> str:
 +        return processor.decode(token_ids, skip_special_tokens=True).strip()
++    prompt_texts = (prompt, fallback_text, text_input)
 +    if input_len > 0 and token_count > input_len:
 +        text = _decode_token_ids(generated_ids[input_len:])
 +            return text
++    if not text.strip():
++        raise RuntimeError("HF VL reference produced empty or prompt-only generated text")
 +    return _decode_token_ids(generated_ids)
 +            from tests.e2e_harness.references.hf_transformers import (
 +                _decode_vl_generated_text,
 +            )
-+            text = _decode_vl_generated_text(processor, generated_ids[0], input_len)
++            text = _decode_vl_generated_text(
++                processor, generated_ids[0], input_len, prompt_texts)
 """
         broad = test_impact.classify_file(
             "tests/e2e_harness/references/hf_transformers.py", imap)
