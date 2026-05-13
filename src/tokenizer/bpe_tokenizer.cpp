@@ -1171,6 +1171,30 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
+    void apply_split_pre_tokenizer(const nlohmann::json& pt) {
+        if (!pt.contains("pattern"))
+            throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
+
+        const auto& pattern = pt["pattern"];
+        if (pattern.contains("Regex")) {
+            int digit_group = 0;
+            mPreTokenizerVariant =
+                classify_split_regex(pattern["Regex"].get<std::string>(), digit_group);
+            mPreTokenizerDigitGroup = digit_group;
+            return;
+        }
+
+        if (pattern.contains("String") && pattern["String"].get<std::string>() == " ") {
+            // Gemma uses a top-level Split(" ", MergedWithPrevious) around
+            // a SentencePiece-style BPE vocab. SentencePiece encode handles
+            // the actual word-boundary marker, so no byte-level split is needed.
+            mUsePreTokenizer = false;
+            return;
+        }
+
+        throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
+    }
+
     void detect_pre_tokenizer(const nlohmann::json& j) {
         mUsePreTokenizer = true;
         mPreTokenizerVariant = pretok::Variant::kGpt2;
@@ -1187,20 +1211,7 @@ class BpeTokenizer final : public ITokenizer {
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
         } else if (pt_type == "Split") {
-            if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
-                int digit_group = 0;
-                mPreTokenizerVariant =
-                    classify_split_regex(pt["pattern"]["Regex"].get<std::string>(), digit_group);
-                mPreTokenizerDigitGroup = digit_group;
-            } else if (pt.contains("pattern") && pt["pattern"].contains("String") &&
-                       pt["pattern"]["String"].get<std::string>() == " ") {
-                // Gemma uses a top-level Split(" ", MergedWithPrevious) around
-                // a SentencePiece-style BPE vocab. SentencePiece encode handles
-                // the actual word-boundary marker, so no byte-level split is needed.
-                mUsePreTokenizer = false;
-            } else {
-                throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
-            }
+            apply_split_pre_tokenizer(pt);
         } else if (pt_type == "Metaspace") {
             mIsMetaspace = true;
             mUsePreTokenizer = false;
