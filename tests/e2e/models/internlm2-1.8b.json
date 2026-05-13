@@ -6,7 +6,7 @@
   "family": "internlm",
   "runtime_strategy": "decoder_kv_cache",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
+  "prompt": "What is 2 + 2?",
   "max_new_tokens": 20,
   "logit_atol": 0.001,
   "layer_atol": 0.05,

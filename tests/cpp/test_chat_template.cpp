@@ -39,6 +39,15 @@ static void test_detect_chatml() {
     check(fmt == trtmc::ChatTemplateFormat::kChatML, "chatml detection");
 }
 
+static void test_detect_internlm() {
+    std::string tpl = "{{ bos_token }}{% for message in messages %}{{'<|im_start|>' + "
+                      "message['role'] + '\\n' + message['content'] + '<|im_end|>' + "
+                      "'\\n'}}{% endfor %}{% if add_generation_prompt %}{{ "
+                      "'<|im_start|>assistant\\n' }}{% endif %}";
+    auto fmt = trtmc::detect_chat_template_format(tpl);
+    check(fmt == trtmc::ChatTemplateFormat::kInternLM, "internlm detection");
+}
+
 static void test_detect_mistral() {
     std::string tpl = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' "
                       "%}[INST] {{ message['content'] }} [/INST]{% endif %}{% endfor %}";
@@ -93,6 +102,12 @@ static void test_apply_chatml() {
           "chatml application");
 }
 
+static void test_apply_internlm() {
+    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kInternLM, "What is 2+2?");
+    check(result == "<s><|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
+          "internlm application");
+}
+
 static void test_apply_chatml_no_thinking() {
     auto result =
         trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kChatML, "What is 2+2?", false);
@@ -140,6 +155,7 @@ int main() {
     // Detection
     test_detect_empty();
     test_detect_chatml();
+    test_detect_internlm();
     test_detect_mistral();
     test_detect_phi();
     test_detect_gemma();
@@ -150,6 +166,7 @@ int main() {
     // Application
     test_apply_none();
     test_apply_chatml();
+    test_apply_internlm();
     test_apply_chatml_no_thinking();
     test_apply_mistral();
     test_apply_phi();

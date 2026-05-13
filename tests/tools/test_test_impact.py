@@ -798,6 +798,39 @@ diff --git a/tests/e2e_harness/plugins/chat_instruct.py b/tests/e2e_harness/plug
         assert refined.rule == "harness_plugin_chat_instruct_internlm_prompt_config"
         assert refined.models == ["internlm2-1.8b"]
 
+    def test_chat_template_internlm_bos_diff_can_be_refined(self, mock_repo):
+        """InternLM ChatML-with-BOS support is scoped to InternLM."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "internlm2-1.8b.json",
+            {
+                "name": "internlm2-1.8b",
+                "family": "internlm",
+                "runtime_strategy": "decoder_kv_cache",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/src/runtime/core/chat_template.cpp b/src/runtime/core/chat_template.cpp
+@@ -1 +1 @@
++    if (tpl.find("bos_token") != std::string::npos && tpl.find("<|im_start|>") != std::string::npos)
++        return ChatTemplateFormat::kInternLM;
++static std::string apply_internlm(const std::string& prompt) {
++    return "<s><|im_start|>user\\n" + prompt + "<|im_end|>\\n<|im_start|>assistant\\n";
++    case ChatTemplateFormat::kInternLM:
++        return apply_internlm(prompt);
+"""
+        broad = test_impact.classify_file(
+            "src/runtime/core/chat_template.cpp", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/runtime/core/chat_template.cpp",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "cpp_chat_template_internlm_bos"
+        assert refined.models == ["internlm2-1.8b"]
+        assert "cpp" in refined.unit_tiers
+
     def test_waives_diff_can_be_refined_to_named_model(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """

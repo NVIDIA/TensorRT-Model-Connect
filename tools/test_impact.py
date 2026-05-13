@@ -1318,6 +1318,44 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
+    if path in {
+        "src/runtime/core/chat_template.cpp",
+        "src/runtime/core/chat_template.h",
+        "tests/cpp/test_chat_template.cpp",
+    }:
+        internlm_chat_template_tokens = (
+            "<s><|im_start|>",
+            "<|im_start|>",
+            "add_generation_prompt",
+            "apply_internlm",
+            "bos_token",
+            "check",
+            "content",
+            "detect_internlm",
+            "endfor",
+            "fmt",
+            "kchatml",
+            "kgemma",
+            "kinternlm",
+            "kmistral",
+            "knone",
+            "kphi",
+            "message",
+            "prompt",
+            "test_apply_internlm",
+            "test_detect_internlm",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        if all(any(token in line for token in internlm_chat_template_tokens)
+               for line in normalized_lines):
+            models = ["internlm2-1.8b"] if "internlm2-1.8b" in imap.all_model_names_set else []
+            return RuleMatch(
+                "cpp_chat_template_internlm_bos",
+                models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tests/e2e/waives.txt":
         models = []
         for line in lines:
