@@ -326,6 +326,31 @@ class TestRenderReport:
         assert "FAIL" in html
         assert "1 Failed" in html
 
+    def test_preflight_skip_shows_failing_check_reason(self):
+        mod = _import_report()
+        r = _make_result(
+            name="gemma-2-2b",
+            status="skip",
+            failure_type="precheck_fail",
+        )
+        r["determinism"] = {
+            "preflight": [
+                {
+                    "kind": "hf_auth_token_present",
+                    "passed": False,
+                    "message": "HF auth token not found",
+                    "gating": True,
+                }
+            ]
+        }
+
+        html = mod.render_report([r])
+
+        assert "Preflight" in html
+        assert "hf_auth_token_present" in html
+        assert "HF auth token not found" in html
+        assert "SKIP" in html
+
     def test_multiple_models_all_present(self):
         mod = _import_report()
         results = [

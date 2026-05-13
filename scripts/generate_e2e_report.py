@@ -1186,6 +1186,39 @@ def _render_diffusion_vlm_assessment(result: Dict[str, Any]) -> str:
     )
 
 
+def _render_preflight_details(result: Dict[str, Any]) -> str:
+    determinism = result.get("determinism", {})
+    if not isinstance(determinism, dict):
+        return ""
+    preflight = determinism.get("preflight", [])
+    if not isinstance(preflight, list) or not preflight:
+        return ""
+
+    rows = []
+    for check in preflight:
+        if not isinstance(check, dict):
+            continue
+        status = "PASS" if check.get("passed") else "FAIL"
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(str(check.get('kind', '')))}</td>"
+            f"<td>{_esc(status)}</td>"
+            f"<td>{_esc(str(check.get('gating', '')))}</td>"
+            f"<td>{_esc(str(check.get('message', '')))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return ""
+
+    return (
+        "<h4>Preflight</h4>"
+        '<table class="metrics-table">'
+        "<thead><tr><th>Check</th><th>Status</th><th>Gating</th>"
+        "<th>Message</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def _stage_output_returncode(stage: Dict[str, Any]) -> Any:
     for key in ("data", "metadata"):
         value = stage.get(key, {})
@@ -1423,6 +1456,7 @@ def render_model_section(
             f'<p class="failure-info">Failure type: '
             f"<strong>{_esc(failure_type)}</strong></p>"
         )
+    body_parts.append(_render_preflight_details(result))
 
     # Dispatch to modality renderer
     if modality == "text":

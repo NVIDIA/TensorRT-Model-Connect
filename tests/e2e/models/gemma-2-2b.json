@@ -5,6 +5,7 @@
   "bundle": "gemma-2-2b.trtfb",
   "family": "gemma",
   "runtime_strategy": "decoder_kv_cache",
+  "gated": true,
   "max_cache_length": 256,
   "prompt": "What is 2 + 2? Answer with just the number.",
   "max_new_tokens": 10,
