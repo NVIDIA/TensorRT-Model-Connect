@@ -326,6 +326,54 @@ class TestRenderReport:
         assert "FAIL" in html
         assert "1 Failed" in html
 
+    def test_xfail_waive_displays_known_limitation_not_failure(self):
+        mod = _import_report()
+        r = _make_result(
+            name="gemma-2-2b", status="fail", failure_type="compare_fail"
+        )
+        r["waive"] = {
+            "action": "XFAIL",
+            "reason": "Gemma2 TRT decoder currently generates whitespace-only output",
+        }
+
+        html = mod.render_report([r])
+
+        assert "XFAIL" in html
+        assert "Known Limitation" in html
+        assert "Gemma2 TRT decoder currently generates whitespace-only output" in html
+        assert "1 Expected Failures" in html
+        assert "0 Failed" in html
+
+    def test_text_report_shows_whitespace_only_stdout(self):
+        mod = _import_report()
+        r = _make_result(
+            name="blank-model",
+            trt_text="",
+            ref_text="4",
+            stage_outputs={
+                "trt_generate": {
+                    "stage_name": "generate",
+                    "timing_s": 1.0,
+                    "text": "",
+                    "data": {},
+                    "metadata": {"cpp": {"stdout": "\n\n\n"}},
+                },
+                "ref_generate": {
+                    "stage_name": "generate",
+                    "timing_s": 1.0,
+                    "text": "4",
+                    "data": {},
+                    "metadata": {},
+                },
+            },
+        )
+
+        html = mod.render_report([r])
+
+        assert "whitespace-only output: 3 chars" in html
+        assert "Reference Output" in html
+        assert ">4</pre>" in html
+
     def test_preflight_skip_shows_failing_check_reason(self):
         mod = _import_report()
         r = _make_result(

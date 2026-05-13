@@ -50,11 +50,12 @@ def test_load_waives_without_platform_ignores_prefixed_entries(monkeypatch, tmp_
     assert waives == {"model-shared": ("XFAIL", "shared waive")}
 
 
-def test_gemma_gated_model_uses_manifest_preflight_not_global_waive() -> None:
+def test_gemma_expected_failure_still_keeps_gated_preflight() -> None:
     case = load_manifest(REPO_ROOT / "tests/e2e/models/gemma-2-2b.json")
     waives = test_e2e._load_waives()
 
-    assert "gemma-2-2b" not in waives
+    assert waives["gemma-2-2b"][0] == "XFAIL"
+    assert "Gemma2 TRT decoder" in waives["gemma-2-2b"][1]
     assert any(
         req.kind == "hf_auth_token_present" and req.gating
         for req in case.preflight

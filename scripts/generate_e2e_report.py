@@ -48,6 +48,10 @@ _TRTMC_ENGINE_TIMING_RE = re.compile(
     r"execute_ms=(?P<ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
+_WAIVE_RE = re.compile(
+    r"^(?P<name>\S+)\s+(?P<action>SKIP|XFAIL)\s*(?P<reason>\(.*\))?\s*$",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -96,6 +100,49 @@ def load_all_results(artifacts_dir: Path) -> List[Dict[str, Any]]:
                 print(f"WARNING: skipping {rj}: {exc}", file=sys.stderr)
     _attach_diffusion_vlm_assessments(results, artifacts_dir)
     return results
+
+
+def _load_waives(project_dir: Optional[Path]) -> Dict[str, Dict[str, str]]:
+    if project_dir is None:
+        return {}
+    waives_path = project_dir / "tests" / "e2e" / "waives.txt"
+    if not waives_path.is_file():
+        return {}
+
+    waives: Dict[str, Dict[str, str]] = {}
+    try:
+        lines = waives_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return waives
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _WAIVE_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name")
+        if "/" in name:
+            _, name = name.split("/", 1)
+        reason = (match.group("reason") or "").strip()
+        if reason.startswith("(") and reason.endswith(")"):
+            reason = reason[1:-1].strip()
+        waives[name] = {
+            "action": match.group("action").upper(),
+            "reason": reason,
+        }
+    return waives
+
+
+def _attach_waives(results: List[Dict[str, Any]], project_dir: Optional[Path]) -> None:
+    waives = _load_waives(project_dir)
+    if not waives:
+        return
+    for result in results:
+        case_name = str(result.get("case_name") or "")
+        if case_name in waives:
+            result["waive"] = waives[case_name]
 
 
 def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -178,11 +225,24 @@ _STATUS_COLORS = {
     "pass": "#22c55e",
     "fail": "#ef4444",
     "skip": "#eab308",
+    "xfail": "#ca8a04",
+    "xpass": "#2563eb",
     "error": "#f97316",
     "passed": "#22c55e",
     "failed": "#ef4444",
     "skipped": "#eab308",
 }
+
+
+def _display_status(result: Dict[str, Any]) -> str:
+    status = str(result.get("status", "error"))
+    waive = result.get("waive")
+    if isinstance(waive, dict) and waive.get("action") == "XFAIL":
+        if status == "fail":
+            return "xfail"
+        if status == "pass":
+            return "xpass"
+    return status
 
 
 def _badge(status: str) -> str:
@@ -935,6 +995,19 @@ def _get_stage_text(stage_outputs: Dict[str, Any], prefix: str) -> Optional[str]
         if key.startswith(prefix) and isinstance(val, dict):
             t = val.get("text")
             if t is not None:
+                if t == "":
+                    raw_stdout = (
+                        ((val.get("metadata") or {}).get("cpp") or {}).get("stdout")
+                    )
+                    if (
+                        isinstance(raw_stdout, str)
+                        and raw_stdout
+                        and not raw_stdout.strip()
+                    ):
+                        return (
+                            "[whitespace-only output: "
+                            f"{len(raw_stdout)} chars, repr={raw_stdout!r}]"
+                        )
                 return str(t)
     return None
 
@@ -1430,7 +1503,7 @@ def render_model_section(
 ) -> str:
     """Render a single collapsible ``<details>`` for one model."""
     name = result.get("case_name", "unknown")
-    status = result.get("status", "error")
+    status = _display_status(result)
     cc = result.get("case_config", {})
     family = cc.get("family", "")
     task_strategy = cc.get("task_strategy", "")
@@ -1450,6 +1523,17 @@ def render_model_section(
 
     # Failure info
     body_parts = []
+    waive = result.get("waive")
+    if isinstance(waive, dict):
+        action = str(waive.get("action", ""))
+        reason = str(waive.get("reason", ""))
+        if action or reason:
+            body_parts.append(
+                '<div class="known-limitation">'
+                "<strong>Known Limitation</strong>"
+                f"<p><span>{_esc(action)}</span>: {_esc(reason)}</p>"
+                "</div>"
+            )
     failure_type = result.get("failure_type")
     if failure_type:
         body_parts.append(
@@ -1543,9 +1627,16 @@ def _total_time_sort_key(result: Dict[str, Any]) -> float:
 
 def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     """Render the top-of-page summary table with counters and filters."""
-    counts: Dict[str, int] = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
+    counts: Dict[str, int] = {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0,
+        "xfail": 0,
+        "xpass": 0,
+        "error": 0,
+    }
     for r in results:
-        s = r.get("status", "error")
+        s = _display_status(r)
         counts[s] = counts.get(s, 0) + 1
 
     counters = (
@@ -1553,6 +1644,8 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
         f'<span class="counter pass-counter">{counts["pass"]} Passed</span>'
         f'<span class="counter fail-counter">{counts["fail"]} Failed</span>'
         f'<span class="counter skip-counter">{counts["skip"]} Skipped</span>'
+        f'<span class="counter xfail-counter">{counts["xfail"]} Expected Failures</span>'
+        f'<span class="counter xpass-counter">{counts["xpass"]} Unexpected Passes</span>'
         f'<span class="counter error-counter">{counts["error"]} Error</span>'
         f'<span class="counter total-counter">{len(results)} Total</span>'
         f"</div>"
@@ -1567,6 +1660,8 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
         '<option value="pass">Pass</option>'
         '<option value="fail">Fail</option>'
         '<option value="skip">Skip</option>'
+        '<option value="xfail">XFail</option>'
+        '<option value="xpass">XPass</option>'
         '<option value="error">Error</option>'
         "</select>"
         "</div>"
@@ -1576,7 +1671,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     sorted_results = sorted(results, key=_total_time_sort_key, reverse=True)
     for r in sorted_results:
         name = r.get("case_name", "unknown")
-        status = r.get("status", "error")
+        status = _display_status(r)
         cc = r.get("case_config", {})
         family = cc.get("family", "")
         task_strategy = cc.get("task_strategy", "")
@@ -1652,6 +1747,8 @@ h4 { margin: 12px 0 6px; }
 .pass-counter { background: #dcfce7; color: #166534; }
 .fail-counter { background: #fee2e2; color: #991b1b; }
 .skip-counter { background: #fef9c3; color: #854d0e; }
+.xfail-counter { background: #fef3c7; color: #92400e; }
+.xpass-counter { background: #dbeafe; color: #1e40af; }
 .error-counter { background: #ffedd5; color: #9a3412; }
 .total-counter { background: #e0e7ff; color: #3730a3; }
 .filters { display: flex; gap: 8px; margin-bottom: 12px; }
@@ -1669,6 +1766,11 @@ h4 { margin: 12px 0 6px; }
 .metric-fail { background: #fef2f2; }
 .pass-icon { color: #16a34a; font-weight: bold; }
 .fail-icon { color: #dc2626; font-weight: bold; }
+.known-limitation { margin: 10px 0; padding: 10px 12px;
+  border-left: 4px solid #ca8a04; background: #fffbeb; }
+.known-limitation strong { color: #92400e; }
+.known-limitation p { margin-top: 4px; color: #713f12; }
+.known-limitation span { font-weight: 700; }
 .total-row td { font-weight: 700; border-top: 2px solid #1e293b; }
 details { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
   margin: 8px 0; }
@@ -1851,6 +1953,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"WARNING: No result.json files found in {args.artifacts_dir}",
             file=sys.stderr,
         )
+    _attach_waives(results, args.project_dir)
 
     html_content = render_report(
         results,
