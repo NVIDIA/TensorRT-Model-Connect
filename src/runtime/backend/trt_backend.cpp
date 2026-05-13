@@ -37,6 +37,17 @@ std::string trt_backend_abi_string() {
     return oss.str();
 }
 
+void keep_backend_resources(ITrtModule& module,
+                            const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
+                            const std::shared_ptr<void>& stream_owner,
+                            const std::shared_ptr<void>& distributed_owner) {
+    module.keep_alive(engine);
+    if (stream_owner)
+        module.keep_alive(stream_owner);
+    if (distributed_owner)
+        module.keep_alive(distributed_owner);
+}
+
 } // namespace
 
 class TrtBackend final : public IBackend {
@@ -78,13 +89,11 @@ class TrtBackend final : public IBackend {
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
         }
 
-        // Transfer engine + stream ownership to module
-        module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
-            engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
-        if (stream_owner)
-            module->keep_alive(stream_owner);
-        if (options.distributed_owner)
-            module->keep_alive(options.distributed_owner);
+        keep_backend_resources(
+            *module,
+            std::shared_ptr<nvinfer1::ICudaEngine>(engine,
+                                                   [](nvinfer1::ICudaEngine* p) { delete p; }),
+            stream_owner, options.distributed_owner);
 
         return module;
     }
@@ -117,11 +126,7 @@ class TrtBackend final : public IBackend {
                 engine.get(), ctx, stream, profile_idx, options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
-            mod->keep_alive(engine);
-            if (stream_owner)
-                mod->keep_alive(stream_owner);
-            if (options.distributed_owner)
-                mod->keep_alive(options.distributed_owner);
+            keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
             return mod;
         };
 
@@ -168,11 +173,7 @@ class TrtBackend final : public IBackend {
                 engine.get(), ctx, stream, profile_idx, options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
-            mod->keep_alive(engine);
-            if (stream_owner)
-                mod->keep_alive(stream_owner);
-            if (options.distributed_owner)
-                mod->keep_alive(options.distributed_owner);
+            keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
             out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
         }
         return out;
