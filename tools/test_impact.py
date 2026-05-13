@@ -981,6 +981,32 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
+    if path == "src/tokenizer/bpe_tokenizer.cpp":
+        allowed_tokens = (
+            "classify_split_regex",
+            "digit_group",
+            "else_{",
+            "gemma",
+            "mergedwithprevious",
+            "mpretokenizervariant",
+            "musepretokenizer",
+            "pattern",
+            "pre_tokenizer",
+            "sentencepiece",
+            "split",
+            "string",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "cpp_tokenizer_gemma_split",
+                imap.family_to_models.get("gemma", []),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
         allowed_tokens = ("fp8_scales", "save_fp8_scales")
         if all(

@@ -1186,6 +1186,21 @@ class BpeTokenizer final : public ITokenizer {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
+        } else if (pt_type == "Split") {
+            if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
+                int digit_group = 0;
+                mPreTokenizerVariant =
+                    classify_split_regex(pt["pattern"]["Regex"].get<std::string>(), digit_group);
+                mPreTokenizerDigitGroup = digit_group;
+            } else if (pt.contains("pattern") && pt["pattern"].contains("String") &&
+                       pt["pattern"]["String"].get<std::string>() == " ") {
+                // Gemma uses a top-level Split(" ", MergedWithPrevious) around
+                // a SentencePiece-style BPE vocab. SentencePiece encode handles
+                // the actual word-boundary marker, so no byte-level split is needed.
+                mUsePreTokenizer = false;
+            } else {
+                throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
+            }
         } else if (pt_type == "Metaspace") {
             mIsMetaspace = true;
             mUsePreTokenizer = false;

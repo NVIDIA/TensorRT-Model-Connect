@@ -1648,6 +1648,49 @@ int main() {
         }
     }
 
+    // === 37. Gemma top-level Split pre-tokenizer ===
+    {
+        std::cerr << "\n=== Gemma Top-level Split Pre-tokenizer ===\n";
+
+        std::string gemma_split_json = R"({
+          "model": {
+            "type": "BPE",
+            "byte_fallback": true,
+            "vocab": {
+              "\u2581": 0, "h": 1, "e": 2, "l": 3, "o": 4,
+              "w": 5, "r": 6, "d": 7, "\u2581hello": 8, "\u2581world": 9
+            },
+            "merges": [
+              ["\u2581", "h"], ["\u2581h", "e"], ["\u2581he", "l"],
+              ["\u2581hel", "l"], ["\u2581hell", "o"],
+              ["\u2581", "w"], ["\u2581w", "o"], ["\u2581wo", "r"],
+              ["\u2581wor", "l"], ["\u2581worl", "d"]
+            ]
+          },
+          "pre_tokenizer": {
+            "type": "Split",
+            "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious",
+            "invert": false
+          },
+          "decoder": {
+            "type": "Sequence",
+            "decoders": [
+              {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+              {"type": "ByteFallback"},
+              {"type": "Fuse"}
+            ]
+          }
+        })";
+
+        auto tok =
+            trtmc::CreateBpeTokenizer(gemma_split_json.data(), gemma_split_json.size(), false);
+        check(tok != nullptr, "gemma_split_create");
+        auto ids = tok->encode("hello world");
+        check(ids.size() == 2 && ids[0] == 8 && ids[1] == 9, "gemma_split_encode_words");
+        check(tok->decode(ids) == " hello world", "gemma_split_decode_sequence");
+    }
+
     if (failures > 0) {
         std::cerr << "\n" << failures << " test(s) failed\n";
         return 1;

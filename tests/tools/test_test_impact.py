@@ -89,6 +89,8 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "gemma-2-2b", "family": "gemma", "runtime_strategy": "decoder_kv_cache",
+         "hf_id": "google/gemma-2-2b-it"},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -118,6 +120,8 @@ def mock_repo(tmp_path):
                   "from ..config import C\nfrom ..graph_ops import conv\n")
     _write_family(families_dir, "mixtral",
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family(families_dir, "gemma",
+                  "from ..config import C\n")
 
     # Placeholder source files
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "standard_decoder_builder.py").write_text("")
@@ -616,6 +620,30 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
             "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
+
+    def test_bpe_top_level_split_diff_can_be_refined_to_gemma(self, imap):
+        """Gemma tokenizer Split support should only re-run Gemma E2E."""
+        diff_text = """
+diff --git a/src/tokenizer/bpe_tokenizer.cpp b/src/tokenizer/bpe_tokenizer.cpp
+@@ -1 +1 @@
++        } else if (pt_type == "Split") {
++            if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
++                mPreTokenizerVariant = classify_split_regex(
++                    pt["pattern"]["Regex"].get<std::string>(), digit_group);
++                mPreTokenizerDigitGroup = digit_group;
++            } else if (pt["pattern"]["String"].get<std::string>() == " ") {
++                // Gemma uses a top-level Split(" ", MergedWithPrevious)
++                // around a SentencePiece-style BPE vocab.
++                mUsePreTokenizer = false;
++            } else {
++                throw std::runtime_error("Unsupported Split pre_tokenizer pattern");
++            }
+"""
+        broad = test_impact.classify_file("src/tokenizer/bpe_tokenizer.cpp", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "src/tokenizer/bpe_tokenizer.cpp", broad, diff_text, imap)
+        assert refined.rule == "cpp_tokenizer_gemma_split"
+        assert refined.models == ["gemma-2-2b"]
 
     def test_manifest_loader_diffusion_threshold_diff_can_be_refined(self, imap):
         """Diffusion-only threshold plumbing in manifest_loader narrows scope."""
