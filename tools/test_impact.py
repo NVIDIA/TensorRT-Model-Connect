@@ -1102,6 +1102,41 @@ def maybe_refine_match_with_diff(
                 match.rebuild_cpp,
             )
 
+    if path == "tests/test_e2e.py":
+        skip_artifact_tokens = (
+            "fileartifactsink",
+            "e2eresult",
+            "e2estatus",
+            "manifest_level_skip",
+            "manifest_skip",
+            "skip_reason",
+            "human_readable_contract",
+            "missing_reference",
+            "artifacts_dir",
+            "case_name=case.name",
+            "oracle_level=case.oracle_level",
+            "tests.e2e_harness.contracts",
+            "tests.e2e_harness.artifact_sink",
+        )
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        skipped_models = sorted(
+            name for name, metadata in imap.model_metadata.items()
+            if metadata.get("skip")
+        )
+        if (
+            skipped_models
+            and all(
+                any(token in line for token in skip_artifact_tokens)
+                for line in normalized_lines
+            )
+        ):
+            return RuleMatch(
+                "e2e_entrypoint_manifest_skip_artifact",
+                skipped_models,
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
     if path == "tests/e2e_harness/references/hf_transformers.py":
         allowed_tokens = (
             "decode_vl_generated_text",

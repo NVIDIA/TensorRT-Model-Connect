@@ -592,6 +592,41 @@ class TestHarness:
         assert match.rule == "e2e_entrypoint"
         assert len(match.models) == len(imap.all_model_names)
 
+    def test_test_e2e_manifest_skip_artifact_diff_can_be_refined(self, mock_repo):
+        """Persisting skip artifacts only re-runs manifest-level skip cases."""
+        _write_json(
+            mock_repo / "tests" / "e2e" / "models" / "nllb-200-distilled-600m.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "runtime_strategy": "seq2seq_encoder_decoder",
+                "skip": "M2M-100 encoder-decoder weight mapping needs debugging",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tests/test_e2e.py b/tests/test_e2e.py
+@@ -1 +1 @@
+-from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
++from tests.e2e_harness.artifact_sink import FileArtifactSink
++from tests.e2e_harness.contracts import E2EResult, E2EStatus, RunContext, StageStatus
+-    # Honor manifest-level skip field
++    artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
++    # Honor manifest-level skip field, but still persist a result artifact so
++    # the HTML report shows a human-readable contract for the missing reference.
++        sink = FileArtifactSink(artifacts_dir, case)
++        sink.finalize(E2EResult(
++            case_name=case.name,
++            status=E2EStatus.SKIP.value,
++            oracle_level=case.oracle_level,
++            determinism={"manifest_skip": {"reason": skip_reason}},
++        ))
+"""
+        broad = test_impact.classify_file("tests/test_e2e.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/test_e2e.py", broad, diff_text, imap)
+        assert refined.rule == "e2e_entrypoint_manifest_skip_artifact"
+        assert refined.models == ["nllb-200-distilled-600m"]
+
     def test_conftest_entrypoint(self, imap):
         """tests/conftest.py -> ALL models."""
         match = test_impact.classify_file("tests/conftest.py", imap)
