@@ -53,7 +53,7 @@ trt = trt_compat.get_trt()
 if TYPE_CHECKING:
     from ...config import ModelConfig
     from ...checkpoint_mapper import WeightDict
-    from .quantization.context import QuantContext
+    from ...quantization.context import QuantContext
 
 
 def _const_in_work_dtype(
@@ -219,7 +219,6 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
-    alibi_bias_scale: float = 1.0,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
 ) -> bytes:
@@ -229,8 +228,6 @@ def build_dual_profile_decoder_engine(
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
     ``scale_attn_weights`` mirror the same parameters on
     ``build_standard_decoder_engine``.
-    ``alibi_bias_scale`` is multiplied into ALiBi slopes before they are added
-    through the native attention mask.
 
     ``quant_ctx`` (optional) routes every projection matmul through
     ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
@@ -397,7 +394,7 @@ def build_dual_profile_decoder_engine(
     alibi_slopes_tensor: trt.ITensor | None = None
     alibi_cache_positions_fp32: trt.ITensor | None = None
     if position_type == "alibi":
-        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads) * float(alibi_bias_scale)
+        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
         # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
         # to the additive mask.

@@ -24,7 +24,7 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class CodeGenPlugin:

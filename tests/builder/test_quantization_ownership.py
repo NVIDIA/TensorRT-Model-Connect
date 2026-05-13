@@ -24,7 +24,6 @@ SHARED_CORE_FILES = [
     "tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py",
     "tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py",
     "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py",
-    "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py",
 ]
 
 # Keep this list to unambiguous, multi-character family names so the regex
@@ -89,9 +88,9 @@ class TestQuantizationSharedCoreBoundary:
 
     def test_shared_core_does_not_import_concrete_family_modules(self):
         import_re = re.compile(
-            r"from\s+\.\.families(?!\._shared\b)"
-            r"|from\s+\.families(?!\._shared\b)"
-            r"|import\s+.*families(?!\._shared\b)"
+            r"from\s+\.\.families\b"
+            r"|from\s+\.families\b"
+            r"|import\s+.*families\b"
         )
         for rel_path in SHARED_CORE_FILES:
             text = _read(rel_path)

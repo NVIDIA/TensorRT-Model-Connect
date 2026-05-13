@@ -22,7 +22,7 @@ from ...checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
 )
-from ...encoder_builder import build_encoder_engine
+from .encoder_builder import build_encoder_engine
 
 
 def _load_ln(readers, prefix):

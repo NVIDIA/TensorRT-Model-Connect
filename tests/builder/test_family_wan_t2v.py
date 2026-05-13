@@ -125,27 +125,27 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.t5_encoder_builder",
+        "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
         _module(
-            "tensorrt_model_connect.t5_encoder_builder",
+            "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.standard_dit_builder",
+        "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
         _module(
-            "tensorrt_model_connect.standard_dit_builder",
+            "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
             load_dit_weights=load_dit_weights,
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.causal_vae_3d_builder",
+        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
         _module(
-            "tensorrt_model_connect.causal_vae_3d_builder",
+            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
             load_vae_weights=load_vae_weights,
             build_causal_vae_3d_engine=build_causal_vae_3d_engine,
             count_vae_caches=lambda **_kwargs: 0,
@@ -188,9 +188,9 @@ def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPa
     """
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.causal_vae_3d_builder",
+        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
         _module(
-            "tensorrt_model_connect.causal_vae_3d_builder",
+            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
             count_vae_caches=lambda **_kwargs: 13,
         ),
     )

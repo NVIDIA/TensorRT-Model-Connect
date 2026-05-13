@@ -25,7 +25,7 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 if TYPE_CHECKING:
     pass
@@ -74,7 +74,7 @@ class InternVLPlugin:
 
         vision_weights = _load_vision_and_projector_weights(model_dir, config)
 
-        from ...internvit_vision_builder import build_internvit_vision_engine
+        from .internvit_vision_builder import build_internvit_vision_engine
         return build_internvit_vision_engine(
             config.raw, vision_config, vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,

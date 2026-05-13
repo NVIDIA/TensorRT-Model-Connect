@@ -288,9 +288,11 @@ def _iter_family_python_files(families_dir: Path) -> List[tuple[str, Path]]:
 
 
 def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
-    """Build reverse index: parent_module -> [family_names that import it].
+    """Build reverse index: parent builder module -> importer family names.
 
-    Only returns entries for *_builder modules (excluding orchestrators).
+    Local imports such as ``from .standard_decoder_builder import build`` are
+    family-owned implementation details. Only parent-package imports are
+    compatibility-shim usage.
     """
     reverse: Dict[str, Set[str]] = {}
     for name, py_file in _iter_family_python_files(families_dir):
@@ -299,12 +301,17 @@ def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
         except OSError:
             continue
         # from ..module_name import ... / from ...module_name import ...
-        for m in re.finditer(r"from\s+\.+(\w+)\s+import", content):
-            module = m.group(1)
+        for m in re.finditer(r"from\s+(\.+)(\w+)\s+import", content):
+            dots, module = m.group(1), m.group(2)
+            if len(dots) <= 1:
+                continue
             reverse.setdefault(module, set()).add(name)
         # from .. import module_name / from ... import module_name
-        for m in re.finditer(r"from\s+\.+\s+import\s+([\w,\s]+)", content):
-            for mod in m.group(1).split(","):
+        for m in re.finditer(r"from\s+(\.+)\s+import\s+([\w,\s]+)", content):
+            dots = m.group(1)
+            if len(dots) <= 1:
+                continue
+            for mod in m.group(2).split(","):
                 mod = mod.strip()
                 if mod:
                     reverse.setdefault(mod, set()).add(name)
@@ -582,28 +589,9 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         models = [name] if name in imap.all_model_names_set else []
         return RuleMatch("manifest", models, unit_tiers, rebuild)
 
-    # Rule 1: Shared family builder internals keep the package root thin but
-    # still use the same import-scan ownership map as compatibility shims.
-    m = re.match(
-        r"tensorrt_model_connect/tensorrt_model_connect/families/_shared/(\w+)\.py$",
-        path,
-    )
-    if m:
-        module_name = m.group(1)
-        if (module_name.endswith("_builder")
-                and module_name not in _ORCHESTRATOR_MODULES
-                and module_name in imap.builder_to_families):
-            families = imap.builder_to_families[module_name]
-            models: Set[str] = set()
-            for fam in families:
-                models.update(imap.family_to_models.get(fam, []))
-            if models:
-                return RuleMatch("specialized_builder", sorted(models), unit_tiers, rebuild)
-        return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
-
     # Rule 1a: Family package file. A flat per-family folder is an ownership
     # boundary: any file under families/<family>/ affects that family's models.
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/(\w+)/.+\.py$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/([A-Za-z]\w*)/.+\.py$", path)
     if m:
         family = m.group(1)
         models = imap.family_to_models.get(family, [])

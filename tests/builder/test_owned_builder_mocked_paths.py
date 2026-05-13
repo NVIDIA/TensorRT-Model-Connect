@@ -54,13 +54,13 @@ def _make_fake_trt_base() -> types.SimpleNamespace:
 
 _SHARED_BUILDER_MODULES = {
     "tensorrt_model_connect.encodec_builder": (
-        "tensorrt_model_connect.families._shared.encodec_builder"
+        "tensorrt_model_connect.families.bark.encodec_builder"
     ),
     "tensorrt_model_connect.encoder_builder": (
-        "tensorrt_model_connect.families._shared.encoder_builder"
+        "tensorrt_model_connect.families.bert.encoder_builder"
     ),
     "tensorrt_model_connect.onnx_vision_builder": (
-        "tensorrt_model_connect.families._shared.onnx_vision_builder"
+        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder"
     ),
 }
 

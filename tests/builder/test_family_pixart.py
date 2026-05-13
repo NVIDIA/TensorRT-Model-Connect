@@ -191,26 +191,26 @@ def test_build_components_uses_transformer_and_t5_configs(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.t5_encoder_builder",
+        "tensorrt_model_connect.families.pixart.t5_encoder_builder",
         _module(
-            "tensorrt_model_connect.t5_encoder_builder",
+            "tensorrt_model_connect.families.pixart.t5_encoder_builder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.standard_dit_builder",
+        "tensorrt_model_connect.families.pixart.standard_dit_builder",
         _module(
-            "tensorrt_model_connect.standard_dit_builder",
+            "tensorrt_model_connect.families.pixart.standard_dit_builder",
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.vae_2d_builder",
+        "tensorrt_model_connect.families.pixart.vae_2d_builder",
         _module(
-            "tensorrt_model_connect.vae_2d_builder",
+            "tensorrt_model_connect.families.pixart.vae_2d_builder",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )

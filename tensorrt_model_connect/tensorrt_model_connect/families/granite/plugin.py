@@ -20,7 +20,7 @@ import numpy as np
 
 from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict, load_standard_weights
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class GranitePlugin:

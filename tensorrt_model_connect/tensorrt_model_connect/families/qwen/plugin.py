@@ -12,7 +12,7 @@ from __future__ import annotations
 from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict, load_standard_weights
 from ...quantization.adapters import StandardDecoderCalibrationAdapter
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class QwenPlugin:

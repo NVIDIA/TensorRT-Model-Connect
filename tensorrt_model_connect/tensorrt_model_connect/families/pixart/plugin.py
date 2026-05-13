@@ -114,9 +114,9 @@ class PixArtPlugin:
     ) -> dict:
         """Build all three component engines."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from ...t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from ...standard_dit_builder import build_standard_dit_engine
-        from ...vae_2d_builder import build_vae_2d_decoder_engine
+        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .standard_dit_builder import build_standard_dit_engine
+        from .vae_2d_builder import build_vae_2d_decoder_engine
         import json
         from pathlib import Path
         build_timing = _kwargs.get("build_timing")

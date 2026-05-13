@@ -1,7 +1,7 @@
-"""Compatibility shim for the shared flux_vae_builder implementation."""
+"""Compatibility shim for the flux family-owned flux_vae_builder implementation."""
 
 import sys as _sys
 
-from .families._shared import flux_vae_builder as _impl
+from .families.flux import flux_vae_builder as _impl
 
 _sys.modules[__name__] = _impl

@@ -22,7 +22,7 @@ from ...checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
 )
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class GPT2Plugin:

@@ -133,7 +133,7 @@ class FNetPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, verbose: bool = False,
     ) -> bytes:
-        from ...fnet_encoder_builder import build_fnet_encoder_engine
+        from .fnet_encoder_builder import build_fnet_encoder_engine
         return build_fnet_encoder_engine(
             config, weights,
             max_seq_length=max_cache_length,

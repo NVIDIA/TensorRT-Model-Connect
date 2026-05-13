@@ -74,7 +74,7 @@ trt = trt_compat.get_trt() if trt_compat.is_available() else None
 # Conditionally import graph_ops -- it needs TRT
 try:
     from ... import graph_ops
-    from ...standard_decoder_builder import build_standard_decoder_engine
+    from .standard_decoder_builder import build_standard_decoder_engine
 except ImportError:
     graph_ops = None
     build_standard_decoder_engine = None

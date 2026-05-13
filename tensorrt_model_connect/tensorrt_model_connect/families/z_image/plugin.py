@@ -107,11 +107,11 @@ class ZImagePlugin:
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from ...qwen3_encoder_builder import (
+        from .qwen3_encoder_builder import (
             build_qwen3_encoder_engine, load_qwen3_encoder_weights)
-        from ...z_image_dit_builder import (
+        from .z_image_dit_builder import (
             build_z_image_dit_engine, load_z_image_dit_weights)
-        from ...vae_2d_builder import build_vae_2d_decoder_engine
+        from .vae_2d_builder import build_vae_2d_decoder_engine
         build_timing = _kwargs.get("build_timing")
 
         text_encoder_dir = weights["_text_encoder_dir"]

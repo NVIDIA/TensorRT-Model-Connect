@@ -80,9 +80,9 @@ class WanT2VPlugin:
     ) -> dict:
         """Build all three component engines."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from ...t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from ...standard_dit_builder import build_standard_dit_engine, load_dit_weights
-        from ...causal_vae_3d_builder import build_causal_vae_3d_engine, load_vae_weights
+        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .standard_dit_builder import build_standard_dit_engine, load_dit_weights
+        from .causal_vae_3d_builder import build_causal_vae_3d_engine, load_vae_weights
         build_timing = _kwargs.get("build_timing")
 
         text_encoder_dir = weights["_text_encoder_dir"]
@@ -196,7 +196,7 @@ class WanT2VPlugin:
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         """Return diffusion pipeline configuration."""
-        from ...causal_vae_3d_builder import count_vae_caches
+        from .causal_vae_3d_builder import count_vae_caches
 
         # Must match the dimensions used in build_components() for TRT
         video_height = config.raw.get("video_height", 480)

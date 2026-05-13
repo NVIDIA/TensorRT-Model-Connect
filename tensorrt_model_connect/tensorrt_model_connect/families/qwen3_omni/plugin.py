@@ -54,7 +54,7 @@ from ...checkpoint_mapper import (
 from ...build_timing import timed_trt_compile
 from ... import graph_ops
 from ... import graph_blocks
-from ...standard_decoder_builder import _mark_debug_output
+from .standard_decoder_builder import _mark_debug_output
 
 
 trt = trt_compat.get_trt()
@@ -732,13 +732,13 @@ class Qwen3OmniPlugin:
         fixed_image_size = 448
 
         if deepstack_indexes:
-            from ...qwen_vl_vision_builder import build_qwen3_vl_vision_engine
+            from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
             return build_qwen3_vl_vision_engine(
                 vision_config, vision_weights,
                 fixed_image_size=fixed_image_size,
                 verbose=verbose)
         else:
-            from ...qwen_vl_vision_builder import build_qwen_vl_vision_engine
+            from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
             return build_qwen_vl_vision_engine(
                 vision_config, vision_weights,
                 fixed_image_size=fixed_image_size,
@@ -1239,7 +1239,7 @@ def _build_talker_engine(
                 break
 
     # Build a standard decoder engine for the Talker
-    from ...standard_decoder_builder import build_standard_decoder_engine
+    from .standard_decoder_builder import build_standard_decoder_engine
 
     sub_mc = ModelConfig(
         model_type="qwen3_omni_talker",

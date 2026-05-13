@@ -33,7 +33,7 @@ from ...checkpoint_mapper import (
     _transpose_2d,
     _target_np_dtype,
 )
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class NemotronPlugin:

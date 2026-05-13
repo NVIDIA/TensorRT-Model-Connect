@@ -116,7 +116,7 @@ class XlnetPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, verbose: bool = False,
     ) -> bytes:
-        from ...xlnet_builder import build_xlnet_engine
+        from .xlnet_builder import build_xlnet_engine
         return build_xlnet_engine(
             config, weights,
             max_seq_length=max_cache_length,

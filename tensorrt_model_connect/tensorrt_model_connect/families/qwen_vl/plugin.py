@@ -29,7 +29,7 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
-from ...standard_decoder_builder import build_standard_decoder_engine
+from .standard_decoder_builder import build_standard_decoder_engine
 from ... import graph_ops
 from ... import graph_blocks
 
@@ -94,13 +94,13 @@ class QwenVLPlugin:
         vision_weights = _load_vision_weights(model_dir, config)
 
         if _is_qwen3_vl(config):
-            from ...qwen_vl_vision_builder import build_qwen3_vl_vision_engine
+            from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
             return build_qwen3_vl_vision_engine(
                 vision_config, vision_weights,
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
                 verbose=verbose)
         else:
-            from ...qwen_vl_vision_builder import build_qwen_vl_vision_engine
+            from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
             return build_qwen_vl_vision_engine(
                 vision_config, vision_weights,
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
@@ -307,7 +307,7 @@ def _build_qwen3_vl_decoder(
       - deepstack_embed_0..N: [1, hidden] per-level embeddings
       - deepstack_active: [1] flag (1.0 during VL prefill, 0.0 during decode)
     """
-    from ...standard_decoder_builder import _mark_debug_output
+    from .standard_decoder_builder import _mark_debug_output
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)

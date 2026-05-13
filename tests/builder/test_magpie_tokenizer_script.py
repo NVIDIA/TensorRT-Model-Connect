@@ -22,10 +22,50 @@ def _load_magpie_script():
     return module
 
 
+def _load_family_magpie_tokenizer():
+    root = Path(__file__).resolve().parents[2]
+    module_path = (
+        root
+        / "tensorrt_model_connect"
+        / "tensorrt_model_connect"
+        / "families"
+        / "magpie_tts"
+        / "magpie_tokenizer.py"
+    )
+    spec = importlib.util.spec_from_file_location("family_magpie_tokenizer", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_repo_id_from_hf_cache_path() -> None:
     mod = _load_magpie_script()
     p = Path("/root/.cache/huggingface/hub/models--nvidia--magpie_tts_multilingual_357m/blobs/abc")
     assert mod._repo_id_from_hf_cache_path(p) == "nvidia/magpie_tts_multilingual_357m"
+
+
+def test_family_tokenizer_is_model_owned() -> None:
+    mod = _load_family_magpie_tokenizer()
+
+    assert callable(mod.load_tokenizer)
+
+
+def test_magpie_plugin_uses_family_tokenizer_for_ipa_assets() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plugin_path = (
+        root
+        / "tensorrt_model_connect"
+        / "tensorrt_model_connect"
+        / "families"
+        / "magpie_tts"
+        / "plugin.py"
+    )
+    source = plugin_path.read_text(encoding="utf-8")
+
+    assert "from . import magpie_tokenizer" in source
+    assert "spec_from_file_location" not in source
+    assert 'parent.parent.parent.parent / "scripts"' not in source
 
 
 def test_resolve_nemo_path_falls_back_to_repo_download(monkeypatch, tmp_path: Path) -> None:

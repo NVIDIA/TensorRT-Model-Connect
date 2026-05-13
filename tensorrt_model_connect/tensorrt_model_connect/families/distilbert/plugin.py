@@ -30,7 +30,7 @@ from ...checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
 )
-from ...encoder_builder import build_encoder_engine
+from .encoder_builder import build_encoder_engine
 
 
 class DistilBertPlugin:

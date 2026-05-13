@@ -37,7 +37,7 @@ from ...checkpoint_mapper import (
 )
 from ... import graph_ops
 from ... import graph_blocks
-from ...standard_decoder_builder import _apply_norm, _mark_debug_output
+from .standard_decoder_builder import _apply_norm, _mark_debug_output
 
 
 trt = trt_compat.get_trt()

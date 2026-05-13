@@ -125,27 +125,27 @@ def test_build_components_calls_all_subbuilders(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.qwen3_encoder_builder",
+        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
         _module(
-            "tensorrt_model_connect.qwen3_encoder_builder",
+            "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
             load_qwen3_encoder_weights=load_qwen3_encoder_weights,
             build_qwen3_encoder_engine=build_qwen3_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.z_image_dit_builder",
+        "tensorrt_model_connect.families.z_image.z_image_dit_builder",
         _module(
-            "tensorrt_model_connect.z_image_dit_builder",
+            "tensorrt_model_connect.families.z_image.z_image_dit_builder",
             load_z_image_dit_weights=load_z_image_dit_weights,
             build_z_image_dit_engine=build_z_image_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.vae_2d_builder",
+        "tensorrt_model_connect.families.z_image.vae_2d_builder",
         _module(
-            "tensorrt_model_connect.vae_2d_builder",
+            "tensorrt_model_connect.families.z_image.vae_2d_builder",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )

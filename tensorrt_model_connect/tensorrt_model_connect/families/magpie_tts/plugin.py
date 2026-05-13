@@ -65,6 +65,7 @@ from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict
 from ...build_timing import timed_trt_compile
 from ... import graph_ops
+from . import magpie_tokenizer
 
 
 trt = trt_compat.get_trt()
@@ -283,37 +284,29 @@ def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes] | None:
     ignore_ambiguous = True
 
     try:
-        # Import the NeMo tokenizer loader from our scripts
-        from importlib.util import spec_from_file_location, module_from_spec
-        scripts_dir = Path(__file__).resolve().parent.parent.parent.parent / "scripts"
-        spec = spec_from_file_location(
-            "magpie_tokenizer", str(scripts_dir / "magpie_tokenizer.py"))
-        if spec and spec.loader:
-            mod = module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            tokenizer, text_vocab_size = mod.load_tokenizer(str(path))
-            # Extract vocab: _id2token is the authoritative mapping
-            if hasattr(tokenizer, '_id2token'):
-                id2token = tokenizer._id2token
-                vocab_lines = []
-                for i in range(len(id2token)):
-                    vocab_lines.append(str(id2token[i]))
-                vocab_text = "\n".join(vocab_lines) + "\n"
+        tokenizer, text_vocab_size = magpie_tokenizer.load_tokenizer(path)
+        # Extract vocab: _id2token is the authoritative mapping
+        if hasattr(tokenizer, '_id2token'):
+            id2token = tokenizer._id2token
+            vocab_lines = []
+            for i in range(len(id2token)):
+                vocab_lines.append(str(id2token[i]))
+            vocab_text = "\n".join(vocab_lines) + "\n"
 
-            # Extract config from tokenizer / g2p attributes
-            g2p = getattr(tokenizer, 'g2p', None)
-            if g2p and hasattr(g2p, 'grapheme_prefix'):
-                gp = getattr(g2p, 'grapheme_prefix', '')
-                if gp:
-                    grapheme_prefix = str(gp)
-                else:
-                    grapheme_prefix = ""  # NeMo uses no prefix
+        # Extract config from tokenizer / g2p attributes
+        g2p = getattr(tokenizer, 'g2p', None)
+        if g2p and hasattr(g2p, 'grapheme_prefix'):
+            gp = getattr(g2p, 'grapheme_prefix', '')
+            if gp:
+                grapheme_prefix = str(gp)
             else:
-                grapheme_prefix = ""  # NeMo default: no grapheme prefix
-            if g2p and hasattr(g2p, 'ignore_ambiguous_words'):
-                ignore_ambiguous = bool(g2p.ignore_ambiguous_words)
-            # EOS is text_vocab_size + 1 (NeMo convention, set by caller)
-            eos_id = text_vocab_size + 1 if text_vocab_size else -1
+                grapheme_prefix = ""  # NeMo uses no prefix
+        else:
+            grapheme_prefix = ""  # NeMo default: no grapheme prefix
+        if g2p and hasattr(g2p, 'ignore_ambiguous_words'):
+            ignore_ambiguous = bool(g2p.ignore_ambiguous_words)
+        # EOS is text_vocab_size + 1 (NeMo convention, set by caller)
+        eos_id = text_vocab_size + 1 if text_vocab_size else -1
     except Exception as e:
         raise RuntimeError(
             f"NeMo IPATokenizer failed to load — this is required for MagpieTTS "
@@ -1011,7 +1004,7 @@ class MagpieTTSPlugin:
                       f"(max_frames={max_codec_frames}) ...",
                       file=sys.stderr)
 
-            from ...nanocodec_builder import build_nanocodec_decoder_engine
+            from .nanocodec_builder import build_nanocodec_decoder_engine
             with timed_trt_compile(build_timing, "extra_nanocodec_audio_decoder"):
                 codec_plan = build_nanocodec_decoder_engine(
                     codec_sd, max_frames=max_codec_frames, verbose=verbose)

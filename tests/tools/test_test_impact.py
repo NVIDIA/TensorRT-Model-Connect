@@ -115,28 +115,70 @@ def mock_repo(tmp_path):
     # Family plugins
     (families_dir / "__init__.py").write_text("")
     (families_dir / "base.py").write_text("")
-    _write_family(families_dir, "qwen",
-                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
-    _write_family(families_dir, "llama",
-                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
-    _write_family(families_dir, "bert",
-                  "from ..encoder_builder import build\nfrom ..config import C\n")
+    _write_family_package(
+        families_dir,
+        "qwen",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "standard_decoder_builder.py": "def build():\n    pass\n",
+        },
+    )
+    _write_family_package(
+        families_dir,
+        "llama",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "standard_decoder_builder.py": "def build():\n    pass\n",
+        },
+    )
+    _write_family_package(
+        families_dir,
+        "bert",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .encoder_builder import build\nfrom ...config import C\n",
+            "encoder_builder.py": "def build():\n    pass\n",
+        },
+    )
     _write_family(families_dir, "whisper",
                   "from ..config import C\nfrom ..graph_ops import rope\n")
     _write_family(families_dir, "flux",
                   "from ..config import C\n")
     _write_family(families_dir, "mamba",
                   "from ..config import C\nfrom ..graph_ops import ssm\n")
-    _write_family(families_dir, "qwen_vl",
-                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
-    _write_family(families_dir, "bark",
-                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family_package(
+        families_dir,
+        "qwen_vl",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "standard_decoder_builder.py": "def build():\n    pass\n",
+        },
+    )
+    _write_family_package(
+        families_dir,
+        "bark",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "standard_decoder_builder.py": "def build():\n    pass\n",
+        },
+    )
     _write_family(families_dir, "sam",
                   "from ..config import C\nfrom ..graph_ops import rope\n")
     _write_family(families_dir, "segformer",
                   "from ..config import C\nfrom ..graph_ops import conv\n")
-    _write_family(families_dir, "mixtral",
-                  "from ..standard_decoder_builder import build\nfrom ..config import C\n")
+    _write_family_package(
+        families_dir,
+        "mixtral",
+        {
+            "__init__.py": "from .plugin import plugin\n",
+            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "standard_decoder_builder.py": "def build():\n    pass\n",
+        },
+    )
     _write_family_package(
         families_dir,
         "convbert",
@@ -231,6 +273,13 @@ class TestFamilyPlugin:
         assert match.rule == "family_package"
         assert match.models == []
 
+    def test_internal_family_folder_is_not_model_owned(self, imap):
+        """families/_internal files are not a model ownership boundary."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/families/_internal/helper.py", imap)
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
     def test_family_base_all_models(self, imap):
         """families/base.py -> ALL models."""
         match = test_impact.classify_file(
@@ -320,34 +369,35 @@ class TestSharedModules:
 # ---------------------------------------------------------------------------
 
 
-class TestSpecializedBuilder:
-    def test_standard_decoder_builder(self, imap):
-        """standard_decoder_builder.py -> only families that import it."""
+class TestFamilyOwnedBuilder:
+    def test_root_standard_decoder_builder_shim_is_broad(self, imap):
+        """Root standard_decoder_builder.py is only a compatibility shim."""
         match = test_impact.classify_file(
             "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py", imap)
-        assert match.rule == "specialized_builder"
-        # qwen, llama, qwen_vl, bark, mixtral import standard_decoder_builder
-        expected_families = {"qwen", "llama", "qwen_vl", "bark", "mixtral"}
-        expected_models = set()
-        for fam in expected_families:
-            expected_models.update(imap.family_to_models.get(fam, []))
-        assert set(match.models) == expected_models
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
 
-    def test_shared_builder_implementation(self, imap):
-        """families/_shared/standard_decoder_builder.py uses import-scanned scope."""
+    def test_family_local_standard_decoder_builder(self, imap):
+        """families/qwen/standard_decoder_builder.py -> exactly qwen models."""
         match = test_impact.classify_file(
-            "tensorrt_model_connect/tensorrt_model_connect/families/_shared/standard_decoder_builder.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen/standard_decoder_builder.py",
             imap,
         )
-        assert match.rule == "specialized_builder"
-        assert "qwen3-0.6b" in match.models
-        assert "bert-base" not in match.models
+        assert match.rule == "family_package"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
 
-    def test_encoder_builder(self, imap):
-        """encoder_builder.py -> only bert family."""
+    def test_root_encoder_builder_shim_is_broad(self, imap):
+        """Root encoder_builder.py is only a compatibility shim."""
         match = test_impact.classify_file(
             "tensorrt_model_connect/tensorrt_model_connect/encoder_builder.py", imap)
-        assert match.rule == "specialized_builder"
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
+    def test_family_local_encoder_builder(self, imap):
+        """families/bert/encoder_builder.py -> exactly bert family."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/families/bert/encoder_builder.py", imap)
+        assert match.rule == "family_package"
         assert set(match.models) == {"bert-base"}
 
 

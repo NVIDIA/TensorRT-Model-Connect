@@ -542,7 +542,7 @@ class BarkPlugin:
 
         # Build codec (EnCodec) engine for waveform synthesis
         if state_dict is not None:
-            from ...encodec_builder import build_encodec_decoder_engine
+            from .encodec_builder import build_encodec_decoder_engine
 
             if verbose:
                 print(f"[trtmc-build]   Building codec engine "
@@ -616,7 +616,7 @@ def _build_bark_standard_engine(
     verbose: bool = False,
 ) -> bytes:
     """Build a standard decoder engine for semantic or coarse using build_standard_decoder_engine."""
-    from ...standard_decoder_builder import build_standard_decoder_engine
+    from .standard_decoder_builder import build_standard_decoder_engine
 
     # Extract sub-model weights (strip prefix)
     prefix = f"{sub_model}."

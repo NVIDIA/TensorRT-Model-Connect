@@ -128,7 +128,7 @@ class LTXVideoPlugin:
         **_kwargs,
     ) -> dict:
         del model_dir
-        from ...t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
         t5_cfg = weights.get("_text_encoder_config", {})
         transformer_cfg = weights.get("_transformer_config", {})
@@ -330,7 +330,7 @@ def _compile_ltx_denoiser_engine(
     verbose: bool,
 ) -> bytes:
     del text_dim
-    from ...ltx_dit_builder import build_ltx_dit_engine, load_ltx_dit_weights
+    from .ltx_dit_builder import build_ltx_dit_engine, load_ltx_dit_weights
 
     weights = load_ltx_dit_weights(transformer_dir, precision=precision)
     return build_ltx_dit_engine(
@@ -356,7 +356,7 @@ def _compile_ltx_vae_decoder_engine(
     precision: str,
     verbose: bool,
 ) -> bytes:
-    from ...ltx_vae_builder import build_ltx_vae_decoder_engine, load_ltx_vae_weights
+    from .ltx_vae_builder import build_ltx_vae_decoder_engine, load_ltx_vae_weights
 
     weights = load_ltx_vae_weights(vae_dir, precision=precision)
     return build_ltx_vae_decoder_engine(

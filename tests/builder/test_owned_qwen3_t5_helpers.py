@@ -52,10 +52,10 @@ def _make_fake_trt() -> types.SimpleNamespace:
 
 _SHARED_BUILDER_MODULES = {
     "tensorrt_model_connect.qwen3_encoder_builder": (
-        "tensorrt_model_connect.families._shared.qwen3_encoder_builder"
+        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder"
     ),
     "tensorrt_model_connect.t5_encoder_builder": (
-        "tensorrt_model_connect.families._shared.t5_encoder_builder"
+        "tensorrt_model_connect.families.flux.t5_encoder_builder"
     ),
 }
 

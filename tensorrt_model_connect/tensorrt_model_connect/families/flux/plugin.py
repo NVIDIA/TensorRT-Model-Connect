@@ -183,9 +183,9 @@ class FluxPlugin:
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from ...t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from ...clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
-        from ...flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
+        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
+        from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
         import json
         from pathlib import Path
 
@@ -343,7 +343,7 @@ class FluxPlugin:
             )
 
         # 4. VAE decoder - native TRT engine
-        from ...flux_vae_builder import build_flux_vae_decoder_engine
+        from .flux_vae_builder import build_flux_vae_decoder_engine
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
             latent_channels=self._VAE_LATENT_CHANNELS,
@@ -374,10 +374,10 @@ class FluxPlugin:
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from ...mistral_encoder_builder import (
+        from .mistral_encoder_builder import (
             build_mistral_encoder_engine, load_mistral_encoder_weights)
-        from ...flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
-        from ...flux_vae_builder import build_flux_vae_decoder_engine
+        from .flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
+        from .flux_vae_builder import build_flux_vae_decoder_engine
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
