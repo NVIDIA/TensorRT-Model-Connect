@@ -6,6 +6,7 @@ import json
 
 
 def test_patch_legacy_dynamic_cache_api_restores_internlm_remote_code_hooks() -> None:
+    import torch
     from transformers.cache_utils import DynamicCache
 
     from tensorrt_model_connect.transformers_compat import (
@@ -15,8 +16,17 @@ def test_patch_legacy_dynamic_cache_api_restores_internlm_remote_code_hooks() ->
     patch_legacy_dynamic_cache_api()
 
     assert hasattr(DynamicCache, "from_legacy_cache")
+    assert hasattr(DynamicCache, "to_legacy_cache")
     assert hasattr(DynamicCache, "get_max_length")
     assert isinstance(DynamicCache.from_legacy_cache(None), DynamicCache)
+
+    key_states = torch.zeros(1, 2, 3, 4)
+    value_states = torch.ones(1, 2, 3, 4)
+    cache = DynamicCache.from_legacy_cache(((key_states, value_states),))
+    legacy = cache.to_legacy_cache()
+    assert len(legacy) == 1
+    assert torch.equal(legacy[0][0], key_states)
+    assert torch.equal(legacy[0][1], value_states)
 
 
 def test_remap_token_ids_to_model_vocab_uses_tokenizer_config_ids(tmp_path) -> None:

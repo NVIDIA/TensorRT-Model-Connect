@@ -29,6 +29,13 @@ def patch_legacy_dynamic_cache_api() -> None:
 
         DynamicCache.from_legacy_cache = from_legacy_cache
 
+    if not hasattr(DynamicCache, "to_legacy_cache"):
+
+        def to_legacy_cache(self):
+            return tuple((key_states, value_states) for key_states, value_states, *_ in self)
+
+        DynamicCache.to_legacy_cache = to_legacy_cache
+
     if (
         not hasattr(DynamicCache, "get_max_length")
         and hasattr(DynamicCache, "get_max_cache_shape")
