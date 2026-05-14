@@ -162,10 +162,9 @@ TextGenerationPipeline::TextGenerationPipeline(
     std::string model_id_str, std::unique_ptr<ISampler> sampler, std::unique_ptr<TrtModule> prefill,
     std::shared_ptr<void> distributed_owner)
     : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
-      prefill_(std::move(prefill)), state_(std::move(state)),
-      config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),
-      logits_output_name_(config_.logits_output_name) {
+      prefill_(std::move(prefill)), state_(std::move(state)), config_(std::move(config)),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
         throw std::runtime_error("TextGenerationPipeline: no decoder modules");
     }

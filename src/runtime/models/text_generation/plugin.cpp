@@ -17,8 +17,8 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -231,8 +231,7 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         return std::make_unique<TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module),
-            tp_runtime.group.owner);
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), tp_runtime.group.owner);
     }
 
   private:
@@ -250,11 +249,12 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static BackendProfileModules load_decoder_profile_modules(
-        const PipelineContext& ctx, const TensorParallelRuntime& tp_runtime) {
-        const std::string section_name =
-            tp_runtime.config.enabled ? tp_engine_section_name(tp_runtime.group.rank)
-                                      : std::string("engine_plan");
+    static BackendProfileModules
+    load_decoder_profile_modules(const PipelineContext& ctx,
+                                 const TensorParallelRuntime& tp_runtime) {
+        const std::string section_name = tp_runtime.config.enabled
+                                             ? tp_engine_section_name(tp_runtime.group.rank)
+                                             : std::string("engine_plan");
         auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
             throw std::runtime_error(section_name + " section is missing");

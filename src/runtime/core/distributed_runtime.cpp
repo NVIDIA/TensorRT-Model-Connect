@@ -2,12 +2,11 @@
 
 #include "runtime/core/cuda_common.h"
 
-#include <cuda_runtime_api.h>
-#include <dlfcn.h>
-
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <cuda_runtime_api.h>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
