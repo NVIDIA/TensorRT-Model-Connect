@@ -14,8 +14,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tensorrt_model_connect.qwen_vl_vision_builder import _compute_vision_rope_tables
+try:
+    from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import _compute_vision_rope_tables
+except (ImportError, ModuleNotFoundError):
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 class TestComputeVisionRopeTables:

@@ -18,7 +18,7 @@ import pytest
 
 try:
     from tensorrt_model_connect import graph_ops
-    from tensorrt_model_connect.qwen_vl_vision_builder import (
+    from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import (
         _compute_vision_rope_tables,
         build_qwen3_vl_vision_engine,
         build_qwen_vl_vision_engine,
@@ -26,7 +26,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.builder.conftest import requires_trt, run_trt_graph
+from tests.builder.conftest import requires_trt
 
 
 # ===================================================================
@@ -177,7 +177,6 @@ class TestSpatialMerge:
         norm_gamma = np.ones(input_dim, dtype=np.float32)
 
         def build_fn(network, trt_inputs):
-            import tensorrt as trt
             eps_tensor = graph_ops.add_constant(
                 network, (1, 1), np.array([1e-6], dtype=np.float32))
             out = graph_ops.add_spatial_merge(
@@ -299,8 +298,6 @@ class TestVisionEncoderGraphConstruction:
     @requires_trt
     def test_qwen25_vl_graph_builds(self):
         """Qwen2.5-VL vision encoder builds without errors on tiny dims."""
-        import tensorrt as trt
-
         # Tiny config: 2 layers, 4x4 grid, embed=32
         embed_dim = 32
         num_heads = 2
@@ -311,9 +308,6 @@ class TestVisionEncoderGraphConstruction:
         in_channels = 3
         temporal_patch_size = 2
         fixed_image_size = 16  # 16/4 = 4x4 grid
-        grid = fixed_image_size // patch_size
-        num_patches = grid * grid  # 16
-        num_merged = num_patches // (merge_size * merge_size)  # 4
         text_hidden = 32
         input_channels = temporal_patch_size * in_channels
         merged_dim = embed_dim * merge_size * merge_size
@@ -395,8 +389,6 @@ class TestVisionEncoderGraphConstruction:
         temporal_patch_size = 2
         fixed_image_size = 16
         grid = fixed_image_size // patch_size
-        num_patches = grid * grid  # 16
-        num_merged = num_patches // (merge_size * merge_size)  # 4
         text_hidden = 32
         input_channels = temporal_patch_size * in_channels
         merge_unit = merge_size * merge_size

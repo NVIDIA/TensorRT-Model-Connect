@@ -25,7 +25,7 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
     from tensorrt_model_connect.families import find_plugin
-    from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
+    from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
@@ -37,7 +37,7 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size})",
           file=sys.stderr)
 
-    print(f"[diff-layers] Loading weights ...", file=sys.stderr)
+    print("[diff-layers] Loading weights ...", file=sys.stderr)
     weights = plugin.load_weights(model_dir, config)
 
     # Build with debug outputs — call the builder directly with the flag
@@ -117,12 +117,12 @@ def main():
           f"text={tokenizer.decode([token_id])!r}")
 
     # Run TRT (single step at position 0)
-    print(f"[diff-layers] Running TRT ...", file=sys.stderr)
+    print("[diff-layers] Running TRT ...", file=sys.stderr)
     trt_results = run_trt_single_step(
         engine_plan, config, token_id, args.max_cache_length)
 
     # Run HF (single token forward pass)
-    print(f"[diff-layers] Running HF ...", file=sys.stderr)
+    print("[diff-layers] Running HF ...", file=sys.stderr)
     hf_hidden, hf_logits = run_hf_single_step(
         model_dir, token_id, trust_remote_code=args.trust_remote_code)
 
@@ -235,82 +235,6 @@ def main():
     print(f"  Tolerance: {args.atol}")
     print(f"  {'PASS' if all_passed else 'FAIL'}")
     sys.exit(0 if all_passed else 1)
-
-
-def run_as_diff_test(ctx):
-    """Framework entry point. Returns DiffResult."""
-    from diff_framework.protocol import DiffResult
-    import time as _time
-
-    t0 = _time.monotonic()
-    try:
-        engine_plan, config, model_dir = build_debug_engine(
-            ctx.model, ctx.max_cache_length, ctx.verbose)
-
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, trust_remote_code=ctx.trust_remote_code)
-        input_ids = tokenizer.encode("Hello")
-        token_id = input_ids[0]
-
-        trt_results = run_trt_single_step(
-            engine_plan, config, token_id, ctx.max_cache_length)
-        hf_hidden, hf_logits = run_hf_single_step(
-            model_dir, token_id, trust_remote_code=ctx.trust_remote_code)
-
-        max_overall = 0.0
-        all_passed = True
-        layer_diffs = {}
-
-        # Embedding
-        if "debug_embed" in trt_results:
-            trt_embed = trt_results["debug_embed"].flatten()
-            hf_embed = hf_hidden[0]
-            md = float(np.abs(trt_embed - hf_embed).max())
-            max_overall = max(max_overall, md)
-            layer_diffs["embed"] = md
-            if md > ctx.layer_atol:
-                all_passed = False
-
-        # Per-layer hidden states
-        num_layers = config.num_hidden_layers
-        for i in range(num_layers):
-            hidden_key = f"debug_hidden_{i}"
-            if hidden_key not in trt_results:
-                continue
-            trt_h = trt_results[hidden_key].flatten()
-            is_last = (i == num_layers - 1)
-            if is_last and len(hf_hidden) == num_layers + 1:
-                continue
-            hf_h = hf_hidden[i + 1] if (i + 1) < len(hf_hidden) else None
-            if hf_h is None:
-                continue
-            md = float(np.abs(trt_h - hf_h).max())
-            max_overall = max(max_overall, md)
-            layer_diffs[f"layer.{i}"] = md
-            if md > ctx.layer_atol:
-                all_passed = False
-
-        # Logits
-        trt_logits_arr = trt_results["logits"].flatten()
-        md = float(np.abs(trt_logits_arr - hf_logits).max())
-        max_overall = max(max_overall, md)
-        layer_diffs["logits"] = md
-        if md > ctx.layer_atol:
-            all_passed = False
-
-        return DiffResult(
-            test_name="layer_diff", model=ctx.model,
-            runtime_strategy=ctx.runtime_strategy,
-            passed=all_passed,
-            status="PASS" if all_passed else "FAIL",
-            message=f"max_overall_diff={max_overall:.6f} (atol={ctx.layer_atol})",
-            metrics={"max_overall_diff": max_overall, "atol": ctx.layer_atol,
-                     "layer_diffs": layer_diffs},
-            duration_s=_time.monotonic() - t0)
-    except Exception as e:
-        return DiffResult.error(
-            "layer_diff", ctx.model, ctx.runtime_strategy, str(e))
 
 
 def run_as_diff_test(ctx):

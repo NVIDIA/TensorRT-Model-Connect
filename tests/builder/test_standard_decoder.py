@@ -88,7 +88,7 @@ class TestTensorNamingContract:
 
     def _build_engine(self, **kwargs):
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -195,7 +195,7 @@ class TestTensorNamingContract:
 
     def test_dynamic_kv_cache_shapes(self):
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -227,7 +227,7 @@ class TestTensorNamingContract:
 
     def test_dynamic_kv_cache_multiple_profiles(self):
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -268,7 +268,7 @@ class TestTensorNamingContract:
 
     def test_dynamic_kv_cache_rejects_alibi(self):
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4

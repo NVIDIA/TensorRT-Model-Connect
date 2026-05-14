@@ -196,22 +196,6 @@ def _make_fake_trt() -> types.SimpleNamespace:
     )
 
 
-_SHARED_BUILDER_MODULES = {
-    "tensorrt_model_connect.clip_encoder_builder": (
-        "tensorrt_model_connect.families.flux.clip_encoder_builder"
-    ),
-    "tensorrt_model_connect.encoder_builder": (
-        "tensorrt_model_connect.families.bert.encoder_builder"
-    ),
-    "tensorrt_model_connect.qwen3_encoder_builder": (
-        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder"
-    ),
-    "tensorrt_model_connect.t5_encoder_builder": (
-        "tensorrt_model_connect.families.flux.t5_encoder_builder"
-    ),
-}
-
-
 def _drop_imported_module(module_name: str) -> None:
     sys.modules.pop(module_name, None)
     package_name, _, attribute_name = module_name.rpartition(".")
@@ -224,7 +208,6 @@ def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace):
     """Import a tensorrt_model_connect module while tensorrt is mocked."""
     for mod_name in (
         module_name,
-        _SHARED_BUILDER_MODULES.get(module_name),
         "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
@@ -247,15 +230,14 @@ def _import_qwen3_with_fake_trt(fake_trt: types.SimpleNamespace):
     fake_cm._has_tensor = lambda _readers, _name: False  # type: ignore[attr-defined]
 
     for mod_name in (
-        "tensorrt_model_connect.qwen3_encoder_builder",
-        _SHARED_BUILDER_MODULES["tensorrt_model_connect.qwen3_encoder_builder"],
+        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
         "tensorrt_model_connect.checkpoint_mapper",
         "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
         _drop_imported_module(mod_name)
     with patch.dict(sys.modules, {"tensorrt": fake_trt, "tensorrt_model_connect.checkpoint_mapper": fake_cm}):
-        return importlib.import_module("tensorrt_model_connect.qwen3_encoder_builder")
+        return importlib.import_module("tensorrt_model_connect.families.z_image.qwen3_encoder_builder")
 
 
 def _fake_tensor_fn(prefix: str):
@@ -379,7 +361,7 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
     Postconditions: Engine bytes are returned, config flags are set, and both outputs are marked.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
 
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
 
@@ -421,7 +403,7 @@ def test_build_clip_encoder_engine_raises_when_builder_returns_none(monkeypatch:
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod.graph_ops, "add_layer_norm", _fake_tensor_fn("ln"))
@@ -448,7 +430,7 @@ def test_load_clip_weights_transposes_projection_matrices_and_keeps_biases() -> 
     Postconditions: Projection matrices are transposed while scalar/vector tensors remain untransformed float32.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
 
     tensors: dict[str, np.ndarray] = {
         "text_model.embeddings.token_embedding.weight": np.arange(32, dtype=np.float32).reshape(8, 4),
@@ -508,7 +490,7 @@ def test_build_t5_encoder_engine_success_exercises_relative_bias_fallback(monkey
     Postconditions: Engine bytes are returned and each layer emits the expected derived bias constant.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.t5_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt)
 
     bucket_indices = np.array([[0, 1], [2, 3]], dtype=np.int32)
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
@@ -573,7 +555,7 @@ def test_build_t5_encoder_engine_raises_when_builder_returns_none(monkeypatch: p
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.t5_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod.graph_ops, "make_t5_relative_position_bias", lambda *_a, **_k: np.zeros((2, 2), dtype=np.int32))
@@ -603,7 +585,7 @@ def test_build_encoder_engine_success_passes_rel_pos_bias_and_activation(monkeyp
     Postconditions: Layer helper receives expected hidden-act/rel-bias values and engine bytes are returned.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))
@@ -657,7 +639,7 @@ def test_build_encoder_engine_raises_when_builder_returns_none(monkeypatch: pyte
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))

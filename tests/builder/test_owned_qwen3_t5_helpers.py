@@ -50,16 +50,6 @@ def _make_fake_trt() -> types.SimpleNamespace:
     )
 
 
-_SHARED_BUILDER_MODULES = {
-    "tensorrt_model_connect.qwen3_encoder_builder": (
-        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder"
-    ),
-    "tensorrt_model_connect.t5_encoder_builder": (
-        "tensorrt_model_connect.families.flux.t5_encoder_builder"
-    ),
-}
-
-
 def _drop_imported_module(module_name: str) -> None:
     sys.modules.pop(module_name, None)
     package_name, _, attribute_name = module_name.rpartition(".")
@@ -73,9 +63,6 @@ def _import_with_fake_trt(module_name: str):
     sentinel = object()
     old_trt = sys.modules.get("tensorrt", sentinel)
     _drop_imported_module(module_name)
-    shared_module_name = _SHARED_BUILDER_MODULES.get(module_name)
-    if shared_module_name is not None:
-        _drop_imported_module(shared_module_name)
     sys.modules["tensorrt"] = _make_fake_trt()
     try:
         return importlib.import_module(module_name)
@@ -93,7 +80,7 @@ def test_qwen3_native_rope_table_has_expected_identities() -> None:
     Preconditions: Qwen3 helper module is importable with fake trt.
     Postconditions: half-dim cos/sin tables satisfy position-0 identity and trig invariants.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.qwen3_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.z_image.qwen3_encoder_builder")
 
     cos = mod.graph_ops.make_rope_table_half_dim(
         max_cache_length=3,
@@ -124,7 +111,7 @@ def test_load_qwen3_encoder_weights_transposes_and_optional_norm() -> None:
     Preconditions: Safetensors reader helpers are mocked with deterministic arrays.
     Postconditions: Returned WeightDict has expected keys and transformed values.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.qwen3_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.z_image.qwen3_encoder_builder")
 
     tensors = {
         "model.embed_tokens.weight": np.arange(20, dtype=np.float32).reshape(5, 4),
@@ -192,7 +179,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     Preconditions: checkpoint_mapper helpers are replaced by a fake deterministic module.
     Postconditions: Returned weights are float32 and include expected optional keys.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.t5_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder")
 
     tensors: dict[str, np.ndarray] = {
         "shared.weight": np.arange(28, dtype=np.float32).reshape(7, 4),

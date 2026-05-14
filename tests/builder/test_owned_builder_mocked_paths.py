@@ -52,19 +52,6 @@ def _make_fake_trt_base() -> types.SimpleNamespace:
     )
 
 
-_SHARED_BUILDER_MODULES = {
-    "tensorrt_model_connect.encodec_builder": (
-        "tensorrt_model_connect.families.bark.encodec_builder"
-    ),
-    "tensorrt_model_connect.encoder_builder": (
-        "tensorrt_model_connect.families.bert.encoder_builder"
-    ),
-    "tensorrt_model_connect.onnx_vision_builder": (
-        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder"
-    ),
-}
-
-
 def _drop_imported_module(module_name: str) -> None:
     sys.modules.pop(module_name, None)
     package_name, _, attribute_name = module_name.rpartition(".")
@@ -78,9 +65,6 @@ def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace | No
         fake_trt = _make_fake_trt_base()
     # Remove cached modules that may have imported with a different trt object.
     _drop_imported_module(module_name)
-    shared_module_name = _SHARED_BUILDER_MODULES.get(module_name)
-    if shared_module_name is not None:
-        _drop_imported_module(shared_module_name)
     if module_name.endswith("encoder_builder"):
         _drop_imported_module("tensorrt_model_connect.graph_ops")
         _drop_imported_module("tensorrt_model_connect.graph_blocks")
@@ -95,7 +79,7 @@ def test_encodec_fuse_weight_norm_matches_manual_formula() -> None:
     Preconditions: `g` and `v` arrays have compatible output-channel shapes.
     Postconditions: Fused weights equal g*v/||v|| with float32 output dtype.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.encodec_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bark.encodec_builder")
 
     g = np.array([[[2.0]], [[4.0]]], dtype=np.float32)
     v = np.array(
@@ -121,7 +105,7 @@ def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
     Postconditions: Function returns tensor from native normalization layer
         with correct epsilon and axis mask.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder")
 
     class _FakeTensor:
         def __init__(self, name: str, dtype=np.float32):
@@ -225,7 +209,7 @@ def test_onnx_builder_raises_parser_error_with_details() -> None:
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
-    mod = _import_with_fake_trt("tensorrt_model_connect.onnx_vision_builder", fake_trt=fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder", fake_trt=fake_trt)
 
     with pytest.raises(RuntimeError, match="ONNX parsing failed"):
         mod.build_vision_engine_from_onnx(b"bad-onnx")
@@ -298,7 +282,7 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
-    mod = _import_with_fake_trt("tensorrt_model_connect.onnx_vision_builder", fake_trt=fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder", fake_trt=fake_trt)
 
     plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
     assert plan == b"engine-plan"
@@ -318,7 +302,7 @@ def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
     Preconditions: torch and transformers modules are replaced by deterministic fakes.
     Postconditions: Missing dependency raises ImportError; missing vision attr raises RuntimeError.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.onnx_vision_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
 
     class _NoGrad:
         def __enter__(self):
@@ -363,7 +347,7 @@ def test_trace_hf_vision_encoder_success_path_with_mocked_export() -> None:
     Preconditions: Fake torch exporter writes deterministic ONNX bytes; fake transformers returns vision model.
     Postconditions: Returned engine bytes come from `build_vision_engine_from_onnx` call.
     """
-    mod = _import_with_fake_trt("tensorrt_model_connect.onnx_vision_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
 
     class _NoGrad:
         def __enter__(self):
@@ -420,21 +404,3 @@ def test_trace_hf_vision_encoder_success_path_with_mocked_export() -> None:
     assert _AutoModel.called == ("model-dir", False)
     assert vision_model.eval_called is True
     assert export_calls and export_calls[0]["opset_version"] == 17
-
-
-@pytest.mark.unit
-def test_vision_encoder_builder_reexports_from_qwen_vl_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intent: verify compatibility shim re-exports symbols from qwen_vl_vision_builder.
-
-    Preconditions: Source module is pre-injected in sys.modules with explicit __all__.
-    Postconditions: Imported shim exposes the source marker symbol.
-    """
-    fake_src = types.ModuleType("tensorrt_model_connect.qwen_vl_vision_builder")
-    fake_src.__all__ = ["MARKER"]  # type: ignore[attr-defined]
-    fake_src.MARKER = object()  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.qwen_vl_vision_builder", fake_src)
-    sys.modules.pop("tensorrt_model_connect.vision_encoder_builder", None)
-
-    shim = importlib.import_module("tensorrt_model_connect.vision_encoder_builder")
-    assert shim.MARKER is fake_src.MARKER

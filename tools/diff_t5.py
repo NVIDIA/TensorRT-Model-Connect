@@ -66,7 +66,7 @@ def main():
 
     # 4. Build TRT engine
     print("[diff-t5] Building TRT T5 engine ...", file=sys.stderr)
-    from tensorrt_model_connect.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+    from tensorrt_model_connect.families.flux.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
     config = hf_model.config
     t5_weights = load_t5_weights(

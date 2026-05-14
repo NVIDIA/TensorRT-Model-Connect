@@ -33,7 +33,6 @@ def main():
 
     DIM = 1536
     NUM_HEADS = 12
-    HEAD_DIM = DIM // NUM_HEADS
     NUM_LAYERS = 30
     FFN_DIM = 8960
     TEXT_SEQ = 16
@@ -65,7 +64,7 @@ def main():
     hf_model.norm_out.register_forward_hook(hook_after_patch)
 
     with torch.no_grad():
-        hf_out = hf_model(
+        hf_model(
             hidden_states=latent,
             timestep=timestep,
             encoder_hidden_states=text_hidden,
@@ -96,7 +95,7 @@ def main():
     cos_np = rope_cos[0, :, 0, :].numpy()  # [num_patches, head_dim]
     sin_np = rope_sin[0, :, 0, :].numpy()  # [num_patches, head_dim]
 
-    print(f"[validate-dit] Extracted intermediates:", file=sys.stderr)
+    print("[validate-dit] Extracted intermediates:", file=sys.stderr)
     print(f"  hidden: {hidden_np.shape}", file=sys.stderr)
     print(f"  block_temb: {temb_np.shape}", file=sys.stderr)
     print(f"  time_embed: {time_embed_np.shape}", file=sys.stderr)
@@ -126,7 +125,7 @@ def main():
     print("[validate-dit] Loading DiT weights & building TRT engine ...",
           file=sys.stderr)
     sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
-    from tensorrt_model_connect.standard_dit_builder import build_standard_dit_engine, load_dit_weights
+    from tensorrt_model_connect.families.pixart.standard_dit_builder import build_standard_dit_engine, load_dit_weights
 
     t0 = time.time()
     weights = load_dit_weights(dit_dir, dim=DIM, num_heads=NUM_HEADS,
@@ -163,7 +162,7 @@ def main():
     cos_sim = np.sum(hf_final * trt_final) / (
         np.linalg.norm(hf_final) * np.linalg.norm(trt_final) + 1e-8)
 
-    print(f"\n=== DiT Denoiser Validation ===")
+    print("\n=== DiT Denoiser Validation ===")
     print(f"Patches: {NUM_PATCHES}, Layers: {NUM_LAYERS}")
     print(f"Max abs diff: {max_diff:.6f}")
     print(f"Mean abs diff: {mean_diff:.6f}")

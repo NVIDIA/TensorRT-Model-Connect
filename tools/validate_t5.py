@@ -64,7 +64,7 @@ def main():
     # --- TRT ---
     print("[validate] Loading T5 weights ...", file=sys.stderr)
     sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
-    from tensorrt_model_connect.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+    from tensorrt_model_connect.families.flux.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
     cfg = hf_model.config
     t0 = time.time()
@@ -115,7 +115,7 @@ def main():
     cos_sim = np.sum(hf_valid * trt_valid) / (
         np.linalg.norm(hf_valid) * np.linalg.norm(trt_valid) + 1e-8)
 
-    print(f"\n=== T5 Encoder Validation ===")
+    print("\n=== T5 Encoder Validation ===")
     print(f"Prompt: {args.prompt!r}")
     print(f"Seq len: {args.max_seq_len} (valid: {valid_len})")
     print(f"Max abs diff: {max_diff:.6f}")
