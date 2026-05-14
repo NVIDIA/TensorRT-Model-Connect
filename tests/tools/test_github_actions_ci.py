@@ -30,6 +30,7 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
     ):
         assert f'mkdir_if_set "${{{name}:-}}"' in text
         assert f"-e {name}" in text
+    assert "/workspace/users/yifeif:/workspace/users/yifeif" in text
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:

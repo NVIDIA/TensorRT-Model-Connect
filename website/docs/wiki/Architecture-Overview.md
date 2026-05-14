@@ -8,7 +8,7 @@
 | Version | 2.0 |
 | Status | NORMATIVE |
 | Classification | ISO 26262-6 Section 7 -- Software Architectural Design |
-| Author | Safety Architecture Team (yifeif@nvidia.com) |
+| Author | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | Reviewer | Independent Review Required (TBD — assign before merge) |
 | Review Status | Pending independent review |
 | Last Updated | 2026-03-30 |
@@ -98,7 +98,7 @@ class FamilyPlugin(Protocol):
 
 ### 3.4 Plugin Auto-Discovery
 
-`tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 67 Python files in the families directory (65 plugins + `base.py` protocol + `__init__.py` auto-discovery module). New plugins are added continuously via the autopilot system (`scripts/autopilot/autorun.py`).
+`tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 67 Python files in the families directory (65 plugins + `base.py` protocol + `__init__.py` auto-discovery module). Batch onboarding can use the autopilot system (`scripts/autopilot/autorun.py`), which launches configurable agent CLI sessions that follow `AGENTS.md` and the repo-local skills.
 
 Key discovery functions:
 - `find_plugin(model_type)` -- matches standard models by HF `model_type`.

@@ -32,5 +32,5 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for FLUX.2-dev. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract. L0 keeps the full end-to-end stage, restores the full 256-token text shape for prompt fidelity, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps; nightly keeps the full 1024px/28-step scale coverage."
+  "notes": "PR L0 repro for FLUX.2-dev. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract. L0 keeps the full end-to-end stage, restores the full 256-token text shape for prompt fidelity, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps; nightly keeps the full 1024px/28-step scale coverage."
 }

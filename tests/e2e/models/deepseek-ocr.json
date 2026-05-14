@@ -7,7 +7,7 @@
   "runtime_strategy": "vision_language",
   "ci_tier": "nightly_only",
   "l0_replacement": "deepseek-ocr-l0",
-  "l0_replacement_reason": "DeepSeek-OCR scale stays nightly; deepseek-ocr-l0 keeps the OCR VL path with shorter decode for MR L0.",
+  "l0_replacement_reason": "DeepSeek-OCR scale stays nightly; deepseek-ocr-l0 keeps the OCR VL path with shorter decode for PR L0.",
   "max_cache_length": 4096,
   "prompt": "Extract the text from this image.",
   "max_new_tokens": 300,

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Dispatch autopilot tasks to parallel Claude Code agents.
+"""Dispatch autopilot tasks to parallel coding agents.
 
-Takes the task list from discover.py and launches Claude Code sessions
+Takes the task list from discover.py and launches configurable agent CLI sessions
 across isolated agent workspaces. Each agent scaffolds a family plugin,
-iterates until validation passes, then commits.
+iterates until validation passes, then opens a GitHub PR.
 
 Usage:
     # Interactive (approve each batch)
@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,12 +37,29 @@ from pathlib import Path
 
 WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
 DEFAULT_AGENTS = ["agent-1", "agent-2", "agent-3", "agent-4"]
+DEFAULT_AGENT_BIN = "codex"
+DEFAULT_AGENT_ARGS = [
+    "exec", "-s", "danger-full-access", "-a", "never",
+    "-C", "{workspace}", "{prompt}",
+]
 
-# The prompt is the ENTIRE automation. The LLM agent IS the worker.
+# The prompt is the ENTIRE automation. The launched agent IS the worker.
 WORKER_PROMPT = textwrap.dedent("""\
-    You are an autonomous agent implementing a new model family for the trtmc
-    framework. Work entirely inside the container. Do not ask questions — make
-    decisions and proceed. If something fails, read the error, fix it, and retry.
+    You are an autonomous coding agent implementing a new model family for the
+    trtmc framework. Read AGENTS.md first and follow it as the repository ground
+    truth. Work through the mounted container checkout. Do not ask questions —
+    make reasonable decisions and proceed. If something fails, read the error,
+    fix it, and retry.
+
+    Use the repo-local skill instructions where they apply:
+    - $transform-model for the model onboarding workflow.
+    - $debug-trt-mismatch when TRT output diverges from HuggingFace output.
+    - $native-trt-builder-guidelines when editing TensorRT graph construction.
+    - $optimize-model-precision when precision tuning is requested.
+    - $write-git-messages and $submit-github-pr before pushing or opening a PR.
+
+    If a skill is not listed in the active runtime, read its SKILL.md directly
+    from plugins/trtmc-agent-skills/skills/<skill-name>/SKILL.md and follow it.
 
     ## Task
     - model_type:  {model_type}
@@ -112,15 +130,19 @@ WORKER_PROMPT = textwrap.dedent("""\
     Adjust runtime_strategy if the model is not a standard decoder (check the
     plugin's runtime_strategy attribute if it has one).
 
-    ## Step 5: Commit and push
+    ## Step 5: Commit, push, and open a PR
     ```
     cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
-    git checkout -b autopilot/{family_name}
+    git fetch github main
+    git switch -C autopilot/{family_name} github/main
     git add tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
     git add tests/e2e/models/{family_name}.json
-    git commit -m "feat: add {family_name} family plugin (autopilot)"
-    git push -u origin autopilot/{family_name}
     ```
+
+    Add any C++ runtime, CMake, contract, or test files required for the model
+    to pass end-to-end. Use $write-git-messages for the commit title/body. Avoid
+    commit messages containing the string rejected by AGENTS.md. Push only to
+    the `github` remote and use $submit-github-pr to open a PR targeting `main`.
 
     ## Step 6: Write status
     At the end, write a JSON status file to the WORKSPACE (not container /tmp):
@@ -135,12 +157,14 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ## Important rules
     - ALL commands run via `docker exec trtmc-dev-gb300-{agent_id}`.
-    - Do NOT modify any file outside families/{family_name}.py and
-      tests/e2e/models/{family_name}.json.
-    - Do NOT edit shared files (checkpoint_mapper.py, standard_decoder_builder.py, etc.).
+    - Keep edits scoped to the model family, runtime strategy, manifest, CMake,
+      contracts, and tests needed for this model.
+    - Do NOT edit broad shared framework files unless the failure proves the
+      change is required and the change follows $native-trt-builder-guidelines.
     - Look at existing plugins in families/ for reference when fixing issues.
-    - If the model needs a completely new C++ runtime plugin (non-transformer
-      architecture), write status "SKIP" with reason and stop.
+    - If the model needs a completely new C++ runtime plugin, implement it and
+      validate through the C++ binary. Only write status "SKIP" when the blocker
+      is external and documented.
 """)
 
 
@@ -148,7 +172,8 @@ _OPTIMIZE_SECTION = """\
 ## Step 4b: Optimize precision (optional)
 
     After validation passes, optimize the model for low precision:
-    1. Read the skill: cat /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.claude/skills/optimize-model-precision.md
+    1. Use $optimize-model-precision. If it is not active, read:
+       plugins/trtmc-agent-skills/skills/optimize-model-precision/SKILL.md
     2. Follow the skill to find the best non-FP32 precision config
     3. At minimum, build an FP16 variant
     4. Create a second E2E manifest for the optimized variant
@@ -176,9 +201,38 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
     )
 
 
-def find_claude_binary() -> str | None:
-    """Find the claude CLI binary."""
-    return shutil.which("claude")
+def _agent_command(workspace: str, prompt: str) -> list[str]:
+    """Build the configured non-interactive agent command for one worker."""
+    agent_bin = os.environ.get("TRTMC_AGENT_BIN", DEFAULT_AGENT_BIN)
+    resolved_bin = shutil.which(agent_bin) if os.path.sep not in agent_bin else agent_bin
+    if not resolved_bin:
+        print(f"ERROR: agent CLI '{agent_bin}' not found in PATH.", file=sys.stderr)
+        sys.exit(1)
+
+    args = shlex.split(os.environ.get("TRTMC_AGENT_ARGS", ""))
+    if not args:
+        args = DEFAULT_AGENT_ARGS
+
+    rendered: list[str] = []
+    has_prompt = False
+    for arg in args:
+        if arg == "{workspace}":
+            rendered.append(workspace)
+        elif arg == "{prompt}":
+            rendered.append(prompt)
+            has_prompt = True
+        else:
+            if "{workspace}" in arg:
+                arg = arg.replace("{workspace}", workspace)
+            if "{prompt}" in arg:
+                arg = arg.replace("{prompt}", prompt)
+                has_prompt = True
+            rendered.append(arg)
+
+    if not has_prompt:
+        rendered.append(prompt)
+
+    return [resolved_bin, *rendered]
 
 
 def launch_agent(
@@ -187,7 +241,7 @@ def launch_agent(
     dry_run: bool = False,
     optimize: bool = False,
 ) -> subprocess.Popen | None:
-    """Launch a Claude Code session for one task in one agent workspace."""
+    """Launch an agent CLI session for one task in one agent workspace."""
     workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
     prompt = build_prompt(task, agent_id, optimize=optimize)
 
@@ -199,26 +253,14 @@ def launch_agent(
         print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
         return None
 
-    claude_bin = find_claude_binary()
-    if not claude_bin:
-        print("ERROR: 'claude' CLI not found in PATH.", file=sys.stderr)
-        sys.exit(1)
-
-    # Launch claude in non-interactive mode
-    # --print: non-interactive, print output
-    # -p: pass prompt directly
+    # Launch the configured agent CLI in non-interactive mode.
     tmpdir = os.environ.get("TMPDIR", "/tmp")
     log_path = os.path.join(tmpdir, f"autopilot_{task['family_name']}.log")
     log_file = open(log_path, "w")
 
     proc = subprocess.Popen(
         [
-            claude_bin,
-            "--print",                     # Non-interactive output mode
-            "-p", prompt,                  # Direct prompt
-            "--output-format", "text",
-            "--max-turns", "30",           # Enough for scaffold + fix loops
-            "--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+            *_agent_command(workspace, prompt),
         ],
         cwd=workspace,
         stdout=log_file,
@@ -289,6 +331,7 @@ def dispatch(
     agent_ids: list[str],
     mode: str = "interactive",
     timeout: int = 1800,
+    optimize: bool = False,
 ):
     """Dispatch tasks across agent slots in batches."""
     batch_size = len(agent_ids)
@@ -327,7 +370,7 @@ def dispatch(
         for i, task in enumerate(batch):
             agent = agent_ids[i]
             proc = launch_agent(agent, task, dry_run=is_dry_run,
-                                optimize=args.optimize)
+                                optimize=optimize)
             if proc:
                 procs[agent] = (proc, task)
 
@@ -351,7 +394,7 @@ def dispatch(
 
     # Final summary
     print(f"\n{'='*50}")
-    print(f"  Autopilot Summary")
+    print("  Autopilot Summary")
     print(f"{'='*50}")
     print(f"  Tasks:   {len(tasks)}")
     print(f"  Passed:  {passed}")
@@ -368,7 +411,7 @@ def dispatch(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Dispatch autopilot tasks to parallel Claude Code agents.")
+        description="Dispatch autopilot tasks to parallel coding agents.")
     parser.add_argument("tasks_file", help="JSON file from discover.py")
     parser.add_argument("--agents", type=int, default=4,
                         help="Number of parallel agents (default: 4)")
@@ -410,9 +453,10 @@ def main():
         if not ws.is_dir() and args.mode != "dry-run":
             print(f"WARNING: Workspace {ws} does not exist.", file=sys.stderr)
             print(f"  Bootstrap it: ./scripts/bootstrap_workspace.sh "
-                  f"--id {aid} --branch master --detach", file=sys.stderr)
+                  f"--id {aid} --branch main --detach", file=sys.stderr)
 
-    dispatch(tasks, agent_ids, mode=args.mode, timeout=args.timeout)
+    dispatch(tasks, agent_ids, mode=args.mode, timeout=args.timeout,
+             optimize=args.optimize)
 
 
 if __name__ == "__main__":

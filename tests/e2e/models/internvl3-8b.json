@@ -10,7 +10,7 @@
   "user_contract": "vl_answer",
   "ci_tier": "nightly_only",
   "l0_replacement": "internvl3-2b",
-  "l0_replacement_reason": "InternVL3-8B is scale coverage; internvl3-2b keeps the InternVL3 VL path for MR L0.",
+  "l0_replacement_reason": "InternVL3-8B is scale coverage; internvl3-2b keeps the InternVL3 VL path for PR L0.",
   "max_cache_length": 384,
   "prompt": "What color is the vehicle in this image? Answer in one word.",
   "max_new_tokens": 10,
@@ -26,5 +26,5 @@
     "normalized_text_edit_distance": 0.7,
     "vision_embedding_cosine": 0.9
   },
-  "notes": "InternVL3 HF reference emits EOS-only text for this fixture under the CI Transformers stack. Nightly scale coverage validates the stable one-word VL answer against a golden snapshot while internvl3-2b keeps the smaller InternVL path in MR L0."
+  "notes": "InternVL3 HF reference emits EOS-only text for this fixture under the CI Transformers stack. Nightly scale coverage validates the stable one-word VL answer against a golden snapshot while internvl3-2b keeps the smaller InternVL path in PR L0."
 }

@@ -30,5 +30,5 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, guidance_scale=0.0, and the 9-step Turbo recipe. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
+  "notes": "PR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, guidance_scale=0.0, and the 9-step Turbo recipe. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
 }

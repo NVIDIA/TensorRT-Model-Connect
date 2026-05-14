@@ -8,7 +8,7 @@
   "runtime_strategy": "diffusion_pixart",
   "ci_tier": "nightly_only",
   "l0_replacement": "pixart-sigma-1024-l0",
-  "l0_replacement_reason": "PixArt-Sigma scale stays nightly; pixart-sigma-1024-l0 keeps the PixArt image path at 512px for MR L0.",
+  "l0_replacement_reason": "PixArt-Sigma scale stays nightly; pixart-sigma-1024-l0 keeps the PixArt image path at 512px for PR L0.",
   "description": "PixArt-Sigma XL-2 text-to-image (T5-XXL + DiT ada_norm_single + 4ch VAE)",
   "build_args": {
     "max_cache_length": 256

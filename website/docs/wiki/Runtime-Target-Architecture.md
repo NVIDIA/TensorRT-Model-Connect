@@ -5,7 +5,7 @@
 | **Document ID** | ARCH-RT-001 |
 | **Status** | IMPLEMENTED |
 | **Applies to** | C++ runtime (`src/`) |
-| **Author** | Safety Architecture Team (yifeif@nvidia.com) |
+| **Author** | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | **Reviewer** | Independent Review Required (TBD — assign before merge) |
 | **Review Status** | Pending independent review |
 | **Last updated** | 2026-03-30 |

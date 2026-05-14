@@ -6,7 +6,7 @@
 | Applicable standard | ISO 26262:2018 Part 6, Sections 9 and 10 |
 | Revision | 2.0 |
 | Date | 2026-03-12 |
-| Author | Safety Architecture Team (yifeif@nvidia.com) |
+| Author | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | Reviewer | Independent Review Required (TBD — assign before merge) |
 | Review Status | Pending independent review |
 | Status | Active |

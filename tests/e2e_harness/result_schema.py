@@ -13,16 +13,16 @@ from typing import Any, Dict
 from .contracts import CompareResult, E2EResult, MetricResult, StageStatus
 
 
-def _serialize_metric_result(mr: MetricResult) -> Dict[str, Any]:
+def _serialize_metric_result(metric_result: MetricResult) -> Dict[str, Any]:
     """Serialize a MetricResult to a JSON-safe dict."""
     d: Dict[str, Any] = {
-        "value": mr.value,
-        "threshold": mr.threshold,
-        "operator": mr.operator,
-        "passed": mr.passed,
+        "value": metric_result.value,
+        "threshold": metric_result.threshold,
+        "operator": metric_result.operator,
+        "passed": metric_result.passed,
     }
-    if mr.note:
-        d["note"] = mr.note
+    if metric_result.note:
+        d["note"] = metric_result.note
     return d
 
 
@@ -42,8 +42,8 @@ def _serialize_compare_result(cr: CompareResult) -> Dict[str, Any]:
     d: Dict[str, Any] = {
         "status": cr.status,
         "metrics": {
-            name: _serialize_metric_result(mr)
-            for name, mr in cr.metrics.items()
+            name: _serialize_metric_result(metric_result)
+            for name, metric_result in cr.metrics.items()
         },
         "message": cr.message,
     }

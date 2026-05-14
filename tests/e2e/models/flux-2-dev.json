@@ -9,7 +9,7 @@
   "gated": true,
   "ci_tier": "nightly_only",
   "l0_replacement": "flux-2-dev-l0",
-  "l0_replacement_reason": "FLUX.2-dev scale stays nightly; flux-2-dev-l0 keeps the Flux2 image path at 384px/20 steps for MR L0.",
+  "l0_replacement_reason": "FLUX.2-dev scale stays nightly; flux-2-dev-l0 keeps the Flux2 image path at 384px/20 steps for PR L0.",
   "precision": "fp16",
   "description": "FLUX.2-dev text-to-image (Mistral 3 encoder, Flux2 DiT, 32ch VAE)",
   "build_args": {

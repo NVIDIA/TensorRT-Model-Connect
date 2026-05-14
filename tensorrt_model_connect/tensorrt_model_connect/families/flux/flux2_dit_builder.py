@@ -168,9 +168,9 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
         # DQ output type = BF16 (not FP32) so the entire network stays in
         # BF16 as the base type.  This prevents FP32 intermediates from
         # bloating activation memory (12.9 GB → ~1 GB) and avoids creating
-        # backend boundaries that fragment Myelin compilation.
+        # backend boundaries that fragment TensorRT compiler partitioning.
         #
-        # Myelin's dequantize_fc() fuses: DQ(A8) + DQ(W8) → MatMul into
+        # TensorRT fuses: DQ(A8) + DQ(W8) -> MatMul into
         # a single FP8 FC kernel regardless of the DQ output type.
         # Q/DQ on input (activation)
         lhs_ready = _to_compute_dtype(network, lhs)
@@ -245,7 +245,7 @@ def build_flux2_dit_engine(
     # FP8 mode uses the selected reduced precision as the base type. Linear
     # layers get FP8 Q/DQ and attention uses TRT's native IAttention API.
     # This avoids FP32 intermediates that bloat activation memory 15× and
-    # prevents explicit Cast nodes from fragmenting Myelin compilation.
+    # prevents explicit Cast nodes from fragmenting TensorRT compiler partitioning.
     _FP8_SCALES = fp8_scales or {}
     _weight_refs = []  # clear from previous builds
 

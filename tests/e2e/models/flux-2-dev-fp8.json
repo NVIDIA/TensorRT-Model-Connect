@@ -12,7 +12,7 @@
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
   "l0_replacement": "flux-2-dev-fp8-l0",
-  "l0_replacement_reason": "FLUX.2-dev FP8 scale stays nightly; flux-2-dev-fp8-l0 keeps the FP8 Flux2 image path at 384px/20 steps for MR L0.",
+  "l0_replacement_reason": "FLUX.2-dev FP8 scale stays nightly; flux-2-dev-fp8-l0 keeps the FP8 Flux2 image path at 384px/20 steps for PR L0.",
   "description": "FLUX.2-dev FP8 text-to-image (pre-computed scales, baked x_embedder+ctx_embedder+temb)",
   "build_args": {
     "max_cache_length": 256

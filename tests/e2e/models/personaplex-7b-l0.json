@@ -21,5 +21,5 @@
   "max_new_tokens": 300,
   "logit_atol": 0.01,
   "trust_remote_code": true,
-  "notes": "MR L0 repro for PersonaPlex. Uses the same checkpoint, speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
+  "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
 }

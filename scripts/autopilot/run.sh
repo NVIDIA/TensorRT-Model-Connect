@@ -9,7 +9,7 @@
 #
 # Prerequisites:
 #   - Agent workspaces bootstrapped (agent-1..4)
-#   - claude CLI in PATH
+#   - Agent CLI in PATH. Codex is the default; override with TRTMC_AGENT_BIN/TRTMC_AGENT_ARGS.
 #   - HuggingFace Hub accessible (or HF_TOKEN set)
 
 set -euo pipefail

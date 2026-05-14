@@ -23,8 +23,6 @@ _NO_IMPACT_PATTERNS = [
     r"^\.clang-format$",
     r"^\.editorconfig$",
     r"^\.github/",
-    r"^\.gitlab-ci\.yml$",
-    r"^\.gitlab/",
     r"^\.claude/",
     r"^LICENSE",
     r"^CLAUDE\.md$",

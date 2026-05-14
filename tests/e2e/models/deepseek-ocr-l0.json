@@ -18,5 +18,5 @@
   "metadata": {
     "golden_snapshot_path": "tests/e2e/data/deepseek_ocr_l0_golden.json"
   },
-  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
+  "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
 }

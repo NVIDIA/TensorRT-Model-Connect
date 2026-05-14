@@ -38,5 +38,5 @@
     "ssim": 0.75
   },
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for LTX-Video. Uses the same checkpoint, T5 text encoder, LTX DiT denoiser, VAE decoder, native TRT runtime, runner, comparator, and video artifact contract. L0 keeps the 256x256, nine-frame CI shape but uses 30 denoising steps and a detailed English prompt matching the model card guidance; broader quality coverage can use the model default resolution and frame count."
+  "notes": "PR L0 repro for LTX-Video. Uses the same checkpoint, T5 text encoder, LTX DiT denoiser, VAE decoder, native TRT runtime, runner, comparator, and video artifact contract. L0 keeps the 256x256, nine-frame CI shape but uses 30 denoising steps and a detailed English prompt matching the model card guidance; broader quality coverage can use the model default resolution and frame count."
 }

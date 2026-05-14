@@ -24,8 +24,8 @@ def test_validate_task_description_reports_missing_sections() -> None:
     assert missing == ["Acceptance Criteria", "Verification", "Non-goals"]
 
 
-def test_encoded_project_path_escapes_namespace() -> None:
-    assert ai_agent_system.encoded_project("yifeif/tensorrt-model-connect") == "yifeif%2Ftensorrt-model-connect"
+def test_project_path_preserves_github_slug() -> None:
+    assert ai_agent_system.encoded_project("NVIDIA/TensorRT-Model-Connect") == "NVIDIA/TensorRT-Model-Connect"
     assert ai_agent_system.encoded_project("12345") == "12345"
 
 
@@ -39,7 +39,7 @@ def test_is_ai_promotion_schedule_accepts_explicit_variable() -> None:
 
 
 def test_is_ai_promotion_schedule_accepts_descriptive_name() -> None:
-    schedule = {"description": "AI staging promotion MR", "variables": []}
+    schedule = {"description": "AI staging promotion PR", "variables": []}
 
     assert ai_agent_system.is_ai_promotion_schedule(schedule)
 
@@ -65,7 +65,7 @@ def test_has_any_prefix_no_match_and_match_at_start() -> None:
 
     # Substring-but-not-prefix must not count as a match.
     assert ai_agent_system.has_any_prefix("feat/ai-task-26", prefixes) is False
-    assert ai_agent_system.has_any_prefix("master", prefixes) is False
+    assert ai_agent_system.has_any_prefix("main", prefixes) is False
 
     # Matches must anchor at the start of the branch name.
     assert ai_agent_system.has_any_prefix("ai-task-26-cover-pure-helpers", prefixes) is True
@@ -81,8 +81,8 @@ def test_csv_labels_empty_single_and_preserves_order() -> None:
 
     # Order from the caller is preserved; we intentionally pass a non-sorted list
     # to confirm csv_labels does not re-order labels.
-    labels = ["ai:sanity-pending", "ai-generated", "ai:staging-mr"]
-    assert ai_agent_system.csv_labels(labels) == "ai:sanity-pending,ai-generated,ai:staging-mr"
+    labels = ["ai:sanity-pending", "ai-generated", "ai:staging-pr"]
+    assert ai_agent_system.csv_labels(labels) == "ai:sanity-pending,ai-generated,ai:staging-pr"
 
 
 def test_task_issue_labels_include_ai_tags() -> None:
@@ -106,7 +106,7 @@ def test_schedule_variables_handles_missing_key_and_coerces_values() -> None:
 
     # Entries with key=None must be skipped; other values must be coerced to str
     # so downstream `.get("AI_STAGING_PROMOTE") == "1"` comparisons work even
-    # when GitLab returns numeric/boolean values.
+    # when GitHub returns numeric/boolean values.
     schedule = {
         "variables": [
             {"key": None, "value": "ignored"},
@@ -127,7 +127,7 @@ def test_schedule_variables_handles_missing_key_and_coerces_values() -> None:
 def test_validate_task_description_matches_headings_case_insensitively() -> None:
     # TASK_REQUIRED_HEADINGS uses Title Case, but validate_task_description
     # lowercases both sides so bodies written as '## scope' / '## CHANGE'
-    # must still validate — this protects against LLM-authored descriptions
+    # must still validate; this protects against LLM-authored descriptions
     # that don't preserve exact casing.
     description = (
         "## scope\nOne file.\n\n"
@@ -140,16 +140,12 @@ def test_validate_task_description_matches_headings_case_insensitively() -> None
     assert ai_agent_system.validate_task_description(description) == []
 
 
-def test_encoded_project_numeric_stays_raw_and_nested_group_is_encoded() -> None:
-    # Numeric-only project IDs are passed through verbatim — GitLab API URLs
-    # accept them directly without percent-encoding.
+def test_project_path_is_not_percent_encoded_for_github_routes() -> None:
+    # GitHub repository routes use owner/repo path segments directly.
     assert ai_agent_system.encoded_project("987654") == "987654"
 
-    # Nested groups must URL-encode every '/' so the encoded path is safe to
-    # splice into /projects/<id>/... routes.
     encoded = ai_agent_system.encoded_project("grp/subgrp/proj")
-    assert encoded == "grp%2Fsubgrp%2Fproj"
-    assert "/" not in encoded
+    assert encoded == "grp/subgrp/proj"
 
 
 def test_task_body_with_empty_bullet_lists_still_validates() -> None:

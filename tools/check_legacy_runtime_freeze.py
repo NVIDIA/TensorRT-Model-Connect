@@ -51,8 +51,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base",
-        default="origin/master",
-        help="Base ref used to compute changed files (default: origin/master). Ignored when --files is set.",
+        default="github/main",
+        help="Base ref used to compute changed files (default: github/main). Ignored when --files is set.",
     )
     parser.add_argument(
         "--files",

@@ -10,7 +10,7 @@ def test_detects_trt_runtime_error_from_zero_rc_stderr() -> None:
         [
             "[trtmc] Pipeline loaded (strategy=seq2seq_encoder_decoder)",
             "[trt] ERROR: IExecutionContext::enqueueV3: Error Code 1: Cuda Runtime",
-            "Internal Error: MyelinCheckException: CHECK(false) failed.",
+            "Internal Error: CHECK(false) failed.",
         ]
     )
 

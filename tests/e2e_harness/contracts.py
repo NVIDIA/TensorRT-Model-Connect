@@ -76,7 +76,7 @@ class ReferenceFamily(enum.Enum):
     what the CI should verify and how.  Strong-behavior families have clear
     end-user contracts; weak-behavior families only guarantee parity.
 
-    See todo/e2e_ci_single_source_of_truth.md Section 5 for full definitions.
+    See the E2E contract documentation in this module for the current definitions.
     """
 
     # --- Text / causal ---
@@ -132,7 +132,7 @@ class ArtifactType(enum.Enum):
     Used by StageSpec to declare what a stage outputs, enabling typed
     comparison dispatch and artifact persistence with schema validation.
 
-    See todo/e2e_ci_single_source_of_truth.md Section 7.2.
+    See the E2E contract documentation in this module.
     """
 
     TOKEN_IDS = "token_ids"
@@ -155,7 +155,7 @@ class ComparisonMode(enum.Enum):
     artifact_type + comparison_mode together determine the comparator
     behavior.
 
-    See todo/e2e_ci_single_source_of_truth.md Section 8.
+    See the E2E contract documentation in this module.
     """
 
     EXACT_TEXT = "exact_text"
@@ -173,7 +173,7 @@ class ComparisonMode(enum.Enum):
 class CILane(enum.Enum):
     """CI execution lane — determines when and how a test runs.
 
-    See todo/e2e_ci_single_source_of_truth.md Section 6.
+    See the E2E contract documentation in this module.
     """
 
     ACCEPTANCE = "acceptance"
@@ -188,7 +188,7 @@ class UserContract(enum.Enum):
     transcript, etc.).  Weak-behavior models can only verify parity
     (continuation, representation).
 
-    See todo/e2e_ci_single_source_of_truth.md Section 3.3.
+    See the E2E contract documentation in this module.
     """
 
     # --- Strong behavior contracts ---
@@ -682,7 +682,7 @@ class DeterminismPolicy(Protocol):
 
 # Per-model reference family classification.
 # Keys are manifest "name" values; values are ReferenceFamily enum values.
-# Derived from todo/e2e_ci_single_source_of_truth.md Section 5.
+# Derived from the E2E contract documentation in this module.
 MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     # 5.1 CAUSAL_BASE_CONTINUATION
     "gpt2-125m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
@@ -806,7 +806,7 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
 }
 
 # Reference family -> user contract mapping.
-# Derived from todo/e2e_ci_single_source_of_truth.md Sections 3.3 and 5.
+# Derived from the E2E contract documentation in this module.
 REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.CAUSAL_BASE_CONTINUATION.value: UserContract.CONTINUATION_PARITY.value,
     ReferenceFamily.CODE_BASE_COMPLETION.value: UserContract.CODE_COMPLETION.value,
@@ -841,7 +841,7 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
 }
 
 # Reference family -> default comparison mode mapping.
-# Derived from todo/e2e_ci_single_source_of_truth.md Section 8.
+# Derived from the E2E contract documentation in this module.
 REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.CAUSAL_BASE_CONTINUATION.value: ComparisonMode.PREFIX_TEXT.value,
     ReferenceFamily.CODE_BASE_COMPLETION.value: ComparisonMode.PREFIX_TEXT.value,

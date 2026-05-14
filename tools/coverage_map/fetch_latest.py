@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fetch the latest coverage_map.json artifact for CI use.
+"""Fetch a coverage_map.json artifact for CI use.
 
-Tries GitLab Jobs API first, then falls back to a local path.
+Tries an authenticated artifact URL first, then falls back to a local path.
 Exits with code 1 if no map is available (signals full-tier fallback).
 
 Usage:
     python tools/coverage_map/fetch_latest.py --output coverage_map.json
+    python tools/coverage_map/fetch_latest.py --output coverage_map.json --artifact-url "$URL"
     python tools/coverage_map/fetch_latest.py --output coverage_map.json --local-fallback /shared/coverage_map.json
 """
 
@@ -17,42 +18,45 @@ import urllib.error
 from pathlib import Path
 
 
-def _try_gitlab_download(api_url: str, output_path: Path) -> bool:
-    """Try to download coverage_map.json from GitLab artifacts API."""
+def _try_artifact_download(artifact_url: str, output_path: Path) -> bool:
+    """Try to download coverage_map.json from an authenticated artifact URL."""
     import os
-    token = os.environ.get("CI_JOB_TOKEN") or os.environ.get("PRIVATE_TOKEN")
-    if not token or not api_url:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if not artifact_url:
         return False
 
-    headers = {"PRIVATE-TOKEN": token} if os.environ.get("PRIVATE_TOKEN") else {"JOB-TOKEN": token}
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/vnd.github+json"
 
     try:
-        req = urllib.request.Request(api_url, headers=headers)
+        req = urllib.request.Request(artifact_url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(resp.read())
             return True
     except (urllib.error.URLError, OSError) as e:
-        print(f"WARNING: GitLab API fetch failed: {e}", file=sys.stderr)
+        print(f"WARNING: Artifact fetch failed: {e}", file=sys.stderr)
         return False
 
 
 def resolve_coverage_map(
     output_path: Path,
     local_fallback: str = "",
-    gitlab_api_url: str = None,
+    artifact_url: str | None = None,
 ) -> bool:
     """Try to resolve a coverage map, writing it to output_path.
 
     Tries in order:
-    1. GitLab artifacts API (if gitlab_api_url is set)
+    1. Artifact URL (if artifact_url is set)
     2. Local fallback path (if provided and exists)
 
     Returns True if a map was written to output_path, False otherwise.
     """
-    if gitlab_api_url:
-        if _try_gitlab_download(gitlab_api_url, output_path):
-            print("[fetch] Downloaded coverage map from GitLab API", file=sys.stderr)
+    if artifact_url:
+        if _try_artifact_download(artifact_url, output_path):
+            print("[fetch] Downloaded coverage map from artifact URL", file=sys.stderr)
             return True
 
     if local_fallback:
@@ -73,14 +77,14 @@ def main() -> int:
     parser.add_argument("--output", "-o", required=True, help="Output path")
     parser.add_argument("--local-fallback", default="",
                         help="Local path to fall back to if API fails")
-    parser.add_argument("--gitlab-api-url", default=None,
-                        help="GitLab artifacts API URL")
+    parser.add_argument("--artifact-url", default=None,
+                        help="Authenticated coverage-map artifact URL")
     args = parser.parse_args()
 
     found = resolve_coverage_map(
         output_path=Path(args.output),
         local_fallback=args.local_fallback,
-        gitlab_api_url=args.gitlab_api_url,
+        artifact_url=args.artifact_url,
     )
 
     if not found:

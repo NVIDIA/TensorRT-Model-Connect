@@ -54,7 +54,7 @@ Throughput on that same slice:
 That is about `1.34x` faster while preserving the dense answers on the matched
 pilot.
 
-Current reproducible MR-tip validation:
+Current reproducible PR-tip validation:
 
 - TriAttention bundle:
   `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`

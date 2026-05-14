@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Usage: optimize_supervisor.sh MODEL_ID [MAX_ATTEMPTS] [ACCURACY_THRESHOLD] [AGENT_ID]
 #
-# Launches a Claude Code agent to optimize MODEL_ID for low-precision inference.
+# Launches a configurable coding agent to optimize MODEL_ID for low-precision inference.
 # Restarts the agent up to MAX_ATTEMPTS times until the progress file shows a
 # verified passing candidate. The supervisor reads the progress file (written by
 # deterministic tools), NOT the agent's self-report.
@@ -17,6 +17,8 @@ SAFE_NAME="$(echo "$MODEL_ID" | tr '/' '_' | tr '.' '_')"
 PROGRESS_FILE="/tmp/optimize_progress_${SAFE_NAME}.json"
 CONTAINER="trtmc-dev-gb300-${AGENT_ID}"
 REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/tensorrt-model-connect"
+AGENT_BIN="${TRTMC_AGENT_BIN:-codex}"
+read -r -a AGENT_ARGS <<< "${TRTMC_AGENT_ARGS:-exec -s danger-full-access -a never -C {workspace} {prompt}}"
 
 echo "[supervisor] Model:        $MODEL_ID"
 echo "[supervisor] Max attempts:  $MAX_ATTEMPTS"
@@ -56,10 +58,12 @@ while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
     attempt=$((attempt + 1))
     echo "[supervisor] === Attempt $attempt/$MAX_ATTEMPTS ==="
 
-    claude --print --dangerously-skip-permissions -p "
+    prompt="
 You are optimizing ${MODEL_ID} for low-precision inference.
 
-Read the skill file: cat ${REPO_DIR}/.claude/skills/optimize-model-precision.md
+Read AGENTS.md first and follow it as the repository ground truth.
+Use \$optimize-model-precision. If it is not active, read:
+plugins/trtmc-agent-skills/skills/optimize-model-precision/SKILL.md
 
 Progress file: ${PROGRESS_FILE}
 Accuracy threshold: ${ACCURACY}
@@ -71,7 +75,32 @@ previous agent left off. Do not repeat completed attempts.
 
 Your goal: find the best non-FP32 precision config that passes
 diff_logits validation. Write every result to the progress file.
-" || true
+"
+    rendered_args=()
+    has_prompt=false
+    for arg in "${AGENT_ARGS[@]}"; do
+        case "$arg" in
+            "{workspace}")
+                rendered_args+=("$REPO_DIR")
+                ;;
+            "{prompt}")
+                rendered_args+=("$prompt")
+                has_prompt=true
+                ;;
+            *)
+                arg="${arg//\{workspace\}/$REPO_DIR}"
+                if [[ "$arg" == *"{prompt}"* ]]; then
+                    arg="${arg//\{prompt\}/$prompt}"
+                    has_prompt=true
+                fi
+                rendered_args+=("$arg")
+                ;;
+        esac
+    done
+    if [ "$has_prompt" = false ]; then
+        rendered_args+=("$prompt")
+    fi
+    "$AGENT_BIN" "${rendered_args[@]}" || true
 
     if check_success; then
         echo ""

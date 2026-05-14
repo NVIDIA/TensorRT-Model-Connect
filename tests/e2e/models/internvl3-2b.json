@@ -18,5 +18,5 @@
     "normalized_text_edit_distance": 0.7,
     "vision_embedding_cosine": 0.9
   },
-  "notes": "Smaller InternVL3 representative for MR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
+  "notes": "Smaller InternVL3 representative for PR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
 }

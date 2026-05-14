@@ -14,5 +14,5 @@
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "notes": "MR L0 repro for Phi MoE. Uses the same checkpoint, decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
+  "notes": "PR L0 repro for Phi MoE. Uses the same checkpoint, decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
 }

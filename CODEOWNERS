@@ -23,5 +23,5 @@ tensorrt_model_connect/                         @tensorrt-model-connect/builder-
 tests/                              @tensorrt-model-connect/test-reviewers
 
 # CI configuration — require infrastructure review
-.gitlab-ci.yml                      @tensorrt-model-connect/infrastructure
+.github/                            @tensorrt-model-connect/infrastructure
 CODEOWNERS                          @tensorrt-model-connect/safety-manager

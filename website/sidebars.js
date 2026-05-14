@@ -97,8 +97,7 @@ const sidebars = {
       items: [
         'context/triattention-native-cpp-worklog',
         'context/config-registry-status',
-        'context/architecture-decision-records',
-        'context/worklog'
+        'context/architecture-decision-records'
       ]
     },
     {

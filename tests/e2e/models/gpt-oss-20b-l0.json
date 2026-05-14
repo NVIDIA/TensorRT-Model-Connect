@@ -22,5 +22,5 @@
     "token_agreement_rate": 0.25,
     "normalized_text_edit_distance": 0.80
   },
-  "notes": "MR L0 repro for GPT-OSS-20B. Uses the same checkpoint, decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
+  "notes": "PR L0 repro for GPT-OSS-20B. Uses the same checkpoint, decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
 }

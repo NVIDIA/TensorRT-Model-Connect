@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-command autopilot: discover → select → implement → validate → report.
 
-Run from the HOST terminal (not inside a container or Claude Code session):
+Run from the HOST terminal (not inside a container or agent CLI session):
 
     python3 scripts/autopilot/autorun.py                    # interactive
     python3 scripts/autopilot/autorun.py --auto             # fully autonomous
@@ -10,7 +10,7 @@ Run from the HOST terminal (not inside a container or Claude Code session):
 
 Prerequisites:
     - Agent workspaces bootstrapped: ./scripts/bootstrap_workspace.sh --id agent-N --detach
-    - claude CLI in PATH
+    - Agent CLI in PATH. Codex is the default; override with TRTMC_AGENT_BIN/TRTMC_AGENT_ARGS.
     - At least one running container: trtmc-dev-gb300-agent-N
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
 DISCOVER_CONTAINER = "trtmc-dev-gb300-agent-1"
+DEFAULT_AGENT_BIN = "codex"
+DEFAULT_AGENT_ARGS = [
+    "exec", "-s", "danger-full-access", "-a", "never",
+    "-C", "{workspace}", "{prompt}",
+]
 
 # Architecture types that are vision/audio/exotic and unlikely to work
 # with the standard encoder/decoder scaffold without C++ runtime changes.
@@ -43,12 +49,24 @@ SKIP_TYPES = {
 }
 
 # ---------------------------------------------------------------------------
-# Worker prompt — the LLM agent IS the automation
+# Worker prompt — the launched agent IS the automation
 # ---------------------------------------------------------------------------
 WORKER_PROMPT = textwrap.dedent("""\
-    You are an autonomous agent implementing a new model family for the trtmc
-    framework. Work entirely inside the container. Do not ask questions — make
-    decisions and proceed. If something fails, read the error, fix it, and retry.
+    You are an autonomous coding agent implementing a new model family for the
+    trtmc framework. Read AGENTS.md first and follow it as the repository ground
+    truth. Work through the mounted container checkout. Do not ask questions —
+    make reasonable decisions and proceed. If something fails, read the error,
+    fix it, and retry.
+
+    Use the repo-local skill instructions where they apply:
+    - $transform-model for the model onboarding workflow.
+    - $debug-trt-mismatch when TRT output diverges from HuggingFace output.
+    - $native-trt-builder-guidelines when editing TensorRT graph construction.
+    - $optimize-model-precision when precision tuning is requested.
+    - $write-git-messages and $submit-github-pr before pushing or opening a PR.
+
+    If a skill is not listed in the active runtime, read its SKILL.md directly
+    from plugins/trtmc-agent-skills/skills/<skill-name>/SKILL.md and follow it.
 
     ## Task
     - model_type:  {model_type}
@@ -177,9 +195,24 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     {optimize_section}
 
+    ### Submit
+    After validation passes, prepare a focused commit and GitHub PR:
+    ```
+    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
+    git fetch github main
+    git switch -C autopilot/{family_name} github/main
+    git status --short
+    git diff --check
+    ```
+    Add the model family, runtime/CMake/contract files, E2E manifest, and tests
+    needed for this model. Use $write-git-messages for the commit title/body.
+    Push only to the `github` remote, then use $submit-github-pr to open a PR
+    targeting `main`.
+
     ### Report
     Print a clear summary:
     - PASS or FAIL
+    - GitHub PR URL, if opened
     - All errors encountered and how each was fixed
     - Validation method chosen and WHY
     - Actual validation metrics (numbers, not just pass/fail)
@@ -296,8 +329,8 @@ _OPTIMIZE_SECTION = """\
 
     After all validation gates pass, optimize the model for low precision:
 
-    1. Read the optimization skill:
-       cat /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.claude/skills/optimize-model-precision.md
+    1. Use $optimize-model-precision. If it is not active, read:
+       plugins/trtmc-agent-skills/skills/optimize-model-precision/SKILL.md
     2. Follow the skill instructions to find the best non-FP32 precision config
     3. Use the progress file at /tmp/optimize_progress_{family_name}.json
     4. At minimum, build and validate an FP16 variant (guaranteed to work for standard decoders)
@@ -334,17 +367,46 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
 # Dispatch + monitor
 # ---------------------------------------------------------------------------
 
+def _agent_command(workspace: str, prompt: str) -> list[str]:
+    """Build the configured non-interactive agent command for one worker."""
+    agent_bin = os.environ.get("TRTMC_AGENT_BIN", DEFAULT_AGENT_BIN)
+    resolved_bin = shutil.which(agent_bin) if os.path.sep not in agent_bin else agent_bin
+    if not resolved_bin:
+        print(f"ERROR: agent CLI '{agent_bin}' not found in PATH.", file=sys.stderr)
+        sys.exit(1)
+
+    args = shlex.split(os.environ.get("TRTMC_AGENT_ARGS", ""))
+    if not args:
+        args = DEFAULT_AGENT_ARGS
+
+    rendered: list[str] = []
+    has_prompt = False
+    for arg in args:
+        if arg == "{workspace}":
+            rendered.append(workspace)
+        elif arg == "{prompt}":
+            rendered.append(prompt)
+            has_prompt = True
+        else:
+            if "{workspace}" in arg:
+                arg = arg.replace("{workspace}", workspace)
+            if "{prompt}" in arg:
+                arg = arg.replace("{prompt}", prompt)
+                has_prompt = True
+            rendered.append(arg)
+
+    if not has_prompt:
+        rendered.append(prompt)
+
+    return [resolved_bin, *rendered]
+
+
 def launch_batch(
     batch: list[tuple[str, dict]],  # [(agent_id, task), ...]
     dry_run: bool = False,
     optimize: bool = False,
 ) -> dict[str, subprocess.Popen]:
-    """Launch claude --print for each (agent_id, task) pair."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin and not dry_run:
-        print("ERROR: 'claude' CLI not found in PATH.", file=sys.stderr)
-        sys.exit(1)
-
+    """Launch the configured agent CLI for each (agent_id, task) pair."""
     procs = {}
     for agent_id, task in batch:
         workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
@@ -360,15 +422,7 @@ def launch_batch(
         log_file = open(log_path, "w")
 
         proc = subprocess.Popen(
-            [
-                claude_bin,
-                "--print",
-                "-p", prompt,
-                "--output-format", "text",
-                "--max-turns", "30",
-                "--allowedTools",
-                "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-            ],
+            _agent_command(workspace, prompt),
             cwd=workspace,
             stdout=log_file,
             stderr=subprocess.STDOUT,

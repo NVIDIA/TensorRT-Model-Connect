@@ -102,10 +102,14 @@ ls tensorrt_model_connect/tensorrt_model_connect/families/*.py \
 
 As of **March 2026**, the repository contains **63** family modules covering standard decoders (Qwen, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Gemma, Falcon, etc.), MoE (Mixtral, Phi-MoE, Qwen-MoE, DeepSeek-V2), SSM/recurrent (Mamba, RWKV), encoder-only (BERT, ELECTRA, ModernBERT, DeBERTa, DistilBERT, RoBERTa, MPNet, Albert, ConvBERT, FNet, DPR, XLNet), encoder-decoder (T5, Marian, BART, M2M-100), speech (Whisper, Bark, MagpieTTS, PersonaPlex, Qwen3-Omni, Canary), vision-language (Qwen-VL, InternVL, Phi4-Multimodal, Eagle-VLM), segmentation (SegFormer, SAM), diffusion (Wan-T2V, FLUX, Z-Image, PixArt), and embedding/reranking (Eagle). 84 E2E model manifests cover the full test matrix.
 
-To add more families automatically, use the autopilot:
+To add more families automatically, use the agent-CLI autopilot:
 ```bash
 python3 scripts/autopilot/autorun.py --auto
 ```
+
+For focused manual work, scaffold a plugin with `scripts/new_family.py`, add the
+matching manifest under `tests/e2e/models/`, and validate with
+`scripts/validate_family.sh`.
 
 ## Quick Start
 

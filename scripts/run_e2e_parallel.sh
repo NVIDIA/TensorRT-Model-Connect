@@ -125,7 +125,7 @@ if [ "$EXCLUDE_GPU0" != "0" ] && [ "${#GPU_IDS[@]}" -gt 1 ]; then
     if [ "${#FILTERED_GPU_IDS[@]}" -gt 0 ] \
         && [ "${#FILTERED_GPU_IDS[@]}" -lt "${#GPU_IDS[@]}" ]; then
         # The shared GitHub GB300 runner can lose communication during large
-        # TensorRT/Myelin builds on physical GPU0. In CI, keep E2E parallel on
+        # TensorRT compiler builds on physical GPU0. In CI, keep E2E parallel on
         # the remaining GPUs instead of risking a runner-level disconnect.
         GPU_IDS=("${FILTERED_GPU_IDS[@]}")
         echo "INFO: Excluding physical GPU 0 from E2E worker assignment (${GPU_IDS[*]})." \
@@ -137,7 +137,7 @@ if [ "${TRTMC_E2E_DEPRIORITIZE_GPU0:-1}" != "0" ] \
     && [ "${#GPU_IDS[@]}" -gt 1 ] \
     && [ "${GPU_IDS[0]}" = "0" ]; then
     # Shared GB300 runners can have physical GPU0 pass a lightweight builder
-    # probe but fail the first large TensorRT/Myelin build. Keep it available,
+    # probe but fail the first large TensorRT compiler build. Keep it available,
     # while assigning the scheduler's first exclusive build bucket elsewhere.
     GPU_IDS=("${GPU_IDS[@]:1}" "${GPU_IDS[0]}")
     echo "INFO: Scheduling physical GPU 0 last for E2E worker assignment (${GPU_IDS[*]})." \

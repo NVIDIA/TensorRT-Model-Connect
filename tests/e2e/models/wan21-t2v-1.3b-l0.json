@@ -29,5 +29,5 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for Wan2.1 T2V. Uses the same checkpoint, wan_t2v model type, T5 encoder, Wan DiT, causal 3D VAE, runner, comparator, full 256-token cache shape, and video artifact contract. L0 uses 384x672, five frames, and fifteen denoising steps; nightly keeps 480x832, seventeen frames, and thirty-step coverage."
+  "notes": "PR L0 repro for Wan2.1 T2V. Uses the same checkpoint, wan_t2v model type, T5 encoder, Wan DiT, causal 3D VAE, runner, comparator, full 256-token cache shape, and video artifact contract. L0 uses 384x672, five frames, and fifteen denoising steps; nightly keeps 480x832, seventeen frames, and thirty-step coverage."
 }

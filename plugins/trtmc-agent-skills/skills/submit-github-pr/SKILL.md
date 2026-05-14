@@ -39,11 +39,11 @@ gh pr create \
   --body-file <pr-body.md>
 ```
 
-If `gh` is not authenticated but a GitHub token file is available, prefer a
-temporary environment variable and do not print the token:
+If `gh` is not authenticated but a GitHub token is available, prefer a temporary
+environment variable and do not print the token:
 
 ```bash
-GH_TOKEN=$(tr -d '\r\n' < /workspace/users/yizhuoz/github.txt) gh pr view --repo NVIDIA/TensorRT-Model-Connect
+GH_TOKEN=<redacted> gh pr view --repo NVIDIA/TensorRT-Model-Connect
 ```
 
 ## ADR Check

@@ -1,31 +1,68 @@
 # Adding a New Model Family
 
-## Autopilot (Recommended)
+## Autopilot (Recommended For Batch Onboarding)
 
-The fastest way to add new model families is the autopilot system, which autonomously discovers unsupported models from HuggingFace and implements them end-to-end — Python plugin, C++ runtime plugin (if needed), validation, and E2E manifest.
+The autopilot system discovers unsupported HuggingFace model families and
+dispatches coding-agent CLI sessions across isolated workspaces. Codex is the
+default launcher, but the same workflow can run through another non-interactive
+agent CLI. Each agent follows `AGENTS.md`, uses the repo-local skill
+instructions in `plugins/trtmc-agent-skills/`, and drives one model through
+plugin scaffolding, build, validation, E2E manifest creation, and GitHub PR
+submission.
 
 ```bash
-# One command — discovers gaps, implements, validates, reports
+# One command: discover gaps, implement, validate, report
 python3 scripts/autopilot/autorun.py --auto
 
-# Interactive mode (shows candidates, asks Y/n)
+# Interactive mode: show candidates, ask before dispatching
 python3 scripts/autopilot/autorun.py
 
 # Limit scope
 python3 scripts/autopilot/autorun.py --auto --limit 4 --min-downloads 5000000
 ```
 
-The autopilot dispatches parallel Claude Code agents across isolated workspaces. Each agent:
-1. Scaffolds a plugin via `scripts/new_family.py`
-2. Builds the TRT bundle
-3. Validates correctness (TRT vs HuggingFace comparison — agent picks the right metric per modality)
-4. Creates a C++ runtime plugin if no existing strategy handles the model
-5. Iterates until `./build/trtmc run <bundle> --prompt "..."` produces correct output
-6. Creates the E2E manifest (no skip)
+The autopilot dispatches parallel agent sessions across isolated workspaces.
+Each agent:
+1. Reads `AGENTS.md` and relevant repo-local skills such as `$transform-model`,
+   `$debug-trt-mismatch`, `$native-trt-builder-guidelines`, and
+   `$submit-github-pr`.
+2. Scaffolds a plugin via `scripts/new_family.py`.
+3. Builds the TensorRT bundle.
+4. Validates correctness through C++ smoke tests, `validate_family.sh`, and E2E
+   harness compatibility.
+5. Creates a C++ runtime plugin when no existing runtime strategy handles the
+   model.
+6. Creates the E2E manifest without `skip`.
+7. Pushes a short-lived branch to the `github` remote and opens a PR targeting
+   `main`.
 
-**Prerequisites**: Agent workspaces bootstrapped (`./scripts/bootstrap_workspace.sh --id agent-N --detach`) and `claude` CLI in PATH.
+Prerequisites:
+- Agent workspaces bootstrapped with
+  `./scripts/bootstrap_workspace.sh --id agent-N --branch main --detach`.
+- An agent CLI in PATH on the host running the dispatcher. Codex is the default.
+- Matching containers running as `trtmc-dev-gb300-agent-N`.
+- GitHub CLI authentication if the worker should open PRs.
 
-See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed documentation.
+Configure the launcher with environment variables:
+
+```bash
+# Default behavior, shown explicitly
+export TRTMC_AGENT_BIN=codex
+export TRTMC_AGENT_ARGS='exec -s danger-full-access -a never -C {workspace} {prompt}'
+
+# Example: use another non-interactive agent CLI
+export TRTMC_AGENT_BIN=claude
+export TRTMC_AGENT_ARGS='--print -p {prompt}'
+```
+
+`{workspace}` is replaced with the agent workspace path, and `{prompt}` is
+replaced with the generated worker prompt. If `{prompt}` is omitted, the prompt
+is appended as the final argument. The dispatcher also sets the process working
+directory to the agent workspace.
+
+Use `scripts/autopilot/autorun.py --dry-run` or
+`scripts/autopilot/dispatch.py <tasks.json> --mode dry-run` to inspect prompts
+before launching agents.
 
 ---
 

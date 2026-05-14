@@ -520,7 +520,7 @@ for (int step = 0; step < num_steps; ++step) {
 Set `_ALL_BF16 = True` for the entire STRONGLY_TYPED network. This ensures:
 - All non-quantized ops run in BF16 (2 bytes, not 4)
 - No FP32 intermediates between FP8 layers
-- Myelin compiles the graph monolithically (1 kernel, not 925)
+- TensorRT keeps the graph in a compact compiler partition
 - Activation memory stays reasonable (~1GB, not ~13GB)
 
 ---
@@ -595,7 +595,7 @@ if scale is None: return bf16_linear(...)
 ### 6. Explicit Cast nodes between FP8 layers
 
 ```python
-# WRONG — casts create backend boundaries, fragment Myelin into 925 kernels
+# WRONG — casts create backend boundaries and fragment compiler partitioning
 x = add_cast(x, FP32)  →  FP8 Q/DQ matmul  →  add_cast(x, BF16)
 
 # CORRECT — DQ outputs BF16 directly, no explicit casts needed
@@ -666,14 +666,14 @@ When the FP8 engine produces wrong output, check in this order:
 - Weight GC: Keep Python references to numpy arrays used in `trt.Weights()`
   until `build_serialized_network()` returns
 
-### Myelin compilation behavior
+### TensorRT compiler partitioning behavior
 
-For maximum performance, the entire network should compile into a single
-Myelin "ForeignNode" (monolithic kernel). This requires:
-- All ops assigned to the same backend (kMYELIN)
+For maximum performance, the network should stay in a compact compiler
+partition. This requires:
+- All ops assigned to compatible TensorRT backends
 - No type boundaries that force backend switches
 - BF16 as uniform base type (no FP32 islands)
-- FP8 Q/DQ properly fused via `dequantize_fc()` into quantized FC ops
+- FP8 Q/DQ properly fused into quantized FC ops
 
 Check monolithic compilation via build log:
 ```

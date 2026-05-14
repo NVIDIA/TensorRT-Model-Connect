@@ -1,106 +1,98 @@
-# Local AI Pipeline Playbook
+# Local AI Workflow Playbook
 
-This is the human-operated startup path for the AI staging pipeline. The goal is
-simple: open five persistent Claude Code windows in one tmux session, then start
-one `/loop` command in each window.
+This is the human-operated startup path for the AI staging workflow. The goal is
+to open persistent agent CLI windows in one tmux session, then start one loop
+prompt in each window.
 
-GitLab remains the durable queue for issues, MRs, labels, pipelines, and branch
-state. The local `.ai-pipeline/` directory is only used for implementation and
+GitHub remains the durable queue for issues, PRs, labels, checks, and branch
+state. The local `.ai-workflow/` directory is only used for implementation and
 promotion-repair worktrees.
+
+## Agent CLI
+
+Use any agent CLI that can run in the repository checkout and accept a prompt.
+Codex is the default example because it understands the repo-local
+`AGENTS.md` and installed skills:
+
+```bash
+export TRTMC_AGENT_BIN="${TRTMC_AGENT_BIN:-codex}"
+export TRTMC_AGENT_ARGS="${TRTMC_AGENT_ARGS:-exec -s danger-full-access -a never -C {workspace} {prompt}}"
+```
+
+For a different CLI, override both variables before opening the tmux session.
+For example:
+
+```bash
+export TRTMC_AGENT_BIN=claude
+export TRTMC_AGENT_ARGS='--print -p {prompt}'
+```
+
+The placeholders are:
+
+- `{workspace}`: the repository checkout for that window.
+- `{prompt}`: the loop command or task prompt to run.
 
 ## Start
 
 From the repo root:
 
 ```bash
-git fetch origin master ai-staging
+git fetch github main ai-staging
 export REPO_ROOT="$PWD"
-python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging preflight
+python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging preflight
 ```
 
-Open five Claude Code windows in tmux:
+Open five agent windows in tmux. The commands below show Codex explicitly; if
+you use another CLI, replace the command after `&&` with your agent invocation.
 
 ```bash
-tmux new-session -d -s ai-pipeline -n discovery \
-  "cd '$REPO_ROOT' && claude --permission-mode auto --worktree ai-discovery"
+tmux new-session -d -s ai-workflow -n discovery \
+  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 30m /discovery'"
 
-tmux new-window -t ai-pipeline -n implement \
-  "cd '$REPO_ROOT' && claude --permission-mode auto --worktree ai-implement"
+tmux new-window -t ai-workflow -n implement \
+  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 10m /implement'"
 
-tmux new-window -t ai-pipeline -n merge \
-  "cd '$REPO_ROOT' && claude --permission-mode auto --worktree ai-merge"
+tmux new-window -t ai-workflow -n merge \
+  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 5m /merge'"
 
-tmux new-window -t ai-pipeline -n staging \
-  "cd '$REPO_ROOT' && claude --permission-mode auto --worktree ai-staging-worker"
+tmux new-window -t ai-workflow -n staging \
+  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 240m /staging'"
 
-tmux new-window -t ai-pipeline -n promotion \
-  "cd '$REPO_ROOT' && claude --permission-mode auto --worktree ai-promotion"
+tmux new-window -t ai-workflow -n promotion \
+  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 20m /promotion'"
 
-tmux attach -t ai-pipeline
+tmux attach -t ai-workflow
 ```
 
-Do not use `--dangerously-skip-permissions`.
-
-## Start The Loops
-
-In the `discovery` Claude window:
-
-```text
-/loop 30m /discovery
-```
-
-In the `implement` Claude window:
-
-```text
-/loop 10m /implement
-```
-
-In the `merge` Claude window:
-
-```text
-/loop 5m /merge
-```
-
-In the `staging` Claude window:
-
-```text
-/loop 240m /staging
-```
-
-In the `promotion` Claude window:
-
-```text
-/loop 20m /promotion
-```
-
-That is the whole steady-state startup.
+Do not skip repository permission checks unless the repository instructions
+explicitly allow it for the environment you are using.
 
 ## What Each Window Does
 
 ```text
 discovery
-  creates small ai:ready GitLab issues
+  creates small ai:ready GitHub issues
 
 implement
-  claims one ai:ready or ai:needs-rework issue from GitLab
-  sends failed/canceled generated MRs back to ai:needs-rework
+  claims one ai:ready or ai:needs-rework issue from GitHub
+  sends failed/canceled generated PRs back to ai:needs-rework
   creates an isolated per-issue worktree
-  starts a subagent to implement and validate the task
-  submits one ai-task-* MR targeting ai-staging, or repairs the existing MR for rework
+  starts an implementation agent
+  submits one ai-task-* PR targeting ai-staging, or repairs the existing PR for rework
 
 merge
-  merges green approved AI MRs into ai-staging
+  merges green approved AI PRs into ai-staging
   sends rebase conflicts back to ai:needs-rework
 
 staging
   snapshots ai-staging to a timestamped promotion branch
-  resets ai-staging to master for future AI MRs
-  opens a human-review MR from the snapshot branch to master
+  resets ai-staging to main for future AI PRs
+  opens a human-review PR from the snapshot branch to main
 
 promotion
-  watches ai-staging-promotion-* MRs targeting master
-  keeps promotion source branches rebased onto master
-  fixes failed full-CI issues on the promotion source branch
+  watches ai-staging-promotion-* PRs targeting main
+  keeps promotion source branches rebased onto main
+  fixes failed full-check issues on the promotion source branch
   leaves final review and merge to the human
 ```
 
@@ -109,13 +101,14 @@ promotion
 From any shell in the repo:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard
+python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging dashboard
 ```
 
 ## Stop
 
-Stop individual Claude sessions with `/quit`, or stop the full tmux session:
+Stop individual agent sessions with the CLI's normal exit command, or stop the
+full tmux session:
 
 ```bash
-tmux kill-session -t ai-pipeline
+tmux kill-session -t ai-workflow
 ```

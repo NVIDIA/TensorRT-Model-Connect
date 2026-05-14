@@ -215,8 +215,6 @@ _NO_IMPACT_PATTERNS = [
     r"^\.clang-format$",
     r"^\.editorconfig$",
     r"^\.github/",
-    r"^\.gitlab-ci\.yml$",
-    r"^\.gitlab/",
     r"^\.claude/",
     r"^LICENSE",
     r"^CLAUDE\.md$",
@@ -522,7 +520,7 @@ def _apply_l0_replacements(
     """Replace nightly-only scale models with their L0 representatives.
 
     Direct edits to a nightly-only scale model still use the L0 representative:
-    the large model's artifact contract is covered by nightly, while MR L0 keeps
+    the large model's artifact contract is covered by nightly, while PR L0 keeps
     the same plugin/runtime path at smaller scale.
     """
     del exact_models  # Retained in the signature to keep call sites stable.
@@ -1483,8 +1481,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Test impact analysis for selective CI execution.",
     )
-    parser.add_argument("--base", default="origin/master",
-                        help="Git ref for diff base (default: origin/master)")
+    parser.add_argument("--base", default="github/main",
+                        help="Git ref for diff base (default: github/main)")
     parser.add_argument("--head", default="HEAD",
                         help="Git ref for diff head (default: HEAD)")
     parser.add_argument("--files",

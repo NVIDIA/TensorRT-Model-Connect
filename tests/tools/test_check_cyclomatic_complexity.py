@@ -1,8 +1,8 @@
 """Unit tests for the pure helpers in tools/check_cyclomatic_complexity.py.
 
 Intent:
-    The CCN gate is required for C++ runtime changes (see CLAUDE.md 'Regression
-    test plan'). A silent regression in ``parse_csv`` or ``evaluate_gate`` would
+    The CCN gate is required for C++ runtime changes. A silent regression in
+    ``parse_csv`` or ``evaluate_gate`` would
     let cyclomatic-complexity violations slip through unnoticed. This module
     covers those two pure helpers with in-memory inputs so that the tests do
     NOT shell out to the ``lizard`` binary and do NOT require that dependency

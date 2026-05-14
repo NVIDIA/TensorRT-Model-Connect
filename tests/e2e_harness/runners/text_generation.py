@@ -47,7 +47,7 @@ _TRT_RUNTIME_ERROR_RE = re.compile(
     r"(?im)^.*("
     r"\[trt\]\s+ERROR:"
     r"|IExecutionContext::enqueueV3:\s+Error Code"
-    r"|Internal Error:\s+MyelinCheckException"
+    r"|Internal Error:"
     r"|Cuda Runtime"
     r"|illegal memory access"
     r").*$"

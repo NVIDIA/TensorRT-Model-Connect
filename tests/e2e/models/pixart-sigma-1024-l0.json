@@ -33,5 +33,5 @@
     "psnr": 2.0,
     "ssim": -1.0
   },
-  "notes": "MR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, and 20-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
+  "notes": "PR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, and 20-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
 }

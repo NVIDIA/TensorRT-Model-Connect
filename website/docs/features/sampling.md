@@ -9,7 +9,7 @@ min-p filtering.
 
 Current implementation status: top-p/top-k/min-p filtering is host-side. The
 sampler requests CPU logits (`LogitsLocation::HOST`), so text generation copies
-the logits to CPU before applying nucleus filtering and sampling. This MR does
+the logits to CPU before applying nucleus filtering and sampling. This PR does
 not add an on-device top-p sampling kernel; the only on-device sampler path is
 greedy argmax, and the optional torch-multinomial path still builds the filtered
 distribution on host before invoking its CUDA multinomial helper.

@@ -68,7 +68,7 @@ def test_is_protected_matches_all_prefixes_from_module_tuple() -> None:
     "path",
     [
         "src/runtime/models/text_generation/plugin.cpp",
-        "tools/ai_agent_system.py",
+        "tools/coverage_map/fetch_latest.py",
         "include/trtmc/runtime/pipeline_plugin.h",
         "README.md",
         "",

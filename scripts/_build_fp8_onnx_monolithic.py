@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Build FP8 TRT engine from ONNX with Q/DQ nodes via ONNX parser.
 
-Key insight: The ONNX parser compiles BF16 into 1 monolithic Myelin layer
-(185ms/step). By injecting FP8 Q/DQ into the ONNX and parsing it through
-the ONNX parser (NOT the API path), TRT's qdqGraphOptimizer fuses Q/DQ into
-MatMul quantization params BEFORE Myelin clustering. This preserves the
-monolithic ForeignNode → single GPU kernel.
+Key insight: the ONNX parser keeps the BF16 graph in a compact TensorRT compiler
+partition. Injecting FP8 Q/DQ into the ONNX lets TensorRT fuse quantization into
+MatMul parameters before backend partitioning, preserving a compact kernel plan.
 
-The API path creates 925 separate kernels because explicit Cast nodes create
-backend boundaries in myelinNodesClusterer.
+The API path creates many separate kernels because explicit Cast nodes create
+backend boundaries.
 """
 import tensorrt as trt
 import time
@@ -42,7 +40,7 @@ builder = trt.Builder(logger)
 
 # NON-STRONGLY_TYPED: Let TRT handle type inference naturally
 # This is critical - STRONGLY_TYPED forces explicit type boundaries
-# that fragment the Myelin compilation into 925 kernels.
+# that fragment TensorRT compiler partitioning into many kernels.
 # The ONNX parser + non-STRONGLY_TYPED compiles to 1 monolithic kernel.
 flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
 if "--strongly-typed" in sys.argv:
@@ -86,7 +84,7 @@ qdq_count = sum(1 for i in range(network.num_layers)
 print(f"  Q/DQ layers: {qdq_count}")
 
 # Build engine
-print(f"\nBuilding engine (BF16+FP8, non-STRONGLY_TYPED)...", flush=True)
+print("\nBuilding engine (BF16+FP8, non-STRONGLY_TYPED)...", flush=True)
 t0 = time.monotonic()
 plan = builder.build_serialized_network(network, config)
 if plan is None:
@@ -104,7 +102,7 @@ print(f"Saved: {ENGINE_OUT}")
 # Inspect engine layers/profiles
 runtime = trt.Runtime(logger)
 engine = runtime.deserialize_cuda_engine(plan_bytes)
-print(f"\nEngine stats:")
+print("\nEngine stats:")
 print(f"  I/O tensors: {engine.num_io_tensors}")
 print(f"  Layers: {engine.num_layers}")
 

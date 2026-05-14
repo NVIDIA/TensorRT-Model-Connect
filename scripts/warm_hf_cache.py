@@ -10,7 +10,7 @@ Nightly mode (no --models-file):
     Sequential with a 0.3 s inter-request delay to stay below the HF API rate
     limit (10 k requests / 5 min).
 
-MR CI selective mode (--models-file FILE):
+PR CI selective mode (--models-file FILE):
     For each model in FILE:
       - Already in cache → skip entirely (zero network calls).
       - Not in cache     → call snapshot_download() to download it.
@@ -22,7 +22,7 @@ Usage:
     # Nightly — warm all non-skipped E2E models:
     python scripts/warm_hf_cache.py
 
-    # MR CI — only download models missing from cache:
+    # PR CI — only download models missing from cache:
     python scripts/warm_hf_cache.py --models-file e2e_models.txt
 
 Exit code 0 even on partial failures — missing cache entries produce a warning
@@ -125,7 +125,7 @@ parser.add_argument(
     metavar="FILE",
     help="Path to a file with one model name per line (manifest stems). "
          "When given, only those models are considered and already-cached "
-         "models are skipped (no network call). Intended for MR CI selective "
+         "models are skipped (no network call). Intended for PR CI selective "
          "warm.",
 )
 parser.add_argument(
@@ -133,7 +133,7 @@ parser.add_argument(
     action="append",
     default=[],
     help="Exclude manifests with this ci_tier value. Intended for nightly mode "
-         "to skip MR-only representative manifests.",
+         "to skip PR-only representative manifests.",
 )
 args = parser.parse_args()
 

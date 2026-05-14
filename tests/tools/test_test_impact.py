@@ -587,13 +587,13 @@ class TestNoImpact:
 
     def test_markdown_no_impact(self, imap):
         """*.md files -> no E2E tests."""
-        match = test_impact.classify_file("CLAUDE.md", imap)
+        match = test_impact.classify_file("AGENTS.md", imap)
         assert match.rule == "no_impact"
         assert match.models == []
 
-    def test_gitlab_ci_no_impact(self, imap):
-        """.gitlab-ci.yml -> no E2E tests (CI infra)."""
-        match = test_impact.classify_file(".gitlab-ci.yml", imap)
+    def test_github_ci_no_impact(self, imap):
+        """.github workflows -> no E2E tests."""
+        match = test_impact.classify_file(".github/workflows/trtmc-ci.yml", imap)
         assert match.rule == "no_impact"
         assert match.models == []
 
@@ -1038,7 +1038,7 @@ class TestAggregation:
         assert "builder" in result.unit_tiers
 
     def test_l0_replaces_nightly_only_model(self, mock_repo):
-        """MR L0 substitutes configured scale-only models with representatives."""
+        """PR L0 substitutes configured scale-only models with representatives."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
         qwen4b["ci_tier"] = "nightly_only"
@@ -1058,7 +1058,7 @@ class TestAggregation:
         }]
 
     def test_nightly_keeps_exact_impacted_models(self, mock_repo):
-        """Nightly policy does not apply MR L0 replacements."""
+        """Nightly policy does not apply PR L0 replacements."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
         qwen4b["ci_tier"] = "nightly_only"
@@ -1077,7 +1077,7 @@ class TestAggregation:
     def test_manifest_change_uses_l0_replacement_for_nightly_only_model(
         self, mock_repo,
     ):
-        """Direct nightly-only manifest edits still keep MR L0 at representative scale."""
+        """Direct nightly-only manifest edits still keep PR L0 at representative scale."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
         qwen4b["ci_tier"] = "nightly_only"

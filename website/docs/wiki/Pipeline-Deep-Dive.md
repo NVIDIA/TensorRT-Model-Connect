@@ -8,7 +8,7 @@
 | Revision | 2.0 |
 | Date | 2026-03-12 |
 | Status | Living document -- reflects code as of this revision date |
-| Author | Safety Architecture Team (yifeif@nvidia.com) |
+| Author | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | Reviewer | Independent Review Required (TBD — assign before merge) |
 | Review Status | Pending independent review |
 

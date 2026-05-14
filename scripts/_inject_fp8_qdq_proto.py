@@ -7,7 +7,7 @@ Reads the per-layer calibrated scales and inserts proper FP8 E4M3 Q/DQ.
 import json
 import os
 import onnx
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto
 import onnx_graphsurgeon as gs
 import numpy as np
 
@@ -49,7 +49,7 @@ for node in matmuls:
         inp_tensor = node.inputs[inp_idx]
         prefix = f"{node.name}_{'A' if inp_idx == 0 else 'B'}"
 
-        # Scale constant (FP32 SCALAR — Myelin requires scalar, not [1])
+        # Scale constant (FP32 scalar; TensorRT expects a scalar here, not [1])
         scale = gs.Constant(
             name=f"{prefix}_scale",
             values=np.array(scale_val, dtype=np.float32))  # scalar, no brackets

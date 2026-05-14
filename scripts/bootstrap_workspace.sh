@@ -20,13 +20,13 @@ set -euo pipefail
 # --- Defaults ----------------------------------------------------------------
 
 WORKSPACE_ROOT="/workspace/users/yifeif/workspaces"
-GIT_REMOTE="ssh://git@gitlab-master.nvidia.com:12051/yifeif/tensorrt-model-connect.git"
+GIT_REMOTE="${TRTMC_GIT_REMOTE:-https://github.com/NVIDIA/TensorRT-Model-Connect.git}"
 DOCKER_IMAGE="trtmc-dev-gb300:latest"
 STORAGE_ROOT="/workspace/users/yifeif/tensorrt-model-connect"
 HF_CACHE="/mnt/storage/tensorrt-model-connect/model-weights"
 
 WORKSPACE_ID=""
-BRANCH="master"
+BRANCH="main"
 DETACH=false
 BUILD=true
 
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
             echo ""
             echo "Options:"
             echo "  --id NAME       Workspace identifier (default: auto-generated UUID)"
-            echo "  --branch BRANCH Git branch to checkout (default: master)"
+            echo "  --branch BRANCH Git branch to checkout (default: main)"
             echo "  --detach        Run container in background (default: interactive)"
             echo "  --no-build      Skip C++ build step"
             echo "  --image IMAGE   Docker image to use (default: trtmc-dev-gb300:latest)"
@@ -87,12 +87,12 @@ if [ -d "${REPO_DIR}/.git" ]; then
     echo "Repo already exists, fetching latest..."
     git -C "$REPO_DIR" fetch origin
     git -C "$REPO_DIR" checkout "$BRANCH" 2>/dev/null \
-        || git -C "$REPO_DIR" checkout -b "$BRANCH" origin/master
+        || git -C "$REPO_DIR" checkout -b "$BRANCH" "origin/${BRANCH}"
 else
     echo "Cloning repo..."
     mkdir -p "$(dirname "$REPO_DIR")"
     git clone "$GIT_REMOTE" "$REPO_DIR"
-    if [ "$BRANCH" != "master" ]; then
+    if [ "$BRANCH" != "main" ]; then
         git -C "$REPO_DIR" checkout -b "$BRANCH"
     fi
 fi

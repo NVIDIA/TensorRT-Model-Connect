@@ -99,7 +99,6 @@ tests/torchtrt_e2e/models/*.json
 !.github/
 !.github/**
 !.gitignore
-!.gitlab-ci.yml
 !.dockerignore
 !website/docs/context/.last_scan_sha
 !.agents/

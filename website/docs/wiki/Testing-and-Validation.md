@@ -721,7 +721,7 @@ python tools/check_cyclomatic_complexity.py src
 python tools/check_cyclomatic_complexity.py src --max-ccn 10
 ```
 
-CI gate job: `check-cyclomatic-complexity` in `.gitlab-ci.yml`.
+CI gate job: `Cyclomatic complexity` in GitHub Actions.
 Threshold can be tuned via:
 - `CCM_MAX_CCN`
 
@@ -839,14 +839,14 @@ Configuration:
 - **Omit**: `*/tests/*`, `*/__pycache__/*`
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
-CI integration (`.gitlab-ci.yml`):
+CI integration (GitHub Actions):
 - `coverage-python` runs `tools/coverage_ci/run_python_coverage.sh`
   - Emits `coverage/python-cobertura.xml`
   - Enforces line=100% and branch=100%
-  - Publishes GitLab `coverage_report` (Cobertura)
+  - Uploads Cobertura artifacts
 - `coverage-cpp` runs `tools/coverage_ci/run_cpp_coverage.sh`
   - Emits `coverage/cpp-cobertura.xml`
-  - Publishes GitLab `coverage_report` (Cobertura)
+  - Uploads Cobertura artifacts
 - Both jobs are hard gates in the test DAG before smoke/E2E jobs.
 
 Note:

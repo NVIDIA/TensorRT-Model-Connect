@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Shared GitLab queue helpers for the AI staging agent system."""
+"""Shared GitHub queue helpers for the AI staging agent system."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -16,32 +17,32 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_REMOTE = "origin"
+DEFAULT_REMOTE = "github"
 DEFAULT_TARGET = "ai-staging"
-DEFAULT_PROMOTION_TARGET = "master"
+DEFAULT_PROMOTION_TARGET = "main"
 DEFAULT_SOURCE_PREFIXES = ("ai-task-",)
-ACTIVE_PIPELINE_STATUSES = {"created", "waiting_for_resource", "preparing", "pending", "running"}
+ACTIVE_CHECK_STATUSES = {"created", "waiting_for_resource", "preparing", "pending", "running"}
 AI_LABEL = "AI"
 AI_GENERATED_LABEL = "ai-generated"
 
 LABELS: dict[str, tuple[str, str]] = {
-    AI_LABEL: ("#5319E7", "Human-facing tag for issues or merge requests produced by an AI agent."),
+    AI_LABEL: ("#5319E7", "Human-facing tag for issues or pull requests produced by an AI agent."),
     "ai:task": ("#1F75CB", "Work item generated for AI implementation."),
     "ai:ready": ("#0E8A16", "Task is ready for an implementation agent."),
     "ai:claimed": ("#FBCA04", "Task has been claimed by an implementation agent."),
     "ai:implementing": ("#FBCA04", "Implementation is in progress."),
-    AI_GENERATED_LABEL: ("#5319E7", "Issue or merge request was produced by an AI agent."),
-    "ai:staging-mr": ("#0052CC", "AI-generated merge request targeting ai-staging."),
-    "ai:sanity-pending": ("#BFDADC", "MR is waiting for sanity CI."),
-    "ai:sanity-failed": ("#D93F0B", "MR failed minimal CI and needs rework."),
-    "ai:sanity-green": ("#0E8A16", "MR sanity CI is green."),
-    "ai:autopilot": ("#006B75", "MR is eligible for ai-staging autopilot."),
+    AI_GENERATED_LABEL: ("#5319E7", "Issue or pull request was produced by an AI agent."),
+    "ai:staging-pr": ("#0052CC", "AI-generated pull request targeting ai-staging."),
+    "ai:sanity-pending": ("#BFDADC", "PR is waiting for sanity CI."),
+    "ai:sanity-failed": ("#D93F0B", "PR failed minimal CI and needs rework."),
+    "ai:sanity-green": ("#0E8A16", "PR sanity CI is green."),
+    "ai:autopilot": ("#006B75", "PR is eligible for ai-staging autopilot."),
     "ai:staged": ("#0E8A16", "AI change has landed in ai-staging."),
     "ai:staging-failed": ("#D93F0B", "ai-staging full CI failed."),
-    "ai:needs-rework": ("#D93F0B", "Task or MR needs another implementation pass."),
-    "ai:dropped": ("#B60205", "AI task or MR was dropped as low-value or invalid."),
+    "ai:needs-rework": ("#D93F0B", "Task or PR needs another implementation pass."),
+    "ai:dropped": ("#B60205", "AI task or PR was dropped as low-value or invalid."),
     "ai:needs-human": ("#D93F0B", "Human decision is required."),
-    "ai:promotion": ("#5319E7", "ai-staging to master promotion MR."),
+    "ai:promotion": ("#5319E7", "ai-staging to main promotion PR."),
 }
 
 TASK_REQUIRED_HEADINGS = (
@@ -63,9 +64,15 @@ class Config:
     dry_run: bool
 
 
-def run(cmd: list[str], *, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    capture: bool = True,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     print("+ " + shlex.join(cmd), file=sys.stderr)
-    return subprocess.run(cmd, check=check, capture_output=capture, text=True)
+    return subprocess.run(cmd, check=check, capture_output=capture, input=input_text, text=True)
 
 
 def git(args: list[str], *, check: bool = True) -> str:
@@ -89,10 +96,12 @@ def infer_project_path(remote: str) -> str:
 
 
 def encoded_project(project: str) -> str:
-    return project if project.isdecimal() else urllib.parse.quote(project, safe="")
+    """Compatibility wrapper for older tests; GitHub repo slugs stay raw."""
+
+    return project.strip()
 
 
-def infer_gitlab_server_url(remote: str) -> str:
+def infer_github_server_url(remote: str) -> str:
     remote_url = git(["remote", "get-url", remote])
     if "://" in remote_url:
         parsed = urllib.parse.urlparse(remote_url)
@@ -102,18 +111,26 @@ def infer_gitlab_server_url(remote: str) -> str:
         host = remote_url.split("@", 1)[1].split(":", 1)[0]
         if host:
             return f"https://{host}"
-    raise SystemExit(f"Could not infer GitLab server URL from remote URL: {remote_url!r}")
+    raise SystemExit(f"Could not infer GitHub server URL from remote URL: {remote_url!r}")
 
 
 def token_header() -> tuple[str, str] | None:
-    token = os.environ.get("AI_STAGING_BOT_TOKEN") or os.environ.get("GITLAB_TOKEN")
-    return ("PRIVATE-TOKEN", token) if token else None
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    return ("Authorization", f"Bearer {token}") if token else None
 
 
 def api_base_url(cfg: Config) -> str:
-    if os.environ.get("CI_API_V4_URL"):
-        return os.environ["CI_API_V4_URL"].rstrip("/")
-    return infer_gitlab_server_url(cfg.remote).rstrip("/") + "/api/v4"
+    if os.environ.get("GH_API_URL"):
+        return os.environ["GH_API_URL"].rstrip("/")
+    server = infer_github_server_url(cfg.remote).rstrip("/")
+    if server == "https://github.com":
+        return "https://api.github.com"
+    return server + "/api/v3"
+
+
+def repo_path(cfg: Config, suffix: str = "") -> str:
+    suffix = suffix.lstrip("/")
+    return f"/repos/{cfg.project}/{suffix}" if suffix else f"/repos/{cfg.project}"
 
 
 def api(
@@ -121,37 +138,41 @@ def api(
     path: str,
     *,
     method: str | None = None,
-    fields: dict[str, str] | None = None,
+    fields: dict[str, Any] | None = None,
 ) -> Any:
     write = (method or "").upper() in {"POST", "PUT", "PATCH", "DELETE"} or bool(fields)
     if cfg.dry_run and write:
-        print(f"+ DRY RUN GitLab API {method or 'POST'} {path} {fields or {}}", file=sys.stderr)
+        print(f"+ DRY RUN GitHub API {method or 'POST'} {path} {fields or {}}", file=sys.stderr)
         return None
 
     header = token_header()
     if header:
-        data = urllib.parse.urlencode(fields or {}).encode() if fields else None
+        data = json.dumps(fields).encode() if fields is not None else None
         request_method = method or ("POST" if data else "GET")
         url = api_base_url(cfg) + path
         print(f"+ {request_method} {url}", file=sys.stderr)
         request = urllib.request.Request(url, data=data, method=request_method)
         request.add_header(*header)
+        request.add_header("Accept", "application/vnd.github+json")
+        request.add_header("X-GitHub-Api-Version", "2022-11-28")
         if data:
-            request.add_header("Content-Type", "application/x-www-form-urlencoded")
+            request.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(request) as response:
                 payload = response.read().decode()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")
-            raise SystemExit(f"GitLab API failed: HTTP {exc.code} {exc.reason}: {body}") from exc
+            raise SystemExit(f"GitHub API failed: HTTP {exc.code} {exc.reason}: {body}") from exc
     else:
-        cmd = ["glab", "api"]
+        cmd = ["gh", "api"]
         if method:
             cmd.extend(["-X", method])
         cmd.append(path)
-        for key, value in (fields or {}).items():
-            cmd.extend(["-f", f"{key}={value}"])
-        result = run(cmd)
+        input_text = None
+        if fields is not None:
+            cmd.extend(["--input", "-"])
+            input_text = json.dumps(fields)
+        result = run(cmd, input_text=input_text)
         payload = result.stdout
 
     if not payload.strip():
@@ -190,6 +211,85 @@ def task_issue_labels(extra_labels: list[str]) -> list[str]:
 
 def has_any_prefix(value: str, prefixes: tuple[str, ...]) -> bool:
     return value.startswith(prefixes)
+
+
+def label_names(item: dict[str, Any]) -> list[str]:
+    labels = item.get("labels") or []
+    names: list[str] = []
+    for label in labels:
+        if isinstance(label, str):
+            names.append(label)
+        elif isinstance(label, dict) and label.get("name") is not None:
+            names.append(str(label["name"]))
+    return names
+
+
+def item_number(item: dict[str, Any]) -> int:
+    value = item.get("number") or item.get("id")
+    if value is None:
+        raise SystemExit(f"GitHub item has no number: {item!r}")
+    return int(value)
+
+
+def item_url(item: dict[str, Any]) -> str:
+    return str(item.get("html_url") or "")
+
+
+def issue_body(issue: dict[str, Any]) -> str:
+    return str(issue.get("body") or issue.get("description") or "")
+
+
+def repo_owner(cfg: Config) -> str:
+    return cfg.project.split("/", 1)[0]
+
+
+def pr_source_branch(pr: dict[str, Any]) -> str:
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    return str(head.get("ref") or "")
+
+
+def pr_target_branch(pr: dict[str, Any]) -> str:
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    return str(base.get("ref") or "")
+
+
+def pr_head_sha(pr: dict[str, Any]) -> str:
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    return str(head.get("sha") or pr.get("sha") or "")
+
+
+def pr_merge_status(pr: dict[str, Any]) -> str:
+    if pr.get("mergeable") is True:
+        return "mergeable"
+    if pr.get("mergeable") is False:
+        return "conflict"
+    return str(pr.get("mergeable_state") or "unknown")
+
+
+def pr_ci_status(cfg: Config, pr: dict[str, Any]) -> str:
+    sha = pr_head_sha(pr)
+    if not sha:
+        return "unknown"
+    try:
+        data = api(cfg, repo_path(cfg, f"commits/{sha}/check-runs"))
+    except SystemExit as exc:
+        print(f"warning: could not inspect checks for PR #{item_number(pr)}: {exc}", file=sys.stderr)
+        return "unknown"
+    check_runs = data.get("check_runs") if isinstance(data, dict) else None
+    if not check_runs:
+        return "none"
+
+    statuses = {str(run_item.get("status") or "") for run_item in check_runs}
+    conclusions = {str(run_item.get("conclusion") or "") for run_item in check_runs}
+    if statuses & {"queued", "in_progress", "requested", "pending", "waiting"}:
+        return "running"
+    if conclusions & {"failure", "timed_out", "action_required"}:
+        return "failed"
+    if conclusions & {"cancelled", "canceled"}:
+        return "canceled"
+    if conclusions <= {"success", "skipped", "neutral", ""}:
+        return "success"
+    return "unknown"
 
 
 def task_body(
@@ -238,21 +338,21 @@ def validate_task_description(description: str) -> list[str]:
 
 
 def list_task_issues(cfg: Config, labels: list[str]) -> list[dict[str, Any]]:
-    query = urllib.parse.urlencode({"state": "opened", "labels": csv_labels(labels)})
-    return paginated(cfg, f"/projects/{cfg.project}/issues?{query}")
+    query = urllib.parse.urlencode({"state": "open", "labels": csv_labels(labels)})
+    return paginated(cfg, repo_path(cfg, f"issues?{query}"))
 
 
-def list_ai_mrs(cfg: Config) -> list[dict[str, Any]]:
+def list_ai_prs(cfg: Config) -> list[dict[str, Any]]:
     query = urllib.parse.urlencode(
         {
-            "state": "opened",
-            "target_branch": cfg.target,
-            "order_by": "created_at",
-            "sort": "asc",
+            "state": "open",
+            "base": cfg.target,
+            "sort": "created",
+            "direction": "asc",
         }
     )
-    mrs = paginated(cfg, f"/projects/{cfg.project}/merge_requests?{query}")
-    return [mr for mr in mrs if has_any_prefix(str(mr.get("source_branch") or ""), cfg.source_prefixes)]
+    prs = paginated(cfg, repo_path(cfg, f"pulls?{query}"))
+    return [pr for pr in prs if has_any_prefix(pr_source_branch(pr), cfg.source_prefixes)]
 
 
 def schedule_variables(schedule: dict[str, Any]) -> dict[str, str]:
@@ -272,80 +372,87 @@ def is_ai_promotion_schedule(schedule: dict[str, Any]) -> bool:
     )
 
 
-def mr_details(cfg: Config, iid: int) -> dict[str, Any]:
-    data = api(cfg, f"/projects/{cfg.project}/merge_requests/{iid}?include_rebase_in_progress=true")
+def pr_details(cfg: Config, number: int) -> dict[str, Any]:
+    data = api(cfg, repo_path(cfg, f"pulls/{number}"))
     if not isinstance(data, dict):
-        raise SystemExit(f"Unexpected MR response for !{iid}: {data!r}")
+        raise SystemExit(f"Unexpected PR response for #{number}: {data!r}")
     return data
 
 
-def issue_details(cfg: Config, iid: int) -> dict[str, Any]:
-    data = api(cfg, f"/projects/{cfg.project}/issues/{iid}")
+def issue_details(cfg: Config, number: int) -> dict[str, Any]:
+    data = api(cfg, repo_path(cfg, f"issues/{number}"))
     if not isinstance(data, dict):
-        raise SystemExit(f"Unexpected issue response for #{iid}: {data!r}")
+        raise SystemExit(f"Unexpected issue response for #{number}: {data!r}")
     return data
 
 
-def approvals_left(cfg: Config, iid: int) -> int | None:
-    data = api(cfg, f"/projects/{cfg.project}/merge_requests/{iid}/approvals")
-    if not isinstance(data, dict):
+def approvals_left(cfg: Config, number: int) -> int | None:
+    reviews = paginated(cfg, repo_path(cfg, f"pulls/{number}/reviews"))
+    if not reviews:
         return None
-    value = data.get("approvals_left")
-    return int(value) if value is not None else None
+    latest_by_user: dict[str, str] = {}
+    for review in reviews:
+        user = (review.get("user") or {}).get("login")
+        if user:
+            latest_by_user[str(user)] = str(review.get("state") or "")
+    if any(state == "CHANGES_REQUESTED" for state in latest_by_user.values()):
+        return 1
+    return 0 if any(state == "APPROVED" for state in latest_by_user.values()) else None
 
 
 def update_labels(
     cfg: Config,
     resource: str,
-    iid: int,
+    number: int,
     *,
     add: set[str],
     remove: set[str],
-    extra_fields: dict[str, str] | None = None,
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    item = issue_details(cfg, iid) if resource == "issues" else mr_details(cfg, iid)
-    labels = set(item.get("labels") or [])
+    is_issue = resource == "issues"
+    item = issue_details(cfg, number) if is_issue else pr_details(cfg, number)
+    labels = set(label_names(item))
     labels.difference_update(remove)
     labels.update(add)
-    fields = {"labels": csv_labels(sorted(labels)), **(extra_fields or {})}
-    updated = api(cfg, f"/projects/{cfg.project}/{resource}/{iid}", method="PUT", fields=fields)
+    updated = api(cfg, repo_path(cfg, f"issues/{number}/labels"), method="PUT", fields={"labels": sorted(labels)})
+    if extra_fields:
+        endpoint = f"issues/{number}" if is_issue else f"pulls/{number}"
+        api(cfg, repo_path(cfg, endpoint), method="PATCH", fields=extra_fields)
     return updated if isinstance(updated, dict) else None
 
 
-def create_note(cfg: Config, resource: str, iid: int, body: str) -> None:
-    api(cfg, f"/projects/{cfg.project}/{resource}/{iid}/notes", method="POST", fields={"body": body})
+def create_note(cfg: Config, resource: str, number: int, body: str) -> None:
+    del resource
+    api(cfg, repo_path(cfg, f"issues/{number}/comments"), method="POST", fields={"body": body})
 
 
-def related_mrs_for_issue(cfg: Config, issue_iid: int) -> list[dict[str, Any]]:
-    data = api(cfg, f"/projects/{cfg.project}/issues/{issue_iid}/related_merge_requests")
-    if not isinstance(data, list):
-        raise SystemExit(f"Unexpected related MR response for #{issue_iid}: {data!r}")
-    return data
+def related_prs_for_issue(cfg: Config, issue_number: int) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode({"q": f"repo:{cfg.project} is:pr #{issue_number}"})
+    data = api(cfg, f"/search/issues?{query}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"Unexpected related PR search response for #{issue_number}: {data!r}")
+    return [item for item in data.get("items", []) if isinstance(item, dict)]
 
 
-def closing_issue_iids_for_mr(cfg: Config, mr_iid: int) -> list[int]:
-    try:
-        data = api(cfg, f"/projects/{cfg.project}/merge_requests/{mr_iid}/closes_issues")
-    except SystemExit as exc:
-        print(f"warning: could not inspect closing issues for !{mr_iid}: {exc}", file=sys.stderr)
-        return []
-    if not isinstance(data, list):
-        return []
-    return [int(issue["iid"]) for issue in data if issue.get("iid") is not None]
+def closing_issue_numbers_for_pr(cfg: Config, pr_number: int) -> list[int]:
+    pr = pr_details(cfg, pr_number)
+    body = str(pr.get("body") or "")
+    matches = re.findall(r"(?i)(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", body)
+    return [int(item) for item in dict.fromkeys(matches)]
 
 
 def cmd_ensure_labels(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    existing = {label["name"] for label in paginated(cfg, f"/projects/{cfg.project}/labels")}
+    existing = {label["name"] for label in paginated(cfg, repo_path(cfg, "labels"))}
     for name, (color, description) in LABELS.items():
         if name in existing:
             print(f"exists: {name}")
             continue
         api(
             cfg,
-            f"/projects/{cfg.project}/labels",
+            repo_path(cfg, "labels"),
             method="POST",
-            fields={"name": name, "color": color, "description": description},
+            fields={"name": name, "color": color.lstrip("#"), "description": description},
         )
         print(f"created: {name}")
     return 0
@@ -362,24 +469,24 @@ def cmd_create_task(args: argparse.Namespace) -> int:
         risk=args.risk,
     )
     labels = task_issue_labels(args.label)
-    fields = {"title": args.title, "description": body, "labels": csv_labels(labels)}
+    fields = {"title": args.title, "body": body, "labels": labels}
     if cfg.dry_run:
         print(json.dumps(fields, indent=2))
         return 0
-    issue = api(cfg, f"/projects/{cfg.project}/issues", method="POST", fields=fields)
+    issue = api(cfg, repo_path(cfg, "issues"), method="POST", fields=fields)
     if not isinstance(issue, dict):
         raise SystemExit(f"Unexpected issue create response: {issue!r}")
-    print(f"Created issue #{issue['iid']}: {issue['web_url']}")
+    print(f"Created issue #{issue['number']}: {issue['html_url']}")
     return 0
 
 
 def cmd_validate_task(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
     if args.issue:
-        issue = api(cfg, f"/projects/{cfg.project}/issues/{args.issue}")
+        issue = api(cfg, repo_path(cfg, f"issues/{args.issue}"))
         if not isinstance(issue, dict):
             raise SystemExit(f"Unexpected issue response: {issue!r}")
-        description = str(issue.get("description") or "")
+        description = issue_body(issue)
     elif args.file:
         with open(args.file, encoding="utf-8") as handle:
             description = handle.read()
@@ -396,19 +503,19 @@ def cmd_validate_task(args: argparse.Namespace) -> int:
 
 def cmd_next_task(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    by_iid: dict[int, dict[str, Any]] = {}
+    by_number: dict[int, dict[str, Any]] = {}
     for issue in [
         *list_task_issues(cfg, ["ai:task", "ai:ready"]),
         *list_task_issues(cfg, ["ai:task", "ai:needs-rework"]),
     ]:
-        by_iid[int(issue["iid"])] = issue
-    tasks = list(by_iid.values())
+        by_number[item_number(issue)] = issue
+    tasks = list(by_number.values())
     candidates = [
         issue
         for issue in tasks
-        if "ai:claimed" not in issue.get("labels", [])
-        and "ai:dropped" not in issue.get("labels", [])
-        and "ai:needs-human" not in issue.get("labels", [])
+        if "ai:claimed" not in label_names(issue)
+        and "ai:dropped" not in label_names(issue)
+        and "ai:needs-human" not in label_names(issue)
     ]
     if not candidates:
         print("No ready unclaimed AI tasks.")
@@ -417,231 +524,171 @@ def cmd_next_task(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(issue, indent=2, sort_keys=True))
     else:
-        print(f"#{issue['iid']} {issue['title']}")
-        print(issue["web_url"])
+        print(f"#{item_number(issue)} {issue['title']}")
+        print(item_url(issue))
     return 0
 
 
 def cmd_claim_task(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    issue = api(cfg, f"/projects/{cfg.project}/issues/{args.issue}")
+    issue = api(cfg, repo_path(cfg, f"issues/{args.issue}"))
     if not isinstance(issue, dict):
         raise SystemExit(f"Unexpected issue response: {issue!r}")
-    labels = set(issue.get("labels") or [])
+    labels = set(label_names(issue))
     labels.discard("ai:ready")
     labels.discard("ai:needs-rework")
     labels.update({"ai:claimed", "ai:implementing"})
-    updated = api(
-        cfg,
-        f"/projects/{cfg.project}/issues/{args.issue}",
-        method="PUT",
-        fields={"labels": csv_labels(sorted(labels))},
-    )
+    updated = api(cfg, repo_path(cfg, f"issues/{args.issue}/labels"), method="PUT", fields={"labels": sorted(labels)})
     if cfg.dry_run:
         print(f"would claim issue #{args.issue}")
     elif isinstance(updated, dict):
-        print(f"claimed issue #{updated['iid']}: {updated['web_url']}")
+        print(f"claimed issue #{args.issue}: {item_url(issue)}")
     return 0
 
 
-def cmd_related_mrs(args: argparse.Namespace) -> int:
+def cmd_related_prs(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    details = [mr_details(cfg, int(item["iid"])) for item in related_mrs_for_issue(cfg, args.issue)]
+    details = [pr_details(cfg, item_number(item)) for item in related_prs_for_issue(cfg, args.issue)]
     if args.json:
         print(json.dumps(details, indent=2, sort_keys=True))
         return 0
 
     if not details:
-        print(f"No related MRs for issue #{args.issue}.")
+        print(f"No related PRs for issue #{args.issue}.")
         return 0
-    for mr in details:
-        pipeline = mr.get("head_pipeline") or {}
+    for pr in details:
+        status = pr_ci_status(cfg, pr)
         print(
-            f"!{mr['iid']} "
-            f"{mr.get('state', '-'):<8} "
-            f"target={mr.get('target_branch', '-')} "
-            f"source={mr.get('source_branch', '-')} "
-            f"pipeline={pipeline.get('status') or '-'} "
-            f"{mr.get('web_url')}"
+            f"PR #{item_number(pr)} "
+            f"{pr.get('state', '-'):<8} "
+            f"target={pr_target_branch(pr) or '-'} "
+            f"source={pr_source_branch(pr) or '-'} "
+            f"ci={status} "
+            f"{item_url(pr)}"
         )
     return 0
 
 
 def cmd_mark_rework(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    if not args.mr and not args.issue:
-        raise SystemExit("mark-rework requires --mr, --issue, or both")
+    if not args.pr and not args.issue:
+        raise SystemExit("mark-rework requires --pr, --issue, or both")
 
-    issue_iids = list(dict.fromkeys(args.issue or []))
-    mr_url = None
-    if args.mr:
-        mr = mr_details(cfg, args.mr)
-        mr_url = str(mr.get("web_url") or f"!{args.mr}")
-        pipeline_status = ((mr.get("head_pipeline") or {}).get("status") or "none").lower()
-        if args.skip_if_active_pipeline and pipeline_status in ACTIVE_PIPELINE_STATUSES:
-            print(f"skipped !{args.mr}: active head pipeline is {pipeline_status}")
+    issue_numbers = list(dict.fromkeys(args.issue or []))
+    pr_url = None
+    if args.pr:
+        pr = pr_details(cfg, args.pr)
+        pr_url = item_url(pr) or f"PR #{args.pr}"
+        check_status = pr_ci_status(cfg, pr).lower()
+        if args.skip_if_active_checks and check_status in ACTIVE_CHECK_STATUSES:
+            print(f"skipped PR #{args.pr}: active head checks are {check_status}")
             return 0
         update_labels(
             cfg,
-            "merge_requests",
-            args.mr,
+            "pulls",
+            args.pr,
             add={"ai:needs-rework"},
             remove={"ai:sanity-pending", "ai:sanity-failed", "ai:sanity-green", "ai:autopilot"},
         )
-        if not issue_iids:
-            issue_iids = closing_issue_iids_for_mr(cfg, args.mr)
+        if not issue_numbers:
+            issue_numbers = closing_issue_numbers_for_pr(cfg, args.pr)
         note = "Marked `ai:needs-rework` for another implementation pass."
         if args.reason:
             note += f"\n\nReason: {args.reason}"
-        create_note(cfg, "merge_requests", args.mr, note)
-        print(f"marked MR !{args.mr} as ai:needs-rework")
+        create_note(cfg, "pulls", args.pr, note)
+        print(f"marked PR #{args.pr} as ai:needs-rework")
 
-    if not issue_iids:
+    if not issue_numbers:
         print("warning: no linked issue was found; pass --issue explicitly", file=sys.stderr)
         return 0
 
-    for issue_iid in issue_iids:
-        issue = issue_details(cfg, issue_iid)
-        extra_fields = {"state_event": "reopen"} if issue.get("state") != "opened" else None
+    for issue_number in issue_numbers:
+        issue = issue_details(cfg, issue_number)
+        extra_fields = {"state": "open"} if issue.get("state") != "open" else None
         update_labels(
             cfg,
             "issues",
-            issue_iid,
+            issue_number,
             add={AI_LABEL, AI_GENERATED_LABEL, "ai:task", "ai:needs-rework"},
             remove={"ai:ready", "ai:claimed", "ai:implementing", "ai:dropped", "ai:needs-human"},
             extra_fields=extra_fields,
         )
         note = "Marked `ai:needs-rework` for another implementation pass."
-        if mr_url:
-            note += f"\n\nRelated MR: {mr_url}"
+        if pr_url:
+            note += f"\n\nRelated PR: {pr_url}"
         if args.reason:
             note += f"\n\nReason: {args.reason}"
-        create_note(cfg, "issues", issue_iid, note)
-        print(f"marked issue #{issue_iid} as ai:needs-rework")
+        create_note(cfg, "issues", issue_number, note)
+        print(f"marked issue #{issue_number} as ai:needs-rework")
     return 0
 
 
-def classify_mr(cfg: Config, mr: dict[str, Any]) -> str:
-    labels = set(mr.get("labels") or [])
-    if "ai:staging-mr" not in labels:
+def classify_pr(cfg: Config, pr: dict[str, Any]) -> str:
+    labels = set(label_names(pr))
+    if "ai:staging-pr" not in labels:
         return "missing-ai-staging-label"
-    pipeline = mr.get("head_pipeline") or {}
-    pipeline_status = pipeline.get("status") or "none"
-    merge_status = mr.get("detailed_merge_status") or "unknown"
-    left = approvals_left(cfg, int(mr["iid"]))
-    if pipeline_status == "success" and merge_status == "mergeable" and left in (None, 0):
+    check_status = pr_ci_status(cfg, pr)
+    merge_status = pr_merge_status(pr)
+    left = approvals_left(cfg, item_number(pr))
+    if check_status == "success" and merge_status == "mergeable" and left in (None, 0):
         return "ready-for-autopilot"
-    if pipeline_status in {"failed", "canceled"}:
+    if check_status in {"failed", "canceled"}:
         return "needs-rework"
     if merge_status in {"conflict", "need_rebase"}:
         return "needs-rebase-or-conflict-resolution"
-    if pipeline_status in {"pending", "running", "created", "preparing"}:
+    if check_status in {"pending", "running", "created", "preparing"}:
         return "waiting-for-ci"
-    return f"blocked:{merge_status}/{pipeline_status}"
+    return f"blocked:{merge_status}/{check_status}"
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
     tasks = list_task_issues(cfg, ["ai:task"])
-    mrs = list_ai_mrs(cfg)
-    promotion_query = urllib.parse.urlencode(
-        {
-            "state": "opened",
-            "source_branch": cfg.target,
-            "target_branch": cfg.promotion_target,
-        }
-    )
-    promotion_mrs = paginated(cfg, f"/projects/{cfg.project}/merge_requests?{promotion_query}")
+    prs = list_ai_prs(cfg)
+    promotion_query = urllib.parse.urlencode({"state": "open", "base": cfg.promotion_target})
+    promotion_prs = [
+        pr
+        for pr in paginated(cfg, repo_path(cfg, f"pulls?{promotion_query}"))
+        if pr_source_branch(pr) == cfg.target
+    ]
 
     print("AI task issues")
     print("--------------")
     if not tasks:
         print("none")
     for issue in tasks[: args.limit]:
-        labels = ",".join(issue.get("labels", []))
-        print(f"#{issue['iid']:<4} {issue['state']:<7} {labels:<45} {issue['title'][:80]}")
+        labels = ",".join(label_names(issue))
+        print(f"#{item_number(issue):<4} {issue['state']:<7} {labels:<45} {issue['title'][:80]}")
 
-    print("\nAI MRs targeting " + cfg.target)
+    print("\nAI PRs targeting " + cfg.target)
     print("----------------" + "-" * len(cfg.target))
-    if not mrs:
+    if not prs:
         print("none")
-    for item in mrs[: args.limit]:
-        mr = mr_details(cfg, int(item["iid"]))
-        pipeline = mr.get("head_pipeline") or {}
-        classification = classify_mr(cfg, mr)
+    for item in prs[: args.limit]:
+        pr = pr_details(cfg, item_number(item))
+        check_status = pr_ci_status(cfg, pr)
+        classification = classify_pr(cfg, pr)
         print(
-            f"!{mr['iid']:<4} "
+            f"#{item_number(pr):<4} "
             f"{classification:<36} "
-            f"{str(mr.get('detailed_merge_status') or '-'):<14} "
-            f"{str(pipeline.get('status') or '-'):<9} "
-            f"{mr.get('source_branch')}"
+            f"{pr_merge_status(pr):<14} "
+            f"{check_status:<9} "
+            f"{pr_source_branch(pr)}"
         )
 
-    print("\nPromotion MRs")
+    print("\nPromotion PRs")
     print("-------------")
-    if not promotion_mrs:
+    if not promotion_prs:
         print("none")
-    for item in promotion_mrs[: args.limit]:
-        mr = mr_details(cfg, int(item["iid"]))
-        pipeline = mr.get("head_pipeline") or {}
-        print(f"!{mr['iid']:<4} {str(pipeline.get('status') or '-'):<9} {mr['title']}")
+    for item in promotion_prs[: args.limit]:
+        pr = pr_details(cfg, item_number(item))
+        print(f"#{item_number(pr):<4} {pr_ci_status(cfg, pr):<9} {pr['title']}")
     return 0
 
 
 def remote_branch_exists(cfg: Config, branch: str) -> bool:
     result = run(["git", "ls-remote", "--heads", cfg.remote, branch], check=False)
     return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def collect_ai_promotion_schedules(cfg: Config) -> list[dict[str, Any]]:
-    schedules = paginated(cfg, f"/projects/{cfg.project}/pipeline_schedules")
-    details: list[dict[str, Any]] = []
-    for schedule in schedules:
-        schedule_id = schedule.get("id")
-        if schedule_id is None:
-            continue
-        detail = api(cfg, f"/projects/{cfg.project}/pipeline_schedules/{schedule_id}")
-        if not isinstance(detail, dict):
-            continue
-        if is_ai_promotion_schedule(detail):
-            details.append(detail)
-    return details
-
-
-def project_variables(cfg: Config) -> list[dict[str, Any]] | None:
-    try:
-        variables = paginated(cfg, f"/projects/{cfg.project}/variables")
-    except SystemExit as exc:
-        print(f"warning: could not inspect project variables: {exc}", file=sys.stderr)
-        return None
-    return variables
-
-
-def runner_details(cfg: Config, runner_id: int) -> dict[str, Any] | None:
-    try:
-        data = api(cfg, f"/runners/{runner_id}")
-    except SystemExit as exc:
-        print(f"warning: could not inspect runner {runner_id}: {exc}", file=sys.stderr)
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def latest_pipeline_failure_summary(cfg: Config, pipeline: dict[str, Any]) -> list[str]:
-    pipeline_id = pipeline.get("id")
-    if not pipeline_id or pipeline.get("status") != "failed":
-        return []
-    jobs = api(cfg, f"/projects/{cfg.project}/pipelines/{pipeline_id}/jobs?per_page=100")
-    if not isinstance(jobs, list):
-        return []
-    failures = []
-    for job in jobs:
-        if job.get("status") != "failed":
-            continue
-        reason = job.get("failure_reason") or "unknown"
-        name = job.get("name") or job.get("id")
-        runner = (job.get("runner") or {}).get("description") or "no runner"
-        failures.append(f"{name}: {reason} on {runner}")
-    return failures
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -658,83 +705,58 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     else:
         print("ok: local worktree is clean")
 
-    for branch in dict.fromkeys(("master", cfg.target, cfg.promotion_target)):
+    for branch in dict.fromkeys(("main", cfg.target, cfg.promotion_target)):
         if remote_branch_exists(cfg, branch):
             print(f"ok: {cfg.remote}/{branch} exists")
         else:
             failures.append(f"missing remote branch: {cfg.remote}/{branch}")
 
-    existing_labels = {label["name"] for label in paginated(cfg, f"/projects/{cfg.project}/labels")}
+    existing_labels = {label["name"] for label in paginated(cfg, repo_path(cfg, "labels"))}
     missing_labels = sorted(set(LABELS) - existing_labels)
     if missing_labels:
         failures.append("missing labels: " + ", ".join(missing_labels))
     else:
         print("ok: standard AI labels exist")
 
-    runners = paginated(cfg, f"/projects/{cfg.project}/runners")
-    cpu_runners = []
-    for runner in runners:
-        detail = runner_details(cfg, int(runner["id"]))
-        if not detail:
-            continue
-        if "cpu" in (detail.get("tag_list") or []):
-            cpu_runners.append(detail)
-    online_cpu = [runner for runner in cpu_runners if runner.get("status") == "online" and not runner.get("paused")]
-    if online_cpu:
-        descriptions = ", ".join(str(runner.get("description") or runner.get("id")) for runner in online_cpu)
-        print(f"ok: online cpu runner(s): {descriptions}")
+    try:
+        permissions = api(cfg, repo_path(cfg, "actions/permissions"))
+    except SystemExit as exc:
+        warnings.append(f"could not inspect GitHub Actions permissions: {exc}")
     else:
-        failures.append("no online unpaused project runner with tag 'cpu'")
+        if isinstance(permissions, dict):
+            print(f"ok: GitHub Actions enabled={permissions.get('enabled', 'unknown')}")
 
-    schedules = collect_ai_promotion_schedules(cfg)
-    active_schedules = [schedule for schedule in schedules if schedule.get("active")]
-    if not active_schedules:
-        failures.append("no active AI staging promotion schedule with AI_STAGING_PROMOTE=1")
+    try:
+        runner_data = api(cfg, repo_path(cfg, "actions/runners?per_page=100"))
+    except SystemExit as exc:
+        warnings.append(f"could not inspect GitHub Actions runners: {exc}")
     else:
-        for schedule in active_schedules:
-            variables = schedule_variables(schedule)
-            ref = str(schedule.get("ref") or "")
-            cron = schedule.get("cron")
-            next_run = schedule.get("next_run_at")
-            print(f"ok: promotion schedule {schedule.get('id')} ref={ref} cron={cron} next={next_run}")
-            if not ref.endswith(f"/{cfg.promotion_target}") and ref != cfg.promotion_target:
-                warnings.append(f"promotion schedule {schedule.get('id')} runs on {ref}, expected {cfg.promotion_target}")
-            if variables.get("AI_STAGING_PROMOTE") != "1":
-                failures.append(f"promotion schedule {schedule.get('id')} is missing AI_STAGING_PROMOTE=1")
-            for failure in latest_pipeline_failure_summary(cfg, schedule.get("last_pipeline") or {}):
-                warnings.append(f"last promotion schedule pipeline failed: {failure}")
+        runners = runner_data.get("runners") if isinstance(runner_data, dict) else []
+        cpu_runners = [
+            runner
+            for runner in runners
+            if any((label.get("name") == "cpu") for label in runner.get("labels", []))
+        ]
+        online_cpu = [runner for runner in cpu_runners if runner.get("status") == "online"]
+        if online_cpu:
+            names = ", ".join(str(runner.get("name") or runner.get("id")) for runner in online_cpu)
+            print(f"ok: online cpu runner(s): {names}")
+        elif runners:
+            warnings.append("no online GitHub Actions runner with label 'cpu' was visible to the token")
 
-    variables = project_variables(cfg)
-    if variables is not None:
-        variable_by_key = {str(item.get("key")): item for item in variables}
-        token = variable_by_key.get("AI_STAGING_BOT_TOKEN")
-        if not token:
-            failures.append("missing project variable AI_STAGING_BOT_TOKEN")
-        else:
-            masked = bool(token.get("masked"))
-            protected = bool(token.get("protected"))
-            print(f"ok: AI_STAGING_BOT_TOKEN exists masked={masked} protected={protected}")
-            if not masked:
-                warnings.append("AI_STAGING_BOT_TOKEN is not masked")
-            if not protected:
-                warnings.append("AI_STAGING_BOT_TOKEN is not protected")
-
-    promotion_query = urllib.parse.urlencode(
-        {
-            "state": "opened",
-            "source_branch": cfg.target,
-            "target_branch": cfg.promotion_target,
-        }
-    )
-    promotion_mrs = paginated(cfg, f"/projects/{cfg.project}/merge_requests?{promotion_query}")
-    if len(promotion_mrs) > 1:
-        warnings.append(f"multiple open promotion MRs exist: {', '.join('!' + str(mr['iid']) for mr in promotion_mrs)}")
-    elif promotion_mrs:
-        mr = mr_details(cfg, int(promotion_mrs[0]["iid"]))
-        pipeline = (mr.get("head_pipeline") or {}).get("status") or "none"
-        print(f"ok: open promotion MR !{mr['iid']} pipeline={pipeline}")
+    promotion_query = urllib.parse.urlencode({"state": "open", "base": cfg.promotion_target})
+    promotion_prs = [
+        pr
+        for pr in paginated(cfg, repo_path(cfg, f"pulls?{promotion_query}"))
+        if pr_source_branch(pr) == cfg.target
+    ]
+    if len(promotion_prs) > 1:
+        warnings.append(f"multiple open promotion PRs exist: {', '.join('#' + str(item_number(pr)) for pr in promotion_prs)}")
+    elif promotion_prs:
+        pr = pr_details(cfg, item_number(promotion_prs[0]))
+        print(f"ok: open promotion PR #{item_number(pr)} checks={pr_ci_status(cfg, pr)}")
     else:
-        print("ok: no open promotion MR; schedule will create one when ai-staging has a tree diff")
+        print("ok: no open promotion PR; the staging loop will create one when ai-staging has a tree diff")
 
     if warnings:
         print("\nWarnings")
@@ -752,7 +774,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--project", help="GitLab project path or numeric id")
+    parser.add_argument("--project", help="GitHub owner/repo path")
     parser.add_argument("--remote", default=os.environ.get("AI_STAGING_REMOTE", DEFAULT_REMOTE))
     parser.add_argument("--target", default=os.environ.get("AI_STAGING_BRANCH", DEFAULT_TARGET))
     parser.add_argument("--promotion-target", default=os.environ.get("AI_STAGING_PROMOTION_TARGET", DEFAULT_PROMOTION_TARGET))
@@ -761,7 +783,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def config_from_args(args: argparse.Namespace) -> Config:
-    project = args.project or os.environ.get("CI_PROJECT_PATH") or infer_project_path(args.remote)
+    project = args.project or os.environ.get("GITHUB_REPOSITORY") or infer_project_path(args.remote)
     return Config(
         project=encoded_project(project),
         remote=args.remote,
@@ -804,19 +826,19 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("issue", type=int)
     claim.set_defaults(func=cmd_claim_task)
 
-    related = subparsers.add_parser("related-mrs", help="list merge requests related to an issue")
+    related = subparsers.add_parser("related-prs", help="list pull requests related to an issue")
     related.add_argument("issue", type=int)
     related.add_argument("--json", action="store_true")
-    related.set_defaults(func=cmd_related_mrs)
+    related.set_defaults(func=cmd_related_prs)
 
-    rework = subparsers.add_parser("mark-rework", help="mark an issue/MR for another implementation pass")
-    rework.add_argument("--mr", type=int, help="merge request IID to mark")
-    rework.add_argument("--issue", type=int, action="append", default=[], help="issue IID to mark; repeatable")
+    rework = subparsers.add_parser("mark-rework", help="mark an issue/PR for another implementation pass")
+    rework.add_argument("--pr", type=int, help="pull request number to mark")
+    rework.add_argument("--issue", type=int, action="append", default=[], help="issue number to mark; repeatable")
     rework.add_argument("--reason", default="")
-    rework.add_argument("--skip-if-active-pipeline", action="store_true")
+    rework.add_argument("--skip-if-active-checks", action="store_true")
     rework.set_defaults(func=cmd_mark_rework)
 
-    dashboard = subparsers.add_parser("dashboard", help="summarize AI tasks, ai-staging MRs, and promotion MRs")
+    dashboard = subparsers.add_parser("dashboard", help="summarize AI tasks, ai-staging PRs, and promotion PRs")
     dashboard.add_argument("--limit", type=int, default=50)
     dashboard.set_defaults(func=cmd_dashboard)
 

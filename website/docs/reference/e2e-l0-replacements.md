@@ -2,7 +2,7 @@
 
 ## Selection Guideline
 
-MR L0 may replace a large or slow model only when the replacement preserves the
+PR L0 may replace a large or slow model only when the replacement preserves the
 same E2E contract:
 
 - the source model is slow enough to matter, normally at least about 10 minutes
@@ -17,13 +17,13 @@ same E2E contract:
 - source manifests stay `nightly_only`; L0-only representatives use
   `ci_tier: "l0_only"`
 
-Nightly remains the scale validation lane. MR L0 applies the configured
+Nightly remains the scale validation lane. PR L0 applies the configured
 replacement for broad changes and for direct changes to a nightly-only model's
 manifest or model-specific E2E data.
 
 ## L0 Replacement Set
 
-| Nightly-only model | MR L0 replacement | L0 change |
+| Nightly-only model | PR L0 replacement | L0 change |
 | --- | --- | --- |
 | `bark-large` | `bark-small` | Smaller Bark checkpoint. |
 | `deepseek-ocr` | `deepseek-ocr-l0` | Same checkpoint; shorter OCR decode. |

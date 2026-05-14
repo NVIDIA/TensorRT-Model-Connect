@@ -6,7 +6,7 @@
 | Applicable standard | ISO 26262:2018 Part 6 (Software Development) |
 | Revision | 1.0 |
 | Date | 2026-03-12 |
-| Author | Safety Architecture Team (yifeif@nvidia.com) |
+| Author | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | Reviewer | Independent Review Required (TBD — assign before merge) |
 | Review Status | Pending independent review |
 | Status | Active |
@@ -112,7 +112,7 @@ If the project is classified above QM:
 
 3. **Every file path in docs MUST be verified to exist.** No phantom file
    references are acceptable. This applies to all documents in `website/docs/wiki/`,
-   `CLAUDE.md`, and any other documentation files.
+   `AGENTS.md`, and any other documentation files.
 
 ### Enforcement
 

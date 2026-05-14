@@ -327,7 +327,7 @@ class TestFetchLatest:
         result = resolve_coverage_map(
             output_path=tmp_path / "output.json",
             local_fallback=str(path),
-            gitlab_api_url=None,
+            artifact_url=None,
         )
         assert result is True
         assert (tmp_path / "output.json").exists()
@@ -337,7 +337,7 @@ class TestFetchLatest:
         result = resolve_coverage_map(
             output_path=tmp_path / "output.json",
             local_fallback=str(tmp_path / "missing.json"),
-            gitlab_api_url=None,
+            artifact_url=None,
         )
         assert result is False
 
@@ -349,7 +349,7 @@ class TestFetchLatest:
         result = resolve_coverage_map(
             output_path=output,
             local_fallback=str(source),
-            gitlab_api_url=None,
+            artifact_url=None,
         )
         assert result is True
         data = json.loads(output.read_text())

@@ -556,7 +556,7 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `new_family.py` | Scaffold a new family plugin from HF repo |
 | `autopilot/autorun.py` | One-command autopilot: discover → select → dispatch → validate |
 | `autopilot/discover.py` | Query HF Hub → find unsupported model_types → JSON task list |
-| `autopilot/dispatch.py` | Launch parallel Claude Code agents across agent workspaces |
+| `autopilot/dispatch.py` | Launch parallel agent CLI sessions across agent workspaces |
 | `autopilot/run.sh` | Shell wrapper for discover + dispatch |
 | `check_family_coverage.py` | Check family plugin test coverage |
 | `hf_generate.py` | HuggingFace generation script |

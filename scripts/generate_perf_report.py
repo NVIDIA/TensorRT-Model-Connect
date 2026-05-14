@@ -10,7 +10,7 @@ Usage:
     python scripts/generate_perf_report.py \\
       --perf-db /path/to/perf.db \\
       -o perf_report.html \\
-      [--title "Perf Report - MR !123"] \\
+      [--title "Perf Report - PR !123"] \\
       [--history-limit 10] \\
       [--regression-threshold 0.10]
 """

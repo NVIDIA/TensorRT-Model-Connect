@@ -283,11 +283,11 @@ class PerfDB:
         for sname, cr in stages.items():
             metrics_dict = {}
             cr_metrics = getattr(cr, "metrics", {}) or {}
-            for mname, mr in cr_metrics.items():
-                if hasattr(mr, "value"):
-                    metrics_dict[mname] = mr.value
+            for mname, metric_result in cr_metrics.items():
+                if hasattr(metric_result, "value"):
+                    metrics_dict[mname] = metric_result.value
                 else:
-                    metrics_dict[mname] = mr
+                    metrics_dict[mname] = metric_result
             stage_summary[sname] = {
                 "status": getattr(cr, "status", ""),
                 "metrics": metrics_dict,
@@ -300,8 +300,12 @@ class PerfDB:
         for cr in stages.values():
             cr_metrics = getattr(cr, "metrics", {}) or {}
             if "token_agreement_rate" in cr_metrics:
-                mr = cr_metrics["token_agreement_rate"]
-                val = mr.value if hasattr(mr, "value") else mr
+                metric_result = cr_metrics["token_agreement_rate"]
+                val = (
+                    metric_result.value
+                    if hasattr(metric_result, "value")
+                    else metric_result
+                )
                 token_match = 1 if val >= 1.0 else 0
                 break
 

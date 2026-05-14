@@ -262,7 +262,7 @@ imports, `cli.py`, and all internal imports updated.
   infrastructure env vars are swept.
 
 Each cluster: schema file, plugin queries registry, env-var readers
-deleted (hard removal per CLAUDE.md style — no shims), tests updated.
+deleted (hard removal with no shims), tests updated.
 
 ### Phase 5 — Acceptance
 - [x] Scalability test: `tests/builder/test_config_isolation_demo.py`
@@ -1034,7 +1034,7 @@ Commit chain:
     4. Swap the `TRTMC_TRIATTN_*` env-var readers in
        `src/runtime/core/triattention_kv_cache.cpp` for ConfigBundle
        queries. Similarly for the Python build path.
-    5. Delete the env-var readers (hard removal per CLAUDE.md style).
+    5. Delete the env-var readers (hard removal with no shims).
     6. Validate per-cluster tests still pass.
 
 ### Tick 6 (2026-04-20)

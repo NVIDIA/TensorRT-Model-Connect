@@ -7,7 +7,7 @@
 | **Standard** | ISO 26262-6:2018 clause 8 |
 | **Scope** | C++ runtime and Python build package |
 | **Status** | Living document, auto-verified against source tree |
-| **Author** | Safety Architecture Team (yifeif@nvidia.com) |
+| **Author** | Safety Architecture Team (TensorRT-Model-Connect Team) |
 | **Reviewer** | Independent Review Required (TBD — assign before merge) |
 | **Review Status** | Pending independent review |
 

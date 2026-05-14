@@ -31,5 +31,5 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "MR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps."
+  "notes": "PR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps."
 }

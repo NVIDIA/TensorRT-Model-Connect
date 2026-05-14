@@ -3,14 +3,13 @@ name: TensorRT-Model-Connect Premerge CI
 on:
   push:
     branches:
-      - ai-staging
+      - main
     paths-ignore:
       - "website/**"
       - ".github/workflows/pages.yml"
   pull_request:
     branches:
       - main
-      - ai-staging
     paths-ignore:
       - "website/**"
       - ".github/workflows/pages.yml"

@@ -5,8 +5,8 @@
 - Treat GitHub as the active repository for this project:
   `https://github.com/NVIDIA/TensorRT-Model-Connect.git`.
 - Use the local `github` remote for fetch, push, PR, and CI operations.
-- Do not push project changes to the GitLab `origin` remote unless the user
-  explicitly asks for GitLab work.
+- Do not push project changes to any non-GitHub legacy remote unless the user
+  explicitly asks for that repository.
 
 ## Branch And PR Flow
 
