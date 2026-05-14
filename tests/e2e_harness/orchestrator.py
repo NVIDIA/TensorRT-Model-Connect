@@ -701,20 +701,56 @@ def _build_repro_commands(
                 if field_input is not None:
                     infer_parts.extend(["--field-input", _csv_arg(field_input)])
         elif task_strategy == "diffusion_media_generation":
-            infer_parts = [
-                ctx.binary_path, "generate-video", bundle_path,
-                "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
-                "--output", "/tmp/trtmc_frames",
-                "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
-            ]
-            guidance_scale = case.inputs.get("guidance_scale")
-            if guidance_scale is not None:
-                infer_parts.extend(["--guidance-scale", str(guidance_scale)])
-            if "seed" in case.inputs:
-                infer_parts.extend(["--seed", str(case.inputs["seed"])])
-            if case.family == "ltx_video" and ctx.artifacts_dir:
-                latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
-                infer_parts.extend(["--initial-latents-raw", str(latent_path)])
+            is_qwen_image = (
+                case.runtime_strategy == "diffusion_qwen_image"
+                or case.family == "qwen_image"
+            )
+            if is_qwen_image:
+                infer_parts = [
+                    ctx.binary_path, "run", bundle_path,
+                    "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+                    "--output", "/tmp/trtmc_qwen_image/output.png",
+                    "--num-inference-steps", str(case.inputs.get("num_inference_steps", 20)),
+                ]
+                negative_prompt = case.inputs.get("negative_prompt")
+                if negative_prompt is not None:
+                    infer_parts.extend(["--negative-prompt", _shell_quote(str(negative_prompt))])
+                cfg_scale = case.inputs.get("cfg_scale")
+                if cfg_scale is None:
+                    cfg_scale = case.inputs.get("guidance_scale")
+                if cfg_scale is not None:
+                    infer_parts.extend(["--cfg-scale", str(cfg_scale)])
+                height = case.inputs.get("height") or case.inputs.get("image_height")
+                if height is not None:
+                    infer_parts.extend(["--height", str(height)])
+                width = case.inputs.get("width") or case.inputs.get("image_width")
+                if width is not None:
+                    infer_parts.extend(["--width", str(width)])
+                if "seed" in case.inputs:
+                    infer_parts.extend(["--seed", str(case.inputs["seed"])])
+                # Shared-initial-latents path: the runner pre-computes the same
+                # raw bytes the HF reference will consume. Mirrors the LTX
+                # plumbing immediately below.
+                if ctx.artifacts_dir:
+                    qi_latent_path = Path(
+                        _case_artifact_dir(ctx.artifacts_dir, case.name)
+                    ) / "initial_latents.raw"
+                    infer_parts.extend(["--initial-latents-raw", str(qi_latent_path)])
+            else:
+                infer_parts = [
+                    ctx.binary_path, "generate-video", bundle_path,
+                    "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+                    "--output", "/tmp/trtmc_frames",
+                    "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
+                ]
+                guidance_scale = case.inputs.get("guidance_scale")
+                if guidance_scale is not None:
+                    infer_parts.extend(["--guidance-scale", str(guidance_scale)])
+                if "seed" in case.inputs:
+                    infer_parts.extend(["--seed", str(case.inputs["seed"])])
+                if case.family == "ltx_video" and ctx.artifacts_dir:
+                    latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
+                    infer_parts.extend(["--initial-latents-raw", str(latent_path)])
         elif task_strategy == "prompted_segmentation":
             infer_parts = [
                 ctx.binary_path, "segment-sam", bundle_path,

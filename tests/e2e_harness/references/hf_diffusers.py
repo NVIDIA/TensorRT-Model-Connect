@@ -91,6 +91,19 @@ def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
     return os.path.join(base_dir, "initial_latents.raw")
 
 
+def _qwen_image_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
+    """Mirror of the runner-side helper. Both subprocesses MUST point at the
+    same path; the runner writes the raw fp32 bytes, the HF reference reads
+    them back so both pipelines start from identical noise (E2E shared-latents
+    path, mirrors the LTX precedent)."""
+    if ctx.artifacts_dir:
+        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
+    else:
+        base_dir = os.path.join(
+            tempfile.gettempdir(), "trtmc_qwen_image_latents", case.name)
+    return os.path.join(base_dir, "initial_latents.raw")
+
+
 class HfDiffusersReference:
     """Reference backend using HuggingFace diffusers pipelines."""
 
@@ -322,6 +335,7 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         video_num_frames = case.inputs.get("video_num_frames", 17)
         python = ctx.reference_python_path() or sys.executable
         ltx_initial_latents_raw = _ltx_initial_latents_path(case, ctx)
+        qwen_image_initial_latents_raw = _qwen_image_initial_latents_path(case, ctx)
         model_type = str(case.metadata.get("model_type", "")).lower()
 
         # Save frames to artifacts_dir so they persist for comparator access
@@ -331,6 +345,18 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         os.makedirs(frames_dir, exist_ok=True)
 
         family = case.family
+        # Qwen-Image (and forward-compat Edit-mode variants) drive the HF
+        # reference via ``diffusers.QwenImagePipeline`` with ``true_cfg_scale``
+        # (NOT ``guidance_scale``). Manifest provides ``negative_prompt``,
+        # ``cfg_scale``, ``height``, ``width``, ``num_inference_steps``,
+        # ``seed`` — mirror what the TRT runner emits to ``trtmc run``.
+        qi_negative_prompt = case.inputs.get("negative_prompt", " ")
+        qi_cfg_scale = float(
+            case.inputs.get("cfg_scale", case.inputs.get("guidance_scale", 4.0)))
+        qi_height = int(
+            case.inputs.get("height", case.inputs.get("image_height", image_height)))
+        qi_width = int(
+            case.inputs.get("width", case.inputs.get("image_width", image_width)))
         script = f"""
 import torch
 import numpy as np
@@ -356,9 +382,80 @@ seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
 ltx_guidance_scale = {float(case.inputs.get("guidance_scale", 3.0))}
 wan_guidance_scale = {float(case.inputs.get("guidance_scale", 5.0))}
 z_image_guidance_scale = {float(case.inputs.get("guidance_scale", 0.0))}
+qi_negative_prompt = {qi_negative_prompt!r}
+qi_cfg_scale = {qi_cfg_scale}
+qi_height = {qi_height}
+qi_width = {qi_width}
 ltx_initial_latents_raw = {ltx_initial_latents_raw!r}
+qwen_image_initial_latents_raw = {qwen_image_initial_latents_raw!r}
 
-if family in ("flux",):
+if family in ("qwen_image",):
+    # Text-to-image via QwenImagePipeline. The class lookup forward-compats
+    # to QwenImageEditPipeline / QwenImageEditPlusPipeline so a future Edit
+    # manifest just works after wiring an ``image`` input.
+    import diffusers
+    diffusers.logging.set_verbosity_error()
+    pipeline_cls = None
+    for cls_name in ("QwenImageEditPlusPipeline", "QwenImageEditPipeline",
+                     "QwenImagePipeline"):
+        cls = getattr(diffusers, cls_name, None)
+        if cls is None:
+            continue
+        # Pick Edit variants only when the manifest passes an image input;
+        # for plain T2I, fall through to QwenImagePipeline.
+        if "Edit" in cls_name and not {bool(case.inputs.get("image"))}:
+            continue
+        pipeline_cls = cls
+        break
+    if pipeline_cls is None:
+        raise RuntimeError(
+            "diffusers does not expose QwenImagePipeline; upgrade diffusers")
+    # bf16 matches the PSNR-validated Python E2E gate.
+    pipe = pipeline_cls.from_pretrained(model_ref, torch_dtype=torch.bfloat16)
+    pipe.to("cuda")
+    # Shared-initial-latents path: load the raw fp32 bytes written by the
+    # runner-side helper, reshape to UNPACKED [1, 16, h_lat, w_lat], call
+    # the pipeline's static ``_pack_latents`` to produce the packed
+    # [1, n_img, 64] tensor diffusers expects when ``latents=`` is supplied
+    # to ``__call__``. Both subprocesses thereby start from byte-identical
+    # noise — eliminates the std::mt19937 vs torch.Generator divergence.
+    qi_latents = None
+    if os.path.exists(qwen_image_initial_latents_raw):
+        vae_scale = 8
+        latent_channels = 16
+        h_lat = qi_height // vae_scale
+        w_lat = qi_width // vae_scale
+        # diffusers' ``prepare_latents`` rounds latent H/W to a multiple
+        # of 2 because the DiT packs 2x2 spatial blocks; mirror that to
+        # match the dimensions ``_pack_latents`` will operate on.
+        pack_h_lat = 2 * (h_lat // 2)
+        pack_w_lat = 2 * (w_lat // 2)
+        raw = np.fromfile(qwen_image_initial_latents_raw, dtype=np.float32)
+        expected_size = latent_channels * pack_h_lat * pack_w_lat
+        if raw.size != expected_size:
+            raise RuntimeError(
+                f"Qwen-Image shared latents size {{raw.size}} does not "
+                f"match expected [1, {{latent_channels}}, {{pack_h_lat}}, "
+                f"{{pack_w_lat}}] = {{expected_size}}")
+        # _pack_latents expects [B, C, H, W] (collapses internally to the
+        # ``height // 2, 2, width // 2, 2`` grid before permute+reshape).
+        unpacked = torch.from_numpy(raw).view(
+            1, latent_channels, pack_h_lat, pack_w_lat).to(
+                device="cuda", dtype=torch.bfloat16)
+        qi_latents = pipeline_cls._pack_latents(
+            unpacked, 1, latent_channels, pack_h_lat, pack_w_lat)
+    output = pipe(
+        prompt=prompt,
+        negative_prompt=qi_negative_prompt,
+        true_cfg_scale=qi_cfg_scale,
+        num_inference_steps=num_steps,
+        height=qi_height,
+        width=qi_width,
+        latents=qi_latents,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.images
+elif family in ("flux",):
     if model_type in ("flux.2", "flux2"):
         from diffusers import Flux2Pipeline
         # FLUX.2's model card recommends bf16 for diffusers inference; full

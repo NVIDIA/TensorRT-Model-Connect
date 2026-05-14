@@ -116,6 +116,66 @@ def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
     return os.path.join(base_dir, "initial_latents.raw")
 
 
+def _qwen_image_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
+    if ctx.artifacts_dir:
+        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
+    else:
+        base_dir = os.path.join(
+            tempfile.gettempdir(), "trtmc_qwen_image_latents", case.name)
+    return os.path.join(base_dir, "initial_latents.raw")
+
+
+def _ensure_qwen_image_initial_latents(
+        case: E2ECase, ctx: RunContext, bundle_path: str) -> str | None:
+    """Pre-compute shared initial latents for the Qwen-Image E2E case.
+
+    Writes a raw fp32 buffer of shape ``[1, 16, h_lat, w_lat]`` (UNPACKED,
+    C-major) that both the TRT C++ pipeline (via ``--initial-latents-raw``)
+    and the HF diffusers reference (via ``latents=`` after ``_pack_latents``)
+    consume verbatim. This eliminates the RNG mismatch between
+    ``std::mt19937`` (TRT side) and ``torch.Generator`` (HF side) that would
+    otherwise drive the PSNR floor below the gate.
+
+    Trace: IT-E2E-QIMG-01, UD-FAM-QWEN-IMAGE-01.
+    """
+    is_qwen_image = (
+        case.runtime_strategy == "diffusion_qwen_image"
+        or case.family == "qwen_image"
+    )
+    if not is_qwen_image:
+        return None
+
+    output_path = _qwen_image_initial_latents_path(case, ctx)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.exists(output_path):
+        return output_path
+
+    height = int(
+        case.inputs.get("height")
+        or case.inputs.get("image_height")
+        or 1024)
+    width = int(
+        case.inputs.get("width")
+        or case.inputs.get("image_width")
+        or 1024)
+    seed = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+    # Qwen-Image VAE: 8x spatial compression, 16 latent channels.
+    vae_scale = 8
+    latent_channels = 16
+    h_lat = height // vae_scale
+    w_lat = width // vae_scale
+
+    # NumPy RNG suffices here — both sides read the SAME bytes from disk, so
+    # the exact RNG used to seed them is immaterial; what matters is byte
+    # identity between the TRT and HF subprocesses.
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    latents = rng.standard_normal(
+        (1, latent_channels, h_lat, w_lat), dtype=np.float32)
+    latents.tofile(output_path)
+    return output_path
+
+
 def _ensure_ltx_initial_latents(case: E2ECase, ctx: RunContext, bundle_path: str) -> str | None:
     if case.family != "ltx_video":
         return None
@@ -343,12 +403,28 @@ class DiffusionMediaRunner:
     def _run_end_to_end(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run full generation via C++ binary (trtmc generate-video)."""
+        """Run full generation via the C++ binary.
+
+        Most diffusion families use ``trtmc generate-video`` which writes
+        ``frame_*.png`` into the output dir. Qwen-Image is image-only and
+        uses ``trtmc run`` (which dispatches to ``generate_image()``); we
+        target a ``frame_0000.png`` output filename so the existing
+        comparator path (frame globbing) still works for single-frame T2I.
+        """
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
+
+        # Qwen-Image (and any image-only diffusion that publishes the
+        # ``diffusion_qwen_image`` runtime strategy) drives the CLI through
+        # ``trtmc run`` with the diffusion-text-to-image flag set.
+        is_qwen_image = (
+            case.runtime_strategy == "diffusion_qwen_image"
+            or case.family == "qwen_image"
+        )
+
         try:
             initial_latents_raw = _ensure_ltx_initial_latents(case, ctx, bundle_path)
         except Exception as exc:
@@ -360,20 +436,62 @@ class DiffusionMediaRunner:
                 metadata={"command": "create_ltx_initial_latents"},
             )
 
+        try:
+            qwen_image_initial_latents_raw = _ensure_qwen_image_initial_latents(
+                case, ctx, bundle_path)
+        except Exception as exc:
+            return StageOutput(
+                stage_name=stage.name,
+                data={"returncode": 1, "stderr": str(exc), "num_frames": 0},
+                text="",
+                timing_s=0.0,
+                metadata={"command": "create_qwen_image_initial_latents"},
+            )
+
         with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
-            cmd = [
-                binary, "generate-video", bundle_path,
-                "--prompt", prompt,
-                "--output", frame_dir,
-                "--num-steps", str(num_steps),
-            ]
-            if initial_latents_raw:
-                cmd.extend(["--initial-latents-raw", initial_latents_raw])
-            guidance_scale = case.inputs.get("guidance_scale")
-            if guidance_scale is not None:
-                cmd.extend(["--guidance-scale", str(guidance_scale)])
-            if "seed" in case.inputs:
-                cmd.extend(["--seed", str(case.inputs["seed"])])
+            if is_qwen_image:
+                # ``trtmc run`` writes a single PNG; target frame_0000.png
+                # so the comparator's frame_*.png glob still picks it up.
+                output_png = os.path.join(frame_dir, "frame_0000.png")
+                cmd = [
+                    binary, "run", bundle_path,
+                    "--prompt", prompt,
+                    "--output", output_png,
+                    "--num-inference-steps", str(num_steps),
+                ]
+                negative_prompt = case.inputs.get("negative_prompt")
+                if negative_prompt is not None:
+                    cmd.extend(["--negative-prompt", str(negative_prompt)])
+                cfg_scale = case.inputs.get("cfg_scale")
+                if cfg_scale is None:
+                    cfg_scale = case.inputs.get("guidance_scale")
+                if cfg_scale is not None:
+                    cmd.extend(["--cfg-scale", str(cfg_scale)])
+                height = case.inputs.get("height") or case.inputs.get("image_height")
+                if height is not None:
+                    cmd.extend(["--height", str(height)])
+                width = case.inputs.get("width") or case.inputs.get("image_width")
+                if width is not None:
+                    cmd.extend(["--width", str(width)])
+                if "seed" in case.inputs:
+                    cmd.extend(["--seed", str(case.inputs["seed"])])
+                if qwen_image_initial_latents_raw:
+                    cmd.extend([
+                        "--initial-latents-raw", qwen_image_initial_latents_raw])
+            else:
+                cmd = [
+                    binary, "generate-video", bundle_path,
+                    "--prompt", prompt,
+                    "--output", frame_dir,
+                    "--num-steps", str(num_steps),
+                ]
+                if initial_latents_raw:
+                    cmd.extend(["--initial-latents-raw", initial_latents_raw])
+                guidance_scale = case.inputs.get("guidance_scale")
+                if guidance_scale is not None:
+                    cmd.extend(["--guidance-scale", str(guidance_scale)])
+                if "seed" in case.inputs:
+                    cmd.extend(["--seed", str(case.inputs["seed"])])
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])

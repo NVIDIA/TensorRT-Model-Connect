@@ -57,6 +57,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_ltx": "diffusion_media_generation",
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
+    "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
     "torchtrt_decoder": "text_generation_causal",
     "torchtrt_diffusion": "diffusion_media_generation",
@@ -94,6 +95,7 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "pixart_plugin": ["diffusion_pixart"],
     "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
     "zimage_plugin": ["diffusion_zimage"],
+    "qwen_image_plugin": ["diffusion_qwen_image"],
     "t5_plugin": ["text_to_text"],
     "marian_plugin": ["marian_translation"],
     "seq2seq_plugin": ["seq2seq_encoder_decoder"],
@@ -130,9 +132,10 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "pixart_pipeline": ["diffusion_pixart"],
     "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
+    "qwen_image_pipeline": ["diffusion_qwen_image"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage", "diffusion_pixart_torchtrt",
+        "diffusion_zimage", "diffusion_qwen_image", "diffusion_pixart_torchtrt",
     ],
 }
 

@@ -378,6 +378,12 @@ def _build_inputs(manifest: dict) -> dict:
         inputs["image_height"] = manifest["image_height"]
         inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
 
+    # Qwen-Image (and other image-only diffusion) extras.
+    for key in ("negative_prompt", "cfg_scale", "height", "width",
+                "num_inference_steps"):
+        if key in manifest and key not in inputs:
+            inputs[key] = manifest[key]
+
     # Numeric tensor inputs for neural-operator / one-shot dense models
     for key in ("field_input", "branch_input", "trunk_input", "output_field"):
         if key in manifest:
@@ -467,6 +473,8 @@ def _build_metadata(manifest: dict) -> dict:
         "stages", "comparison_profile", "threshold_overrides", "determinism",
         "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
+        "negative_prompt", "cfg_scale", "height", "width",
+        "image_height", "image_width",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -528,6 +536,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_ltx",
     "diffusion_wan",
     "diffusion_zimage",
+    "diffusion_qwen_image",
     "diffusion_pixart",
     "torchtrt_diffusion",
     "diffusion_pixart_torchtrt",
