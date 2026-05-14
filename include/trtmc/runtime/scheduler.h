@@ -14,7 +14,7 @@
 namespace trtmc {
 
 class IScheduler {
-public:
+  public:
     virtual ~IScheduler() = default;
 
     // Configure the timestep schedule for the given number of steps.
@@ -28,37 +28,66 @@ public:
 
     // Single scheduler step: update latents in-place.
     // latents += (sigma_next - sigma) * velocity
-    virtual void step(float* latents, const float* velocity,
-                      int32_t num_elements, int32_t step_index) = 0;
+    virtual void step(float* latents, const float* velocity, int32_t num_elements,
+                      int32_t step_index) = 0;
+};
+
+// Full FlowMatchEulerDiscreteScheduler configuration. Mirrors the diffusers
+// constructor surface that Qwen-Image relies on. The defaults match the
+// legacy static-shift behavior used by FLUX / Z-Image so the existing
+// single-arg constructor remains a no-op equivalent.
+struct FlowMatchEulerConfig {
+    int32_t num_train_timesteps = 1000;
+    float shift = 1.0f; // static shift; used when use_dynamic_shifting=false
+    bool use_dynamic_shifting = false;
+    float base_shift = 0.5f;
+    float max_shift = 1.15f;
+    int32_t base_image_seq_len = 256;
+    int32_t max_image_seq_len = 4096;
+    float shift_terminal = 0.0f; // 0 = disabled (matches diffusers None)
+    // "exponential" or empty/"linear". Empty defaults to "exponential" when
+    // use_dynamic_shifting=true (diffusers' default).
+    std::string time_shift_type;
 };
 
 // Flow Matching Euler Discrete Scheduler.
-// Used by: FLUX, Wan, Z-Image, SD3.
+// Used by: FLUX, Wan, Z-Image, SD3, Qwen-Image.
+//
+// Two construction modes:
+//   - Static-shift (FLUX / Z-Image): pass `shift` directly. Equivalent to
+//     diffusers' use_dynamic_shifting=False.
+//   - Full config (Qwen-Image): pass FlowMatchEulerConfig. Supports
+//     dynamic-mu shifting, exponential time_shift_type, and shift_terminal.
 class FlowMatchEulerScheduler final : public IScheduler {
-public:
-    explicit FlowMatchEulerScheduler(float shift = 1.0f,
-                                      int32_t num_train_timesteps = 1000);
+  public:
+    explicit FlowMatchEulerScheduler(float shift = 1.0f, int32_t num_train_timesteps = 1000);
+    explicit FlowMatchEulerScheduler(const FlowMatchEulerConfig& cfg);
 
+    // Static-shift path (matches the original behavior, unchanged for FLUX).
     void set_timesteps(int32_t num_steps) override;
+
+    // Dynamic-shifting path. Mirrors diffusers'
+    //   sigmas = np.linspace(1.0, 1.0/N, N)
+    //   set_timesteps(sigmas=sigmas, mu=calculate_shift(image_seq_len, ...))
+    // when use_dynamic_shifting=true. Falls back to the static-shift path
+    // when use_dynamic_shifting=false (image_seq_len ignored).
+    void set_timesteps(int32_t num_steps, int32_t image_seq_len);
+
     const std::vector<float>& timesteps() const override { return timesteps_; }
     const std::vector<float>& sigmas() const override { return sigmas_; }
 
-    void step(float* latents, const float* velocity,
-              int32_t num_elements, int32_t step_index) override;
+    void step(float* latents, const float* velocity, int32_t num_elements,
+              int32_t step_index) override;
 
-private:
-    float shift_;
-    int32_t num_train_timesteps_;
+  private:
+    FlowMatchEulerConfig cfg_;
     std::vector<float> timesteps_;
     std::vector<float> sigmas_;
 };
 
 // Factory: create scheduler by name.
-inline std::unique_ptr<IScheduler> create_scheduler(
-    const std::string& name, float shift = 1.0f)
-{
-    if (name == "flow_match_euler")
-    {
+inline std::unique_ptr<IScheduler> create_scheduler(const std::string& name, float shift = 1.0f) {
+    if (name == "flow_match_euler") {
         return std::make_unique<FlowMatchEulerScheduler>(shift);
     }
     return nullptr;

@@ -7,6 +7,9 @@
 //                        [--initial-latents-raw PATH] [--condition-latents-raw PATH]
 //                        [--condition-mask-raw PATH] [--sampling-steps-raw PATH]
 //                        [--sde-noise-raw PATH] [--output samples.jsonl] [--hf-python PATH]
+//                        Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image):
+//                        [--negative-prompt "text"] [--num-inference-steps N]
+//                        [--height N] [--width N]
 //   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
@@ -79,6 +82,10 @@ struct CliArgs {
     float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
+    // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
+    std::string negative_prompt;
+    int diffusion_height{0}; // 0 = use bundle default
+    int diffusion_width{0};  // 0 = use bundle default
     bool greedy{false};
     bool stream{false};
     bool pad_and_drop_preencoded{false};
@@ -175,6 +182,9 @@ void print_usage() {
            "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
            "[--condition-mask-raw PATH] [--sampling-steps-raw PATH] [--sde-noise-raw PATH] "
            "[--output samples.jsonl]\n"
+           "                        Diffusion text-to-image extras (Qwen-Image, FLUX, "
+           "Z-Image): [--negative-prompt \"text\"] "
+           "[--num-inference-steps N] [--height N] [--width N]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
@@ -353,7 +363,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.sde_noise_raw = argv[++i];
             continue;
         }
-        if (arg == "--num-steps" && need_value(arg)) {
+        if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
             args.num_steps = std::atoi(argv[++i]);
             continue;
         }
@@ -363,6 +373,18 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
             args.sde_gamma = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--negative-prompt" && need_value(arg)) {
+            args.negative_prompt = argv[++i];
+            continue;
+        }
+        if (arg == "--height" && need_value(arg)) {
+            args.diffusion_height = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--width" && need_value(arg)) {
+            args.diffusion_width = std::atoi(argv[++i]);
             continue;
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
@@ -661,12 +683,33 @@ int cmd_run(const CliArgs& args) {
         }
         cfg.sde_noises = std::move(*noise);
     }
+    // Diffusion-only knobs. Non-diffusion pipelines ignore these.
+    cfg.negative_prompt = args.negative_prompt;
+    cfg.height = args.diffusion_height;
+    cfg.width = args.diffusion_width;
+    // --cfg-scale is an alias for --guidance-scale on the diffusion path.
+    // Prefer an explicitly set --cfg-scale if the user provided one.
+    if (args.cfg_scale >= 0.0F) {
+        cfg.guidance_scale = args.cfg_scale;
+    }
 
     // Detect diffusion pipelines — they use generate_image(), not generate().
     const bool is_diffusion =
         (ptype.find("Diffusion") != std::string::npos || ptype.find("Flux") != std::string::npos ||
          ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos ||
-         ptype.find("LTX") != std::string::npos);
+         ptype.find("LTX") != std::string::npos || ptype.find("QwenImage") != std::string::npos);
+
+    // Diffusion pipelines may consume shared initial latents from a raw fp32
+    // file (E2E shared-latents path; mirrors the cmd_generate_video plumbing).
+    if (is_diffusion && !args.initial_latents_raw.empty()) {
+        std::string error;
+        auto latents = read_float32_raw_file(args.initial_latents_raw, error);
+        if (!latents) {
+            std::cerr << "Error: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.initial_latents = std::move(*latents);
+    }
 
     if (args.benchmark > 0) {
         // Benchmark mode: warmup, then N timed iterations.
@@ -726,17 +769,10 @@ int cmd_run(const CliArgs& args) {
             out_path = out_dir + "/output.png";
         }
 
-        const auto frame_pixels =
-            static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width) * 3;
-        std::vector<unsigned char> rgb(frame_pixels);
-        for (std::size_t i = 0; i < frame_pixels; ++i) {
-            const float v = std::max(0.0F, std::min(1.0F, result.pixels[i]));
-            rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
-        }
-
-        const int stride = result.width * 3;
-        if (!stbi_write_png(out_path.c_str(), result.width, result.height, 3, rgb.data(), stride)) {
-            std::cerr << "Error: failed to write " << out_path << '\n';
+        try {
+            trtmc::io::save_png(result, out_path);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
             return EXIT_FAILURE;
         }
         std::cout << "Saved " << out_path << " (" << result.width << "x" << result.height << ")\n";
@@ -1461,8 +1497,7 @@ int apply_cli_config(const CliArgs& args) {
         return EXIT_SUCCESS;
     if (trtmc::config::SchemaRegistry::instance().registered_namespaces().empty()) {
         std::cerr << "[trtmc] --config/--set accepted but no config schemas are "
-                     "registered yet; values have no effect. Phase 4 cluster "
-                     "migrations add schemas."
+                     "registered yet; values have no effect."
                   << '\n';
         return EXIT_SUCCESS;
     }

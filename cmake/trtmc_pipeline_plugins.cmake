@@ -33,6 +33,7 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/ltx_video/plugin.cpp|register_ltx_video_plugin"
   "models/wan/plugin.cpp|register_wan_plugin"
   "models/z_image/plugin.cpp|register_zimage_plugin"
+  "models/qwen_image/plugin.cpp|register_qwen_image_plugin"
   "models/t5/plugin.cpp|register_t5_plugin"
   "models/marian/plugin.cpp|register_marian_plugin"
   "models/seq2seq/plugin.cpp|register_seq2seq_plugin"

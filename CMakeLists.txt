@@ -159,6 +159,7 @@ add_library(trtmc_core
   src/runtime/domains/audio/mel_spectrogram.cpp
   src/runtime/domains/audio/audio_bundle_validation.cpp
   src/runtime/domains/diffusion/diffusion_preprocessor.cpp
+  src/runtime/domains/diffusion/qwen_image_types.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
@@ -204,6 +205,7 @@ add_library(trtmc_core
   src/runtime/models/ltx_video/pipeline.cpp
   src/runtime/models/wan/pipeline.cpp
   src/runtime/models/z_image/pipeline.cpp
+  src/runtime/models/qwen_image/pipeline.cpp
   src/runtime/models/whisper/pipeline.cpp
   src/runtime/models/rnnt/pipeline.cpp
   src/runtime/models/bark/pipeline.cpp

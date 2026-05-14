@@ -112,6 +112,13 @@ struct GenerateConfig {
     std::vector<float> condition_mask;    // ELF: [max_length], >0 marks fixed cond tokens
     std::vector<float> sampling_steps;    // ELF: optional upstream t_steps [num_steps + 1]
     std::vector<float> sde_noises;        // ELF: optional scaled eps [num_steps - 1, L, D]
+    // Diffusion (text-to-image): optional override for the negative prompt.
+    // Empty means "use the bundle's default negative prompt".
+    std::string negative_prompt;
+    // Diffusion (text-to-image): optional output image size override. <=0
+    // means "use the bundle's default height/width".
+    int32_t height{0};
+    int32_t width{0};
     int32_t eos_token_id{-1};
     int32_t tail_frames{0};           // speech-to-speech: extra frames after input
     bool use_chat_template{false};    ///< Apply chat template before tokenization

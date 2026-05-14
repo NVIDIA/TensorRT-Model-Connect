@@ -18,4 +18,18 @@ std::vector<float> extract_json_float_array(const std::string& text, const std::
 std::vector<int32_t> extract_json_int_array(const std::string& text, const std::string& key,
                                             std::size_t max_count = 16);
 
+// Parse a JSON literal boolean (true/false) for the given key. Also accepts
+// integer 0/1. Returns `fallback` if the key is missing or unparseable.
+bool extract_json_bool(const std::string& text, const std::string& key, bool fallback);
+
+// Parse a JSON array of booleans (true/false), returning each element.
+std::vector<bool> extract_json_bool_array(const std::string& text, const std::string& key,
+                                          std::size_t max_count = 16);
+
+// Extract a nested JSON object's text (including the enclosing braces) for the
+// given key. Returns an empty string if the key is absent or the value is not
+// an object. Useful for scoping further extractions to a sub-section without
+// risking key collisions with siblings.
+std::string extract_json_object_text(const std::string& text, const std::string& key);
+
 } // namespace trtmc

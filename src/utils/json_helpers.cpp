@@ -275,4 +275,135 @@ std::vector<int32_t> extract_json_int_array(const std::string& text, const std::
     return extract_numeric_array_impl<int32_t>(text, key, max_count, is_int_char, parse_int);
 }
 
+namespace {
+
+// Match either JSON literal `true`/`false` or numeric 0/1 at `pos`. Returns
+// {parsed_value, end_index} on success; `end == pos` on failure.
+struct BoolMatch {
+    bool value;
+    std::size_t end;
+    bool ok;
+};
+
+BoolMatch read_bool_token(const std::string& text, std::size_t pos) {
+    BoolMatch m{false, pos, false};
+    if (pos >= text.size()) {
+        return m;
+    }
+    if (text.compare(pos, 4, "true") == 0) {
+        m.value = true;
+        m.end = pos + 4;
+        m.ok = true;
+        return m;
+    }
+    if (text.compare(pos, 5, "false") == 0) {
+        m.value = false;
+        m.end = pos + 5;
+        m.ok = true;
+        return m;
+    }
+    if (is_digit_char(text[pos])) {
+        const std::size_t end = scan_while(text, pos, is_digit_char);
+        try {
+            const int v = std::stoi(text.substr(pos, end - pos));
+            m.value = (v != 0);
+            m.end = end;
+            m.ok = true;
+        } catch (const std::exception&) {
+            // fall through
+        }
+    }
+    return m;
+}
+
+} // namespace
+
+bool extract_json_bool(const std::string& text, const std::string& key, bool fallback) {
+    std::size_t colon = 0;
+    if (!find_key_colon(text, key, colon)) {
+        return fallback;
+    }
+    const std::size_t pos = skip_whitespace(text, colon + 1);
+    const BoolMatch m = read_bool_token(text, pos);
+    if (!m.ok) {
+        return fallback;
+    }
+    return m.value;
+}
+
+std::vector<bool> extract_json_bool_array(const std::string& text, const std::string& key,
+                                          std::size_t max_count) {
+    std::vector<bool> out;
+    std::size_t colon = 0;
+    if (!find_key_colon(text, key, colon)) {
+        return out;
+    }
+    std::size_t open_bracket = 0;
+    if (!find_array_start(text, colon, open_bracket)) {
+        return out;
+    }
+    std::size_t pos = open_bracket + 1;
+    while (pos < text.size() && out.size() < max_count) {
+        if (advance_array_pos(text, pos) != ArrayParseState::kReady) {
+            break;
+        }
+        const BoolMatch m = read_bool_token(text, pos);
+        if (!m.ok) {
+            break;
+        }
+        out.push_back(m.value);
+        pos = m.end;
+    }
+    return out;
+}
+
+namespace {
+// Updates in_string / escape based on c. Returns true if c is inside a string
+// (or a quote that toggled string state) and should be ignored by the
+// brace-depth tracker.
+bool inside_string_state(char c, bool& in_string, bool& escape) {
+    if (in_string) {
+        if (escape) {
+            escape = false;
+        } else if (c == '\\') {
+            escape = true;
+        } else if (c == '"') {
+            in_string = false;
+        }
+        return true;
+    }
+    if (c == '"') {
+        in_string = true;
+        return true;
+    }
+    return false;
+}
+} // namespace
+
+std::string extract_json_object_text(const std::string& text, const std::string& key) {
+    std::size_t colon = 0;
+    if (!find_key_colon(text, key, colon)) {
+        return "";
+    }
+    const std::size_t brace = text.find('{', colon + 1);
+    if (brace == std::string::npos) {
+        return "";
+    }
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    for (std::size_t i = brace; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inside_string_state(c, in_string, escape)) {
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}' && --depth == 0) {
+            return text.substr(brace, i - brace + 1);
+        }
+    }
+    return "";
+}
+
 } // namespace trtmc
