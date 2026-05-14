@@ -12,25 +12,28 @@ from tests.e2e_harness.runners.text_generation import TextGenerationCausalRunner
 
 
 def test_multi_device_qwen_manifests_declare_tp_build_and_mpirun_runtime() -> None:
-    for tp_size in (2, 4, 8):
-        case = get_case_by_name(f"qwen3-0.6b-fp16-tp{tp_size}")
-        assert case is not None
-        assert case.metadata["ci_tier"] == "multi_device"
-        assert "TensorRT 11.0+" in case.metadata["notes"]
-        assert case.metadata["build_args"]["parallel"] == {
-            "mode": "tensor_parallel",
-            "tp_size": tp_size,
-        }
-        assert case.metadata["distributed_runtime"]["enabled"] is True
-        assert case.metadata["distributed_runtime"]["world_size"] == tp_size
-        assert case.metadata["distributed_runtime"]["capture_gpu_memory"] is True
-        assert case.metadata["distributed_runtime"]["debug_logits"] is True
-        assert [req.kind for req in case.preflight] == [
-            "binary_exists",
-            "command_available",
-            "gpu_count_min",
-        ]
-        assert case.preflight[-1].args["count"] == tp_size
+    for case_prefix in ("qwen3-0.6b-fp16", "qwen3-4b-instruct-2507"):
+        for tp_size in (2, 4, 8):
+            case = get_case_by_name(f"{case_prefix}-tp{tp_size}")
+            assert case is not None
+            assert case.family == "qwen"
+            assert case.runtime_strategy == "decoder_kv_cache"
+            assert case.metadata["ci_tier"] == "multi_device"
+            assert "TensorRT 11.0+" in case.metadata["notes"]
+            assert case.metadata["build_args"]["parallel"] == {
+                "mode": "tensor_parallel",
+                "tp_size": tp_size,
+            }
+            assert case.metadata["distributed_runtime"]["enabled"] is True
+            assert case.metadata["distributed_runtime"]["world_size"] == tp_size
+            assert case.metadata["distributed_runtime"]["capture_gpu_memory"] is True
+            assert case.metadata["distributed_runtime"]["debug_logits"] is True
+            assert [req.kind for req in case.preflight] == [
+                "binary_exists",
+                "command_available",
+                "gpu_count_min",
+            ]
+            assert case.preflight[-1].args["count"] == tp_size
 
 
 def test_e2e_build_args_append_parallel_config_sets() -> None:

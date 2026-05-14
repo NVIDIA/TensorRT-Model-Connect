@@ -27,6 +27,9 @@ The current Qwen TensorRT 11.0+ tensor-parallel manifests are:
 - `qwen3-0.6b-fp16-tp2`
 - `qwen3-0.6b-fp16-tp4`
 - `qwen3-0.6b-fp16-tp8`
+- `qwen3-4b-instruct-2507-tp2`
+- `qwen3-4b-instruct-2507-tp4`
+- `qwen3-4b-instruct-2507-tp8`
 
 Each manifest sets `build_args.parallel.mode=tensor_parallel`,
 `build_args.parallel.tp_size=<N>`, and `distributed_runtime.world_size=<N>`.
