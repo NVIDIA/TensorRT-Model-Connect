@@ -85,6 +85,18 @@ def test_csv_labels_empty_single_and_preserves_order() -> None:
     assert ai_agent_system.csv_labels(labels) == "ai:sanity-pending,ai-generated,ai:staging-mr"
 
 
+def test_task_issue_labels_include_ai_tags() -> None:
+    labels = ai_agent_system.task_issue_labels(["priority:high"])
+
+    assert labels == ["AI", "ai-generated", "ai:task", "ai:ready", "priority:high"]
+
+
+def test_task_issue_labels_deduplicate_ai_tags() -> None:
+    labels = ai_agent_system.task_issue_labels(["AI", "ai-generated", "ai:needs-human"])
+
+    assert labels == ["AI", "ai-generated", "ai:task", "ai:ready", "ai:needs-human"]
+
+
 def test_schedule_variables_handles_missing_key_and_coerces_values() -> None:
     # Schedule with no "variables" field at all -> empty dict, no KeyError.
     assert ai_agent_system.schedule_variables({}) == {}

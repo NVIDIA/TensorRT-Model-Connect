@@ -21,13 +21,16 @@ DEFAULT_TARGET = "ai-staging"
 DEFAULT_PROMOTION_TARGET = "master"
 DEFAULT_SOURCE_PREFIXES = ("ai-task-",)
 ACTIVE_PIPELINE_STATUSES = {"created", "waiting_for_resource", "preparing", "pending", "running"}
+AI_LABEL = "AI"
+AI_GENERATED_LABEL = "ai-generated"
 
 LABELS: dict[str, tuple[str, str]] = {
+    AI_LABEL: ("#5319E7", "Human-facing tag for issues or merge requests produced by an AI agent."),
     "ai:task": ("#1F75CB", "Work item generated for AI implementation."),
     "ai:ready": ("#0E8A16", "Task is ready for an implementation agent."),
     "ai:claimed": ("#FBCA04", "Task has been claimed by an implementation agent."),
     "ai:implementing": ("#FBCA04", "Implementation is in progress."),
-    "ai-generated": ("#5319E7", "Merge request was produced by an AI agent."),
+    AI_GENERATED_LABEL: ("#5319E7", "Issue or merge request was produced by an AI agent."),
     "ai:staging-mr": ("#0052CC", "AI-generated merge request targeting ai-staging."),
     "ai:sanity-pending": ("#BFDADC", "MR is waiting for sanity CI."),
     "ai:sanity-failed": ("#D93F0B", "MR failed minimal CI and needs rework."),
@@ -175,6 +178,14 @@ def paginated(cfg: Config, path: str) -> list[dict[str, Any]]:
 
 def csv_labels(labels: list[str]) -> str:
     return ",".join(labels)
+
+
+def task_issue_labels(extra_labels: list[str]) -> list[str]:
+    labels = [AI_LABEL, AI_GENERATED_LABEL, "ai:task", "ai:ready"]
+    for label in extra_labels:
+        if label not in labels:
+            labels.append(label)
+    return labels
 
 
 def has_any_prefix(value: str, prefixes: tuple[str, ...]) -> bool:
@@ -350,7 +361,7 @@ def cmd_create_task(args: argparse.Namespace) -> int:
         non_goals=args.non_goal,
         risk=args.risk,
     )
-    labels = ["ai:task", "ai:ready", *args.label]
+    labels = task_issue_labels(args.label)
     fields = {"title": args.title, "description": body, "labels": csv_labels(labels)}
     if cfg.dry_run:
         print(json.dumps(fields, indent=2))
@@ -496,7 +507,7 @@ def cmd_mark_rework(args: argparse.Namespace) -> int:
             cfg,
             "issues",
             issue_iid,
-            add={"ai:task", "ai:needs-rework"},
+            add={AI_LABEL, AI_GENERATED_LABEL, "ai:task", "ai:needs-rework"},
             remove={"ai:ready", "ai:claimed", "ai:implementing", "ai:dropped", "ai:needs-human"},
             extra_fields=extra_fields,
         )
