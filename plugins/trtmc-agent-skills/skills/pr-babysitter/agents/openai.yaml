@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Babysitter"
+  short_description: "Monitor GitHub PR checks and repair failing branches"
+  default_prompt: "Use $pr-babysitter to check open PRs and fix CI failures where appropriate."

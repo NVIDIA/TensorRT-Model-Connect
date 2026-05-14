@@ -1,0 +1,4 @@
+interface:
+  display_name: "Submit GitHub PR"
+  short_description: "Push a branch and open a GitHub pull request"
+  default_prompt: "Use $submit-github-pr to push this branch and open a PR against main."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Profile Model"
+  short_description: "Profile TRT model latency, throughput, and bottlenecks"
+  default_prompt: "Use $profile-model to profile this model and summarize the bottleneck."

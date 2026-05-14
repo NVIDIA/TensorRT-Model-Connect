@@ -1,0 +1,4 @@
+interface:
+  display_name: "Doc Sync"
+  short_description: "Repair ADR, wiki, and traceability documentation drift"
+  default_prompt: "Use $doc-sync to scan documentation drift and prepare focused GitHub PRs."

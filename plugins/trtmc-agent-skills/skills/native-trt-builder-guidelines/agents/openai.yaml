@@ -1,0 +1,4 @@
+interface:
+  display_name: "Native TRT Builder Guidelines"
+  short_description: "Apply TensorRT builder rules for strongly typed native graphs"
+  default_prompt: "Use $native-trt-builder-guidelines while modifying this TensorRT builder or graph helper."

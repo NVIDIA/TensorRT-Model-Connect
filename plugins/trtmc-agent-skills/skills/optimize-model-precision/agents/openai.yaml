@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize Model Precision"
+  short_description: "Find and validate lower-precision TRT model configurations"
+  default_prompt: "Use $optimize-model-precision to find the best verified low-precision setup for this model."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transform Model"
+  short_description: "Add or transform a HuggingFace model into a TRT bundle"
+  default_prompt: "Use $transform-model to add this HuggingFace model and produce validation output."

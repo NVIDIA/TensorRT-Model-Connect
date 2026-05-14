@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug TRT Mismatch"
+  short_description: "Isolate TensorRT vs HuggingFace numerical divergence"
+  default_prompt: "Use $debug-trt-mismatch to investigate why this TRT model output differs from HuggingFace."

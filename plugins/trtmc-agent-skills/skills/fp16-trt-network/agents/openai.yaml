@@ -1,0 +1,4 @@
+interface:
+  display_name: "FP16 TRT Network"
+  short_description: "Add or debug FP16 support in strongly typed TensorRT graphs"
+  default_prompt: "Use $fp16-trt-network to review this FP16 TensorRT builder change."
