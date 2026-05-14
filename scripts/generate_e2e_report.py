@@ -1718,130 +1718,26 @@ def render_env_section(results: List[Dict[str, Any]]) -> str:
 # Full report assembly
 # ---------------------------------------------------------------------------
 
-_CSS = """\
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-  Helvetica, Arial, sans-serif; background: #f8f9fa; color: #1a1a2e;
-  max-width: 1400px; margin: 0 auto; padding: 20px; }
-h1 { margin-bottom: 8px; }
-h2 { margin: 24px 0 12px; }
-h4 { margin: 12px 0 6px; }
-.subtitle { color: #6b7280; margin-bottom: 20px; }
-.badge { display: inline-block; padding: 2px 10px; border-radius: 12px;
-  color: #fff; font-size: 0.8em; font-weight: 600; }
-.counters { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.counter { padding: 6px 16px; border-radius: 8px; font-weight: 600;
-  font-size: 0.95em; }
-.pass-counter { background: #dcfce7; color: #166534; }
-.fail-counter { background: #fee2e2; color: #991b1b; }
-.skip-counter { background: #fef9c3; color: #854d0e; }
-.error-counter { background: #ffedd5; color: #9a3412; }
-.total-counter { background: #e0e7ff; color: #3730a3; }
-.filters { display: flex; gap: 8px; margin-bottom: 12px; }
-#search-box { padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 6px;
-  flex: 1; max-width: 300px; }
-#status-filter { padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 6px; }
-.summary-table, .metrics-table, .timing-table { width: 100%;
-  border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
-.summary-table th, .metrics-table th, .timing-table th { background: #1e293b;
-  color: #fff; padding: 8px 12px; text-align: left; }
-.summary-table td, .metrics-table td, .timing-table td { padding: 6px 12px;
-  border-bottom: 1px solid #e2e8f0; }
-.summary-table tbody tr:hover { background: #f1f5f9; }
-.metric-pass { background: #f0fdf4; }
-.metric-fail { background: #fef2f2; }
-.pass-icon { color: #16a34a; font-weight: bold; }
-.fail-icon { color: #dc2626; font-weight: bold; }
-.total-row td { font-weight: 700; border-top: 2px solid #1e293b; }
-details { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
-  margin: 8px 0; }
-details[open] { border-color: #94a3b8; }
-summary { padding: 12px 16px; cursor: pointer; font-size: 1em; }
-summary:hover { background: #f8fafc; }
-.timing-expand, .timing-expand[open] { background: transparent; border: 0;
-  border-radius: 0; margin: 0; }
-.timing-expand summary { padding: 0; font-size: inherit; font-weight: 600;
-  line-height: 1.35; }
-.timing-expand summary:hover { background: transparent; }
-.timing-breakdown { margin-top: 6px; display: grid; gap: 3px; color: #475569;
-  font-size: 0.92em; }
-.timing-breakdown-row { display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px; align-items: baseline; }
-.timing-breakdown-row span:first-child { min-width: 0; overflow-wrap: anywhere; }
-.timing-breakdown-row span:last-child { white-space: nowrap;
-  font-variant-numeric: tabular-nums; }
-.model-body { padding: 12px 16px; }
-.failure-info { color: #dc2626; margin-bottom: 8px; }
-.waive-info { color: #92400e; margin-bottom: 8px; }
-.text-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-  margin: 8px 0; }
-.text-col pre { background: #f1f5f9; padding: 12px; border-radius: 6px;
-  white-space: pre-wrap; word-break: break-word; font-size: 0.85em;
-  max-height: 300px; overflow-y: auto; }
-.code-wrap { position: relative; margin: 6px 0; }
-.code-wrap pre { background: #1e293b; color: #e2e8f0; padding: 12px;
-  border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
-.copy-btn { position: absolute; top: 6px; right: 6px; background: #475569;
-  color: #fff; border: none; border-radius: 4px; padding: 2px 8px;
-  cursor: pointer; font-size: 0.75em; }
-.copy-btn:hover { background: #64748b; }
-.frame-gallery { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
-.frame-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px; margin: 8px 0; }
-.frame-pair { border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px;
-  background: #fff; }
-.frame-pair-title { font-weight: 600; font-size: 0.85em; margin-bottom: 6px; }
-.frame-pair-images { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.frame-pair figure { margin: 0; }
-.frame-pair figcaption { font-size: 0.75em; color: #64748b; margin-bottom: 3px; }
-.frame-pair .frame-img { width: 100%; height: auto; max-height: 170px;
-  object-fit: contain; background: #f8fafc; }
-.frame-img { max-width: 220px; max-height: 180px; border-radius: 4px;
-  border: 1px solid #e2e8f0; }
-.preview-img { max-width: 400px; max-height: 300px; border-radius: 6px;
-  margin: 6px 0; border: 1px solid #e2e8f0; }
-.vlm-assessment { margin: 12px 0; padding: 10px; border: 1px solid #e2e8f0;
-  border-radius: 6px; background: #f8fafc; }
-.vlm-pass { color: #166534; }
-.vlm-fail { color: #991b1b; }
-.vlm-table { width: 100%; border-collapse: collapse; margin: 6px 0;
-  font-size: 0.9em; }
-.vlm-table td { padding: 5px 8px; border-bottom: 1px solid #e2e8f0; }
-.vlm-table td:first-child { width: 220px; color: #475569; font-weight: 600; }
-audio { margin: 6px 0; }
-.missing { color: #9ca3af; font-style: italic; }
-.env-section ul { list-style: none; columns: 2; }
-.env-section li { padding: 2px 0; font-size: 0.9em; }
-.repro-section { margin-top: 12px; }
-@media (max-width: 768px) {
-  .text-compare { grid-template-columns: 1fr; }
-  .env-section ul { columns: 1; }
-}
-"""
+_REPORT_ASSETS_DIR = Path(__file__).resolve().with_name("generate_e2e_report_assets")
+_REPORT_CSS_FILENAME = "e2e_report.css"
+_REPORT_JS_FILENAME = "e2e_report.js"
 
-_JS = """\
-function copyCmd(id) {
-  var el = document.getElementById(id);
-  if (!el) return;
-  var text = el.textContent || el.innerText;
-  navigator.clipboard.writeText(text).then(function() {
-    var btn = el.parentElement.querySelector('.copy-btn');
-    if (btn) { btn.textContent = 'Copied!'; setTimeout(function() {
-      btn.textContent = 'Copy'; }, 1500); }
-  });
-}
-function filterModels() {
-  var q = (document.getElementById('search-box').value || '').toLowerCase();
-  var s = document.getElementById('status-filter').value;
-  var rows = document.querySelectorAll('.summary-row');
-  for (var i = 0; i < rows.length; i++) {
-    var name = rows[i].getAttribute('data-name') || '';
-    var status = rows[i].getAttribute('data-status') || '';
-    var show = (!q || name.indexOf(q) >= 0) && (!s || status === s);
-    rows[i].style.display = show ? '' : 'none';
-  }
-}
-"""
+
+def _load_report_asset(filename: str) -> str:
+    """Load a report asset that will be embedded into the generated HTML."""
+    asset_path = _REPORT_ASSETS_DIR / filename
+    try:
+        return asset_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Missing E2E report asset: {asset_path}") from exc
+
+
+def _load_report_css() -> str:
+    return _load_report_asset(_REPORT_CSS_FILENAME)
+
+
+def _load_report_js() -> str:
+    return _load_report_asset(_REPORT_JS_FILENAME)
 
 
 def render_report(
@@ -1862,7 +1758,7 @@ def render_report(
         '<meta name="viewport" content="width=device-width, initial-scale=1" />'
     )
     parts.append(f"<title>{_esc(title)}</title>")
-    parts.append(f"<style>{_CSS}</style>")
+    parts.append(f"<style>{_load_report_css()}</style>")
     parts.append("</head><body>")
     parts.append(f"<h1>{_esc(title)}</h1>")
 
@@ -1884,7 +1780,7 @@ def render_report(
     for r in results:
         parts.append(render_model_section(r, project_dir))
 
-    parts.append(f"<script>{_JS}</script>")
+    parts.append(f"<script>{_load_report_js()}</script>")
     parts.append("</body></html>")
     return "\n".join(parts)
 

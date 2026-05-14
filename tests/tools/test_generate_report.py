@@ -340,6 +340,35 @@ class TestEncodeFileBase64:
 class TestRenderReport:
     """Integration tests for the full render_report pipeline."""
 
+    def test_external_assets_are_loaded_from_files(self):
+        mod = _import_report()
+        css = mod._load_report_asset(mod._REPORT_CSS_FILENAME)
+        js = mod._load_report_asset(mod._REPORT_JS_FILENAME)
+
+        assert ".summary-table" in css
+        assert "function filterModels()" in js
+
+    def test_render_report_embeds_loaded_external_assets(self, tmp_path, monkeypatch):
+        mod = _import_report()
+        assets_dir = tmp_path / "assets"
+        assets_dir.mkdir()
+        (assets_dir / mod._REPORT_CSS_FILENAME).write_text(
+            ".external-asset-test { color: red; }\n",
+            encoding="utf-8",
+        )
+        (assets_dir / mod._REPORT_JS_FILENAME).write_text(
+            "function externalAssetTest() { return true; }\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_REPORT_ASSETS_DIR", assets_dir)
+
+        html = mod.render_report([], title="External Asset Report")
+
+        assert "<style>.external-asset-test { color: red; }\n</style>" in html
+        assert (
+            "<script>function externalAssetTest() { return true; }\n</script>" in html
+        )
+
     def test_empty_results(self):
         mod = _import_report()
         html = mod.render_report([], title="Empty Report")
