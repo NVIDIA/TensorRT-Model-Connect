@@ -82,7 +82,8 @@ def mock_repo(tmp_path):
         {"name": "bert-base", "family": "bert", "runtime_strategy": "encoder_only",
          "hf_id": "bert-base", "core": True},
         {"name": "whisper-tiny-fp16", "family": "whisper", "runtime_strategy": "speech_to_text",
-         "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True},
+         "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True,
+         "test_input_audio": "tests/e2e/data/Recording.wav"},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
         {"name": "z-image-turbo", "family": "z_image", "runtime_strategy": "diffusion_zimage",
@@ -94,7 +95,7 @@ def mock_repo(tmp_path):
         {"name": "mamba-130m", "family": "mamba", "runtime_strategy": "ssm_recurrent",
          "hf_id": "ss/mamba", "core": True},
         {"name": "qwen25vl-3b", "family": "qwen_vl", "runtime_strategy": "vision_language",
-         "hf_id": "Q/Q25VL", "core": True},
+         "hf_id": "Q/Q25VL", "test_image": "data/test_img.jpeg", "core": True},
         {"name": "bark-small", "family": "bark", "runtime_strategy": "text_to_audio_bark",
          "hf_id": "suno/bark", "core": True},
         {"name": "sam-vit", "family": "sam", "runtime_strategy": "prompted_segmentation",
@@ -603,6 +604,37 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".agents/plugins/marketplace.json",
+            "plugins/trtmc-agent-skills/.codex-plugin/plugin.json",
+            "plugins/trtmc-agent-skills/skills/fp16-trt-network/agents/openai.yaml",
+        ],
+    )
+    def test_agent_plugin_metadata_no_impact(self, imap, path):
+        """Codex agent/plugin metadata should not trigger E2E selection."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "no_impact"
+        assert match.models == []
+        assert match.unit_tiers == []
+        assert match.rebuild_cpp is False
+
+    def test_agent_plugin_metadata_aggregate_no_e2e(self, imap):
+        """Agent-only plugin edits should aggregate to no selected E2E models."""
+        result = test_impact.analyze_impact(
+            [
+                ".agents/plugins/marketplace.json",
+                "plugins/trtmc-agent-skills/.codex-plugin/plugin.json",
+                "plugins/trtmc-agent-skills/skills/debug-trt-mismatch/SKILL.md",
+                "plugins/trtmc-agent-skills/skills/debug-trt-mismatch/agents/openai.yaml",
+            ],
+            imap,
+        )
+        assert result.e2e_models == []
+        assert result.unit_tiers == []
+        assert result.rebuild_cpp is False
+
 
 class TestE2EDataFiles:
     def test_data_file_maps_to_manifest_users(self, imap):
@@ -611,6 +643,20 @@ class TestE2EDataFiles:
             "tests/e2e/data/flux2-fp8-scales.json", imap)
         assert match.rule == "e2e_data_file"
         assert match.models == ["flux-2-dev-fp8"]
+
+    def test_repo_relative_data_file_maps_to_manifest_users(self, imap):
+        """Manifest tests/e2e/data references should select only their users."""
+        match = test_impact.classify_file(
+            "tests/e2e/data/Recording.wav", imap)
+        assert match.rule == "e2e_data_file"
+        assert match.models == ["whisper-tiny-fp16"]
+
+    def test_manifest_relative_data_file_maps_to_manifest_users(self, imap):
+        """Manifest data/ references resolve relative to tests/e2e/."""
+        match = test_impact.classify_file(
+            "tests/e2e/data/test_img.jpeg", imap)
+        assert match.rule == "e2e_data_file"
+        assert match.models == ["qwen25vl-3b"]
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +688,14 @@ class TestUnitTiers:
         assert match.rule == "unit_tools"
         assert match.models == []
         assert "tools" in match.unit_tiers
+
+    def test_unit_tier_torchtrt_engine_defs(self, imap):
+        """Torch-TRT engine-def tests run as builder tests without E2E."""
+        match = test_impact.classify_file(
+            "tests/engine_defs/torch_trt/test_config.py", imap)
+        assert match.rule == "unit_torchtrt_builder"
+        assert match.models == []
+        assert "builder" in match.unit_tiers
 
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""

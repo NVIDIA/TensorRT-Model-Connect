@@ -218,6 +218,8 @@ _NO_IMPACT_PATTERNS = [
     r"^\.gitlab-ci\.yml$",
     r"^\.gitlab/",
     r"^\.claude/",
+    r"^\.agents/",
+    r"^plugins/trtmc-agent-skills/",
     r"^LICENSE",
     r"^CLAUDE\.md$",
     r"^recovery-",
@@ -348,6 +350,24 @@ def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
     return scoped
 
 
+def _iter_manifest_data_paths(value: object) -> List[str]:
+    """Return repo-relative tests/e2e/data paths referenced by a manifest."""
+    paths: Set[str] = set()
+    if isinstance(value, dict):
+        for child in value.values():
+            paths.update(_iter_manifest_data_paths(child))
+    elif isinstance(value, list):
+        for child in value:
+            paths.update(_iter_manifest_data_paths(child))
+    elif isinstance(value, str):
+        normalized = value.strip().replace("\\", "/")
+        if normalized.startswith("tests/e2e/data/"):
+            paths.add(normalized)
+        elif normalized.startswith("data/"):
+            paths.add(f"tests/e2e/{normalized}")
+    return sorted(paths)
+
+
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
@@ -396,6 +416,8 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
             e2e_data_file_to_models_sets.setdefault(
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
+        for data_path in _iter_manifest_data_paths(data):
+            e2e_data_file_to_models_sets.setdefault(data_path, set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
     cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
@@ -555,7 +577,9 @@ def _infer_unit_tiers(path: str) -> List[str]:
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
         tiers.append("cpp")
-    if path.startswith("tests/builder/") or path.startswith("tests/torchtrt_builder/"):
+    if (path.startswith("tests/builder/")
+            or path.startswith("tests/torchtrt_builder/")
+            or path.startswith("tests/engine_defs/torch_trt/")):
         tiers.append("builder")
     if path.startswith("tests/cpp/"):
         tiers.append("cpp")
@@ -838,6 +862,8 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path.startswith("tests/tools/"):
         return RuleMatch("unit_tools", [], unit_tiers, rebuild)
     if path.startswith("tests/torchtrt_builder/"):
+        return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
+    if path.startswith("tests/engine_defs/torch_trt/"):
         return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
 
     # Rule 12: CMake / build system — triggers C++ rebuild + unit tests
