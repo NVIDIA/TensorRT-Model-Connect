@@ -1203,30 +1203,44 @@ def _build_diffusion_bundle(
         time.monotonic() - tokenizer_t0)
     _write_build_timing(build_timing)
 
-    # Build config.json with diffusion config injected
-    _effective_precision = "bf16" if fp8_scales else precision
-    cfg_dict = {
-        "model_type": model_type,
-        "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
-        "precision": _effective_precision,
-        "engine_backend": "trt_rtx" if rtx else "trt",
-        "trt_version": trt_version,
-        "num_text_encoders": len(components["text_encoders"]),
-        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
-    }
-    if trt_abi:
-        cfg_dict["trt_abi"] = trt_abi
-    if fp8_scales:
-        cfg_dict["quantization"] = {"format": "fp8"}
+    # Build config.json. Plugins that need a variant-specific schema can
+    # return a pre-rendered JSON blob via components["config_json"] (e.g.
+    # Qwen-Image, which has its own bundle schema built by
+    # qwen_image_bundle_config.build_bundle_config()). Existing plugins
+    # (Z-Image / FLUX / Wan / PixArt) don't return config_json and fall
+    # through to the inline construction below.
+    if "config_json" in components:
+        cfg_data = components["config_json"]
+        if not isinstance(cfg_data, (bytes, bytearray)):
+            raise TypeError(
+                f"Plugin {plugin.name} returned components['config_json'] "
+                f"as {type(cfg_data).__name__}; expected bytes."
+            )
+    else:
+        _effective_precision = "bf16" if fp8_scales else precision
+        cfg_dict = {
+            "model_type": model_type,
+            "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
+            "precision": _effective_precision,
+            "engine_backend": "trt_rtx" if rtx else "trt",
+            "trt_version": trt_version,
+            "num_text_encoders": len(components["text_encoders"]),
+            "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
+        }
+        if trt_abi:
+            cfg_dict["trt_abi"] = trt_abi
+        if fp8_scales:
+            cfg_dict["quantization"] = {"format": "fp8"}
 
-    # Inject diffusion config from plugin
-    get_diff_config = getattr(plugin, 'get_diffusion_config', None)
-    if get_diff_config is not None:
-        diff_cfg = get_diff_config(config)
-        if diff_cfg is not None:
-            cfg_dict.update(diff_cfg)
+        # Inject diffusion config from plugin
+        get_diff_config = getattr(plugin, 'get_diffusion_config', None)
+        if get_diff_config is not None:
+            diff_cfg = get_diff_config(config)
+            if diff_cfg is not None:
+                cfg_dict.update(diff_cfg)
 
-    cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+        cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+
     sections.append(BundleSection("config.json", cfg_data))
 
     # Ensure tokenizer.json exists for diffusion tokenizer directories.

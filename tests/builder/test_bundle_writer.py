@@ -24,6 +24,8 @@ from tensorrt_model_connect.bundle_writer import (
     write_bundle,
 )
 
+from tests.builder.conftest import read_trtfb_bundle
+
 
 class TestBundleMagic:
     def test_magic_bytes(self):
@@ -33,20 +35,7 @@ class TestBundleMagic:
 
 class TestWriteBundle:
     def _read_bundle(self, path: str) -> tuple[dict, dict[str, bytes]]:
-        """Read a .trtfb bundle and return (header_dict, sections_data)."""
-        with open(path, "rb") as f:
-            magic = f.read(8)
-            assert magic == BUNDLE_MAGIC
-            header_len = struct.unpack("<Q", f.read(8))[0]
-            header = json.loads(f.read(header_len).decode("utf-8"))
-
-            sections_data = {}
-            data_start = 16 + header_len
-            for name, meta in header.get("sections", {}).items():
-                f.seek(data_start + meta["offset"])
-                sections_data[name] = f.read(meta["size"])
-
-        return header, sections_data
+        return read_trtfb_bundle(path)
 
     def test_single_section(self, tmp_path):
         info = BundleInfo(

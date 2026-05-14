@@ -367,6 +367,10 @@ _POSITIVE_MATCH_CASES = [
     ("flux.2", "flux"),
     # Z-Image (diffusion T2I)
     ("z_image", "z_image"),
+    # Qwen-Image (diffusion T2I/Edit)
+    ("qwen_image", "qwen_image"),
+    ("qwen-image", "qwen_image"),
+    ("qwen_image_edit", "qwen_image"),
     # PixArt (diffusion T2I)
     ("pixart", "pixart"),
     ("pixart_sigma", "pixart"),

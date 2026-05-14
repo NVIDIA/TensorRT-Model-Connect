@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import struct
 import sys
 from pathlib import Path
 
@@ -12,6 +14,32 @@ import pytest
 _PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# Bundle round-trip helper (shared across bundle_writer / schema tests)
+# ---------------------------------------------------------------------------
+
+def read_trtfb_bundle(path: str | Path) -> tuple[dict, dict[str, bytes]]:
+    """Parse a .trtfb file into (header_dict, sections_data).
+
+    Verifies BUNDLE_MAGIC, reads the JSON header, then seeks to each
+    section payload by offset/size. Used by tests that need to inspect
+    bundle contents without depending on a C++ reader.
+    """
+    from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
+
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        assert magic == BUNDLE_MAGIC, f"bad magic: {magic!r}"
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        data_start = 16 + header_len
+        sections_data: dict[str, bytes] = {}
+        for name, meta in header.get("sections", {}).items():
+            f.seek(data_start + meta["offset"])
+            sections_data[name] = f.read(meta["size"])
+    return header, sections_data
 
 
 # ---------------------------------------------------------------------------

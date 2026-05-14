@@ -57,9 +57,10 @@ class QwenPlugin:
         mt = model_type.lower()
         # Exclude vision-language variants (handled by qwen_vl plugin),
         # MoE variants (handled by qwen_moe plugin),
-        # omni variants (handled by qwen3_omni plugin), and
+        # omni variants (handled by qwen3_omni plugin),
+        # Qwen-Image diffusion variants (handled by qwen_image plugin), and
         # Qwen3.5 hybrid variants (handled by qwen3_5 plugin).
-        if "vl" in mt or "moe" in mt or "omni" in mt:
+        if "vl" in mt or "moe" in mt or "omni" in mt or "image" in mt:
             return False
         if mt in {"qwen3_5", "qwen3.5"}:
             return False
