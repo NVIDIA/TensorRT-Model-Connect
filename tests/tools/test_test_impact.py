@@ -907,7 +907,24 @@ class TestHarness:
         assert match.rule == "e2e_entrypoint"
         assert len(match.models) == len(imap.all_model_names)
 
-    def test_harness_orchestrator_fp8_diff_can_be_refined(self, imap):
+    def test_diff_refinement_rules_are_named_in_dispatch_order(self):
+        """Diff refinement dispatch keeps named rules in reviewable order."""
+        assert [rule.name for rule in test_impact.DIFF_REFINEMENT_RULES] == [
+            "harness_shared_fp8_scales",
+            "e2e_warm_hf_cache_diffusers_components",
+            "shared_builder_fp8_scales_cli",
+            "shared_builder_fp8_scales_engine",
+            "shared_builder_diffusion_tokenizer",
+            "torchtrt_compiler_tokenizer",
+            "harness_manifest_diffusion_thresholds",
+            "harness_reference_dpr_context_encoder",
+            "harness_reference_vl_generated_only_decode",
+            "e2e_waives_model_lines",
+        ]
+        assert all(callable(rule.matches) and callable(rule.refine)
+                   for rule in test_impact.DIFF_REFINEMENT_RULES)
+
+    def test_harness_shared_fp8_scales_rule_refines_orchestrator_diff(self, imap):
         """Diff-only fp8_scales plumbing narrows orchestrator scope."""
         diff_text = """
 diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.py
@@ -926,7 +943,7 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
 
-    def test_warm_hf_cache_component_diff_can_be_refined(self, imap):
+    def test_e2e_warm_hf_cache_diffusers_components_rule_refines_component_diff(self, imap):
         """Diffusers component-cache validation narrows to FP8 Diffusers coverage."""
         diff_text = """
 diff --git a/scripts/warm_hf_cache.py b/scripts/warm_hf_cache.py
@@ -948,7 +965,7 @@ diff --git a/scripts/warm_hf_cache.py b/scripts/warm_hf_cache.py
         assert refined.rule == "e2e_warm_hf_cache_diffusers_components"
         assert refined.models == ["flux-2-dev-fp8"]
 
-    def test_manifest_loader_diffusion_threshold_diff_can_be_refined(self, imap):
+    def test_harness_manifest_diffusion_thresholds_rule_refines_manifest_loader_diff(self, imap):
         """Diffusion-only threshold plumbing in manifest_loader narrows scope."""
         diff_text = """
 diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_loader.py
@@ -965,7 +982,7 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
 
-    def test_hf_vl_generated_only_decode_diff_can_be_refined(self, imap):
+    def test_harness_reference_vl_generated_only_decode_rule_refines_hf_vl_diff(self, imap):
         """VL generated-only decode fallback is scoped to InternVL3-8B."""
         diff_text = """
 diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
@@ -998,7 +1015,7 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_vl_generated_only_decode"
         assert refined.models == ["internvl3-8b"]
 
-    def test_hf_dpr_context_encoder_diff_can_be_refined(self, imap):
+    def test_harness_reference_dpr_context_encoder_rule_refines_hf_dpr_diff(self, imap):
         """DPR-only reference routing should not select every HF model."""
         diff_text = """
 diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
@@ -1027,7 +1044,7 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
         assert refined.rule == "harness_reference_dpr_context_encoder"
         assert refined.models == ["dpr-ctx-encoder"]
 
-    def test_waives_diff_can_be_refined_to_named_model(self, imap):
+    def test_e2e_waives_model_lines_rule_refines_named_model_diff(self, imap):
         """A waiver change for one known model should only re-run that model."""
         diff_text = """
 diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
@@ -1041,7 +1058,7 @@ diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
         assert refined.models == ["flux-schnell"]
 
 class TestDiffAwareBuilderRefinement:
-    def test_cli_fp8_diff_can_be_refined(self, imap):
+    def test_shared_builder_fp8_scales_cli_rule_refines_cli_fp8_diff(self, imap):
         """CLI fp8-only plumbing narrows to fp8-scales manifests."""
         diff_text = """
 diff --git a/tensorrt_model_connect/tensorrt_model_connect/cli.py b/tensorrt_model_connect/tensorrt_model_connect/cli.py
@@ -1056,7 +1073,7 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/cli.py b/tensorrt_mod
         assert refined.rule == "shared_builder_fp8_scales_cli"
         assert refined.models == ["flux-2-dev-fp8"]
 
-    def test_engine_builder_fp8_diff_can_be_refined(self, imap):
+    def test_shared_builder_fp8_scales_engine_rule_refines_engine_fp8_diff(self, imap):
         """Diffusion fp8-only engine_builder changes narrow to fp8-scales manifests."""
         diff_text = """
 diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
@@ -1079,7 +1096,7 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/t
         assert refined.rule == "shared_builder_fp8_scales_engine"
         assert refined.models == ["flux-2-dev-fp8"]
 
-    def test_engine_builder_diffusion_tokenizer_diff_can_be_refined(self, imap):
+    def test_shared_builder_diffusion_tokenizer_rule_refines_engine_tokenizer_diff(self, imap):
         """Diffusion tokenizer metadata plumbing should not select every model."""
         diff_text = """
 diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
@@ -1103,7 +1120,7 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/t
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
 
-    def test_torchtrt_compiler_tokenizer_diff_can_be_refined(self, mock_repo):
+    def test_torchtrt_compiler_tokenizer_rule_refines_compiler_tokenizer_diff(self, mock_repo):
         """Torch-TRT tokenizer metadata changes narrow to Torch-TRT tokenizer users."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         _write_json(

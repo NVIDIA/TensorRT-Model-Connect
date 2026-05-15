@@ -1594,37 +1594,264 @@ def _normalize_diff_line(line: str) -> str:
     return re.sub(r"[-\s]+", "_", line.lower())
 
 
-def maybe_refine_match_with_diff(
-    path: str,
-    match: RuleMatch,
-    diff_text: str,
-    imap: ImpactMap,
-) -> RuleMatch:
-    """Narrow broad file matches when the diff is demonstrably feature-scoped."""
-    lines = _significant_diff_lines(diff_text)
-    if not lines:
-        return match
+class DiffRefinementRule:
+    """Named diff-aware rule that can narrow a broad file classification."""
 
-    fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+    name: str
 
-    if path == "tests/e2e_harness/orchestrator.py":
-        allowed = {
-            "CILane,",
-            'fp8_scales = case.metadata.get("fp8_scales")',
-            "if fp8_scales:",
-            "# Resolve relative to tests/e2e/data/",
-            'scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales',
-            "if scales_path.is_file():",
-            'cmd.extend(["--fp8-scales", str(scales_path)])',
-        }
-        if all(line in allowed for line in lines):
-            return RuleMatch(
-                "harness_shared_fp8_scales", fp8_models,
-                match.unit_tiers, match.rebuild_cpp,
-            )
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        raise NotImplementedError
 
-    if path == "scripts/warm_hf_cache.py":
-        allowed_tokens = (
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        raise NotImplementedError
+
+
+def _all_lines_match_tokens(lines: List[str], allowed_tokens: tuple[str, ...]) -> bool:
+    return all(
+        any(token in _normalize_diff_line(line) for token in allowed_tokens)
+        for line in lines
+    )
+
+
+def _fp8_scale_models(imap: ImpactMap) -> List[str]:
+    return imap.manifest_field_to_models.get("fp8_scales", [])
+
+
+def _diffusion_task_models(imap: ImpactMap) -> List[str]:
+    return _models_for_task_strategies(["diffusion_media_generation"], imap)
+
+
+def _torchtrt_tokenizer_models(imap: ImpactMap) -> List[str]:
+    return _models_for_runtime_strategies(
+        ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap)
+
+
+@dataclass(frozen=True)
+class TokenDiffRefinementRule(DiffRefinementRule):
+    name: str
+    path: str
+    allowed_tokens: tuple[str, ...]
+    models_for_impact: Callable[[ImpactMap], List[str]]
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        return path == self.path and _all_lines_match_tokens(lines, self.allowed_tokens)
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines
+        return RuleMatch(
+            self.name,
+            self.models_for_impact(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+class HarnessSharedFp8ScalesRule(DiffRefinementRule):
+    name = "harness_shared_fp8_scales"
+    path = "tests/e2e_harness/orchestrator.py"
+    allowed_lines = {
+        "CILane,",
+        'fp8_scales = case.metadata.get("fp8_scales")',
+        "if fp8_scales:",
+        "# Resolve relative to tests/e2e/data/",
+        'scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales',
+        "if scales_path.is_file():",
+        'cmd.extend(["--fp8-scales", str(scales_path)])',
+    }
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        return path == self.path and all(line in self.allowed_lines for line in lines)
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines
+        return RuleMatch(
+            self.name,
+            _fp8_scale_models(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+class HarnessReferenceDprContextEncoderRule(DiffRefinementRule):
+    name = "harness_reference_dpr_context_encoder"
+    path = "tests/e2e_harness/references/hf_transformers.py"
+    dpr_tokens = (
+        "dpr",
+        "dprcontextencoder",
+        "dprcontextencodertokenizerfast",
+        "ctx_encoder",
+        "bert_model",
+        "autotokenizer.from_pretrained",
+        "automodel.from_pretrained",
+        "model_type",
+        "context",
+        "tokenizer",
+        "same_token_ids",
+        "tokenizer.json",
+        "trt_artifact",
+        "question_classes",
+        "wrong_class",
+        "dprquestionencoder",
+        "model_ref",
+        "trust_remote_code",
+    )
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        if path != self.path:
+            return False
+        normalized_lines = [_normalize_diff_line(line) for line in lines]
+        return (
+            all(any(token in line for token in self.dpr_tokens) for line in normalized_lines)
+            and any("dprcontextencodertokenizerfast" in line for line in normalized_lines)
+            and any("dprcontextencoder" in line for line in normalized_lines)
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines, imap
+        return RuleMatch(
+            self.name,
+            ["dpr-ctx-encoder"],
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+class HarnessReferenceVlGeneratedOnlyDecodeRule(DiffRefinementRule):
+    name = "harness_reference_vl_generated_only_decode"
+    path = "tests/e2e_harness/references/hf_transformers.py"
+    allowed_tokens = (
+        "decode_vl_generated_text",
+        "vl_generation",
+        "generated_ids",
+        "generated_text",
+        "input_len",
+        "token_count",
+        "decode_token_ids",
+        "processor.decode",
+        "processor",
+        "prompt_guard",
+        "prompt_only",
+        "prompt_text",
+        "prompt_texts",
+        "normalized",
+        "marker",
+        "image",
+        "img_context",
+        "image_pad",
+        "vision_start",
+        "vision_end",
+        "fallback_text",
+        "text_input",
+        "empty",
+        "runtimeerror",
+        "return_true",
+        "return_false",
+        "return_",
+        "continue",
+        "tail",
+        "skip_special_tokens",
+        "strip",
+        "str",
+        "if_text",
+        "return_text",
+        "hf_transformers",
+    )
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        if path != self.path:
+            return False
+        normalized_lines = [
+            _normalize_diff_line(line)
+            for line in lines
+            if any(ch.isalnum() for ch in _normalize_diff_line(line))
+        ]
+        return all(
+            any(token in line for token in self.allowed_tokens)
+            for line in normalized_lines
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines, imap
+        return RuleMatch(
+            self.name,
+            ["internvl3-8b"],
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+class E2EWaivesModelLinesRule(DiffRefinementRule):
+    name = "e2e_waives_model_lines"
+    path = "tests/e2e/waives.txt"
+
+    @staticmethod
+    def _models_from_lines(lines: List[str], imap: ImpactMap) -> List[str]:
+        models = []
+        for line in lines:
+            fields = line.split()
+            if fields and fields[0] in imap.all_model_names_set:
+                models.append(fields[0])
+        return sorted(set(models))
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        return path == self.path and bool(self._models_from_lines(lines, imap))
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path
+        return RuleMatch(
+            self.name,
+            self._models_from_lines(lines, imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
+    HarnessSharedFp8ScalesRule(),
+    TokenDiffRefinementRule(
+        "e2e_warm_hf_cache_diffusers_components",
+        "scripts/warm_hf_cache.py",
+        (
             "component",
             "component_dir",
             "component_has_weight",
@@ -1655,31 +1882,19 @@ def maybe_refine_match_with_diff(
             "unet",
             "vae",
             "weight",
-        )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "e2e_warm_hf_cache_diffusers_components",
-                fp8_models,
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
-
-    if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
-        allowed_tokens = ("fp8_scales", "save_fp8_scales")
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "shared_builder_fp8_scales_cli", fp8_models,
-                match.unit_tiers, match.rebuild_cpp,
-            )
-
-    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
-        allowed_tokens = (
+        ),
+        _fp8_scale_models,
+    ),
+    TokenDiffRefinementRule(
+        "shared_builder_fp8_scales_cli",
+        "tensorrt_model_connect/tensorrt_model_connect/cli.py",
+        ("fp8_scales", "save_fp8_scales"),
+        _fp8_scale_models,
+    ),
+    TokenDiffRefinementRule(
+        "shared_builder_fp8_scales_engine",
+        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        (
             "fp8_scales",
             "save_fp8_scales",
             "_build_diffusion_bundle(",
@@ -1688,18 +1903,13 @@ def maybe_refine_match_with_diff(
             '"quantization"',
             "cfg_dict[",
             "fp8_scales",
-        )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "shared_builder_fp8_scales_engine", fp8_models,
-                match.unit_tiers, match.rebuild_cpp,
-            )
-
-    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
-        allowed_tokens = (
+        ),
+        _fp8_scale_models,
+    ),
+    TokenDiffRefinementRule(
+        "shared_builder_diffusion_tokenizer",
+        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        (
             "detect_diffusion_tokenizer_add_special_tokens",
             "detect_tokenizer_add_special_tokens",
             "detect_add_special",
@@ -1717,20 +1927,13 @@ def maybe_refine_match_with_diff(
             "write_build_timing",
             "add_build_timing",
             "return_detect_tokenizer_add_special_tokens",
-        )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "shared_builder_diffusion_tokenizer",
-                _models_for_task_strategies(["diffusion_media_generation"], imap),
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
-
-    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py":
-        allowed_tokens = (
+        ),
+        _diffusion_task_models,
+    ),
+    TokenDiffRefinementRule(
+        "torchtrt_compiler_tokenizer",
+        "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
+        (
             "detect_tokenizer_add_special_tokens",
             "detect_diffusion_tokenizer_add_special_tokens",
             "detect_add_special",
@@ -1757,137 +1960,40 @@ def maybe_refine_match_with_diff(
             "return_bool",
             "return_true",
             "return_detect_tokenizer_add_special_tokens",
-        )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "torchtrt_compiler_tokenizer",
-                _models_for_runtime_strategies(
-                    ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap),
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
-
-    if path == "tests/e2e_harness/manifest_loader.py":
-        allowed_tokens = (
+        ),
+        _torchtrt_tokenizer_models,
+    ),
+    TokenDiffRefinementRule(
+        "harness_manifest_diffusion_thresholds",
+        "tests/e2e_harness/manifest_loader.py",
+        (
             "reference_min_pixel_std_for_ratio",
             "min_reference_std_ratio",
             "min_pixel_std",
             "overrides",
-        )
-        if all(
-            any(token in _normalize_diff_line(line) for token in allowed_tokens)
-            for line in lines
-        ):
-            return RuleMatch(
-                "harness_manifest_diffusion_thresholds",
-                _models_for_task_strategies(["diffusion_media_generation"], imap),
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
+        ),
+        _diffusion_task_models,
+    ),
+    HarnessReferenceDprContextEncoderRule(),
+    HarnessReferenceVlGeneratedOnlyDecodeRule(),
+    E2EWaivesModelLinesRule(),
+)
 
-    if path == "tests/e2e_harness/references/hf_transformers.py":
-        dpr_tokens = (
-            "dpr",
-            "dprcontextencoder",
-            "dprcontextencodertokenizerfast",
-            "ctx_encoder",
-            "bert_model",
-            "autotokenizer.from_pretrained",
-            "automodel.from_pretrained",
-            "model_type",
-            "context",
-            "tokenizer",
-            "same_token_ids",
-            "tokenizer.json",
-            "trt_artifact",
-            "question_classes",
-            "wrong_class",
-            "dprquestionencoder",
-            "model_ref",
-            "trust_remote_code",
-        )
-        normalized_lines = [_normalize_diff_line(line) for line in lines]
-        if (
-            all(any(token in line for token in dpr_tokens) for line in normalized_lines)
-            and any("dprcontextencodertokenizerfast" in line for line in normalized_lines)
-            and any("dprcontextencoder" in line for line in normalized_lines)
-        ):
-            return RuleMatch(
-                "harness_reference_dpr_context_encoder",
-                ["dpr-ctx-encoder"],
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
 
-        allowed_tokens = (
-            "decode_vl_generated_text",
-            "vl_generation",
-            "generated_ids",
-            "generated_text",
-            "input_len",
-            "token_count",
-            "decode_token_ids",
-            "processor.decode",
-            "processor",
-            "prompt_guard",
-            "prompt_only",
-            "prompt_text",
-            "prompt_texts",
-            "normalized",
-            "marker",
-            "image",
-            "img_context",
-            "image_pad",
-            "vision_start",
-            "vision_end",
-            "fallback_text",
-            "text_input",
-            "empty",
-            "runtimeerror",
-            "return_true",
-            "return_false",
-            "return_",
-            "continue",
-            "tail",
-            "skip_special_tokens",
-            "strip",
-            "str",
-            "if_text",
-            "return_text",
-            "hf_transformers",
-        )
-        normalized_lines = [
-            _normalize_diff_line(line)
-            for line in lines
-            if any(ch.isalnum() for ch in _normalize_diff_line(line))
-        ]
-        if all(
-            any(token in line for token in allowed_tokens)
-            for line in normalized_lines
-        ):
-            return RuleMatch(
-                "harness_reference_vl_generated_only_decode",
-                ["internvl3-8b"],
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
+def maybe_refine_match_with_diff(
+    path: str,
+    match: RuleMatch,
+    diff_text: str,
+    imap: ImpactMap,
+) -> RuleMatch:
+    """Narrow broad file matches when the diff is demonstrably feature-scoped."""
+    lines = _significant_diff_lines(diff_text)
+    if not lines:
+        return match
 
-    if path == "tests/e2e/waives.txt":
-        models = []
-        for line in lines:
-            fields = line.split()
-            if fields and fields[0] in imap.all_model_names_set:
-                models.append(fields[0])
-        if models:
-            return RuleMatch(
-                "e2e_waives_model_lines",
-                sorted(set(models)),
-                match.unit_tiers,
-                match.rebuild_cpp,
-            )
+    for rule in DIFF_REFINEMENT_RULES:
+        if rule.matches(path, lines, imap):
+            return rule.refine(path, match, lines, imap)
 
     return match
 
