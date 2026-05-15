@@ -249,6 +249,115 @@ def imap(mock_repo):
 
 
 # ---------------------------------------------------------------------------
+# Declarative rule table tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeclarativeClassificationRules:
+    def test_rule_table_has_unique_priorities_and_declared_coverage(self):
+        """Every classification rule declares order and test coverage."""
+        priorities = [rule.priority for rule in test_impact.CLASSIFICATION_RULES]
+
+        assert priorities == sorted(priorities)
+        assert len(priorities) == len(set(priorities))
+        assert test_impact.CLASSIFICATION_RULES[-1].name == "catch_all"
+        assert all(rule.covered_by for rule in test_impact.CLASSIFICATION_RULES)
+
+    def test_scoped_cpp_helper_precedes_generic_cpp_source(self):
+        """Scoped C++ rules stay narrower than the generic C++ fallback."""
+        priorities = {
+            rule.name: rule.priority for rule in test_impact.CLASSIFICATION_RULES
+        }
+
+        assert priorities["cpp_scoped_helper"] < priorities["cpp_source"]
+
+    @pytest.mark.parametrize(
+        "path,rule_name",
+        [
+            (
+                "tensorrt_model_connect/tensorrt_model_connect/families/whisper.py",
+                "family_plugin",
+            ),
+            (
+                "tensorrt_model_connect/tensorrt_model_connect/"
+                "engine_defs/torch_trt/families/base.py",
+                "torchtrt_family_base",
+            ),
+            (
+                "tensorrt_model_connect/tensorrt_model_connect/"
+                "engine_defs/torch_trt/strategies/custom.py",
+                "torchtrt_strategy_unknown",
+            ),
+            ("src/runtime/models/custom_backend/plugin.cpp", "cpp_runtime_model_unknown"),
+            ("src/runtime/plugins/flux_plugin.cpp", "cpp_plugin_flux_runtime"),
+            ("src/runtime/plugins/decoder_plugin.cpp", "cpp_plugin"),
+            ("src/runtime/plugins/custom_plugin.cpp", "cpp_plugin_unknown"),
+            ("src/runtime/pipelines/flux_pipeline.cpp", "cpp_pipeline_flux_runtime"),
+            ("src/runtime/pipelines/text_generation_pipeline.cpp", "cpp_pipeline"),
+            ("src/runtime/pipelines/custom_pipeline.cpp", "cpp_pipeline_unknown"),
+            ("src/runtime/plugins/shared/custom_helper.h", "cpp_shared_helper_unknown"),
+            ("tests/e2e_harness/runners/__init__.py", "harness_runner_init"),
+            ("tests/e2e_harness/runners/custom.py", "harness_runner_unknown"),
+            ("tests/e2e_harness/comparators/__init__.py", "harness_comparator_init"),
+            ("tests/e2e_harness/comparators/custom.py", "harness_comparator_unknown"),
+            ("tests/e2e_harness/references/__init__.py", "harness_reference_init"),
+            ("tests/e2e_harness/references/custom.py", "harness_reference_unknown"),
+            ("tests/e2e_harness/plugins/__init__.py", "harness_plugin_init"),
+            ("tests/e2e_harness/plugins/custom.py", "harness_plugin_unknown"),
+            (
+                "tests/e2e_harness/thresholds/defaults/custom.json",
+                "harness_threshold_unknown",
+            ),
+            ("scripts/_gen_fp8_bf16.py", "fp8_gen_script"),
+        ],
+    )
+    def test_representative_rule_paths(self, imap, path, rule_name):
+        """Representative paths keep their existing rule names."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == rule_name
+
+    def test_specialized_builder_rule(self, mock_repo):
+        """Root builder imports still use the dynamic family import index."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        families_dir = (
+            mock_repo
+            / "tensorrt_model_connect"
+            / "tensorrt_model_connect"
+            / "families"
+        )
+        _write_json(
+            models_dir / "custom-builder-model.json",
+            {
+                "name": "custom-builder-model",
+                "family": "custom_builder_family",
+                "runtime_strategy": "encoder_only",
+                "hf_id": "custom/model",
+            },
+        )
+        _write_family(
+            families_dir,
+            "custom_builder_family",
+            "from ..custom_builder import build\n",
+        )
+        (
+            mock_repo
+            / "tensorrt_model_connect"
+            / "tensorrt_model_connect"
+            / "custom_builder.py"
+        ).write_text("", encoding="utf-8")
+
+        imap = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/custom_builder.py",
+            imap,
+        )
+
+        assert match.rule == "specialized_builder"
+        assert match.models == ["custom-builder-model"]
+
+
+# ---------------------------------------------------------------------------
 # Family isolation tests
 # ---------------------------------------------------------------------------
 

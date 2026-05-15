@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants -- strategy mappings (mirrored from e2e_harness/contracts.py)
@@ -593,306 +593,837 @@ def _infer_rebuild_cpp(path: str) -> bool:
             or path.startswith("tests/cpp/"))
 
 # ---------------------------------------------------------------------------
-# File classification (ordered rules)
+# File classification (ordered declarative rules)
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RuleContext:
+    path: str
+    match: Optional[re.Match[str]] = None
+
+
+RuleMatcher = Callable[[str, ImpactMap], Optional[RuleContext]]
+RuleImpactResolver = Callable[[RuleContext, ImpactMap, List[str], bool], RuleMatch]
+RulePredicate = Callable[[str, ImpactMap, re.Match[str]], bool]
+ModelsResolver = Callable[[RuleContext, ImpactMap], List[str]]
+
+
+@dataclass(frozen=True)
+class ClassificationRule:
+    priority: int
+    name: str
+    matcher: RuleMatcher
+    resolver: RuleImpactResolver
+    covered_by: Tuple[str, ...]
+
+
+def _group(context: RuleContext, index: int = 1) -> str:
+    if context.match is None:
+        raise ValueError("Rule context has no regex match")
+    return context.match.group(index)
+
+
+def _regex_rule(pattern: str, predicate: Optional[RulePredicate] = None) -> RuleMatcher:
+    compiled = re.compile(pattern)
+
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        match = compiled.match(path)
+        if match is None:
+            return None
+        if predicate is not None and not predicate(path, imap, match):
+            return None
+        return RuleContext(path=path, match=match)
+
+    return _matcher
+
+
+def _path_equals(expected: str) -> RuleMatcher:
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        del imap
+        return RuleContext(path=path) if path == expected else None
+
+    return _matcher
+
+
+def _path_in(paths: Set[str]) -> RuleMatcher:
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        del imap
+        return RuleContext(path=path) if path in paths else None
+
+    return _matcher
+
+
+def _path_startswith(prefix: str) -> RuleMatcher:
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        del imap
+        return RuleContext(path=path) if path.startswith(prefix) else None
+
+    return _matcher
+
+
+def _path_startswith_any(prefixes: Tuple[str, ...]) -> RuleMatcher:
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        del imap
+        return RuleContext(path=path) if path.startswith(prefixes) else None
+
+    return _matcher
+
+
+def _path_in_impact_map(
+    mapping_getter: Callable[[ImpactMap], Dict[str, List[str]]],
+) -> RuleMatcher:
+    def _matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+        return RuleContext(path=path) if path in mapping_getter(imap) else None
+
+    return _matcher
+
+
+def _no_impact_matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+    del imap
+    if path.startswith("tools/") or path.startswith("scripts/"):
+        return RuleContext(path=path)
+    if any(re.match(pattern, path) for pattern in _NO_IMPACT_PATTERNS):
+        return RuleContext(path=path)
+    if path.endswith(".md"):
+        return RuleContext(path=path)
+    return None
+
+
+def _catch_all_matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+    del imap
+    return RuleContext(path=path)
+
+
+def _match_result(
+    rule_name: str,
+    models_resolver: ModelsResolver,
+    unit_tiers_override: Optional[List[str]] = None,
+    rebuild_override: Optional[bool] = None,
+) -> RuleImpactResolver:
+    def _resolver(
+        context: RuleContext,
+        imap: ImpactMap,
+        unit_tiers: List[str],
+        rebuild: bool,
+    ) -> RuleMatch:
+        effective_unit_tiers = (
+            list(unit_tiers_override)
+            if unit_tiers_override is not None
+            else unit_tiers
+        )
+        effective_rebuild = rebuild if rebuild_override is None else rebuild_override
+        return RuleMatch(
+            rule_name,
+            models_resolver(context, imap),
+            effective_unit_tiers,
+            effective_rebuild,
+        )
+
+    return _resolver
+
+
+def _no_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context, imap
+    return []
+
+
+def _all_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    return list(imap.all_model_names)
+
+
+def _manifest_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    name = _group(context)
+    return [name] if name in imap.all_model_names_set else []
+
+
+def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    return sorted(imap.family_to_models.get(_group(context), []))
+
+
+def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
+    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
+        del context
+        return _models_for_task_strategies(task_strategies, imap)
+
+    return _resolver
+
+
+def _runtime_strategy_models(
+    strategies_getter: Callable[[RuleContext, ImpactMap], List[str]],
+) -> ModelsResolver:
+    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
+        return _drop_fp8_scale_models(
+            _models_for_runtime_strategies(strategies_getter(context, imap), imap),
+            imap,
+        )
+
+    return _resolver
+
+
+def _cpp_runtime_model_strategies(
+    context: RuleContext, imap: ImpactMap,
+) -> List[str]:
+    return imap.cpp_runtime_model_strategies.get(_group(context), [])
+
+
+def _cpp_plugin_strategies(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del imap
+    return CPP_PLUGIN_STRATEGIES.get(_group(context), [])
+
+
+def _cpp_pipeline_strategies(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del imap
+    return CPP_PIPELINE_STRATEGIES.get(_group(context), [])
+
+
+def _shared_cpp_helper_strategies(
+    context: RuleContext, imap: ImpactMap,
+) -> List[str]:
+    del imap
+    return SHARED_CPP_HELPER_STRATEGIES.get(_group(context), [])
+
+
+def _specialized_builder_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    families = imap.builder_to_families[_group(context)]
+    models: Set[str] = set()
+    for family in families:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
+def _scoped_cpp_helper_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    return _drop_fp8_scale_models(imap.path_scope_overrides[context.path], imap)
+
+
+def _e2e_data_file_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    return imap.e2e_data_file_to_models[context.path]
+
+
+def _fp8_scale_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    return sorted(imap.manifest_field_to_models.get("fp8_scales", []))
+
+
+def _known_cpp_runtime_model(
+    path: str, imap: ImpactMap, match: re.Match[str],
+) -> bool:
+    del path
+    return bool(imap.cpp_runtime_model_strategies.get(match.group(1), []))
+
+
+def _unknown_cpp_runtime_model(
+    path: str, imap: ImpactMap, match: re.Match[str],
+) -> bool:
+    return not _known_cpp_runtime_model(path, imap, match)
+
+
+def _is_specialized_builder(
+    path: str, imap: ImpactMap, match: re.Match[str],
+) -> bool:
+    del path
+    module_name = match.group(1)
+    if not module_name.endswith("_builder"):
+        return False
+    if module_name in _ORCHESTRATOR_MODULES:
+        return False
+    families = imap.builder_to_families.get(module_name, [])
+    return any(imap.family_to_models.get(family, []) for family in families)
+
+
+def _known_plugin_stem(
+    strategy_map: Dict[str, List[str]],
+    excluded_stems: Set[str],
+) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path, imap
+        stem = match.group(1)
+        return stem not in excluded_stems and bool(strategy_map.get(stem, []))
+
+    return _predicate
+
+
+def _unknown_plugin_stem(
+    strategy_map: Dict[str, List[str]],
+) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path, imap
+        return not bool(strategy_map.get(match.group(1), []))
+
+    return _predicate
+
+
+def _known_task_strategy_stem(
+    strategy_map: Dict[str, List[str]],
+) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path, imap
+        return bool(strategy_map.get(match.group(1), []))
+
+    return _predicate
+
+
+def _unknown_task_strategy_stem(
+    strategy_map: Dict[str, List[str]],
+) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path, imap
+        stem = match.group(1)
+        return stem != "__init__" and not bool(strategy_map.get(stem, []))
+
+    return _predicate
+
+
+def _task_strategy_models_from_group(
+    strategy_map: Dict[str, List[str]],
+) -> ModelsResolver:
+    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
+        return _models_for_task_strategies(strategy_map.get(_group(context), []), imap)
+
+    return _resolver
+
+
+def _no_impact_resolver(
+    context: RuleContext,
+    imap: ImpactMap,
+    unit_tiers: List[str],
+    rebuild: bool,
+) -> RuleMatch:
+    del context, imap, unit_tiers, rebuild
+    return RuleMatch("no_impact", [], [], False)
+
+
+def _catch_all_resolver(
+    context: RuleContext,
+    imap: ImpactMap,
+    unit_tiers: List[str],
+    rebuild: bool,
+) -> RuleMatch:
+    del context, rebuild
+    return RuleMatch("catch_all", list(imap.all_model_names), unit_tiers, True)
+
+
+def _classification_rules() -> Tuple[ClassificationRule, ...]:
+    rules = (
+        ClassificationRule(
+            priority=10,
+            name="manifest",
+            matcher=_regex_rule(r"tests/e2e/models/(.+)\.json$"),
+            resolver=_match_result("manifest", _manifest_models),
+            covered_by=("TestSafetyNet.test_manifest_self",),
+        ),
+        ClassificationRule(
+            priority=20,
+            name="family_package",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"families/([A-Za-z]\w*)/.+\.py$"
+            ),
+            resolver=_match_result("family_package", _family_models),
+            covered_by=(
+                "TestFamilyPlugin.test_family_only_change",
+                "TestFamilyOwnedBuilder.test_family_local_standard_decoder_builder",
+            ),
+        ),
+        ClassificationRule(
+            priority=30,
+            name="family_plugin",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"families/(\w+)\.py$",
+                lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
+            ),
+            resolver=_match_result("family_plugin", _family_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=40,
+            name="family_base",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"families/((__init__|base)\.py)$"
+            ),
+            resolver=_match_result("family_base", _all_models),
+            covered_by=(
+                "TestFamilyPlugin.test_family_base_all_models",
+                "TestFamilyPlugin.test_family_init_all_models",
+            ),
+        ),
+        ClassificationRule(
+            priority=50,
+            name="torchtrt_family_plugin",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"engine_defs/torch_trt/families/(\w+)\.py$",
+                lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
+            ),
+            resolver=_match_result("torchtrt_family_plugin", _family_models),
+            covered_by=("TestFamilyPlugin.test_torchtrt_family_only_change",),
+        ),
+        ClassificationRule(
+            priority=60,
+            name="torchtrt_family_base",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"engine_defs/torch_trt/families/((__init__|base)\.py)$"
+            ),
+            resolver=_match_result("torchtrt_family_base", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=70,
+            name="torchtrt_strategy",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"engine_defs/torch_trt/strategies/(diffusion)\.py$"
+            ),
+            resolver=_match_result(
+                "torchtrt_strategy",
+                _task_strategy_models(["diffusion_media_generation"]),
+            ),
+            covered_by=("TestHarness.test_torchtrt_diffusion_strategy",),
+        ),
+        ClassificationRule(
+            priority=80,
+            name="torchtrt_strategy_unknown",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"engine_defs/torch_trt/strategies/(\w+)\.py$"
+            ),
+            resolver=_match_result("torchtrt_strategy_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=90,
+            name="specialized_builder",
+            matcher=_regex_rule(
+                r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$",
+                _is_specialized_builder,
+            ),
+            resolver=_match_result("specialized_builder", _specialized_builder_models),
+            covered_by=("TestDeclarativeClassificationRules.test_specialized_builder_rule",),
+        ),
+        ClassificationRule(
+            priority=100,
+            name="shared_builder_module",
+            matcher=_path_startswith("tensorrt_model_connect/"),
+            resolver=_match_result("shared_builder_module", _all_models),
+            covered_by=("TestSharedModules.test_shared_module_all_models",),
+        ),
+        ClassificationRule(
+            priority=110,
+            name="cpp_runtime_model",
+            matcher=_regex_rule(
+                r"src/runtime/models/([^/]+)/.+$",
+                _known_cpp_runtime_model,
+            ),
+            resolver=_match_result(
+                "cpp_runtime_model",
+                _runtime_strategy_models(_cpp_runtime_model_strategies),
+            ),
+            covered_by=("TestCppScope.test_cpp_runtime_model_scope",),
+        ),
+        ClassificationRule(
+            priority=120,
+            name="cpp_runtime_model_unknown",
+            matcher=_regex_rule(
+                r"src/runtime/models/([^/]+)/.+$",
+                _unknown_cpp_runtime_model,
+            ),
+            resolver=_match_result("cpp_runtime_model_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=130,
+            name="cpp_plugin_flux_runtime",
+            matcher=_regex_rule(r"src/runtime/plugins/(flux_plugin)\.cpp$"),
+            resolver=_match_result(
+                "cpp_plugin_flux_runtime",
+                _runtime_strategy_models(_cpp_plugin_strategies),
+            ),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=140,
+            name="cpp_plugin",
+            matcher=_regex_rule(
+                r"src/runtime/plugins/(\w+)\.cpp$",
+                _known_plugin_stem(CPP_PLUGIN_STRATEGIES, {"flux_plugin"}),
+            ),
+            resolver=_match_result(
+                "cpp_plugin",
+                _runtime_strategy_models(_cpp_plugin_strategies),
+            ),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=150,
+            name="cpp_plugin_unknown",
+            matcher=_regex_rule(
+                r"src/runtime/plugins/(\w+)\.cpp$",
+                _unknown_plugin_stem(CPP_PLUGIN_STRATEGIES),
+            ),
+            resolver=_match_result("cpp_plugin_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=160,
+            name="cpp_pipeline_flux_runtime",
+            matcher=_regex_rule(r"src/runtime/pipelines/(flux_pipeline)\.(h|cpp)$"),
+            resolver=_match_result(
+                "cpp_pipeline_flux_runtime",
+                _runtime_strategy_models(_cpp_pipeline_strategies),
+            ),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=170,
+            name="cpp_pipeline",
+            matcher=_regex_rule(
+                r"src/runtime/pipelines/(\w+)\.(h|cpp)$",
+                _known_plugin_stem(CPP_PIPELINE_STRATEGIES, {"flux_pipeline"}),
+            ),
+            resolver=_match_result(
+                "cpp_pipeline",
+                _runtime_strategy_models(_cpp_pipeline_strategies),
+            ),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=180,
+            name="cpp_pipeline_unknown",
+            matcher=_regex_rule(
+                r"src/runtime/pipelines/(\w+)\.(h|cpp)$",
+                _unknown_plugin_stem(CPP_PIPELINE_STRATEGIES),
+            ),
+            resolver=_match_result("cpp_pipeline_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=190,
+            name="cpp_shared_plugin_helpers",
+            matcher=_regex_rule(
+                r"src/runtime/plugins/shared/(plugin_helpers)\.(h|cpp)$"
+            ),
+            resolver=_match_result("cpp_shared_plugin_helpers", _all_models),
+            covered_by=("TestCppScope.test_cpp_shared_plugin_helpers",),
+        ),
+        ClassificationRule(
+            priority=200,
+            name="cpp_shared_helper",
+            matcher=_regex_rule(
+                r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$",
+                _known_task_strategy_stem(SHARED_CPP_HELPER_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "cpp_shared_helper",
+                _runtime_strategy_models(_shared_cpp_helper_strategies),
+            ),
+            covered_by=(
+                "TestCppScope.test_cpp_shared_audio",
+                "TestCppScope.test_cpp_shared_diffusion",
+            ),
+        ),
+        ClassificationRule(
+            priority=210,
+            name="cpp_shared_helper_unknown",
+            matcher=_regex_rule(
+                r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$",
+                _unknown_task_strategy_stem(SHARED_CPP_HELPER_STRATEGIES),
+            ),
+            resolver=_match_result("cpp_shared_helper_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=220,
+            name="cpp_scoped_helper",
+            matcher=_path_in_impact_map(lambda imap: imap.path_scope_overrides),
+            resolver=_match_result("cpp_scoped_helper", _scoped_cpp_helper_models),
+            covered_by=(
+                "TestCppScope.test_scoped_cpp_helper_gpu_matmul",
+                "TestCppScope.test_scoped_cpp_helper_diffusion_seam",
+            ),
+        ),
+        ClassificationRule(
+            priority=230,
+            name="cpp_source",
+            matcher=_path_startswith_any(("src/", "include/")),
+            resolver=_match_result("cpp_source", _all_models),
+            covered_by=("TestCppScope.test_cpp_wildcard_all",),
+        ),
+        ClassificationRule(
+            priority=240,
+            name="harness_runner_init",
+            matcher=_regex_rule(r"tests/e2e_harness/runners/(__init__)\.py$"),
+            resolver=_match_result("harness_runner_init", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=250,
+            name="harness_runner",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/runners/(\w+)\.py$",
+                _known_task_strategy_stem(RUNNER_TASK_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "harness_runner",
+                _task_strategy_models_from_group(RUNNER_TASK_STRATEGIES),
+            ),
+            covered_by=("TestHarness.test_harness_runner",),
+        ),
+        ClassificationRule(
+            priority=260,
+            name="harness_runner_unknown",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/runners/(\w+)\.py$",
+                _unknown_task_strategy_stem(RUNNER_TASK_STRATEGIES),
+            ),
+            resolver=_match_result("harness_runner_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=270,
+            name="harness_comparator_init",
+            matcher=_regex_rule(r"tests/e2e_harness/comparators/(__init__)\.py$"),
+            resolver=_match_result("harness_comparator_init", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=280,
+            name="harness_comparator",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/comparators/(\w+)\.py$",
+                _known_task_strategy_stem(COMPARATOR_TASK_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "harness_comparator",
+                _task_strategy_models_from_group(COMPARATOR_TASK_STRATEGIES),
+            ),
+            covered_by=("TestHarness.test_harness_comparator",),
+        ),
+        ClassificationRule(
+            priority=290,
+            name="harness_comparator_unknown",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/comparators/(\w+)\.py$",
+                _unknown_task_strategy_stem(COMPARATOR_TASK_STRATEGIES),
+            ),
+            resolver=_match_result("harness_comparator_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=300,
+            name="harness_reference_init",
+            matcher=_regex_rule(r"tests/e2e_harness/references/(__init__)\.py$"),
+            resolver=_match_result("harness_reference_init", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=310,
+            name="harness_reference",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/references/(\w+)\.py$",
+                _known_task_strategy_stem(REFERENCE_TASK_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "harness_reference",
+                _task_strategy_models_from_group(REFERENCE_TASK_STRATEGIES),
+            ),
+            covered_by=("TestHarness.test_torch_reference_includes_neural_operator_models",),
+        ),
+        ClassificationRule(
+            priority=320,
+            name="harness_reference_unknown",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/references/(\w+)\.py$",
+                _unknown_task_strategy_stem(REFERENCE_TASK_STRATEGIES),
+            ),
+            resolver=_match_result("harness_reference_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=330,
+            name="harness_plugin_init",
+            matcher=_regex_rule(r"tests/e2e_harness/plugins/(__init__)\.py$"),
+            resolver=_match_result("harness_plugin_init", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=340,
+            name="harness_plugin",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/plugins/(\w+)\.py$",
+                _known_task_strategy_stem(PLUGIN_TASK_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "harness_plugin",
+                _task_strategy_models_from_group(PLUGIN_TASK_STRATEGIES),
+            ),
+            covered_by=("TestHarness.test_harness_plugin",),
+        ),
+        ClassificationRule(
+            priority=350,
+            name="harness_plugin_unknown",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/plugins/(\w+)\.py$",
+                _unknown_task_strategy_stem(PLUGIN_TASK_STRATEGIES),
+            ),
+            resolver=_match_result("harness_plugin_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=360,
+            name="harness_threshold_profile",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
+                _known_task_strategy_stem(THRESHOLD_PROFILE_TASK_STRATEGIES),
+            ),
+            resolver=_match_result(
+                "harness_threshold_profile",
+                _task_strategy_models_from_group(THRESHOLD_PROFILE_TASK_STRATEGIES),
+            ),
+            covered_by=("TestHarness.test_harness_threshold_profile",),
+        ),
+        ClassificationRule(
+            priority=370,
+            name="harness_threshold_unknown",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
+                _unknown_task_strategy_stem(THRESHOLD_PROFILE_TASK_STRATEGIES),
+            ),
+            resolver=_match_result("harness_threshold_unknown", _all_models),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=380,
+            name="harness_shared",
+            matcher=_path_startswith("tests/e2e_harness/"),
+            resolver=_match_result("harness_shared", _all_models),
+            covered_by=("TestHarness.test_harness_shared",),
+        ),
+        ClassificationRule(
+            priority=390,
+            name="e2e_entrypoint",
+            matcher=_path_in({"tests/test_e2e.py", "tests/conftest.py"}),
+            resolver=_match_result("e2e_entrypoint", _all_models),
+            covered_by=(
+                "TestHarness.test_test_e2e_entrypoint",
+                "TestHarness.test_conftest_entrypoint",
+            ),
+        ),
+        ClassificationRule(
+            priority=400,
+            name="e2e_runner_script",
+            matcher=_path_in({
+                "scripts/run_e2e_parallel.sh",
+                "scripts/schedule_e2e.py",
+                "scripts/warm_hf_cache.py",
+            }),
+            resolver=_match_result("e2e_runner_script", _all_models),
+            covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
+        ),
+        ClassificationRule(
+            priority=410,
+            name="e2e_waives",
+            matcher=_path_equals("tests/e2e/waives.txt"),
+            resolver=_match_result("e2e_waives", _all_models),
+            covered_by=("TestHarness.test_waives_diff_can_be_refined",),
+        ),
+        ClassificationRule(
+            priority=420,
+            name="unit_builder",
+            matcher=_path_startswith("tests/builder/"),
+            resolver=_match_result("unit_builder", _no_models),
+            covered_by=("TestUnitTiers.test_unit_tier_builder",),
+        ),
+        ClassificationRule(
+            priority=430,
+            name="unit_cpp",
+            matcher=_path_startswith("tests/cpp/"),
+            resolver=_match_result("unit_cpp", _no_models),
+            covered_by=("TestUnitTiers.test_unit_tier_cpp",),
+        ),
+        ClassificationRule(
+            priority=440,
+            name="unit_tools",
+            matcher=_path_startswith("tests/tools/"),
+            resolver=_match_result("unit_tools", _no_models),
+            covered_by=("TestUnitTiers.test_unit_tier_tools",),
+        ),
+        ClassificationRule(
+            priority=450,
+            name="unit_torchtrt_builder",
+            matcher=_path_startswith_any((
+                "tests/torchtrt_builder/",
+                "tests/engine_defs/torch_trt/",
+            )),
+            resolver=_match_result("unit_torchtrt_builder", _no_models),
+            covered_by=("TestUnitTiers.test_unit_tier_torchtrt_engine_defs",),
+        ),
+        ClassificationRule(
+            priority=460,
+            name="cmake",
+            matcher=lambda path, _imap: (
+                RuleContext(path=path)
+                if path == "CMakeLists.txt" or path.startswith("cmake/")
+                else None
+            ),
+            resolver=_match_result("cmake", _no_models),
+            covered_by=("TestSafetyNet.test_cmake_no_e2e_models",),
+        ),
+        ClassificationRule(
+            priority=470,
+            name="e2e_data_file",
+            matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
+            resolver=_match_result("e2e_data_file", _e2e_data_file_models),
+            covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
+        ),
+        ClassificationRule(
+            priority=480,
+            name="fp8_gen_script",
+            matcher=_path_equals("scripts/_gen_fp8_bf16.py"),
+            resolver=_match_result(
+                "fp8_gen_script", _fp8_scale_models, [], False,
+            ),
+            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=490,
+            name="no_impact",
+            matcher=_no_impact_matcher,
+            resolver=_no_impact_resolver,
+            covered_by=("TestNoImpact.test_docs_no_impact",),
+        ),
+        ClassificationRule(
+            priority=500,
+            name="catch_all",
+            matcher=_catch_all_matcher,
+            resolver=_catch_all_resolver,
+            covered_by=("TestSafetyNet.test_unknown_file_triggers_all",),
+        ),
+    )
+    priorities = [rule.priority for rule in rules]
+    if len(priorities) != len(set(priorities)):
+        raise ValueError("Classification rule priorities must be unique")
+    return tuple(sorted(rules, key=lambda rule: rule.priority))
+
+
+CLASSIFICATION_RULES = _classification_rules()
+
+
 def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
-    """Classify a single changed file. First matching rule wins."""
-    # Normalize path separators
+    """Classify a single changed file. Lowest priority matching rule wins."""
     path = path.replace("\\", "/").strip("/")
     unit_tiers = _infer_unit_tiers(path)
     rebuild = _infer_rebuild_cpp(path)
 
-    # Rule 0: E2E model manifest
-    m = re.match(r"tests/e2e/models/(.+)\.json$", path)
-    if m:
-        name = m.group(1)
-        models = [name] if name in imap.all_model_names_set else []
-        return RuleMatch("manifest", models, unit_tiers, rebuild)
+    for rule in CLASSIFICATION_RULES:
+        context = rule.matcher(path, imap)
+        if context is not None:
+            return rule.resolver(context, imap, unit_tiers, rebuild)
 
-    # Rule 1a: Family package file. A flat per-family folder is an ownership
-    # boundary: any file under families/<family>/ affects that family's models.
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/([A-Za-z]\w*)/.+\.py$", path)
-    if m:
-        family = m.group(1)
-        models = imap.family_to_models.get(family, [])
-        return RuleMatch("family_package", sorted(models), unit_tiers, rebuild)
-
-    # Rule 1b: Family plugin (not __init__ or base)
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/(\w+)\.py$", path)
-    if m and m.group(1) not in ("__init__", "base"):
-        family = m.group(1)
-        models = imap.family_to_models.get(family, [])
-        return RuleMatch("family_plugin", sorted(models), unit_tiers, rebuild)
-
-    # Rule 1c: Top-level family __init__.py or base.py -> ALL models
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/((__init__|base)\.py)$", path)
-    if m:
-        return RuleMatch("family_base", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 1c: Torch-TRT family plugin (not __init__ or base)
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/(\w+)\.py$", path)
-    if m and m.group(1) not in ("__init__", "base"):
-        family = m.group(1)
-        models = imap.family_to_models.get(family, [])
-        return RuleMatch("torchtrt_family_plugin", sorted(models), unit_tiers, rebuild)
-
-    # Rule 1d: Torch-TRT family __init__.py or base.py -> ALL models
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/((__init__|base)\.py)$", path)
-    if m:
-        return RuleMatch("torchtrt_family_base", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 1e: Torch-TRT strategy modules with known modality scope
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/(\w+)\.py$", path)
-    if m:
-        strategy_stem = m.group(1)
-        if strategy_stem == "diffusion":
-            return RuleMatch(
-                "torchtrt_strategy",
-                _models_for_task_strategies(["diffusion_media_generation"], imap),
-                unit_tiers,
-                rebuild,
-            )
-        return RuleMatch("torchtrt_strategy_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 2: Specialized builder (auto-detected via import scan)
-    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$", path)
-    if m:
-        module_name = m.group(1)
-        if (module_name.endswith("_builder")
-                and module_name not in _ORCHESTRATOR_MODULES
-                and module_name in imap.builder_to_families):
-            families = imap.builder_to_families[module_name]
-            models: Set[str] = set()
-            for fam in families:
-                models.update(imap.family_to_models.get(fam, []))
-            if models:
-                return RuleMatch("specialized_builder", sorted(models), unit_tiers, rebuild)
-        # Fall through to Rule 3 for non-builder or unmatched builder
-
-    # Rule 3: Any other file under tensorrt_model_connect/
-    if path.startswith("tensorrt_model_connect/"):
-        return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 4: C++ model-runtime folder. MODEL.toml declares runtime_strategy
-    # ownership so impact selection does not depend on plugin/pipeline names.
-    m = re.match(r"src/runtime/models/([^/]+)/.+$", path)
-    if m:
-        model_folder = m.group(1)
-        strategies = imap.cpp_runtime_model_strategies.get(model_folder, [])
-        if strategies:
-            return RuleMatch(
-                "cpp_runtime_model",
-                _drop_fp8_scale_models(
-                    _models_for_runtime_strategies(strategies, imap), imap),
-                unit_tiers,
-                rebuild,
-            )
-        return RuleMatch("cpp_runtime_model_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 5: C++ plugin
-    m = re.match(r"src/runtime/plugins/(\w+)\.cpp$", path)
-    if m:
-        plugin_stem = m.group(1)
-        strategies = CPP_PLUGIN_STRATEGIES.get(plugin_stem, [])
-        if strategies:
-            models = _drop_fp8_scale_models(
-                _models_for_runtime_strategies(strategies, imap), imap)
-            if plugin_stem == "flux_plugin":
-                return RuleMatch(
-                    "cpp_plugin_flux_runtime",
-                    models, unit_tiers, rebuild,
-                )
-            return RuleMatch(
-                "cpp_plugin", models, unit_tiers, rebuild,
-            )
-        # Unknown plugin -> all models (safety)
-        return RuleMatch("cpp_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 6: C++ pipeline
-    m = re.match(r"src/runtime/pipelines/(\w+)\.(h|cpp)$", path)
-    if m:
-        pipeline_stem = m.group(1)
-        strategies = CPP_PIPELINE_STRATEGIES.get(pipeline_stem, [])
-        if strategies:
-            models = _drop_fp8_scale_models(
-                _models_for_runtime_strategies(strategies, imap), imap)
-            if pipeline_stem == "flux_pipeline":
-                return RuleMatch(
-                    "cpp_pipeline_flux_runtime",
-                    models, unit_tiers, rebuild,
-                )
-            return RuleMatch(
-                "cpp_pipeline", models, unit_tiers, rebuild,
-            )
-        return RuleMatch("cpp_pipeline_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 7: Shared C++ helpers
-    m = re.match(r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$", path)
-    if m:
-        helper_stem = m.group(1)
-        if helper_stem == "plugin_helpers":
-            return RuleMatch("cpp_shared_plugin_helpers", list(imap.all_model_names), unit_tiers, rebuild)
-        runtime_strategies = SHARED_CPP_HELPER_STRATEGIES.get(helper_stem, [])
-        if runtime_strategies:
-            return RuleMatch(
-                "cpp_shared_helper",
-                _drop_fp8_scale_models(
-                    _models_for_runtime_strategies(runtime_strategies, imap), imap),
-                unit_tiers, rebuild,
-            )
-        return RuleMatch("cpp_shared_helper_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 7b: Scoped C++ helper/source used by a subset of pipelines
-    if path in imap.path_scope_overrides:
-        return RuleMatch(
-            "cpp_scoped_helper",
-            _drop_fp8_scale_models(imap.path_scope_overrides[path], imap),
-            unit_tiers, rebuild,
-        )
-
-    # Rule 8: Any other C++ source/header
-    if path.startswith("src/") or path.startswith("include/"):
-        return RuleMatch("cpp_source", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9a: E2E runner
-    m = re.match(r"tests/e2e_harness/runners/(\w+)\.py$", path)
-    if m:
-        runner_stem = m.group(1)
-        if runner_stem == "__init__":
-            return RuleMatch("harness_runner_init", list(imap.all_model_names), unit_tiers, rebuild)
-        task_strategies = RUNNER_TASK_STRATEGIES.get(runner_stem, [])
-        if task_strategies:
-            return RuleMatch(
-                "harness_runner",
-                _models_for_task_strategies(task_strategies, imap),
-                unit_tiers, rebuild,
-            )
-        return RuleMatch("harness_runner_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9b: E2E comparator
-    m = re.match(r"tests/e2e_harness/comparators/(\w+)\.py$", path)
-    if m:
-        comp_stem = m.group(1)
-        if comp_stem == "__init__":
-            return RuleMatch("harness_comparator_init", list(imap.all_model_names), unit_tiers, rebuild)
-        task_strategies = COMPARATOR_TASK_STRATEGIES.get(comp_stem, [])
-        if task_strategies:
-            return RuleMatch(
-                "harness_comparator",
-                _models_for_task_strategies(task_strategies, imap),
-                unit_tiers, rebuild,
-            )
-        return RuleMatch("harness_comparator_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9c: E2E reference
-    m = re.match(r"tests/e2e_harness/references/(\w+)\.py$", path)
-    if m:
-        ref_stem = m.group(1)
-        if ref_stem == "__init__":
-            return RuleMatch("harness_reference_init", list(imap.all_model_names), unit_tiers, rebuild)
-        task_strategies = REFERENCE_TASK_STRATEGIES.get(ref_stem, [])
-        if task_strategies:
-            return RuleMatch(
-                "harness_reference",
-                _models_for_task_strategies(task_strategies, imap),
-                unit_tiers, rebuild,
-            )
-        return RuleMatch("harness_reference_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9d: E2E contract plugin
-    m = re.match(r"tests/e2e_harness/plugins/(\w+)\.py$", path)
-    if m:
-        plugin_stem = m.group(1)
-        if plugin_stem == "__init__":
-            return RuleMatch("harness_plugin_init", list(imap.all_model_names), unit_tiers, rebuild)
-        task_strategies = PLUGIN_TASK_STRATEGIES.get(plugin_stem, [])
-        if task_strategies:
-            return RuleMatch(
-                "harness_plugin",
-                _models_for_task_strategies(task_strategies, imap),
-                unit_tiers,
-                rebuild,
-            )
-        return RuleMatch("harness_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9e: E2E threshold profiles
-    m = re.match(r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$", path)
-    if m:
-        profile_stem = m.group(1)
-        task_strategies = THRESHOLD_PROFILE_TASK_STRATEGIES.get(profile_stem, [])
-        if task_strategies:
-            return RuleMatch(
-                "harness_threshold_profile",
-                _models_for_task_strategies(task_strategies, imap),
-                unit_tiers,
-                rebuild,
-            )
-        return RuleMatch("harness_threshold_unknown", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9f: Any other E2E harness file
-    if path.startswith("tests/e2e_harness/"):
-        return RuleMatch("harness_shared", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 10: test_e2e.py or conftest.py
-    if path in ("tests/test_e2e.py", "tests/conftest.py"):
-        return RuleMatch("e2e_entrypoint", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 10b: E2E runner/scheduler scripts affect every selected model.
-    if path in {
-        "scripts/run_e2e_parallel.sh",
-        "scripts/schedule_e2e.py",
-        "scripts/warm_hf_cache.py",
-    }:
-        return RuleMatch("e2e_runner_script", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 9c: E2E waiver files affect report/test interpretation. Without
-    # diff context, re-run all models; diff-aware refinement narrows model rows.
-    if path == "tests/e2e/waives.txt":
-        return RuleMatch("e2e_waives", list(imap.all_model_names), unit_tiers, rebuild)
-
-    # Rule 11: Unit test directories (no E2E)
-    if path.startswith("tests/builder/"):
-        return RuleMatch("unit_builder", [], unit_tiers, rebuild)
-    if path.startswith("tests/cpp/"):
-        return RuleMatch("unit_cpp", [], unit_tiers, rebuild)
-    if path.startswith("tests/tools/"):
-        return RuleMatch("unit_tools", [], unit_tiers, rebuild)
-    if path.startswith("tests/torchtrt_builder/"):
-        return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
-    if path.startswith("tests/engine_defs/torch_trt/"):
-        return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
-
-    # Rule 12: CMake / build system — triggers C++ rebuild + unit tests
-    # but no E2E models; actual model impact comes from the source files.
-    if path == "CMakeLists.txt" or path.startswith("cmake/"):
-        return RuleMatch("cmake", [], unit_tiers, rebuild)
-
-    # Rule 12b: E2E data file referenced by manifests
-    if path in imap.e2e_data_file_to_models:
-        return RuleMatch("e2e_data_file", imap.e2e_data_file_to_models[path], unit_tiers, rebuild)
-
-    # Rule 12c: FP8 weight generation script — affects all models with fp8_scales manifests
-    if path == "scripts/_gen_fp8_bf16.py":
-        return RuleMatch(
-            "fp8_gen_script",
-            sorted(imap.manifest_field_to_models.get("fp8_scales", [])),
-            [], False,
-        )
-
-    # Rule 13: Non-code files (no impact)
-    if path.startswith("tools/") or path.startswith("scripts/"):
-        return RuleMatch("no_impact", [], [], False)
-    for pattern in _NO_IMPACT_PATTERNS:
-        if re.match(pattern, path):
-            return RuleMatch("no_impact", [], [], False)
-    # *.md files anywhere
-    if path.endswith(".md"):
-        return RuleMatch("no_impact", [], [], False)
-
-    # CATCH-ALL: unknown file -> ALL models (safety net)
-    return RuleMatch("catch_all", list(imap.all_model_names), unit_tiers, True)
+    raise RuntimeError("classification rules must include a catch_all rule")
 
 # ---------------------------------------------------------------------------
 # Impact analysis (aggregate across all changed files)
