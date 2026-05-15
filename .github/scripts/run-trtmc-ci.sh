@@ -447,28 +447,7 @@ run_diffusion_vlm_assessment() {
   fi
 
   local pair_count
-  pair_count=$(python3 -c '
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-count = 0
-for result_path in root.glob("*/result.json"):
-    try:
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    case = result.get("case_config", {})
-    if case.get("task_strategy") != "diffusion_media_generation":
-        continue
-    model_dir = result_path.parent
-    has_trt = (model_dir / "frames").is_dir()
-    has_ref = (model_dir / "hf_frames").is_dir() or (model_dir / "ref_frames").is_dir()
-    if has_trt and has_ref:
-        count += 1
-print(count)
-' e2e_artifacts/artifacts)
+  pair_count=$(python3 tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts)
   if [ "${pair_count:-0}" -eq 0 ]; then
     echo "Skipping: no TRT/HF diffusion frame pairs for VLM assessment"
     return 0

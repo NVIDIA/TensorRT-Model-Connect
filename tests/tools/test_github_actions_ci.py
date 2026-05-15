@@ -50,6 +50,16 @@ def test_diffusion_vlm_gate_failures_are_not_waived() -> None:
     assert "--waives" not in text
 
 
+def test_diffusion_vlm_pair_count_uses_helper() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    vlm_block = text.split("run_diffusion_vlm_assessment() {", maxsplit=1)[1].split(
+        "\ngenerate_coverage_map() {",
+        maxsplit=1,
+    )[0]
+    assert "tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts" in vlm_block
+    assert "python3 -c" not in vlm_block
+
+
 def test_shared_setup_action_creates_hf_cache_dirs() -> None:
     text = (REPO_ROOT / ".github" / "actions" / "setup-trtmc" / "action.yml").read_text()
     assert '"${HF_HOME:-}"' in text

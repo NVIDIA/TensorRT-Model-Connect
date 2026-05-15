@@ -14,6 +14,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+try:
+    from tools.count_diffusion_frame_pairs import discover_diffusion_frame_pairs
+except ModuleNotFoundError:
+    from count_diffusion_frame_pairs import discover_diffusion_frame_pairs
+
 
 DEFAULT_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -55,45 +60,8 @@ def _load_image(path: Path, max_side: int) -> Any:
     return image
 
 
-def _frames_in(path: Path) -> list[Path]:
-    if not path.is_dir():
-        return []
-    frames = sorted(path.glob("frame_*.png"))
-    if frames:
-        return frames
-    return sorted(path.glob("*.png"))
-
-
-def _select_frame(frames: list[Path]) -> Path | None:
-    if not frames:
-        return None
-    return frames[(len(frames) - 1) // 2]
-
-
 def _discover_pairs(artifacts_dir: Path) -> list[dict[str, Any]]:
-    pairs: list[dict[str, Any]] = []
-    for result_path in sorted(artifacts_dir.glob("*/result.json")):
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        case = result.get("case_config", {})
-        if case.get("task_strategy") != "diffusion_media_generation":
-            continue
-
-        model_dir = result_path.parent
-        trt_frame = _select_frame(_frames_in(model_dir / "frames"))
-        hf_frame = _select_frame(_frames_in(model_dir / "hf_frames"))
-        if hf_frame is None:
-            hf_frame = _select_frame(_frames_in(model_dir / "ref_frames"))
-        if trt_frame is None or hf_frame is None:
-            continue
-
-        inputs = case.get("inputs", {})
-        pairs.append({
-            "case_name": result.get("case_name") or case.get("name") or model_dir.name,
-            "prompt": inputs.get("prompt", ""),
-            "trt_image": str(trt_frame),
-            "hf_image": str(hf_frame),
-        })
-    return pairs
+    return discover_diffusion_frame_pairs(artifacts_dir)
 
 
 def _parse_json(text: str) -> dict[str, Any]:
