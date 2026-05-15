@@ -15,7 +15,7 @@ purpose, dependency profile, and speed:
 | 2. C++ runtime unit | `tests/cpp/` | 91 | 70+ | Mix | ~8 s | C++ runtime correctness |
 | 3. Tools self-tests | `tests/tools/` | 51 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 108 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 110 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -528,7 +528,7 @@ gold-standard correctness gate. All modalities use the same harness.
 
 ```
 tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 108 per-model JSON manifests
+tests/e2e/models/*.json              # 110 per-model JSON manifests
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -748,7 +748,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 108 models, force-rebuild every bundle. Gold-standard regression gate.
+All 110 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \

@@ -445,7 +445,7 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-108 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
+110 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
 `family`, `runtime_strategy`, `prompt`, `max_new_tokens`, and optional
 fields like `logit_atol`, `trust_remote_code`, `skip`.
 
