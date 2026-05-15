@@ -223,6 +223,13 @@ _NO_IMPACT_PATTERNS = [
     r"^recovery-",
 ]
 
+_BROAD_FALLBACK_RULES = {
+    "catch_all",
+    "harness_shared",
+    "shared_builder_module",
+}
+_FALLBACK_ALLOWLIST = Path("tools/test_impact_fallback_allowlist.txt")
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -1896,7 +1903,158 @@ def maybe_refine_match_with_diff(
 # ---------------------------------------------------------------------------
 
 
-def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
+def _is_guarded_fallback(rule: str, path: str) -> bool:
+    """Return True when a rule is intentionally broad enough to need review."""
+    path = path.replace("\\", "/").strip("/")
+    if rule in _BROAD_FALLBACK_RULES:
+        return True
+    return rule == "no_impact" and path.startswith(("tools/", "scripts/"))
+
+
+def _load_fallback_allowlist(allowlist_path: Path) -> tuple[Set[tuple[str, str]], List[str]]:
+    """Load reviewed broad fallback classifications.
+
+    Non-comment lines use:
+        <rule> <repo-relative-path> # <rationale>
+    """
+    allowed: Set[tuple[str, str]] = set()
+    errors: List[str] = []
+    if not allowlist_path.is_file():
+        return allowed, [f"Fallback allowlist missing: {allowlist_path}"]
+
+    try:
+        lines = allowlist_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return allowed, [f"Could not read fallback allowlist {allowlist_path}: {exc}"]
+
+    for line_no, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        entry_text, sep, comment = line.partition("#")
+        entry_text = entry_text.strip()
+        if not sep or not comment.strip():
+            errors.append(
+                f"{allowlist_path}:{line_no}: fallback allowlist entries need "
+                "an inline rationale comment"
+            )
+            continue
+
+        parts = entry_text.split(maxsplit=1)
+        if len(parts) != 2:
+            errors.append(
+                f"{allowlist_path}:{line_no}: expected '<rule> <path> # <rationale>'"
+            )
+            continue
+
+        rule, path = parts
+        path = path.replace("\\", "/").strip("/")
+        if not _is_guarded_fallback(rule, path):
+            errors.append(
+                f"{allowlist_path}:{line_no}: '{rule} {path}' is not a guarded "
+                "broad fallback classification"
+            )
+            continue
+
+        entry = (rule, path)
+        if entry in allowed:
+            errors.append(
+                f"{allowlist_path}:{line_no}: duplicate fallback allowlist entry "
+                f"for {rule} {path}"
+            )
+            continue
+        allowed.add(entry)
+
+    return allowed, errors
+
+
+def _tracked_repo_paths(repo_root: Path) -> tuple[List[str], List[str]]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return [], [f"Could not list tracked repo paths with git ls-files: {exc}"]
+
+    paths = [
+        path.replace("\\", "/").strip("/")
+        for path in result.stdout.splitlines()
+        if path.strip()
+    ]
+    return sorted(paths), []
+
+
+def _broad_fallback_classifications(
+    imap: ImpactMap,
+    tracked_paths: List[str],
+) -> List[Dict[str, str]]:
+    fallbacks: List[Dict[str, str]] = []
+    for path in sorted({p.replace("\\", "/").strip("/") for p in tracked_paths if p}):
+        match = classify_file(path, imap)
+        if _is_guarded_fallback(match.rule, path):
+            fallbacks.append({"path": path, "rule": match.rule})
+    return fallbacks
+
+
+def validate_fallback_allowlist(
+    imap: ImpactMap,
+    repo_root: Path,
+    tracked_paths: Optional[List[str]] = None,
+    allowlist_path: Optional[Path] = None,
+) -> tuple[List[str], List[str], List[Dict[str, str]]]:
+    """Validate reviewed broad fallback classifications.
+
+    Returns errors, warnings, and the tracked fallback classifications that were
+    checked. Warnings are advisory so obsolete allowlist entries do not fail
+    unrelated map checks.
+    """
+    if allowlist_path is None:
+        allowlist_path = repo_root / _FALLBACK_ALLOWLIST
+    elif not allowlist_path.is_absolute():
+        allowlist_path = repo_root / allowlist_path
+
+    allowed, errors = _load_fallback_allowlist(allowlist_path)
+
+    tracked_errors: List[str] = []
+    if tracked_paths is None:
+        tracked_paths, tracked_errors = _tracked_repo_paths(repo_root)
+    errors.extend(tracked_errors)
+
+    fallbacks = _broad_fallback_classifications(imap, tracked_paths or [])
+    fallback_keys = {(entry["rule"], entry["path"]) for entry in fallbacks}
+
+    for entry in fallbacks:
+        key = (entry["rule"], entry["path"])
+        if key not in allowed:
+            errors.append(
+                "Unreviewed broad fallback classification: "
+                f"{entry['path']} -> {entry['rule']}. Add it to "
+                f"{_FALLBACK_ALLOWLIST} with a rationale comment or add a "
+                "more precise classification rule."
+            )
+
+    warnings: List[str] = []
+    for rule, path in sorted(allowed - fallback_keys):
+        warnings.append(
+            "Fallback allowlist entry no longer matches a tracked broad "
+            f"fallback: {rule} {path}"
+        )
+
+    return errors, warnings, fallbacks
+
+
+def validate_map(
+    imap: ImpactMap,
+    repo_root: Path,
+    tracked_paths: Optional[List[str]] = None,
+    fallback_allowlist_path: Optional[Path] = None,
+    report_fallbacks: bool = False,
+) -> List[str]:
     """Validate impact map consistency. Returns list of error strings."""
     errors: List[str] = []
     warnings: List[str] = []
@@ -1983,6 +2141,23 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
     for name, exists in spot_checks.items():
         if not exists:
             errors.append(f"Expected directory missing for rule validation: {name}")
+
+    # 7. Broad fallback classifications must be explicitly reviewed.
+    fallback_errors, fallback_warnings, fallbacks = validate_fallback_allowlist(
+        imap,
+        repo_root,
+        tracked_paths=tracked_paths,
+        allowlist_path=fallback_allowlist_path,
+    )
+    errors.extend(fallback_errors)
+    warnings.extend(fallback_warnings)
+
+    if report_fallbacks:
+        for entry in fallbacks:
+            print(
+                f"  FALLBACK: {entry['path']} -> {entry['rule']}",
+                file=sys.stderr,
+            )
 
     # Print warnings to stderr
     for w in warnings:
@@ -2077,7 +2252,7 @@ def main() -> int:
     imap = build_impact_map(repo_root)
 
     if args.validate:
-        errors = validate_map(imap, repo_root)
+        errors = validate_map(imap, repo_root, report_fallbacks=args.verbose)
         if errors:
             print("Validation FAILED:", file=sys.stderr)
             for e in errors:

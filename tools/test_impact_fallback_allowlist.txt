@@ -1,0 +1,230 @@
+# Reviewed broad fallback classifications for tools/test_impact.py --validate.
+#
+# Each non-comment line uses:
+#   <rule> <repo-relative-path> # <rationale>
+#
+# These entries make broad fallback behavior visible. When a new tracked path
+# lands in one of these rules, either add a precise classifier or add a reviewed
+# allowlist entry with a rationale.
+
+catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all Dockerfile.gb300 # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all examples/trtmc_cli.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/.gitattributes # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/LICENSE # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/config.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/generation_config.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/merges.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/tokenizer.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/tokenizer_config.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/Qwen__Qwen3-0.6B/vocab.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/config.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/model.safetensors # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/trtmc_decoder/config.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/trtmc_decoder/transitions.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/trtmc_decoder/vocab.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all models/hf/qwen3/trtmc_decoder/weights.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/assets/test_scene.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_cache_correctness.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_diffusion_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_error_handling.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_full_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_inference.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_logit_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_runner_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/test_vl_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/timing_estimates.json # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e_partition.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/engine_defs/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/run_qwen3_fi.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/runtime_strategy_matrix.yaml # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/test_flashinfer_plugin_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/test_flashinfer_trt_attention.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/test_qwen3_flashinfer_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/test_tvm_ffi_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all third_party/stb/stb_image.h # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all third_party/stb/stb_image_resize2.h # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all third_party/stb/stb_image_write.h # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all verify_encoder.py # tracked path has no precise impact rule yet; catch-all stays conservative
+harness_shared tests/e2e_harness/__init__.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/contracts.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/manifest_loader.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/orchestrator.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/python_profiles.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/registry.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/result_schema.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
+no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
+no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
+no_impact scripts/_mk_fp8_bf16_bundle.py # developer utility script; no CI test impact is intentional
+no_impact scripts/_quantize_fp8.py # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/__init__.py # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/autorun.py # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/discover.py # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/dispatch.py # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/optimize_supervisor.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/autopilot/run.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/bench_flux2_perf.py # developer utility script; no CI test impact is intentional
+no_impact scripts/bootstrap_workspace.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/build_wan14b.py # developer utility script; no CI test impact is intentional
+no_impact scripts/check_family_coverage.py # developer utility script; no CI test impact is intentional
+no_impact scripts/diagnose_loop.py # developer utility script; no CI test impact is intentional
+no_impact scripts/docker_build_gb300.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/docker_run_gb300.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/eval_mmlu.py # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_ci_summary.py # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_e2e_report.py # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_e2e_report_assets/e2e_report.css # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_e2e_report_assets/e2e_report.js # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_perf_report.py # developer utility script; no CI test impact is intentional
+no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
+no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
+no_impact scripts/magpie_codec_bridge.py # developer utility script; no CI test impact is intentional
+no_impact scripts/magpie_tokenizer.py # developer utility script; no CI test impact is intentional
+no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
+no_impact scripts/new_torchtrt_family.py # developer utility script; no CI test impact is intentional
+no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
+no_impact scripts/profile_magpie_tts.py # developer utility script; no CI test impact is intentional
+no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
+no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
+no_impact scripts/sdpa_nan_repro.py # developer utility script; no CI test impact is intentional
+no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
+no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
+no_impact scripts/validate_torchtrt_family.sh # developer utility script; no CI test impact is intentional
+no_impact tools/__init__.py # developer utility script; no CI test impact is intentional
+no_impact tools/ai_agent_system.py # developer utility script; no CI test impact is intentional
+no_impact tools/ai_staging.py # developer utility script; no CI test impact is intentional
+no_impact tools/auto_perf_tune.py # developer utility script; no CI test impact is intentional
+no_impact tools/bench_flashinfer_e2e.py # developer utility script; no CI test impact is intentional
+no_impact tools/benchmark_qwen3_8b_aime25_vs_hf.py # developer utility script; no CI test impact is intentional
+no_impact tools/check_cyclomatic_complexity.py # developer utility script; no CI test impact is intentional
+no_impact tools/check_doc_file_references.py # developer utility script; no CI test impact is intentional
+no_impact tools/check_legacy_runtime_freeze.py # developer utility script; no CI test impact is intentional
+no_impact tools/check_runtime_strategy_matrix.py # developer utility script; no CI test impact is intentional
+no_impact tools/classify_bottleneck.py # developer utility script; no CI test impact is intentional
+no_impact tools/count_diffusion_frame_pairs.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage/cpp_coverage.sh # developer utility script; no CI test impact is intentional
+no_impact tools/coverage/python_coverage.sh # developer utility script; no CI test impact is intentional
+no_impact tools/coverage/run_coverage_all.sh # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_ci/run_cpp_coverage.sh # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_ci/run_python_coverage.sh # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/__init__.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/cpp_collector.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/fetch_latest.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/generate.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/python_collector.py # developer utility script; no CI test impact is intentional
+no_impact tools/coverage_map/select_tests.py # developer utility script; no CI test impact is intentional
+no_impact tools/cpu_profile.py # developer utility script; no CI test impact is intentional
+no_impact tools/cpu_profile_matrix.py # developer utility script; no CI test impact is intentional
+no_impact tools/debug_diffusion_pipeline.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_audio.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/__init__.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/__init__.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/diffusion_components.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/layer_diff.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/layer_profile.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/logit_diff.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/perf_benchmark.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/runner_parity.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/checks/vl_pipeline.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/protocol.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/registry.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_framework/runner.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_layers.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_logits.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_personaplex.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_segmentation.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_t5.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_torchtrt.py # developer utility script; no CI test impact is intentional
+no_impact tools/diff_vl.py # developer utility script; no CI test impact is intentional
+no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
+no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
+no_impact tools/layer_profiler.py # developer utility script; no CI test impact is intentional
+no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test impact is intentional
+no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
+no_impact tools/perf_compare_all.py # developer utility script; no CI test impact is intentional
+no_impact tools/perf_compare_diffusion.py # developer utility script; no CI test impact is intentional
+no_impact tools/perf_compare_torchtrt.py # developer utility script; no CI test impact is intentional
+no_impact tools/perf_utils.py # developer utility script; no CI test impact is intentional
+no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional
+no_impact tools/profile_report.py # developer utility script; no CI test impact is intentional
+no_impact tools/sol_estimate.py # developer utility script; no CI test impact is intentional
+no_impact tools/test_graph_ops.py # developer utility script; no CI test impact is intentional
+no_impact tools/test_impact.py # developer utility script; no CI test impact is intentional
+no_impact tools/test_impact_fallback_allowlist.txt # validation metadata; no CI test impact is intentional
+no_impact tools/test_runner_parity.py # developer utility script; no CI test impact is intentional
+no_impact tools/tool_helpers.py # developer utility script; no CI test impact is intentional
+no_impact tools/trtmc_profile.py # developer utility script; no CI test impact is intentional
+no_impact tools/validate_dit.py # developer utility script; no CI test impact is intentional
+no_impact tools/validate_t5.py # developer utility script; no CI test impact is intentional
+shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/cli.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/bundle_reader.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_ops.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.toml # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/context.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/profile.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/registry.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/scales.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/cli_support.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/config_bundle.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schema_registry.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_bark.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/base.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/flow_match_euler.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional

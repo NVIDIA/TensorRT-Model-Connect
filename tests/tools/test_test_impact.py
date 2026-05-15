@@ -1266,6 +1266,75 @@ class TestAggregation:
 
 
 class TestValidation:
+    def test_fallback_allowlist_accepts_reviewed_fallback_paths(
+        self, imap, mock_repo, tmp_path,
+    ):
+        """Reviewed fallback classifications pass the fallback guardrail."""
+        allowlist = tmp_path / "fallbacks.txt"
+        tracked_paths = [
+            "pyproject.toml",
+            "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py",
+            "tests/e2e_harness/contracts.py",
+            "tools/diff_logits.py",
+        ]
+        allowlist.write_text(
+            "\n".join([
+                "catch_all pyproject.toml # conservative repo metadata fallback",
+                "shared_builder_module "
+                "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py "
+                "# shared builder surface",
+                "harness_shared tests/e2e_harness/contracts.py # shared harness surface",
+                "no_impact tools/diff_logits.py # developer utility script",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        errors, warnings, fallbacks = test_impact.validate_fallback_allowlist(
+            imap,
+            mock_repo,
+            tracked_paths=tracked_paths,
+            allowlist_path=allowlist,
+        )
+
+        assert errors == []
+        assert warnings == []
+        assert {(entry["rule"], entry["path"]) for entry in fallbacks} == {
+            ("catch_all", "pyproject.toml"),
+            (
+                "shared_builder_module",
+                "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py",
+            ),
+            ("harness_shared", "tests/e2e_harness/contracts.py"),
+            ("no_impact", "tools/diff_logits.py"),
+        }
+
+    def test_validate_rejects_unreviewed_fallback_path(self, imap, mock_repo, tmp_path):
+        """A new tracked path classified by a broad fallback fails validation."""
+        allowlist = tmp_path / "fallbacks.txt"
+        allowlist.write_text(
+            "shared_builder_module "
+            "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py "
+            "# existing reviewed shared builder surface\n",
+            encoding="utf-8",
+        )
+
+        errors = test_impact.validate_map(
+            imap,
+            mock_repo,
+            tracked_paths=[
+                "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py",
+                "tensorrt_model_connect/tensorrt_model_connect/new_shared.py",
+            ],
+            fallback_allowlist_path=allowlist,
+        )
+
+        assert any(
+            "Unreviewed broad fallback classification" in error
+            and "new_shared.py -> shared_builder_module" in error
+            for error in errors
+        )
+        assert not any("checkpoint_mapper.py" in error for error in errors)
+
     def test_validate_consistency(self):
         """Runs --validate on the real repo and checks it passes."""
         real_root = REPO_ROOT
