@@ -32,6 +32,14 @@ def _import_report():
     return importlib.import_module("generate_e2e_report")
 
 
+def _import_vlm_assessment():
+    """Import the VLM assessment report component from scripts/."""
+    scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    return importlib.import_module("reporting.vlm_assessment")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -844,6 +852,23 @@ class TestRenderVlModel:
 
 class TestRenderDiffusionModel:
     """Tests for render_diffusion_model()."""
+
+    def test_vlm_assessment_missing_artifact_message(self):
+        mod = _import_vlm_assessment()
+        html = mod.render_diffusion_vlm_assessment({})
+        assert "No VLM assessment artifact was found for this model" in html
+
+    def test_vlm_assessment_malformed_judgment_defaults_to_pass(self):
+        mod = _import_vlm_assessment()
+        html = mod.render_diffusion_vlm_assessment({
+            "vlm_assessment": {
+                "model_id": "Judge <model>",
+                "vlm_judgment": "not a structured judgment",
+            }
+        })
+        assert "Judge &lt;model&gt;" in html
+        assert "<strong>Gate:</strong> PASS" in html
+        assert "Semantic similarity" not in html
 
     def test_frame_gallery(self, tmp_path):
         mod = _import_report()

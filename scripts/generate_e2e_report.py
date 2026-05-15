@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
+from reporting.vlm_assessment import render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment
+
 # Maximum file size to embed inline (10 MB).
 _MAX_EMBED_BYTES = 10 * 1024 * 1024
 
@@ -1220,77 +1222,6 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
     return "\n".join(parts)
-
-
-def _render_diffusion_vlm_assessment(result: Dict[str, Any]) -> str:
-    assessment = result.get("vlm_assessment")
-    if not isinstance(assessment, dict):
-        return (
-            "<h4>VLM Semantic Assessment</h4>"
-            "<p><em>No VLM assessment artifact was found for this model.</em></p>"
-        )
-
-    judgment = assessment.get("vlm_judgment", {})
-    if not isinstance(judgment, dict):
-        judgment = {}
-    gate = judgment.get("vlm_gate", {})
-    if not isinstance(gate, dict):
-        gate = {}
-
-    gate_failed = bool(gate.get("failed", False))
-    if gate_failed:
-        gate_label = "FAIL"
-        gate_cls = "vlm-fail"
-    else:
-        gate_label = "PASS"
-        gate_cls = "vlm-pass"
-    reasons = gate.get("reasons") or []
-    if isinstance(reasons, list):
-        reason_text = (
-            "; ".join(str(r) for r in reasons)
-            or str(judgment.get("reason", ""))
-        )
-    else:
-        reason_text = str(reasons)
-
-    rows = [
-        ("Judge model", assessment.get("model_id", "")),
-        ("Semantic similarity", judgment.get("semantic_similarity_0_to_5", "")),
-        ("TRT prompt alignment", judgment.get("trt_prompt_alignment_0_to_5", "")),
-        ("HF prompt alignment", judgment.get("hf_prompt_alignment_0_to_5", "")),
-        ("TRT visual quality", judgment.get("trt_visual_quality_0_to_5", "")),
-        ("HF visual quality", judgment.get("hf_visual_quality_0_to_5", "")),
-        ("TRT relative to HF", judgment.get("trt_relative_to_hf", "")),
-        ("Regression", judgment.get("is_regression", "")),
-        ("Gate", gate_label),
-        ("Reason", reason_text or judgment.get("reason", "")),
-    ]
-    table_rows = "\n".join(
-        f"<tr><td>{_esc(name)}</td><td>{_format_value(value)}</td></tr>"
-        for name, value in rows
-        if value not in ("", None)
-    )
-
-    descriptions = []
-    trt_description = judgment.get("trt_description")
-    hf_description = judgment.get("hf_description")
-    if trt_description:
-        descriptions.append(
-            f"<p><strong>TRT description:</strong> {_esc(trt_description)}</p>")
-    if hf_description:
-        descriptions.append(
-            f"<p><strong>HF description:</strong> {_esc(hf_description)}</p>")
-
-    return (
-        '<section class="vlm-assessment">'
-        '<h4>VLM Semantic Assessment</h4>'
-        f'<p class="{gate_cls}"><strong>Gate:</strong> {gate_label}</p>'
-        '<table class="vlm-table"><tbody>'
-        f"{table_rows}"
-        "</tbody></table>"
-        + "".join(descriptions)
-        + "</section>"
-    )
 
 
 def _stage_output_returncode(stage: Dict[str, Any]) -> Any:
