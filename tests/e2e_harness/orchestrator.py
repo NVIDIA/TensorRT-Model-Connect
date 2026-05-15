@@ -21,6 +21,7 @@ Lifecycle per case:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from .contracts import (
     E2EResult,
     E2EStatus,
     FailureType,
+    PluginRuntimeContext,
     PreflightRequirement,
     RunContext,
     StageOutput,
@@ -937,6 +939,54 @@ def _collect_trt_stage_timing(output: StageOutput, stage_name: str) -> dict[str,
     return timings
 
 
+def _build_plugin_runtime_context(ctx: RunContext) -> PluginRuntimeContext:
+    """Create the typed runtime context exposed to contract plugins."""
+    return PluginRuntimeContext(
+        engine_dir=ctx.engine_dir,
+        binary_path=ctx.binary_path,
+        hf_python=ctx.runtime_cli_hf_python(),
+        runtime_python=ctx.runtime_python_path(),
+        reference_python=ctx.reference_python_path(),
+        artifacts_dir=ctx.artifacts_dir,
+    )
+
+
+def _plugin_accepts_runtime_context(contract_plugin: Any) -> bool:
+    """Return True when a contract plugin opts into PluginRuntimeContext."""
+    try:
+        parameters = inspect.signature(contract_plugin.verify).parameters
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        "runtime_context" in parameters
+        or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in parameters.values()
+        )
+    )
+
+
+def _verify_contract_plugin(
+    contract_plugin: Any,
+    trt_output: StageOutput,
+    ref_output: StageOutput,
+    case: E2ECase,
+    threshold: ThresholdProfile,
+    runtime_context: PluginRuntimeContext,
+) -> CompareResult:
+    """Call a contract plugin while preserving legacy verify signatures."""
+    if _plugin_accepts_runtime_context(contract_plugin):
+        return contract_plugin.verify(
+            trt_output,
+            ref_output,
+            case,
+            threshold,
+            runtime_context=runtime_context,
+        )
+    return contract_plugin.verify(trt_output, ref_output, case, threshold)
+
+
 def _extract_trt_engine_time_s(output: StageOutput) -> float | None:
     metadata = output.metadata or {}
     candidates: list[Any] = [
@@ -1146,6 +1196,7 @@ class E2EOrchestrator:
             rebuild=ctx.rebuild,
             verbose=ctx.verbose,
         )
+        plugin_runtime_context = _build_plugin_runtime_context(ctx_with_bundle)
 
         # Resolve runner, reference, comparator, and contract plugin
         runner = get_runner(case.task_strategy)
@@ -1162,17 +1213,6 @@ class E2EOrchestrator:
                     case.metadata["contract_config"] = ref_config
             except Exception as e:
                 logger.warning("Contract plugin configure_reference failed: %s", e)
-
-            # Expose runtime paths so plugins can invoke auxiliary binaries
-            # and reference Python tools for contract checks.
-            case.metadata["_ctx"] = {
-                "engine_dir": ctx.engine_dir,
-                "binary_path": ctx.binary_path,
-                "hf_python": ctx.runtime_cli_hf_python(),
-                "runtime_python": ctx.runtime_python_path(),
-                "reference_python": ctx.reference_python_path(),
-                "artifacts_dir": artifacts_dir,
-            }
 
         # 3. Execute stages
         stage_results: dict[str, CompareResult] = {}
@@ -1289,8 +1329,14 @@ class E2EOrchestrator:
                 if contract_plugin is not None:
                     t0 = time.monotonic()
                     try:
-                        compare_result = contract_plugin.verify(
-                            trt_output, ref_output, case, threshold)
+                        compare_result = _verify_contract_plugin(
+                            contract_plugin,
+                            trt_output,
+                            ref_output,
+                            case,
+                            threshold,
+                            plugin_runtime_context,
+                        )
                         timing[f"contract_{stage_name}_s"] = time.monotonic() - t0
                     except Exception as e:
                         timing[f"contract_{stage_name}_s"] = time.monotonic() - t0

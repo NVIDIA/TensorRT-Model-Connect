@@ -21,6 +21,7 @@ from ..contracts import (
     CompareResult,
     E2ECase,
     MetricResult,
+    PluginRuntimeContext,
     StageOutput,
     StageStatus,
     ThresholdProfile,
@@ -70,12 +71,19 @@ class ContractTestPlugin(Protocol):
         ref_output: StageOutput,
         case: E2ECase,
         threshold: ThresholdProfile,
+        *,
+        runtime_context: PluginRuntimeContext | None = None,
     ) -> CompareResult:
         """Verify the user-facing contract.
 
         Called in the acceptance CI lane.  Should check user-visible behavior
         (exact text match, correct ranking, valid transcript, etc.) rather
         than numeric tensor parity.
+
+        Migrated plugins may accept ``runtime_context`` for resolved runtime
+        paths such as engine directories, binaries, and Python interpreters.
+        The orchestrator omits this keyword for legacy plugins that have not
+        declared it yet.
 
         Returns a CompareResult with contract-level metrics.
         """

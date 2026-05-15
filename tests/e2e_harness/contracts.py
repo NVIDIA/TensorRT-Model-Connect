@@ -560,6 +560,32 @@ class RunContext:
         return self.runtime_python_path()
 
 
+@dataclass(frozen=True)
+class PluginRuntimeContext:
+    """Resolved runtime paths made available to contract plugins.
+
+    This context is intentionally narrower than :class:`RunContext`: it contains
+    only paths that contract plugins may need for validation helpers. Empty
+    strings mean the corresponding path was not configured for this run.
+
+    Attributes:
+        engine_dir: Directory containing resolved TensorRT engine bundles.
+        binary_path: Path to the TensorRT-Model-Connect CLI binary.
+        hf_python: Optional Python interpreter value passed as ``--hf-python``
+            to compatible runtime commands.
+        runtime_python: Python interpreter for TRT-side helper subprocesses.
+        reference_python: Python interpreter for reference/validation tools.
+        artifacts_dir: Directory where this case writes E2E artifacts.
+    """
+
+    engine_dir: str = ""
+    binary_path: str = ""
+    hf_python: str = ""
+    runtime_python: str = ""
+    reference_python: str = ""
+    artifacts_dir: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Protocols
 # ---------------------------------------------------------------------------

@@ -16,7 +16,12 @@ import sys
 import textwrap
 
 from ..contracts import (
-    CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile,
+    CompareResult,
+    E2ECase,
+    MetricResult,
+    PluginRuntimeContext,
+    StageOutput,
+    ThresholdProfile,
 )
 from .base import (
     normalize_text, levenshtein_ned, make_pass, make_fail,
@@ -150,6 +155,8 @@ class TTSPlugin:
         ref_output: StageOutput,
         case: E2ECase,
         threshold: ThresholdProfile,
+        *,
+        runtime_context: PluginRuntimeContext | None = None,
     ) -> CompareResult:
         trt_wav = trt_output.data.get("wav_path")
         trt_rms = trt_output.data.get("rms")
@@ -191,12 +198,10 @@ class TTSPlugin:
         )
 
         if has_wav and input_prompt:
-            # Runtime paths injected by the orchestrator
-            ctx = case.metadata.get("_ctx", {})
             asr_python = (
-                ctx.get("reference_python")
-                or ctx.get("hf_python")
-                or ctx.get("runtime_python")
+                (runtime_context.reference_python if runtime_context else "")
+                or (runtime_context.hf_python if runtime_context else "")
+                or (runtime_context.runtime_python if runtime_context else "")
                 or sys.executable
             )
 
