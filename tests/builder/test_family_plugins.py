@@ -135,8 +135,10 @@ class TestQwenPlugin:
     def test_tensor_parallel_shards_qwen_projection_weights(self, tmp_path):
         """TP shards attention/MLP inner dims and leaves replicated weights intact."""
         from tensorrt_model_connect.families.qwen import plugin
-        from tensorrt_model_connect.parallel_config import ParallelConfig
-        from tensorrt_model_connect.sharding_policy import standard_decoder_sharding_policy
+        from tensorrt_model_connect.parallel_config import (
+            ParallelConfig,
+            shard_standard_decoder_weights,
+        )
 
         config = {
             "model_type": "qwen3",
@@ -153,12 +155,8 @@ class TestQwenPlugin:
 
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
-        policy = standard_decoder_sharding_policy(
-            cfg,
-            weights,
-            ParallelConfig(mode="tensor_parallel", tp_size=2, rank=1),
-        )
-        shard = policy.shard_weights()
+        shard = shard_standard_decoder_weights(
+            cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=2, rank=1))
 
         np.testing.assert_allclose(
             shard["layer.0.w_q"], weights["layer.0.w_q"][:, self.HIDDEN // 2:])

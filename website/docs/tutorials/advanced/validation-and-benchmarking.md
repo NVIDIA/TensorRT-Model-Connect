@@ -36,21 +36,6 @@ Read the manifest before debugging a failure. It tells you what the test is tryi
 | Threshold fields | Define acceptable numerical, textual, image, audio, or task-specific differences. |
 | Artifact fields | Define where logs and outputs should be written. |
 
-## Multi-device validation
-
-Multi-device validation must prove more than bundle construction. The manifest should state the distributed runtime shape, including launcher, world size, visible devices, and whether rank-zero output extraction or per-rank artifact collection is expected.
-
-Treat these as separate checkpoints:
-
-| Checkpoint | Evidence |
-| --- | --- |
-| Build contract | Bundle contains the expected rank-local engine sections, `config.json` fields, and `distributed_plan.json`. |
-| Launch contract | The requested launcher starts the expected number of ranks and initializes the required communicators. |
-| Runtime contract | The pipeline completes the task and records rank-zero or task-specific output artifacts. |
-| Accuracy contract | The comparator checks distributed output against HF, single-device TRT, or another accepted oracle using the manifest thresholds. |
-
-A TP bundle that builds successfully but segfaults under `mpirun` is not TP accuracy validation. It is build-path evidence plus a distributed runtime failure to debug.
-
 ## C++ unit tests
 
 ```bash
@@ -91,7 +76,6 @@ Report:
 
 - GPU, driver, CUDA, TensorRT version, and backend DSO.
 - Bundle path and build command.
-- Distributed launcher, world size, mesh axes, visible devices, and rank-output policy when benchmarking a distributed bundle.
 - Prompt length and generated token count.
 - Whether the number is wall-clock CLI latency, per-token decode time, or raw engine enqueue time.
 
@@ -138,7 +122,6 @@ Run command:
 GPU:
 Driver/CUDA/TensorRT:
 Backend DSO:
-Distributed launcher/world size:
 Input:
 Output length or shape:
 Warmup iterations:

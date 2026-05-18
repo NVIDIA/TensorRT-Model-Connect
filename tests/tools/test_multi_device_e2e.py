@@ -85,9 +85,9 @@ def test_text_runner_wraps_distributed_runtime_with_mpirun(monkeypatch, tmp_path
             0,
             stdout="[1,0]<stdout>:Paris\n[1,1]<stdout>:Paris\n",
             stderr=(
-                "[1,0]<stderr>:[trtmc.load_timing] label=\"decoder_rank0_plan\" "
+                "[1,0]<stderr>:[trtmc.load_timing] label=\"engine_plan_tp_rank0\" "
                 "load_deserialize_ms=1.5\n"
-                "[1,1]<stderr>:[trtmc.load_timing] label=\"decoder_rank1_plan\" "
+                "[1,1]<stderr>:[trtmc.load_timing] label=\"engine_plan_tp_rank1\" "
                 "load_deserialize_ms=2.5\n"
                 "[1,0]<stderr>:[trtmc] Pipeline loaded "
                 "(strategy=decoder_kv_cache, backend=trt_new_runtime)\n"
@@ -194,8 +194,6 @@ def test_text_runner_collects_distributed_debug_logits_with_mpirun(
     ]
     assert seen["cmd"][8:10] == ["/python", "-c"]
     assert "TensorParallelNcclGroup" in seen["cmd"][10]
-    assert "DISTRIBUTED_PLAN_SECTION" in seen["cmd"][10]
-    assert 'pattern.replace("{rank}", str(rank))' in seen["cmd"][10]
     assert seen["env"]["LD_LIBRARY_PATH"] == "/trt:/nccl"
     assert seen["env"]["TRTMC_NCCL_RENDEZVOUS"] == str(
         tmp_path / "qwen-tp" / "qwen-tp.debug_full.nccl_rendezvous.bin")

@@ -92,7 +92,6 @@ flowchart LR
 | New Python family using existing runtime strategy | Family plugin tests plus one E2E manifest. |
 | New runtime strategy | C++ registry/plugin tests, pipeline tests, CLI/API test if exposed, and one E2E manifest. |
 | New config namespace | Python and C++ config schema tests, CLI `--set` tests, effective config checks. |
-| New multi-device plan or mesh behavior | Builder plan tests, C++ distributed runtime tests, and at least one multi-device E2E manifest with an oracle comparison. |
 | New quantization format | Quantization plan tests, calibration/scale tests, one numerical E2E. |
 | New report or scheduling behavior | Tool tests plus one small fixture artifact. |
 | ABI or backend selection behavior | Backend loader tests and a smoke run with diagnostic output. |
@@ -109,5 +108,3 @@ E2E is the highest-level user contract, but it is not a replacement for unit tes
 | The verifier path works for that modality. | That the builder internals are fully covered. |
 
 Use E2E for confidence that a feature works as users see it. Use unit tests to make failures precise and cheap to debug.
-
-For multi-device features, builder tests that prove rank-local sections and `distributed_plan.json` are emitted are not runtime validation. The user-visible contract is only proven when the distributed launch produces rank-zero or task-specific output and the E2E comparator checks it against the selected oracle.

@@ -573,7 +573,6 @@ trtmc_add_test(test_chat_template)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
-trtmc_add_test(test_distributed_runtime_plan)
 
 # TRT runtime core
 trtmc_add_test(test_decode_runtime REQUIRES_TRT)

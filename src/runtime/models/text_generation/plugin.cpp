@@ -33,10 +33,14 @@ struct KvCacheRuntimeSizing {
     bool clamped_to_bundle_max{false};
 };
 
-struct MeshRuntimeState {
-    MeshRuntimeConfig plan;
-    MeshRuntimeGroup group;
-    std::string engine_section_name{"engine_plan"};
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+struct TensorParallelRuntime {
+    TensorParallelRuntimeConfig config;
+    DistributedRuntimeGroup group;
 };
 
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
@@ -83,6 +87,18 @@ bool cache_input_supports_runtime_rows(const TrtModule& module, const std::strin
             return true;
     }
     return false;
+}
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
 }
 
 std::string format_bytes(std::uint64_t bytes) {
@@ -159,24 +175,6 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
     return sizing;
 }
 
-MeshRuntimeState resolve_distributed_decoder_runtime(const PipelineContext& ctx) {
-    MeshRuntimeState runtime;
-    auto* plan_section = find_section(ctx.bundle, "distributed_plan.json");
-    if (plan_section == nullptr || plan_section->empty())
-        return runtime;
-
-    const std::string plan_json(plan_section->begin(), plan_section->end());
-    runtime.plan = parse_distributed_plan_runtime_config(plan_json, "decoder");
-    if (runtime.plan.enabled) {
-        runtime.group = initialize_mesh_runtime_group(runtime.plan);
-        runtime.engine_section_name =
-            distributed_rank_section_name(runtime.plan.rank_section_pattern, runtime.group.rank);
-    } else {
-        runtime.engine_section_name = runtime.plan.rank_section_pattern;
-    }
-    return runtime;
-}
-
 } // namespace
 
 class DecoderPlugin final : public IPipelinePlugin {
@@ -194,8 +192,12 @@ class DecoderPlugin final : public IPipelinePlugin {
         TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
-        MeshRuntimeState mesh_runtime = resolve_distributed_decoder_runtime(ctx);
-        auto profile_modules = load_decoder_profile_modules(ctx, mesh_runtime);
+        TensorParallelRuntime tp_runtime;
+        tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        if (tp_runtime.config.enabled)
+            tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
+
+        auto profile_modules = load_decoder_profile_modules(ctx, tp_runtime);
         if (profile_modules.modules.empty())
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
@@ -229,8 +231,7 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         return std::make_unique<TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module),
-            mesh_runtime.group.owner);
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), tp_runtime.group.owner);
     }
 
   private:
@@ -250,8 +251,10 @@ class DecoderPlugin final : public IPipelinePlugin {
 
     static BackendProfileModules
     load_decoder_profile_modules(const PipelineContext& ctx,
-                                 const MeshRuntimeState& mesh_runtime) {
-        const std::string& section_name = mesh_runtime.engine_section_name;
+                                 const TensorParallelRuntime& tp_runtime) {
+        const std::string section_name = tp_runtime.config.enabled
+                                             ? tp_engine_section_name(tp_runtime.group.rank)
+                                             : std::string("engine_plan");
         auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
             throw std::runtime_error(section_name + " section is missing");
@@ -269,8 +272,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         ModuleCreateOptions opts;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
-        opts.distributed_communicator = mesh_runtime.group.communicator;
-        opts.distributed_owner = mesh_runtime.group.owner;
+        opts.distributed_communicator = tp_runtime.group.communicator;
+        opts.distributed_owner = tp_runtime.group.owner;
 
         const auto t0 = std::chrono::steady_clock::now();
         auto modules =

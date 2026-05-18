@@ -118,14 +118,6 @@ flowchart LR
 
 These units are where shared request-time mechanics should live. For example, a new cache policy should extend the inference-state layer rather than being hard-coded in one decoder plugin.
 
-## Distributed runtime
-
-Distributed runtime support follows the same split. Runtime plugins may decide which task modules they need, but rank detection, device binding, process groups, communicator lifetime, and rank-local section selection are shared runtime concerns.
-
-The current tensor-parallel decoder path parses `distributed_plan.json`, uses `initialize_mesh_runtime_group()` from `include/trtmc/runtime/distributed_runtime.h`, and passes the resulting communicator through backend module creation. The implemented mesh-runtime entry point validates the launched TP world against the plan and returns the rank-local engine section to the decoder plugin. Future CP, DP, PP, and EP support should extend that same runtime layer with named process groups.
-
-`PipelineFactory` should still avoid model-family-specific distributed logic. It should read bundle/config data, create the plugin context, and let the plugin plus shared mesh runtime assemble the concrete pipeline.
-
 ## Backend DSOs
 
 `src/runtime/backend/` owns TensorRT ABI isolation. The main runtime loads backend DSOs dynamically instead of linking one TensorRT version directly into the public runtime.

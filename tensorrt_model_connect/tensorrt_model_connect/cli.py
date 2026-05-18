@@ -408,16 +408,16 @@ def list_engine_sections(bundle_path: str) -> list[dict]:
 
     engines = []
     for name, meta in sections.items():
-        is_rank_local_plan = "_rank" in name and name.endswith("_plan")
-        if not name.endswith("_plan") and name != "engine_plan" and not is_rank_local_plan:
+        is_tp_rank_plan = name.startswith("engine_plan_tp_rank")
+        if not name.endswith("_plan") and name != "engine_plan" and not is_tp_rank_plan:
             continue
         size_bytes = meta.get("size", 0)
 
         # Infer role from section name
         if name == "engine_plan":
             role = "primary"
-        elif is_rank_local_plan:
-            role = name.replace("_plan", "")
+        elif is_tp_rank_plan:
+            role = name.replace("engine_plan_", "")
         elif "vision" in name:
             role = "vision"
         elif "text_encoder" in name:

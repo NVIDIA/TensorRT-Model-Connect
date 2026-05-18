@@ -18,7 +18,6 @@ from .build_timing import (
 from .config import ModelConfig
 from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
-from .plan_compiler import PlanCompiler
 from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
@@ -27,6 +26,7 @@ from .triattention_export import (
 from .parallel_config import (
     ParallelConfig,
     normalize_parallel_config,
+    rank_engine_section,
     require_tensorrt_11_for_tensor_parallel,
 )
 
@@ -800,22 +800,21 @@ def build_bundle(
         extra_kwargs['parallel_config'] = parallel
     engine_t0 = time.monotonic()
     try:
-        plan_compiler = PlanCompiler(
-            family=plugin.name,
-            component="decoder",
-            model_id=model_dir_path.name,
-            model_type=config.model_type,
-            parallel=parallel,
-        )
-        compiled_plan_artifacts = plan_compiler.compile_decoder(
-            plugin.build_engine,
-            config,
-            weights,
-            max_cache_length,
-            build_kwargs=extra_kwargs,
-            verbose=verbose,
-        )
-        engine_plan = compiled_plan_artifacts.primary_engine_plan
+        tp_engine_plans: dict[int, bytes] = {}
+        if parallel.enabled:
+            for rank in range(parallel.tp_size):
+                rank_kwargs = dict(extra_kwargs)
+                rank_kwargs["parallel_config"] = parallel.for_rank(rank)
+                print(f"[trtmc-build]   rank {rank}/{parallel.tp_size} ...",
+                      file=sys.stderr)
+                tp_engine_plans[rank] = plugin.build_engine(
+                    config, weights, max_cache_length, verbose=verbose,
+                    **rank_kwargs)
+            engine_plan = tp_engine_plans[0]
+        else:
+            engine_plan = plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
     finally:
         engine_elapsed = time.monotonic() - engine_t0
         _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
@@ -906,7 +905,13 @@ def build_bundle(
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
-    sections = list(compiled_plan_artifacts.sections)
+    if parallel.enabled:
+        sections = [
+            BundleSection(rank_engine_section(rank), plan)
+            for rank, plan in sorted(tp_engine_plans.items())
+        ]
+    else:
+        sections = [BundleSection("engine_plan", engine_plan)]
 
     # Add vision engine section if present
     if vision_plan is not None:

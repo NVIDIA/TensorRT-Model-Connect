@@ -105,14 +105,14 @@ class TestLoadEngineFromBundle:
         bundle = _make_bundle_bytes(
             header,
             engine_plan=b"SINGLE_PLAN",
-            extra_sections={"decoder_rank1_plan": b"TP_RANK1_PLAN"},
+            extra_sections={"engine_plan_tp_rank1": b"TP_RANK1_PLAN"},
         )
 
         path = tmp_path / "tp.trtfb"
         path.write_bytes(bundle)
 
         plan, hdr = load_engine_from_bundle(
-            str(path), section_name="decoder_rank1_plan")
+            str(path), section_name="engine_plan_tp_rank1")
         assert plan == b"TP_RANK1_PLAN"
         assert hdr["model_id"] == "test-model"
 
@@ -228,7 +228,7 @@ class TestRunnerFromBundle:
         bundle = _make_bundle_bytes(
             {"num_layers": 2, "max_cache_length": 128},
             engine_plan=b"SINGLE_ENGINE",
-            extra_sections={"decoder_rank1_plan": b"RANK1_ENGINE"},
+            extra_sections={"engine_plan_tp_rank1": b"RANK1_ENGINE"},
         )
 
         path = tmp_path / "tp_dispatch.trtfb"
@@ -239,7 +239,7 @@ class TestRunnerFromBundle:
                    return_value="tp-runner") as mock_runner:
             runner = runner_from_bundle(
                 str(path),
-                engine_section="decoder_rank1_plan",
+                engine_section="engine_plan_tp_rank1",
                 distributed_communicator=communicator,
             )
 
