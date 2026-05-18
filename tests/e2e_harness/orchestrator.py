@@ -258,11 +258,39 @@ def _check_sana_wm_runtime_entrypoint_available(
         )
 
     checked: list[str] = []
+    script_failures: list[str] = []
     for path in external_candidates:
         candidate = path if path.is_absolute() else project_root / path
         checked.append(str(candidate))
         if candidate.is_file() and candidate.resolve() != local_shim.resolve():
-            return True, f"SANA-WM external runtime script found: {candidate}"
+            python = ctx.runtime_python_path() or ctx.reference_python_path() or sys.executable
+            repo_root = candidate.parent.parent if candidate.parent.name == "inference_video_scripts" else candidate.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                str(repo_root)
+                if not env.get("PYTHONPATH")
+                else str(repo_root) + os.pathsep + env["PYTHONPATH"]
+            )
+            try:
+                result = subprocess.run(
+                    [python, str(candidate), "--help"],
+                    cwd=str(repo_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                script_failures.append(f"{candidate}: help probe failed: {exc}")
+                continue
+            if result.returncode == 0:
+                return True, f"SANA-WM external runtime script loaded: {candidate}"
+            detail = (result.stderr or result.stdout or "").strip()
+            if len(detail) > 500:
+                detail = detail[-500:]
+            script_failures.append(
+                f"{candidate}: help probe rc={result.returncode}: {detail}"
+            )
 
     hf_id = str(
         req.args.get("hf_id", "") or "Efficient-Large-Model/SANA-WM_bidirectional"
@@ -299,6 +327,7 @@ def _check_sana_wm_runtime_entrypoint_available(
         False,
         "SANA-WM runtime entrypoint unavailable. Checked external scripts: "
         + (", ".join(checked) if checked else "<none>")
+        + (("; script load failures: " + " | ".join(script_failures)) if script_failures else "")
         + f"; no cached action-capable Diffusers model_index.json for {hf_id}. "
         "Set SANA_WM_SCRIPT/SANA_REPO to an official runtime checkout, or use an "
         "updated HF repo that publishes a Diffusers model_index.json with SANA-WM "

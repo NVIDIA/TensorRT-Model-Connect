@@ -292,6 +292,49 @@ def test_sana_wm_runtime_entrypoint_rejects_local_shim_without_model_index(
     assert "SANA_WM_SCRIPT/SANA_REPO" in details[0]["message"]
 
 
+def test_sana_wm_runtime_entrypoint_rejects_unloadable_official_script(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sana_repo = tmp_path / "Sana"
+    scripts_dir = sana_repo / "inference_video_scripts"
+    scripts_dir.mkdir(parents=True)
+    script = scripts_dir / "inference_sana_wm.py"
+    script.write_text("import definitely_missing_sana_wm_dependency\n", encoding="utf-8")
+    monkeypatch.setenv("SANA_REPO", str(sana_repo))
+    monkeypatch.delenv("SANA_WM_SCRIPT", raising=False)
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        if str(script) in command:
+            return orchestrator.subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'definitely_missing_sana_wm_dependency'",
+            )
+        assert "model_index.json" in command[-1]
+        return orchestrator.subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="missing model_index.json",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+    case = _make_case(
+        "sana-wm-unloadable-entrypoint",
+        preflight=[PreflightRequirement(kind="sana_wm_runtime_entrypoint_available")],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is False
+    assert details[0]["passed"] is False
+    assert "script load failures" in details[0]["message"]
+    assert "definitely_missing_sana_wm_dependency" in details[0]["message"]
+
+
 def test_sana_wm_runtime_entrypoint_allows_action_capable_diffusers_model_index(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
