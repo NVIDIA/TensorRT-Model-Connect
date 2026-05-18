@@ -1,12 +1,6 @@
 name: TensorRT-Model-Connect Premerge CI
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "website/**"
-      - ".github/workflows/pages.yml"
   pull_request:
     branches:
       - main
