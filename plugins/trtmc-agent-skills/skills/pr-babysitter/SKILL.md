@@ -22,6 +22,10 @@ branch, and push updated commits. Work sequentially and report every PR state.
 - Do not rewrite a PR's intent during rebase. Preserve the feature and adapt it
   to current `main`.
 - Do not skip CI unless the user explicitly asks.
+- Never request, enable, or queue GitHub auto-merge. Do not use
+  `gh pr merge --auto` or any equivalent API flag.
+- When merge authority is granted, merge only after the latest CI for the
+  current PR head has completed successfully and the PR is mergeable.
 - If a fix needs unavailable hardware, product judgment, or broad scope, stop
   and report the blocker.
 
@@ -75,13 +79,48 @@ gh pr checks <number> --repo NVIDIA/TensorRT-Model-Connect
 
 | State | Action |
 |-------|--------|
-| Checks pending/running | Wait; do not push noise |
-| Checks green and branch current | Report OK |
+| Checks pending/running | Wait; do not push noise; never request auto-merge |
+| Checks green and branch current | Merge if merge authority was granted; otherwise report OK |
 | Checks green but branch behind main | Rebase and push |
 | Checks failed and branch behind main | Rebase first, then diagnose/fix |
 | Checks failed and branch current | Diagnose/fix |
 | Merge conflicts | Rebase locally if mechanical; otherwise report blocker |
 | Missing required review | Report waiting on review |
+
+## Merge After CI
+
+Only merge when the user has explicitly authorized merging. Never treat
+auto-merge as a way to wait for CI. GitHub auto-merge has previously accepted a
+merge request while a check was still queued, so it is forbidden for this skill.
+
+Before merging, verify all of the following against the latest PR head:
+
+- `gh pr checks <number> --repo NVIDIA/TensorRT-Model-Connect --watch --interval 30`
+  exits successfully.
+- `gh pr view <number> --repo NVIDIA/TensorRT-Model-Connect --json headRefOid,mergeable,mergeStateStatus,statusCheckRollup`
+  shows the same head SHA whose checks passed.
+- `mergeable` is `MERGEABLE` and `mergeStateStatus` is clean enough for the
+  repository ruleset, such as `CLEAN`.
+- No required check is pending, queued, running, skipped unexpectedly, or
+  failing.
+
+If any check is pending or queued, wait and poll. If any check fails, diagnose
+and fix it. Do not merge.
+
+Use an explicit merge command only after those checks pass. Do not include
+`--auto`:
+
+```bash
+gh pr merge <number> \
+  --repo NVIDIA/TensorRT-Model-Connect \
+  --squash \
+  --delete-branch \
+  --subject "<reviewed squash title>" \
+  --body "<reviewed squash body>"
+```
+
+After merging, verify the PR state is `MERGED` and report the merge commit. If a
+linked issue was expected to close, verify the issue state separately.
 
 ## Rebase
 
