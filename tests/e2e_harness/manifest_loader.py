@@ -224,6 +224,31 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             args={"path": manifest["test_image"]},
             gating=True,
         ))
+    if manifest.get("prompt_file"):
+        reqs.append(PreflightRequirement(
+            kind="asset_exists",
+            args={"path": manifest["prompt_file"]},
+            gating=True,
+        ))
+
+    runtime_strategy = str(manifest.get("runtime_strategy", "") or "")
+    if (
+        runtime_strategy == "diffusion_sana_wm"
+        and manifest.get("sana_wm_require_official_script", True)
+    ):
+        reqs.append(PreflightRequirement(
+            kind="sana_wm_script_available",
+            args={"path": manifest.get("sana_wm_script", "")},
+            gating=False,
+        ))
+        reqs.append(PreflightRequirement(
+            kind="sana_wm_runtime_entrypoint_available",
+            args={
+                "hf_id": manifest.get("hf_id", ""),
+                "path": manifest.get("sana_wm_script", ""),
+            },
+            gating=True,
+        ))
 
     # Audio models need test audio
     if manifest.get("test_input_audio"):
@@ -245,7 +270,6 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
     # relies on CLI auto-selection instead of forcing --method torchtrt.
     build_args = manifest.get("build_args", {})
     backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
-    runtime_strategy = str(manifest.get("runtime_strategy", "") or "")
     if (
         build_args.get("torch_trt", False)
         or backend in {"torchtrt", "torch_trt"}
@@ -257,18 +281,27 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    # Diffusion needs diffusers
+    # Diffusion needs Python reference/runtime dependencies.
     if task_strategy == "diffusion_media_generation":
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "diffusers", "phase": "build"},
-            gating=True,
-        ))
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "ftfy", "phase": "build"},
-            gating=True,
-        ))
+        if runtime_strategy == "diffusion_sana_wm":
+            for phase in ("runtime", "reference"):
+                for module in ("diffusers", "torch", "PIL"):
+                    reqs.append(PreflightRequirement(
+                        kind="python_module_available",
+                        args={"module": module, "phase": phase},
+                        gating=True,
+                    ))
+        else:
+            reqs.append(PreflightRequirement(
+                kind="python_module_available",
+                args={"module": "diffusers", "phase": "build"},
+                gating=True,
+            ))
+            reqs.append(PreflightRequirement(
+                kind="python_module_available",
+                args={"module": "ftfy", "phase": "build"},
+                gating=True,
+            ))
 
     if runtime_strategy == "chronos_bolt_torchtrt":
         reqs.append(PreflightRequirement(
@@ -338,6 +371,8 @@ def _build_inputs(manifest: dict) -> dict:
     prompt = manifest.get("prompt") or manifest.get("test_prompt", "")
     if prompt:
         inputs["prompt"] = prompt
+    if manifest.get("prompt_file"):
+        inputs["prompt_file"] = manifest["prompt_file"]
 
     # Image for VL/segmentation
     if manifest.get("test_image"):
@@ -362,7 +397,19 @@ def _build_inputs(manifest: dict) -> dict:
     )
 
     # Generation parameters (optional, default to each runtime's configured value)
-    for key in ("temperature", "top_p", "top_k", "min_p", "seed", "guidance_scale"):
+    for key in (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "seed",
+        "guidance_scale",
+        "action",
+        "translation_speed",
+        "rotation_speed_deg",
+        "sana_wm_script",
+        "sana_wm_require_official_script",
+    ):
         if key in manifest:
             inputs[key] = manifest[key]
 
@@ -462,7 +509,7 @@ def _build_metadata(manifest: dict) -> dict:
         "test_prompt", "max_new_tokens", "max_cache_length", "precision",
         "quantization",
         "logit_atol", "layer_atol", "trust_remote_code", "skip",
-        "skip_comparison", "test_image",
+        "skip_comparison", "test_image", "prompt_file",
         "test_input_audio", "speech_reference_tokens", "speech_test_max_frames",
         "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
         "point_x", "point_y", "num_expected_masks", "min_pixel_agreement",
@@ -475,6 +522,8 @@ def _build_metadata(manifest: dict) -> dict:
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
         "negative_prompt", "cfg_scale", "height", "width",
         "image_height", "image_width",
+        "action", "translation_speed", "rotation_speed_deg", "sana_wm_script",
+        "sana_wm_require_official_script",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -538,6 +587,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_zimage",
     "diffusion_qwen_image",
     "diffusion_pixart",
+    "diffusion_sana_wm",
     "torchtrt_diffusion",
     "diffusion_pixart_torchtrt",
     "segmentation",

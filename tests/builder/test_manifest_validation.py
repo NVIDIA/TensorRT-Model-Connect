@@ -302,3 +302,58 @@ class TestManifestValidation:
         assert [stage.name for stage in case.stages] == ["end_to_end"]
         assert all(stage.required for stage in case.stages)
         assert "Wan-specific" in case.metadata["notes"]
+
+    def test_sana_wm_manifest_preserves_official_demo_inputs(self):
+        """SANA-WM e2e should expose the model-card image/prompt/action contract."""
+        manifest_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "e2e",
+            "models",
+            "sana-wm-bidirectional.json",
+        )
+        case = load_manifest(manifest_path)
+
+        assert case.task_strategy == "diffusion_media_generation"
+        assert case.reference_backend == "hf_diffusers"
+        assert case.inputs["image"] == "asset/sana_wm/demo_0.png"
+        assert case.inputs["prompt_file"] == "asset/sana_wm/demo_0.txt"
+        assert case.inputs["action"] == "w-80,jw-40,w-40,lw-60,w-100"
+        assert case.inputs["translation_speed"] == 0.055
+        assert case.inputs["rotation_speed_deg"] == 1.2
+        assert case.inputs["sana_wm_require_official_script"] is True
+        assert case.inputs["video_num_frames"] == 321
+        asset_paths = {
+            req.args["path"]
+            for req in case.preflight
+            if req.kind == "asset_exists"
+        }
+        assert asset_paths == {
+            "asset/sana_wm/demo_0.png",
+            "asset/sana_wm/demo_0.txt",
+        }
+        script_reqs = [
+            req for req in case.preflight if req.kind == "sana_wm_script_available"
+        ]
+        assert len(script_reqs) == 1
+        assert script_reqs[0].gating is False
+        entrypoint_reqs = [
+            req
+            for req in case.preflight
+            if req.kind == "sana_wm_runtime_entrypoint_available"
+        ]
+        assert len(entrypoint_reqs) == 1
+        assert entrypoint_reqs[0].args["hf_id"] == case.hf_id
+        assert entrypoint_reqs[0].gating is True
+        module_reqs = {
+            (req.args["module"], req.args["phase"])
+            for req in case.preflight
+            if req.kind == "python_module_available"
+        }
+        assert ("ftfy", "build") not in module_reqs
+        assert {
+            ("diffusers", "runtime"),
+            ("diffusers", "reference"),
+            ("PIL", "runtime"),
+            ("PIL", "reference"),
+        }.issubset(module_reqs)

@@ -1,0 +1,43 @@
+{
+  "name": "sana-wm-bidirectional",
+  "trace_id": "IT-E2E-SANAWM-01",
+  "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+  "bundle": "sana-wm-bidirectional.trtfb",
+  "model_type": "sana_wm",
+  "family": "sana_wm",
+  "runtime_strategy": "diffusion_sana_wm",
+  "ci_tier": "nightly_only",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "SANA-WM bidirectional image-to-video world-model e2e using the official camera-control demo contract",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_type": "diffusion",
+  "test_image": "asset/sana_wm/demo_0.png",
+  "prompt_file": "asset/sana_wm/demo_0.txt",
+  "action": "w-80,jw-40,w-40,lw-60,w-100",
+  "translation_speed": 0.055,
+  "rotation_speed_deg": 1.2,
+  "sana_wm_require_official_script": true,
+  "video_num_frames": 321,
+  "video_height": 704,
+  "video_width": 1280,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "threshold_overrides": {
+    "min_pixel_mean": 0.02,
+    "max_pixel_mean": 0.98,
+    "min_pixel_std": 0.01,
+    "contract_min_pixel_mean": 0.02,
+    "contract_max_pixel_mean": 0.98,
+    "contract_min_pixel_std": 0.01
+  },
+  "skip_text_comparison": true,
+  "notes": "Runs the SANA-WM image-to-video contract from the model card: image asset/sana_wm/demo_0.png, prompt file asset/sana_wm/demo_0.txt, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, and 321 output frames. The TRTMC runtime and HF reference both call the same SANA-WM bridge so the e2e result is parity against the official inference_video_scripts/inference_sana_wm.py invocation when the demo assets and weights are available."
+}

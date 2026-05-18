@@ -83,6 +83,20 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     return str(patched_root)
 
 
+def _resolve_input_path(path: str | None, ctx: RunContext) -> str | None:
+    """Resolve e2e asset paths against engine, repo, and tests/e2e roots."""
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    for base in (ctx.engine_dir, str(PROJECT_DIR), str(PROJECT_DIR / "tests" / "e2e")):
+        candidate = Path(base) / path
+        if candidate.is_file():
+            return str(candidate)
+    return str(p)
+
+
 def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
     if ctx.artifacts_dir:
         base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
@@ -324,6 +338,9 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         """Run full HF diffusers pipeline to generate reference frames."""
+        if case.family == "sana_wm":
+            return self._run_sana_wm_pipeline(case, stage, ctx)
+
         model_id = case.hf_id
         model_ref = _resolve_cached_model_ref(model_id)
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
@@ -629,6 +646,107 @@ print(f"Generated {{len(frames)}} frames")
             text=result.stdout,
             timing_s=elapsed,
             metadata={"backend": "hf_diffusers"},
+        )
+
+    def _run_sana_wm_pipeline(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run SANA-WM through the same official-script bridge used by TRTMC."""
+        prompt = case.inputs.get("prompt", "")
+        prompt_file = _resolve_input_path(case.inputs.get("prompt_file"), ctx)
+        if prompt_file and os.path.isfile(prompt_file):
+            prompt = Path(prompt_file).read_text(encoding="utf-8")
+
+        image_path = _resolve_input_path(
+            case.inputs.get("image")
+            or case.inputs.get("test_image")
+            or case.inputs.get("image_path"),
+            ctx,
+        )
+
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        frames_dir = os.path.join(model_dir, "hf_frames")
+        output_dir = os.path.join(model_dir, "hf_sana_wm_output")
+        meta_json = os.path.join(model_dir, "hf_sana_wm_metadata.json")
+        shutil.rmtree(frames_dir, ignore_errors=True)
+        os.makedirs(frames_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        python = ctx.reference_python_path() or sys.executable
+        cmd = [
+            python, "-m", "tensorrt_model_connect.sana_wm_bridge",
+            "--hf-id", case.hf_id,
+            "--prompt-text", prompt,
+            "--output-dir", output_dir,
+            "--frames-dir", frames_dir,
+            "--meta-json", meta_json,
+            "--action", str(case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")),
+            "--translation-speed", str(case.inputs.get("translation_speed", 0.055)),
+            "--rotation-speed-deg", str(case.inputs.get("rotation_speed_deg", 1.2)),
+            "--num-frames", str(case.inputs.get("video_num_frames", 321)),
+        ]
+        if image_path:
+            cmd.extend(["--image", image_path])
+        sana_script = case.inputs.get("sana_wm_script")
+        if sana_script:
+            cmd.extend(["--sana-script", str(sana_script)])
+        if case.inputs.get("sana_wm_require_official_script", False):
+            cmd.append("--no-diffusers-fallback")
+
+        t0 = time.monotonic()
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=3600,
+            env=_ref_subprocess_env())
+        elapsed = time.monotonic() - t0
+
+        frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
+        if result.stderr:
+            stderr_path = os.path.join(model_dir, "hf_sana_wm_stderr.log")
+            try:
+                with open(stderr_path, "w") as f:
+                    f.write(result.stderr)
+            except OSError:
+                pass
+            if result.returncode != 0:
+                logger.error("HF SANA-WM pipeline failed (rc=%d): %s",
+                             result.returncode, result.stderr[-500:])
+
+        data: dict = {
+            "returncode": result.returncode,
+            "num_frames": len(frame_files),
+            "frames_dir": frames_dir,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
+        if frame_files:
+            try:
+                import numpy as np
+                from PIL import Image
+
+                all_pixels = []
+                for fp in frame_files:
+                    img = Image.open(fp).convert("RGB")
+                    arr = np.array(img, dtype=np.float32) / 255.0
+                    all_pixels.append(arr.flatten())
+                combined = np.concatenate(all_pixels)
+                data["frame_stats"] = {
+                    "count": len(frame_files),
+                    "mean": float(np.mean(combined)),
+                    "std": float(np.std(combined)),
+                    "min": float(np.min(combined)),
+                    "max": float(np.max(combined)),
+                }
+            except Exception as e:
+                data["frame_stats_error"] = str(e)
+
+        return StageOutput(
+            stage_name=stage.name,
+            data=data,
+            text=result.stdout,
+            timing_s=elapsed,
+            metadata={"backend": "hf_diffusers", "command": cmd},
         )
 
 

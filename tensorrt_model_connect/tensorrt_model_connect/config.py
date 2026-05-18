@@ -42,6 +42,60 @@ def _elf_yaml_to_config(raw: dict) -> dict:
     return converted
 
 
+def _is_sana_wm_yaml(raw: dict) -> bool:
+    model = raw.get("model")
+    vae = raw.get("vae")
+    if not isinstance(model, dict) or not isinstance(vae, dict):
+        return False
+    model_name = str(model.get("model", ""))
+    camctrl = str(model.get("camctrl_type", ""))
+    vae_type = str(vae.get("vae_type", ""))
+    return (
+        model_name.startswith("SanaMSVideoCamCtrl")
+        or "CamCtrl" in camctrl
+        or vae_type == "LTX2VAE_diffusers"
+    )
+
+
+def _sana_wm_yaml_to_config(raw: dict) -> dict:
+    model = raw.get("model", {}) if isinstance(raw.get("model"), dict) else {}
+    text_encoder = (
+        raw.get("text_encoder", {}) if isinstance(raw.get("text_encoder"), dict) else {}
+    )
+    vae = raw.get("vae", {}) if isinstance(raw.get("vae"), dict) else {}
+
+    model_name = str(model.get("model", "SanaMSVideoCamCtrl_1600M_P1_D20"))
+    # The public config names the 20-block DiT as "..._D20". Keep a safe
+    # fallback for future variants where the suffix changes.
+    depth = 20
+    if "_D" in model_name:
+        try:
+            depth = int(model_name.rsplit("_D", 1)[1].split("_", 1)[0])
+        except (ValueError, IndexError):
+            depth = 20
+
+    converted = dict(raw)
+    converted.update(
+        {
+            "model_type": "sana_wm",
+            "architectures": ["SanaWmWorldModel"],
+            "runtime_strategy": "diffusion_sana_wm",
+            "hidden_size": int(model.get("linear_head_dim", 112)) * 16,
+            "num_hidden_layers": depth,
+            "num_attention_heads": 16,
+            "vocab_size": 0,
+            "max_position_embeddings": int(text_encoder.get("model_max_length", 300)),
+            "video_height": 704,
+            "video_width": 1280,
+            "video_num_frames": 321,
+            "vae_latent_dim": int(vae.get("vae_latent_dim", 128)),
+            "vae_downsample_rate": int(vae.get("vae_downsample_rate", 32)),
+            "sana_wm_config": raw,
+        }
+    )
+    return converted
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -265,5 +319,7 @@ class ModelConfig:
                 continue
             if str(data.get("model", "")).upper().replace("_", "-") in _ELF_VARIANTS:
                 return ModelConfig.from_json(json.dumps(_elf_yaml_to_config(data)))
+            if _is_sana_wm_yaml(data):
+                return ModelConfig.from_json(json.dumps(_sana_wm_yaml_to_config(data)))
 
         return ModelConfig.from_json(config_path.read_text())

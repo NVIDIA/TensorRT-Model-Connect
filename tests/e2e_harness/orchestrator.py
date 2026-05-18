@@ -201,12 +201,119 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
         return False, f"Module check failed in {phase} profile: {exc}"
 
 
+def _check_sana_wm_script_available(
+    ctx: RunContext, req: PreflightRequirement
+) -> tuple[bool, str]:
+    """Check that the official SANA-WM inference script is available."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    local_shim = project_root / "inference_video_scripts" / "inference_sana_wm.py"
+    candidates: list[Path] = []
+    explicit = str(req.args.get("path", "") or "")
+    if explicit:
+        candidates.append(Path(explicit))
+    env_script = os.environ.get("SANA_WM_SCRIPT", "")
+    if env_script:
+        candidates.append(Path(env_script))
+    sana_repo = os.environ.get("SANA_REPO", "")
+    if sana_repo:
+        candidates.append(
+            Path(sana_repo) / "inference_video_scripts" / "inference_sana_wm.py"
+        )
+    candidates.append(project_root / "inference_video_scripts" / "inference_sana_wm.py")
+    candidates.append(
+        project_root / "Sana" / "inference_video_scripts" / "inference_sana_wm.py"
+    )
+
+    checked: list[str] = []
+    for path in candidates:
+        candidate = path if path.is_absolute() else project_root / path
+        checked.append(str(candidate))
+        if candidate.is_file() and candidate.resolve() != local_shim.resolve():
+            return True, f"SANA-WM official script found: {candidate}"
+    return (
+        False,
+        "SANA-WM official script not found; repo-local compatibility shim is "
+        "not sufficient for parity. Checked: "
+        + ", ".join(checked),
+    )
+
+
+def _check_sana_wm_runtime_entrypoint_available(
+    ctx: RunContext, req: PreflightRequirement
+) -> tuple[bool, str]:
+    """Check that SANA-WM has a runnable implementation, not just a CLI shim."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    local_shim = project_root / "inference_video_scripts" / "inference_sana_wm.py"
+    explicit = str(req.args.get("path", "") or "")
+    external_candidates: list[Path] = []
+    if explicit:
+        external_candidates.append(Path(explicit))
+    env_script = os.environ.get("SANA_WM_SCRIPT", "")
+    if env_script:
+        external_candidates.append(Path(env_script))
+    sana_repo = os.environ.get("SANA_REPO", "")
+    if sana_repo:
+        external_candidates.append(
+            Path(sana_repo) / "inference_video_scripts" / "inference_sana_wm.py"
+        )
+
+    checked: list[str] = []
+    for path in external_candidates:
+        candidate = path if path.is_absolute() else project_root / path
+        checked.append(str(candidate))
+        if candidate.is_file() and candidate.resolve() != local_shim.resolve():
+            return True, f"SANA-WM external runtime script found: {candidate}"
+
+    hf_id = str(
+        req.args.get("hf_id", "") or "Efficient-Large-Model/SANA-WM_bidirectional"
+    )
+    python = ctx.runtime_python_path() or ctx.reference_python_path() or sys.executable
+    probe = (
+        "import importlib, inspect, json, sys; "
+        "from huggingface_hub import hf_hub_download; "
+        f"path = hf_hub_download({hf_id!r}, 'model_index.json', local_files_only=True); "
+        "cfg = json.load(open(path, encoding='utf-8')); "
+        "class_name = cfg.get('_class_name') or cfg.get('pipeline_class'); "
+        "module_name = cfg.get('_module') or 'diffusers'; "
+        "required = {'action', 'translation_speed', 'rotation_speed_deg', 'num_frames'}; "
+        "mod = importlib.import_module(module_name); "
+        "cls = getattr(mod, class_name); "
+        "params = set(inspect.signature(cls.__call__).parameters); "
+        "missing = sorted(required - params); "
+        "print('pipeline_class=' + str(class_name)); "
+        "sys.exit(0 if not missing else 3)"
+    )
+    try:
+        result = subprocess.run(
+            [python, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        return False, f"SANA-WM Diffusers entrypoint probe failed: {exc}"
+    if result.returncode == 0:
+        return True, f"SANA-WM action-capable Diffusers entrypoint available for {hf_id}"
+
+    return (
+        False,
+        "SANA-WM runtime entrypoint unavailable. Checked external scripts: "
+        + (", ".join(checked) if checked else "<none>")
+        + f"; no cached action-capable Diffusers model_index.json for {hf_id}. "
+        "Set SANA_WM_SCRIPT/SANA_REPO to an official runtime checkout, or use an "
+        "updated HF repo that publishes a Diffusers model_index.json with SANA-WM "
+        "action-control arguments.",
+    )
+
+
 _PREFLIGHT_CHECKERS = {
     "binary_exists": _check_binary_exists,
     "gpu_memory_min_gb": _check_gpu_memory,
     "hf_auth_token_present": _check_hf_auth,
     "asset_exists": _check_asset_exists,
     "python_module_available": _check_python_module,
+    "sana_wm_script_available": _check_sana_wm_script_available,
+    "sana_wm_runtime_entrypoint_available": _check_sana_wm_runtime_entrypoint_available,
 }
 
 
@@ -642,6 +749,10 @@ def _build_repro_commands(
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
+    if case.family == "sana_wm":
+        repro["sana_wm_python_reference"] = _build_sana_wm_python_reference_command(
+            case, ctx
+        )
 
     # TRT inference command (task-specific C++ binary entrypoint)
     if bundle_path and ctx.binary_path:
@@ -739,10 +850,30 @@ def _build_repro_commands(
             else:
                 infer_parts = [
                     ctx.binary_path, "generate-video", bundle_path,
-                    "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
                     "--output", "/tmp/trtmc_frames",
-                    "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
                 ]
+                if case.family != "sana_wm":
+                    infer_parts.extend(["--num-steps", str(case.inputs.get("num_inference_steps", 30))])
+                prompt_file = case.inputs.get("prompt_file")
+                if prompt_file:
+                    infer_parts.extend(["--prompt-file", str(prompt_file)])
+                else:
+                    infer_parts.extend([
+                        "--prompt",
+                        _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+                    ])
+                if image:
+                    infer_parts.extend(["--image", str(image)])
+                action = case.inputs.get("action")
+                if action:
+                    infer_parts.extend(["--action", _shell_quote(str(action))])
+                if "translation_speed" in case.inputs:
+                    infer_parts.extend(["--translation-speed", str(case.inputs["translation_speed"])])
+                if "rotation_speed_deg" in case.inputs:
+                    infer_parts.extend(["--rotation-speed-deg", str(case.inputs["rotation_speed_deg"])])
+                num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames"))
+                if num_frames is not None:
+                    infer_parts.extend(["--num-frames", str(num_frames)])
                 guidance_scale = case.inputs.get("guidance_scale")
                 if guidance_scale is not None:
                     infer_parts.extend(["--guidance-scale", str(guidance_scale)])
@@ -814,6 +945,38 @@ def _build_repro_commands(
     repro["rerun_test_rebuild"] = " ".join(rebuild_parts)
 
     return repro
+
+
+def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> str:
+    image = (
+        case.inputs.get("image")
+        or case.inputs.get("test_image")
+        or case.inputs.get("image_path")
+        or "asset/sana_wm/demo_0.png"
+    )
+    prompt_file = case.inputs.get("prompt_file") or "asset/sana_wm/demo_0.txt"
+    action = case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")
+    translation_speed = case.inputs.get("translation_speed", 0.055)
+    rotation_speed_deg = case.inputs.get("rotation_speed_deg", 1.2)
+    num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames", 321))
+    return " ".join([
+        ctx.reference_python_path() or "python",
+        "inference_video_scripts/inference_sana_wm.py",
+        "--image",
+        str(image),
+        "--prompt",
+        str(prompt_file),
+        "--action",
+        f'"{action}"',
+        "--translation_speed",
+        str(translation_speed),
+        "--rotation_speed_deg",
+        str(rotation_speed_deg),
+        "--num_frames",
+        str(num_frames),
+        "--output_dir",
+        "results/demo",
+    ])
 
 
 def _shell_quote(s: str) -> str:
@@ -1248,6 +1411,13 @@ class E2EOrchestrator:
         if preflight_ok:
             return None
 
+        preflight_path = state.sink.base_dir / "preflight_details.json"
+        preflight_path.write_text(
+            json.dumps(preflight_details, indent=2, default=str),
+            encoding="utf-8",
+        )
+        state.sink.register_artifact("preflight_details", preflight_path.name)
+
         result = E2EResult(
             case_name=state.case.name,
             status=E2EStatus.SKIP.value,
@@ -1259,6 +1429,7 @@ class E2EOrchestrator:
             detailed_timing=_build_detailed_timing(state.timing, {}),
             env_fingerprint=state.env_fingerprint,
             timestamp=state.timestamp,
+            repro_commands=_build_repro_commands(state.case, state.ctx, None, {}),
         )
         state.sink.finalize(result)
         return result

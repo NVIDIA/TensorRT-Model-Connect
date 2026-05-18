@@ -12,7 +12,9 @@
 //                        [--height N] [--width N]
 //   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
-//   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
+//   trtmc generate-video  <bundle.trtfb> (--prompt "text" | --prompt-file PATH)
+//                        --output DIR [--num-steps N] [--image PATH]
+//                        [--action DSL] [--num-frames N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc inspect         <bundle.trtfb>
 //   trtmc version
@@ -49,6 +51,7 @@ struct CliArgs {
     std::string command;
     std::string bundle_path;
     std::string prompt;
+    std::string prompt_file;
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
@@ -61,6 +64,7 @@ struct CliArgs {
     std::string document;
     std::string audio_in;
     std::string audio_out;
+    std::string action;
     std::string field_input;
     std::string branch_input;
     std::string trunk_input;
@@ -78,8 +82,11 @@ struct CliArgs {
     int top_k{1};
     int seed{-1};
     int num_steps{-1};
+    int num_frames{-1};
     float guidance_scale{-1.0F};
     float sde_gamma{-1.0F};
+    float translation_speed{-1.0F};
+    float rotation_speed_deg{-1.0F};
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
     // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
@@ -196,8 +203,10 @@ void print_usage() {
            "[--hf-python PATH]\n"
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "
            "stdout.\n"
-           "  trtmc generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
-           "[--guidance-scale S] [--initial-latents-raw PATH]\n"
+           "  trtmc generate-video  <bundle.trtfb> (--prompt \"text\" | --prompt-file PATH) "
+           "--output DIR [--num-steps N] [--guidance-scale S] [--initial-latents-raw PATH] "
+           "[--image PATH] [--action DSL] [--translation-speed F] "
+           "[--rotation-speed-deg F] [--num-frames N]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -266,6 +275,10 @@ CliArgs parse_args(int argc, char** argv) {
 
         if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
             args.prompt = argv[++i];
+            continue;
+        }
+        if (arg == "--prompt-file" && need_value(arg)) {
+            args.prompt_file = argv[++i];
             continue;
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
@@ -367,8 +380,24 @@ CliArgs parse_args(int argc, char** argv) {
             args.num_steps = std::atoi(argv[++i]);
             continue;
         }
+        if (arg == "--num-frames" && need_value(arg)) {
+            args.num_frames = std::atoi(argv[++i]);
+            continue;
+        }
         if (arg == "--guidance-scale" && need_value(arg)) {
             args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--action" && need_value(arg)) {
+            args.action = argv[++i];
+            continue;
+        }
+        if (arg == "--translation-speed" && need_value(arg)) {
+            args.translation_speed = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--rotation-speed-deg" && need_value(arg)) {
+            args.rotation_speed_deg = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
@@ -557,6 +586,21 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
         return std::nullopt;
     }
     return values;
+}
+
+std::optional<std::string> read_text_file(const std::string& path, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "failed to open " + path;
+        return std::nullopt;
+    }
+    std::ostringstream contents;
+    contents << in.rdbuf();
+    if (in.bad()) {
+        error = "failed to read " + path;
+        return std::nullopt;
+    }
+    return contents.str();
 }
 
 std::string json_escape(const std::string& text) {
@@ -831,8 +875,8 @@ int cmd_run(const CliArgs& args) {
 }
 
 int cmd_generate_video(const CliArgs& args) {
-    if (args.bundle_path.empty() || args.prompt.empty()) {
-        std::cerr << "Error: generate-video requires bundle + --prompt\n";
+    if (args.bundle_path.empty() || (args.prompt.empty() && args.prompt_file.empty())) {
+        std::cerr << "Error: generate-video requires bundle + --prompt or --prompt-file\n";
         return EXIT_FAILURE;
     }
 
@@ -845,6 +889,11 @@ int cmd_generate_video(const CliArgs& args) {
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
     cfg.seed = args.seed;
+    cfg.image_path = args.image_path;
+    cfg.camera_action = args.action;
+    cfg.translation_speed = args.translation_speed;
+    cfg.rotation_speed_deg = args.rotation_speed_deg;
+    cfg.num_frames = args.num_frames;
     if (!args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);
@@ -855,7 +904,18 @@ int cmd_generate_video(const CliArgs& args) {
         cfg.initial_latents = std::move(*latents);
     }
 
-    auto result = pipeline->generate_image(args.prompt, cfg);
+    std::string prompt = args.prompt;
+    if (prompt.empty()) {
+        std::string error;
+        auto loaded = read_text_file(args.prompt_file, error);
+        if (!loaded) {
+            std::cerr << "Error: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        prompt = std::move(*loaded);
+    }
+
+    auto result = pipeline->generate_image(prompt, cfg);
     std::cout << "Generated image: " << result.width << "x" << result.height << " ("
               << result.num_frames << " frames)\n";
 

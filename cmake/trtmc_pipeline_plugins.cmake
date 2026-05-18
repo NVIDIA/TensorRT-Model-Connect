@@ -31,6 +31,7 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/omni/plugin.cpp|register_omni_plugin"
   "models/flux/plugin.cpp|register_flux_plugin"
   "models/ltx_video/plugin.cpp|register_ltx_video_plugin"
+  "models/sana_wm/plugin.cpp|register_sana_wm_plugin"
   "models/wan/plugin.cpp|register_wan_plugin"
   "models/z_image/plugin.cpp|register_zimage_plugin"
   "models/qwen_image/plugin.cpp|register_qwen_image_plugin"

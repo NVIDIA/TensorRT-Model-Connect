@@ -770,6 +770,44 @@ class TestE2EDataFiles:
         assert match.models == ["qwen25vl-3b"]
 
 
+class TestSanaWmImpactRules:
+    def test_sana_wm_scoped_paths(self, mock_repo):
+        """SANA-WM bridge/runtime assets select only the SANA-WM manifest."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "sana-wm-bidirectional.json",
+            {
+                "name": "sana-wm-bidirectional",
+                "family": "sana_wm",
+                "runtime_strategy": "diffusion_sana_wm",
+                "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+                "test_image": "asset/sana_wm/demo_0.png",
+                "prompt_file": "asset/sana_wm/demo_0.txt",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        scoped = [
+            (
+                "tensorrt_model_connect/tensorrt_model_connect/sana_wm_bridge.py",
+                "sana_wm_bridge",
+                ["builder", "tools"],
+            ),
+            (
+                "inference_video_scripts/inference_sana_wm.py",
+                "sana_wm_inference_script",
+                ["tools"],
+            ),
+            ("asset/sana_wm/demo_0.png", "e2e_data_file", []),
+            ("asset/sana_wm/demo_0.txt", "e2e_data_file", []),
+        ]
+        for path, rule, unit_tiers in scoped:
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == rule
+            assert match.models == ["sana-wm-bidirectional"]
+            assert match.unit_tiers == unit_tiers
+
+
 # ---------------------------------------------------------------------------
 # Unit tier tests
 # ---------------------------------------------------------------------------

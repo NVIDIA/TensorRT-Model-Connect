@@ -83,6 +83,18 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy) {
                              " (available: " + available + ")");
 }
 
+bool strategy_uses_no_backend(const std::string& strategy) {
+    return strategy == "diffusion_sana_wm";
+}
+
+bool backend_is_disabled(const std::string& backend_name) {
+    return backend_name == "none";
+}
+
+const char* backend_log_name(IBackend* backend) {
+    return backend ? "trt_new_runtime" : "none";
+}
+
 // Apply platform.* values to their process-wide sinks. Replaces the old
 // TRTMC_DATA_DIR and TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
 // Called from try_resolve_runtime_config once a bundle has resolved.
@@ -188,6 +200,16 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
     return backend;
 }
 
+IBackend* load_optional_backend(const BundleFile& bundle, const std::string& config_text,
+                                const std::string& bundle_path, const std::string& backend_name,
+                                const std::string& strategy,
+                                const std::vector<std::string>& backend_search_paths) {
+    if (strategy_uses_no_backend(strategy) || backend_is_disabled(backend_name))
+        return nullptr;
+    return load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
+                                   backend_search_paths);
+}
+
 std::optional<config::ConfigBundle>
 try_resolve_runtime_config(const std::string& config_text, const std::string& bundle_path,
                            const std::string& config_path,
@@ -229,9 +251,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
-    // Load backend DSO based on bundle metadata
+    // Load backend DSO based on bundle metadata. Bridge-only strategies do
+    // not own TRT engine sections, so keep their context backend null.
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
+    IBackend* backend =
+        load_optional_backend(bundle, config_text, bundle_path, backend_name, strategy, {});
 
     auto* plugin = lookup_plugin_or_throw(strategy);
 
@@ -263,8 +287,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         resolved ? &*resolved : nullptr};
     auto pipeline = plugin->create(ctx);
 
-    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
-              << std::endl;
+    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy
+              << ", backend=" << backend_log_name(backend) << ")" << std::endl;
     return pipeline;
 }
 
@@ -288,8 +312,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     strategy = normalize_legacy_strategy(strategy, config_text);
 
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
-                                                options.backend_search_paths);
+    IBackend* backend = load_optional_backend(bundle, config_text, bundle_path, backend_name,
+                                              strategy, options.backend_search_paths);
 
     auto* plugin = lookup_plugin_or_throw(strategy);
 
@@ -311,8 +335,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         resolved ? &*resolved : nullptr};
     auto pipeline = plugin->create(ctx);
 
-    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
-              << std::endl;
+    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy
+              << ", backend=" << backend_log_name(backend) << ")" << std::endl;
     return pipeline;
 }
 

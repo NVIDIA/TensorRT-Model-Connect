@@ -59,6 +59,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
+    "diffusion_sana_wm": "diffusion_media_generation",
     "torchtrt_decoder": "text_generation_causal",
     "torchtrt_diffusion": "diffusion_media_generation",
     "diffusion_pixart_torchtrt": "diffusion_media_generation",
@@ -96,6 +97,7 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
     "zimage_plugin": ["diffusion_zimage"],
     "qwen_image_plugin": ["diffusion_qwen_image"],
+    "sana_wm_plugin": ["diffusion_sana_wm"],
     "t5_plugin": ["text_to_text"],
     "marian_plugin": ["marian_translation"],
     "seq2seq_plugin": ["seq2seq_encoder_decoder"],
@@ -133,9 +135,11 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
     "qwen_image_pipeline": ["diffusion_qwen_image"],
+    "sana_wm_pipeline": ["diffusion_sana_wm"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
         "diffusion_zimage", "diffusion_qwen_image", "diffusion_pixart_torchtrt",
+        "diffusion_sana_wm",
     ],
 }
 
@@ -209,7 +213,7 @@ THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
 SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_helpers": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage",
+        "diffusion_zimage", "diffusion_sana_wm",
     ],
     "audio_helpers": [
         "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
@@ -386,6 +390,8 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
             paths.add(normalized)
         elif normalized.startswith("data/"):
             paths.add(f"tests/e2e/{normalized}")
+        elif normalized.startswith("asset/"):
+            paths.add(normalized)
     return sorted(paths)
 
 
@@ -785,6 +791,17 @@ def _runtime_strategy_models(
     return _resolver
 
 
+def _fixed_runtime_strategy_models(strategies: List[str]) -> ModelsResolver:
+    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
+        del context
+        return _drop_fp8_scale_models(
+            _models_for_runtime_strategies(strategies, imap),
+            imap,
+        )
+
+    return _resolver
+
+
 def _cpp_runtime_model_strategies(
     context: RuleContext, imap: ImpactMap,
 ) -> List[str]:
@@ -1026,6 +1043,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result("specialized_builder", _specialized_builder_models),
             covered_by=("TestDeclarativeClassificationRules.test_specialized_builder_rule",),
+        ),
+        ClassificationRule(
+            priority=95,
+            name="sana_wm_bridge",
+            matcher=_path_equals(
+                "tensorrt_model_connect/tensorrt_model_connect/sana_wm_bridge.py"
+            ),
+            resolver=_match_result(
+                "sana_wm_bridge",
+                _fixed_runtime_strategy_models(["diffusion_sana_wm"]),
+                ["builder", "tools"],
+                False,
+            ),
+            covered_by=("TestSanaWmImpactRules.test_sana_wm_scoped_paths",),
         ),
         ClassificationRule(
             priority=100,
@@ -1428,6 +1459,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             }),
             resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=488,
+            name="sana_wm_inference_script",
+            matcher=_path_equals("inference_video_scripts/inference_sana_wm.py"),
+            resolver=_match_result(
+                "sana_wm_inference_script",
+                _fixed_runtime_strategy_models(["diffusion_sana_wm"]),
+                ["tools"],
+                False,
+            ),
+            covered_by=("TestSanaWmImpactRules.test_sana_wm_scoped_paths",),
         ),
         ClassificationRule(
             priority=490,

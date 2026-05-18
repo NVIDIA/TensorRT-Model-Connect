@@ -71,6 +71,20 @@ def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
     return os.path.join(ctx.engine_dir, bundle_name)
 
 
+def _resolve_input_path(path: str | None, ctx: RunContext) -> str | None:
+    """Resolve e2e asset paths against engine, repo, and tests/e2e roots."""
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    for base in (ctx.engine_dir, str(PROJECT_DIR), str(PROJECT_DIR / "tests" / "e2e")):
+        candidate = Path(base) / path
+        if candidate.is_file():
+            return str(candidate)
+    return str(p)
+
+
 def _resolve_cached_model_ref(hf_id: str) -> str:
     """Prefer a local snapshot and patch known-bad tokenizer configs in /tmp."""
     if not hf_id:
@@ -414,6 +428,13 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        prompt_file = _resolve_input_path(case.inputs.get("prompt_file"), ctx)
+        image_path = _resolve_input_path(
+            case.inputs.get("image")
+            or case.inputs.get("test_image")
+            or case.inputs.get("image_path"),
+            ctx,
+        )
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
 
@@ -481,12 +502,30 @@ class DiffusionMediaRunner:
             else:
                 cmd = [
                     binary, "generate-video", bundle_path,
-                    "--prompt", prompt,
                     "--output", frame_dir,
-                    "--num-steps", str(num_steps),
                 ]
+                if case.family != "sana_wm":
+                    cmd.extend(["--num-steps", str(num_steps)])
+                if prompt_file:
+                    cmd.extend(["--prompt-file", prompt_file])
+                else:
+                    cmd.extend(["--prompt", prompt])
                 if initial_latents_raw:
                     cmd.extend(["--initial-latents-raw", initial_latents_raw])
+                if image_path:
+                    cmd.extend(["--image", image_path])
+                action = case.inputs.get("action")
+                if action:
+                    cmd.extend(["--action", str(action)])
+                translation_speed = case.inputs.get("translation_speed")
+                if translation_speed is not None:
+                    cmd.extend(["--translation-speed", str(translation_speed)])
+                rotation_speed_deg = case.inputs.get("rotation_speed_deg")
+                if rotation_speed_deg is not None:
+                    cmd.extend(["--rotation-speed-deg", str(rotation_speed_deg)])
+                num_frames = case.inputs.get("video_num_frames") or case.inputs.get("num_frames")
+                if num_frames is not None:
+                    cmd.extend(["--num-frames", str(num_frames)])
                 guidance_scale = case.inputs.get("guidance_scale")
                 if guidance_scale is not None:
                     cmd.extend(["--guidance-scale", str(guidance_scale)])

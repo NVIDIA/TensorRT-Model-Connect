@@ -207,6 +207,215 @@ def test_run_returns_preflight_skip_without_resolving_bundle(
     assert data["status"] == E2EStatus.SKIP.value
     assert data["failure_type"] == FailureType.PRECHECK_FAIL.value
     assert data["stages"] == {}
+    assert data["artifacts"]["preflight_details"] == "preflight_details.json"
+    preflight_details = json.loads(
+        (Path(ctx.artifacts_dir) / case.name / "preflight_details.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert preflight_details[0]["kind"] == "unknown_preflight"
+
+
+def test_sana_wm_preflight_finds_official_script_and_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "trtmc"
+    binary.write_text("", encoding="utf-8")
+    image = tmp_path / "demo_0.png"
+    image.write_text("image", encoding="utf-8")
+    prompt = tmp_path / "demo_0.txt"
+    prompt.write_text("prompt", encoding="utf-8")
+    script = tmp_path / "inference_sana_wm.py"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SANA_WM_SCRIPT", str(script))
+
+    case = _make_case(
+        "sana-wm-preflight",
+        preflight=[
+            PreflightRequirement(kind="binary_exists"),
+            PreflightRequirement(kind="asset_exists", args={"path": str(image)}),
+            PreflightRequirement(kind="asset_exists", args={"path": str(prompt)}),
+            PreflightRequirement(kind="sana_wm_script_available"),
+            PreflightRequirement(kind="sana_wm_runtime_entrypoint_available"),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+    ctx.binary_path = str(binary)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is True
+    assert all(item["passed"] for item in details)
+    assert details[-2]["kind"] == "sana_wm_script_available"
+    assert details[-1]["kind"] == "sana_wm_runtime_entrypoint_available"
+
+
+def test_sana_wm_runtime_entrypoint_rejects_local_shim_without_model_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("SANA_WM_SCRIPT", raising=False)
+    monkeypatch.delenv("SANA_REPO", raising=False)
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        assert "model_index.json" in command[-1]
+        return orchestrator.subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="missing model_index.json",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+    case = _make_case(
+        "sana-wm-no-entrypoint",
+        preflight=[
+            PreflightRequirement(
+                kind="sana_wm_runtime_entrypoint_available",
+                args={
+                    "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+                    "path": "inference_video_scripts/inference_sana_wm.py",
+                },
+            ),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is False
+    assert details[0]["kind"] == "sana_wm_runtime_entrypoint_available"
+    assert details[0]["passed"] is False
+    assert "runtime entrypoint unavailable" in details[0]["message"]
+    assert "model_index.json" in details[0]["message"]
+    assert "SANA_WM_SCRIPT/SANA_REPO" in details[0]["message"]
+
+
+def test_sana_wm_runtime_entrypoint_allows_action_capable_diffusers_model_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("SANA_WM_SCRIPT", raising=False)
+    monkeypatch.delenv("SANA_REPO", raising=False)
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        assert "model_index.json" in command[-1]
+        return orchestrator.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="pipeline_class=ActionCapableSanaWmPipeline\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+    case = _make_case(
+        "sana-wm-diffusers-entrypoint",
+        preflight=[
+            PreflightRequirement(
+                kind="sana_wm_script_available",
+                args={"path": "inference_video_scripts/inference_sana_wm.py"},
+                gating=False,
+            ),
+            PreflightRequirement(
+                kind="sana_wm_runtime_entrypoint_available",
+                args={"hf_id": "Efficient-Large-Model/SANA-WM_bidirectional"},
+            ),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is True
+    assert details[0]["kind"] == "sana_wm_script_available"
+    assert details[0]["passed"] is False
+    assert details[0]["gating"] is False
+    assert details[1]["kind"] == "sana_wm_runtime_entrypoint_available"
+    assert details[1]["passed"] is True
+    assert "action-capable Diffusers entrypoint" in details[1]["message"]
+
+
+def test_sana_wm_script_available_rejects_repo_local_shim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("SANA_WM_SCRIPT", raising=False)
+    monkeypatch.delenv("SANA_REPO", raising=False)
+    case = _make_case(
+        "sana-wm-local-shim",
+        preflight=[
+            PreflightRequirement(
+                kind="sana_wm_script_available",
+                args={"path": "inference_video_scripts/inference_sana_wm.py"},
+                gating=False,
+            ),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is True
+    assert details[0]["kind"] == "sana_wm_script_available"
+    assert details[0]["passed"] is False
+    assert details[0]["gating"] is False
+    assert "compatibility shim is not sufficient" in details[0]["message"]
+
+
+def test_sana_wm_preflight_skip_keeps_model_card_reference_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = E2ECase(
+        name="sana-wm-bidirectional",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        task_strategy="diffusion_media_generation",
+        reference_backend="hf_diffusers",
+        bundle="sana-wm-bidirectional.trtfb",
+        preflight=[PreflightRequirement(kind="unknown_preflight")],
+        inputs={
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "image": "asset/sana_wm/demo_0.png",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "translation_speed": 0.055,
+            "rotation_speed_deg": 1.2,
+            "video_num_frames": 321,
+        },
+        stages=[StageSpec(name="end_to_end")],
+    )
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_bundle",
+        lambda case, ctx: pytest.fail("bundle resolution should not run"),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    expected = (
+        f"{sys.executable} inference_video_scripts/inference_sana_wm.py "
+        "--image asset/sana_wm/demo_0.png "
+        "--prompt asset/sana_wm/demo_0.txt "
+        '--action "w-80,jw-40,w-40,lw-60,w-100" '
+        "--translation_speed 0.055 "
+        "--rotation_speed_deg 1.2 "
+        "--num_frames 321 "
+        "--output_dir results/demo"
+    )
+    assert result.status == E2EStatus.SKIP.value
+    assert result.repro_commands["sana_wm_python_reference"] == expected
+    data = _read_result_json(ctx, case)
+    assert data["repro_commands"]["sana_wm_python_reference"] == expected
+    assert data["artifacts"]["preflight_details"] == "preflight_details.json"
+    preflight_details = json.loads(
+        (Path(ctx.artifacts_dir) / case.name / "preflight_details.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert preflight_details[0]["kind"] == "unknown_preflight"
 
 
 def test_run_returns_build_failure_and_logs_build_command(

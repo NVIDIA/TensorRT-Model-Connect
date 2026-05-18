@@ -11,8 +11,10 @@ from __future__ import annotations
 import subprocess
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+from tests.e2e_harness.references import hf_diffusers
 from tests.e2e_harness.runners import (
     audio_speech,
+    diffusion,
     neural_operator,
     object_detection,
     omni,
@@ -160,6 +162,95 @@ def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     assert "audio_magpie.temperature=0.6" in cmd
     assert "audio_magpie.seed=42" in cmd
     assert "TRTMC_MAGPIE_SEED" not in captured["env"]
+    assert out.metadata["command"] == cmd
+
+
+def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path):
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        inputs={
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "image": "asset/sana_wm/demo_0.png",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "translation_speed": 0.055,
+            "rotation_speed_deg": 1.2,
+            "video_num_frames": 321,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    ctx.runtime_python = "/opt/trtmc-python/bin/python"
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(diffusion.subprocess, "run", _fake_run)
+
+    out = diffusion.DiffusionMediaRunner().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[1] == "generate-video"
+    assert "--prompt-file" in cmd
+    assert any(str(arg).endswith("asset/sana_wm/demo_0.txt") for arg in cmd)
+    assert "--prompt" not in cmd
+    assert "--num-steps" not in cmd
+    assert "--image" in cmd
+    assert any(str(arg).endswith("asset/sana_wm/demo_0.png") for arg in cmd)
+    assert "--action" in cmd
+    assert "w-80,jw-40,w-40,lw-60,w-100" in cmd
+    assert "--translation-speed" in cmd
+    assert "0.055" in cmd
+    assert "--rotation-speed-deg" in cmd
+    assert "1.2" in cmd
+    assert "--num-frames" in cmd
+    assert "321" in cmd
+    assert "--hf-python" in cmd
+    assert "/opt/trtmc-python/bin/python" in cmd
+    assert out.metadata["command"] == cmd
+
+
+def test_sana_wm_reference_requires_official_script_when_manifest_requests_it(
+    monkeypatch, tmp_path
+):
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        inputs={
+            "prompt": "drive forward",
+            "image": "asset/sana_wm/demo_0.png",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "translation_speed": 0.055,
+            "rotation_speed_deg": 1.2,
+            "video_num_frames": 321,
+            "sana_wm_require_official_script": True,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", _fake_run)
+
+    out = hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[1:3] == ["-m", "tensorrt_model_connect.sana_wm_bridge"]
+    assert "--no-diffusers-fallback" in cmd
+    assert "--translation-speed" in cmd
+    assert "--rotation-speed-deg" in cmd
+    assert "--num-frames" in cmd
     assert out.metadata["command"] == cmd
 
 

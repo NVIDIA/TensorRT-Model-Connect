@@ -127,6 +127,7 @@ recovery-*-clone/
 /tmp/
 engines
 *.png
+!asset/sana_wm/demo_0.png
 *.wav
 *.trtfb
 *.ttrtb

@@ -10,11 +10,9 @@ Postconditions: Local directories with config.json resolve correctly, HF repo ID
 
 from __future__ import annotations
 
-import json
 import importlib
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -94,6 +92,33 @@ class TestResolveModel:
         result = _resolve_model("nvidia/Magpie-TTS")
         assert result == f"resolved:{nemo_path}"
 
+    def test_sana_wm_downloads_only_metadata_files(self, tmp_path, monkeypatch):
+        """SANA-WM resolution must not pull the 100GB weight payload during build."""
+        dl_dir = tmp_path / "sana-wm"
+        dl_dir.mkdir()
+        (dl_dir / "config.yaml").write_text(
+            "model:\n"
+            "  model: SanaMSVideoCamCtrl_1600M_P1_D20\n"
+            "vae:\n"
+            "  vae_type: LTX2VAE_diffusers\n",
+            encoding="utf-8",
+        )
+        calls: list[dict] = []
+
+        def fake_snapshot_download(**kwargs):
+            calls.append(kwargs)
+            return str(dl_dir)
+
+        fake_hf = types.ModuleType("huggingface_hub")
+        fake_hf.snapshot_download = fake_snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        result = _resolve_model("Efficient-Large-Model/SANA-WM_bidirectional")
+
+        assert result == str(dl_dir)
+        assert calls
+        assert calls[0]["allow_patterns"] == ["README.md", "config.yaml"]
+
 
 class TestFindPlugin:
     def test_supported_model_types(self):
@@ -107,6 +132,7 @@ class TestFindPlugin:
             "olmo", "xglm", "gpt_neox", "gpt_neo", "codegen",
             "bloom", "mamba", "mixtral",
             "qwen2_vl", "qwen2_5_vl",
+            "sana_wm",
         ]
         for model_type in known_types:
             plugin = find_plugin(model_type)

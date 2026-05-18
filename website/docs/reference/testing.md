@@ -41,3 +41,39 @@ Common fields include:
 - `max_cache_length`
 - task input fields such as `prompt`, `test_prompt`, `audio`, `image`, or `inputs`
 - oracle fields such as `reference_backend`, `reference_family`, `user_contract`, and thresholds
+
+## SANA-WM E2E Runtime
+
+The `sana-wm-bidirectional` case validates the model-card camera-control
+contract for `Efficient-Large-Model/SANA-WM_bidirectional`:
+
+```bash
+python inference_video_scripts/inference_sana_wm.py \
+  --image asset/sana_wm/demo_0.png \
+  --prompt asset/sana_wm/demo_0.txt \
+  --action "w-80,jw-40,w-40,lw-60,w-100" \
+  --translation_speed 0.055 \
+  --rotation_speed_deg 1.2 \
+  --num_frames 321 \
+  --output_dir results/demo
+```
+
+The manifest requires an official SANA-WM runtime entrypoint. If the upstream
+checkpoint does not include `inference_video_scripts/inference_sana_wm.py` or
+an action-capable Diffusers `model_index.json`, the case skips during preflight
+with `precheck_fail` and writes `preflight_details.json`.
+
+To run true parity once the official runtime is available, point either
+environment variable at that runtime before invoking the normal E2E command:
+
+```bash
+export SANA_REPO=/path/to/Sana
+# or:
+export SANA_WM_SCRIPT=/path/to/inference_video_scripts/inference_sana_wm.py
+
+pytest tests/test_e2e.py::test_e2e[sana-wm-bidirectional] -v \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc \
+  --hf-python /opt/venv/bin/python \
+  --e2e-artifacts-dir /workspace/users/yifeif/tensorrt-model-connect/test-result
+```

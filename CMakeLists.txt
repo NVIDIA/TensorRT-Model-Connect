@@ -203,6 +203,7 @@ add_library(trtmc_core
   src/runtime/models/vision_language/pipeline.cpp
   src/runtime/models/flux/pipeline.cpp
   src/runtime/models/ltx_video/pipeline.cpp
+  src/runtime/models/sana_wm/pipeline.cpp
   src/runtime/models/wan/pipeline.cpp
   src/runtime/models/z_image/pipeline.cpp
   src/runtime/models/qwen_image/pipeline.cpp
@@ -628,6 +629,7 @@ trtmc_add_test(test_vl_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_vl_pipeline PRIVATE trtmc_backend_trt)
 endif()
+trtmc_add_test(test_sana_wm_pipeline)
 trtmc_add_test(test_diffusion_pipeline_new)
 trtmc_add_test(test_audio_pipeline_new REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)

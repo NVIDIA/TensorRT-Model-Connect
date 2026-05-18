@@ -240,6 +240,21 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
+def _is_sana_wm_model_ref(model_ref: str) -> bool:
+    return model_ref.rstrip("/") == "Efficient-Large-Model/SANA-WM_bidirectional"
+
+
+def _is_sana_wm_model_dir(path: Path) -> bool:
+    config_path = path / "config.yaml"
+    if not config_path.is_file():
+        return False
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "SanaMSVideoCamCtrl" in text and "LTX2VAE_diffusers" in text
+
+
 def _is_elf_model_dir(path: Path) -> bool:
     """Return True for the official ELF YAML + checkpoint directory layout."""
     if not path.is_dir():
@@ -273,7 +288,9 @@ def _resolve_model(model_id_or_path: str) -> str:
     Handles .nemo archives by extracting config and creating a synthetic dir.
     """
     local = Path(model_id_or_path)
-    if local.is_dir() and (_is_hf_model_dir(local) or _is_elf_model_dir(local)):
+    if local.is_dir() and (
+        _is_hf_model_dir(local) or _is_elf_model_dir(local) or _is_sana_wm_model_dir(local)
+    ):
         return str(local)
 
     # Handle .nemo archives (NeMo models like MagpieTTS)
@@ -297,10 +314,13 @@ def _resolve_model(model_id_or_path: str) -> str:
 
     print(f"[trtmc-build] Downloading {model_id_or_path} ...", file=sys.stderr)
     try:
-        local_dir = snapshot_download(
-            repo_id=model_id_or_path,
-            allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
-        )
+        allow_patterns = _HF_ALLOW_PATTERNS + ["*.nemo"]
+        if _is_sana_wm_model_ref(model_id_or_path):
+            # The public SANA-WM repo is 105 GB and the runtime bridge fetches
+            # weights on demand through the official inference path. Bundle
+            # construction only needs the YAML contract.
+            allow_patterns = ["README.md", "config.yaml"]
+        local_dir = snapshot_download(repo_id=model_id_or_path, allow_patterns=allow_patterns)
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)
 
@@ -308,6 +328,10 @@ def _resolve_model(model_id_or_path: str) -> str:
     dl_path = Path(local_dir)
     if _is_hf_model_dir(dl_path):
         print(f"[trtmc-build] Downloaded to {local_dir}", file=sys.stderr)
+        return local_dir
+
+    if _is_sana_wm_model_dir(dl_path):
+        print(f"[trtmc-build] Downloaded SANA-WM config to {local_dir}", file=sys.stderr)
         return local_dir
 
     # Fallback for NeMo-only snapshots.
@@ -894,6 +918,7 @@ def build_bundle(
         "object_detection",
         "prompted_segmentation",
         "image_classification",
+        "diffusion_sana_wm",
     ):
         tokenizer_json_t0 = time.monotonic()
         _ensure_tokenizer_json(model_dir_path)

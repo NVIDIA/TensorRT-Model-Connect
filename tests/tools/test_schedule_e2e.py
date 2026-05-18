@@ -34,6 +34,7 @@ def _test_id(name: str) -> str:
 def test_diffusion_family_strategies_are_large() -> None:
     assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_flux"}) == "large"
     assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_ltx"}) == "large"
+    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_sana_wm"}) == "large"
     assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_pixart_torchtrt"}) == "large"
 
 

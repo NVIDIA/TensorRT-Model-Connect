@@ -88,3 +88,55 @@ def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
     assert "--num-steps 28" in cmd
     assert "--guidance-scale 3.0" in cmd
     assert "--seed 42" in cmd
+
+
+def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> None:
+    case = E2ECase(
+        name="sana-wm-bidirectional",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        task_strategy="diffusion_media_generation",
+        bundle="sana-wm-bidirectional.trtfb",
+        inputs={
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "image": "asset/sana_wm/demo_0.png",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "translation_speed": 0.055,
+            "rotation_speed_deg": 1.2,
+            "video_num_frames": 321,
+        },
+        stages=[],
+    )
+    ctx = _make_ctx(tmp_path)
+    ctx.case = case
+    repro = _build_repro_commands(
+        case,
+        ctx,
+        "/tmp/engines/sana-wm-bidirectional.trtfb",
+        {},
+    )
+
+    cmd = repro["trt_inference"]
+    assert " generate-video " in f" {cmd} "
+    assert "--prompt-file asset/sana_wm/demo_0.txt" in cmd
+    assert "--prompt " not in cmd
+    assert "--num-steps" not in cmd
+    assert "--image asset/sana_wm/demo_0.png" in cmd
+    assert "--action w-80,jw-40,w-40,lw-60,w-100" in cmd
+    assert "--translation-speed 0.055" in cmd
+    assert "--rotation-speed-deg 1.2" in cmd
+    assert "--num-frames 321" in cmd
+    assert "--hf-python /usr/bin/python3" in cmd
+
+    reference_cmd = repro["sana_wm_python_reference"]
+    assert reference_cmd == (
+        "/usr/bin/python3 inference_video_scripts/inference_sana_wm.py "
+        "--image asset/sana_wm/demo_0.png "
+        "--prompt asset/sana_wm/demo_0.txt "
+        '--action "w-80,jw-40,w-40,lw-60,w-100" '
+        "--translation_speed 0.055 "
+        "--rotation_speed_deg 1.2 "
+        "--num_frames 321 "
+        "--output_dir results/demo"
+    )
