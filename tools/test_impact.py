@@ -596,7 +596,7 @@ def _infer_unit_tiers(path: str) -> List[str]:
         tiers.append("builder")
     if path.startswith("tests/cpp/"):
         tiers.append("cpp")
-    if path.startswith("tests/tools/"):
+    if path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
         tiers.append("tools")
     return sorted(set(tiers))
 
@@ -1312,6 +1312,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=380,
+            name="harness_unit_test",
+            matcher=_regex_rule(r"tests/e2e_harness/test_[\w_]+\.py$"),
+            resolver=_match_result("harness_unit_test", _no_models, ["tools"], False),
+            covered_by=("TestHarness.test_harness_unit_test_file",),
+        ),
+        ClassificationRule(
+            priority=385,
             name="harness_shared",
             matcher=_path_startswith("tests/e2e_harness/"),
             resolver=_match_result("harness_shared", _all_models),
@@ -1404,6 +1411,17 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
+            priority=485,
+            name="elf_replay_tool",
+            matcher=_path_in({
+                "tools/make_elf_replay_artifact.py",
+                "tools/prepare_elf_model_dir.py",
+                "tools/validate_elf_replay_artifact.py",
+            }),
+            resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
             priority=490,
             name="no_impact",
             matcher=_no_impact_matcher,
@@ -1455,7 +1473,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
             continue
         if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
             builder_tests.add(path)
-        elif path.startswith("tests/tools/"):
+        elif path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
             tools_tests.add(path)
     return sorted(builder_tests), sorted(tools_tests)
 

@@ -308,7 +308,9 @@ class TestDeclarativeClassificationRules:
                 "tests/e2e_harness/thresholds/defaults/custom.json",
                 "harness_threshold_unknown",
             ),
+            ("tests/e2e_harness/test_orchestrator_phases.py", "harness_unit_test"),
             ("scripts/_gen_fp8_bf16.py", "fp8_gen_script"),
+            ("tools/make_elf_replay_artifact.py", "elf_replay_tool"),
         ],
     )
     def test_representative_rule_paths(self, imap, path, rule_name):
@@ -798,6 +800,18 @@ class TestUnitTiers:
         assert match.models == []
         assert "tools" in match.unit_tiers
 
+    def test_elf_replay_tools_trigger_tools_tier(self, imap):
+        """ELF helper tool edits run tools-tier tests without E2E."""
+        for path in (
+            "tools/make_elf_replay_artifact.py",
+            "tools/prepare_elf_model_dir.py",
+            "tools/validate_elf_replay_artifact.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "elf_replay_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+
     def test_unit_tier_torchtrt_engine_defs(self, imap):
         """Torch-TRT engine-def tests run as builder tests without E2E."""
         match = test_impact.classify_file(
@@ -874,6 +888,14 @@ class TestHarness:
             "tests/e2e_harness/orchestrator.py", imap)
         assert match.rule == "harness_shared"
         assert len(match.models) == len(imap.all_model_names)
+
+    def test_harness_unit_test_file(self, imap):
+        """e2e_harness/test_*.py -> direct tools-tier test only."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/test_orchestrator_phases.py", imap)
+        assert match.rule == "harness_unit_test"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
 
     def test_torch_reference_includes_neural_operator_models(self, mock_repo):
         """torch_reference.py includes neural_operator-backed time-series manifests."""
@@ -1473,6 +1495,17 @@ class TestCoverageMapIntegration:
         )
 
         assert result.tools_tests == ["tests/tools/test_z_image_model_card_contract.py"]
+        assert "tools" not in result.fallback_tiers
+
+    def test_changed_e2e_harness_unit_test_selected_directly(self, imap):
+        """Changed e2e_harness test files run directly without broad E2E impact."""
+        result = test_impact.analyze_impact(
+            ["tests/e2e_harness/test_orchestrator_phases.py"], imap,
+            coverage_map={},
+        )
+
+        assert result.e2e_models == []
+        assert result.tools_tests == ["tests/e2e_harness/test_orchestrator_phases.py"]
         assert "tools" not in result.fallback_tiers
 
     def test_json_output_includes_test_lists(self, imap):

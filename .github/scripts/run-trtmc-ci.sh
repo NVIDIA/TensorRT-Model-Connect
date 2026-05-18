@@ -277,7 +277,7 @@ for test in tests:
       -n auto "${cov_args[@]}"
   else
     echo "Running all builder + tools tests"
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ tests/e2e_harness/test_*.py -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
       -n auto "${cov_args[@]}"

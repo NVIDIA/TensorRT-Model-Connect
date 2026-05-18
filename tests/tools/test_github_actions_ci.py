@@ -60,6 +60,11 @@ def test_diffusion_vlm_pair_count_uses_helper() -> None:
     assert "python3 -c" not in vlm_block
 
 
+def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "tests/e2e_harness/test_*.py" in text
+
+
 def test_shared_setup_action_creates_hf_cache_dirs() -> None:
     text = (REPO_ROOT / ".github" / "actions" / "setup-trtmc" / "action.yml").read_text()
     assert '"${HF_HOME:-}"' in text
