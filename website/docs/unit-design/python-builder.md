@@ -88,6 +88,16 @@ classDiagram
 
 The design goal is to avoid repeating TensorRT layer wiring in every family plugin. A family plugin should describe what is family-specific: weight naming, architecture variations, optional components, and config metadata.
 
+## Distributed build planning
+
+Distributed build planning is still builder-owned because it changes graph construction, weight slicing, engine sections, and bundle metadata before runtime load.
+
+For the current TP path, `ParallelConfig` carries the build request, `ModelRecipe` names decoder regions, `ShardingPolicy` applies local sharding and collectives, `PlanCompiler` emits rank-local sections, and `distributed_plan.py` writes `distributed_plan.json`.
+
+The ownership boundary stays builder-side because distributed planning changes graph construction, weight slicing, engine sections, and bundle metadata before runtime load. A family-owned `ModelRecipe` names components and shardable regions. `ShardingPolicy` decides whether those regions are replicated, tensor-parallel, pipeline-parallel, context-parallel, data-parallel, expert-parallel, or partially sharded. `PlanCompiler` emits the rank-local TensorRT sections and bundle metadata.
+
+Family plugins should not accumulate separate branches for every future mesh mode. They should expose model structure and call shared graph helpers; distributed policy belongs in the plan and compiler layer.
+
 ## Torch-TRT engine definitions
 
 `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/` owns Torch export and Torch-TRT compilation flows. These bundles still run through the same C++ runtime.
@@ -120,4 +130,5 @@ Builder changes should usually have tests in `tests/builder/`:
 | Weight mapping | Tiny checkpoint or fixture-based mapper tests. |
 | Graph builder behavior | Focused graph construction or mock TensorRT tests. |
 | Quantization | Plan, calibration, scale-provider, and exclusion tests. |
+| Distributed plan output | Mesh validation, selector resolution, JSON roundtrip, rank-section names, and bundle section checks. |
 | Bundle output | Inspect `BundleInfo`, sections, and `config.json` fields. |

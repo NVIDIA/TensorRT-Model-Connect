@@ -43,6 +43,9 @@ const sidebars = {
       items: [
         'architecture/overview',
         'architecture/bundle-format',
+        'architecture/multi-device-architecture',
+        'architecture/multi-device-design-brief',
+        'architecture/multi-device-implementation-map',
         'architecture/runtime-plugins',
         'architecture/build-system'
       ]
@@ -97,7 +100,8 @@ const sidebars = {
       items: [
         'context/triattention-native-cpp-worklog',
         'context/config-registry-status',
-        'context/architecture-decision-records'
+        'context/architecture-decision-records',
+        'context/multi-device-plan-status'
       ]
     },
     {

@@ -106,6 +106,7 @@ flowchart TB
 | `graph_ops.py` | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Atomic TensorRT graph operations. | Family builders should not rewrite low-level TRT layer creation repeatedly. |
 | `graph_blocks.py` | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Reusable transformer/model blocks. | Shared blocks keep attention, MLP, normalization, and projection patterns consistent. |
 | Dedicated builders | `standard_decoder_builder.py`, `encoder_builder.py`, `*_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling. |
+| Distributed plan schema | `tensorrt_model_connect/tensorrt_model_connect/distributed_plan.py` | Process mesh, component placement, rank-local section names, and partial-sharding selectors. | Distributed choices need a bundle contract instead of model-family-specific branches. |
 | Quantization context | `tensorrt_model_connect/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
 | Python `ConfigBundle` mirror | `tensorrt_model_connect/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
 | `BundleInfo` / `BundleSection` | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
@@ -117,6 +118,7 @@ flowchart TB
 | `.trtfb` magic/header/sections | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`, `src/bundle/bundle_format.cpp` | A portable container format for build output. |
 | `BundleInfo` | `include/trtmc/bundle.h`, internal `src/bundle/bundle_format.h` | Fast metadata inspection without constructing a pipeline. |
 | `config.json` section | Written by builder, read in `PipelineFactory` and plugins | Runtime strategy, IO map, backend name, and strategy-specific fields. |
+| `distributed_plan.json` section | Written by distributed builders, read by future mesh runtime | Optional process mesh and rank-local execution plan for distributed bundles. |
 | Engine sections | Bundle sections such as `engine_plan`, `vision_engine_plan`, `denoiser_plan` | Serialized TensorRT or Torch-TRT execution plans. |
 | Asset sections | Tokenizer, preprocessor, kernel, scale, and family metadata files | Data needed for preprocessing, postprocessing, or custom execution. |
 
@@ -134,6 +136,7 @@ flowchart TB
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution and tensor introspection without TensorRT headers. | Pipelines and runtime core. |
 | `Tensor` | `include/trtmc/runtime/tensor.h` | CPU-side tensor view. | Pipeline input/output binding. |
 | `DeviceTensor` | `include/trtmc/runtime/device_tensor.h` | Owned GPU tensor storage. | Runtime core and pipelines. |
+| `DistributedRuntimeGroup` / mesh-runtime layer | `include/trtmc/runtime/distributed_runtime.h`, `src/runtime/core/distributed_runtime.cpp` | Rank detection, device binding, communicator creation, and distributed group lifetime. | Runtime plugins and backend module creation. |
 | `IInferenceState` | `include/trtmc/runtime/inference_state.h` | Per-sequence decode state. | Text/recurrent/hybrid pipelines. |
 | `ISampler` | `include/trtmc/runtime/sampler.h` | Token selection from logits. | Text-generation pipelines. |
 | `ConfigBundle` | `include/trtmc/config/config_bundle.h` | Resolved layered runtime config. | Factory and migrated plugins. |

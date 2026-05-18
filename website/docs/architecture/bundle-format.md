@@ -40,6 +40,7 @@ Typical sections include:
 - Tokenizer assets
 - Family-specific metadata
 - Optional config artifacts such as effective config output
+- Optional distributed execution metadata such as `distributed_plan.json`
 
 Different strategies expect different section sets:
 
@@ -48,6 +49,7 @@ Different strategies expect different section sets:
 | Decoder text generation | `engine_plan`, tokenizer files, `config.json`. |
 | Vision-language | Text decoder engine, optional `vision_engine_plan`, image preprocessing metadata, tokenizer assets. |
 | Diffusion | Text encoder plans, `denoiser_plan`, `vae_decoder_plan`, scheduler and latent config. |
+| Tensor-parallel decoder | Rank-local sections such as `decoder_rank0_plan`, plus `distributed_plan.json`. |
 | Speech-to-text | Encoder/decoder or RNNT plans, mel/filterbank metadata, tokenizer assets. |
 | Text-to-audio | Semantic/acoustic/codec plans, tokenizer or phoneme assets, audio generation metadata. |
 | Torch-TRT time-series | Torch-TRT engine plan plus model-specific context and horizon configuration. |
@@ -99,6 +101,12 @@ The bundle has both a JSON header and a `config.json` section.
 | `config.json` section | Runtime construction details such as tensor IO names, modality-specific fields, engine backend, scheduler settings, and strategy-specific config. |
 
 The runtime reads both. `ReadBundleFile()` parses the container, while `PipelineFactory` extracts `config.json` and passes both the parsed base config and raw JSON to the plugin through `PipelineContext`.
+
+## Distributed plan section
+
+Tensor-parallel decoder bundles include a `distributed_plan.json` section. The section records the process mesh, component placement, rank-local engine section naming, and region or collective metadata used by the MD architecture.
+
+The decoder runtime uses this section to select the rank-local engine section and initialize the current TP group through the shared mesh-runtime entry point.
 
 ## Compatibility boundaries
 

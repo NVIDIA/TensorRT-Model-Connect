@@ -281,6 +281,7 @@ Other modalities reuse the same architectural pattern:
 ## Where to go deeper
 
 - [Bundle Format](bundle-format.md) explains the artifact boundary.
+- [Multi-Device Target Architecture](multi-device-architecture.md) explains the planned internal interfaces for distributed and partial-sharded bundles.
 - [Runtime Plugins](runtime-plugins.md) explains strategy dispatch and pipeline construction.
 - [Build System](build-system.md) explains CMake targets, generated registration, and backend DSO boundaries.
 - [Building Blocks](/unit-design/building-blocks) maps architecture concepts to concrete source abstractions.

@@ -625,8 +625,27 @@ class TextGenerationCausalRunner:
                 TensorParallelNcclGroup,
                 runner_from_bundle,
                 load_config_from_bundle,
+                load_section_from_bundle,
             )
-            from tensorrt_model_connect.parallel_config import rank_engine_section
+            from tensorrt_model_connect.distributed_plan import (
+                DISTRIBUTED_PLAN_SECTION,
+                DistributedPlan,
+            )
+
+            def rank_engine_section_from_plan(rank):
+                data = load_section_from_bundle(bundle_path, DISTRIBUTED_PLAN_SECTION)
+                if data is None:
+                    raise RuntimeError("distributed_plan.json section is required for distributed debug logits")
+                plan = DistributedPlan.from_json_bytes(data)
+                section = plan.bundle_sections.get("decoder", {{}})
+                pattern = section.get("rank_section_pattern")
+                if pattern:
+                    return pattern.replace("{{rank}}", str(rank))
+                name = section.get("section")
+                if name:
+                    return name
+                raise RuntimeError("distributed_plan.json is missing decoder bundle section metadata")
+
             group = None
             runner = None
             try:
@@ -634,7 +653,7 @@ class TextGenerationCausalRunner:
                     group = TensorParallelNcclGroup(world_size=tp_size)
                     runner = runner_from_bundle(
                         bundle_path,
-                        engine_section=rank_engine_section(group.rank),
+                        engine_section=rank_engine_section_from_plan(group.rank),
                         distributed_communicator=group.communicator,
                     )
                 else:

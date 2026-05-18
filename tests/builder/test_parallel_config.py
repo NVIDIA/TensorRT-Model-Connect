@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from tensorrt_model_connect.config import ModelConfig
+from tensorrt_model_connect.distributed_plan import DISTRIBUTED_PLAN_SECTION
 from tensorrt_model_connect.parallel_config import (
     ParallelConfig,
     parallel_config_from_bundle,
     require_tensorrt_11_for_tensor_parallel,
-    shard_standard_decoder_weights,
 )
 from tensorrt_model_connect.runtime_config import clear_for_testing, resolve_cli_config
 from tensorrt_model_connect.runtime_config.schemas import load_all
@@ -53,13 +52,15 @@ def test_parallel_config_rejects_unsupported_tp_size() -> None:
         )
 
 
-def test_standard_decoder_weight_sharding_preserves_single_device() -> None:
-    cfg = ModelConfig.create_tiny("qwen3")
-    weights = {"_mlp_size": 32, "_attention_size": 16, "_kv_attention_size": 16}
+def test_parallel_config_points_to_distributed_plan_without_legacy_runtime_fields() -> None:
+    fields = ParallelConfig(mode="tensor_parallel", tp_size=2).to_bundle_config_fields()
 
-    out = shard_standard_decoder_weights(cfg, weights, ParallelConfig())
-
-    assert out is weights
+    assert fields["parallelism"]["mode"] == "tensor_parallel"
+    assert fields["parallelism"]["tp_size"] == 2
+    assert fields["distributed_plan_section"] == DISTRIBUTED_PLAN_SECTION
+    assert "tensor_parallel_mode" not in fields
+    assert "tensor_parallel_size" not in fields
+    assert "tensor_parallel_require_mpirun" not in fields
 
 
 def test_tensor_parallel_requires_trt11(monkeypatch) -> None:

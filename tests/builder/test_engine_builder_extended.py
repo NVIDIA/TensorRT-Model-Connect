@@ -641,6 +641,80 @@ class TestBuildBundleOrchestration:
         cfg = json.loads(section_map["config.json"].decode("utf-8"))
         assert cfg["dynamic_kv_profile_rows"] == [3072, 6144, 12288]
 
+    def test_tensor_parallel_bundle_emits_distributed_plan(self, tmp_path):
+        """Qwen TP bundles carry rank-local plans plus distributed_plan.json."""
+        from tensorrt_model_connect.parallel_config import ParallelConfig
+
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+        seen_ranks = []
+
+        class _Plugin:
+            name = "qwen"
+            runtime_strategy = "decoder_kv_cache"
+
+            def load_weights(self, model_dir, config):
+                return {}
+
+            def build_engine(
+                self,
+                config,
+                weights,
+                max_cache_length,
+                *,
+                parallel_config=None,
+                verbose=False,
+            ):
+                seen_ranks.append(parallel_config.rank)
+                return f"PLAN{parallel_config.rank}".encode("utf-8")
+
+        plugin = _Plugin()
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                    return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._setup_trt_import"):
+                with patch("tensorrt_model_connect.trt_compat.resolved_summary",
+                            return_value="TensorRT: version=11.0.0"):
+                    with patch("tensorrt_model_connect.trt_compat.tensorrt_version",
+                                return_value="11.0.0"):
+                        with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                                    return_value="11.0.0"):
+                            with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                                        return_value="NVIDIA A100"):
+                                with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                                    with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                                        build_bundle(
+                                            str(model_dir),
+                                            output_path,
+                                            parallel_config=ParallelConfig(
+                                                mode="tensor_parallel",
+                                                tp_size=2,
+                                            ),
+                                        )
+
+        assert seen_ranks == [0, 1]
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        assert section_map["decoder_rank0_plan"] == b"PLAN0"
+        assert section_map["decoder_rank1_plan"] == b"PLAN1"
+
+        plan = json.loads(section_map["distributed_plan.json"].decode("utf-8"))
+        assert plan["mesh"]["axes"]["tp"] == 2
+        assert plan["components"]["decoder"]["placement"] == "sharded"
+        assert plan["bundle_sections"]["decoder"] == {
+            "rank_section_pattern": "decoder_rank{rank}_plan"
+        }
+        assert plan["model"]["recipe"]["component"] == "decoder"
+        assert {
+            item["selector"] for item in plan["regions"]
+        } == {"decoder.layers[*].self_attn", "decoder.layers[*].mlp"}
+
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        assert cfg["distributed_plan_section"] == "distributed_plan.json"
+        assert cfg["parallelism"]["mode"] == "tensor_parallel"
+        assert "tensor_parallel_mode" not in cfg
+        assert "tensor_parallel_size" not in cfg
+
     def test_load_weights_precision_forwarded_when_supported(self, tmp_path):
         """build_bundle forwards precision to load_weights when supported."""
         model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
