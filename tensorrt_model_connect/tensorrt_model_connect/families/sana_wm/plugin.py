@@ -219,6 +219,22 @@ def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path
     return None
 
 
+def _resolve_refiner_text_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_refiner_text_encoder_dir"),
+        os.environ.get("SANA_WM_REFINER_TEXT_ENCODER_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / _REFINER_GEMMA_REL)
+
+    for candidate in candidates:
+        if (candidate / "config.json").is_file():
+            return candidate
+    return None
+
+
 def _has_safetensors_weight_file(path: Path) -> bool:
     return (
         (path / "model.safetensors").is_file()
@@ -352,12 +368,15 @@ def _effective_native_sections(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool,
+    can_build_refiner_text_encoder: bool = False,
     can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
 ) -> list[str]:
     present = set(paths)
     if can_build_stage1_text_encoder:
         present.add("text_encoder_0_plan")
+    if can_build_refiner_text_encoder:
+        present.add("sana_wm_refiner_text_encoder_plan")
     if can_build_vae_encoder:
         present.add("sana_wm_vae_encoder_plan")
     if can_build_vae_decoder:
@@ -379,6 +398,7 @@ def _validate_native_plan_paths(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool = False,
+    can_build_refiner_text_encoder: bool = False,
     can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
 ) -> None:
@@ -387,6 +407,7 @@ def _validate_native_plan_paths(
     effective_sections = _effective_native_sections(
         paths,
         can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+        can_build_refiner_text_encoder=can_build_refiner_text_encoder,
         can_build_vae_encoder=can_build_vae_encoder,
         can_build_vae_decoder=can_build_vae_decoder,
     )
@@ -514,12 +535,13 @@ def _native_build_error(weights: WeightDict) -> str:
     return message
 
 
-def _build_stage1_text_encoder_plan(
+def _build_gemma_text_encoder_plan(
     text_encoder_dir: Path,
     max_cache_length: int,
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    label: str,
 ) -> bytes:
     from ..gemma.plugin import plugin as gemma_plugin
     from ..gemma.standard_decoder_builder import build_standard_decoder_engine
@@ -527,7 +549,7 @@ def _build_stage1_text_encoder_plan(
     text_config = ModelConfig.from_dir(text_encoder_dir)
     if not gemma_plugin.matches(text_config.model_type):
         raise ValueError(
-            "SANA-WM stage-1 text encoder builder currently supports Gemma only; "
+            f"SANA-WM {label} text encoder builder currently supports Gemma only; "
             f"found model_type={text_config.model_type!r} in {text_encoder_dir}"
         )
     text_weights = gemma_plugin.load_weights(
@@ -542,6 +564,38 @@ def _build_stage1_text_encoder_plan(
         precision=precision,
         verbose=verbose,
         hidden_state_output=True,
+    )
+
+
+def _build_stage1_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    return _build_gemma_text_encoder_plan(
+        text_encoder_dir,
+        max_cache_length,
+        precision=precision,
+        verbose=verbose,
+        label="stage-1",
+    )
+
+
+def _build_refiner_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    return _build_gemma_text_encoder_plan(
+        text_encoder_dir,
+        max_cache_length,
+        precision=precision,
+        verbose=verbose,
+        label="refiner",
     )
 
 
@@ -681,6 +735,8 @@ class SanaWmPlugin:
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
         stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
         can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
+        refiner_text_encoder_dir = _resolve_refiner_text_encoder_dir(model_path, config.raw)
+        can_build_refiner_text_encoder = refiner_text_encoder_dir is not None
         vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
         can_build_vae_encoder = vae_encoder_dir is not None
         vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
@@ -688,6 +744,7 @@ class SanaWmPlugin:
         _validate_native_plan_paths(
             native_plan_paths,
             can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            can_build_refiner_text_encoder=can_build_refiner_text_encoder,
             can_build_vae_encoder=can_build_vae_encoder,
             can_build_vae_decoder=can_build_vae_decoder,
         )
@@ -701,6 +758,7 @@ class SanaWmPlugin:
             effective_sections = _effective_native_sections(
                 native_plan_paths,
                 can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+                can_build_refiner_text_encoder=can_build_refiner_text_encoder,
                 can_build_vae_encoder=can_build_vae_encoder,
                 can_build_vae_decoder=can_build_vae_decoder,
             )
@@ -708,6 +766,8 @@ class SanaWmPlugin:
                 config.raw["_sana_wm_native_plan_sections"] = effective_sections
         if stage1_text_encoder_dir is not None:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
+        if refiner_text_encoder_dir is not None:
+            weights["_refiner_text_encoder_dir"] = str(refiner_text_encoder_dir)
         if vae_encoder_dir is not None:
             weights["_sana_wm_vae_encoder_dir"] = str(vae_encoder_dir)
         if vae_decoder_dir is not None:
@@ -733,6 +793,7 @@ class SanaWmPlugin:
         effective_sections = _effective_native_sections(
             native_plan_paths if isinstance(native_plan_paths, dict) else {},
             can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
+            can_build_refiner_text_encoder=bool(weights.get("_refiner_text_encoder_dir")),
             can_build_vae_encoder=bool(weights.get("_sana_wm_vae_encoder_dir")),
             can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
         )
@@ -766,6 +827,14 @@ class SanaWmPlugin:
             result["text_encoder_0_plan"] = _build_stage1_text_encoder_plan(
                 Path(str(text_encoder_dir)),
                 max_cache_length,
+                precision=precision,
+                verbose=verbose,
+            )
+        refiner_text_encoder_dir = weights.get("_refiner_text_encoder_dir")
+        if "sana_wm_refiner_text_encoder_plan" not in result and refiner_text_encoder_dir:
+            result["sana_wm_refiner_text_encoder_plan"] = _build_refiner_text_encoder_plan(
+                Path(str(refiner_text_encoder_dir)),
+                max(max_cache_length, 256),
                 precision=precision,
                 verbose=verbose,
             )

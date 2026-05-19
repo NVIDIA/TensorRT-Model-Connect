@@ -78,6 +78,7 @@ def _write_native_plan_set(
     plan_dir=None,
     include_text_encoder: bool = True,
     include_vae_encoder: bool = True,
+    include_refiner_text_encoder: bool = True,
 ) -> dict[str, bytes]:
     engine_dir = plan_dir or model_dir / "trtmc_engines"
     engine_dir.mkdir(parents=True)
@@ -94,6 +95,8 @@ def _write_native_plan_set(
         plans.pop("text_encoder_0_plan")
     if not include_vae_encoder:
         plans.pop("sana_wm_vae_encoder_plan")
+    if not include_refiner_text_encoder:
+        plans.pop("sana_wm_refiner_text_encoder_plan")
     for section, data in plans.items():
         (engine_dir / f"{section}.plan").write_bytes(data)
     return plans
@@ -400,6 +403,78 @@ def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(
     assert set(overrides["sana_wm_native_plan_sections"]) == set(plans) | {
         "text_encoder_0_plan"
     }
+
+
+def test_sana_wm_plugin_builds_missing_refiner_text_encoder_plan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    plans = _write_native_plan_set(tmp_path, include_refiner_text_encoder=False)
+    _write_tokenizer(tmp_path)
+    refiner_text_encoder_dir = tmp_path / "refiner" / "text_encoder"
+    refiner_text_encoder_dir.mkdir(parents=True)
+    (refiner_text_encoder_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma",
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "intermediate_size": 16,
+                "vocab_size": 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_build_text_encoder_plan(text_encoder_dir, max_cache_length, *, precision, verbose):
+        captured["text_encoder_dir"] = text_encoder_dir
+        captured["max_cache_length"] = max_cache_length
+        captured["precision"] = precision
+        captured["verbose"] = verbose
+        return b"generated-refiner-text-plan"
+
+    monkeypatch.setattr(
+        sana_wm_plugin_mod,
+        "_build_refiner_text_encoder_plan",
+        fake_build_text_encoder_plan,
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert "sana_wm_refiner_text_encoder_plan" not in weights["_native_plan_paths"]
+    assert weights["_refiner_text_encoder_dir"].endswith("refiner/text_encoder")
+    assert sana_wm_mod.plugin.build_engine(
+        cfg,
+        weights,
+        128,
+        precision="bf16",
+    ) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+
+    extras = sana_wm_mod.plugin.build_extra_engines(
+        cfg,
+        weights,
+        128,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert extras["sana_wm_refiner_text_encoder_plan"] == b"generated-refiner-text-plan"
+    for section, data in plans.items():
+        assert extras[section] == data
+    assert captured["text_encoder_dir"] == refiner_text_encoder_dir
+    assert captured["max_cache_length"] == 256
+    assert captured["precision"] == "bf16"
+    assert captured["verbose"] is True
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert "engine_backend" not in overrides
+    assert "sana_wm_refiner_text_encoder_plan" in overrides[
+        "sana_wm_native_plan_sections"
+    ]
 
 
 def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
