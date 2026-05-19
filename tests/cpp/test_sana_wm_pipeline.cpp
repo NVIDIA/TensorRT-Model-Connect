@@ -318,6 +318,7 @@ void test_runtime_config_parses_native_sana_wm_fields() {
           "text_encoder_max_length": 300,
           "sana_wm_dit_text_embed_dim": 2304,
           "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: ",
+          "sana_wm_allow_python_bridge": 1,
           "sana_wm_default_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225]
         })json");
 
@@ -333,6 +334,7 @@ void test_runtime_config_parses_native_sana_wm_fields() {
     check(cfg.text_encoder_dim == 2304, "sana wm config: text encoder dim parsed");
     check(cfg.chi_prompt == "Generate an \"Enhanced prompt\".\nUser Prompt: ",
           "sana wm config: chi prompt parsed");
+    check(cfg.allow_python_bridge, "sana wm config: bridge opt-in parsed");
     check(cfg.default_intrinsics.size() == 4 && near(cfg.default_intrinsics[0], 797.87866F) &&
               near(cfg.default_intrinsics[3], 463.7225F),
           "sana wm config: default demo intrinsics parsed");
@@ -513,6 +515,7 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
     cfg.rotation_speed_deg = 0.5F;
     cfg.num_frames = 99;
     cfg.require_official_script = true;
+    cfg.allow_python_bridge = true;
 
     auto runner = std::make_shared<FakeSubprocessRunner>();
     trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner);
@@ -554,6 +557,29 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
           "sana wm: frame count forwarded");
     check(contains_arg(runner->last_argv, "--no-diffusers-fallback"),
           "sana wm: strict official runtime required");
+}
+
+void test_bridge_path_requires_explicit_opt_in() {
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+
+    auto runner = std::make_shared<FakeSubprocessRunner>();
+    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner);
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = "asset/sana_wm/demo_0.png";
+
+    bool bridge_disabled_reported = false;
+    try {
+        (void)pipeline.generate_image("drive forward", gen_cfg);
+    } catch (const std::runtime_error& exc) {
+        bridge_disabled_reported =
+            std::string(exc.what()).find("Python bridge execution is disabled") !=
+            std::string::npos;
+    }
+
+    check(bridge_disabled_reported, "sana wm bridge: disabled unless explicitly opted in");
+    check(runner->call_count == 0, "sana wm bridge: subprocess not invoked when disabled");
 }
 
 void test_native_module_sections_do_not_fall_back_to_bridge() {
@@ -839,6 +865,7 @@ int main() {
     test_stage1_latents_anchor_first_frame();
     test_stage1_latents_seeded_noise_is_deterministic();
     test_stage1_latents_reject_mismatched_buffers();
+    test_bridge_path_requires_explicit_opt_in();
     test_bridge_command_forwards_strict_sana_wm_contract();
     test_native_module_sections_do_not_fall_back_to_bridge();
     test_native_stage1_solver_decodes_without_bridge();

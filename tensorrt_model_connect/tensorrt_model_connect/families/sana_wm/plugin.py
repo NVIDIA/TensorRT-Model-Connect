@@ -83,6 +83,10 @@ def _float_list(value, fallback: tuple[float, ...]) -> list[float]:
     return list(fallback)
 
 
+def _allow_python_bridge(raw_config: dict) -> bool:
+    return int(raw_config.get("sana_wm_allow_python_bridge", 0)) != 0
+
+
 def _read_safetensors_header(path: Path) -> dict:
     with path.open("rb") as f:
         prefix = f.read(8)
@@ -294,7 +298,13 @@ class SanaWmPlugin:
         quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
-        del config, weights, max_cache_length, precision, quant_ctx, verbose
+        del max_cache_length, precision, quant_ctx, verbose
+        if not weights.get("_native_plan_paths") and not _allow_python_bridge(config.raw):
+            raise NotImplementedError(
+                "SANA-WM pure C++ builds require native TensorRT component plans under "
+                "trtmc_engines/ or sana_wm_native_plan_paths. The Python bridge is disabled "
+                "by default; set sana_wm_allow_python_bridge=1 only for legacy bridge testing."
+            )
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
         return b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
@@ -361,6 +371,7 @@ class SanaWmPlugin:
             "sana_wm_require_official_script": int(
                 raw.get("sana_wm_require_official_script", 1)
             ),
+            "sana_wm_allow_python_bridge": int(_allow_python_bridge(raw)),
             "sana_wm_action": str(raw.get("sana_wm_action", _DEFAULT_ACTION)),
             "sana_wm_translation_speed": float(
                 raw.get("sana_wm_translation_speed", _DEFAULT_TRANSLATION_SPEED)

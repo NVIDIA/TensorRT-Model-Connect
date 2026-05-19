@@ -651,7 +651,7 @@ print(f"Generated {{len(frames)}} frames")
     def _run_sana_wm_pipeline(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run SANA-WM through the same official-script bridge used by TRTMC."""
+        """Run SANA-WM through the official-script bridge used as the oracle."""
         prompt = case.inputs.get("prompt", "")
         prompt_file = _resolve_input_path(case.inputs.get("prompt_file"), ctx)
         if prompt_file and os.path.isfile(prompt_file):

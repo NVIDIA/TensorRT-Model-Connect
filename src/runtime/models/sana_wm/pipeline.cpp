@@ -1618,6 +1618,7 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
         extract_json_float_array(config_json, "sana_wm_default_intrinsics", 9U);
     cfg.require_official_script =
         extract_json_int(config_json, "sana_wm_require_official_script", 0) != 0;
+    cfg.allow_python_bridge = extract_json_int(config_json, "sana_wm_allow_python_bridge", 0) != 0;
     return cfg;
 }
 
@@ -1925,6 +1926,10 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (native_modules_.has_any()) {
         validate_native_module_set(native_modules_);
         return run_native_image_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
+    }
+    if (!config_.allow_python_bridge) {
+        throw std::runtime_error("SANA-WM pure C++ execution requires native TensorRT plan "
+                                 "sections; Python bridge execution is disabled in this bundle");
     }
 
     const auto paths = make_invocation_paths();

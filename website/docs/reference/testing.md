@@ -58,10 +58,14 @@ python inference_video_scripts/inference_sana_wm.py \
   --output_dir results/demo
 ```
 
-The manifest requires an official SANA-WM runtime entrypoint. If the upstream
-checkpoint does not include `inference_video_scripts/inference_sana_wm.py` or
-an action-capable Diffusers `model_index.json`, the case skips during preflight
-with `precheck_fail` and writes `preflight_details.json`.
+The HF reference uses an official SANA-WM runtime entrypoint as the oracle. If
+the upstream checkpoint does not include `inference_video_scripts/inference_sana_wm.py`
+or an action-capable Diffusers `model_index.json`, the case skips during
+preflight with `precheck_fail` and writes `preflight_details.json`.
+
+The TRTMC side is expected to run native TensorRT sections. Bridge execution is
+disabled by default and is only available when `sana_wm_allow_python_bridge=1`
+is explicitly set for legacy bridge testing.
 
 To run true parity once the official runtime is available, point either
 environment variable at that runtime before invoking the normal E2E command:

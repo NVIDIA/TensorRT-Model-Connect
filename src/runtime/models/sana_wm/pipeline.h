@@ -36,6 +36,7 @@ struct SanaWmRuntimeConfig {
     std::string chi_prompt;
     std::vector<float> default_intrinsics;
     bool require_official_script{false};
+    bool allow_python_bridge{false};
 };
 
 SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json);

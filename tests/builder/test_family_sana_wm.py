@@ -14,8 +14,9 @@ from tensorrt_model_connect import engine_builder
 import tensorrt_model_connect.families.sana_wm as sana_wm_mod
 
 
-def _sana_yaml() -> str:
-    return """
+def _sana_yaml(*, allow_bridge: bool = False) -> str:
+    bridge_cfg = "sana_wm_allow_python_bridge: 1\n" if allow_bridge else ""
+    return bridge_cfg + """
 model:
   model: SanaMSVideoCamCtrl_1600M_P1_D20
   image_size: 720
@@ -102,7 +103,7 @@ def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
 
 
 def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
-    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(_sana_yaml(allow_bridge=True), encoding="utf-8")
     cfg = ModelConfig.from_dir(tmp_path)
 
     plugin = sana_wm_mod.plugin
@@ -117,6 +118,7 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     overrides = plugin.get_bundle_config_overrides(cfg)
     assert overrides["runtime_strategy"] == "diffusion_sana_wm"
     assert overrides["engine_backend"] == "none"
+    assert overrides["sana_wm_allow_python_bridge"] == 1
     assert overrides["sana_wm_hf_id"] == "Efficient-Large-Model/SANA-WM_bidirectional"
     assert overrides["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
     assert overrides["sana_wm_translation_speed"] == 0.055
@@ -135,6 +137,19 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["text_encoder_name"] == "gemma-2-2b-it"
     assert overrides["text_encoder_max_length"] == 300
     assert overrides["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
+
+
+def test_sana_wm_plugin_rejects_bridge_build_without_native_plans(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    with pytest.raises(NotImplementedError, match="pure C\\+\\+ builds require native"):
+        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert overrides["sana_wm_allow_python_bridge"] == 0
 
 
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
@@ -200,6 +215,7 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
+    assert overrides["sana_wm_allow_python_bridge"] == 0
     assert overrides["sana_wm_native_plan_sections"] == list(plans)
 
 
@@ -218,7 +234,7 @@ def test_sana_wm_plugin_rejects_partial_native_plan_sections(tmp_path) -> None:
 def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    (model_dir / "config.yaml").write_text(_sana_yaml(allow_bridge=True), encoding="utf-8")
     output_path = str(tmp_path / "sana-wm.trtfb")
     captured: dict[str, object] = {}
 
@@ -253,6 +269,7 @@ def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> Non
     assert config["model_type"] == "sana_wm"
     assert config["runtime_strategy"] == "diffusion_sana_wm"
     assert config["engine_backend"] == "none"
+    assert config["sana_wm_allow_python_bridge"] == 1
     assert config["sana_wm_hf_id"] == "Efficient-Large-Model/SANA-WM_bidirectional"
     assert config["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
     assert config["sana_wm_translation_speed"] == 0.055
@@ -306,4 +323,5 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     assert sections["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
     config = json.loads(sections["config.json"].decode("utf-8"))
     assert config["engine_backend"] == "trt"
+    assert config["sana_wm_allow_python_bridge"] == 0
     assert config["sana_wm_native_plan_sections"] == list(plans)
