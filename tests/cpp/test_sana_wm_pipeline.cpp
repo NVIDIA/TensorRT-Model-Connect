@@ -152,6 +152,8 @@ class FakeTrtModule final : public trtmc::ITrtModule {
 
 class FakeDecoderTextModule final : public trtmc::ITrtModule {
   public:
+    explicit FakeDecoderTextModule(int64_t max_tokens = 2) : max_tokens_(max_tokens) {}
+
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         ++call_count;
         last_input_shapes.clear();
@@ -192,9 +194,9 @@ class FakeDecoderTextModule final : public trtmc::ITrtModule {
         return {
             {"token_id", {1}, trtmc::DType::kInt32, true},
             {"position_id", {1}, trtmc::DType::kInt32, true},
-            {"attention_mask", {1, 3}, trtmc::DType::kFloat32, true},
-            {"cache_k_0", {2, 2}, trtmc::DType::kFloat32, true},
-            {"cache_v_0", {2, 2}, trtmc::DType::kFloat32, true},
+            {"attention_mask", {1, max_tokens_ + 1}, trtmc::DType::kFloat32, true},
+            {"cache_k_0", {max_tokens_, 2}, trtmc::DType::kFloat32, true},
+            {"cache_v_0", {max_tokens_, 2}, trtmc::DType::kFloat32, true},
         };
     }
     std::vector<trtmc::TensorInfo> output_info() const override {
@@ -256,6 +258,7 @@ class FakeDecoderTextModule final : public trtmc::ITrtModule {
     std::vector<std::unordered_map<std::string, std::vector<float>>> input_value_calls;
 
   private:
+    int64_t max_tokens_{2};
     std::vector<float> hidden_state_;
     std::vector<float> present_k_;
     std::vector<float> present_v_;
@@ -928,8 +931,9 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
             0.8F,
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
-    auto refiner_text = std::make_unique<FakeTrtModule>(std::vector<float>{0.1F, 0.2F, 0.3F, 0.4F},
-                                                        std::vector<int64_t>{1, 2, 2});
+    auto refiner_text = std::make_unique<FakeTrtModule>(
+        std::vector<float>{0.1F, 0.2F, 0.3F, 0.4F}, std::vector<int64_t>{1, 2, 2},
+        std::vector<std::string>{"input_ids", "attention_mask"});
     auto* refiner_text_ptr = refiner_text.get();
     modules.refiner_text_encoder = std::move(refiner_text);
     auto refiner_denoiser = std::make_unique<FakeTrtModule>(
@@ -984,6 +988,104 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     std::filesystem::remove(image_path, ec);
 }
 
+void test_native_refiner_accepts_decoder_style_text_encoder() {
+    const auto image_path =
+        std::filesystem::temp_directory_path() / "trtmc_sana_wm_refiner_decoder_text_test.png";
+    trtmc::io::save_png(image_path.string(),
+                        {
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
+                        },
+                        2, 2);
+
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+    cfg.height = 4;
+    cfg.width = 4;
+    cfg.num_frames = 2;
+    cfg.vae_latent_dim = 2;
+    cfg.vae_time_stride = 1;
+    cfg.vae_spatial_stride = 2;
+    cfg.text_encoder_max_length = 2;
+    cfg.text_encoder_dim = 2;
+    cfg.num_steps = 1;
+    cfg.default_intrinsics = {2.0F, 2.0F, 1.0F, 1.0F};
+
+    trtmc::SanaWmNativeModules modules;
+    modules.text_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}, std::vector<int64_t>{1, 2, 2},
+        std::vector<std::string>{"input_ids", "attention_mask"});
+    modules.stage1_denoiser = std::make_unique<FakeTrtModule>(
+        std::vector<float>(32, 0.25F), std::vector<int64_t>{2, 2, 2, 2, 2},
+        std::vector<std::string>{"x", "timestep", "y", "mask", "camera_conditions",
+                                 "chunk_plucker"});
+    modules.vae_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{
+            0.1F,
+            0.2F,
+            0.3F,
+            0.4F,
+            0.5F,
+            0.6F,
+            0.7F,
+            0.8F,
+        },
+        std::vector<int64_t>{1, 2, 1, 2, 2});
+    auto refiner_text = std::make_unique<FakeDecoderTextModule>(256);
+    auto* refiner_text_ptr = refiner_text.get();
+    modules.refiner_text_encoder = std::move(refiner_text);
+    auto refiner_denoiser = std::make_unique<FakeTrtModule>(
+        std::vector<float>(8, 0.0F), std::vector<int64_t>{1, 4, 2},
+        std::vector<std::string>{"latent", "clean_latent", "denoise_mask", "positions", "v_context",
+                                 "sigma"});
+    auto* refiner_denoiser_ptr = refiner_denoiser.get();
+    modules.refiner_denoiser = std::move(refiner_denoiser);
+    modules.refiner_vae_decoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>(96, 255.0F), std::vector<int64_t>{2, 4, 4, 3},
+        std::vector<std::string>{"latents"});
+
+    trtmc::SanaWmPipeline pipeline(cfg, std::move(modules), std::make_shared<FakeTokenizer>());
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = image_path.string();
+    gen_cfg.camera_action = "w-1";
+    gen_cfg.num_frames = 2;
+
+    const auto result = pipeline.generate_image("drive forward", gen_cfg);
+
+    check(result.num_frames == 1, "sana wm refiner decoder text: generated refined video");
+    check(refiner_text_ptr->call_count == 256,
+          "sana wm refiner decoder text: encoder invoked once per refiner token");
+    check(refiner_text_ptr->position_ids.front() == 0 &&
+              refiner_text_ptr->position_ids.back() == 255,
+          "sana wm refiner decoder text: positions span full refiner context");
+    check(refiner_text_ptr->last_input_shapes["attention_mask"] == std::vector<int64_t>({1, 257}),
+          "sana wm refiner decoder text: attention mask covers cache and current token");
+    check(refiner_text_ptr->last_input_shapes["cache_k_0"] == std::vector<int64_t>({256, 2}),
+          "sana wm refiner decoder text: cache input covers refiner context");
+    check(refiner_denoiser_ptr->last_input_shapes["v_context"] == std::vector<int64_t>({1, 256, 2}),
+          "sana wm refiner decoder text: inferred text context shape");
+    if (!refiner_denoiser_ptr->input_value_calls.empty()) {
+        const auto& text = refiner_denoiser_ptr->input_value_calls.front()["v_context"];
+        check(text.size() == 512 && near(text[0], 10.0F) && near(text[1], 11.0F) &&
+                  near(text[2], 21.0F) && near(text[3], 22.0F),
+              "sana wm refiner decoder text: hidden states feed refiner conditioning");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(image_path, ec);
+}
+
 } // namespace
 
 int main() {
@@ -1006,5 +1108,6 @@ int main() {
     test_native_stage1_solver_decodes_with_native_modules();
     test_native_stage1_accepts_decoder_style_text_encoder();
     test_native_refiner_decodes_and_drops_sink_frame();
+    test_native_refiner_accepts_decoder_style_text_encoder();
     return failures == 0 ? 0 : 1;
 }

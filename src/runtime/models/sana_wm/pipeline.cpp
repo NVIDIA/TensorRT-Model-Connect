@@ -863,6 +863,11 @@ struct SanaWmTextConditioning {
     std::vector<int32_t> neg_mask;
 };
 
+struct SanaWmTextEncoding {
+    std::vector<float> values;
+    std::vector<int64_t> shape;
+};
+
 struct SanaWmRefinerText {
     std::vector<float> values;
     std::vector<int64_t> shape;
@@ -1122,7 +1127,7 @@ std::vector<int32_t> attention_mask_from_tokens(const std::vector<int32_t>& ids)
     return mask;
 }
 
-std::vector<float> run_native_full_sequence_text_encoder(ITrtModule& text_encoder,
+SanaWmTextEncoding run_native_full_sequence_text_encoder(ITrtModule& text_encoder,
                                                          const std::vector<int32_t>& input_ids,
                                                          const std::vector<int32_t>& attention_mask,
                                                          int32_t text_dim, const char* label) {
@@ -1134,17 +1139,22 @@ std::vector<float> run_native_full_sequence_text_encoder(ITrtModule& text_encode
         Tensor{const_cast<int32_t*>(attention_mask.data()), {1, seq_len}, DType::kInt32};
 
     auto outputs = text_encoder.forward(inputs);
-    const auto it = find_output_tensor(
-        outputs, {"last_hidden_state", "hidden_states", "text_embeddings", "output0"});
+    const auto it =
+        find_output_tensor(outputs, {"last_hidden_state", "hidden_states", "text_embeddings",
+                                     "video_encoding", "encoder_hidden_states", "output0"});
     if (it == outputs.end())
         throw std::runtime_error(std::string("SANA-WM native ") + label +
                                  " text encoder output tensor not found");
-    const auto count =
-        static_cast<std::size_t>(input_ids.size()) * static_cast<std::size_t>(text_dim);
-    return tensor_to_float_vector(it->second, count, label);
+    const auto count = text_dim > 0 ? static_cast<std::size_t>(input_ids.size()) *
+                                          static_cast<std::size_t>(text_dim)
+                                    : it->second.numel();
+    auto shape = it->second.shape;
+    if (shape.empty() && text_dim > 0)
+        shape = {1, seq_len, text_dim};
+    return {tensor_to_float_vector(it->second, count, label), std::move(shape)};
 }
 
-std::vector<float> run_native_decoder_text_encoder(ITrtModule& text_encoder,
+SanaWmTextEncoding run_native_decoder_text_encoder(ITrtModule& text_encoder,
                                                    const std::vector<int32_t>& input_ids,
                                                    int32_t text_dim, const char* label) {
     const auto attention_shape =
@@ -1152,8 +1162,10 @@ std::vector<float> run_native_decoder_text_encoder(ITrtModule& text_encoder,
     const auto attention_count = checked_shape_numel(attention_shape, "text attention mask");
     auto caches = collect_decoder_cache_layers(text_encoder);
 
+    int32_t output_dim = text_dim;
     std::vector<float> encoded;
-    encoded.reserve(input_ids.size() * static_cast<std::size_t>(text_dim));
+    if (output_dim > 0)
+        encoded.reserve(input_ids.size() * static_cast<std::size_t>(output_dim));
 
     for (std::size_t pos = 0; pos < input_ids.size(); ++pos) {
         int32_t token_id = input_ids[pos];
@@ -1180,16 +1192,26 @@ std::vector<float> run_native_decoder_text_encoder(ITrtModule& text_encoder,
         if (it == outputs.end())
             throw std::runtime_error(std::string("SANA-WM native ") + label +
                                      " decoder text encoder output tensor not found");
-        auto token_encoded =
-            tensor_to_float_vector(it->second, static_cast<std::size_t>(text_dim), label);
+        const auto token_dim =
+            output_dim > 0 ? static_cast<std::size_t>(output_dim) : it->second.numel();
+        if (token_dim == 0 ||
+            token_dim > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                     " decoder text encoder output size is invalid");
+        }
+        if (output_dim <= 0) {
+            output_dim = static_cast<int32_t>(token_dim);
+            encoded.reserve(input_ids.size() * token_dim);
+        }
+        auto token_encoded = tensor_to_float_vector(it->second, token_dim, label);
         encoded.insert(encoded.end(), token_encoded.begin(), token_encoded.end());
         update_decoder_caches(caches, outputs, position_id);
     }
 
-    return encoded;
+    return {std::move(encoded), {1, static_cast<int64_t>(input_ids.size()), output_dim}};
 }
 
-std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
+SanaWmTextEncoding run_native_text_encoder(ITrtModule& text_encoder,
                                            const std::vector<int32_t>& input_ids,
                                            const std::vector<int32_t>& attention_mask,
                                            int32_t text_dim, const char* label) {
@@ -1252,12 +1274,14 @@ SanaWmTextConditioning run_native_text_conditioning(ITrtModule& text_encoder,
     auto cond_ids = tokenize_fixed(tokenizer, conditioning_prompt, cond_len);
     auto cond_mask_full = attention_mask_from_tokens(cond_ids);
     auto cond_full = run_native_text_encoder(text_encoder, cond_ids, cond_mask_full,
-                                             config.text_encoder_dim, "cond");
+                                             config.text_encoder_dim, "cond")
+                         .values;
 
     auto neg_ids = tokenize_fixed(tokenizer, negative_prompt, config.text_encoder_max_length);
     auto neg_mask = attention_mask_from_tokens(neg_ids);
     auto neg = run_native_text_encoder(text_encoder, neg_ids, neg_mask, config.text_encoder_dim,
-                                       "negative");
+                                       "negative")
+                   .values;
 
     return {select_stage1_text_window(cond_full, cond_len, config.text_encoder_max_length,
                                       config.text_encoder_dim),
@@ -1416,22 +1440,10 @@ SanaWmRefinerText run_native_refiner_text_encoder(ITrtModule& text_encoder,
     constexpr int32_t kRefinerTextLength = 256;
     auto input_ids = tokenize_fixed(tokenizer, prompt, kRefinerTextLength);
     auto attention_mask = attention_mask_from_tokens(input_ids);
-    TensorMap inputs;
-    inputs["input_ids"] = Tensor{input_ids.data(), {1, kRefinerTextLength}, DType::kInt32};
-    inputs["attention_mask"] =
-        Tensor{attention_mask.data(), {1, kRefinerTextLength}, DType::kInt32};
-
-    auto outputs = text_encoder.forward(inputs);
-    const auto it =
-        find_output_tensor(outputs, {"video_encoding", "encoder_hidden_states", "text_embeddings",
-                                     "last_hidden_state", "output0"});
-    if (it == outputs.end())
-        throw std::runtime_error("SANA-WM native refiner text output tensor not found");
-    auto shape = it->second.shape;
-    if (shape.empty())
-        shape = {1, static_cast<int64_t>(it->second.numel())};
-    return {tensor_to_float_vector(it->second, it->second.numel(), "refiner text encoder"),
-            std::move(shape)};
+    auto encoded = run_native_text_encoder(text_encoder, input_ids, attention_mask, 0, "refiner");
+    if (encoded.shape.empty())
+        encoded.shape = {1, static_cast<int64_t>(encoded.values.size())};
+    return {std::move(encoded.values), std::move(encoded.shape)};
 }
 
 std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
