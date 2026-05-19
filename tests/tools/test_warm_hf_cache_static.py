@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import os
 import pathlib
 from pathlib import Path
 
@@ -12,10 +13,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 HELPER_FUNCTIONS = {
+    "_allow_patterns_for_hf_id",
     "_component_has_weight",
     "_diffusers_missing_weight_components",
     "_is_diffusers_component_enabled",
     "_snapshot_has_required_files",
+    "_truthy_env",
+}
+HELPER_CONSTANTS = {
+    "_DIFFUSERS_WEIGHT_COMPONENTS",
+    "_ENTRYPOINT_PATTERNS",
+    "_HF_ALLOW_PATTERNS",
+    "_HF_EXTRA_ALLOW_PATTERNS",
+    "_SANA_WM_FULL_ALLOW_PATTERNS",
+    "_SANA_WM_HF_ID",
+    "_SANA_WM_METADATA_ALLOW_PATTERNS",
+    "_WEIGHT_PATTERNS",
 }
 
 
@@ -24,20 +37,17 @@ def _load_cache_helpers() -> dict:
     namespace = {
         "fnmatch": fnmatch,
         "json": json,
+        "os": os,
         "pathlib": pathlib,
-        "_DIFFUSERS_WEIGHT_COMPONENTS": {
-            "controlnet",
-            "image_encoder",
-            "text_encoder",
-            "text_encoder_2",
-            "transformer",
-            "unet",
-            "vae",
-        },
-        "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
-        "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
     }
     for node in tree.body:
+        if isinstance(node, ast.Assign) and all(
+            isinstance(target, ast.Name) and target.id in HELPER_CONSTANTS
+            for target in node.targets
+        ):
+            module = ast.Module(body=[node], type_ignores=[])
+            ast.fix_missing_locations(module)
+            exec(compile(module, str(WARM_HF_CACHE), "exec"), namespace)
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
             module = ast.Module(body=[node], type_ignores=[])
             ast.fix_missing_locations(module)
@@ -105,3 +115,34 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
 
     assert helpers["_diffusers_missing_weight_components"](snapshot) == []
     assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_sana_wm_cache_warm_uses_metadata_only_by_default(monkeypatch) -> None:
+    helpers = _load_cache_helpers()
+    monkeypatch.delenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", raising=False)
+
+    assert helpers["_allow_patterns_for_hf_id"](
+        "Efficient-Large-Model/SANA-WM_bidirectional"
+    ) == ["README.md", "config.yaml"]
+
+
+def test_sana_wm_cache_warm_can_opt_into_full_weights(monkeypatch) -> None:
+    helpers = _load_cache_helpers()
+    monkeypatch.setenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", "1")
+
+    allow_patterns = helpers["_allow_patterns_for_hf_id"](
+        "Efficient-Large-Model/SANA-WM_bidirectional"
+    )
+
+    assert allow_patterns != ["README.md", "config.yaml"]
+    assert "asset/sana_wm/**" in allow_patterns
+    assert "dit/**" in allow_patterns
+    assert "refiner/**" in allow_patterns
+
+
+def test_non_sana_wm_cache_warm_uses_standard_allow_patterns() -> None:
+    helpers = _load_cache_helpers()
+
+    assert helpers["_allow_patterns_for_hf_id"]("nvidia/test-model") == (
+        helpers["_HF_ALLOW_PATTERNS"] + helpers["_HF_EXTRA_ALLOW_PATTERNS"]
+    )

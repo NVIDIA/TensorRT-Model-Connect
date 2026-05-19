@@ -115,6 +115,21 @@ _MAGPIE_REFERENCE_DEPENDENCIES = [
         "microsoft/wavlm-base-plus",
     ),
 ]
+_SANA_WM_HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
+_SANA_WM_METADATA_ALLOW_PATTERNS = ["README.md", "config.yaml"]
+_SANA_WM_FULL_ALLOW_PATTERNS = [
+    "README.md",
+    "model_index.json",
+    "config.yaml",
+    "pipeline*.py",
+    "asset/sana_wm/**",
+    "inference_video_scripts/**",
+    "scheduler/**",
+    "dit/**",
+    "vae/**",
+    "text_encoder/**",
+    "refiner/**",
+]
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -284,6 +299,21 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
     )
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _allow_patterns_for_hf_id(hf_id: str) -> list[str]:
+    if hf_id.rstrip("/") == _SANA_WM_HF_ID:
+        if _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
+            return list(_SANA_WM_FULL_ALLOW_PATTERNS)
+        # SANA-WM is unusually large. Keep CI cache warming aligned with the
+        # builder default: fetch the YAML contract unless full weights are
+        # explicitly requested.
+        return list(_SANA_WM_METADATA_ALLOW_PATTERNS)
+    return _HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
+
+
 selective = filter_names is not None
 scope = f"selective ({len(entries)} models)" if selective else f"all {len(entries)} models"
 print(f"Warming HF cache — {scope}...")
@@ -308,7 +338,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_allow_patterns_for_hf_id(hf_id),
         )
         if not _snapshot_has_required_files(pathlib.Path(local_dir)):
             raise RuntimeError(
