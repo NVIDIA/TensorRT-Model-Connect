@@ -564,10 +564,7 @@ class RunContext:
 
     def runtime_cli_hf_python(self) -> str:
         """Optional --hf-python value for the C++ CLI."""
-        if str(self.case.runtime_strategy or "") not in {
-            "speech_to_speech",
-            "diffusion_sana_wm",
-        }:
+        if str(self.case.runtime_strategy or "") != "speech_to_speech":
             return ""
         return self.runtime_python_path()
 

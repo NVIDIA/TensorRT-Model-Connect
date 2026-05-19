@@ -212,8 +212,8 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert "797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num-frames" in cmd
     assert "321" in cmd
-    assert "--hf-python" in cmd
-    assert "/opt/trtmc-python/bin/python" in cmd
+    assert "--hf-python" not in cmd
+    assert "/opt/trtmc-python/bin/python" not in cmd
     assert out.metadata["command"] == cmd
 
 

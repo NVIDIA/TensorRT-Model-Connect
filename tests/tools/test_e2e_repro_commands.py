@@ -129,7 +129,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
     assert "--rotation-speed-deg 1.2" in cmd
     assert "--camera-intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num-frames 321" in cmd
-    assert "--hf-python /usr/bin/python3" in cmd
+    assert "--hf-python" not in cmd
 
     reference_cmd = repro["sana_wm_python_reference"]
     assert reference_cmd == (
