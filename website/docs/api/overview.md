@@ -21,6 +21,6 @@ The core contract is always the same:
 HuggingFace model or local model directory
   -> trtmc build
   -> model.trtfb
-  -> trtmc::load() or ./build/trtmc
+  -> trtmc::load() or trtmc run
   -> task-specific output
 ```

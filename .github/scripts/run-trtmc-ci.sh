@@ -480,6 +480,69 @@ generate_coverage_map() {
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
 
+current_python_wheel_tag() {
+  python - <<'PY'
+import sys
+print(f"py{sys.version_info.major}{sys.version_info.minor}")
+PY
+}
+
+select_compatible_wheel() {
+  local wheel_dir="${1:-dist}"
+  local py_tag
+  py_tag="$(current_python_wheel_tag)"
+  mapfile -t candidates < <(
+    find "$wheel_dir" -maxdepth 1 -type f \( \
+      -name "*-${py_tag}-none-linux_aarch64.whl" -o \
+      -name "*-py3-none-linux_aarch64.whl" \
+    \) | sort
+  )
+  if [ "${#candidates[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one %s-compatible aarch64 wheel under %s, found %d\n' \
+      "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
+    printf '  %s\n' "${candidates[@]:-}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
+
+select_wheel_by_tag() {
+  local py_tag="$1"
+  local wheel_dir="${2:-dist}"
+  mapfile -t candidates < <(
+    find "$wheel_dir" -maxdepth 1 -type f -name "*-${py_tag}-none-linux_aarch64.whl" | sort
+  )
+  if [ "${#candidates[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one %s aarch64 wheel under %s, found %d\n' \
+      "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
+    printf '  %s\n' "${candidates[@]:-}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
+
+python312_bin() {
+  local candidates=()
+  if [ -n "${TRTMC_WHEEL_QWEN_PYTHON:-}" ]; then
+    candidates+=("$TRTMC_WHEEL_QWEN_PYTHON")
+  fi
+  candidates+=(python3.12 python)
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" - <<'PY' >/dev/null 2>&1; then
+import sys
+raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)
+PY
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  echo "ERROR: Python 3.12 is required for the py312 wheel Qwen smoke test" >&2
+  exit 1
+}
+
 build_pip_package() {
   local native_bin="${TRTMC_NATIVE_BIN:-build/trtmc}"
   if [[ "$native_bin" != /* ]]; then
@@ -498,25 +561,61 @@ build_pip_package() {
   python -m pip install --disable-pip-version-check --quiet "build>=1.2"
   rm -rf dist tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
   mkdir -p dist
-  env \
-    TRTMC_NATIVE_BIN="$native_bin" \
-    TRTMC_NATIVE_LIB_DIR="$native_lib_dir" \
-    TRTMC_REQUIRE_NATIVE_BIN=1 \
-    TRTMC_REQUIRE_NATIVE_LIBS=1 \
-    python -m build --wheel --outdir "$PWD/dist" tensorrt_model_connect
+
+  local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
+  local expected_wheels=0
+  local tag
+  for tag in $python_tags; do
+    expected_wheels=$((expected_wheels + 1))
+    rm -rf tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+    env \
+      TRTMC_NATIVE_BIN="$native_bin" \
+      TRTMC_NATIVE_LIB_DIR="$native_lib_dir" \
+      TRTMC_REQUIRE_NATIVE_BIN=1 \
+      TRTMC_REQUIRE_NATIVE_LIBS=1 \
+      TRTMC_WHEEL_PYTHON_TAG="$tag" \
+      python -m build --wheel --outdir "$PWD/dist" tensorrt_model_connect
+  done
 
   mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
-  if [ "${#wheels[@]}" -ne 1 ]; then
-    printf 'ERROR: expected exactly one wheel, found %d\n' "${#wheels[@]}" >&2
+  if [ "${#wheels[@]}" -ne "$expected_wheels" ]; then
+    printf 'ERROR: expected %d wheels, found %d\n' "$expected_wheels" "${#wheels[@]}" >&2
     printf '  %s\n' "${wheels[@]:-}" >&2
     exit 1
   fi
 
+  python - "${wheels[@]}" <<'PY'
+import sys
+import zipfile
+
+for wheel in sys.argv[1:]:
+    with zipfile.ZipFile(wheel) as zf:
+        names = set(zf.namelist())
+        bin_entries = [name for name in names if name.endswith("/bin/trtmc")]
+        backend_entries = [
+            name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
+        ]
+        metadata = zf.read(
+            next(name for name in names if name.endswith(".dist-info/METADATA"))
+        ).decode()
+    if len(bin_entries) != 1:
+        raise SystemExit(f"{wheel}: expected one packaged trtmc executable")
+    if not backend_entries:
+        raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
+    if "Requires-Dist: tensorrt>=10.16" not in metadata:
+        raise SystemExit(f"{wheel}: TensorRT dependency metadata is missing")
+    print(f"validated wheel={wheel}")
+    for entry in sorted([*bin_entries, *backend_entries]):
+        print(f"  {entry}")
+PY
+
+  local install_wheel
+  install_wheel="$(select_compatible_wheel dist)"
   local smoke_venv="${TRTMC_PACKAGE_SMOKE_VENV:-/tmp/trtmc-wheel-smoke-${GITHUB_RUN_ID:-local}}"
   rm -rf "$smoke_venv"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$install_wheel"
   "$smoke_venv/bin/trtmc" version
   "$smoke_venv/bin/trtmc" --help >/tmp/trtmc-help.txt
   "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
@@ -538,6 +637,49 @@ if not backends:
 for backend in backends:
     print(f"native_backend={backend}")
 PY
+}
+
+run_wheel_qwen_smoke() {
+  local wheel
+  wheel="$(select_wheel_by_tag py312 dist)"
+  local smoke_python
+  smoke_python="$(python312_bin)"
+
+  local smoke_root="${TRTMC_WHEEL_QWEN_SMOKE_ROOT:-/tmp/trtmc-wheel-qwen-smoke-${GITHUB_RUN_ID:-local}}"
+  local smoke_venv="${smoke_root}/venv"
+  local bundle="${smoke_root}/qwen3-0.6b.trtfb"
+  local timing_cache="${smoke_root}/qwen3-0.6b.timing.cache"
+  local model_id="${TRTMC_WHEEL_QWEN_MODEL_ID:-Qwen/Qwen3-0.6B}"
+  local max_cache="${TRTMC_WHEEL_QWEN_MAX_CACHE:-64}"
+  local max_new_tokens="${TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS:-8}"
+
+  rm -rf "$smoke_root"
+  mkdir -p "$smoke_root"
+  "$smoke_python" -m venv "$smoke_venv"
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
+  "$smoke_venv/bin/python" -m pip check
+  env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    "$smoke_venv/bin/trtmc" version
+
+  run_with_timeout "${TRTMC_WHEEL_QWEN_BUILD_TIMEOUT:-45m}" \
+    env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      TRTMC_TRT_TIMING_CACHE_PATH="$timing_cache" \
+      TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL:-1}" \
+      "$smoke_venv/bin/trtmc" build "$model_id" \
+        -o "$bundle" \
+        --max-cache-length "$max_cache" \
+        --precision fp16
+
+  env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    "$smoke_venv/bin/trtmc" inspect --list-engines "$bundle"
+
+  run_with_timeout "${TRTMC_WHEEL_QWEN_RUN_TIMEOUT:-10m}" \
+    env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      "$smoke_venv/bin/trtmc" run "$bundle" \
+        --prompt "The capital of France is" \
+        --max-new-tokens "$max_new_tokens" \
+        --greedy
 }
 
 run_stage() {
@@ -598,6 +740,10 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Build trtmc pip package" build_pip_package
       ;;
+    wheel-qwen-smoke)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
+      ;;
     *)
       echo "ERROR: Unknown CI stage: $stage" >&2
       exit 2
@@ -624,3 +770,4 @@ run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
 run_step "Generate coverage map" generate_coverage_map
 run_step "Build trtmc pip package" build_pip_package
+run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke

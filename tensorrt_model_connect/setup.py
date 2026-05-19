@@ -123,6 +123,25 @@ def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
     return any(Path(name).match(pattern) for pattern in patterns)
 
 
+def _wheel_python_tag(default: str) -> str:
+    override = os.environ.get("TRTMC_WHEEL_PYTHON_TAG")
+    if not override:
+        return default
+
+    aliases = {
+        "py10": "py310",
+        "py12": "py312",
+        "3.10": "py310",
+        "3.12": "py312",
+    }
+    tag = aliases.get(override, override)
+    if tag in {"py3", "py310", "py312"}:
+        return tag
+    raise RuntimeError(
+        f"invalid TRTMC_WHEEL_PYTHON_TAG={override!r}; expected py310, py312, or py3"
+    )
+
+
 cmdclass = {"build_py": build_py}
 
 if _bdist_wheel is not None:
@@ -133,8 +152,8 @@ if _bdist_wheel is not None:
             self.root_is_pure = False
 
         def get_tag(self) -> tuple[str, str, str]:
-            python, abi, platform = super().get_tag()
-            return "py3", "none", platform
+            _python, _abi, platform = super().get_tag()
+            return _wheel_python_tag("py3"), "none", platform
 
     cmdclass["bdist_wheel"] = bdist_wheel
 

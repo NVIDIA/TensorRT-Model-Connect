@@ -62,5 +62,5 @@ For Torch-TRT engine definitions, `tensorrt_model_connect/tensorrt_model_connect
 For runtime, the bundle's `runtime_strategy` selects a C++ `IPipelinePlugin` registered through `cmake/trtmc_pipeline_plugins.cmake`.
 
 :::note CLI coverage is smaller than runtime coverage
-Some runtime strategies have C++ API and test coverage before they have a polished CLI wrapper. For example, `object_detection` maps to `IPipeline::detect`, but the current `./build/trtmc` CLI does not expose a `detect` subcommand.
+Some runtime strategies have C++ API and test coverage before they have a polished CLI wrapper. For example, `object_detection` maps to `IPipeline::detect`, but the current `trtmc` CLI does not expose a `detect` subcommand.
 :::

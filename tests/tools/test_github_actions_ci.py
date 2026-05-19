@@ -39,6 +39,23 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
+def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    for name in (
+        "TRTMC_PACKAGE_PYTHON_TAGS",
+        "TRTMC_PACKAGE_SMOKE_VENV",
+        "TRTMC_WHEEL_QWEN_SMOKE_ROOT",
+        "TRTMC_WHEEL_QWEN_MODEL_ID",
+        "TRTMC_WHEEL_QWEN_MAX_CACHE",
+        "TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS",
+        "TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL",
+        "TRTMC_WHEEL_QWEN_BUILD_TIMEOUT",
+        "TRTMC_WHEEL_QWEN_RUN_TIMEOUT",
+        "TRTMC_WHEEL_QWEN_PYTHON",
+    ):
+        assert f"-e {name}" in text
+
+
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text
@@ -106,6 +123,35 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
         assert "Write CI summary" in text
         assert "scripts/generate_ci_summary.py" in text
         assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
+
+
+def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    package_index = text.index("Build trtmc pip package")
+    smoke_index = text.index("Qwen smoke test from trtmc pip package")
+    upload_index = text.index("Upload trtmc pip package artifact")
+    publish_index = text.index("Publish trtmc pip package to GitHub Release")
+    assert package_index < smoke_index < upload_index < publish_index
+    assert "run-gha-stage.sh wheel-qwen-smoke" in text
+
+
+def test_package_stage_builds_py310_and_py312_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
+    assert 'TRTMC_WHEEL_PYTHON_TAG="$tag"' in text
+    assert "wheel-qwen-smoke)" in text
+    assert "Qwen smoke test from trtmc pip package" in text
+
+
+def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    smoke_block = text.split("run_wheel_qwen_smoke() {", maxsplit=1)[1].split(
+        "\n}",
+        maxsplit=1,
+    )[0]
+    assert "select_wheel_by_tag py312 dist" in smoke_block
+    assert "python312_bin" in smoke_block
+    assert "select_compatible_wheel" not in smoke_block
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:

@@ -41,7 +41,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
 | Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, builds engine plans, and writes `.trtfb` bundles. |
-| C++ runtime | Request-time execution library and CLI. | `./build/trtmc` and `trtmc::load()` load bundles and run task APIs. |
+| C++ runtime | Request-time execution library and CLI. | `trtmc`, source-built `./build/trtmc`, and `trtmc::load()` load bundles and run task APIs. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `timesfm`. It handles config and weights. |
 | Runtime strategy | C++ dispatch key in bundle metadata. | Examples: `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `timesfm_torchtrt`. |
 | Pipeline | Task-oriented runtime implementation. | A concrete `IPipeline` handles generation, transcription, segmentation, solve, or another task. |

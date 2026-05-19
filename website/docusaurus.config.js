@@ -1,4 +1,4 @@
-const repository = process.env.GITHUB_REPOSITORY || 'NVIDIA-dev/TensorRT-Model-Connct';
+const repository = process.env.GITHUB_REPOSITORY || 'NVIDIA/TensorRT-Model-Connect';
 const [organizationName, repositoryName] = repository.split('/');
 
 const config = {

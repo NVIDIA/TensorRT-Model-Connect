@@ -4,12 +4,20 @@ title: Quick Start
 
 This quick start builds one text-generation bundle, inspects it, and runs it through the C++ runtime.
 
-Complete [Environment and First Repro](environment-and-repro.md) first. The commands below assume you are inside the dev container with the Python builder installed and `build/trtmc` compiled.
+Complete [Installation](installation.md) first. If you installed a release
+wheel, the command is `trtmc`. If you built from source in the dev container,
+the command is `./build/trtmc`.
+
+```bash
+TRTMC=trtmc
+# Source build alternative:
+# TRTMC=./build/trtmc
+```
 
 ## 1. Prove The Tools Are Available
 
 ```bash
-./build/trtmc version
+$TRTMC version
 ```
 
 Expected signals:
@@ -19,18 +27,22 @@ trtmc 0.1.0
 TRT support: yes
 ```
 
-If `./build/trtmc` fails with a missing shared library, you are probably outside the dev container or missing its runtime library paths.
+If source-built `./build/trtmc` fails with a missing shared library, you are
+probably outside the dev container or missing its runtime library paths.
+If `trtmc` from a wheel fails, check that you installed the aarch64 wheel for
+your Python version and that the host has compatible NVIDIA driver/CUDA runtime
+libraries.
 
 ## 2. Build A Bundle
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-0.6b.trtfb \
   --precision fp16 \
   --max-cache-length 256
 ```
 
-`./build/trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
+`trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
 
 First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
 
@@ -39,8 +51,8 @@ First builds can be slow because the builder may download model files and compil
 Inspect the bundle:
 
 ```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb --list-engines
+$TRTMC inspect /tmp/qwen3-0.6b.trtfb
+$TRTMC inspect /tmp/qwen3-0.6b.trtfb --list-engines
 ```
 
 Expected fields include:
@@ -57,7 +69,7 @@ Inspection should become the first debugging habit. The important fields are `fa
 ## 4. Run Deterministic Inference
 
 ```bash
-./build/trtmc run /tmp/qwen3-0.6b.trtfb \
+$TRTMC run /tmp/qwen3-0.6b.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy

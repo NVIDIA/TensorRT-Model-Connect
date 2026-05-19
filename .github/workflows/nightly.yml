@@ -151,6 +151,10 @@ jobs:
         timeout-minutes: 30
         run: bash .github/scripts/run-gha-stage.sh package
 
+      - name: Qwen smoke test from trtmc pip package
+        timeout-minutes: 60
+        run: bash .github/scripts/run-gha-stage.sh wheel-qwen-smoke
+
       - name: Upload trtmc pip package artifact
         uses: actions/upload-artifact@v4
         with:

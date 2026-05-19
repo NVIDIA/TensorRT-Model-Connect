@@ -11,7 +11,28 @@ TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trt
 
 ## Start Here
 
-For the fastest setup, open Claude Code, Codex, or another repo-aware coding agent and ask:
+Nightly GitHub Releases publish Linux aarch64 wheels for Python 3.10 and
+Python 3.12. On a compatible NVIDIA GPU host, download the wheel that matches
+your Python version and run:
+
+```bash
+python3.12 -m venv .venv-trtmc
+. .venv-trtmc/bin/activate
+pip install ./tensorrt_model_connect-0.1.0-py312-none-linux_aarch64.whl
+
+trtmc version
+trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc run /tmp/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --greedy
+```
+
+The wheel installs a `trtmc` console command, the Python builder dependencies
+including TensorRT, the native `trtmc` executable, and the TensorRT backend DSO.
+CUDA driver/runtime libraries still come from the host system.
+
+For source development, open Codex or another repo-aware coding agent and ask:
 
 ```text
 Clone https://github.com/NVIDIA/TensorRT-Model-Connect, set up the dev
@@ -27,7 +48,7 @@ Use the [Environment and First Repro](website/docs/getting-started/environment-a
 
 ```bash
 git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
-cd TensorRT-Model-Connct
+cd TensorRT-Model-Connect
 
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
@@ -45,11 +66,8 @@ cmake --build build -j
 
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
-Nightly GitHub Releases include a Linux wheel for the unified CLI. The wheel
-installs a `trtmc` console command that dispatches to the packaged native
-executable, installs the matching TensorRT Python runtime, includes the native
-TensorRT backend DSO, and uses the installing Python environment for
-`trtmc build`.
+Nightly wheels are tagged `py310-none-linux_aarch64` and
+`py312-none-linux_aarch64`; use the tag matching your Python interpreter.
 
 ## Useful Docs
 

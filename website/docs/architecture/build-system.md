@@ -61,7 +61,7 @@ The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
 
 ## Python package
 
-`tensorrt_model_connect/pyproject.toml` defines the Python builder package consumed by `trtmc build`. TensorRT installation is deliberately environment-specific and not forced through package metadata.
+`tensorrt_model_connect/pyproject.toml` defines the Python builder package consumed by `trtmc build`. The package metadata declares TensorRT and the other builder dependencies. Release wheels also include the native `trtmc` executable and backend DSOs under `tensorrt_model_connect/bin/`.
 
 ## Generated registration files
 
@@ -98,4 +98,5 @@ This is why extension work normally changes local plugin/schema files plus a man
 | `libtrtmc_backend_trt.so` | Standard TensorRT backend DSO. |
 | `libtrtmc_backend_trt_rtx.so` | Optional TensorRT-RTX backend DSO. |
 | `libtrtmc_tvm_ffi_plugin.so` | Optional TensorRT plugin for TVM-FFI kernels. |
+| `dist/tensorrt_model_connect-*.whl` | Python wheel containing the builder package, `trtmc` console entry point, packaged native executable, and backend DSOs. |
 | `website/build/` | Static Docusaurus docs output. |

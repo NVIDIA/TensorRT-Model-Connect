@@ -99,9 +99,9 @@ This site is organized for users first:
 | --- | --- |
 | [Learning Path](learning-path.md) | You want the course-style sequence from zero background to extension work. |
 | [Glossary](getting-started/glossary.md) | You want plain definitions for inference, deployment, and project terms. |
-| [Environment and First Repro](getting-started/environment-and-repro.md) | You want to prove the container, Python builder, and C++ runtime work before building a model. |
+| [Environment and First Repro](getting-started/environment-and-repro.md) | You want to prove the source-build container, Python builder, and C++ runtime work before building a model. |
 | [Inference Fundamentals](/getting-started/inference-fundamentals) | You are new to deep learning inference or TensorRT deployment. |
-| [Quick Start](getting-started/quick-start.md) | You want the shortest path from checkout to a generated answer. |
+| [Quick Start](getting-started/quick-start.md) | You want the shortest path from install or checkout to a generated answer. |
 | [Tutorials](tutorials/beginner/text-generation.md) | You want a guided path from beginner to advanced usage. |
 | [API Manual](api/overview.md) | You need exact CLI, Python, or C++ entry points. |
 | [Architecture](architecture/overview.md) | You need to understand how builder, bundle, backend, and pipeline pieces fit. |

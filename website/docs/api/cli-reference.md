@@ -7,13 +7,16 @@ title: CLI Reference
 `trtmc build` builds `.trtfb` bundles through the Python builder package.
 
 ```bash
-./build/trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
+trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
 ```
 
 The C++ bridge runs `python -m tensorrt_model_connect build ...`. Set `TRTMC_PYTHON` or `PYTHON` to choose a specific build interpreter.
 When installed from the release wheel, the `trtmc` console command dispatches
 to the packaged native executable and sets `TRTMC_PYTHON` to that environment's
-Python interpreter.
+Python interpreter. It also sets `TRTMC_TRT_LIBRARY_DIR` to the
+dependency-installed `tensorrt_libs` directory when that package is present.
+
+Source builds use the same subcommands through `./build/trtmc`.
 
 Direct module execution is still available for debugging:
 
@@ -51,21 +54,21 @@ TriAttention options are also exposed for experimental KV compaction: `--triatte
 `trtmc` also inspects and runs bundles from C++.
 
 ```bash
-./build/trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
-./build/trtmc encode <bundle.trtfb> --prompt "text"
-./build/trtmc segment <bundle.trtfb> --image PATH --output PATH
-./build/trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
-./build/trtmc serve-audio <bundle.trtfb>
-./build/trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
-./build/trtmc embed <bundle.trtfb> --prompt "text"
-./build/trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
-./build/trtmc solve <bundle.trtfb> --field-input CSV
-./build/trtmc solve <bundle.trtfb> --branch-input CSV [--trunk-input CSV]
-./build/trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
-./build/trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
-./build/trtmc inspect <bundle.trtfb>
-./build/trtmc inspect <bundle.trtfb> --list-engines
-./build/trtmc version
+trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
+trtmc encode <bundle.trtfb> --prompt "text"
+trtmc segment <bundle.trtfb> --image PATH --output PATH
+trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
+trtmc serve-audio <bundle.trtfb>
+trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
+trtmc embed <bundle.trtfb> --prompt "text"
+trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
+trtmc solve <bundle.trtfb> --field-input CSV
+trtmc solve <bundle.trtfb> --branch-input CSV [--trunk-input CSV]
+trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
+trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
+trtmc inspect <bundle.trtfb>
+trtmc inspect <bundle.trtfb> --list-engines
+trtmc version
 ```
 
 Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable `--set`.
