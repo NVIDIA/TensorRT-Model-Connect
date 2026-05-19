@@ -1276,6 +1276,46 @@ class TestAggregation:
         assert sorted(result.e2e_models) == ["qwen3-0.6b", "qwen3-4b"]
         assert result.l0_replacements == []
 
+    def test_impact_excludes_multi_device_models_by_default(self, mock_repo):
+        """Default impact selection matches current single-device CI capability."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["ci_tier"] = "multi_device"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        result = test_impact.analyze_impact(
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"],
+            imap,
+        )
+
+        assert result.e2e_models
+        assert all(
+            imap.model_metadata[model].get("ci_tier") != "multi_device"
+            for model in result.e2e_models
+        )
+
+    def test_impact_can_include_multi_device_models_by_flag(self, mock_repo):
+        """Manual multi-device selection opts in by clearing the default exclusion."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["ci_tier"] = "multi_device"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        result = test_impact.analyze_impact(
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py"],
+            imap,
+            exclude_ci_tiers=set(),
+        )
+
+        selected_ci_tiers = {
+            str(imap.model_metadata[model].get("ci_tier", "") or "")
+            for model in result.e2e_models
+        }
+        assert "" in selected_ci_tiers
+        assert "multi_device" in selected_ci_tiers
+
     def test_manifest_change_uses_l0_replacement_for_nightly_only_model(
         self, mock_repo,
     ):

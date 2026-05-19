@@ -104,15 +104,15 @@ impact_analysis() {
     --local-fallback "${COVERAGE_MAP_PATH:-}" \
     || echo "No coverage map available -- using tier-level selection"
 
+  local impact_args=(--base "$CI_BASE_REF")
   if [ -f coverage_map.json ]; then
-    python3 tools/test_impact.py --base "$CI_BASE_REF" --coverage-map coverage_map.json --json > impact.json
-  else
-    python3 tools/test_impact.py --base "$CI_BASE_REF" --json > impact.json
+    impact_args+=(--coverage-map coverage_map.json)
   fi
+  python3 tools/test_impact.py "${impact_args[@]}" --json > impact.json
 
   echo "--- Impact Analysis ---"
   cat impact.json
-  python3 tools/test_impact.py --base "$CI_BASE_REF" --verbose
+  python3 tools/test_impact.py "${impact_args[@]}" --verbose
 }
 
 build_all() {
@@ -395,7 +395,11 @@ run_full_e2e() {
   nvidia-smi
   configure_e2e_timing_cache
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
-  python scripts/warm_hf_cache.py --exclude-ci-tier l0_only
+  # TODO: Remove the multi_device exclusions once nightly CI has a runner pool
+  # that can reserve all GPUs for tensor-parallel E2E cases.
+  python scripts/warm_hf_cache.py \
+    --exclude-ci-tier l0_only \
+    --exclude-ci-tier multi_device
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
   local args=(
     --engine-dir "$ENGINE_DIR"
@@ -403,6 +407,7 @@ run_full_e2e() {
     --trtmc-binary ./build/trtmc
     --workers-per-gpu 4
     --exclude-ci-tier l0_only
+    --exclude-ci-tier multi_device
   )
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)

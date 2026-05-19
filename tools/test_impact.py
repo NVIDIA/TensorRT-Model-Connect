@@ -244,6 +244,9 @@ _BROAD_FALLBACK_RULES = {
     "harness_shared",
     "shared_builder_module",
 }
+# TODO: Remove multi_device from the default exclusion once CI has a runner pool
+# that can reserve all GPUs for tensor-parallel E2E cases.
+_DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
 _FALLBACK_ALLOWLIST = Path("tools/test_impact_fallback_allowlist.txt")
 
 # ---------------------------------------------------------------------------
@@ -1486,6 +1489,22 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     return sorted(builder_tests), sorted(tools_tests)
 
 
+def _filter_models_by_ci_tier(
+    models: List[str],
+    imap: ImpactMap,
+    exclude_ci_tiers: Set[str],
+) -> List[str]:
+    """Drop models whose manifest ci_tier is excluded by this selection."""
+    if not exclude_ci_tiers:
+        return sorted(models)
+    return sorted(
+        model
+        for model in models
+        if str(imap.model_metadata.get(model, {}).get("ci_tier", "") or "")
+        not in exclude_ci_tiers
+    )
+
+
 def analyze_impact(
     changed_files: List[str],
     imap: ImpactMap,
@@ -1495,8 +1514,12 @@ def analyze_impact(
     head: Optional[str] = None,
     repo_root: Optional[Path] = None,
     e2e_suite: str = "l0",
+    exclude_ci_tiers: Optional[Set[str]] = None,
 ) -> ImpactResult:
     """Analyze impact of all changed files and return aggregated result."""
+    if exclude_ci_tiers is None:
+        exclude_ci_tiers = set(_DEFAULT_EXCLUDED_CI_TIERS)
+
     all_models: Set[str] = set()
     exact_models: Set[str] = set()
     all_tiers: Set[str] = set()
@@ -1532,6 +1555,7 @@ def analyze_impact(
         e2e_models = sorted(imap.core_models)
         cap_applied = True
         l0_replacements = []
+    e2e_models = _filter_models_by_ci_tier(e2e_models, imap, exclude_ci_tiers)
 
     # Coverage-map-based unit test selection
     builder_tests: List[str] = []
@@ -2364,6 +2388,11 @@ def main() -> int:
     parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
                         help="E2E selection policy: l0 applies configured "
                              "large-model replacements; nightly keeps exact models")
+    parser.add_argument("--exclude-ci-tier", action="append", default=[],
+                        help="Exclude selected E2E manifests with this ci_tier")
+    parser.add_argument("--include-ci-tier", action="append", default=[],
+                        help="Include a ci_tier that is excluded by default, "
+                             "for example multi_device for manual local runs")
     parser.add_argument("--json", action="store_true", dest="json_output",
                         help="Output structured JSON for CI consumption")
     parser.add_argument("--validate", action="store_true",
@@ -2414,6 +2443,12 @@ def main() -> int:
             print(f"WARNING: Coverage map not found at {args.coverage_map}. "
                   "Falling back to tier-level selection.", file=sys.stderr)
 
+    exclude_ci_tiers = (
+        set(_DEFAULT_EXCLUDED_CI_TIERS)
+        .difference(set(args.include_ci_tier or []))
+        .union(set(args.exclude_ci_tier or []))
+    )
+
     # Get changed files
     if args.files:
         changed: Optional[List[str]] = [f.strip() for f in args.files.split(",") if f.strip()]
@@ -2423,14 +2458,19 @@ def main() -> int:
     if changed is None:
         # Git diff failed -- safety net: run everything
         print("Running all tests (git diff unavailable).", file=sys.stderr)
+        e2e_models = _filter_models_by_ci_tier(
+            list(imap.all_model_names),
+            imap,
+            exclude_ci_tiers,
+        )
         result_obj = ImpactResult(
-            e2e_models=list(imap.all_model_names),
+            e2e_models=e2e_models,
             unit_tiers=["builder", "cpp", "tools"],
             rebuild_cpp=True,
             cap_applied=False,
             matched_rules=[{
                 "file": "<all>", "rule": "git_diff_failed",
-                "models": list(imap.all_model_names),
+                "models": e2e_models,
             }],
         )
     elif not changed:
@@ -2449,6 +2489,7 @@ def main() -> int:
             head=args.head,
             repo_root=repo_root,
             e2e_suite=args.e2e_suite,
+            exclude_ci_tiers=exclude_ci_tiers,
         )
 
     if args.verbose:
