@@ -598,6 +598,9 @@ Tensor make_model_tensor(const std::vector<float>& values, std::vector<half_bits
                          DType dtype, std::vector<int64_t> shape) {
     if (dtype == DType::kFloat32)
         return Tensor{const_cast<float*>(values.data()), std::move(shape), DType::kFloat32};
+    if (dtype != DType::kFloat16 && dtype != DType::kBFloat16) {
+        throw std::runtime_error("SANA-WM float tensor input has unsupported dtype");
+    }
     scratch16 = convert_float_to_16(values, dtype);
     return Tensor{scratch16.data(), std::move(shape), dtype};
 }
@@ -697,6 +700,46 @@ struct SanaWmTextConditioning {
     std::vector<int32_t> cond_mask;
     std::vector<int32_t> neg_mask;
 };
+
+std::vector<float> repeat_batch(const std::vector<float>& values, int32_t batch) {
+    if (batch <= 1)
+        return values;
+    std::vector<float> out(values.size() * static_cast<std::size_t>(batch));
+    for (int32_t b = 0; b < batch; ++b) {
+        std::copy(values.begin(), values.end(),
+                  out.begin() + static_cast<std::size_t>(b) * values.size());
+    }
+    return out;
+}
+
+template <typename T>
+std::vector<T> concat_two(const std::vector<T>& first, const std::vector<T>& second,
+                          const std::string& label) {
+    if (first.size() != second.size()) {
+        throw std::runtime_error("SANA-WM " + label + " CFG tensors have mismatched sizes");
+    }
+    std::vector<T> out;
+    out.reserve(first.size() + second.size());
+    out.insert(out.end(), first.begin(), first.end());
+    out.insert(out.end(), second.begin(), second.end());
+    return out;
+}
+
+std::vector<float> stage1_text_input(const SanaWmTextConditioning& text, bool do_cfg) {
+    return do_cfg ? concat_two(text.neg, text.cond, "text conditioning") : text.cond;
+}
+
+std::vector<int32_t> stage1_mask_input(const SanaWmTextConditioning& text, bool do_cfg) {
+    return do_cfg ? concat_two(text.neg_mask, text.cond_mask, "text mask") : text.cond_mask;
+}
+
+std::vector<float> stage1_first_timestep(int32_t batch, int32_t frames, float timestep) {
+    std::vector<float> out(static_cast<std::size_t>(batch) * static_cast<std::size_t>(frames),
+                           timestep);
+    for (int32_t b = 0; b < batch; ++b)
+        out[static_cast<std::size_t>(b) * static_cast<std::size_t>(frames)] = 0.0F;
+    return out;
+}
 
 std::vector<SanaWmIntrinsics>
 crop_intrinsics(const std::vector<SanaWmIntrinsics>& intrinsics, const SanaWmResizeCropPlan& plan) {
@@ -871,6 +914,90 @@ SanaWmTextConditioning run_native_text_conditioning(ITrtModule& text_encoder,
                                       config.text_encoder_dim),
             std::move(neg), select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length),
             std::move(neg_mask)};
+}
+
+Tensor make_mask_tensor(const std::vector<int32_t>& values, std::vector<float>& scratch,
+                        std::vector<half_bits_t>& scratch16, DType dtype,
+                        std::vector<int64_t> shape) {
+    if (dtype == DType::kInt32)
+        return Tensor{const_cast<int32_t*>(values.data()), std::move(shape), DType::kInt32};
+    scratch.resize(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i)
+        scratch[i] = static_cast<float>(values[i]);
+    return make_model_tensor(scratch, scratch16, dtype, std::move(shape));
+}
+
+std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
+                                              const SanaWmStage1Latents& latents,
+                                              const SanaWmTextConditioning& text,
+                                              const SanaWmCameraConditions& camera,
+                                              const SanaWmRuntimeConfig& config) {
+    if (!denoiser.ok())
+        throw std::runtime_error("SANA-WM native Stage-1 denoiser is not ready");
+
+    const bool do_cfg = config.cfg_scale > 1.0F;
+    const int32_t batch = do_cfg ? 2 : 1;
+    auto latent_input = repeat_batch(latents.values, batch);
+    auto text_input = stage1_text_input(text, do_cfg);
+    auto mask_input = stage1_mask_input(text, do_cfg);
+    auto raymap_input = repeat_batch(camera.raymap, batch);
+    auto plucker_input = repeat_batch(camera.chunk_plucker, batch);
+    auto timestep_input = stage1_first_timestep(batch, latents.frames, 1000.0F);
+
+    const auto latent_name =
+        pick_input_name(denoiser, {"x", "sample", "latents", "hidden_states",
+                                   "noisy_image_or_video"},
+                        "Stage-1 denoiser latent");
+    const auto timestep_name =
+        pick_input_name(denoiser, {"timestep", "timesteps", "t"}, "Stage-1 denoiser timestep");
+    const auto text_name = pick_input_name(denoiser, {"y", "encoder_hidden_states", "condition",
+                                                      "prompt_embeds"},
+                                           "Stage-1 denoiser text");
+    const auto mask_name = pick_input_name(denoiser, {"mask", "encoder_attention_mask",
+                                                      "attention_mask"},
+                                           "Stage-1 denoiser mask");
+    const auto camera_name =
+        pick_input_name(denoiser, {"camera_conditions", "raymap", "camera"},
+                        "Stage-1 denoiser camera");
+    const auto plucker_name =
+        pick_input_name(denoiser, {"chunk_plucker", "plucker", "plucker_emb"},
+                        "Stage-1 denoiser chunk plucker");
+
+    std::vector<half_bits_t> latent16;
+    std::vector<half_bits_t> text16;
+    std::vector<half_bits_t> timestep16;
+    std::vector<half_bits_t> mask16;
+    std::vector<half_bits_t> raymap16;
+    std::vector<half_bits_t> plucker16;
+    std::vector<float> mask_float;
+    TensorMap inputs;
+    inputs[latent_name] = make_model_tensor(
+        latent_input, latent16, input_dtype_or(denoiser, latent_name, DType::kBFloat16),
+        {batch, latents.channels, latents.frames, latents.height, latents.width});
+    inputs[timestep_name] = make_model_tensor(
+        timestep_input, timestep16, input_dtype_or(denoiser, timestep_name, DType::kFloat32),
+        {batch, 1, latents.frames});
+    inputs[text_name] = make_model_tensor(
+        text_input, text16, input_dtype_or(denoiser, text_name, DType::kBFloat16),
+        {batch, 1, config.text_encoder_max_length, config.text_encoder_dim});
+    inputs[mask_name] = make_mask_tensor(
+        mask_input, mask_float, mask16, input_dtype_or(denoiser, mask_name, DType::kInt32),
+        {batch, config.text_encoder_max_length});
+    inputs[camera_name] = make_model_tensor(
+        raymap_input, raymap16, input_dtype_or(denoiser, camera_name, DType::kBFloat16),
+        {batch, camera.latent_frames, camera.raymap_width});
+    inputs[plucker_name] = make_model_tensor(
+        plucker_input, plucker16, input_dtype_or(denoiser, plucker_name, DType::kBFloat16),
+        {batch, camera.chunk_plucker_channels, camera.latent_frames, camera.latent_height,
+         camera.latent_width});
+
+    auto outputs = denoiser.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"output0", "sample", "noise_pred", "velocity", "x"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native Stage-1 denoiser output tensor not found");
+    const auto count = static_cast<std::size_t>(batch) * latents.values.size();
+    return tensor_to_float_vector(it->second, count, "Stage-1 denoiser");
 }
 
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
@@ -1299,14 +1426,20 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
             *native_modules_.text_encoder, *tokenizer_, config_, prompt, cfg.negative_prompt);
         const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
                                         : static_cast<uint64_t>(config_.seed);
-        (void)sana_wm_prepare_stage1_latents(
+        auto latents = sana_wm_prepare_stage1_latents(
             first_latent, cfg.initial_latents, config_.vae_latent_dim,
             native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
             native_inputs.camera.latent_width, seed);
-        (void)text;
+        if (!native_modules_.stage1_denoiser) {
+            throw std::runtime_error(
+                "SANA-WM native TensorRT execution requires a Stage-1 denoiser module");
+        }
+        auto denoised = run_native_stage1_denoiser(*native_modules_.stage1_denoiser, latents,
+                                                   text, native_inputs.camera, config_);
+        (void)denoised;
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
-            "SANA-WM denoiser/refiner execution is not implemented yet");
+            "SANA-WM Stage-1 solver/refiner execution is not implemented yet");
     }
 
     const auto paths = make_invocation_paths();

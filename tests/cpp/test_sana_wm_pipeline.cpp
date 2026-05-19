@@ -22,6 +22,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -85,9 +86,20 @@ class FakeTrtModule final : public trtmc::ITrtModule {
   public:
     FakeTrtModule() = default;
     FakeTrtModule(std::vector<float> output, std::vector<int64_t> shape)
-        : output_(std::move(output)), output_shape_(std::move(shape)) {}
+        : output_(std::move(output)), output_shape_(std::move(shape)), input_names_({"sample"}) {}
+    FakeTrtModule(std::vector<float> output, std::vector<int64_t> shape,
+                  std::vector<std::string> input_names)
+        : output_(std::move(output)), output_shape_(std::move(shape)),
+          input_names_(std::move(input_names)) {}
 
-    trtmc::TensorMap forward(const trtmc::TensorMap&) override {
+    trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++call_count;
+        last_input_shapes.clear();
+        last_input_dtypes.clear();
+        for (const auto& [name, tensor] : inputs) {
+            last_input_shapes[name] = tensor.shape;
+            last_input_dtypes[name] = tensor.dtype;
+        }
         if (output_.empty())
             return {};
         return {{"latent", trtmc::Tensor{output_.data(), output_shape_, trtmc::DType::kFloat32}}};
@@ -103,11 +115,16 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     std::vector<trtmc::TensorInfo> input_info() const override {
         if (output_.empty())
             return {};
-        return {{"sample", {1, 3, 1, 4, 4}, trtmc::DType::kFloat32, true}};
+        std::vector<trtmc::TensorInfo> out;
+        out.reserve(input_names_.size());
+        for (const auto& name : input_names_)
+            out.push_back({name, {}, name == "mask" ? trtmc::DType::kInt32 : trtmc::DType::kFloat32, true});
+        return out;
     }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override {
-        return !output_.empty() && name == "sample";
+        return !output_.empty() &&
+               std::find(input_names_.begin(), input_names_.end(), name) != input_names_.end();
     }
     bool has_output(const std::string& name) const override {
         return !output_.empty() && name == "latent";
@@ -124,9 +141,14 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
 
+    int call_count{0};
+    std::unordered_map<std::string, std::vector<int64_t>> last_input_shapes;
+    std::unordered_map<std::string, trtmc::DType> last_input_dtypes;
+
   private:
     std::vector<float> output_;
     std::vector<int64_t> output_shape_;
+    std::vector<std::string> input_names_;
 };
 
 class FakeTokenizer final : public trtmc::ITokenizer {
@@ -522,7 +544,7 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
 }
 
-void test_native_input_preparation_reaches_solver_boundary() {
+void test_native_stage1_denoiser_reaches_solver_boundary() {
     const auto image_path =
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
     trtmc::io::save_png(image_path.string(),
@@ -548,7 +570,12 @@ void test_native_input_preparation_reaches_solver_boundary() {
     trtmc::SanaWmNativeModules modules;
     modules.text_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}, std::vector<int64_t>{1, 2, 2});
-    modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+    auto denoiser = std::make_unique<FakeTrtModule>(
+        std::vector<float>(32, 0.25F), std::vector<int64_t>{2, 2, 2, 2, 2},
+        std::vector<std::string>{"x", "timestep", "y", "mask", "camera_conditions",
+                                 "chunk_plucker"});
+    auto* denoiser_ptr = denoiser.get();
+    modules.stage1_denoiser = std::move(denoiser);
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{
             0.1F, 0.2F, 0.3F, 0.4F,
@@ -571,12 +598,29 @@ void test_native_input_preparation_reaches_solver_boundary() {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
         solver_boundary_reported =
-            std::string(exc.what()).find("denoiser/refiner execution is not implemented") !=
+            std::string(exc.what()).find("Stage-1 solver/refiner execution is not implemented") !=
             std::string::npos;
     }
 
-    check(solver_boundary_reported, "sana wm native: input prep reaches solver boundary");
+    check(solver_boundary_reported, "sana wm native: stage1 denoiser reaches solver boundary");
     check(runner->call_count == 0, "sana wm native: prepared inputs without bridge");
+    check(denoiser_ptr->call_count == 1, "sana wm native: denoiser invoked once");
+    check(denoiser_ptr->last_input_shapes["x"] == std::vector<int64_t>({2, 2, 2, 2, 2}),
+          "sana wm native: denoiser latent shape");
+    check(denoiser_ptr->last_input_shapes["timestep"] == std::vector<int64_t>({2, 1, 2}),
+          "sana wm native: denoiser timestep shape");
+    check(denoiser_ptr->last_input_shapes["y"] == std::vector<int64_t>({2, 1, 2, 2}),
+          "sana wm native: denoiser text shape");
+    check(denoiser_ptr->last_input_shapes["mask"] == std::vector<int64_t>({2, 2}),
+          "sana wm native: denoiser mask shape");
+    check(denoiser_ptr->last_input_shapes["camera_conditions"] ==
+              std::vector<int64_t>({2, 2, 20}),
+          "sana wm native: denoiser camera shape");
+    check(denoiser_ptr->last_input_shapes["chunk_plucker"] ==
+              std::vector<int64_t>({2, 6, 2, 2, 2}),
+          "sana wm native: denoiser chunk plucker shape");
+    check(denoiser_ptr->last_input_dtypes["mask"] == trtmc::DType::kInt32,
+          "sana wm native: denoiser mask dtype");
 
     std::error_code ec;
     std::filesystem::remove(image_path, ec);
@@ -601,6 +645,6 @@ int main() {
     test_stage1_latents_reject_mismatched_buffers();
     test_bridge_command_forwards_strict_sana_wm_contract();
     test_native_module_sections_do_not_fall_back_to_bridge();
-    test_native_input_preparation_reaches_solver_boundary();
+    test_native_stage1_denoiser_reaches_solver_boundary();
     return failures == 0 ? 0 : 1;
 }
