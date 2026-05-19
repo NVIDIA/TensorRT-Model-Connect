@@ -2388,8 +2388,6 @@ def main() -> int:
     parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
                         help="E2E selection policy: l0 applies configured "
                              "large-model replacements; nightly keeps exact models")
-    parser.add_argument("--exclude-ci-tier", action="append", default=[],
-                        help="Exclude selected E2E manifests with this ci_tier")
     parser.add_argument("--include-ci-tier", action="append", default=[],
                         help="Include a ci_tier that is excluded by default, "
                              "for example multi_device for manual local runs")
@@ -2446,7 +2444,6 @@ def main() -> int:
     exclude_ci_tiers = (
         set(_DEFAULT_EXCLUDED_CI_TIERS)
         .difference(set(args.include_ci_tier or []))
-        .union(set(args.exclude_ci_tier or []))
     )
 
     # Get changed files
