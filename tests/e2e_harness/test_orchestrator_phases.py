@@ -239,6 +239,9 @@ def test_sana_wm_preflight_finds_official_script_and_assets(
         "sana_wm_refiner_vae_decoder_plan",
     ):
         (plan_dir / f"{section}.plan").write_bytes(b"plan")
+    tokenizer_dir = tmp_path / "text_encoder"
+    tokenizer_dir.mkdir()
+    (tokenizer_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("SANA_WM_SCRIPT", str(script))
 
     case = _make_case(
@@ -289,6 +292,36 @@ def test_sana_wm_native_plan_preflight_rejects_missing_plans(tmp_path: Path) -> 
     assert details[0]["passed"] is False
     assert "native TensorRT plans not found" in details[0]["message"]
     assert "text_encoder_0_plan" in details[0]["message"]
+
+
+def test_sana_wm_native_plan_preflight_rejects_missing_tokenizer(tmp_path: Path) -> None:
+    plan_dir = tmp_path / "trtmc_engines"
+    plan_dir.mkdir()
+    for section in (
+        "text_encoder_0_plan",
+        "denoiser_plan",
+        "sana_wm_vae_encoder_plan",
+        "vae_decoder_plan",
+    ):
+        (plan_dir / f"{section}.plan").write_bytes(b"plan")
+    case = _make_case(
+        "sana-wm-missing-tokenizer",
+        preflight=[
+            PreflightRequirement(
+                kind="sana_wm_native_plans_available",
+                args={"plan_dir": str(plan_dir)},
+            ),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is False
+    assert details[0]["kind"] == "sana_wm_native_plans_available"
+    assert details[0]["passed"] is False
+    assert "tokenizer assets were not found" in details[0]["message"]
+    assert "tokenizer.json" in details[0]["message"]
 
 
 def test_sana_wm_runtime_entrypoint_rejects_local_shim_without_model_index(

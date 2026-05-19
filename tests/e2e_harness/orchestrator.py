@@ -111,6 +111,7 @@ _SANA_WM_REFINER_PLAN_SECTIONS = (
     "sana_wm_refiner_denoiser_plan",
     "sana_wm_refiner_vae_decoder_plan",
 )
+_SANA_WM_TOKENIZER_FILES = ("tokenizer.json",)
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +366,9 @@ def _check_sana_wm_native_plans_available(
         if raw_model_dir:
             candidates.append(Path(raw_model_dir) / "trtmc_engines")
 
+    tokenizer_checked: list[str] = []
+    tokenizer_candidates = _sana_wm_tokenizer_candidates(project_root, req, candidates)
+    saw_complete_plans = False
     for path in candidates:
         candidate = path if path.is_absolute() else project_root / path
         checked.append(str(candidate))
@@ -387,8 +391,24 @@ def _check_sana_wm_native_plans_available(
             if section not in present
         ]
         if has_stage1_decoder or not missing_refiner:
+            saw_complete_plans = True
+            tokenizer_ok, tokenizer_checked = _sana_wm_tokenizer_available(tokenizer_candidates)
+            if not tokenizer_ok:
+                continue
             mode = "refiner" if not missing_refiner else "stage1 VAE decoder"
-            return True, f"SANA-WM native TensorRT plans found: {candidate} ({mode})"
+            return (
+                True,
+                f"SANA-WM native TensorRT plans and tokenizer found: {candidate} ({mode})",
+            )
+
+    if saw_complete_plans:
+        return (
+            False,
+            "SANA-WM native TensorRT plans found, but tokenizer assets were not found "
+            "for the pure C++ text-encoder path. Required: tokenizer.json. Set "
+            "SANA_WM_TOKENIZER_DIR, SANA_WM_MODEL_DIR, or sana_wm_tokenizer_dir. "
+            "Checked tokenizers: " + (", ".join(tokenizer_checked) if tokenizer_checked else "<none>"),
+        )
 
     required = (
         ", ".join(_SANA_WM_STAGE1_CORE_PLAN_SECTIONS)
@@ -402,6 +422,51 @@ def _check_sana_wm_native_plans_available(
         "SANA_WM_MODEL_DIR to a directory containing trtmc_engines/*.plan. "
         "Checked: " + (", ".join(checked) if checked else "<none>"),
     )
+
+
+def _resolve_preflight_path(project_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else project_root / path
+
+
+def _append_sana_wm_tokenizer_dir(candidates: list[Path], path: Path) -> None:
+    if path not in candidates:
+        candidates.append(path)
+
+
+def _sana_wm_tokenizer_candidates(
+    project_root: Path, req: PreflightRequirement, plan_dirs: list[Path]
+) -> list[Path]:
+    candidates: list[Path] = []
+    raw_tokenizer_dir = (
+        str(req.args.get("tokenizer_dir", "") or "")
+        or os.environ.get("SANA_WM_TOKENIZER_DIR", "")
+    )
+    if raw_tokenizer_dir:
+        _append_sana_wm_tokenizer_dir(candidates, Path(raw_tokenizer_dir))
+    for raw_model_dir in (
+        str(req.args.get("model_dir", "") or ""),
+        os.environ.get("SANA_WM_MODEL_DIR", ""),
+    ):
+        if raw_model_dir:
+            model_dir = Path(raw_model_dir)
+            _append_sana_wm_tokenizer_dir(candidates, model_dir / "text_encoder")
+            _append_sana_wm_tokenizer_dir(candidates, model_dir / "refiner" / "text_encoder")
+    for raw_plan_dir in plan_dirs:
+        plan_dir = _resolve_preflight_path(project_root, raw_plan_dir)
+        if plan_dir.name == "trtmc_engines":
+            model_dir = plan_dir.parent
+            _append_sana_wm_tokenizer_dir(candidates, model_dir / "text_encoder")
+            _append_sana_wm_tokenizer_dir(candidates, model_dir / "refiner" / "text_encoder")
+    return [_resolve_preflight_path(project_root, path) for path in candidates]
+
+
+def _sana_wm_tokenizer_available(candidates: list[Path]) -> tuple[bool, list[str]]:
+    checked: list[str] = []
+    for candidate in candidates:
+        checked.append(str(candidate))
+        if candidate.is_dir() and any((candidate / name).is_file() for name in _SANA_WM_TOKENIZER_FILES):
+            return True, checked
+    return False, checked
 
 
 _PREFLIGHT_CHECKERS = {

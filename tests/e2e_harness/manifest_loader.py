@@ -241,6 +241,7 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             args={
                 "plan_dir": manifest.get("sana_wm_native_plan_dir", ""),
                 "model_dir": manifest.get("sana_wm_model_dir", ""),
+                "tokenizer_dir": manifest.get("sana_wm_tokenizer_dir", ""),
             },
             gating=True,
         ))
@@ -418,6 +419,7 @@ def _build_inputs(manifest: dict) -> dict:
         "sana_wm_script",
         "sana_wm_native_plan_dir",
         "sana_wm_model_dir",
+        "sana_wm_tokenizer_dir",
         "sana_wm_require_official_script",
     ):
         if key in manifest:
@@ -533,7 +535,7 @@ def _build_metadata(manifest: dict) -> dict:
         "negative_prompt", "cfg_scale", "height", "width",
         "image_height", "image_width",
         "action", "translation_speed", "rotation_speed_deg", "sana_wm_script",
-        "sana_wm_native_plan_dir", "sana_wm_model_dir",
+        "sana_wm_native_plan_dir", "sana_wm_model_dir", "sana_wm_tokenizer_dir",
         "sana_wm_require_official_script",
     }
 
