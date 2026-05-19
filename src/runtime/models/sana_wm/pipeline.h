@@ -3,8 +3,10 @@
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/domains/audio/subprocess_runner.h"
 
+#include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace trtmc {
 
@@ -22,6 +24,14 @@ struct SanaWmRuntimeConfig {
 };
 
 SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json);
+
+struct SanaWmPose {
+    // Row-major 4x4 camera-to-world matrix, matching the upstream .npy layout.
+    std::array<float, 16> c2w{};
+};
+
+std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
+                                              float rotation_speed_deg);
 
 class SanaWmPipeline final : public IPipeline {
   public:

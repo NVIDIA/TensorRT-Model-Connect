@@ -12,6 +12,7 @@
 #include "../../src/runtime/models/sana_wm/pipeline.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
@@ -33,6 +34,10 @@ void check(bool condition, const char* test_name) {
 
 bool contains_arg(const std::vector<std::string>& argv, const std::string& arg) {
     return std::find(argv.begin(), argv.end(), arg) != argv.end();
+}
+
+bool near(float actual, float expected, float eps = 1.0e-4F) {
+    return std::fabs(actual - expected) <= eps;
 }
 
 std::string value_after(const std::vector<std::string>& argv, const std::string& flag) {
@@ -61,6 +66,39 @@ class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
         return 0;
     }
 };
+
+void test_action_rollout_matches_model_card_frame_count_and_translation() {
+    const auto poses = trtmc::sana_wm_action_to_c2w("w-80,jw-40,w-40,lw-60,w-100", 0.055F, 1.2F);
+
+    check(poses.size() == 321, "sana wm action: model-card action rolls out to 321 poses");
+    check(near(poses.front().c2w[0], 1.0F) && near(poses.front().c2w[5], 1.0F) &&
+              near(poses.front().c2w[10], 1.0F) && near(poses.front().c2w[15], 1.0F),
+          "sana wm action: first pose is identity");
+    check(near(poses[1].c2w[11], 0.055F), "sana wm action: w moves forward on +Z");
+    check(near(poses[80].c2w[11], 4.399996F, 1.0e-3F),
+          "sana wm action: first w-80 segment accumulates translation");
+    check(poses[81].c2w[2] < 0.0F, "sana wm action: j yaw turns left");
+    check(poses[121].c2w[2] < poses[81].c2w[2], "sana wm action: repeated j yaw accumulates");
+    check(std::fabs(poses.back().c2w[3]) > 0.01F, "sana wm action: yaw changes final x motion");
+}
+
+void test_action_rollout_rejects_invalid_segments() {
+    bool rejected_empty = false;
+    try {
+        (void)trtmc::sana_wm_action_to_c2w("", 0.055F, 1.2F);
+    } catch (const std::invalid_argument&) {
+        rejected_empty = true;
+    }
+    check(rejected_empty, "sana wm action: empty string rejected");
+
+    bool rejected_bad_key = false;
+    try {
+        (void)trtmc::sana_wm_action_to_c2w("wx-1", 0.055F, 1.2F);
+    } catch (const std::invalid_argument&) {
+        rejected_bad_key = true;
+    }
+    check(rejected_bad_key, "sana wm action: unknown key rejected");
+}
 
 void test_bridge_command_forwards_strict_sana_wm_contract() {
     trtmc::SanaWmRuntimeConfig cfg;
@@ -116,6 +154,8 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
 } // namespace
 
 int main() {
+    test_action_rollout_matches_model_card_frame_count_and_translation();
+    test_action_rollout_rejects_invalid_segments();
     test_bridge_command_forwards_strict_sana_wm_contract();
     return failures == 0 ? 0 : 1;
 }
