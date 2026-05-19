@@ -49,8 +49,9 @@ class SanaWmPlugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         auto config = parse_sana_wm_config(ctx.config_json);
         auto native_modules = load_sana_wm_native_modules(ctx);
+        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         return std::make_unique<SanaWmPipeline>(std::move(config), ctx.hf_python, nullptr,
-                                                std::move(native_modules));
+                                                std::move(native_modules), std::move(tokenizer));
     }
 };
 

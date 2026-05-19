@@ -691,6 +691,13 @@ struct SanaWmNativeInputs {
     SanaWmCameraConditions camera;
 };
 
+struct SanaWmTextConditioning {
+    std::vector<float> cond;
+    std::vector<float> neg;
+    std::vector<int32_t> cond_mask;
+    std::vector<int32_t> neg_mask;
+};
+
 std::vector<SanaWmIntrinsics>
 crop_intrinsics(const std::vector<SanaWmIntrinsics>& intrinsics, const SanaWmResizeCropPlan& plan) {
     std::vector<SanaWmIntrinsics> out;
@@ -767,6 +774,103 @@ std::vector<float> run_native_vae_encoder(ITrtModule& vae_encoder,
                        static_cast<std::size_t>(camera.latent_height) *
                        static_cast<std::size_t>(camera.latent_width);
     return tensor_to_float_vector(it->second, count, "VAE encoder");
+}
+
+std::vector<int32_t> tokenize_fixed(const ITokenizer& tokenizer, const std::string& text,
+                                    int32_t length) {
+    auto ids = tokenizer.encode(text);
+    if (static_cast<int32_t>(ids.size()) > length)
+        ids.resize(static_cast<std::size_t>(length));
+    ids.resize(static_cast<std::size_t>(length), 0);
+    return ids;
+}
+
+std::vector<int32_t> attention_mask_from_tokens(const std::vector<int32_t>& ids) {
+    std::vector<int32_t> mask(ids.size(), 0);
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] != 0)
+            mask[i] = 1;
+    }
+    return mask;
+}
+
+std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
+                                           const std::vector<int32_t>& input_ids,
+                                           const std::vector<int32_t>& attention_mask,
+                                           int32_t text_dim, const char* label) {
+    if (!text_encoder.ok())
+        throw std::runtime_error(std::string("SANA-WM native ") + label + " text encoder is not ready");
+
+    const int64_t seq_len = static_cast<int64_t>(input_ids.size());
+    TensorMap inputs;
+    inputs["input_ids"] =
+        Tensor{const_cast<int32_t*>(input_ids.data()), {1, seq_len}, DType::kInt32};
+    inputs["attention_mask"] =
+        Tensor{const_cast<int32_t*>(attention_mask.data()), {1, seq_len}, DType::kInt32};
+
+    auto outputs = text_encoder.forward(inputs);
+    const auto it = find_output_tensor(outputs, {"last_hidden_state", "hidden_states",
+                                                 "text_embeddings", "output0"});
+    if (it == outputs.end())
+        throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                 " text encoder output tensor not found");
+    const auto count = static_cast<std::size_t>(input_ids.size()) *
+                       static_cast<std::size_t>(text_dim);
+    return tensor_to_float_vector(it->second, count, label);
+}
+
+std::vector<float> select_stage1_text_window(const std::vector<float>& encoded, int32_t encoded_len,
+                                             int32_t max_length, int32_t text_dim) {
+    std::vector<float> out(static_cast<std::size_t>(max_length) * static_cast<std::size_t>(text_dim),
+                           0.0F);
+    auto copy_token = [&](int32_t src_token, int32_t dst_token) {
+        const auto src = static_cast<std::size_t>(src_token) * static_cast<std::size_t>(text_dim);
+        const auto dst = static_cast<std::size_t>(dst_token) * static_cast<std::size_t>(text_dim);
+        std::copy_n(encoded.data() + src, static_cast<std::size_t>(text_dim), out.data() + dst);
+    };
+    copy_token(0, 0);
+    const int32_t tail_start = std::max(1, encoded_len - max_length + 1);
+    for (int32_t i = 1; i < max_length; ++i)
+        copy_token(tail_start + i - 1, i);
+    return out;
+}
+
+std::vector<int32_t> select_stage1_mask_window(const std::vector<int32_t>& mask, int32_t max_length) {
+    std::vector<int32_t> out(static_cast<std::size_t>(max_length), 0);
+    out[0] = mask.empty() ? 0 : mask.front();
+    const int32_t encoded_len = static_cast<int32_t>(mask.size());
+    const int32_t tail_start = std::max(1, encoded_len - max_length + 1);
+    for (int32_t i = 1; i < max_length; ++i)
+        out[static_cast<std::size_t>(i)] = mask[static_cast<std::size_t>(tail_start + i - 1)];
+    return out;
+}
+
+SanaWmTextConditioning run_native_text_conditioning(ITrtModule& text_encoder,
+                                                    const ITokenizer& tokenizer,
+                                                    const SanaWmRuntimeConfig& config,
+                                                    const std::string& prompt,
+                                                    const std::string& negative_prompt) {
+    const auto conditioning_prompt = sana_wm_make_conditioning_prompt(prompt, config.chi_prompt);
+    const int32_t chi_tokens =
+        config.chi_prompt.empty() ? 0 : static_cast<int32_t>(tokenizer.encode(config.chi_prompt).size());
+    const int32_t cond_len = config.chi_prompt.empty()
+                                 ? config.text_encoder_max_length
+                                 : chi_tokens + config.text_encoder_max_length - 2;
+
+    auto cond_ids = tokenize_fixed(tokenizer, conditioning_prompt, cond_len);
+    auto cond_mask_full = attention_mask_from_tokens(cond_ids);
+    auto cond_full =
+        run_native_text_encoder(text_encoder, cond_ids, cond_mask_full, config.text_encoder_dim, "cond");
+
+    auto neg_ids = tokenize_fixed(tokenizer, negative_prompt, config.text_encoder_max_length);
+    auto neg_mask = attention_mask_from_tokens(neg_ids);
+    auto neg =
+        run_native_text_encoder(text_encoder, neg_ids, neg_mask, config.text_encoder_dim, "negative");
+
+    return {select_stage1_text_window(cond_full, cond_len, config.text_encoder_max_length,
+                                      config.text_encoder_dim),
+            std::move(neg), select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length),
+            std::move(neg_mask)};
 }
 
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
@@ -868,6 +972,9 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
         extract_json_int(config_json, "vae_downsample_rate", cfg.vae_spatial_stride));
     cfg.text_encoder_max_length =
         extract_json_int(config_json, "text_encoder_max_length", cfg.text_encoder_max_length);
+    cfg.text_encoder_dim =
+        extract_json_int(config_json, "sana_wm_dit_text_embed_dim",
+                         extract_json_int(config_json, "text_encoder_dim", cfg.text_encoder_dim));
     cfg.chi_prompt = extract_json_string(config_json, "sana_wm_chi_prompt", cfg.chi_prompt);
     cfg.require_official_script =
         extract_json_int(config_json, "sana_wm_require_official_script", 0) != 0;
@@ -1160,9 +1267,11 @@ bool SanaWmNativeModules::has_refiner() const {
 
 SanaWmPipeline::SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
                                std::shared_ptr<ISubprocessRunner> subprocess_runner,
-                               SanaWmNativeModules native_modules)
+                               SanaWmNativeModules native_modules,
+                               std::shared_ptr<ITokenizer> tokenizer)
     : config_(std::move(config)), hf_python_(std::move(hf_python)),
-      subprocess_runner_(std::move(subprocess_runner)), native_modules_(std::move(native_modules)) {
+      subprocess_runner_(std::move(subprocess_runner)), native_modules_(std::move(native_modules)),
+      tokenizer_(std::move(tokenizer)) {
     if (!subprocess_runner_)
         subprocess_runner_ = CreateDefaultSubprocessRunner();
 }
@@ -1182,17 +1291,22 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
         auto first_latent =
             run_native_vae_encoder(*native_modules_.vae_encoder, native_inputs.first_frame,
                                    native_inputs.camera, config_.vae_latent_dim);
-        const auto conditioning_prompt = sana_wm_make_conditioning_prompt(prompt, config_.chi_prompt);
+        if (!native_modules_.text_encoder || !tokenizer_) {
+            throw std::runtime_error(
+                "SANA-WM native TensorRT execution requires text encoder and tokenizer");
+        }
+        auto text = run_native_text_conditioning(
+            *native_modules_.text_encoder, *tokenizer_, config_, prompt, cfg.negative_prompt);
         const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
                                         : static_cast<uint64_t>(config_.seed);
         (void)sana_wm_prepare_stage1_latents(
             first_latent, cfg.initial_latents, config_.vae_latent_dim,
             native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
             native_inputs.camera.latent_width, seed);
-        (void)conditioning_prompt;
+        (void)text;
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
-            "SANA-WM text encoding/solver/refiner execution is not implemented yet");
+            "SANA-WM denoiser/refiner execution is not implemented yet");
     }
 
     const auto paths = make_invocation_paths();

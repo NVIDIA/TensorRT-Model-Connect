@@ -129,6 +129,18 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     std::vector<int64_t> output_shape_;
 };
 
+class FakeTokenizer final : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string& text) const override {
+        if (text.empty())
+            return {};
+        return {1, 2};
+    }
+    std::string decode(const std::vector<int32_t>&) const override { return ""; }
+    int32_t id_for_token(std::string_view) const override { return 0; }
+    std::string token_for_id(int32_t) const override { return ""; }
+};
+
 void test_action_rollout_matches_model_card_frame_count_and_translation() {
     const auto poses = trtmc::sana_wm_action_to_c2w("w-80,jw-40,w-40,lw-60,w-100", 0.055F, 1.2F);
 
@@ -241,6 +253,7 @@ void test_runtime_config_parses_native_sana_wm_fields() {
           "vae_time_stride": 8,
           "vae_spatial_stride": 32,
           "text_encoder_max_length": 300,
+          "sana_wm_dit_text_embed_dim": 2304,
           "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: "
         })json");
 
@@ -253,6 +266,7 @@ void test_runtime_config_parses_native_sana_wm_fields() {
     check(cfg.vae_latent_dim == 128 && cfg.vae_time_stride == 8 && cfg.vae_spatial_stride == 32,
           "sana wm config: vae shape contract parsed");
     check(cfg.text_encoder_max_length == 300, "sana wm config: text encoder length parsed");
+    check(cfg.text_encoder_dim == 2304, "sana wm config: text encoder dim parsed");
     check(cfg.chi_prompt == "Generate an \"Enhanced prompt\".\nUser Prompt: ",
           "sana wm config: chi prompt parsed");
 }
@@ -528,8 +542,12 @@ void test_native_input_preparation_reaches_solver_boundary() {
     cfg.vae_latent_dim = 2;
     cfg.vae_time_stride = 1;
     cfg.vae_spatial_stride = 2;
+    cfg.text_encoder_max_length = 2;
+    cfg.text_encoder_dim = 2;
 
     trtmc::SanaWmNativeModules modules;
+    modules.text_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}, std::vector<int64_t>{1, 2, 2});
     modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{
@@ -539,7 +557,8 @@ void test_native_input_preparation_reaches_solver_boundary() {
         std::vector<int64_t>{1, 2, 1, 2, 2});
 
     auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
+    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules),
+                                   std::make_shared<FakeTokenizer>());
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = image_path.string();
@@ -551,9 +570,9 @@ void test_native_input_preparation_reaches_solver_boundary() {
     try {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
-        solver_boundary_reported = std::string(exc.what()).find(
-                                       "text encoding/solver/refiner execution is not implemented") !=
-                                   std::string::npos;
+        solver_boundary_reported =
+            std::string(exc.what()).find("denoiser/refiner execution is not implemented") !=
+            std::string::npos;
     }
 
     check(solver_boundary_reported, "sana wm native: input prep reaches solver boundary");

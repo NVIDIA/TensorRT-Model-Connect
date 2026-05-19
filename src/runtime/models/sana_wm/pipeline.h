@@ -3,6 +3,7 @@
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/domains/audio/subprocess_runner.h"
 #include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <array>
 #include <cstdint>
@@ -31,6 +32,7 @@ struct SanaWmRuntimeConfig {
     int32_t vae_time_stride{8};
     int32_t vae_spatial_stride{32};
     int32_t text_encoder_max_length{300};
+    int32_t text_encoder_dim{2304};
     std::string chi_prompt;
     bool require_official_script{false};
 };
@@ -148,7 +150,8 @@ class SanaWmPipeline final : public IPipeline {
   public:
     SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
                    std::shared_ptr<ISubprocessRunner> subprocess_runner = nullptr,
-                   SanaWmNativeModules native_modules = {});
+                   SanaWmNativeModules native_modules = {},
+                   std::shared_ptr<ITokenizer> tokenizer = nullptr);
 
     const char* model_id() const override { return config_.hf_id.c_str(); }
     const char* pipeline_type() const override { return "SanaWmPipeline"; }
@@ -164,6 +167,7 @@ class SanaWmPipeline final : public IPipeline {
     std::string hf_python_;
     std::shared_ptr<ISubprocessRunner> subprocess_runner_;
     SanaWmNativeModules native_modules_;
+    std::shared_ptr<ITokenizer> tokenizer_;
 };
 
 } // namespace trtmc
