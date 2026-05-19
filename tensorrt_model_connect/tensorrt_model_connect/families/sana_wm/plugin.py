@@ -10,6 +10,7 @@ legacy compatibility path and is only bundled when explicitly enabled.
 from __future__ import annotations
 
 import json
+import os
 import struct
 from pathlib import Path
 
@@ -161,6 +162,32 @@ def _resolve_native_plan_path(model_path: Path, value: str) -> Path:
     return path
 
 
+def _append_native_plan_dir(candidates: list[Path], model_path: Path, value: object) -> None:
+    if not value:
+        return
+    path = _resolve_native_plan_path(model_path, str(value))
+    if path not in candidates:
+        candidates.append(path)
+
+
+def _append_model_native_plan_dir(candidates: list[Path], model_path: Path, value: object) -> None:
+    if not value:
+        return
+    path = _resolve_native_plan_path(model_path, str(value)) / _NATIVE_PLAN_DIR
+    if path not in candidates:
+        candidates.append(path)
+
+
+def _discover_native_plan_dirs(model_path: Path, raw_config: dict) -> list[Path]:
+    candidates: list[Path] = []
+    _append_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_native_plan_dir"))
+    _append_native_plan_dir(candidates, model_path, os.environ.get("SANA_WM_NATIVE_PLAN_DIR"))
+    _append_model_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_model_dir"))
+    _append_model_native_plan_dir(candidates, model_path, os.environ.get("SANA_WM_MODEL_DIR"))
+    _append_native_plan_dir(candidates, model_path, _NATIVE_PLAN_DIR)
+    return candidates
+
+
 def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str, Path]:
     paths: dict[str, Path] = {}
     configured = raw_config.get("sana_wm_native_plan_paths")
@@ -175,12 +202,13 @@ def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str,
                     )
                 paths[section] = path
 
-    for section in _NATIVE_PLAN_SECTIONS:
-        if section in paths:
-            continue
-        path = model_path / _NATIVE_PLAN_DIR / f"{section}.plan"
-        if path.is_file():
-            paths[section] = path
+    for plan_dir in _discover_native_plan_dirs(model_path, raw_config):
+        for section in _NATIVE_PLAN_SECTIONS:
+            if section in paths:
+                continue
+            path = plan_dir / f"{section}.plan"
+            if path.is_file():
+                paths[section] = path
     return paths
 
 

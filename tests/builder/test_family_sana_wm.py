@@ -68,9 +68,9 @@ def _write_safetensors_header(path, tensors: dict[str, tuple[str, list[int]]]) -
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded)
 
 
-def _write_native_plan_set(model_dir) -> dict[str, bytes]:
-    engine_dir = model_dir / "trtmc_engines"
-    engine_dir.mkdir()
+def _write_native_plan_set(model_dir, *, plan_dir=None) -> dict[str, bytes]:
+    engine_dir = plan_dir or model_dir / "trtmc_engines"
+    engine_dir.mkdir(parents=True)
     plans = {
         "text_encoder_0_plan": b"text-encoder-plan",
         "denoiser_plan": b"stage1-dit-plan",
@@ -220,6 +220,71 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
     assert "engine_backend" not in overrides
     assert overrides["sana_wm_allow_python_bridge"] == 0
     assert overrides["sana_wm_native_plan_sections"] == list(plans)
+
+
+def test_sana_wm_plugin_discovers_native_plan_dir_from_config(tmp_path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    plan_dir = tmp_path / "native_plans"
+    plans = _write_native_plan_set(model_dir, plan_dir=plan_dir)
+    (model_dir / "config.yaml").write_text(
+        _sana_yaml() + f"\nsana_wm_native_plan_dir: {plan_dir}\n",
+        encoding="utf-8",
+    )
+
+    cfg = ModelConfig.from_dir(model_dir)
+    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+
+    assert weights["_native_plan_paths"]["denoiser_plan"] == str(
+        plan_dir / "denoiser_plan.plan"
+    )
+    assert sana_wm_mod.plugin.build_engine(
+        cfg, weights, 256
+    ) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+    assert sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)["denoiser_plan"] == plans[
+        "denoiser_plan"
+    ]
+
+
+def test_sana_wm_plugin_discovers_native_plan_dir_from_env(tmp_path, monkeypatch) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    plan_dir = tmp_path / "env_native_plans"
+    _write_native_plan_set(model_dir, plan_dir=plan_dir)
+    (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    monkeypatch.setenv("SANA_WM_NATIVE_PLAN_DIR", str(plan_dir))
+
+    cfg = ModelConfig.from_dir(model_dir)
+    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+
+    assert weights["_native_plan_paths"]["denoiser_plan"] == str(
+        plan_dir / "denoiser_plan.plan"
+    )
+    assert sana_wm_mod.plugin.build_engine(
+        cfg, weights, 256
+    ) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+
+
+def test_sana_wm_plugin_discovers_native_plan_model_dir_from_config(tmp_path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    external_model_dir = tmp_path / "native_model"
+    plans = _write_native_plan_set(external_model_dir)
+    (model_dir / "config.yaml").write_text(
+        _sana_yaml() + f"\nsana_wm_model_dir: {external_model_dir}\n",
+        encoding="utf-8",
+    )
+
+    cfg = ModelConfig.from_dir(model_dir)
+    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+
+    native_plan_paths = weights["_native_plan_paths"]
+    assert native_plan_paths["denoiser_plan"] == str(
+        external_model_dir / "trtmc_engines" / "denoiser_plan.plan"
+    )
+    assert sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)["denoiser_plan"] == plans[
+        "denoiser_plan"
+    ]
 
 
 def test_sana_wm_plugin_rejects_partial_native_plan_sections(tmp_path) -> None:
