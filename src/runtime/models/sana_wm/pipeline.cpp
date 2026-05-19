@@ -1102,6 +1102,84 @@ SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
                                     native_inputs.camera, config, num_steps, cfg_scale);
 }
 
+bool has_any_refiner_module(const SanaWmNativeModules& modules) {
+    return modules.refiner_text_encoder || modules.refiner_denoiser || modules.refiner_vae_decoder;
+}
+
+ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
+                                   const SanaWmRuntimeConfig& config) {
+    if (!vae_decoder.ok())
+        throw std::runtime_error("SANA-WM native VAE decoder is not ready");
+
+    const auto input_name =
+        pick_input_name(vae_decoder, {"latents", "sample", "z"}, "VAE decoder");
+    std::vector<half_bits_t> latent16;
+    TensorMap inputs;
+    inputs[input_name] = make_model_tensor(
+        latents.values, latent16, input_dtype_or(vae_decoder, input_name, DType::kBFloat16),
+        {1, latents.channels, latents.frames, latents.height, latents.width});
+
+    auto outputs = vae_decoder.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"output0", "sample", "decoder_output", "video"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native VAE decoder output tensor not found");
+
+    const auto raw_count = static_cast<std::size_t>(3) *
+                           static_cast<std::size_t>(config.num_frames) *
+                           static_cast<std::size_t>(config.height) *
+                           static_cast<std::size_t>(config.width);
+    auto raw = tensor_to_float_vector(it->second, raw_count, "VAE decoder");
+
+    ImageResult result;
+    result.channels = 3;
+    result.height = config.height;
+    result.width = config.width;
+    result.num_frames = config.num_frames;
+    result.pixels.resize(raw_count, 0.0F);
+    for (int32_t t = 0; t < config.num_frames; ++t) {
+        for (int32_t y = 0; y < config.height; ++y) {
+            for (int32_t x = 0; x < config.width; ++x) {
+                for (int32_t c = 0; c < 3; ++c) {
+                    const auto src =
+                        (((static_cast<std::size_t>(c) * static_cast<std::size_t>(config.num_frames) +
+                           static_cast<std::size_t>(t)) *
+                              static_cast<std::size_t>(config.height) +
+                          static_cast<std::size_t>(y)) *
+                             static_cast<std::size_t>(config.width) +
+                         static_cast<std::size_t>(x));
+                    const auto dst =
+                        (((static_cast<std::size_t>(t) * static_cast<std::size_t>(config.height) +
+                           static_cast<std::size_t>(y)) *
+                              static_cast<std::size_t>(config.width) +
+                          static_cast<std::size_t>(x)) *
+                             3U +
+                         static_cast<std::size_t>(c));
+                    result.pixels[dst] = std::max(0.0F, std::min(1.0F, raw[src] * 0.5F + 0.5F));
+                }
+            }
+        }
+    }
+    return result;
+}
+
+ImageResult run_native_image_path(SanaWmNativeModules& modules,
+                                  const std::shared_ptr<ITokenizer>& tokenizer,
+                                  const SanaWmRuntimeConfig& config,
+                                  const SanaWmRequest& request,
+                                  const GenerateConfig& cfg,
+                                  const std::string& prompt) {
+    auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
+    if (has_any_refiner_module(modules)) {
+        throw std::runtime_error("SANA-WM native refiner execution is not implemented yet");
+    }
+    if (!modules.vae_decoder) {
+        throw std::runtime_error(
+            "SANA-WM native TensorRT execution requires a VAE decoder module");
+    }
+    return decode_native_sana_vae(*modules.vae_decoder, latents, config);
+}
+
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
                                            const SanaWmRequest& request, const SanaWmPaths& paths,
                                            const std::string& prompt) {
@@ -1512,12 +1590,7 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
-        auto denoised =
-            run_native_stage1_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
-        (void)denoised;
-        throw std::runtime_error(
-            "SANA-WM native TensorRT module sections were loaded, but native "
-            "SANA-WM Stage-1 decode/refiner execution is not implemented yet");
+        return run_native_image_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
     }
 
     const auto paths = make_invocation_paths();

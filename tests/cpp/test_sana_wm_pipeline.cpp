@@ -569,7 +569,7 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
 }
 
-void test_native_stage1_denoiser_reaches_solver_boundary() {
+void test_native_stage1_solver_decodes_without_bridge() {
     const auto image_path =
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
     trtmc::io::save_png(image_path.string(),
@@ -608,6 +608,11 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
             0.5F, 0.6F, 0.7F, 0.8F,
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
+    auto decoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>(96, 0.0F), std::vector<int64_t>{1, 3, 2, 4, 4},
+        std::vector<std::string>{"latents"});
+    auto* decoder_ptr = decoder.get();
+    modules.vae_decoder = std::move(decoder);
 
     auto runner = std::make_shared<FakeSubprocessRunner>();
     trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules),
@@ -619,18 +624,15 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
     gen_cfg.camera_intrinsics = {4.0F, 4.0F, 2.0F, 2.0F};
     gen_cfg.num_frames = 2;
 
-    bool solver_boundary_reported = false;
-    try {
-        (void)pipeline.generate_image("drive forward", gen_cfg);
-    } catch (const std::runtime_error& exc) {
-        solver_boundary_reported =
-            std::string(exc.what()).find("Stage-1 decode/refiner execution is not implemented") !=
-            std::string::npos;
-    }
+    const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
-    check(solver_boundary_reported, "sana wm native: stage1 denoiser reaches solver boundary");
-    check(runner->call_count == 0, "sana wm native: prepared inputs without bridge");
+    check(runner->call_count == 0, "sana wm native: generated without bridge");
     check(denoiser_ptr->call_count == 2, "sana wm native: denoiser invoked per solver step");
+    check(decoder_ptr->call_count == 1, "sana wm native: VAE decoder invoked once");
+    check(result.num_frames == 2 && result.height == 4 && result.width == 4,
+          "sana wm native: decoded video dimensions");
+    check(result.pixels.size() == 96 && near(result.pixels[0], 0.5F),
+          "sana wm native: VAE decoder output converted to pixels");
     check(denoiser_ptr->last_input_shapes["x"] == std::vector<int64_t>({2, 2, 2, 2, 2}),
           "sana wm native: denoiser latent shape");
     check(denoiser_ptr->last_input_shapes["timestep"] == std::vector<int64_t>({2, 1, 2}),
@@ -647,6 +649,8 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
           "sana wm native: denoiser chunk plucker shape");
     check(denoiser_ptr->last_input_dtypes["mask"] == trtmc::DType::kInt32,
           "sana wm native: denoiser mask dtype");
+    check(decoder_ptr->last_input_shapes["latents"] == std::vector<int64_t>({1, 2, 2, 2, 2}),
+          "sana wm native: VAE decoder latent shape");
     check(denoiser_ptr->input_value_calls.size() == 2,
           "sana wm native: denoiser input values recorded per step");
     if (denoiser_ptr->input_value_calls.size() == 2) {
@@ -690,6 +694,6 @@ int main() {
     test_stage1_latents_reject_mismatched_buffers();
     test_bridge_command_forwards_strict_sana_wm_contract();
     test_native_module_sections_do_not_fall_back_to_bridge();
-    test_native_stage1_denoiser_reaches_solver_boundary();
+    test_native_stage1_solver_decodes_without_bridge();
     return failures == 0 ? 0 : 1;
 }
