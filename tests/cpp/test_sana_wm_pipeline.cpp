@@ -675,6 +675,102 @@ void test_native_stage1_solver_decodes_without_bridge() {
     std::filesystem::remove(image_path, ec);
 }
 
+void test_native_refiner_decodes_and_drops_sink_frame() {
+    const auto image_path =
+        std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_refiner_test.png";
+    trtmc::io::save_png(image_path.string(),
+                        {
+                            1.0F, 0.0F, 0.0F,
+                            0.0F, 1.0F, 0.0F,
+                            0.0F, 0.0F, 1.0F,
+                            1.0F, 1.0F, 1.0F,
+                        },
+                        2, 2);
+
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+    cfg.height = 4;
+    cfg.width = 4;
+    cfg.num_frames = 2;
+    cfg.vae_latent_dim = 2;
+    cfg.vae_time_stride = 1;
+    cfg.vae_spatial_stride = 2;
+    cfg.text_encoder_max_length = 2;
+    cfg.text_encoder_dim = 2;
+    cfg.num_steps = 1;
+
+    trtmc::SanaWmNativeModules modules;
+    modules.text_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}, std::vector<int64_t>{1, 2, 2});
+    modules.stage1_denoiser = std::make_unique<FakeTrtModule>(
+        std::vector<float>(32, 0.25F), std::vector<int64_t>{2, 2, 2, 2, 2},
+        std::vector<std::string>{"x", "timestep", "y", "mask", "camera_conditions",
+                                 "chunk_plucker"});
+    modules.vae_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{
+            0.1F, 0.2F, 0.3F, 0.4F,
+            0.5F, 0.6F, 0.7F, 0.8F,
+        },
+        std::vector<int64_t>{1, 2, 1, 2, 2});
+    auto refiner_text = std::make_unique<FakeTrtModule>(
+        std::vector<float>{0.1F, 0.2F, 0.3F, 0.4F}, std::vector<int64_t>{1, 2, 2});
+    auto* refiner_text_ptr = refiner_text.get();
+    modules.refiner_text_encoder = std::move(refiner_text);
+    auto refiner_denoiser = std::make_unique<FakeTrtModule>(
+        std::vector<float>(8, 0.0F), std::vector<int64_t>{1, 4, 2},
+        std::vector<std::string>{"latent", "clean_latent", "denoise_mask", "positions",
+                                 "v_context", "sigma"});
+    auto* refiner_denoiser_ptr = refiner_denoiser.get();
+    modules.refiner_denoiser = std::move(refiner_denoiser);
+    auto refiner_decoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>(96, 255.0F), std::vector<int64_t>{2, 4, 4, 3},
+        std::vector<std::string>{"latents"});
+    auto* refiner_decoder_ptr = refiner_decoder.get();
+    modules.refiner_vae_decoder = std::move(refiner_decoder);
+
+    auto runner = std::make_shared<FakeSubprocessRunner>();
+    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules),
+                                   std::make_shared<FakeTokenizer>());
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = image_path.string();
+    gen_cfg.camera_action = "w-1";
+    gen_cfg.camera_intrinsics = {4.0F, 4.0F, 2.0F, 2.0F};
+    gen_cfg.num_frames = 2;
+
+    const auto result = pipeline.generate_image("drive forward", gen_cfg);
+
+    check(runner->call_count == 0, "sana wm native refiner: generated without bridge");
+    check(refiner_text_ptr->call_count == 1, "sana wm native refiner: text encoded once");
+    check(refiner_denoiser_ptr->call_count == 3,
+          "sana wm native refiner: distilled denoiser steps");
+    check(refiner_decoder_ptr->call_count == 1, "sana wm native refiner: VAE decoded once");
+    check(result.num_frames == 1 && result.pixels.size() == 48 && near(result.pixels[0], 1.0F),
+          "sana wm native refiner: drops sink frame and normalizes pixels");
+    check(refiner_denoiser_ptr->last_input_shapes["latent"] == std::vector<int64_t>({1, 8, 2}),
+          "sana wm native refiner: combined latent shape");
+    check(refiner_denoiser_ptr->last_input_shapes["clean_latent"] ==
+              std::vector<int64_t>({1, 8, 2}),
+          "sana wm native refiner: clean latent shape");
+    check(refiner_denoiser_ptr->last_input_shapes["denoise_mask"] ==
+              std::vector<int64_t>({1, 8, 1}),
+          "sana wm native refiner: denoise mask shape");
+    check(refiner_denoiser_ptr->last_input_shapes["positions"] ==
+              std::vector<int64_t>({1, 3, 8, 2}),
+          "sana wm native refiner: positions shape");
+    check(refiner_denoiser_ptr->last_input_shapes["v_context"] ==
+              std::vector<int64_t>({1, 2, 2}),
+          "sana wm native refiner: text context shape");
+    if (!refiner_denoiser_ptr->input_value_calls.empty()) {
+        const auto& mask = refiner_denoiser_ptr->input_value_calls.front()["denoise_mask"];
+        check(mask.size() == 8 && near(mask.front(), 0.0F) && near(mask.back(), 1.0F),
+              "sana wm native refiner: mask freezes context and updates current tokens");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(image_path, ec);
+}
+
 } // namespace
 
 int main() {
@@ -695,5 +791,6 @@ int main() {
     test_bridge_command_forwards_strict_sana_wm_contract();
     test_native_module_sections_do_not_fall_back_to_bridge();
     test_native_stage1_solver_decodes_without_bridge();
+    test_native_refiner_decodes_and_drops_sink_frame();
     return failures == 0 ? 0 : 1;
 }

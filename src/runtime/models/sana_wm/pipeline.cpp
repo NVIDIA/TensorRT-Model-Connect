@@ -26,6 +26,7 @@ namespace {
 
 constexpr float kDefaultPitchLimitDeg = 85.0F;
 constexpr float kPi = 3.14159265358979323846F;
+constexpr std::array<float, 4> kRefinerSigmas = {0.909375F, 0.725F, 0.421875F, 0.0F};
 using half_bits_t = uint16_t;
 
 std::string first_nonempty(std::string a, const std::string& b) {
@@ -702,6 +703,11 @@ struct SanaWmTextConditioning {
     std::vector<int32_t> neg_mask;
 };
 
+struct SanaWmRefinerText {
+    std::vector<float> values;
+    std::vector<int64_t> shape;
+};
+
 std::vector<float> repeat_batch(const std::vector<float>& values, int32_t batch) {
     if (batch <= 1)
         return values;
@@ -773,6 +779,88 @@ std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& m
         velocity[i] = -(uncond + cfg_scale * (cond - uncond));
     }
     return velocity;
+}
+
+std::size_t refiner_token_count(int32_t frames, int32_t height, int32_t width) {
+    return static_cast<std::size_t>(frames) * static_cast<std::size_t>(height) *
+           static_cast<std::size_t>(width);
+}
+
+std::size_t refiner_patched_index(int32_t token, int32_t channel, int32_t channels) {
+    return static_cast<std::size_t>(token) * static_cast<std::size_t>(channels) +
+           static_cast<std::size_t>(channel);
+}
+
+std::vector<float> patchify_refiner_latents(const std::vector<float>& cthw, int32_t channels,
+                                            int32_t frame_offset, int32_t frames,
+                                            int32_t total_frames, int32_t height,
+                                            int32_t width) {
+    std::vector<float> out(refiner_token_count(frames, height, width) *
+                           static_cast<std::size_t>(channels));
+    int32_t token = 0;
+    for (int32_t f = 0; f < frames; ++f) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x, ++token) {
+                for (int32_t c = 0; c < channels; ++c) {
+                    out[refiner_patched_index(token, c, channels)] =
+                        cthw[stage1_latent_index(c, frame_offset + f, y, x, total_frames, height,
+                                                 width)];
+                }
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<float> unpatchify_refiner_current(const std::vector<float>& tokens, int32_t channels,
+                                              int32_t frames, int32_t height, int32_t width) {
+    std::vector<float> out(stage1_latent_count(channels, frames, height, width));
+    int32_t token = 0;
+    for (int32_t f = 0; f < frames; ++f) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x, ++token) {
+                for (int32_t c = 0; c < channels; ++c) {
+                    out[stage1_latent_index(c, f, y, x, frames, height, width)] =
+                        tokens[refiner_patched_index(token, c, channels)];
+                }
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<float> refiner_positions(int32_t sink_frames, int32_t current_frames, int32_t height,
+                                     int32_t width, int32_t fps) {
+    const int32_t total_frames = sink_frames + current_frames;
+    const auto tokens = refiner_token_count(total_frames, height, width);
+    std::vector<float> out(3U * tokens * 2U, 0.0F);
+    int32_t token = 0;
+    const float inv_fps = 1.0F / static_cast<float>(std::max(fps, 1));
+    for (int32_t f = 0; f < total_frames; ++f) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x, ++token) {
+                const auto base = static_cast<std::size_t>(token) * 2U;
+                out[base] = std::max(0.0F, static_cast<float>(f * 8 + 1 - 8)) * inv_fps;
+                out[base + 1U] = std::max(0.0F, static_cast<float>((f + 1) * 8 + 1 - 8)) * inv_fps;
+                const auto y_base = (tokens + static_cast<std::size_t>(token)) * 2U;
+                out[y_base] = static_cast<float>(y * 32);
+                out[y_base + 1U] = static_cast<float>((y + 1) * 32);
+                const auto x_base = (2U * tokens + static_cast<std::size_t>(token)) * 2U;
+                out[x_base] = static_cast<float>(x * 32);
+                out[x_base + 1U] = static_cast<float>((x + 1) * 32);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<float> concatenate_float_vectors(const std::vector<float>& a,
+                                             const std::vector<float>& b) {
+    std::vector<float> out;
+    out.reserve(a.size() + b.size());
+    out.insert(out.end(), a.begin(), a.end());
+    out.insert(out.end(), b.begin(), b.end());
+    return out;
 }
 
 std::vector<SanaWmIntrinsics>
@@ -1102,6 +1190,181 @@ SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
                                     native_inputs.camera, config, num_steps, cfg_scale);
 }
 
+SanaWmRefinerText run_native_refiner_text_encoder(ITrtModule& text_encoder,
+                                                  const ITokenizer& tokenizer,
+                                                  const std::string& prompt) {
+    if (!text_encoder.ok())
+        throw std::runtime_error("SANA-WM native refiner text encoder is not ready");
+    constexpr int32_t kRefinerTextLength = 256;
+    auto input_ids = tokenize_fixed(tokenizer, prompt, kRefinerTextLength);
+    auto attention_mask = attention_mask_from_tokens(input_ids);
+    TensorMap inputs;
+    inputs["input_ids"] = Tensor{input_ids.data(), {1, kRefinerTextLength}, DType::kInt32};
+    inputs["attention_mask"] =
+        Tensor{attention_mask.data(), {1, kRefinerTextLength}, DType::kInt32};
+
+    auto outputs = text_encoder.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"video_encoding", "encoder_hidden_states", "text_embeddings",
+                                     "last_hidden_state", "output0"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native refiner text output tensor not found");
+    auto shape = it->second.shape;
+    if (shape.empty())
+        shape = {1, static_cast<int64_t>(it->second.numel())};
+    return {tensor_to_float_vector(it->second, it->second.numel(), "refiner text encoder"),
+            std::move(shape)};
+}
+
+std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
+                                               const std::vector<float>& combined_latent,
+                                               const std::vector<float>& clean_latent,
+                                               const std::vector<float>& denoise_mask,
+                                               const std::vector<float>& positions,
+                                               const SanaWmRefinerText& text, float sigma,
+                                               int32_t total_tokens, int32_t channels) {
+    if (!denoiser.ok())
+        throw std::runtime_error("SANA-WM native refiner denoiser is not ready");
+
+    const auto latent_name =
+        pick_input_name(denoiser, {"latent", "hidden_states", "video_latent"},
+                        "refiner denoiser latent");
+    const auto clean_name =
+        pick_input_name(denoiser, {"clean_latent", "clean_video_latent"},
+                        "refiner denoiser clean latent");
+    const auto mask_name =
+        pick_input_name(denoiser, {"denoise_mask", "mask"}, "refiner denoiser mask");
+    const auto positions_name =
+        pick_input_name(denoiser, {"positions", "video_positions"}, "refiner denoiser positions");
+    const auto text_name =
+        pick_input_name(denoiser, {"v_context", "encoder_hidden_states", "text_embeddings"},
+                        "refiner denoiser text");
+    const auto sigma_name =
+        pick_input_name(denoiser, {"sigma", "timestep"}, "refiner denoiser sigma");
+
+    std::vector<half_bits_t> latent16;
+    std::vector<half_bits_t> clean16;
+    std::vector<half_bits_t> positions16;
+    std::vector<half_bits_t> text16;
+    std::vector<half_bits_t> sigma16;
+    std::vector<float> sigma_vec{sigma};
+    TensorMap inputs;
+    inputs[latent_name] = make_model_tensor(
+        combined_latent, latent16, input_dtype_or(denoiser, latent_name, DType::kBFloat16),
+        {1, total_tokens, channels});
+    inputs[clean_name] = make_model_tensor(
+        clean_latent, clean16, input_dtype_or(denoiser, clean_name, DType::kBFloat16),
+        {1, total_tokens, channels});
+    inputs[mask_name] = Tensor{const_cast<float*>(denoise_mask.data()), {1, total_tokens, 1},
+                               DType::kFloat32};
+    inputs[positions_name] = make_model_tensor(
+        positions, positions16, input_dtype_or(denoiser, positions_name, DType::kBFloat16),
+        {1, 3, total_tokens, 2});
+    inputs[text_name] = make_model_tensor(text.values, text16,
+                                          input_dtype_or(denoiser, text_name, DType::kBFloat16),
+                                          text.shape);
+    inputs[sigma_name] = make_model_tensor(
+        sigma_vec, sigma16, input_dtype_or(denoiser, sigma_name, DType::kFloat32), {1});
+
+    auto outputs = denoiser.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"output0", "denoised", "sample", "pred", "x0"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native refiner denoiser output tensor not found");
+    return tensor_to_float_vector(it->second, it->second.numel(), "refiner denoiser");
+}
+
+std::vector<float> refiner_current_prediction(const std::vector<float>& output,
+                                              std::size_t context_values,
+                                              std::size_t current_values) {
+    if (output.size() == current_values)
+        return output;
+    if (output.size() == context_values + current_values) {
+        return std::vector<float>(output.begin() + static_cast<std::ptrdiff_t>(context_values),
+                                  output.end());
+    }
+    if (output.size() > current_values)
+        return std::vector<float>(output.begin(), output.begin() + static_cast<std::ptrdiff_t>(current_values));
+    throw std::runtime_error("SANA-WM native refiner denoiser output is smaller than current tokens");
+}
+
+std::vector<float> refiner_euler_step(const std::vector<float>& sample,
+                                      const std::vector<float>& denoised,
+                                      float sigma, float sigma_next) {
+    if (sample.size() != denoised.size())
+        throw std::runtime_error("SANA-WM native refiner sample/prediction size mismatch");
+    std::vector<float> out(sample.size(), 0.0F);
+    const float dt = sigma_next - sigma;
+    for (std::size_t i = 0; i < sample.size(); ++i) {
+        const float velocity = (sample[i] - denoised[i]) / std::max(sigma, 1.0e-6F);
+        out[i] = sample[i] + velocity * dt;
+    }
+    return out;
+}
+
+SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& denoiser,
+                                       const ITokenizer& tokenizer,
+                                       const SanaWmStage1Latents& stage1,
+                                       const SanaWmRuntimeConfig& config,
+                                       const GenerateConfig& cfg,
+                                       const std::string& prompt) {
+    constexpr int32_t kSinkFrames = 1;
+    if (stage1.frames <= kSinkFrames)
+        throw std::runtime_error("SANA-WM native refiner requires more than one latent frame");
+    const int32_t current_frames = stage1.frames - kSinkFrames;
+    const auto text = run_native_refiner_text_encoder(text_encoder, tokenizer, prompt);
+    auto sink = patchify_refiner_latents(stage1.values, stage1.channels, 0, kSinkFrames,
+                                         stage1.frames, stage1.height, stage1.width);
+    auto current_clean = patchify_refiner_latents(stage1.values, stage1.channels, kSinkFrames,
+                                                 current_frames, stage1.frames, stage1.height,
+                                                 stage1.width);
+    auto noise = sample_stage1_noise(current_clean.size(),
+                                     cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
+                                                   : static_cast<uint64_t>(config.seed));
+    std::vector<float> current(current_clean.size(), 0.0F);
+    for (std::size_t i = 0; i < current.size(); ++i)
+        current[i] = (1.0F - kRefinerSigmas[0]) * current_clean[i] + kRefinerSigmas[0] * noise[i];
+
+    const auto positions = refiner_positions(kSinkFrames, current_frames, stage1.height,
+                                             stage1.width, config.fps);
+    const auto context_values = sink.size();
+    const auto current_values = current.size();
+    const int32_t total_tokens =
+        static_cast<int32_t>((context_values + current_values) / static_cast<std::size_t>(stage1.channels));
+    std::vector<float> clean = concatenate_float_vectors(sink, std::vector<float>(current_values, 0.0F));
+    std::vector<float> mask(static_cast<std::size_t>(total_tokens), 0.0F);
+    std::fill(mask.begin() + static_cast<std::ptrdiff_t>(context_values / stage1.channels),
+              mask.end(), 1.0F);
+
+    for (std::size_t i = 0; i + 1U < kRefinerSigmas.size(); ++i) {
+        auto combined = concatenate_float_vectors(sink, current);
+        auto output = run_native_refiner_denoiser(
+            denoiser, combined, clean, mask, positions, text, kRefinerSigmas[i], total_tokens,
+            stage1.channels);
+        auto pred = refiner_current_prediction(output, context_values, current_values);
+        current = refiner_euler_step(current, pred, kRefinerSigmas[i], kRefinerSigmas[i + 1U]);
+    }
+
+    auto current_cthw =
+        unpatchify_refiner_current(current, stage1.channels, current_frames, stage1.height,
+                                   stage1.width);
+    SanaWmStage1Latents refined;
+    refined.values = stage1.values;
+    refined.channels = stage1.channels;
+    refined.frames = stage1.frames;
+    refined.height = stage1.height;
+    refined.width = stage1.width;
+    for (int32_t c = 0; c < stage1.channels; ++c)
+        for (int32_t f = 0; f < current_frames; ++f)
+            for (int32_t y = 0; y < stage1.height; ++y)
+                for (int32_t x = 0; x < stage1.width; ++x)
+                    refined.values[stage1_latent_index(c, f + kSinkFrames, y, x, stage1.frames,
+                                                       stage1.height, stage1.width)] =
+                        current_cthw[stage1_latent_index(c, f, y, x, current_frames,
+                                                         stage1.height, stage1.width)];
+    return refined;
+}
+
 bool has_any_refiner_module(const SanaWmNativeModules& modules) {
     return modules.refiner_text_encoder || modules.refiner_denoiser || modules.refiner_vae_decoder;
 }
@@ -1163,6 +1426,56 @@ ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1La
     return result;
 }
 
+float normalize_refiner_pixel(float value) {
+    if (value > 1.0F)
+        return std::max(0.0F, std::min(1.0F, value / 255.0F));
+    return std::max(0.0F, std::min(1.0F, value));
+}
+
+ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
+                                      const SanaWmRuntimeConfig& config) {
+    if (!vae_decoder.ok())
+        throw std::runtime_error("SANA-WM native refiner VAE decoder is not ready");
+    const auto input_name =
+        pick_input_name(vae_decoder, {"latents", "sample", "z"}, "refiner VAE decoder");
+    std::vector<half_bits_t> latent16;
+    TensorMap inputs;
+    inputs[input_name] = make_model_tensor(
+        latents.values, latent16, input_dtype_or(vae_decoder, input_name, DType::kBFloat16),
+        {1, latents.channels, latents.frames, latents.height, latents.width});
+
+    auto outputs = vae_decoder.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"output0", "video", "sample", "decoder_output"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native refiner VAE decoder output tensor not found");
+
+    const int32_t output_frames = std::max(config.num_frames - 1, 1);
+    const auto direct_count = static_cast<std::size_t>(output_frames) *
+                              static_cast<std::size_t>(config.height) *
+                              static_cast<std::size_t>(config.width) * 3U;
+    const auto with_sink_count = static_cast<std::size_t>(config.num_frames) *
+                                 static_cast<std::size_t>(config.height) *
+                                 static_cast<std::size_t>(config.width) * 3U;
+    auto raw = tensor_to_float_vector(
+        it->second, it->second.numel() >= with_sink_count ? with_sink_count : direct_count,
+        "refiner VAE decoder");
+    const bool drop_sink = raw.size() >= with_sink_count;
+    const auto frame_stride =
+        static_cast<std::size_t>(config.height) * static_cast<std::size_t>(config.width) * 3U;
+
+    ImageResult result;
+    result.channels = 3;
+    result.height = config.height;
+    result.width = config.width;
+    result.num_frames = output_frames;
+    result.pixels.resize(direct_count, 0.0F);
+    const auto src_offset = drop_sink ? frame_stride : 0U;
+    for (std::size_t i = 0; i < direct_count; ++i)
+        result.pixels[i] = normalize_refiner_pixel(raw[src_offset + i]);
+    return result;
+}
+
 ImageResult run_native_image_path(SanaWmNativeModules& modules,
                                   const std::shared_ptr<ITokenizer>& tokenizer,
                                   const SanaWmRuntimeConfig& config,
@@ -1171,7 +1484,14 @@ ImageResult run_native_image_path(SanaWmNativeModules& modules,
                                   const std::string& prompt) {
     auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
     if (has_any_refiner_module(modules)) {
-        throw std::runtime_error("SANA-WM native refiner execution is not implemented yet");
+        if (!modules.has_refiner() || !tokenizer) {
+            throw std::runtime_error(
+                "SANA-WM native refiner execution requires refiner text, denoiser, VAE, and tokenizer");
+        }
+        auto refined =
+            run_native_refiner(*modules.refiner_text_encoder, *modules.refiner_denoiser,
+                               *tokenizer, latents, config, cfg, prompt);
+        return decode_native_refiner_vae(*modules.refiner_vae_decoder, refined, config);
     }
     if (!modules.vae_decoder) {
         throw std::runtime_error(
