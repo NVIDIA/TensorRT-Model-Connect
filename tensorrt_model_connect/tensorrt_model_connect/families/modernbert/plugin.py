@@ -274,7 +274,7 @@ class ModernbertPlugin:
         network.mark_output(hidden_state)
 
         if verbose:
-            print(f"[trtmc-build] Building ModernBERT encoder TRT engine "
+            print(f"[trtmc build] Building ModernBERT encoder TRT engine "
                   f"({num_layers} layers, hidden={hidden}, seq_len={max_seq}) ...",
                   file=sys.stderr)
 

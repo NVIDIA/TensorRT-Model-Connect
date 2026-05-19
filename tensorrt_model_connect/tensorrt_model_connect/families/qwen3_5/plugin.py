@@ -571,7 +571,7 @@ class Qwen35Plugin:
 
         # --- Build ---
         if verbose:
-            print(f"[trtmc-build] Building Qwen3.5 hybrid TRT engine "
+            print(f"[trtmc build] Building Qwen3.5 hybrid TRT engine "
                   f"({num_layers} layers: {num_mamba} deltanet + "
                   f"{num_attn} attention, "
                   f"hidden={hidden}, d_inner={d_inner}, "

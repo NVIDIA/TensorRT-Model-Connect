@@ -234,7 +234,7 @@ def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes] | None:
                     if f is not None:
                         heteronyms_text = f.read().decode("utf-8")
     except Exception as e:
-        print(f"[trtmc-build]   Warning: failed to read .nemo for IPA: {e}",
+        print(f"[trtmc build]   Warning: failed to read .nemo for IPA: {e}",
               file=sys.stderr)
         return None
 
@@ -249,7 +249,7 @@ def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes] | None:
             heteronyms_text = Path(het_path).read_text(encoding="utf-8")
 
     if phoneme_dict_text is None:
-        print("[trtmc-build]   Warning: could not find IPA phoneme dict",
+        print("[trtmc build]   Warning: could not find IPA phoneme dict",
               file=sys.stderr)
         return None
 
@@ -489,7 +489,7 @@ class MagpieTTSPlugin:
         override_max_pos = int(config.raw.get(
             "_audio_magpie_max_source_positions", 0))
         if 0 < override_max_pos < max_positions:
-            print(f"[trtmc-build]   Shrinking max_source_positions: "
+            print(f"[trtmc build]   Shrinking max_source_positions: "
                   f"{max_positions} -> {override_max_pos}", file=sys.stderr)
             max_positions = override_max_pos
             # Truncate encoder position embedding to new size
@@ -672,7 +672,7 @@ class MagpieTTSPlugin:
                 or k.startswith("vector_quantizer.")
             }
         except Exception as e:
-            print(f"[trtmc-build]   Warning: could not load NanoCodec: {e}",
+            print(f"[trtmc build]   Warning: could not load NanoCodec: {e}",
                   file=sys.stderr)
             # Fallback: try to extract from MagpieTTS state_dict
             codec_keys = {
@@ -910,7 +910,7 @@ class MagpieTTSPlugin:
             network.mark_output(present_v_outputs[i])
 
         if verbose:
-            print(f"[trtmc-build] Building MagpieTTS decoder "
+            print(f"[trtmc build] Building MagpieTTS decoder "
                   f"({dec_layers}L, h={hidden}, SA heads={dec_heads}, "
                   f"XA heads={xa_n_heads} d_head={xa_d_head}, "
                   f"ffn={dec_ffn}, cache={max_cache_length}, "
@@ -974,7 +974,7 @@ class MagpieTTSPlugin:
             lt_hidden = weights["_lt_hidden"]
             num_cb = weights["_num_codebooks"]
             if verbose:
-                print(f"[trtmc-build]   Building local transformer engine "
+                print(f"[trtmc build]   Building local transformer engine "
                       f"(hidden={lt_hidden}, 1 layer, {num_cb} codebooks) ...",
                       file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_magpie_local_transformer"):
@@ -1000,7 +1000,7 @@ class MagpieTTSPlugin:
             max_codec_frames = ((max_codec_frames + 63) // 64) * 64
 
             if verbose:
-                print(f"[trtmc-build]   Building NanoCodec engine "
+                print(f"[trtmc build]   Building NanoCodec engine "
                       f"(max_frames={max_codec_frames}) ...",
                       file=sys.stderr)
 
@@ -1019,10 +1019,10 @@ class MagpieTTSPlugin:
                         result[key] = data
                     if verbose:
                         for key, data in ipa_assets.items():
-                            print(f"[trtmc-build]   Baked {key} "
+                            print(f"[trtmc build]   Baked {key} "
                                   f"({len(data)} bytes)", file=sys.stderr)
             except Exception as e:
-                print(f"[trtmc-build]   Warning: IPA extraction failed, "
+                print(f"[trtmc build]   Warning: IPA extraction failed, "
                       f"Python bridge will be needed at runtime: {e}",
                       file=sys.stderr)
 
@@ -1140,7 +1140,7 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
     network.mark_output(hs)
 
     if verbose:
-        print(f"[trtmc-build] Building MagpieTTS encoder "
+        print(f"[trtmc build] Building MagpieTTS encoder "
               f"({enc_layers}L, h={hidden}, heads={enc_heads}, "
               f"ffn={enc_ffn}, kernel={enc_kernel_size}, causal=True)",
               file=sys.stderr)

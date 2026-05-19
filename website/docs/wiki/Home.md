@@ -36,7 +36,7 @@ The system has two phases.
 ### 1. Build Phase (Python)
 
 ```
-trtmc-build build <hf-model-or-dir> -o model.trtfb
+./build/trtmc build <hf-model-or-dir> -o model.trtfb
 ```
 
 - Family plugin matches `config.json` model_type
@@ -115,10 +115,10 @@ matching manifest under `tests/e2e/models/`, and validate with
 
 ```bash
 # Build a bundle from HuggingFace (inside container)
-trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 
 # Inspect the bundle
-trtmc-build inspect /tmp/qwen3.trtfb
+./build/trtmc inspect /tmp/qwen3.trtfb
 
 # Run inference
 ./build/trtmc run /tmp/qwen3.trtfb \
@@ -127,7 +127,7 @@ trtmc-build inspect /tmp/qwen3.trtfb
   --hf-python /opt/venv/bin/python
 
 # Vision-language model
-trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
+./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
 ./build/trtmc run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image." --image photo.jpg \
   --max-new-tokens 30 --hf-python /opt/venv/bin/python

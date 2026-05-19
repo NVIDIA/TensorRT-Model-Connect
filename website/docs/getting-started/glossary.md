@@ -30,7 +30,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | TensorRT | NVIDIA inference compiler/runtime. | Build-time code creates engine plans; runtime code deserializes and executes them. |
 | Engine plan | Serialized TensorRT execution artifact. | Stored in bundle sections such as `engine_plan`, `vision_engine_plan`, or `denoiser_plan`. |
 | `.trtfb` bundle | TensorRT-Model-Connect deployable artifact. | A container with metadata, config, engine plans, tokenizer assets, and other sections. |
-| HuggingFace model ID | A repo name such as `Qwen/Qwen3-0.6B`. | `trtmc-build` resolves it to a local model directory, downloading files if needed. |
+| HuggingFace model ID | A repo name such as `Qwen/Qwen3-0.6B`. | `trtmc build` resolves it to a local model directory, downloading files if needed. |
 | Precision | Numeric format used by engine weights/activations. | `fp16` is common for fast GPU smoke tests; `fp32` is larger and usually slower. |
 | Quantization | Lower-precision representation such as FP8 or INT4. | Reduces footprint or latency when supported by the family and backend. |
 | Backend DSO | A runtime-loaded shared library. | `libtrtmc_backend_trt.so` and `libtrtmc_backend_trt_rtx.so` isolate TensorRT ABI-sensitive calls. |
@@ -40,7 +40,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
-| Python builder | Build-time conversion tool. | `trtmc-build` reads checkpoints, builds engine plans, and writes `.trtfb` bundles. |
+| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, builds engine plans, and writes `.trtfb` bundles. |
 | C++ runtime | Request-time execution library and CLI. | `./build/trtmc` and `trtmc::load()` load bundles and run task APIs. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `timesfm`. It handles config and weights. |
 | Runtime strategy | C++ dispatch key in bundle metadata. | Examples: `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `timesfm_torchtrt`. |

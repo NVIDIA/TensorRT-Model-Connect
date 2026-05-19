@@ -4,7 +4,7 @@ Pure Python, no TRT needed. Tests the CLI argument parser without
 actually invoking engine builds.
 
 Trace: ARCH-ENG-001, UD-ENG-01
-Intent: Validate that the trtmc-build CLI correctly parses build/inspect/version subcommands and their arguments.
+Intent: Validate that the trtmc CLI correctly parses build/inspect/version subcommands and their arguments.
 Preconditions: tensorrt_model_connect.cli is importable; no TRT or GPU required.
 Postconditions: Parsed arguments match expected values for all subcommands, defaults, and edge cases.
 """
@@ -23,13 +23,13 @@ class TestBuildArgs:
     def test_build_with_all_args(self):
         """Verify build command parses all arguments."""
         test_args = [
-            "trtmc-build", "build", "Qwen/Qwen3-0.6B",
+            "trtmc", "build", "Qwen/Qwen3-0.6B",
             "-o", "/tmp/out.trtfb",
             "--max-cache-length", "512",
             "--verbose",
         ]
         with patch.object(sys, "argv", test_args):
-            parser = argparse.ArgumentParser(prog="trtmc-build")
+            parser = argparse.ArgumentParser(prog="trtmc")
             subparsers = parser.add_subparsers(dest="command")
             build_p = subparsers.add_parser("build")
             build_p.add_argument("model")
@@ -98,7 +98,7 @@ class TestInspectArgs:
 
 class TestVersionCommand:
     def test_version_exits_zero(self):
-        """trtmc-build version should return 0."""
+        """trtmc version should return 0."""
         from tensorrt_model_connect.cli import _cmd_version
         result = _cmd_version(argparse.Namespace())
         assert result == 0
@@ -521,7 +521,7 @@ class TestCmdBuildMocked:
         with patch.object(
             sys,
             "argv",
-            ["trtmc-build", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
+            ["trtmc", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
         ):
             assert cli._cmd_build(args) == 0
 

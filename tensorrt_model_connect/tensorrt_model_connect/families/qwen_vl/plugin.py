@@ -499,7 +499,7 @@ def _build_qwen3_vl_decoder(
 
     # --- Build ---
     if verbose:
-        print(f"[trtmc-build] Building Qwen3-VL decoder engine "
+        print(f"[trtmc build] Building Qwen3-VL decoder engine "
               f"({num_layers} layers, hidden={hidden}, attn={attention_size}, "
               f"mlp={mlp_size}, cache={max_cache_length}, "
               f"deepstack_levels={deepstack_num_levels}) ...",

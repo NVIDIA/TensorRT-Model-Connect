@@ -201,7 +201,7 @@ def build_fnet_encoder_engine(
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc-build] Building FNet encoder TRT engine "
+        print(f"[trtmc build] Building FNet encoder TRT engine "
               f"({num_layers} layers, hidden={hidden}, "
               f"seq_len={S}) ...", file=sys.stderr)
 

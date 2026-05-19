@@ -488,7 +488,7 @@ def _build_metadata(manifest: dict) -> dict:
         meta["trust_remote_code"] = manifest["trust_remote_code"]
 
     # Propagate precision to metadata so the orchestrator can pass it to
-    # the trtmc-build CLI when building bundles.
+    # the trtmc build CLI when building bundles.
     if "precision" in manifest:
         meta["precision"] = manifest["precision"]
 

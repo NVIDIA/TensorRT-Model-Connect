@@ -507,7 +507,7 @@ def build_standard_decoder_engine(
     # Build engine
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building TRT engine ({num_layers} layers, "
+        print(f"[trtmc build] Building TRT engine ({num_layers} layers, "
               f"hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, "
               f"mlp={mlp_size}, "
               f"cache={max_cache_length}, precision={precision}) ...",

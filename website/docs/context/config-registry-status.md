@@ -282,7 +282,7 @@ deleted (hard removal with no shims), tests updated.
   TRTMC_HAS_TRT / TRTMC_SOURCE_DIR / TRTMC_VERSION_STRING which are
   compile-time machinery, not env vars.
 - [x] Qwen3-0.6B smoke (D6) — commit TBD
-  - `trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+  - `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
     --max-cache-length 256 --set triattention.kv_budget=2048
     --set triattention.recent_window=64` — build succeeded (86.8s),
     `/tmp/qwen3-0.6b-smoke.effective_config.json` was written alongside
@@ -402,7 +402,7 @@ deleted (hard removal with no shims), tests updated.
   `extra_contributions` platform layer, and the
   `write_effective_config_next_to` artifact placement.
 - Gates: 54/54 tests pass (25 new + 23 mirror + 6 from schema-registry
-  rerun); `trtmc-build build --help` now shows `--config` and
+  rerun); `./build/trtmc build --help` now shows `--config` and
   `--set` in the help text; 81 existing builder/cli tests still pass,
   confirming no regression from the package rename.
 - Commit: `4daa555e`.
@@ -455,7 +455,7 @@ deleted (hard removal with no shims), tests updated.
 ### Tick 18 (2026-04-20) — loop terminates after this tick
 - Ran the Qwen3-0.6B end-to-end smoke under the new config path.
 - Build command:
-    `trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+    `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
      --max-cache-length 256 --set triattention.kv_budget=2048
      --set triattention.recent_window=64`
   completed in 86.8s. Output files:
@@ -500,7 +500,7 @@ self-registering config registry. Seven namespaces are registered:
   - one manifest line in `cmake/trtmc_config_schemas.cmake`.
 
 The two-flag CLI surface (`--config`, `--set`) is wired into `trtmc`,
-`trtmc-build`, `trtmc_dataset_benchmark`, and the AIME25 benchmark
+`trtmc build`, `trtmc_dataset_benchmark`, and the AIME25 benchmark
 orchestrator. No per-knob flags exist; new clusters plug in with
 exactly their own files + one schema manifest line.
 

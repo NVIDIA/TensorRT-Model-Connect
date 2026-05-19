@@ -10,10 +10,14 @@ import re
 import shutil
 import subprocess
 import tempfile
-import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
+    import tomli as tomllib
 
 PROFILE_PHASES = ("build", "runtime", "reference")
 DEFAULT_PROFILE = "base"
@@ -64,7 +68,7 @@ def profile_root() -> Path:
 
 @lru_cache(maxsize=1)
 def load_python_profile_registry() -> dict[str, Any]:
-    """Load the declarative profile registry bundled with trtmc-build."""
+    """Load the declarative profile registry bundled with the Python builder."""
     registry_file = _PACKAGE_DIR / "python_profiles.toml"
     with registry_file.open("rb") as f:
         registry = tomllib.load(f)

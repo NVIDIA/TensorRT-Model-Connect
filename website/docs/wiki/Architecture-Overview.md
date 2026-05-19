@@ -38,7 +38,7 @@ The system operates in two strictly separated phases:
 
 | Phase | Language | Entry Point | Input | Output |
 |-------|----------|-------------|-------|--------|
-| **Build** | Python | `trtmc-build build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
+| **Build** | Python | `./build/trtmc build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
 | **Run** | C++ | `trtmc run` / `trtmc::load()` / C ABI | `.trtfb` bundle | Task-specific results |
 
 The bundle is the sole interface between the two phases. The C++ runtime never reads HuggingFace model directories directly. All model-specific architectural decisions (attention type, normalization, activation functions, weight layout) are baked into the TRT engine plan at build time.

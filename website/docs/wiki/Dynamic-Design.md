@@ -35,7 +35,7 @@ sequenceDiagram
     participant Plugin as FamilyPlugin
     participant Writer as bundle_writer.py write_bundle()
 
-    User->>CLI: trtmc-build build <model> -o model.trtfb
+    User->>CLI: ./build/trtmc build <model> -o model.trtfb
     CLI->>EB: build(model_id_or_path, output_path, max_cache_length)
     EB->>Resolve: _resolve_model(model_id_or_path)
     Note over Resolve: Local dir with config.json? Return directly.<br/>HF repo ID? snapshot_download().<br/>.nemo archive? Extract to synthetic HF dir.

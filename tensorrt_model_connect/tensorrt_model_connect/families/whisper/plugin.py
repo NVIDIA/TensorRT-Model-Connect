@@ -260,7 +260,7 @@ class WhisperPlugin:
             network.mark_output(present_v_outputs[i])
 
         if verbose:
-            print(f"[trtmc-build] Building Whisper decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length}, precision={precision})", file=sys.stderr)
+            print(f"[trtmc build] Building Whisper decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length}, precision={precision})", file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT decoder engine build failed")
@@ -304,7 +304,7 @@ class WhisperPlugin:
         try:
             from transformers.audio_utils import mel_filter_bank
         except ImportError:
-            print("[trtmc-build] Warning: transformers.audio_utils not available, "
+            print("[trtmc build] Warning: transformers.audio_utils not available, "
                   "skipping mel filterbank embedding", file=sys.stderr)
             return None
 
@@ -328,7 +328,7 @@ class WhisperPlugin:
         mel_fb_bytes = header.tobytes() + filters_flat.tobytes()
 
         if verbose:
-            print(f"[trtmc-build] Mel filterbank: {n_freq_bins}x{num_mel_bins} "
+            print(f"[trtmc build] Mel filterbank: {n_freq_bins}x{num_mel_bins} "
                   f"({len(mel_fb_bytes)} bytes)", file=sys.stderr)
 
         return {"mel_filterbank": mel_fb_bytes}
@@ -429,7 +429,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     network.mark_output(hs)
 
     if verbose:
-        print(f"[trtmc-build] Building Whisper encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, mel={num_mel_bins}, precision={precision})", file=sys.stderr)
+        print(f"[trtmc build] Building Whisper encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, mel={num_mel_bins}, precision={precision})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TensorRT encoder engine build failed")

@@ -684,7 +684,7 @@ class Qwen3OmniPlugin:
             network.mark_output(pv)
 
         if verbose:
-            print(f"[trtmc-build] Building Qwen3-Omni Thinker MoE engine "
+            print(f"[trtmc build] Building Qwen3-Omni Thinker MoE engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, experts={num_experts}, "
                   f"top_k={top_k}, inter={moe_intermediate}, "
@@ -757,7 +757,7 @@ class Qwen3OmniPlugin:
         audio_cfg = weights.get("_audio_encoder_cfg", {})
         if audio_cfg and audio_cfg.get("num_layers", 0) > 0:
             if verbose:
-                print("[trtmc-build]   Building audio encoder engine ...",
+                print("[trtmc build]   Building audio encoder engine ...",
                       file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_audio_encoder"):
                 audio_plan = _build_audio_encoder_engine(
@@ -769,7 +769,7 @@ class Qwen3OmniPlugin:
         talker_cfg = weights.get("_talker_cfg", {})
         if talker_cfg and talker_cfg.get("num_layers", 0) > 0:
             if verbose:
-                print("[trtmc-build]   Building Talker engine ...",
+                print("[trtmc build]   Building Talker engine ...",
                       file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_talker_decoder"):
                 talker_plan = _build_talker_engine(
@@ -782,7 +782,7 @@ class Qwen3OmniPlugin:
         code2wav_cfg = weights.get("_code2wav_cfg", {})
         if code2wav_cfg and code2wav_cfg.get("n_upsample_blocks", 0) > 0:
             if verbose:
-                print("[trtmc-build]   Building Code2Wav engine ...",
+                print("[trtmc build]   Building Code2Wav engine ...",
                       file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_code2wav_decoder"):
                 code2wav_plan = _build_code2wav_engine(
@@ -1182,7 +1182,7 @@ def _build_audio_encoder_engine(
     network.mark_output(hidden)
 
     if verbose:
-        print(f"[trtmc-build] Building Qwen3-Omni audio encoder "
+        print(f"[trtmc build] Building Qwen3-Omni audio encoder "
               f"({num_layers} layers, embed={embed_dim}, "
               f"mel={num_mel}, frames={num_frames}) ...", file=sys.stderr)
 
@@ -1263,7 +1263,7 @@ def _build_talker_engine(
         std_weights[k] = v
 
     if verbose:
-        print(f"[trtmc-build]   Talker: layers={num_layers}, "
+        print(f"[trtmc build]   Talker: layers={num_layers}, "
               f"hidden={talker_hidden}, vocab={talker_vocab}, "
               f"codebooks={n_codebooks}, cb_size={codebook_size}",
               file=sys.stderr)
@@ -1277,7 +1277,7 @@ def _build_talker_engine(
         )
         return plan
     except Exception as e:
-        print(f"[trtmc-build]   Warning: Talker engine build failed: {e}",
+        print(f"[trtmc build]   Warning: Talker engine build failed: {e}",
               file=sys.stderr)
         return None
 
@@ -1381,7 +1381,7 @@ def _build_code2wav_engine(
     network.mark_output(hidden)
 
     if verbose:
-        print(f"[trtmc-build] Building Qwen3-Omni Code2Wav engine "
+        print(f"[trtmc build] Building Qwen3-Omni Code2Wav engine "
               f"({n_upsample} upsample blocks, embed={embed_dim}, "
               f"max_frames={max_frames}, upsample={total_upsample}x) ...",
               file=sys.stderr)

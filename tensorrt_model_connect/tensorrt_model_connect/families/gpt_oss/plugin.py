@@ -62,7 +62,7 @@ class GptOssPlugin:
         import torch
         from transformers import AutoModelForCausalLM
 
-        print("[trtmc-build] Loading GPT-OSS model (MXFP4 auto-dequant) ...",
+        print("[trtmc build] Loading GPT-OSS model (MXFP4 auto-dequant) ...",
               file=sys.stderr, flush=True)
 
         model = AutoModelForCausalLM.from_pretrained(
@@ -409,7 +409,7 @@ class GptOssPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building GPT-OSS MoE TRT engine "
+            print(f"[trtmc build] Building GPT-OSS MoE TRT engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, experts={num_experts}, "
                   f"top_k={top_k}, inter={moe_intermediate}, "

@@ -294,7 +294,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 |------|---------|
 | `__init__.py` | Package init, public `build()` API |
 | `__main__.py` | `python -m tensorrt_model_connect` entry |
-| `cli.py` | CLI: `trtmc-build build|inspect|version` |
+| `cli.py` | CLI: `./build/trtmc build|inspect|version` |
 | `config.py` | `ModelConfig` from HF `config.json` |
 | `checkpoint_mapper.py` | HF safetensors -> weight dict |
 | `graph_ops.py` | Layer 1: atomic TRT graph ops |

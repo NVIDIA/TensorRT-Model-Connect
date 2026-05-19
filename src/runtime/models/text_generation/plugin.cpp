@@ -210,7 +210,7 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
     if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtmc-build --dynamic-kv-cache to use --kv-cache-size.");
+            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
     }
 
     const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;

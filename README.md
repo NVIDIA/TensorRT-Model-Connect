@@ -36,7 +36,7 @@ pip install -e tensorrt_model_connect/
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 ./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
@@ -44,6 +44,10 @@ trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 ```
 
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
+
+Nightly GitHub Releases include a Linux wheel for the unified CLI. The wheel
+installs a `trtmc` console command that dispatches to the packaged native
+executable and uses the installing Python environment for `trtmc build`.
 
 ## Useful Docs
 

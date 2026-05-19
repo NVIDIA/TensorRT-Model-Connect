@@ -4,7 +4,7 @@
 // Trace ID:       UT-CLI-CPP-01
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-CABI-01
-// Intent:         CLI argument parsing for run/inspect/version commands
+// Intent:         CLI argument parsing for build/run/inspect/version commands
 // Preconditions:  None
 // Postconditions: Parsed args match expected command and options
 // =============================================================================
@@ -14,7 +14,7 @@
 //
 // Purpose:
 //   Validates the CLI argument parser that powers the `trtmc` executable. The
-//   parser handles subcommands (run, detect, inspect, version, help),
+//   parser handles subcommands (build, run, detect, inspect, version, help),
 //   positional arguments (bundle path), and option flags (--prompt,
 //   --max-new-tokens, --hf-python, detection aliases).
 //
@@ -64,6 +64,7 @@ namespace {
 
 struct CliArgs {
     std::string command;
+    std::vector<std::string> build_args;
     std::string model_or_bundle;
     std::string prompt;
     std::string hf_python;
@@ -152,6 +153,12 @@ CliArgs parse_args(int argc, const char** argv) {
 
     if (args.command == "help" || args.command == "--help" || args.command == "-h") {
         args.show_help = true;
+        return args;
+    }
+
+    if (args.command == "build") {
+        for (int i = 2; i < argc; ++i)
+            args.build_args.emplace_back(argv[i]);
         return args;
     }
 
@@ -440,6 +447,26 @@ static void test_version_subcommand() {
 }
 
 // -----------------------------------------------------------------------------
+// Intention: Verify that "trtmc build" preserves builder arguments verbatim for
+//   the Python builder bridge.
+// Setup: Simulated argv with build + model/output/cache flags.
+// Mechanism: Calls parse(), checks command=="build" and all trailing tokens were
+//   captured without validation by the C++ runtime parser.
+// -----------------------------------------------------------------------------
+static void test_build_forwards_args() {
+    auto args = parse({"trtmc", "build", "Qwen/Qwen3-0.6B", "-o", "/tmp/qwen.trtfb",
+                       "--max-cache-length", "512"});
+    check(!args.parse_error, "build no parse error");
+    check(args.command == "build", "build command");
+    check(args.build_args.size() == 5, "build arg count");
+    check(args.build_args[0] == "Qwen/Qwen3-0.6B", "build model arg");
+    check(args.build_args[1] == "-o", "build output flag");
+    check(args.build_args[2] == "/tmp/qwen.trtfb", "build output path");
+    check(args.build_args[3] == "--max-cache-length", "build cache flag");
+    check(args.build_args[4] == "512", "build cache value");
+}
+
+// -----------------------------------------------------------------------------
 // Intention: Verify that an unknown flag (e.g., --bogus) is rejected with a
 //   parse error whose message mentions the offending flag.
 // Setup: Simulated argv with "run" + "--bogus".
@@ -578,6 +605,7 @@ int main() {
     test_no_args_shows_usage();
     test_help_flag();
     test_version_subcommand();
+    test_build_forwards_args();
     test_unknown_flag_errors();
     test_unknown_command_errors();
     test_all_run_flags_combined();

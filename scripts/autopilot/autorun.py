@@ -84,7 +84,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} python3 scripts/new_family.py \\
         --model-type {model_type} --hf-repo {hf_id} --family-name {family_name}
     docker exec trtmc-dev-gb300-{agent_id} bash -c \\
-        'trtmc-build build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
+        './build/trtmc build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
     ```
 
     ### Validate (3 mandatory gates — ALL must pass)

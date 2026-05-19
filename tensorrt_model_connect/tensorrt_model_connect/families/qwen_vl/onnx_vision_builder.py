@@ -56,7 +56,7 @@ def build_engine_from_onnx(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     if verbose:
-        print(f"[trtmc-build] Building vision TRT engine from ONNX "
+        print(f"[trtmc build] Building vision TRT engine from ONNX "
               f"({network.num_layers} layers) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
@@ -112,7 +112,7 @@ def trace_hf_vision_encoder(
         image_size = vision_config.get("image_size", 224)
 
     if verbose:
-        print(f"[trtmc-build] Tracing vision encoder to ONNX "
+        print(f"[trtmc build] Tracing vision encoder to ONNX "
               f"(image_size={image_size}) ...", file=sys.stderr)
 
     # Load the full model and extract the vision encoder
@@ -151,7 +151,7 @@ def trace_hf_vision_encoder(
 
     onnx_bytes = onnx_buffer.getvalue()
     if verbose:
-        print(f"[trtmc-build] ONNX export done ({len(onnx_bytes) / 1024:.0f} KB)",
+        print(f"[trtmc build] ONNX export done ({len(onnx_bytes) / 1024:.0f} KB)",
               file=sys.stderr)
 
     return build_vision_engine_from_onnx(onnx_bytes, verbose=verbose)

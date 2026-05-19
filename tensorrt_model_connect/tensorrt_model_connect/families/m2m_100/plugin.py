@@ -304,7 +304,7 @@ class M2M100Plugin:
             network.mark_output(present_v_outputs[i])
 
         if verbose:
-            print(f"[trtmc-build] Building M2M-100 decoder ({dec_layers}L, h={hidden}, "
+            print(f"[trtmc build] Building M2M-100 decoder ({dec_layers}L, h={hidden}, "
                   f"heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})",
                   file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
@@ -430,7 +430,7 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
     network.mark_output(hs)
 
     if verbose:
-        print(f"[trtmc-build] Building M2M-100 encoder ({enc_layers}L, h={hidden}, "
+        print(f"[trtmc build] Building M2M-100 encoder ({enc_layers}L, h={hidden}, "
               f"heads={enc_heads}, src_len={max_source_length})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:

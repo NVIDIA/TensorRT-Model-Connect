@@ -384,7 +384,7 @@ def build_nanocodec_decoder_engine(
 
     if verbose:
         ns = max_frames * TOTAL_UPSAMPLE
-        print(f"[trtmc-build] Building NanoCodec decoder engine "
+        print(f"[trtmc build] Building NanoCodec decoder engine "
               f"(max_frames={max_frames}, samples={ns}, "
               f"res_groups={num_res_groups}) ...", file=sys.stderr)
 

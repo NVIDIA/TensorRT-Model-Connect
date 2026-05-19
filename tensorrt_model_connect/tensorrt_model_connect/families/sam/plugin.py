@@ -587,7 +587,7 @@ class SamPlugin:
         network.mark_output(output)
 
         if verbose:
-            print(f"[trtmc-build] Building SAM encoder engine "
+            print(f"[trtmc build] Building SAM encoder engine "
                   f"(image={image_size}x{image_size}, hidden={hidden}, "
                   f"layers={num_layers}) ...", file=sys.stderr)
 
@@ -988,7 +988,7 @@ class SamPlugin:
         network.mark_output(iou_out)
 
         if verbose:
-            print(f"[trtmc-build] Building SAM mask decoder engine "
+            print(f"[trtmc build] Building SAM mask decoder engine "
                   f"(decoder_hidden={decoder_hidden}, depth={decoder_depth}) ...",
                   file=sys.stderr)
 

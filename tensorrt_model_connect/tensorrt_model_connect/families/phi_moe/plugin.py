@@ -358,7 +358,7 @@ class PhiMoEPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building MoE TRT engine ({num_layers} layers, "
+            print(f"[trtmc build] Building MoE TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, attn={attention_size}, "
                   f"experts={num_experts}, top_k={top_k}, "
                   f"inter={moe_intermediate}, "

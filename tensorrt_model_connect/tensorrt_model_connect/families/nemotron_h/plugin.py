@@ -432,7 +432,7 @@ class NemotronHPlugin:
 
         # --- Build ---
         if verbose:
-            print(f"[trtmc-build] Building NemotronH hybrid TRT engine "
+            print(f"[trtmc build] Building NemotronH hybrid TRT engine "
                   f"({num_layers} layers: {num_mamba} mamba2 + "
                   f"{sum(1 for t in layer_types if t == 'mlp')} mlp + "
                   f"{num_attn} attention, "

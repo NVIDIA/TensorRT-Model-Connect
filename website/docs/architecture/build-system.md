@@ -14,9 +14,9 @@ flowchart TB
   end
 
   subgraph Python["Python builder package"]
-    PyProj["tensorrt_model_connect/pyproject.toml"] --> Console["trtmc-build console script"]
-    Console --> Families["family plugins"]
-    Console --> Engines["engine builders"]
+    PyProj["tensorrt_model_connect/pyproject.toml"] --> BuilderModule["tensorrt_model_connect module"]
+    BuilderModule --> Families["family plugins"]
+    BuilderModule --> Engines["engine builders"]
   end
 
   subgraph Generated["Generated registration"]
@@ -61,7 +61,7 @@ The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
 
 ## Python package
 
-`tensorrt_model_connect/pyproject.toml` defines the package `trtmc-build` and the `trtmc-build` console script. TensorRT installation is deliberately environment-specific and not forced through package metadata.
+`tensorrt_model_connect/pyproject.toml` defines the Python builder package consumed by `trtmc build`. TensorRT installation is deliberately environment-specific and not forced through package metadata.
 
 ## Generated registration files
 

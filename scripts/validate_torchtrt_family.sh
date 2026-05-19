@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Validate a Torch-TRT model family end-to-end:
-#   1. Build .ttrtb bundle
+#   1. Build .trtfb bundle
 #   2. Diff logits (Torch-TRT StaticCache vs HF eager)
 #   3. Runner parity (Python Torch-TRT vs C++ binary) [if binary available]
 #
@@ -56,7 +56,7 @@ fi
 
 # Derive a safe bundle filename
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
-BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.ttrtb"
+BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
 
 # Python with HF/TRT deps
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
@@ -83,8 +83,8 @@ run_step() {
 }
 
 # Step 1: Build bundle
-run_step "Build .ttrtb bundle" \
-    trtmc-build build --torch-trt "$MODEL" -o "$BUNDLE_PATH" \
+run_step "Build .trtfb bundle" \
+    env TRTMC_PYTHON="$HF_PYTHON" "$BINARY" build --method torchtrt "$MODEL" -o "$BUNDLE_PATH" \
         --max-cache-length "$MAX_CACHE_LENGTH" \
         --precision "$PRECISION"
 
@@ -94,7 +94,7 @@ run_step "diff_torchtrt (battery)" \
         --model "$MODEL" --atol 1e-2 --battery \
         --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
 
-# Step 3: C++ runner (if binary exists and supports .ttrtb)
+# Step 3: C++ runner (if binary exists)
 if [[ -x "$BINARY" ]]; then
     run_step "C++ inference" \
         "$BINARY" run "$BUNDLE_PATH" \

@@ -276,7 +276,7 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc-build] Building DeBERTa encoder ({num_layers} layers, hidden={hidden}, seq={max_seq_length})", file=sys.stderr)
+        print(f"[trtmc build] Building DeBERTa encoder ({num_layers} layers, hidden={hidden}, seq={max_seq_length})", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:

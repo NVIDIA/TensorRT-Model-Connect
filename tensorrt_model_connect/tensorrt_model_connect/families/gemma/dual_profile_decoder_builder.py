@@ -684,7 +684,7 @@ def build_dual_profile_decoder_engine(
 
     if verbose:
         mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
-        print(f"[trtmc-build] Building {mode_label} engine "
+        print(f"[trtmc build] Building {mode_label} engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
               f"kv={kv_attention_size}, "
               f"mlp={mlp_size}, cache={max_cache_length}, "

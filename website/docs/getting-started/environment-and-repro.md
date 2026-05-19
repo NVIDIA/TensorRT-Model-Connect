@@ -9,8 +9,8 @@ This page is the first-run contract. Complete it before building a model bundle.
 ```mermaid
 flowchart TB
   Host["Linux host<br/>GPU driver + Docker"] --> Container["Dev container<br/>CUDA + TensorRT + Python deps"]
-  Container --> Builder["trtmc-build<br/>Python bundle builder"]
-  Container --> Runtime["./build/trtmc<br/>C++ runtime CLI"]
+  Container --> Runtime["./build/trtmc<br/>build + C++ runtime CLI"]
+  Runtime --> Builder["Python bundle builder"]
   Builder --> Bundle["model.trtfb"]
   Bundle --> Runtime
 ```
@@ -62,7 +62,6 @@ Run these commands before building a model:
 
 ```bash
 python -c "import transformers, tensorrt; print('python inference deps ok')"
-trtmc-build version
 ./build/trtmc version
 ./build/trtmc --help
 ```
@@ -71,15 +70,14 @@ Expected signals:
 
 ```text
 python inference deps ok
-trtmc-build 0.1.0
-TensorRT: <installed version>
 trtmc 0.1.0
 TRT support: yes
 Usage:
+  trtmc build ...
   trtmc run ...
 ```
 
-If `trtmc-build version` works but `./build/trtmc version` does not, debug the C++ runtime environment. If `./build/trtmc version` works but model build fails, debug Python dependencies, model resolution, or TensorRT build errors.
+If `./build/trtmc version` fails, debug the C++ runtime environment. If `./build/trtmc build ...` fails, debug Python dependencies, model resolution, or TensorRT build errors.
 
 ## 4. Know What The First Model Build Does
 
@@ -89,9 +87,9 @@ The quick-start model is:
 Qwen/Qwen3-0.6B
 ```
 
-On the first build, `trtmc-build` may download model files from HuggingFace into the cache visible inside the container. Expect network access, cache writes, GPU memory use during TensorRT build, and a build time that is much longer than normal program startup.
+On the first build, `./build/trtmc build` may download model files from HuggingFace into the cache visible inside the container. Expect network access, cache writes, GPU memory use during TensorRT build, and a build time that is much longer than normal program startup.
 
-For gated or private models, log in or provide the required HuggingFace token before running `trtmc-build`.
+For gated or private models, log in or provide the required HuggingFace token before running `./build/trtmc build`.
 
 ## 5. First-Failure Triage
 

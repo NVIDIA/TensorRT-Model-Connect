@@ -423,7 +423,7 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
 
     if verbose:
         step = "first" if first_step else "next"
-        print(f"[trtmc-build] Building RNNT streaming encoder {step} "
+        print(f"[trtmc build] Building RNNT streaming encoder {step} "
               f"(right={right_context}, mel={mel_len}, frames={query_len})",
               file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
@@ -783,7 +783,7 @@ def _build_predictor(weights: WeightDict, *, verbose: bool = False) -> bytes:
         network.mark_output(next_c[layer])
 
     if verbose:
-        print(f"[trtmc-build] Building RNNT predictor ({pred_layers}L, h={pred_hidden})",
+        print(f"[trtmc build] Building RNNT predictor ({pred_layers}L, h={pred_hidden})",
               file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -841,7 +841,7 @@ def _build_joint(weights: WeightDict, *, verbose: bool = False) -> bytes:
     network.mark_output(logits)
 
     if verbose:
-        print(f"[trtmc-build] Building RNNT joint (enc={enc_hidden}, pred={pred_hidden}, "
+        print(f"[trtmc build] Building RNNT joint (enc={enc_hidden}, pred={pred_hidden}, "
               f"joint={joint_hidden}, vocab={vocab_total})", file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -868,7 +868,7 @@ def _build_mel_filterbank(weights: WeightDict, *, verbose: bool = False) -> byte
         try:
             from transformers.audio_utils import mel_filter_bank
         except ImportError:
-            print("[trtmc-build] Warning: mel filterbank builder not available", file=sys.stderr)
+            print("[trtmc build] Warning: mel filterbank builder not available", file=sys.stderr)
             return None
         filters = mel_filter_bank(
             num_frequency_bins=n_freq_bins,
@@ -882,7 +882,7 @@ def _build_mel_filterbank(weights: WeightDict, *, verbose: bool = False) -> byte
     filters_flat = np.ascontiguousarray(filters, dtype=np.float32)
     header = np.array([n_freq_bins, num_mel_bins], dtype=np.int32)
     if verbose:
-        print(f"[trtmc-build] RNNT mel filterbank: {n_freq_bins}x{num_mel_bins}",
+        print(f"[trtmc build] RNNT mel filterbank: {n_freq_bins}x{num_mel_bins}",
               file=sys.stderr)
     return header.tobytes() + filters_flat.tobytes()
 

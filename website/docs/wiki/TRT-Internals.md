@@ -137,7 +137,7 @@ Interpolation is configurable: `"bicubic"` (default, Catmull-Rom), `"bilinear"` 
 
 ### Engine Compilation (Python)
 
-Engine compilation happens during `trtmc-build build`:
+Engine compilation happens during `./build/trtmc build`:
 - TensorRT compiles the network graph into optimized CUDA kernels
 - Compilation takes 30-300 seconds depending on model size
 - The serialized plan is written into the `.trtfb` bundle

@@ -1,6 +1,7 @@
 // trtmc CLI — command-line interface using the new C++ library API.
 //
 // Usage:
+//   trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]
 //   trtmc run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--benchmark N]
 //                        [--warmup N] [--num-samples N] [--num-steps N]
 //                        [--guidance-scale S] [--cfg-scale S] [--sde-gamma S]
@@ -14,7 +15,7 @@
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
-//   trtmc inspect         <bundle.trtfb>
+//   trtmc inspect         <bundle.trtfb> [--list-engines]
 //   trtmc version
 
 #include "stb_image_write.h"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -41,12 +43,16 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
+#include <system_error>
+#include <unistd.h>
 #include <vector>
 
 namespace {
 
 struct CliArgs {
     std::string command;
+    std::vector<std::string> build_args;
     std::string bundle_path;
     std::string prompt;
     std::string hf_python;
@@ -98,6 +104,7 @@ struct CliArgs {
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     bool cuda_graphs{false};
+    bool list_engines{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -174,6 +181,7 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
 void print_usage() {
     std::cerr
         << "Usage:\n"
+           "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
@@ -207,13 +215,16 @@ void print_usage() {
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-           "  trtmc inspect         <bundle.trtfb>\n"
+           "  trtmc inspect         <bundle.trtfb> [--list-engines]\n"
            "  trtmc version\n"
            "\n"
            "Options:\n"
            "  --backend-dir PATH    Extra directory to search for libtrtmc_backend_*.so\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
-           "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n";
+           "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
+           "\n"
+           "Build uses Python module tensorrt_model_connect. Set TRTMC_PYTHON or PYTHON to "
+           "choose the build interpreter.\n";
 }
 
 CliArgs parse_args(int argc, char** argv) {
@@ -233,6 +244,12 @@ CliArgs parse_args(int argc, char** argv) {
 
     if (args.command == "help" || args.command == "--help" || args.command == "-h") {
         args.show_help = true;
+        return args;
+    }
+
+    if (args.command == "build") {
+        for (int i = 2; i < argc; ++i)
+            args.build_args.emplace_back(argv[i]);
         return args;
     }
 
@@ -487,6 +504,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.cuda_graphs = true;
             continue;
         }
+        if (arg == "--list-engines") {
+            args.list_engines = true;
+            continue;
+        }
         if (arg == "--config" && need_value(arg)) {
             args.config_path = argv[++i];
             continue;
@@ -515,6 +536,92 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     return args;
+}
+
+std::string build_pythonpath() {
+    std::string pythonpath;
+
+#ifdef TRTMC_SOURCE_DIR
+    const char* disable_source_pythonpath = std::getenv("TRTMC_DISABLE_SOURCE_PYTHONPATH");
+    if (!disable_source_pythonpath || disable_source_pythonpath[0] == '\0') {
+        const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
+        std::error_code ec;
+        if (std::filesystem::is_directory(source_pkg, ec)) {
+            pythonpath = source_pkg.string();
+        }
+    }
+#endif
+
+    const char* existing = std::getenv("PYTHONPATH");
+    if (existing && existing[0] != '\0') {
+        if (!pythonpath.empty())
+            pythonpath += ":";
+        pythonpath += existing;
+    }
+    return pythonpath;
+}
+
+int run_python_module(const std::vector<std::string>& argv) {
+    if (argv.empty()) {
+        std::cerr << "Error: empty Python command\n";
+        return EXIT_FAILURE;
+    }
+
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv)
+        exec_argv.push_back(const_cast<char*>(arg.c_str()));
+    exec_argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "Error: failed to start Python builder: " << std::strerror(errno) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    if (pid == 0) {
+        const std::string pythonpath = build_pythonpath();
+        if (!pythonpath.empty())
+            setenv("PYTHONPATH", pythonpath.c_str(), 1);
+        execvp(exec_argv[0], exec_argv.data());
+        std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        std::cerr << "Error: failed waiting for Python builder: " << std::strerror(errno) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        const int sig = WTERMSIG(status);
+        std::cerr << "Error: Python builder terminated by signal " << sig << '\n';
+        return 128 + sig;
+    }
+    return EXIT_FAILURE;
+}
+
+int cmd_build(const CliArgs& args) {
+    const char* configured_python = std::getenv("TRTMC_PYTHON");
+    if (!configured_python || configured_python[0] == '\0')
+        configured_python = std::getenv("PYTHON");
+    const std::string python = (configured_python && configured_python[0] != '\0')
+                                   ? configured_python
+                                   : std::string("python3");
+
+    std::vector<std::string> command = {
+        python,
+        "-m",
+        "tensorrt_model_connect",
+        "build",
+    };
+    command.insert(command.end(), args.build_args.begin(), args.build_args.end());
+    return run_python_module(command);
 }
 
 int cmd_version() {
@@ -1448,6 +1555,55 @@ int cmd_speak(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+bool is_engine_section(const std::string& name) {
+    return name == "engine_plan" ||
+           (name.size() >= 5 && name.compare(name.size() - 5, 5, "_plan") == 0);
+}
+
+std::string engine_section_role(const std::string& name) {
+    if (name == "engine_plan")
+        return "primary";
+    if (name.find("vision") != std::string::npos)
+        return "vision";
+    if (name.find("text_encoder") != std::string::npos)
+        return "text_encoder";
+    if (name.find("denoiser") != std::string::npos)
+        return "denoiser";
+    if (name.find("vae") != std::string::npos)
+        return "vae";
+    if (name.find("lt_") != std::string::npos ||
+        name.find("local_transformer") != std::string::npos)
+        return "local_transformer";
+    if (name.size() >= 5 && name.compare(name.size() - 5, 5, "_plan") == 0)
+        return name.substr(0, name.size() - 5);
+    return name;
+}
+
+int cmd_inspect_list_engines(const trtmc::BundleInfo& info) {
+    std::vector<trtmc::BundleSectionInfo> engines;
+    for (const auto& section : info.sections) {
+        if (is_engine_section(section.name))
+            engines.push_back(section);
+    }
+    if (engines.empty()) {
+        std::cerr << "No engine sections found.\n";
+        return EXIT_FAILURE;
+    }
+
+    std::cout << std::left << std::setw(30) << "Section" << ' ' << std::right << std::setw(10)
+              << "Size"
+              << " " << std::left << std::setw(16) << "Role" << '\n';
+    std::cout << std::string(30, '-') << ' ' << std::string(10, '-') << ' ' << std::string(16, '-')
+              << '\n';
+    for (const auto& section : engines) {
+        const double size_mb = static_cast<double>(section.size) / (1024.0 * 1024.0);
+        std::cout << std::left << std::setw(30) << section.name << ' ' << std::right << std::setw(8)
+                  << std::fixed << std::setprecision(1) << size_mb << " MB " << std::left
+                  << std::setw(16) << engine_section_role(section.name) << '\n';
+    }
+    return EXIT_SUCCESS;
+}
+
 int cmd_inspect(const CliArgs& args) {
     if (args.bundle_path.empty()) {
         std::cerr << "Error: inspect requires a bundle file path\n";
@@ -1461,6 +1617,9 @@ int cmd_inspect(const CliArgs& args) {
 
     try {
         const auto info = trtmc::InspectBundle(args.bundle_path);
+        if (args.list_engines)
+            return cmd_inspect_list_engines(info);
+
         std::cout << "Model ID:           " << info.model_id << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';
         std::cout << "Family:             " << info.family << '\n';
@@ -1479,6 +1638,14 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "Max cache length:   " << info.max_cache_length << '\n';
         if (!info.runtime_strategy.empty())
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
+        if (!info.sections.empty()) {
+            std::cout << "Sections:\n";
+            for (const auto& section : info.sections) {
+                const double size_mb = static_cast<double>(section.size) / (1024.0 * 1024.0);
+                std::cout << "  " << section.name << ": " << std::fixed << std::setprecision(1)
+                          << size_mb << " MB\n";
+            }
+        }
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
@@ -1493,6 +1660,8 @@ int cmd_inspect(const CliArgs& args) {
 // registered for the relevant namespaces yet) the flags are accepted
 // and a clear message prints — existing invocations are unaffected.
 int apply_cli_config(const CliArgs& args) {
+    if (args.command == "build")
+        return EXIT_SUCCESS;
     if (args.config_path.empty() && args.set_tokens.empty())
         return EXIT_SUCCESS;
     if (trtmc::config::SchemaRegistry::instance().registered_namespaces().empty()) {
@@ -1533,6 +1702,8 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
+        if (args.command == "build")
+            return cmd_build(args);
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")

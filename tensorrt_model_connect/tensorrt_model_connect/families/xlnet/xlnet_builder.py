@@ -276,7 +276,7 @@ def build_xlnet_engine(
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc-build] Building XLNet encoder TRT engine "
+        print(f"[trtmc build] Building XLNet encoder TRT engine "
               f"({num_layers} layers, hidden={hidden}, "
               f"seq_len={max_seq_length}) ...", file=sys.stderr)
 

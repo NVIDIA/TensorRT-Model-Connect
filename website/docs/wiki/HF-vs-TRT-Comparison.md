@@ -6,7 +6,7 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 
 | Concept | HuggingFace Transformers | TensorRT-Model-Connect |
 |---------|-------------------------|---------------------|
-| Build engine | N/A (eager execution) | `trtmc-build build <model-dir> -o model.trtfb` (Python) |
+| Build engine | N/A (eager execution) | `./build/trtmc build <model-dir> -o model.trtfb` (Python) |
 | Run inference | `pipeline("Hello")` | `trtmc run model.trtfb --prompt "Hello"` (C++) |
 | Programmatic API | `pipeline("text-generation", model=...)` | `trtmc_create_pipeline("model.trtfb", flags)` (C ABI) |
 | Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `tensorrt_model_connect/` |
@@ -29,7 +29,7 @@ model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
 
 ```bash
 # trtmc: Family plugin dispatch (Python build)
-trtmc-build build path/to/Qwen3-0.6B -o qwen3.trtfb
+./build/trtmc build path/to/Qwen3-0.6B -o qwen3.trtfb
 # Internally: model_type="qwen3" -> QwenPlugin -> checkpoint mapper -> TRT graph
 ```
 
@@ -141,7 +141,7 @@ HuggingFace:
 
 TensorRT-Model-Connect:
   # Step 1: Build (Python, once per model per GPU)
-  trtmc-build build path/to/Qwen3-0.6B -o qwen3.trtfb
+  ./build/trtmc build path/to/Qwen3-0.6B -o qwen3.trtfb
 
   # Step 2: Run (C++, no Python needed except for tokenizer)
   trtmc run qwen3.trtfb --prompt "Hello" --max-new-tokens 30

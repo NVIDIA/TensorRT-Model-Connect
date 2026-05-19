@@ -306,7 +306,7 @@ def build_internvit_vision_engine(
     num_output_tokens = num_patches // (scale * scale)
 
     if verbose:
-        print(f"[trtmc-build] InternViT: image={fixed_image_size}, "
+        print(f"[trtmc build] InternViT: image={fixed_image_size}, "
               f"patch={patch_size}, grid={grid_h}x{grid_w}, "
               f"patches={num_patches}, output_tokens={num_output_tokens}, "
               f"embed={embed_dim}, "
@@ -607,7 +607,7 @@ def build_internvit_vision_engine(
     # Build
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building InternViT vision TRT engine "
+        print(f"[trtmc build] Building InternViT vision TRT engine "
               f"({actual_select_layer + 1} layers, embed={embed_dim}, "
               f"patches={num_patches}, output_tokens={num_output_tokens}, "
               f"llm_hidden={llm_hidden}) ...", file=sys.stderr)

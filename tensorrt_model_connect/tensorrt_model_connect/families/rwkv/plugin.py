@@ -387,7 +387,7 @@ class RwkvPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building RWKV TRT engine ({num_layers} layers, "
+            print(f"[trtmc build] Building RWKV TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, intermediate={intermediate}) ...",
                   file=sys.stderr)
 

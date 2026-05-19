@@ -315,7 +315,7 @@ class MambaPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building Mamba TRT engine ({num_layers} layers, "
+            print(f"[trtmc build] Building Mamba TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, d_inner={d_inner}, state_size={state_size}, "
                   f"conv_kernel={conv_kernel}, dt_rank={dt_rank}) ...",
                   file=sys.stderr)

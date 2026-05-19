@@ -9,15 +9,12 @@ Complete [Environment and First Repro](environment-and-repro.md) first. The comm
 ## 1. Prove The Tools Are Available
 
 ```bash
-trtmc-build version
 ./build/trtmc version
 ```
 
 Expected signals:
 
 ```text
-trtmc-build 0.1.0
-TensorRT: <installed version>
 trtmc 0.1.0
 TRT support: yes
 ```
@@ -27,23 +24,23 @@ If `./build/trtmc` fails with a missing shared library, you are probably outside
 ## 2. Build A Bundle
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-0.6b.trtfb \
   --precision fp16 \
   --max-cache-length 256
 ```
 
-`trtmc-build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
+`./build/trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
 
 First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
 
 ## 3. Inspect The Bundle
 
-Run the Python inspector:
+Inspect the bundle:
 
 ```bash
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb --list-engines
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb --list-engines
 ```
 
 Expected fields include:
@@ -53,12 +50,6 @@ Model ID:           Qwen/Qwen3-0.6B
 Family:             qwen
 Runtime strategy:   decoder_kv_cache
 Precision:          fp16
-```
-
-Then prove the C++ runtime can parse the same artifact:
-
-```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
 ```
 
 Inspection should become the first debugging habit. The important fields are `family`, `precision`, `runtime_strategy`, engine sections, tokenizer assets, and TensorRT compatibility metadata.
@@ -82,7 +73,7 @@ If generation succeeds, you have proven this path:
 
 ```mermaid
 flowchart LR
-  Build["trtmc-build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
+  Build["trtmc build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
   Bundle --> Inspect["inspect metadata"]
   Bundle --> Load["trtmc::load"]
   Load --> Strategy["decoder_kv_cache"]
@@ -96,8 +87,7 @@ If generation fails, classify the failure before changing code:
 | --- | --- |
 | Build cannot download model | HuggingFace model ID, auth, network, or cache problem. |
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
-| Python inspection fails | Bundle was not written correctly or path is wrong. |
-| C++ inspection fails | Runtime cannot parse the bundle or runtime library environment is wrong. |
+| Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
 | Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 

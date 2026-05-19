@@ -60,7 +60,7 @@ Auto-discovery registers modules with a module-level `plugin` attribute. No cent
 ## 2. Build a smoke bundle
 
 ```bash
-trtmc-build build <hf-repo-or-local-dir> -o /tmp/family-smoke.trtfb --max-cache-length 256
+./build/trtmc build <hf-repo-or-local-dir> -o /tmp/family-smoke.trtfb --max-cache-length 256
 ```
 
 ## 3. Validate

@@ -199,7 +199,7 @@ Run the one-command validation gate:
 ```
 
 This runs:
-1. `trtmc-build build` — builds a `.trtfb` bundle
+1. `./build/trtmc build` — builds a `.trtfb` bundle
 2. `diff_logits.py --battery` — E2E logit comparison (4 prompts)
 3. `diff_layers.py` — per-layer hidden state comparison
 4. `test_runner_parity.py` — Python-vs-C++ cross-validation
@@ -208,7 +208,7 @@ Or run each step individually:
 
 ```bash
 # Build bundle
-trtmc-build build <model> -o /tmp/test.trtfb --max-cache-length 256
+./build/trtmc build <model> -o /tmp/test.trtfb --max-cache-length 256
 
 # E2E logit comparison (per-step, all tokens)
 python3 tools/diff_logits.py --model <model> --atol 1e-3 --battery

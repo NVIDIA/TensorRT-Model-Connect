@@ -2,20 +2,23 @@
 title: CLI Reference
 ---
 
-## `trtmc-build`
+## `trtmc build`
 
-`trtmc-build` builds and inspects `.trtfb` bundles.
+`trtmc build` builds `.trtfb` bundles through the Python builder package.
 
 ```bash
-trtmc-build build <hf-repo-or-local-dir> -o <output.trtfb> [options]
-trtmc-build inspect <bundle.trtfb> [--list-engines]
-trtmc-build version
+./build/trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
 ```
 
-The bare form is accepted as build sugar:
+The C++ bridge runs `python -m tensorrt_model_connect build ...`. Set `TRTMC_PYTHON` or `PYTHON` to choose a specific build interpreter.
+When installed from the release wheel, the `trtmc` console command dispatches
+to the packaged native executable and sets `TRTMC_PYTHON` to that environment's
+Python interpreter.
+
+Direct module execution is still available for debugging:
 
 ```bash
-trtmc-build <hf-repo-or-local-dir> -o <output.trtfb>
+python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 ```
 
 ### Build options
@@ -43,9 +46,9 @@ trtmc-build <hf-repo-or-local-dir> -o <output.trtfb>
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 
-## `trtmc`
+## Runtime commands
 
-`trtmc` runs bundles from C++.
+`trtmc` also inspects and runs bundles from C++.
 
 ```bash
 ./build/trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
@@ -61,6 +64,7 @@ TriAttention options are also exposed for experimental KV compaction: `--triatte
 ./build/trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
 ./build/trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 ./build/trtmc inspect <bundle.trtfb>
+./build/trtmc inspect <bundle.trtfb> --list-engines
 ./build/trtmc version
 ```
 

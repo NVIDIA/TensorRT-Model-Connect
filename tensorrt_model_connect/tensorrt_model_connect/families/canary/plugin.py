@@ -719,7 +719,7 @@ class CanaryPlugin:
             net.mark_output(pvo[i])
 
         if verbose:
-            print(f"[trtmc-build] Building Canary decoder ({dl}L, h={h}, heads={dh})", file=sys.stderr)
+            print(f"[trtmc build] Building Canary decoder ({dl}L, h={h}, heads={dh})", file=sys.stderr)
         plan = b.build_serialized_network(net, tc)
         if plan is None:
             raise RuntimeError("Canary decoder build failed")
@@ -749,7 +749,7 @@ class CanaryPlugin:
         try:
             from transformers.audio_utils import mel_filter_bank
         except ImportError:
-            print("[trtmc-build] Warning: mel_filter_bank not available", file=sys.stderr)
+            print("[trtmc build] Warning: mel_filter_bank not available", file=sys.stderr)
             return None
 
         filters = mel_filter_bank(
@@ -766,7 +766,7 @@ class CanaryPlugin:
         mel_fb_bytes = header.tobytes() + filters_flat.tobytes()
 
         if verbose:
-            print(f"[trtmc-build] Canary mel filterbank: {n_freq_bins}x{num_mel_bins}", file=sys.stderr)
+            print(f"[trtmc build] Canary mel filterbank: {n_freq_bins}x{num_mel_bins}", file=sys.stderr)
 
         return {"mel_filterbank": mel_fb_bytes}
 
@@ -835,7 +835,7 @@ def _build_encoder(config, weights, *, verbose=False):
     hs.name = "encoder_output"
     net.mark_output(hs)
     if verbose:
-        print(f"[trtmc-build] Building Canary encoder ({el}L, h={h}, heads={eh}, seq={es})", file=sys.stderr)
+        print(f"[trtmc build] Building Canary encoder ({el}L, h={h}, heads={eh}, seq={es})", file=sys.stderr)
     plan = b.build_serialized_network(net, tc)
     if plan is None:
         raise RuntimeError("Canary encoder build failed")

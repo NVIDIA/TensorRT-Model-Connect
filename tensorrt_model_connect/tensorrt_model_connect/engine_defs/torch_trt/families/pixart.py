@@ -116,7 +116,7 @@ class PixArtTorchTrtPlugin:
         sections = []
 
         # --- 1. T5 text encoder (CPU export for VRAM savings) ---
-        print("[trtmc-build] Loading T5 text encoder (on CPU) ...",
+        print("[trtmc build] Loading T5 text encoder (on CPU) ...",
               file=sys.stderr)
         from transformers import T5EncoderModel
         t5_model = T5EncoderModel.from_pretrained(
@@ -139,7 +139,7 @@ class PixArtTorchTrtPlugin:
                         device="cuda"),
         )
 
-        print(f"[trtmc-build] Compiling T5 encoder "
+        print(f"[trtmc build] Compiling T5 encoder "
               f"(d_model={t5_d_model}, seq_len={self._T5_MAX_SEQ_LEN}) ...",
               file=sys.stderr)
         t5_engine = compile_fn(
@@ -151,7 +151,7 @@ class PixArtTorchTrtPlugin:
         gc.collect()
 
         # --- 2. PixArt DiT denoiser (CPU export) ---
-        print(f"[trtmc-build] Loading PixArt DiT "
+        print(f"[trtmc build] Loading PixArt DiT "
               f"(dim={dit_dim}, layers={dit_num_layers}) ...",
               file=sys.stderr)
         from diffusers import PixArtTransformer2DModel
@@ -184,7 +184,7 @@ class PixArtTorchTrtPlugin:
         )
         dit_cuda_args = tuple(t.cuda() for t in dit_cpu_args)
 
-        print(f"[trtmc-build] Compiling DiT denoiser "
+        print(f"[trtmc build] Compiling DiT denoiser "
               f"(latent={h_lat}x{w_lat}) ...", file=sys.stderr)
         dit_engine = compile_fn(
             dit_wrapper, dit_cpu_args,
@@ -195,7 +195,7 @@ class PixArtTorchTrtPlugin:
         gc.collect()
 
         # --- 3. VAE decoder (CPU export) ---
-        print("[trtmc-build] Loading VAE decoder ...", file=sys.stderr)
+        print("[trtmc build] Loading VAE decoder ...", file=sys.stderr)
         from diffusers import AutoencoderKL
         vae_model = AutoencoderKL.from_pretrained(
             str(model_path / "vae"),
@@ -213,7 +213,7 @@ class PixArtTorchTrtPlugin:
         )
         vae_cuda_args = tuple(t.cuda() for t in vae_cpu_args)
 
-        print(f"[trtmc-build] Compiling VAE decoder "
+        print(f"[trtmc build] Compiling VAE decoder "
               f"(latent={h_lat}x{w_lat} -> "
               f"image={self._IMAGE_HEIGHT}x{self._IMAGE_WIDTH}) ...",
               file=sys.stderr)

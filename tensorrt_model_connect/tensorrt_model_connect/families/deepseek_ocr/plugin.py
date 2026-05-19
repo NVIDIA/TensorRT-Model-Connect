@@ -233,14 +233,14 @@ class DeepSeekOCRPlugin:
         image_prefill_tokens = 257
         if max_cache_length <= image_prefill_tokens:
             print(
-                "[trtmc-build] WARNING: DeepSeek-OCR-2 uses 257 image prefill tokens. "
+                "[trtmc build] WARNING: DeepSeek-OCR-2 uses 257 image prefill tokens. "
                 f"max_cache_length={max_cache_length} is too small and can cause "
                 "prompt echo / repeated skip-like tokens. Use --max-cache-length 4096.",
                 file=sys.stderr,
             )
         elif max_cache_length < 4096:
             print(
-                "[trtmc-build] NOTE: DeepSeek-OCR-2 is more stable with "
+                "[trtmc build] NOTE: DeepSeek-OCR-2 is more stable with "
                 "--max-cache-length 4096.",
                 file=sys.stderr,
             )
@@ -431,7 +431,7 @@ class DeepSeekOCRPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building DeepSeek-OCR TRT engine "
+            print(f"[trtmc build] Building DeepSeek-OCR TRT engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, heads={num_heads}, "
                   f"experts={n_routed_experts}, top_k={num_experts_per_tok}, "
@@ -1143,7 +1143,7 @@ def _build_deepseek_ocr_vision_engine(
     Input:  pixel_values  [1, 3, 1024, 1024] float32
     Output: image_features [257, 1280] float32 (256 projected + 1 view_sep)
     """
-    print("[trtmc-build] Building DeepSeek-OCR-2 vision engine (native TRT) ...",
+    print("[trtmc build] Building DeepSeek-OCR-2 vision engine (native TRT) ...",
           file=sys.stderr)
 
     vw = _load_vision_weights(model_dir)
@@ -1501,7 +1501,7 @@ def _build_deepseek_ocr_vision_engine(
     network.mark_output(output)
 
     if verbose:
-        print(f"[trtmc-build] Building vision TRT engine "
+        print(f"[trtmc build] Building vision TRT engine "
               f"(SAM: {sam_layers} blocks, Qwen2: {qwen2_layers} layers, "
               f"output: 257x{proj_out}) ...", file=sys.stderr)
 

@@ -199,7 +199,7 @@ def build_qwen_vl_vision_engine(
         text_hidden_size = vision_config.get("text_hidden_size", embed_dim)
 
     if verbose:
-        print(f"[trtmc-build] Vision: image={fixed_image_size}, "
+        print(f"[trtmc build] Vision: image={fixed_image_size}, "
               f"grid={grid_h}x{grid_w}, patches={num_patches}, "
               f"merged={num_merged}, embed={embed_dim}, "
               f"text_hidden={text_hidden_size}", file=sys.stderr)
@@ -266,7 +266,7 @@ def build_qwen_vl_vision_engine(
         vision_config.get("fullatt_block_indexes", [7, 15, 23, 31]))
 
     if verbose:
-        print(f"[trtmc-build] Vision RoPE: head_dim={embed_dim // num_heads}, "
+        print(f"[trtmc build] Vision RoPE: head_dim={embed_dim // num_heads}, "
               f"rope_dim={embed_dim // num_heads // 2}, "
               f"window_size={window_size}, "
               f"vit_merger_window_size={vit_merger_window_size}, "
@@ -513,7 +513,7 @@ def build_qwen_vl_vision_engine(
     # Build
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building Qwen VL vision TRT engine "
+        print(f"[trtmc build] Building Qwen VL vision TRT engine "
               f"({num_layers} layers, embed={embed_dim}, "
               f"patches={num_patches}, merged={num_merged}, "
               f"text_hidden={text_hidden_size}) ...", file=sys.stderr)
@@ -634,7 +634,7 @@ def build_qwen3_vl_vision_engine(
     num_merged = num_patches // merge_unit
 
     if verbose:
-        print(f"[trtmc-build] Qwen3-VL Vision: image={fixed_image_size}, "
+        print(f"[trtmc build] Qwen3-VL Vision: image={fixed_image_size}, "
               f"patch={patch_size}, grid={grid_h}x{grid_w}, "
               f"patches={num_patches}, merged={num_merged}, "
               f"embed={embed_dim}, text_hidden={text_hidden_size}, "
@@ -913,7 +913,7 @@ def build_qwen3_vl_vision_engine(
     # Build
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building Qwen3-VL vision TRT engine "
+        print(f"[trtmc build] Building Qwen3-VL vision TRT engine "
               f"({num_layers} layers, embed={embed_dim}, "
               f"patches={num_patches}, merged={num_merged}, "
               f"text_hidden={text_hidden_size}, "

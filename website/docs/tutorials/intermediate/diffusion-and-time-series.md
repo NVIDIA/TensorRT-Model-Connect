@@ -17,7 +17,7 @@ flowchart LR
 ## FLUX image generation
 
 ```bash
-trtmc-build build black-forest-labs/FLUX.2-dev \
+./build/trtmc build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2.trtfb \
   --precision fp16 \
   --image-height 1024 \
@@ -57,7 +57,7 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 ## Wan video generation
 
 ```bash
-trtmc-build build Wan-AI/Wan2.1-T2V-1.3B \
+./build/trtmc build Wan-AI/Wan2.1-T2V-1.3B \
   -o /tmp/wan21.trtfb \
   --precision fp16 \
   --video-height 480 \

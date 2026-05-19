@@ -89,7 +89,7 @@ The result is a two-phase deployment model:
 ```mermaid
 sequenceDiagram
   participant User
-  participant Build as trtmc-build
+  participant Build as trtmc build
   participant Bundle as .trtfb bundle
   participant App as C++ application
   participant Runtime as TensorRT-Model-Connect runtime
@@ -145,7 +145,7 @@ It starts in `tensorrt_model_connect/tensorrt_model_connect/cli.py`, then calls 
 
 ```mermaid
 flowchart TD
-  CLI["cli.py<br/>parse trtmc-build args"] --> Resolve["resolve model path and config"]
+  CLI["cli.py<br/>parse trtmc build args"] --> Resolve["resolve model path and config"]
   Resolve --> ModelConfig["ModelConfig.from_dir"]
   ModelConfig --> Match["families/__init__.py<br/>select FamilyPlugin"]
   Match --> LoadWeights["FamilyPlugin.load_weights"]

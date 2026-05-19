@@ -480,6 +480,58 @@ generate_coverage_map() {
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
 
+build_pip_package() {
+  local native_bin="${TRTMC_NATIVE_BIN:-build/trtmc}"
+  if [[ "$native_bin" != /* ]]; then
+    native_bin="$PWD/$native_bin"
+  fi
+  if [ ! -x "$native_bin" ]; then
+    echo "ERROR: native trtmc executable is missing or not executable: $native_bin" >&2
+    exit 1
+  fi
+
+  local native_lib_dir="${TRTMC_NATIVE_LIB_DIR:-$(dirname "$native_bin")}"
+  if [[ "$native_lib_dir" != /* ]]; then
+    native_lib_dir="$PWD/$native_lib_dir"
+  fi
+
+  python -m pip install --disable-pip-version-check --quiet "build>=1.2"
+  rm -rf dist tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+  mkdir -p dist
+  env \
+    TRTMC_NATIVE_BIN="$native_bin" \
+    TRTMC_NATIVE_LIB_DIR="$native_lib_dir" \
+    TRTMC_REQUIRE_NATIVE_BIN=1 \
+    python -m build --wheel --outdir "$PWD/dist" tensorrt_model_connect
+
+  mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
+  if [ "${#wheels[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one wheel, found %d\n' "${#wheels[@]}" >&2
+    printf '  %s\n' "${wheels[@]:-}" >&2
+    exit 1
+  fi
+
+  local smoke_venv="${TRTMC_PACKAGE_SMOKE_VENV:-/tmp/trtmc-wheel-smoke-${GITHUB_RUN_ID:-local}}"
+  rm -rf "$smoke_venv"
+  python -m venv "$smoke_venv"
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+  "$smoke_venv/bin/trtmc" version
+  "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
+  "$smoke_venv/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import importlib.resources as resources
+from pathlib import Path
+
+dist = metadata.distribution("tensorrt-model-connect")
+native = Path(resources.files("tensorrt_model_connect").joinpath("bin", "trtmc"))
+print(f"wheel={dist.metadata['Name']} {dist.version}")
+print(f"native_trtmc={native}")
+if not native.is_file():
+    raise SystemExit("packaged native trtmc executable is missing")
+PY
+}
+
 run_stage() {
   local stage="$1"
   case "$stage" in
@@ -534,6 +586,10 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Generate coverage map" generate_coverage_map
       ;;
+    package)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Build trtmc pip package" build_pip_package
+      ;;
     *)
       echo "ERROR: Unknown CI stage: $stage" >&2
       exit 2
@@ -559,3 +615,4 @@ run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
 run_step "Generate coverage map" generate_coverage_map
+run_step "Build trtmc pip package" build_pip_package

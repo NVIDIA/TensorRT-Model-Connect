@@ -514,7 +514,7 @@ class BarkPlugin:
         fine_seq_length = max_codec_frames  # match codec_seq_length
         self._fine_seq_length = fine_seq_length
         if verbose:
-            print(f"[trtmc-build]   Building fine engine "
+            print(f"[trtmc build]   Building fine engine "
                   f"(seq_length={fine_seq_length}) ...",
                   file=sys.stderr)
         with timed_trt_compile(build_timing, "extra_bark_fine_decoder"):
@@ -545,7 +545,7 @@ class BarkPlugin:
             from .encodec_builder import build_encodec_decoder_engine
 
             if verbose:
-                print(f"[trtmc-build]   Building codec engine "
+                print(f"[trtmc build]   Building codec engine "
                       f"(max_frames={max_codec_frames}) ...",
                       file=sys.stderr)
 
@@ -648,7 +648,7 @@ def _build_bark_standard_engine(
     )
 
     if verbose:
-        print(f"[trtmc-build]   Building {sub_model} engine: "
+        print(f"[trtmc build]   Building {sub_model} engine: "
               f"layers={sub_cfg['num_layers']}, hidden={hidden}, "
               f"vocab={sub_cfg['vocab_size']}, output_vocab={sub_cfg.get('output_vocab', sub_cfg['vocab_size'])}",
               file=sys.stderr)
@@ -837,7 +837,7 @@ def _build_bark_decoder_engine(
         network.mark_output(pv)
 
     if verbose:
-        print(f"[trtmc-build] Building Bark {sub_model} engine "
+        print(f"[trtmc build] Building Bark {sub_model} engine "
               f"(layers={num_layers}, hidden={hidden}, vocab={vocab}) ...",
               file=sys.stderr)
 
@@ -996,7 +996,7 @@ def _build_bark_fine_engine(
         network.mark_output(logits_j)
 
     if verbose:
-        print(f"[trtmc-build] Building Bark fine engine "
+        print(f"[trtmc build] Building Bark fine engine "
               f"(layers={num_layers}, hidden={hidden}, heads={num_heads}, "
               f"seq_length={seq_length}, lm_heads={n_lm_heads}, "
               f"codebook_size={codebook_size}) ...",

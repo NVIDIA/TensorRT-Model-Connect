@@ -2,8 +2,15 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace trtmc {
+
+struct BundleSectionInfo {
+    std::string name;
+    std::uint64_t offset{0};
+    std::uint64_t size{0};
+};
 
 struct BundleInfo {
     std::string model_id;
@@ -23,6 +30,7 @@ struct BundleInfo {
     std::string runtime_strategy; // e.g. "decoder_kv_cache", "diffusion", etc.
     bool tokenizer_add_special_tokens{false};
     bool tokenizer_add_special_tokens_present{false};
+    std::vector<BundleSectionInfo> sections;
 };
 
 // Read metadata without loading the engine.

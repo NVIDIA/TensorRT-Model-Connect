@@ -19,7 +19,7 @@ The difference between text, vision, and speech is mostly the preprocessing, com
 ## Vision-language
 
 ```bash
-trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct \
+./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl.trtfb \
   --precision fp16 \
   --max-cache-length 384
@@ -57,7 +57,7 @@ Key ideas:
 ## Speech-to-text
 
 ```bash
-trtmc-build build openai/whisper-large-v3-turbo \
+./build/trtmc build openai/whisper-large-v3-turbo \
   -o /tmp/whisper.trtfb \
   --precision fp16
 

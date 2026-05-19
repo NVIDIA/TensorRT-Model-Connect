@@ -420,12 +420,12 @@ class TestRenderReport:
         mod = _import_report()
         r = _make_result(
             repro_commands={
-                "build_bundle": "trtmc-build build X -o y.trtfb",
+                "build_bundle": "./build/trtmc build X -o y.trtfb",
                 "trt_inference": "./trtmc run y.trtfb --prompt 'Hi'",
             }
         )
         html = mod.render_report([r])
-        assert "trtmc-build build X" in html
+        assert "./build/trtmc build X" in html
         assert "Copy" in html
 
     def test_timing_rendered(self):
@@ -746,8 +746,8 @@ class TestRenderReport:
         model_dir = _write_result(tmp_path, "test-model", r)
         (model_dir / "e2e_run.log").write_text(
             "\n".join([
-                "[trtmc-build] Weights loaded [999.0s]",
-                "[trtmc-build] Engine built [888.0s] (10.0 MB)",
+                "[trtmc build] Weights loaded [999.0s]",
+                "[trtmc build] Engine built [888.0s] (10.0 MB)",
             ]),
             encoding="utf-8",
         )

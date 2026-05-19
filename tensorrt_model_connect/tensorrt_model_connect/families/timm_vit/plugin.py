@@ -174,7 +174,7 @@ class TimmVitPlugin:
 
         if verbose:
             print(
-                "[trtmc-build] timm_vit: "
+                "[trtmc build] timm_vit: "
                 f"image={image_h}x{image_w}, patch={patch_h}x{patch_w}, "
                 f"tokens={seq_len}, hidden={hidden_size}, layers={depth}, "
                 f"heads={num_heads}, classes={num_classes}",

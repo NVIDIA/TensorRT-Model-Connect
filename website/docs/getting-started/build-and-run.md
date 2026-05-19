@@ -2,12 +2,12 @@
 title: Build and Run
 ---
 
-All examples assume you are inside the dev container, the C++ runtime is available at `./build/trtmc`, and the Python builder is installed as `trtmc-build`. Run [Environment and First Repro](environment-and-repro.md) first if either command fails.
+All examples assume you are inside the dev container, the Python builder package is installed, and the unified CLI is available at `./build/trtmc`. Run [Environment and First Repro](environment-and-repro.md) first if either command fails.
 
 ## Text generation
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --precision fp16
+./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --precision fp16
 
 ./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "Write one sentence about TensorRT." \
@@ -21,7 +21,7 @@ Useful runtime knobs include `--greedy`, `--top-k`, `--top-p`, `--min-p`, `--see
 ## Vision-language generation
 
 ```bash
-trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct \
+./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl.trtfb \
   --precision fp16 \
   --max-cache-length 384
@@ -37,7 +37,7 @@ Vision-language families build a vision engine plus a text decoder and route thr
 ## Speech and audio
 
 ```bash
-trtmc-build build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precision fp16
+./build/trtmc build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precision fp16
 
 ./build/trtmc transcribe /tmp/whisper.trtfb \
   --audio tests/e2e/data/Recording.wav \
@@ -45,7 +45,7 @@ trtmc-build build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precisio
 ```
 
 ```bash
-trtmc-build build nvidia/magpie_tts_multilingual_357m -o /tmp/magpie.trtfb --precision fp16
+./build/trtmc build nvidia/magpie_tts_multilingual_357m -o /tmp/magpie.trtfb --precision fp16
 
 ./build/trtmc generate-audio /tmp/magpie.trtfb \
   --prompt "A clear short test sentence." \
@@ -57,7 +57,7 @@ Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware 
 ## Diffusion and video
 
 ```bash
-trtmc-build build black-forest-labs/FLUX.2-dev \
+./build/trtmc build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2.trtfb \
   --precision fp16 \
   --image-height 1024 \

@@ -7,7 +7,7 @@ Quantization is a build-time feature controlled by the Python builder and family
 ## CLI surface
 
 ```bash
-trtmc-build build <model> -o <bundle.trtfb> --quantize fp8
+./build/trtmc build <model> -o <bundle.trtfb> --quantize fp8
 ```
 
 Supported `--quantize` values are:

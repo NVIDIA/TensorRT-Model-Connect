@@ -498,7 +498,7 @@ class DeepSeekV2Plugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building DeepSeek-V2 TRT engine "
+            print(f"[trtmc build] Building DeepSeek-V2 TRT engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, heads={num_heads}, "
                   f"kv_lora_rank={kv_lora_rank}, "

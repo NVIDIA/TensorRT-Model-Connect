@@ -151,7 +151,7 @@ def build_convbert_encoder_engine(
     # Build engine
     # -------------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building ConvBERT encoder TRT engine "
+        print(f"[trtmc build] Building ConvBERT encoder TRT engine "
               f"({num_layers} layers, hidden={hidden}, "
               f"seq_len={S}, conv_kernel={conv_kernel_size}) ...", file=sys.stderr)
 

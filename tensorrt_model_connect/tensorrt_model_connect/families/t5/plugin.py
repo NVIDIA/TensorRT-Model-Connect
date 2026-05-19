@@ -159,7 +159,7 @@ class T5Plugin:
             network.mark_output(pk_out[i])
             network.mark_output(pv_out[i])
         if verbose:
-            print(f"[trtmc-build] T5 decoder ({dl}L, h={h}, heads={nh}, d_kv={dkv}, ffn={dff}, cache={max_cache_length})", file=sys.stderr)
+            print(f"[trtmc build] T5 decoder ({dl}L, h={h}, heads={nh}, d_kv={dkv}, ffn={dff}, cache={max_cache_length})", file=sys.stderr)
         plan = builder.build_serialized_network(network, tc)
         if plan is None:
             raise RuntimeError("TRT T5 decoder build failed")
@@ -224,7 +224,7 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     hs.name = "encoder_output"
     network.mark_output(hs)
     if verbose:
-        print(f"[trtmc-build] T5 encoder ({el}L, h={h}, heads={nh}, seq={msl})", file=sys.stderr)
+        print(f"[trtmc build] T5 encoder ({el}L, h={h}, heads={nh}, seq={msl})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TRT T5 encoder build failed")

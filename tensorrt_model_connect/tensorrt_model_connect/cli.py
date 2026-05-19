@@ -1,4 +1,4 @@
-"""CLI entry point: trtmc-build <model-dir> -o <out.trtfb> [options]."""
+"""Builder CLI implementation for ``trtmc build``."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if getattr(args, 'rtx', False):
         from . import trt_compat
         trt_compat.configure_backend(rtx=True)
-        print("[trtmc-build] Using TensorRT-RTX backend", file=sys.stderr)
+        print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
 
     # Raw TRT path imports builder modules that bind trt_compat.get_trt().
     from .engine_builder import build
@@ -115,12 +115,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
         import json as _json
         with open(args.fp8_scales) as _f:
             fp8_scales = _json.load(_f)
-        print(f"[trtmc-build] Loaded FP8 scales from {args.fp8_scales} "
+        print(f"[trtmc build] Loaded FP8 scales from {args.fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
     elif fp8_auto:
         # Sentinel: engine_builder will call plugin.fp8_calibrate()
         fp8_scales = "auto"
-        print("[trtmc-build] FP8 auto-calibration enabled", file=sys.stderr)
+        print("[trtmc build] FP8 auto-calibration enabled", file=sys.stderr)
 
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
@@ -212,7 +212,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if resolved_bundle is not None:
         from .runtime_config import write_effective_config_next_to
         path = write_effective_config_next_to(resolved_bundle, args.output)
-        print(f"[trtmc-build] Wrote effective config: {path}", file=sys.stderr)
+        print(f"[trtmc build] Wrote effective config: {path}", file=sys.stderr)
     return 0
 
 
@@ -281,7 +281,7 @@ def _maybe_reexec_build_in_profile(
         required_profile,
     ]
     print(
-        f"[trtmc-build] Switching build to Python profile {required_profile!r}: "
+        f"[trtmc build] Switching build to Python profile {required_profile!r}: "
         f"{target_python}",
         file=sys.stderr,
     )
@@ -340,7 +340,7 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
                 raw_supported = False
 
     if raw_supported:
-        print("[trtmc-build] Auto-selected backend: trt", file=sys.stderr)
+        print("[trtmc build] Auto-selected backend: trt", file=sys.stderr)
         return "trt", resolved_model_ref
 
     if torchtrt_available and not torchtrt_supported and (model_dir / "model_index.json").exists():
@@ -350,7 +350,7 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
         torchtrt_supported = find_torchtrt_plugin(_parse_model_config(model_dir)) is not None
 
     if torchtrt_supported:
-        print("[trtmc-build] Auto-selected backend: torchtrt", file=sys.stderr)
+        print("[trtmc build] Auto-selected backend: torchtrt", file=sys.stderr)
         return "torchtrt", resolved_model_ref
 
     if not raw_supported and not torchtrt_available:
@@ -367,8 +367,9 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
             "family plugin matched it either."
         )
 
-    print("[trtmc-build] Auto-selected backend: trt", file=sys.stderr)
+    print("[trtmc build] Auto-selected backend: trt", file=sys.stderr)
     return "trt", resolved_model_ref
+
 
 def _parse_profile_rows(value: str) -> list[int]:
     rows: list[int] = []
@@ -501,7 +502,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def _cmd_version(_args: argparse.Namespace) -> int:
-    print(f"trtmc-build {__version__}")
+    print(f"trtmc build {__version__}")
     from . import trt_compat
     trt_version = trt_compat.module_version("tensorrt")
     if trt_version:
@@ -540,19 +541,19 @@ def main() -> None:
         try:
             from . import trt_compat
             trt_compat.configure_backend(rtx=True)
-            print("[trtmc-build] Using TensorRT-RTX backend", file=sys.stderr)
+            print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
         except ImportError:
             print("Error: --rtx requires tensorrt_rtx. Install: pip install tensorrt-rtx",
                   file=sys.stderr)
             sys.exit(1)
 
     parser = argparse.ArgumentParser(
-        prog="trtmc-build",
+        prog="trtmc",
         description="Build .trtfb bundles from HuggingFace models",
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # trtmc-build build <model> -o <out.trtfb>
+    # trtmc build <model> -o <out.trtfb>
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (e.g. Qwen/Qwen3-0.6B) or local directory")
@@ -677,29 +678,28 @@ def main() -> None:
         help="Set one config field for this session (repeatable). Uses the "
              "schema's declared type; unknown namespaces/fields fail fast.")
 
-    # trtmc-build inspect <bundle.trtfb>
+    # python -m tensorrt_model_connect inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",
                                       help="Inspect a .trtfb bundle")
     inspect_p.add_argument("bundle_path", help=".trtfb file to inspect")
     inspect_p.add_argument("--list-engines", action="store_true",
                            help="List only TRT engine plan sections with roles")
 
-    # trtmc-build version
+    # python -m tensorrt_model_connect version
     subparsers.add_parser("version", help="Show version info")
 
-    # Allow bare positional as sugar: `trtmc-build <model-dir> -o out.trtfb`
-    # (i.e., default subcommand is "build")
-    args, remaining = parser.parse_known_args()
+    # Keep direct module compatibility: `python -m tensorrt_model_connect
+    # <model-dir> -o out.trtfb` still means build. The public native CLI uses
+    # explicit `trtmc build`.
+    command_names = {"build", "inspect", "version"}
+    cli_argv = sys.argv[1:]
+    if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
+        cli_argv = ["build"] + cli_argv
+    args = parser.parse_args(cli_argv)
 
     if args.command is None:
-        # Try to parse as implicit "build"
-        if remaining or (len(sys.argv) > 1 and sys.argv[1] not in
-                         ("--help", "-h")):
-            build_args = ["build"] + sys.argv[1:]
-            args = parser.parse_args(build_args)
-        else:
-            parser.print_help()
-            sys.exit(0)
+        parser.print_help()
+        sys.exit(0)
 
     dispatch = {
         "build": _cmd_build,

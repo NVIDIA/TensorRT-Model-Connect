@@ -462,7 +462,7 @@ class Qwen3MoePlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc-build] Building Qwen MoE TRT engine "
+            print(f"[trtmc build] Building Qwen MoE TRT engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, experts={num_experts}, "
                   f"top_k={top_k}, moe_inter={moe_intermediate}, "

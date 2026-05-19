@@ -196,7 +196,7 @@ def build_encoder_engine(
     # Build engine
     # -------------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building BERT encoder TRT engine "
+        print(f"[trtmc build] Building BERT encoder TRT engine "
               f"({num_layers} layers, hidden={hidden}, "
               f"seq_len={max_seq_length}) ...", file=sys.stderr)
 

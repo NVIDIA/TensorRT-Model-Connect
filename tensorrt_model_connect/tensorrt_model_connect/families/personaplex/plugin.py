@@ -13,7 +13,7 @@ Bring-up CLI reference (used for PersonaPlex TRT/C++ iteration):
   docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && cmake --build build -j'
 
   # Build a PersonaPlex bundle from HF (base engine bundle)
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && .venv/bin/trtmc-build build nvidia/personaplex-7b-v1 -o /tmp/trtmc-ci/engines/personaplex-7b.trtfb --max-cache-length 256 --verbose'
+  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && ./build/trtmc build nvidia/personaplex-7b-v1 -o /tmp/trtmc-ci/engines/personaplex-7b.trtfb --max-cache-length 256 --verbose'
 
   # Rebuild only Mimi decoder capacity (example: 320 frames) and repack bundle
   docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && .venv/bin/python <inline script calling _build_mimi_decoder_engine(..., num_input_codebooks=8, num_frames=320) and replacing mimi_decoder_plan in an existing .trtfb>'
@@ -347,7 +347,7 @@ class PersonaPlexPlugin:
                     depth_weights[new_key] = val
 
             if verbose:
-                print(f"[trtmc-build] Building depth engine for codebook {cb} "
+                print(f"[trtmc build] Building depth engine for codebook {cb} "
                       f"({len(depth_weights)} weights)", file=sys.stderr)
 
             with timed_trt_compile(
@@ -380,7 +380,7 @@ class PersonaPlexPlugin:
             all_proj = np.stack(proj_parts, axis=0)  # [num_cb, depth_hidden, temporal_hidden]
             extras["depth_projection"] = all_proj.tobytes()
             if verbose:
-                print(f"[trtmc-build] depth_projection: {all_proj.shape} "
+                print(f"[trtmc build] depth_projection: {all_proj.shape} "
                       f"({all_proj.nbytes} bytes)", file=sys.stderr)
 
         # --- Per-codebook audio embedding tables for temporal input ---
@@ -400,7 +400,7 @@ class PersonaPlexPlugin:
             all_emb = np.stack(emb_parts, axis=0)  # [num_cb, audio_vocab, temporal_hidden]
             extras["audio_embeddings"] = all_emb.tobytes()
             if verbose:
-                print(f"[trtmc-build] audio_embeddings: {all_emb.shape} "
+                print(f"[trtmc build] audio_embeddings: {all_emb.shape} "
                       f"({all_emb.nbytes / (1024*1024):.1f} MB)", file=sys.stderr)
 
         # --- Temporal text embedding table (text_emb.weight) ---
@@ -412,7 +412,7 @@ class PersonaPlexPlugin:
             text_emb = weights["text_emb"].astype(np.float32)
             extras["temporal_text_embedding"] = text_emb.tobytes()
             if verbose:
-                print(f"[trtmc-build] temporal_text_embedding: {text_emb.shape} "
+                print(f"[trtmc build] temporal_text_embedding: {text_emb.shape} "
                       f"({text_emb.nbytes / (1024*1024):.1f} MB)", file=sys.stderr)
 
         # --- Depth text embedding table (depformer_text_emb) ---
@@ -422,7 +422,7 @@ class PersonaPlexPlugin:
             depth_text_emb = weights["depformer_text_emb"].astype(np.float32)
             extras["depth_text_embedding"] = depth_text_emb.tobytes()
             if verbose:
-                print(f"[trtmc-build] depth_text_embedding: {depth_text_emb.shape} "
+                print(f"[trtmc build] depth_text_embedding: {depth_text_emb.shape} "
                       f"({depth_text_emb.nbytes / (1024*1024):.1f} MB)", file=sys.stderr)
 
         # --- Depth per-codebook audio embedding tables (depformer_emb) ---
@@ -440,7 +440,7 @@ class PersonaPlexPlugin:
             all_dep_emb = np.stack(dep_emb_parts, axis=0)
             extras["depth_audio_embeddings"] = all_dep_emb.tobytes()
             if verbose:
-                print(f"[trtmc-build] depth_audio_embeddings: {all_dep_emb.shape} "
+                print(f"[trtmc build] depth_audio_embeddings: {all_dep_emb.shape} "
                       f"({all_dep_emb.nbytes / (1024*1024):.1f} MB)", file=sys.stderr)
 
         # --- Mimi Encoder engine (placeholder) ---
@@ -943,11 +943,11 @@ def _build_mimi_encoder_engine(
     """
     if trt is None or graph_ops is None:
         if verbose:
-            print("[trtmc-build] Skipping Mimi encoder (TRT not available)",
+            print("[trtmc build] Skipping Mimi encoder (TRT not available)",
                   file=sys.stderr)
         return None
 
-    print("[trtmc-build] Building Mimi encoder TRT engine ...", file=sys.stderr)
+    print("[trtmc build] Building Mimi encoder TRT engine ...", file=sys.stderr)
 
     mimi_w, mimi_cfg = _load_mimi_weights()
 
@@ -1243,17 +1243,17 @@ def _build_mimi_encoder_engine(
     network.mark_output(codec_out)
 
     if verbose:
-        print(f"[trtmc-build] Mimi encoder: {num_input_samples} samples -> "
+        print(f"[trtmc build] Mimi encoder: {num_input_samples} samples -> "
               f"{ds_seq_len} frames x 32 codebooks", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
-        print("[trtmc-build] ERROR: Mimi encoder engine build failed",
+        print("[trtmc build] ERROR: Mimi encoder engine build failed",
               file=sys.stderr)
         return None
 
     plan_bytes = bytes(plan)
-    print(f"[trtmc-build] Mimi encoder engine built ({len(plan_bytes) / (1024*1024):.1f} MB)",
+    print(f"[trtmc build] Mimi encoder engine built ({len(plan_bytes) / (1024*1024):.1f} MB)",
           file=sys.stderr)
     return plan_bytes
 
@@ -1281,11 +1281,11 @@ def _build_mimi_decoder_engine(
     """
     if trt is None or graph_ops is None:
         if verbose:
-            print("[trtmc-build] Skipping Mimi decoder (TRT not available)",
+            print("[trtmc build] Skipping Mimi decoder (TRT not available)",
                   file=sys.stderr)
         return None
 
-    print("[trtmc-build] Building Mimi decoder TRT engine ...", file=sys.stderr)
+    print("[trtmc build] Building Mimi decoder TRT engine ...", file=sys.stderr)
 
     mimi_w, mimi_cfg = _load_mimi_weights()
 
@@ -1580,18 +1580,18 @@ def _build_mimi_decoder_engine(
 
     output_samples = x.shape[2]
     if verbose:
-        print(f"[trtmc-build] Mimi decoder: {num_frames} frames x {num_codebooks} codebooks "
+        print(f"[trtmc build] Mimi decoder: {num_frames} frames x {num_codebooks} codebooks "
               f"(1 semantic + {num_acoustic} acoustic) -> "
               f"{output_samples} samples", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
-        print("[trtmc-build] ERROR: Mimi decoder engine build failed",
+        print("[trtmc build] ERROR: Mimi decoder engine build failed",
               file=sys.stderr)
         return None
 
     plan_bytes = bytes(plan)
-    print(f"[trtmc-build] Mimi decoder engine built ({len(plan_bytes) / (1024*1024):.1f} MB)",
+    print(f"[trtmc build] Mimi decoder engine built ({len(plan_bytes) / (1024*1024):.1f} MB)",
           file=sys.stderr)
     return plan_bytes
 

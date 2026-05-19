@@ -514,7 +514,7 @@ def _build_eagle_engine(
     # --- Build ---
     mode_str = "reranking" if is_reranker else "embedding"
     if verbose:
-        print(f"[trtmc-build] Building Eagle {mode_str} engine "
+        print(f"[trtmc build] Building Eagle {mode_str} engine "
               f"({num_layers} layers, hidden={hidden}, "
               f"attn={attention_size}, mlp={mlp_size}, "
               f"seq_len={seq_length}) ...",
@@ -861,7 +861,7 @@ def _build_siglip_vision_engine(
             hidden_state = flatten.get_output(0)
 
             if verbose:
-                print(f"[trtmc-build] Pixel shuffle: [{num_patches_h}x{num_patches_w}, {vision_hidden}] -> "
+                print(f"[trtmc build] Pixel shuffle: [{num_patches_h}x{num_patches_w}, {vision_hidden}] -> "
                       f"[{num_merged}, {mlp1_in_dim}]", file=sys.stderr)
         else:
             num_merged = num_patches
@@ -903,7 +903,7 @@ def _build_siglip_vision_engine(
         # Update num_patches for output annotation
         num_patches = num_merged if merge_factor > 1 else num_patches
         if verbose:
-            print(f"[trtmc-build] Added MLP projector: {mlp1_in_dim} -> "
+            print(f"[trtmc build] Added MLP projector: {mlp1_in_dim} -> "
                   f"{mlp1_inter} -> {text_hidden_size}", file=sys.stderr)
 
     # Output: vision_features [num_patches, output_dim]
@@ -911,7 +911,7 @@ def _build_siglip_vision_engine(
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc-build] Building SigLIP-2 vision engine "
+        print(f"[trtmc build] Building SigLIP-2 vision engine "
               f"({num_vision_layers} layers, hidden={vision_hidden}, "
               f"patches={num_patches}) ...", file=sys.stderr)
 

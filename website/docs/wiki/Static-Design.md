@@ -687,7 +687,7 @@ classDiagram
 | Field | Value |
 |---|---|
 | **Files** | `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` |
-| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`trtmc-build build`) and Python API (`tensorrt_model_connect.build()`). |
+| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`./build/trtmc build`) and Python API (`tensorrt_model_connect.build()`). |
 
 ### UD-BLD-DBG-01: Debug Runner
 

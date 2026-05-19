@@ -249,7 +249,7 @@ class BartPlugin:
             network.mark_output(present_v_outputs[i])
 
         if verbose:
-            print(f"[trtmc-build] Building BART decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
+            print(f"[trtmc build] Building BART decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT decoder engine build failed")
@@ -353,7 +353,7 @@ def _build_bart_encoder(config, weights, *, max_cache_length=256, verbose=False)
     hs.name = "encoder_output"
     network.mark_output(hs)
     if verbose:
-        print(f"[trtmc-build] Building BART encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, seq={max_enc_seq})", file=sys.stderr)
+        print(f"[trtmc build] Building BART encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, seq={max_enc_seq})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TensorRT encoder engine build failed")

@@ -126,7 +126,7 @@ def build_evolve_prompt(
     ### Step 1: Build
     ```bash
     docker exec {container} bash -c \\
-        'trtmc-build build {model} -o /tmp/evolve_test.trtfb \\
+        './build/trtmc build {model} -o /tmp/evolve_test.trtfb \\
          --max-cache-length {max_cache_length} --verbose 2>&1; echo EXIT=$?'
     ```
     If the build fails, read the error, fix the code, and retry the build.
@@ -402,14 +402,14 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         Already implemented in the quantization framework. Just pass `--precision fp16`:
         ```bash
-        trtmc-build build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
+        ./build/trtmc build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
         ```
         Correctness: use `--atol 0.1` (relaxed for FP16).
         Bundle size halves (~2.5GB → ~1.3GB for 0.6B model).
 
         **BF16 — similar to FP16, better numerical stability**
         ```bash
-        trtmc-build build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
+        ./build/trtmc build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
         ```
         Only on B100/B200/H100 (native BF16 support).
 

@@ -568,7 +568,7 @@ class SegformerPlugin:
         network.mark_output(logits)
 
         if verbose:
-            print(f"[trtmc-build] Building SegFormer engine "
+            print(f"[trtmc build] Building SegFormer engine "
                   f"(image={H_in}x{W_in}, classes={num_classes}) ...",
                   file=sys.stderr)
 

@@ -210,7 +210,7 @@ class MarianPlugin:
             network.mark_output(present_v_outputs[i])
 
         if verbose:
-            print(f"[trtmc-build] Building Marian decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
+            print(f"[trtmc build] Building Marian decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT decoder engine build failed")
@@ -315,7 +315,7 @@ def _build_marian_encoder(config, weights, *, verbose=False):
     network.mark_output(hs)
 
     if verbose:
-        print(f"[trtmc-build] Building Marian encoder ({enc_layers}L, h={hidden}, heads={enc_heads})", file=sys.stderr)
+        print(f"[trtmc build] Building Marian encoder ({enc_layers}L, h={hidden}, heads={enc_heads})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TensorRT encoder engine build failed")

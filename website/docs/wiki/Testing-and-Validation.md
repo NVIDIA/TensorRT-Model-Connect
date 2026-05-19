@@ -864,7 +864,7 @@ The primary validation gate for new model families:
 validate_family.sh <hf-repo-or-path> [options]
   |
   +-- Step 1: Build bundle
-  |     trtmc-build build <model> -o /tmp/<name>.trtfb --max-cache-length 256
+  |     ./build/trtmc build <model> -o /tmp/<name>.trtfb --max-cache-length 256
   |
   +-- Step 2: diff_logits battery
   |     python tools/diff_logits.py --model <model> --atol 1e-3 --battery

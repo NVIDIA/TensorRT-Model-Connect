@@ -110,7 +110,7 @@ Critical details:
 
 ## Validation
 
-- Inspect the bundle with `trtmc-build inspect <bundle.trtfb>`.
+- Inspect the bundle with `./build/trtmc inspect <bundle.trtfb>`.
 - Compare FP32 and FP16 bundle sizes; FP16 weight-heavy bundles should be
   materially smaller.
 - Run the narrow E2E manifest or a targeted diff command before claiming the

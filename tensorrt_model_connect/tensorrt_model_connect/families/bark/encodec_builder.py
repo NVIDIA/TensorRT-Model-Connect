@@ -244,7 +244,7 @@ def build_encodec_decoder_engine(
     network.mark_output(x)
 
     if verbose:
-        print(f"[trtmc-build] Building EnCodec decoder engine "
+        print(f"[trtmc build] Building EnCodec decoder engine "
               f"(codebooks={num_codebooks}, dim={codebook_dim}, seq={seq_length}) ...",
               file=sys.stderr)
 

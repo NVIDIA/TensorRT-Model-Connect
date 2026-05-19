@@ -67,7 +67,7 @@ def build_phi4mm_vision_engine(
     num_patches = grid_h * grid_w
 
     if verbose:
-        print(f"[trtmc-build] Phi4MM Vision: image={fixed_image_size}, "
+        print(f"[trtmc build] Phi4MM Vision: image={fixed_image_size}, "
               f"patch={patch_size}, grid={grid_h}x{grid_w}, "
               f"patches={num_patches}, embed={embed_dim}, "
               f"text_hidden={text_hidden_size}", file=sys.stderr)
@@ -419,7 +419,7 @@ def build_phi4mm_vision_engine(
     # Build
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building Phi4MM vision TRT engine "
+        print(f"[trtmc build] Building Phi4MM vision TRT engine "
               f"({num_layers} layers, embed={embed_dim}, "
               f"patches={num_patches}, "
               f"output_dim={output_feature_dim}) ...", file=sys.stderr)

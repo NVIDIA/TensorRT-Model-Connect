@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: trtmc-nightly-main
@@ -146,6 +146,71 @@ jobs:
       - name: Generate coverage map
         timeout-minutes: 90
         run: bash .github/scripts/run-gha-stage.sh coverage-map
+
+      - name: Build trtmc pip package
+        timeout-minutes: 30
+        run: bash .github/scripts/run-gha-stage.sh package
+
+      - name: Upload trtmc pip package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-pip-package-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+          path: dist/*.whl
+
+      - name: Publish trtmc pip package to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          compgen -G "dist/*.whl" >/dev/null || {
+            echo "::error::No trtmc wheel found under dist/"
+            exit 1
+          }
+          release_payload="$(python3 - <<'PY'
+          import json
+          import os
+
+          tag = f"trtmc-nightly-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          print(json.dumps({
+              "tag_name": tag,
+              "target_commitish": os.environ["GITHUB_SHA"],
+              "name": f"TRTMC Nightly {os.environ['GITHUB_RUN_ID']} attempt {os.environ['GITHUB_RUN_ATTEMPT']}",
+              "body": f"Nightly TensorRT-Model-Connect pip package built by {run_url}.",
+              "draft": False,
+              "prerelease": True,
+              "make_latest": "false",
+          }))
+          PY
+          )"
+          curl -sSfL \
+            -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "$release_payload" \
+            > release.json
+          upload_url="$(python3 - <<'PY'
+          import json
+          print(json.load(open("release.json"))["upload_url"].split("{", 1)[0])
+          PY
+          )"
+          for asset in dist/*.whl; do
+            name="$(basename "$asset")"
+            curl -sSfL \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$asset" \
+              "${upload_url}?name=${name}" \
+              > /dev/null
+            echo "Published release asset: $name"
+          done
 
       - name: Write CI summary
         if: always()

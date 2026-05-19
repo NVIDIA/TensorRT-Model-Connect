@@ -325,7 +325,7 @@ class Olmo2Plugin:
 
         # Build engine
         if verbose:
-            print(f"[trtmc-build] Building TRT engine ({num_layers} layers, "
+            print(f"[trtmc build] Building TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, attn={attention_size}, mlp={mlp_size}, "
                   f"cache={max_cache_length}) ...", file=sys.stderr)
 

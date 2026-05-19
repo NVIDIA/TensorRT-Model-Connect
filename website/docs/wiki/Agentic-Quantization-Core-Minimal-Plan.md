@@ -31,7 +31,7 @@ The shared core is intentionally small:
 
 5. `Validation Contract`
    - E2E manifests now accept a generic `quantization` block
-   - orchestrator converts that block into `trtmc-build build` args
+   - orchestrator converts that block into `./build/trtmc build` args
 
 Authoritative shared-core files for quantization:
 

@@ -153,13 +153,13 @@ def model_entry(request, engine_dir):
 # Built-bundle fixture (for full-pipeline tests)
 # ---------------------------------------------------------------------------
 
-def _build_bundle(hf_id, bundle_path, max_cache_length, precision="fp32"):
+def _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache_length, precision="fp32"):
     """Build a .trtfb bundle as a subprocess to isolate GPU memory.
 
     Returns build time in seconds.
     """
     cmd = [
-        "trtmc-build", "build",
+        str(trtmc_binary), "build",
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache_length),
     ]
@@ -210,7 +210,7 @@ def compute_frame_stats(frame_dir: Path) -> dict:
 
 
 @pytest.fixture(params=_model_ids() or ["__no_models__"])
-def built_bundle(request, engine_dir):
+def built_bundle(request, engine_dir, trtmc_binary):
     """Parametrized fixture that ensures a bundle exists, building if needed.
 
     Returns a dict:
@@ -242,7 +242,7 @@ def built_bundle(request, engine_dir):
     hf_id = entry["hf_id"]
     max_cache = entry.get("max_cache_length", 256)
     precision = entry.get("precision", "fp32")
-    build_time = _build_bundle(hf_id, bundle_path, max_cache, precision)
+    build_time = _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache, precision)
 
     entry["bundle_path"] = str(bundle_path)
     return {

@@ -1,6 +1,6 @@
 """CLI support helpers for the two-flag config surface (``--config``, ``--set``).
 
-This module lets the various entry points (``trtmc-build``, the benchmark
+This module lets the various entry points (``trtmc build``, the benchmark
 scripts, tests) accept the fixed two-flag surface without growing per-knob
 flags. All callers end up producing a :class:`LayerContribution` that feeds
 :meth:`ConfigBundle.build`.

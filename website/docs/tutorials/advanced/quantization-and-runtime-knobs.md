@@ -21,7 +21,7 @@ flowchart LR
 ## Precision
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-fp16.trtfb \
   --precision fp16
 ```
@@ -39,7 +39,7 @@ Precision changes the numeric type used by the engine. It affects memory, speed,
 ## Quantization
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-fp8.trtfb \
   --quantize fp8 \
   --quant-calibration-samples 512
@@ -69,7 +69,7 @@ Quantization is not just a compression flag. It is a contract between:
 ## Reusing scales
 
 ```bash
-trtmc-build build black-forest-labs/FLUX.2-dev \
+./build/trtmc build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2-fp8.trtfb \
   --fp8-scales tests/e2e/data/flux2-fp8-scales.json
 ```
@@ -79,7 +79,7 @@ Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.
 ## Dynamic KV cache
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-dynamic.trtfb \
   --dynamic-kv-cache \
   --dynamic-kv-profile-rows 256,512,1024
@@ -120,7 +120,7 @@ Backend selection is part of deployment correctness. The runtime checks TensorRT
 Build an RTX-targeted bundle:
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-rtx.trtfb \
   --rtx
 ```
