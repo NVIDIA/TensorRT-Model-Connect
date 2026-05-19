@@ -214,12 +214,18 @@ print('|'.join(tests))
 " 2>/dev/null) || true
   fi
 
+  local ctest_filter_args=()
+  if [ "${TRTMC_CPP_CPU_ONLY:-}" = "1" ]; then
+    ctest_filter_args=(-LE requires_gpu)
+    echo "Excluding C++ tests labeled requires_gpu in CPU-only CI container"
+  fi
+
   if [ -n "$cpp_tests" ]; then
     echo "Selective C++ tests: $cpp_tests"
-    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build -R "$cpp_tests" --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build "${ctest_filter_args[@]}" -R "$cpp_tests" --output-on-failure
   else
     echo "Running all C++ tests"
-    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build "${ctest_filter_args[@]}" --output-on-failure
   fi
 }
 
@@ -331,7 +337,12 @@ run_cpp_coverage() {
       ;;
   esac
   python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
-  run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh
+  local coverage_ctest_args=()
+  if [ "${TRTMC_CPP_CPU_ONLY:-}" = "1" ]; then
+    coverage_ctest_args=(-LE requires_gpu)
+    echo "Excluding C++ tests labeled requires_gpu from CPU-only coverage container"
+  fi
+  run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh "${coverage_ctest_args[@]}"
 }
 
 run_graph_op_tests() {

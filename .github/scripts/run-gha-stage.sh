@@ -35,7 +35,11 @@ fi
 
 container_options=()
 case "$stage" in
-  cpp-unit|cpp-coverage|graph-ops|selective-e2e|full-e2e)
+  cpp-unit|cpp-coverage)
+    export TRTMC_CPP_CPU_ONLY=1
+    echo "Skipping GPU container options for CPU-safe C++ stage '${stage}'"
+    ;;
+  graph-ops|selective-e2e|full-e2e)
     # shellcheck disable=SC2206
     container_options=(${TRTMC_CONTAINER_OPTIONS:-})
     echo "Using GPU container options for stage '${stage}': ${TRTMC_CONTAINER_OPTIONS:-<none>}"
@@ -77,6 +81,7 @@ docker run --rm \
   -e CPP_COVERAGE_MIN_LINE \
   -e CPP_COVERAGE_MIN_FUNCTION \
   -e CPP_COVERAGE_MIN_BRANCH \
+  -e TRTMC_CPP_CPU_ONLY \
   -e BUILD_ALL_TIMEOUT \
   -e CPP_UNIT_TIMEOUT \
   -e PYTHON_BUILDER_TIMEOUT \

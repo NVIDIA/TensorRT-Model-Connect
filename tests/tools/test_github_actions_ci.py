@@ -39,14 +39,46 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
-def test_github_stage_wrapper_uses_gpu_options_for_cuda_stages_only() -> None:
+def test_github_stage_wrapper_keeps_cpp_unit_stages_cpu_only() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     gpu_case = text.split("case \"$stage\" in", maxsplit=1)[1].split(
         "*)",
         maxsplit=1,
     )[0]
-    assert "cpp-unit|cpp-coverage|graph-ops|selective-e2e|full-e2e)" in gpu_case
+    assert "graph-ops|selective-e2e|full-e2e)" in gpu_case
     assert "python-builder" not in gpu_case
+    assert "cpp-unit|cpp-coverage)" in text
+    assert "TRTMC_CPP_CPU_ONLY=1" in text
+    assert "-e TRTMC_CPP_CPU_ONLY" in text
+
+
+def test_github_cpp_unit_stages_exclude_gpu_labeled_ctests() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "-LE requires_gpu" in text
+    assert "Excluding C++ tests labeled requires_gpu in CPU-only CI container" in text
+    assert "Excluding C++ tests labeled requires_gpu from CPU-only coverage container" in text
+
+
+def test_cmake_labels_cuda_device_tests() -> None:
+    text = (REPO_ROOT / "CMakeLists.txt").read_text()
+    for test_name in (
+        "test_c_abi_runtime_regression",
+        "test_trt_runtime_lifetime",
+        "test_trt_module",
+        "test_cuda_buffer",
+        "test_cuda_stream",
+        "test_cuda_graph",
+        "test_device_kv_cache",
+        "test_device_resources",
+        "test_device_tensor",
+        "test_kv_cache_new",
+        "test_triattention_kv_cache",
+        "test_recurrent_state",
+        "test_encoder_pipeline",
+        "test_vl_pipeline",
+    ):
+        line = next(line for line in text.splitlines() if f"trtmc_add_test({test_name}" in line)
+        assert "REQUIRES_GPU" in line
 
 
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
