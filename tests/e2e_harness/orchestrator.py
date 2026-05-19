@@ -101,6 +101,16 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
+_SANA_WM_STAGE1_CORE_PLAN_SECTIONS = (
+    "text_encoder_0_plan",
+    "denoiser_plan",
+    "sana_wm_vae_encoder_plan",
+)
+_SANA_WM_REFINER_PLAN_SECTIONS = (
+    "sana_wm_refiner_text_encoder_plan",
+    "sana_wm_refiner_denoiser_plan",
+    "sana_wm_refiner_vae_decoder_plan",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +345,65 @@ def _check_sana_wm_runtime_entrypoint_available(
     )
 
 
+def _check_sana_wm_native_plans_available(
+    ctx: RunContext, req: PreflightRequirement
+) -> tuple[bool, str]:
+    """Check that TRTMC has enough native plans for pure C++ SANA-WM."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    raw_plan_dir = (
+        str(req.args.get("plan_dir", "") or "")
+        or os.environ.get("SANA_WM_NATIVE_PLAN_DIR", "")
+    )
+    checked: list[str] = []
+    candidates: list[Path] = []
+    if raw_plan_dir:
+        candidates.append(Path(raw_plan_dir))
+    for raw_model_dir in (
+        str(req.args.get("model_dir", "") or ""),
+        os.environ.get("SANA_WM_MODEL_DIR", ""),
+    ):
+        if raw_model_dir:
+            candidates.append(Path(raw_model_dir) / "trtmc_engines")
+
+    for path in candidates:
+        candidate = path if path.is_absolute() else project_root / path
+        checked.append(str(candidate))
+        if not candidate.is_dir():
+            continue
+        present = {
+            plan.stem
+            for plan in candidate.glob("*.plan")
+            if plan.is_file()
+        }
+        missing_core = [
+            section for section in _SANA_WM_STAGE1_CORE_PLAN_SECTIONS
+            if section not in present
+        ]
+        if missing_core:
+            continue
+        has_stage1_decoder = "vae_decoder_plan" in present
+        missing_refiner = [
+            section for section in _SANA_WM_REFINER_PLAN_SECTIONS
+            if section not in present
+        ]
+        if has_stage1_decoder or not missing_refiner:
+            mode = "refiner" if not missing_refiner else "stage1 VAE decoder"
+            return True, f"SANA-WM native TensorRT plans found: {candidate} ({mode})"
+
+    required = (
+        ", ".join(_SANA_WM_STAGE1_CORE_PLAN_SECTIONS)
+        + " plus vae_decoder_plan or "
+        + ", ".join(_SANA_WM_REFINER_PLAN_SECTIONS)
+    )
+    return (
+        False,
+        "SANA-WM native TensorRT plans not found for pure C++ TRTMC execution. "
+        f"Required: {required}. Set SANA_WM_NATIVE_PLAN_DIR or "
+        "SANA_WM_MODEL_DIR to a directory containing trtmc_engines/*.plan. "
+        "Checked: " + (", ".join(checked) if checked else "<none>"),
+    )
+
+
 _PREFLIGHT_CHECKERS = {
     "binary_exists": _check_binary_exists,
     "gpu_memory_min_gb": _check_gpu_memory,
@@ -343,6 +412,7 @@ _PREFLIGHT_CHECKERS = {
     "python_module_available": _check_python_module,
     "sana_wm_script_available": _check_sana_wm_script_available,
     "sana_wm_runtime_entrypoint_available": _check_sana_wm_runtime_entrypoint_available,
+    "sana_wm_native_plans_available": _check_sana_wm_native_plans_available,
 }
 
 

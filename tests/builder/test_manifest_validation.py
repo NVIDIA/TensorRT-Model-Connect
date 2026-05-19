@@ -337,6 +337,11 @@ class TestManifestValidation:
         ]
         assert len(script_reqs) == 1
         assert script_reqs[0].gating is False
+        native_plan_reqs = [
+            req for req in case.preflight if req.kind == "sana_wm_native_plans_available"
+        ]
+        assert len(native_plan_reqs) == 1
+        assert native_plan_reqs[0].gating is True
         entrypoint_reqs = [
             req
             for req in case.preflight

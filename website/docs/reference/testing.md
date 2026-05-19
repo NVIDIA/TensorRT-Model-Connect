@@ -66,6 +66,13 @@ preflight with `precheck_fail` and writes `preflight_details.json`.
 The TRTMC side is expected to run native TensorRT sections. Bridge execution is
 disabled by default and is only available when `sana_wm_allow_python_bridge=1`
 is explicitly set for legacy bridge testing.
+Set `SANA_WM_NATIVE_PLAN_DIR` to a directory containing the required
+`trtmc_engines/*.plan` sections, or set `SANA_WM_MODEL_DIR` to a model
+directory with a `trtmc_engines/` subdirectory. The minimum native set is
+`text_encoder_0_plan`, `denoiser_plan`, and `sana_wm_vae_encoder_plan`, plus
+either `vae_decoder_plan` or the complete refiner set:
+`sana_wm_refiner_text_encoder_plan`, `sana_wm_refiner_denoiser_plan`, and
+`sana_wm_refiner_vae_decoder_plan`.
 
 To run true parity once the official runtime is available, point either
 environment variable at that runtime before invoking the normal E2E command:

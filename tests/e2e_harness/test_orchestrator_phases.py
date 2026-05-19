@@ -228,6 +228,17 @@ def test_sana_wm_preflight_finds_official_script_and_assets(
     prompt.write_text("prompt", encoding="utf-8")
     script = tmp_path / "inference_sana_wm.py"
     script.write_text("", encoding="utf-8")
+    plan_dir = tmp_path / "trtmc_engines"
+    plan_dir.mkdir()
+    for section in (
+        "text_encoder_0_plan",
+        "denoiser_plan",
+        "sana_wm_vae_encoder_plan",
+        "sana_wm_refiner_text_encoder_plan",
+        "sana_wm_refiner_denoiser_plan",
+        "sana_wm_refiner_vae_decoder_plan",
+    ):
+        (plan_dir / f"{section}.plan").write_bytes(b"plan")
     monkeypatch.setenv("SANA_WM_SCRIPT", str(script))
 
     case = _make_case(
@@ -236,6 +247,10 @@ def test_sana_wm_preflight_finds_official_script_and_assets(
             PreflightRequirement(kind="binary_exists"),
             PreflightRequirement(kind="asset_exists", args={"path": str(image)}),
             PreflightRequirement(kind="asset_exists", args={"path": str(prompt)}),
+            PreflightRequirement(
+                kind="sana_wm_native_plans_available",
+                args={"plan_dir": str(plan_dir)},
+            ),
             PreflightRequirement(kind="sana_wm_script_available"),
             PreflightRequirement(kind="sana_wm_runtime_entrypoint_available"),
         ],
@@ -247,8 +262,33 @@ def test_sana_wm_preflight_finds_official_script_and_assets(
 
     assert ok is True
     assert all(item["passed"] for item in details)
+    assert details[-3]["kind"] == "sana_wm_native_plans_available"
     assert details[-2]["kind"] == "sana_wm_script_available"
     assert details[-1]["kind"] == "sana_wm_runtime_entrypoint_available"
+
+
+def test_sana_wm_native_plan_preflight_rejects_missing_plans(tmp_path: Path) -> None:
+    plan_dir = tmp_path / "trtmc_engines"
+    plan_dir.mkdir()
+    (plan_dir / "denoiser_plan.plan").write_bytes(b"partial")
+    case = _make_case(
+        "sana-wm-missing-native-plans",
+        preflight=[
+            PreflightRequirement(
+                kind="sana_wm_native_plans_available",
+                args={"plan_dir": str(plan_dir)},
+            ),
+        ],
+    )
+    ctx = _make_ctx(tmp_path, case)
+
+    ok, details = orchestrator.run_preflight(case, ctx)
+
+    assert ok is False
+    assert details[0]["kind"] == "sana_wm_native_plans_available"
+    assert details[0]["passed"] is False
+    assert "native TensorRT plans not found" in details[0]["message"]
+    assert "text_encoder_0_plan" in details[0]["message"]
 
 
 def test_sana_wm_runtime_entrypoint_rejects_local_shim_without_model_index(
