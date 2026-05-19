@@ -2,6 +2,7 @@
 
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/domains/audio/subprocess_runner.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <array>
 #include <cstdint>
@@ -99,6 +100,20 @@ struct SanaWmStage1Latents {
     int32_t width{0};
 };
 
+struct SanaWmNativeModules {
+    std::unique_ptr<ITrtModule> text_encoder;
+    std::unique_ptr<ITrtModule> stage1_denoiser;
+    std::unique_ptr<ITrtModule> vae_encoder;
+    std::unique_ptr<ITrtModule> vae_decoder;
+    std::unique_ptr<ITrtModule> refiner_text_encoder;
+    std::unique_ptr<ITrtModule> refiner_denoiser;
+    std::unique_ptr<ITrtModule> refiner_vae_decoder;
+
+    bool has_any() const;
+    bool has_stage1() const;
+    bool has_refiner() const;
+};
+
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
 
@@ -126,17 +141,23 @@ SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& fir
 class SanaWmPipeline final : public IPipeline {
   public:
     SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
-                   std::shared_ptr<ISubprocessRunner> subprocess_runner = nullptr);
+                   std::shared_ptr<ISubprocessRunner> subprocess_runner = nullptr,
+                   SanaWmNativeModules native_modules = {});
 
     const char* model_id() const override { return config_.hf_id.c_str(); }
     const char* pipeline_type() const override { return "SanaWmPipeline"; }
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
+    bool has_native_modules() const { return native_modules_.has_any(); }
+    bool has_native_stage1() const { return native_modules_.has_stage1(); }
+    bool has_native_refiner() const { return native_modules_.has_refiner(); }
+
   private:
     SanaWmRuntimeConfig config_;
     std::string hf_python_;
     std::shared_ptr<ISubprocessRunner> subprocess_runner_;
+    SanaWmNativeModules native_modules_;
 };
 
 } // namespace trtmc

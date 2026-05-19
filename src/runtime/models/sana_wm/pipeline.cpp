@@ -892,10 +892,24 @@ SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& fir
     return {std::move(values), channels, latent_frames, latent_height, latent_width};
 }
 
+bool SanaWmNativeModules::has_any() const {
+    return text_encoder || stage1_denoiser || vae_encoder || vae_decoder || refiner_text_encoder ||
+           refiner_denoiser || refiner_vae_decoder;
+}
+
+bool SanaWmNativeModules::has_stage1() const {
+    return text_encoder && stage1_denoiser && vae_encoder && vae_decoder;
+}
+
+bool SanaWmNativeModules::has_refiner() const {
+    return refiner_text_encoder && refiner_denoiser && refiner_vae_decoder;
+}
+
 SanaWmPipeline::SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
-                               std::shared_ptr<ISubprocessRunner> subprocess_runner)
+                               std::shared_ptr<ISubprocessRunner> subprocess_runner,
+                               SanaWmNativeModules native_modules)
     : config_(std::move(config)), hf_python_(std::move(hf_python)),
-      subprocess_runner_(std::move(subprocess_runner)) {
+      subprocess_runner_(std::move(subprocess_runner)), native_modules_(std::move(native_modules)) {
     if (!subprocess_runner_)
         subprocess_runner_ = CreateDefaultSubprocessRunner();
 }
@@ -906,6 +920,11 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
         throw std::runtime_error("SANA-WM generation requires --image");
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
+    if (native_modules_.has_any()) {
+        throw std::runtime_error(
+            "SANA-WM native TensorRT module sections were loaded, but native "
+            "SANA-WM solver/refiner execution is not implemented yet");
+    }
 
     const auto paths = make_invocation_paths();
     run_bridge_or_throw(*subprocess_runner_, build_bridge_argv(config_, request, paths, prompt));

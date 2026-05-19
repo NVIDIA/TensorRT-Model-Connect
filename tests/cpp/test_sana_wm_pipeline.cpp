@@ -78,6 +78,34 @@ class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
     }
 };
 
+class FakeTrtModule final : public trtmc::ITrtModule {
+  public:
+    trtmc::TensorMap forward(const trtmc::TensorMap&) override { return {}; }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtmc::DeviceTensorMap&) override {}
+    void forward_async(const trtmc::TensorMap&) override {}
+    void sync() override {}
+    cudaStream_t stream() const override { return nullptr; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
+    std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
+    std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
+    bool has_input(const std::string&) const override { return false; }
+    bool has_output(const std::string&) const override { return false; }
+    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtmc::ProfileShapeSelector) const override {
+        return {};
+    }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
+    void bind_external(const std::string&, void*) override {}
+    bool ok() const override { return true; }
+    void keep_alive(std::shared_ptr<void>) override {}
+};
+
 void test_action_rollout_matches_model_card_frame_count_and_translation() {
     const auto poses = trtmc::sana_wm_action_to_c2w("w-80,jw-40,w-40,lw-60,w-100", 0.055F, 1.2F);
 
@@ -349,6 +377,33 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
           "sana wm: strict official runtime required");
 }
 
+void test_native_module_sections_do_not_fall_back_to_bridge() {
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+
+    trtmc::SanaWmNativeModules modules;
+    modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+
+    auto runner = std::make_shared<FakeSubprocessRunner>();
+    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = "asset/sana_wm/demo_0.png";
+
+    bool native_incomplete_reported = false;
+    try {
+        (void)pipeline.generate_image("drive forward", gen_cfg);
+    } catch (const std::runtime_error& exc) {
+        native_incomplete_reported =
+            std::string(exc.what()).find("native TensorRT module sections") != std::string::npos;
+    }
+
+    check(pipeline.has_native_modules(), "sana wm native: modules recorded");
+    check(!pipeline.has_native_stage1(), "sana wm native: partial stage1 is not complete");
+    check(native_incomplete_reported, "sana wm native: incomplete native path reported");
+    check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
+}
+
 } // namespace
 
 int main() {
@@ -364,5 +419,6 @@ int main() {
     test_stage1_latents_seeded_noise_is_deterministic();
     test_stage1_latents_reject_mismatched_buffers();
     test_bridge_command_forwards_strict_sana_wm_contract();
+    test_native_module_sections_do_not_fall_back_to_bridge();
     return failures == 0 ? 0 : 1;
 }
