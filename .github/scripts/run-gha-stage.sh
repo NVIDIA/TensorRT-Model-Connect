@@ -30,8 +30,10 @@ mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
 mkdir_if_set "${HF_MODULES_CACHE:-}"
 
 if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
-  chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
-    echo "::warning::Could not normalize workspace permissions before entering the CI container."
+  chmod_timeout="${TRTMC_WORKSPACE_CHMOD_TIMEOUT:-60s}"
+  echo "Normalizing workspace permissions with timeout ${chmod_timeout}: ${GITHUB_WORKSPACE}"
+  timeout "$chmod_timeout" chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
+    echo "::warning::Could not fully normalize workspace permissions within ${chmod_timeout}; continuing into the CI container."
   }
 fi
 
