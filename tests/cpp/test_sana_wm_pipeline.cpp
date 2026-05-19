@@ -62,6 +62,26 @@ std::string value_after(const std::vector<std::string>& argv, const std::string&
     return *it;
 }
 
+std::vector<float> copy_float_tensor(const trtmc::Tensor& tensor) {
+    if (tensor.dtype != trtmc::DType::kFloat32 || tensor.data == nullptr)
+        return {};
+    const auto* data = static_cast<const float*>(tensor.data);
+    return std::vector<float>(data, data + tensor.numel());
+}
+
+std::size_t stage1_bcthw_index(int32_t batch, int32_t channel, int32_t frame, int32_t y,
+                               int32_t x, int32_t channels, int32_t frames, int32_t height,
+                               int32_t width) {
+    return ((((static_cast<std::size_t>(batch) * static_cast<std::size_t>(channels) +
+               static_cast<std::size_t>(channel)) *
+                  static_cast<std::size_t>(frames) +
+              static_cast<std::size_t>(frame)) *
+                 static_cast<std::size_t>(height) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(width) +
+            static_cast<std::size_t>(x));
+}
+
 class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
   public:
     std::vector<std::string> last_argv;
@@ -100,6 +120,10 @@ class FakeTrtModule final : public trtmc::ITrtModule {
             last_input_shapes[name] = tensor.shape;
             last_input_dtypes[name] = tensor.dtype;
         }
+        input_value_calls.push_back({});
+        auto& values = input_value_calls.back();
+        for (const auto& [name, tensor] : inputs)
+            values[name] = copy_float_tensor(tensor);
         if (output_.empty())
             return {};
         return {{"latent", trtmc::Tensor{output_.data(), output_shape_, trtmc::DType::kFloat32}}};
@@ -144,6 +168,7 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     int call_count{0};
     std::unordered_map<std::string, std::vector<int64_t>> last_input_shapes;
     std::unordered_map<std::string, trtmc::DType> last_input_dtypes;
+    std::vector<std::unordered_map<std::string, std::vector<float>>> input_value_calls;
 
   private:
     std::vector<float> output_;
@@ -566,6 +591,7 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
     cfg.vae_spatial_stride = 2;
     cfg.text_encoder_max_length = 2;
     cfg.text_encoder_dim = 2;
+    cfg.num_steps = 2;
 
     trtmc::SanaWmNativeModules modules;
     modules.text_encoder = std::make_unique<FakeTrtModule>(
@@ -598,13 +624,13 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
         solver_boundary_reported =
-            std::string(exc.what()).find("Stage-1 solver/refiner execution is not implemented") !=
+            std::string(exc.what()).find("Stage-1 decode/refiner execution is not implemented") !=
             std::string::npos;
     }
 
     check(solver_boundary_reported, "sana wm native: stage1 denoiser reaches solver boundary");
     check(runner->call_count == 0, "sana wm native: prepared inputs without bridge");
-    check(denoiser_ptr->call_count == 1, "sana wm native: denoiser invoked once");
+    check(denoiser_ptr->call_count == 2, "sana wm native: denoiser invoked per solver step");
     check(denoiser_ptr->last_input_shapes["x"] == std::vector<int64_t>({2, 2, 2, 2, 2}),
           "sana wm native: denoiser latent shape");
     check(denoiser_ptr->last_input_shapes["timestep"] == std::vector<int64_t>({2, 1, 2}),
@@ -621,6 +647,25 @@ void test_native_stage1_denoiser_reaches_solver_boundary() {
           "sana wm native: denoiser chunk plucker shape");
     check(denoiser_ptr->last_input_dtypes["mask"] == trtmc::DType::kInt32,
           "sana wm native: denoiser mask dtype");
+    check(denoiser_ptr->input_value_calls.size() == 2,
+          "sana wm native: denoiser input values recorded per step");
+    if (denoiser_ptr->input_value_calls.size() == 2) {
+        const auto& first_x = denoiser_ptr->input_value_calls[0]["x"];
+        const auto& second_x = denoiser_ptr->input_value_calls[1]["x"];
+        const auto& first_t = denoiser_ptr->input_value_calls[0]["timestep"];
+        check(first_t.size() == 4 && near(first_t[0], 0.0F) && near(first_t[2], 0.0F),
+              "sana wm native: anchor frame timestep is zero for CFG batches");
+        check(first_x.size() == 32 && second_x.size() == 32,
+              "sana wm native: denoiser latent values captured");
+        if (first_x.size() == 32 && second_x.size() == 32) {
+            const auto anchor_idx = stage1_bcthw_index(0, 0, 0, 0, 0, 2, 2, 2, 2);
+            const auto moving_idx = stage1_bcthw_index(0, 0, 1, 0, 0, 2, 2, 2, 2);
+            check(near(first_x[anchor_idx], second_x[anchor_idx]),
+                  "sana wm native: solver keeps first latent frame anchored");
+            check(!near(first_x[moving_idx], second_x[moving_idx]),
+                  "sana wm native: solver updates non-anchor latent frames");
+        }
+    }
 
     std::error_code ec;
     std::filesystem::remove(image_path, ec);

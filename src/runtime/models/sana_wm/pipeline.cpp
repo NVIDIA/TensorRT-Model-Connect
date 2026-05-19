@@ -1,5 +1,6 @@
 #include "runtime/models/sana_wm/pipeline.h"
 
+#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "stb_image_resize2.h"
 #include "trtmc/trtmc_io.hpp"
 #include "utils/json_helpers.h"
@@ -733,12 +734,45 @@ std::vector<int32_t> stage1_mask_input(const SanaWmTextConditioning& text, bool 
     return do_cfg ? concat_two(text.neg_mask, text.cond_mask, "text mask") : text.cond_mask;
 }
 
-std::vector<float> stage1_first_timestep(int32_t batch, int32_t frames, float timestep) {
+std::vector<float> stage1_frame_timestep(int32_t batch, int32_t frames, float timestep) {
     std::vector<float> out(static_cast<std::size_t>(batch) * static_cast<std::size_t>(frames),
                            timestep);
     for (int32_t b = 0; b < batch; ++b)
         out[static_cast<std::size_t>(b) * static_cast<std::size_t>(frames)] = 0.0F;
     return out;
+}
+
+void keep_stage1_anchor_frame(std::vector<float>& next, const std::vector<float>& current,
+                              int32_t channels, int32_t frames, int32_t height, int32_t width) {
+    for (int32_t c = 0; c < channels; ++c) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                const auto idx = stage1_latent_index(c, 0, y, x, frames, height, width);
+                next[idx] = current[idx];
+            }
+        }
+    }
+}
+
+std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& model_output,
+                                                     std::size_t latent_count,
+                                                     float cfg_scale) {
+    std::vector<float> velocity(latent_count, 0.0F);
+    if (cfg_scale <= 1.0F) {
+        if (model_output.size() != latent_count)
+            throw std::runtime_error("SANA-WM Stage-1 denoiser output size mismatch");
+        for (std::size_t i = 0; i < latent_count; ++i)
+            velocity[i] = -model_output[i];
+        return velocity;
+    }
+    if (model_output.size() != latent_count * 2U)
+        throw std::runtime_error("SANA-WM Stage-1 CFG denoiser output size mismatch");
+    for (std::size_t i = 0; i < latent_count; ++i) {
+        const float uncond = model_output[i];
+        const float cond = model_output[latent_count + i];
+        velocity[i] = -(uncond + cfg_scale * (cond - uncond));
+    }
+    return velocity;
 }
 
 std::vector<SanaWmIntrinsics>
@@ -931,18 +965,19 @@ std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
                                               const SanaWmStage1Latents& latents,
                                               const SanaWmTextConditioning& text,
                                               const SanaWmCameraConditions& camera,
-                                              const SanaWmRuntimeConfig& config) {
+                                              const SanaWmRuntimeConfig& config,
+                                              float timestep, float cfg_scale) {
     if (!denoiser.ok())
         throw std::runtime_error("SANA-WM native Stage-1 denoiser is not ready");
 
-    const bool do_cfg = config.cfg_scale > 1.0F;
+    const bool do_cfg = cfg_scale > 1.0F;
     const int32_t batch = do_cfg ? 2 : 1;
     auto latent_input = repeat_batch(latents.values, batch);
     auto text_input = stage1_text_input(text, do_cfg);
     auto mask_input = stage1_mask_input(text, do_cfg);
     auto raymap_input = repeat_batch(camera.raymap, batch);
     auto plucker_input = repeat_batch(camera.chunk_plucker, batch);
-    auto timestep_input = stage1_first_timestep(batch, latents.frames, 1000.0F);
+    auto timestep_input = stage1_frame_timestep(batch, latents.frames, timestep);
 
     const auto latent_name =
         pick_input_name(denoiser, {"x", "sample", "latents", "hidden_states",
@@ -998,6 +1033,73 @@ std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
         throw std::runtime_error("SANA-WM native Stage-1 denoiser output tensor not found");
     const auto count = static_cast<std::size_t>(batch) * latents.values.size();
     return tensor_to_float_vector(it->second, count, "Stage-1 denoiser");
+}
+
+SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser,
+                                             SanaWmStage1Latents latents,
+                                             const SanaWmTextConditioning& text,
+                                             const SanaWmCameraConditions& camera,
+                                             const SanaWmRuntimeConfig& config,
+                                             int32_t num_steps, float cfg_scale) {
+    if (num_steps <= 0)
+        throw std::runtime_error("SANA-WM Stage-1 solver requires num_steps > 0");
+    diffusion::FlowMatchEulerState scheduler;
+    scheduler.num_train_timesteps = 1000;
+    scheduler.shift = config.flow_shift;
+    scheduler.set_timesteps(num_steps);
+    std::vector<float> next(latents.values.size(), 0.0F);
+
+    for (int32_t step = 0; step < num_steps; ++step) {
+        const float timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
+        auto model_output =
+            run_native_stage1_denoiser(denoiser, latents, text, camera, config, timestep, cfg_scale);
+        auto velocity =
+            stage1_velocity_from_model_output(model_output, latents.values.size(), cfg_scale);
+        scheduler.step(velocity.data(), latents.values.data(), next.data(), latents.values.size(), step);
+        keep_stage1_anchor_frame(next, latents.values, latents.channels, latents.frames,
+                                 latents.height, latents.width);
+        latents.values.swap(next);
+    }
+    return latents;
+}
+
+SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
+                                           const std::shared_ptr<ITokenizer>& tokenizer,
+                                           const SanaWmRuntimeConfig& config,
+                                           const SanaWmRequest& request,
+                                           const GenerateConfig& cfg,
+                                           const std::string& prompt) {
+    auto native_inputs = prepare_native_inputs(config, request, cfg);
+    if (!modules.vae_encoder) {
+        throw std::runtime_error(
+            "SANA-WM native TensorRT execution requires a VAE encoder module");
+    }
+    auto first_latent = run_native_vae_encoder(*modules.vae_encoder, native_inputs.first_frame,
+                                               native_inputs.camera, config.vae_latent_dim);
+    if (!modules.text_encoder || !tokenizer) {
+        throw std::runtime_error(
+            "SANA-WM native TensorRT execution requires text encoder and tokenizer");
+    }
+    auto text =
+        run_native_text_conditioning(*modules.text_encoder, *tokenizer, config, prompt,
+                                     cfg.negative_prompt);
+    const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
+                                    : static_cast<uint64_t>(config.seed);
+    auto latents = sana_wm_prepare_stage1_latents(
+        first_latent, cfg.initial_latents, config.vae_latent_dim,
+        native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
+        native_inputs.camera.latent_width, seed);
+    if (!modules.stage1_denoiser) {
+        throw std::runtime_error(
+            "SANA-WM native TensorRT execution requires a Stage-1 denoiser module");
+    }
+    const int32_t num_steps = cfg.num_steps > 0 ? cfg.num_steps : config.num_steps;
+    const float cfg_scale = cfg.cfg_scale >= 0.0F
+                                ? cfg.cfg_scale
+                                : (cfg.guidance_scale >= 0.0F ? cfg.guidance_scale
+                                                              : config.cfg_scale);
+    return run_native_stage1_solver(*modules.stage1_denoiser, std::move(latents), text,
+                                    native_inputs.camera, config, num_steps, cfg_scale);
 }
 
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
@@ -1410,36 +1512,12 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
-        auto native_inputs = prepare_native_inputs(config_, request, cfg);
-        if (!native_modules_.vae_encoder) {
-            throw std::runtime_error(
-                "SANA-WM native TensorRT execution requires a VAE encoder module");
-        }
-        auto first_latent =
-            run_native_vae_encoder(*native_modules_.vae_encoder, native_inputs.first_frame,
-                                   native_inputs.camera, config_.vae_latent_dim);
-        if (!native_modules_.text_encoder || !tokenizer_) {
-            throw std::runtime_error(
-                "SANA-WM native TensorRT execution requires text encoder and tokenizer");
-        }
-        auto text = run_native_text_conditioning(
-            *native_modules_.text_encoder, *tokenizer_, config_, prompt, cfg.negative_prompt);
-        const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
-                                        : static_cast<uint64_t>(config_.seed);
-        auto latents = sana_wm_prepare_stage1_latents(
-            first_latent, cfg.initial_latents, config_.vae_latent_dim,
-            native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
-            native_inputs.camera.latent_width, seed);
-        if (!native_modules_.stage1_denoiser) {
-            throw std::runtime_error(
-                "SANA-WM native TensorRT execution requires a Stage-1 denoiser module");
-        }
-        auto denoised = run_native_stage1_denoiser(*native_modules_.stage1_denoiser, latents,
-                                                   text, native_inputs.camera, config_);
+        auto denoised =
+            run_native_stage1_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
         (void)denoised;
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
-            "SANA-WM Stage-1 solver/refiner execution is not implemented yet");
+            "SANA-WM Stage-1 decode/refiner execution is not implemented yet");
     }
 
     const auto paths = make_invocation_paths();
