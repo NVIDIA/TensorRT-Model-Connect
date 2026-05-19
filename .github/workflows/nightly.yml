@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$GITHUB_WORKSPACE" ]; then
-            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chmod a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
             docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
               echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
               exit 1
