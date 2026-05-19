@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -606,6 +607,232 @@ TensorMap::const_iterator find_output_tensor(const TensorMap& outputs,
     return outputs.end();
 }
 
+bool has_positive_shape(const std::vector<int64_t>& shape) {
+    if (shape.empty())
+        return false;
+    for (int64_t dim : shape) {
+        if (dim <= 0)
+            return false;
+    }
+    return true;
+}
+
+std::size_t checked_shape_numel(const std::vector<int64_t>& shape, const std::string& label) {
+    if (!has_positive_shape(shape))
+        throw std::runtime_error("SANA-WM native " + label + " tensor shape is unresolved");
+    std::size_t count = 1;
+    for (int64_t dim : shape) {
+        if (static_cast<std::uint64_t>(dim) >
+            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max() / count)) {
+            throw std::runtime_error("SANA-WM native " + label + " tensor shape is too large");
+        }
+        count *= static_cast<std::size_t>(dim);
+    }
+    return count;
+}
+
+std::vector<int64_t> input_shape_or_profile_max(const ITrtModule& module, const std::string& name,
+                                                const std::string& label) {
+    auto shape = module.tensor_shape(name);
+    if (has_positive_shape(shape))
+        return shape;
+    for (const auto& info : module.input_info()) {
+        if (info.name == name && has_positive_shape(info.shape))
+            return info.shape;
+    }
+    const int32_t profile_count = module.optimization_profile_count();
+    for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
+        shape = module.input_profile_shape(name, profile_idx, ProfileShapeSelector::kMax);
+        if (has_positive_shape(shape))
+            return shape;
+    }
+    throw std::runtime_error("SANA-WM native " + label + " input tensor shape not found");
+}
+
+int32_t trailing_nonnegative_suffix(const std::string& name, const std::string& prefix) {
+    if (name.rfind(prefix, 0) != 0)
+        return -1;
+    if (name.size() == prefix.size())
+        return -1;
+    int32_t value = 0;
+    for (std::size_t i = prefix.size(); i < name.size(); ++i) {
+        const char ch = name[i];
+        if (ch < '0' || ch > '9')
+            return -1;
+        value = value * 10 + (ch - '0');
+    }
+    return value;
+}
+
+std::vector<std::string> sorted_layer_input_names(const ITrtModule& module,
+                                                  const std::string& prefix) {
+    std::vector<std::pair<int32_t, std::string>> indexed;
+    for (const auto& info : module.input_info()) {
+        const int32_t idx = trailing_nonnegative_suffix(info.name, prefix);
+        if (idx >= 0)
+            indexed.emplace_back(idx, info.name);
+    }
+    std::sort(indexed.begin(), indexed.end());
+
+    std::vector<std::string> names;
+    names.reserve(indexed.size());
+    for (const auto& [_, name] : indexed)
+        names.push_back(name);
+    return names;
+}
+
+struct DecoderCacheTensor {
+    std::string input_name;
+    std::string output_name;
+    std::vector<int64_t> shape;
+    DType dtype{DType::kFloat32};
+    std::vector<float> values32;
+    std::vector<half_bits_t> values16;
+
+    void allocate(const ITrtModule& module, const std::string& label) {
+        shape = input_shape_or_profile_max(module, input_name, label);
+        const auto count = checked_shape_numel(shape, label);
+        dtype = input_dtype_or(module, input_name, DType::kFloat32);
+        if (dtype == DType::kFloat32) {
+            values32.assign(count, 0.0F);
+            values16.clear();
+            return;
+        }
+        if (dtype == DType::kFloat16 || dtype == DType::kBFloat16) {
+            values16.assign(count, 0);
+            values32.clear();
+            return;
+        }
+        throw std::runtime_error("SANA-WM native " + label + " cache dtype is unsupported");
+    }
+
+    void* data() {
+        return dtype == DType::kFloat32 ? static_cast<void*>(values32.data())
+                                        : static_cast<void*>(values16.data());
+    }
+
+    std::size_t numel() const {
+        return dtype == DType::kFloat32 ? values32.size() : values16.size();
+    }
+
+    std::size_t row_count() const {
+        if (shape.empty())
+            return 0;
+        return static_cast<std::size_t>(shape.front());
+    }
+
+    std::size_t row_width() const {
+        const std::size_t rows = row_count();
+        return rows == 0 ? 0 : numel() / rows;
+    }
+};
+
+struct DecoderCacheLayer {
+    DecoderCacheTensor k;
+    DecoderCacheTensor v;
+};
+
+std::string present_name_from_cache_name(const std::string& cache_name, const char* cache_prefix,
+                                         const char* present_prefix) {
+    const int32_t idx = trailing_nonnegative_suffix(cache_name, cache_prefix);
+    if (idx < 0)
+        return {};
+    return std::string(present_prefix) + std::to_string(idx);
+}
+
+std::vector<DecoderCacheLayer> collect_decoder_cache_layers(const ITrtModule& module) {
+    const auto k_names = sorted_layer_input_names(module, "cache_k_");
+    const auto v_names = sorted_layer_input_names(module, "cache_v_");
+    if (k_names.size() != v_names.size()) {
+        throw std::runtime_error("SANA-WM native decoder text encoder has mismatched KV cache "
+                                 "input tensors");
+    }
+
+    std::vector<DecoderCacheLayer> layers;
+    layers.reserve(k_names.size());
+    for (std::size_t i = 0; i < k_names.size(); ++i) {
+        DecoderCacheLayer layer;
+        layer.k.input_name = k_names[i];
+        layer.v.input_name = v_names[i];
+        layer.k.output_name =
+            present_name_from_cache_name(layer.k.input_name, "cache_k_", "present_k_");
+        layer.v.output_name =
+            present_name_from_cache_name(layer.v.input_name, "cache_v_", "present_v_");
+        layer.k.allocate(module, "text cache K");
+        layer.v.allocate(module, "text cache V");
+        layers.push_back(std::move(layer));
+    }
+    return layers;
+}
+
+Tensor make_cache_tensor(DecoderCacheTensor& cache) {
+    return Tensor{cache.data(), cache.shape, cache.dtype};
+}
+
+std::vector<float> decoder_attention_mask(int32_t token_index, std::size_t width) {
+    std::vector<float> mask(width, -10000.0F);
+    if (mask.empty())
+        return mask;
+    const std::size_t visible_cache = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max(token_index, 0)), width > 0 ? width - 1U : 0U);
+    for (std::size_t i = 0; i < visible_cache; ++i)
+        mask[i] = 0.0F;
+    mask.back() = 0.0F;
+    return mask;
+}
+
+void write_cache_values(DecoderCacheTensor& cache, const std::vector<float>& values,
+                        std::size_t offset) {
+    if (offset + values.size() > cache.numel()) {
+        throw std::runtime_error("SANA-WM native text cache update exceeds cache tensor size");
+    }
+    if (cache.dtype == DType::kFloat32) {
+        std::copy(values.begin(), values.end(), cache.values32.begin() + offset);
+        return;
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        cache.values16[offset + i] =
+            cache.dtype == DType::kBFloat16 ? fp32_to_bf16(values[i]) : fp32_to_fp16(values[i]);
+    }
+}
+
+void update_decoder_cache_tensor(DecoderCacheTensor& cache, const TensorMap& outputs,
+                                 int32_t token_index, const std::string& label) {
+    if (cache.output_name.empty())
+        return;
+    const auto it = outputs.find(cache.output_name);
+    if (it == outputs.end())
+        return;
+
+    const auto cache_count = cache.numel();
+    const auto row_width = cache.row_width();
+    if (row_width == 0)
+        throw std::runtime_error("SANA-WM native " + label + " cache row width is zero");
+    const auto rows = cache.row_count();
+    const auto present_count = it->second.numel();
+    if (present_count >= cache_count) {
+        auto values = tensor_to_float_vector(it->second, cache_count, label + " cache");
+        write_cache_values(cache, values, 0);
+        return;
+    }
+    if (present_count < row_width) {
+        throw std::runtime_error("SANA-WM native " + label +
+                                 " present cache tensor is smaller than one cache row");
+    }
+    const auto row =
+        std::min<std::size_t>(static_cast<std::size_t>(std::max(token_index, 0)), rows - 1U);
+    auto values = tensor_to_float_vector(it->second, row_width, label + " cache");
+    write_cache_values(cache, values, row * row_width);
+}
+
+void update_decoder_caches(std::vector<DecoderCacheLayer>& layers, const TensorMap& outputs,
+                           int32_t token_index) {
+    for (auto& layer : layers) {
+        update_decoder_cache_tensor(layer.k, outputs, token_index, "text K");
+        update_decoder_cache_tensor(layer.v, outputs, token_index, "text V");
+    }
+}
+
 struct SanaWmRequest {
     std::string image_path;
     std::string action;
@@ -895,14 +1122,10 @@ std::vector<int32_t> attention_mask_from_tokens(const std::vector<int32_t>& ids)
     return mask;
 }
 
-std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
-                                           const std::vector<int32_t>& input_ids,
-                                           const std::vector<int32_t>& attention_mask,
-                                           int32_t text_dim, const char* label) {
-    if (!text_encoder.ok())
-        throw std::runtime_error(std::string("SANA-WM native ") + label +
-                                 " text encoder is not ready");
-
+std::vector<float> run_native_full_sequence_text_encoder(ITrtModule& text_encoder,
+                                                         const std::vector<int32_t>& input_ids,
+                                                         const std::vector<int32_t>& attention_mask,
+                                                         int32_t text_dim, const char* label) {
     const int64_t seq_len = static_cast<int64_t>(input_ids.size());
     TensorMap inputs;
     inputs["input_ids"] =
@@ -919,6 +1142,70 @@ std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
     const auto count =
         static_cast<std::size_t>(input_ids.size()) * static_cast<std::size_t>(text_dim);
     return tensor_to_float_vector(it->second, count, label);
+}
+
+std::vector<float> run_native_decoder_text_encoder(ITrtModule& text_encoder,
+                                                   const std::vector<int32_t>& input_ids,
+                                                   int32_t text_dim, const char* label) {
+    const auto attention_shape =
+        input_shape_or_profile_max(text_encoder, "attention_mask", "text attention mask");
+    const auto attention_count = checked_shape_numel(attention_shape, "text attention mask");
+    auto caches = collect_decoder_cache_layers(text_encoder);
+
+    std::vector<float> encoded;
+    encoded.reserve(input_ids.size() * static_cast<std::size_t>(text_dim));
+
+    for (std::size_t pos = 0; pos < input_ids.size(); ++pos) {
+        int32_t token_id = input_ids[pos];
+        int32_t position_id = static_cast<int32_t>(pos);
+        auto attention = decoder_attention_mask(position_id, attention_count);
+        std::vector<half_bits_t> attention16;
+
+        TensorMap inputs;
+        inputs["token_id"] = Tensor{const_cast<int32_t*>(&token_id), {1}, DType::kInt32};
+        inputs["position_id"] = Tensor{const_cast<int32_t*>(&position_id), {1}, DType::kInt32};
+        inputs["attention_mask"] = make_model_tensor(
+            attention, attention16, input_dtype_or(text_encoder, "attention_mask", DType::kFloat32),
+            attention_shape);
+
+        for (auto& layer : caches) {
+            inputs[layer.k.input_name] = make_cache_tensor(layer.k);
+            inputs[layer.v.input_name] = make_cache_tensor(layer.v);
+        }
+
+        auto outputs = text_encoder.forward(inputs);
+        const auto it =
+            find_output_tensor(outputs, {"hidden_state", "last_hidden_state", "hidden_states",
+                                         "text_embeddings", "output0"});
+        if (it == outputs.end())
+            throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                     " decoder text encoder output tensor not found");
+        auto token_encoded =
+            tensor_to_float_vector(it->second, static_cast<std::size_t>(text_dim), label);
+        encoded.insert(encoded.end(), token_encoded.begin(), token_encoded.end());
+        update_decoder_caches(caches, outputs, position_id);
+    }
+
+    return encoded;
+}
+
+std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
+                                           const std::vector<int32_t>& input_ids,
+                                           const std::vector<int32_t>& attention_mask,
+                                           int32_t text_dim, const char* label) {
+    if (!text_encoder.ok())
+        throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                 " text encoder is not ready");
+    if (text_encoder.has_input("input_ids")) {
+        return run_native_full_sequence_text_encoder(text_encoder, input_ids, attention_mask,
+                                                     text_dim, label);
+    }
+    if (text_encoder.has_input("token_id") && text_encoder.has_input("position_id") &&
+        text_encoder.has_input("attention_mask")) {
+        return run_native_decoder_text_encoder(text_encoder, input_ids, text_dim, label);
+    }
+    throw std::runtime_error(std::string("SANA-WM native ") + label +
+                             " text encoder input tensors not found");
 }
 
 std::vector<float> select_stage1_text_window(const std::vector<float>& encoded, int32_t encoded_len,
