@@ -1704,24 +1704,58 @@ std::size_t hwc_video_index(int32_t frame, int32_t y, int32_t x, int32_t channel
             static_cast<std::size_t>(channel));
 }
 
-bool copy_cthw_refiner_frames(const std::vector<float>& raw, const std::vector<int64_t>& shape,
-                              int32_t output_frames, int32_t height, int32_t width,
-                              std::vector<float>& out) {
-    int32_t frames = 0;
-    if (shape.size() == 5U && shape[0] == 1 && shape[1] == 3 && shape[3] == height &&
-        shape[4] == width) {
-        frames = static_cast<int32_t>(shape[2]);
-    } else if (shape.size() == 4U && shape[0] == 3 && shape[2] == height && shape[3] == width) {
-        frames = static_cast<int32_t>(shape[1]);
-    } else {
+bool is_ncthw_refiner_shape(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    return shape.size() == 5U && shape[0] == 1 && shape[1] == 3 && shape[3] == height &&
+           shape[4] == width;
+}
+
+bool is_cthw_refiner_shape(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    return shape.size() == 4U && shape[0] == 3 && shape[2] == height && shape[3] == width;
+}
+
+bool is_nthwc_refiner_shape(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    return shape.size() == 5U && shape[0] == 1 && shape[2] == height && shape[3] == width &&
+           shape[4] == 3;
+}
+
+bool is_thwc_refiner_shape(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    return shape.size() == 4U && shape[1] == height && shape[2] == width && shape[3] == 3;
+}
+
+int32_t cthw_refiner_frame_count(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    if (is_ncthw_refiner_shape(shape, height, width))
+        return static_cast<int32_t>(shape[2]);
+    if (is_cthw_refiner_shape(shape, height, width))
+        return static_cast<int32_t>(shape[1]);
+    return 0;
+}
+
+int32_t hwc_refiner_frame_count(const std::vector<int64_t>& shape, int32_t height, int32_t width) {
+    if (is_nthwc_refiner_shape(shape, height, width))
+        return static_cast<int32_t>(shape[1]);
+    if (is_thwc_refiner_shape(shape, height, width))
+        return static_cast<int32_t>(shape[0]);
+    return 0;
+}
+
+bool valid_refiner_frame_count(int32_t frames, int32_t output_frames) {
+    if (frames <= 0)
         return false;
-    }
     if (frames != output_frames && frames != output_frames + 1)
         return false;
+    return true;
+}
+
+bool refiner_raw_has_values(const std::vector<float>& raw, int32_t frames, int32_t height,
+                            int32_t width) {
     if (raw.size() < static_cast<std::size_t>(3) * static_cast<std::size_t>(frames) *
                          static_cast<std::size_t>(height) * static_cast<std::size_t>(width))
         return false;
+    return true;
+}
 
+void copy_cthw_refiner_pixels(const std::vector<float>& raw, int32_t frames, int32_t output_frames,
+                              int32_t height, int32_t width, std::vector<float>& out) {
     const int32_t frame_offset = frames == output_frames + 1 ? 1 : 0;
     for (int32_t f = 0; f < output_frames; ++f) {
         for (int32_t y = 0; y < height; ++y) {
@@ -1735,30 +1769,32 @@ bool copy_cthw_refiner_frames(const std::vector<float>& raw, const std::vector<i
             }
         }
     }
+}
+
+bool copy_cthw_refiner_frames(const std::vector<float>& raw, const std::vector<int64_t>& shape,
+                              int32_t output_frames, int32_t height, int32_t width,
+                              std::vector<float>& out) {
+    const auto frames = cthw_refiner_frame_count(shape, height, width);
+    if (!valid_refiner_frame_count(frames, output_frames))
+        return false;
+    if (!refiner_raw_has_values(raw, frames, height, width))
+        return false;
+    copy_cthw_refiner_pixels(raw, frames, output_frames, height, width, out);
     return true;
 }
 
 bool copy_hwc_refiner_frames(const std::vector<float>& raw, const std::vector<int64_t>& shape,
                              int32_t output_frames, int32_t height, int32_t width,
                              std::vector<float>& out) {
-    int32_t frames = 0;
-    std::size_t offset = 0;
-    if (shape.size() == 5U && shape[0] == 1 && shape[2] == height && shape[3] == width &&
-        shape[4] == 3) {
-        frames = static_cast<int32_t>(shape[1]);
-    } else if (shape.size() == 4U && shape[1] == height && shape[2] == width && shape[3] == 3) {
-        frames = static_cast<int32_t>(shape[0]);
-    } else {
-        return false;
-    }
-    if (frames != output_frames && frames != output_frames + 1)
+    const auto frames = hwc_refiner_frame_count(shape, height, width);
+    if (!valid_refiner_frame_count(frames, output_frames))
         return false;
     const auto frame_stride =
         static_cast<std::size_t>(height) * static_cast<std::size_t>(width) * 3U;
     if (raw.size() < static_cast<std::size_t>(frames) * frame_stride)
         return false;
 
-    offset = frames == output_frames + 1 ? frame_stride : 0U;
+    const auto offset = frames == output_frames + 1 ? frame_stride : 0U;
     for (std::size_t i = 0; i < out.size(); ++i)
         out[i] = normalize_refiner_pixel(raw[offset + i]);
     return true;
