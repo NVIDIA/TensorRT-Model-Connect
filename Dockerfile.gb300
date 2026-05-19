@@ -1,18 +1,31 @@
-FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── System packages ──────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 22.04 provides the glibc 2.35 floor used by the release wheel tag.
+# Python 3.12 comes from deadsnakes; TensorRT CUDA 13 headers come from NVIDIA's
+# Ubuntu 24.04 CUDA repo because CUDA 13 TensorRT header packages are not
+# published in the Ubuntu 22.04 repo.
+RUN add-apt-repository -y ppa:deadsnakes/ppa && \
+    echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/ /" \
+      > /etc/apt/sources.list.d/cuda-ubuntu2404.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     ninja-build \
     git \
-    ca-certificates \
     pkg-config \
-    python3 \
-    python3-dev \
-    python3-venv \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
     python3-pip \
     lcov \
     libnvinfer-headers-dev \
@@ -20,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Python venv with all deps ───────────────────────────────────────────────
 ENV VIRTUAL_ENV=/opt/venv
-RUN python3 -m venv $VIRTUAL_ENV
+RUN python3.12 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # TensorRT (auto-selects cu13 wheels for CUDA 13.x)

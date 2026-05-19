@@ -18,7 +18,7 @@ your Python version and run:
 ```bash
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
-pip install ./tensorrt_model_connect-0.1.0-py312-none-linux_aarch64.whl
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
 
 trtmc version
 trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
@@ -66,8 +66,10 @@ cmake --build build -j
 
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
-Nightly wheels are tagged `py310-none-linux_aarch64` and
-`py312-none-linux_aarch64`; use the tag matching your Python interpreter.
+Nightly wheels are tagged `py310-none-manylinux_2_35_aarch64` and
+`py312-none-manylinux_2_35_aarch64`; use the tag matching your Python
+interpreter. The `manylinux_2_35_aarch64` platform tag matches the TensorRT
+CUDA 13 aarch64 wheels and requires a glibc 2.35 or newer Linux host.
 
 ## Useful Docs
 

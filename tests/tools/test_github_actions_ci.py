@@ -139,8 +139,18 @@ def test_package_stage_builds_py310_and_py312_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
     assert 'TRTMC_WHEEL_PYTHON_TAG="$tag"' in text
+    assert "manylinux_2_35_aarch64" in text
     assert "wheel-qwen-smoke)" in text
     assert "Qwen smoke test from trtmc pip package" in text
+
+
+def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'EXPECTED_PLATFORM = "manylinux_2_35_aarch64"' in text
+    assert 'native wheel must not contain .data/purelib entries' in text
+    assert '"auditwheel>=6.2"' in text
+    assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
+    assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
 
 
 def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:

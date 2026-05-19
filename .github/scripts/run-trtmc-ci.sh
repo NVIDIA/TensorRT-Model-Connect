@@ -493,12 +493,14 @@ select_compatible_wheel() {
   py_tag="$(current_python_wheel_tag)"
   mapfile -t candidates < <(
     find "$wheel_dir" -maxdepth 1 -type f \( \
+      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-py3-none-manylinux_2_35_aarch64.whl" -o \
       -name "*-${py_tag}-none-linux_aarch64.whl" -o \
       -name "*-py3-none-linux_aarch64.whl" \
     \) | sort
   )
   if [ "${#candidates[@]}" -ne 1 ]; then
-    printf 'ERROR: expected exactly one %s-compatible aarch64 wheel under %s, found %d\n' \
+    printf 'ERROR: expected exactly one %s-compatible Linux aarch64 wheel under %s, found %d\n' \
       "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
     printf '  %s\n' "${candidates[@]:-}" >&2
     exit 1
@@ -510,10 +512,13 @@ select_wheel_by_tag() {
   local py_tag="$1"
   local wheel_dir="${2:-dist}"
   mapfile -t candidates < <(
-    find "$wheel_dir" -maxdepth 1 -type f -name "*-${py_tag}-none-linux_aarch64.whl" | sort
+    find "$wheel_dir" -maxdepth 1 -type f \( \
+      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-${py_tag}-none-linux_aarch64.whl" \
+    \) | sort
   )
   if [ "${#candidates[@]}" -ne 1 ]; then
-    printf 'ERROR: expected exactly one %s aarch64 wheel under %s, found %d\n' \
+    printf 'ERROR: expected exactly one %s Linux aarch64 wheel under %s, found %d\n' \
       "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
     printf '  %s\n' "${candidates[@]:-}" >&2
     exit 1
@@ -558,7 +563,7 @@ build_pip_package() {
     native_lib_dir="$PWD/$native_lib_dir"
   fi
 
-  python -m pip install --disable-pip-version-check --quiet "build>=1.2"
+  python -m pip install --disable-pip-version-check --quiet "auditwheel>=6.2" "build>=1.2"
   rm -rf dist tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
   mkdir -p dist
 
@@ -585,12 +590,23 @@ build_pip_package() {
   fi
 
   python - "${wheels[@]}" <<'PY'
+import re
+import subprocess
 import sys
 import zipfile
 
+EXPECTED_PLATFORM = "manylinux_2_35_aarch64"
+MAX_GLIBC_MINOR = 35
+
 for wheel in sys.argv[1:]:
+    if not wheel.endswith(f"-{EXPECTED_PLATFORM}.whl"):
+        raise SystemExit(f"{wheel}: expected platform tag {EXPECTED_PLATFORM}")
     with zipfile.ZipFile(wheel) as zf:
         names = set(zf.namelist())
+        if any(name.startswith(".data/purelib/") for name in names):
+            raise SystemExit(f"{wheel}: native wheel must not contain .data/purelib entries")
+        if any(".data/purelib/" in name for name in names):
+            raise SystemExit(f"{wheel}: native wheel must not install package files via purelib")
         bin_entries = [name for name in names if name.endswith("/bin/trtmc")]
         backend_entries = [
             name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
@@ -598,12 +614,36 @@ for wheel in sys.argv[1:]:
         metadata = zf.read(
             next(name for name in names if name.endswith(".dist-info/METADATA"))
         ).decode()
+        wheel_metadata = zf.read(
+            next(name for name in names if name.endswith(".dist-info/WHEEL"))
+        ).decode()
     if len(bin_entries) != 1:
         raise SystemExit(f"{wheel}: expected one packaged trtmc executable")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
     if "Requires-Dist: tensorrt>=10.16" not in metadata:
         raise SystemExit(f"{wheel}: TensorRT dependency metadata is missing")
+    if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
+        raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
+    audit = subprocess.run(
+        [sys.executable, "-m", "auditwheel", "show", wheel],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ).stdout
+    print(audit, end="")
+    manylinux_minors = [
+        int(match)
+        for line in audit.splitlines()
+        if "platform tag" in line
+        for match in re.findall(r"manylinux_2_([0-9]+)_aarch64", line)
+    ]
+    if not manylinux_minors or max(manylinux_minors) > MAX_GLIBC_MINOR:
+        raise SystemExit(
+            f"{wheel}: auditwheel did not confirm compatibility with "
+            f"manylinux_2_{MAX_GLIBC_MINOR}_aarch64 or older"
+        )
     print(f"validated wheel={wheel}")
     for entry in sorted([*bin_entries, *backend_entries]):
         print(f"  {entry}")

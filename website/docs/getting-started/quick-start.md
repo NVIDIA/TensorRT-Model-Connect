@@ -29,9 +29,9 @@ TRT support: yes
 
 If source-built `./build/trtmc` fails with a missing shared library, you are
 probably outside the dev container or missing its runtime library paths.
-If `trtmc` from a wheel fails, check that you installed the aarch64 wheel for
-your Python version and that the host has compatible NVIDIA driver/CUDA runtime
-libraries.
+If `trtmc` from a wheel fails, check that you installed the
+`manylinux_2_35_aarch64` wheel for your Python version and that the host has
+compatible NVIDIA driver/CUDA runtime libraries.
 
 ## 2. Build A Bundle
 

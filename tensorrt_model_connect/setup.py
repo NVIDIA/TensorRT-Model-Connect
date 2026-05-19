@@ -5,6 +5,7 @@ import shutil
 import stat
 from pathlib import Path
 
+from setuptools import Distribution
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
 
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover - older setuptools falls back to wheel.
 
 
 PACKAGE_NAME = "tensorrt_model_connect"
+MANYLINUX_AARCH64_PLATFORM = "manylinux_2_35_aarch64"
 NATIVE_LIB_PATTERNS = (
     "libtrtmc*.so",
     "libtrtmc*.so.*",
@@ -142,6 +144,30 @@ def _wheel_python_tag(default: str) -> str:
     )
 
 
+def _wheel_platform_tag(default: str) -> str:
+    override = os.environ.get("TRTMC_WHEEL_PLATFORM_TAG")
+    if override:
+        aliases = {
+            "aarch64": MANYLINUX_AARCH64_PLATFORM,
+            "linux_aarch64": MANYLINUX_AARCH64_PLATFORM,
+            "manylinux": MANYLINUX_AARCH64_PLATFORM,
+            "manylinux_2_35": MANYLINUX_AARCH64_PLATFORM,
+        }
+        return aliases.get(override, override)
+
+    if default == "linux_aarch64":
+        return MANYLINUX_AARCH64_PLATFORM
+    return default
+
+
+class BinaryDistribution(Distribution):
+    def has_ext_modules(self) -> bool:
+        return True
+
+    def is_pure(self) -> bool:
+        return False
+
+
 cmdclass = {"build_py": build_py}
 
 if _bdist_wheel is not None:
@@ -153,9 +179,9 @@ if _bdist_wheel is not None:
 
         def get_tag(self) -> tuple[str, str, str]:
             _python, _abi, platform = super().get_tag()
-            return _wheel_python_tag("py3"), "none", platform
+            return _wheel_python_tag("py3"), "none", _wheel_platform_tag(platform)
 
     cmdclass["bdist_wheel"] = bdist_wheel
 
 
-setup(cmdclass=cmdclass)
+setup(cmdclass=cmdclass, distclass=BinaryDistribution)

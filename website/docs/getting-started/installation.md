@@ -28,13 +28,16 @@ Python 3.12. Download the wheel asset that matches your interpreter tag
 ```bash
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
-pip install ./tensorrt_model_connect-0.1.0-py312-none-linux_aarch64.whl
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
 trtmc version
 trtmc build --help
 ```
 
 Use the `py310` wheel with Python 3.10 and the `py312` wheel with Python 3.12.
 Do not install one tag into the other interpreter version.
+The published wheel platform tag is `manylinux_2_35_aarch64`, matching the
+TensorRT CUDA 13 aarch64 pip wheels and requiring a glibc 2.35 or newer Linux
+host.
 
 The wheel installs the `trtmc` console command, the Python builder package,
 declared Python dependencies including `tensorrt>=10.16`, the native `trtmc`
