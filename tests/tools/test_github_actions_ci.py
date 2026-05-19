@@ -59,6 +59,11 @@ def test_github_cpp_unit_stages_exclude_gpu_labeled_ctests() -> None:
     assert "Excluding C++ tests labeled requires_gpu from CPU-only coverage container" in text
 
 
+def test_cpp_coverage_ci_wrapper_forwards_ctest_filters() -> None:
+    text = (REPO_ROOT / "tools" / "coverage_ci" / "run_cpp_coverage.sh").read_text()
+    assert '"${REPO_ROOT}/tools/coverage/cpp_coverage.sh" "$@"' in text
+
+
 def test_cmake_labels_cuda_device_tests() -> None:
     text = (REPO_ROOT / "CMakeLists.txt").read_text()
     for test_name in (
