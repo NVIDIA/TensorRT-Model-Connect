@@ -28,6 +28,7 @@ _DEFAULT_WIDTH = 1280
 _DEFAULT_FPS = 16
 _DEFAULT_NUM_STEPS = 60
 _DEFAULT_GUIDANCE_SCALE = 5.0
+_DEFAULT_DEMO_INTRINSICS = (797.87866, 830.0503, 844.2675, 463.7225)
 _DEFAULT_VAE_STRIDE = (8, 32, 32)
 _STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
 _STAGE1_TEXT_ENCODER_REL = Path("text_encoder")
@@ -64,6 +65,12 @@ def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
     if len(values) == 2:
         values = [values[0], values[1], values[1]]
     return values[0], values[1], values[2]
+
+
+def _float_list(value, fallback: tuple[float, ...]) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    return list(fallback)
 
 
 def _read_safetensors_header(path: Path) -> dict:
@@ -319,6 +326,9 @@ class SanaWmPlugin:
             ),
             "sana_wm_rotation_speed_deg": float(
                 raw.get("sana_wm_rotation_speed_deg", _DEFAULT_ROTATION_SPEED_DEG)
+            ),
+            "sana_wm_default_intrinsics": _float_list(
+                raw.get("sana_wm_default_intrinsics"), _DEFAULT_DEMO_INTRINSICS
             ),
             "video_height": video_height,
             "video_width": video_width,

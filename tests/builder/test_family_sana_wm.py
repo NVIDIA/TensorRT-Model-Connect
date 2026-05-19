@@ -104,6 +104,9 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
     assert overrides["sana_wm_translation_speed"] == 0.055
     assert overrides["sana_wm_rotation_speed_deg"] == 1.2
+    assert overrides["sana_wm_default_intrinsics"] == pytest.approx(
+        [797.87866, 830.0503, 844.2675, 463.7225]
+    )
     assert overrides["sana_wm_require_official_script"] == 1
     assert overrides["video_num_frames"] == 321
     assert overrides["fps"] == 16
@@ -231,6 +234,9 @@ def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> Non
     assert config["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
     assert config["sana_wm_translation_speed"] == 0.055
     assert config["sana_wm_rotation_speed_deg"] == 1.2
+    assert config["sana_wm_default_intrinsics"] == pytest.approx(
+        [797.87866, 830.0503, 844.2675, 463.7225]
+    )
     assert config["sana_wm_require_official_script"] == 1
     assert config["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
     assert config["video_num_frames"] == 321

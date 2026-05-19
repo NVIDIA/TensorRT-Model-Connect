@@ -34,6 +34,7 @@ struct SanaWmRuntimeConfig {
     int32_t text_encoder_max_length{300};
     int32_t text_encoder_dim{2304};
     std::string chi_prompt;
+    std::vector<float> default_intrinsics;
     bool require_official_script{false};
 };
 

@@ -301,7 +301,8 @@ void test_runtime_config_parses_native_sana_wm_fields() {
           "vae_spatial_stride": 32,
           "text_encoder_max_length": 300,
           "sana_wm_dit_text_embed_dim": 2304,
-          "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: "
+          "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: ",
+          "sana_wm_default_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225]
         })json");
 
     check(cfg.height == 704 && cfg.width == 1280 && cfg.num_frames == 321,
@@ -316,6 +317,9 @@ void test_runtime_config_parses_native_sana_wm_fields() {
     check(cfg.text_encoder_dim == 2304, "sana wm config: text encoder dim parsed");
     check(cfg.chi_prompt == "Generate an \"Enhanced prompt\".\nUser Prompt: ",
           "sana wm config: chi prompt parsed");
+    check(cfg.default_intrinsics.size() == 4 && near(cfg.default_intrinsics[0], 797.87866F) &&
+              near(cfg.default_intrinsics[3], 463.7225F),
+          "sana wm config: default demo intrinsics parsed");
 }
 
 void test_conditioning_prompt_matches_upstream_chi_prefix() {
@@ -592,6 +596,7 @@ void test_native_stage1_solver_decodes_without_bridge() {
     cfg.text_encoder_max_length = 2;
     cfg.text_encoder_dim = 2;
     cfg.num_steps = 2;
+    cfg.default_intrinsics = {2.0F, 2.0F, 1.0F, 1.0F};
 
     trtmc::SanaWmNativeModules modules;
     modules.text_encoder = std::make_unique<FakeTrtModule>(
@@ -621,7 +626,6 @@ void test_native_stage1_solver_decodes_without_bridge() {
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = image_path.string();
     gen_cfg.camera_action = "w-1";
-    gen_cfg.camera_intrinsics = {4.0F, 4.0F, 2.0F, 2.0F};
     gen_cfg.num_frames = 2;
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);

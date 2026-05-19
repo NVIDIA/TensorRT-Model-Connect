@@ -880,6 +880,13 @@ std::vector<SanaWmPose> resolve_native_poses(const SanaWmRequest& request,
                                  request.rotation_speed_deg);
 }
 
+const std::vector<float>& resolve_native_intrinsics_values(const SanaWmRuntimeConfig& config,
+                                                           const GenerateConfig& cfg) {
+    if (!cfg.camera_intrinsics.empty())
+        return cfg.camera_intrinsics;
+    return config.default_intrinsics;
+}
+
 SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
                                          const SanaWmRequest& request,
                                          const GenerateConfig& cfg) {
@@ -892,10 +899,11 @@ SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
     if (request.num_frames > 0 && static_cast<int32_t>(poses.size()) != request.num_frames) {
         throw std::runtime_error("SANA-WM native camera pose count does not match num_frames");
     }
-    if (cfg.camera_intrinsics.empty()) {
+    const auto& intrinsics_values = resolve_native_intrinsics_values(config, cfg);
+    if (intrinsics_values.empty()) {
         throw std::runtime_error(
-            "SANA-WM native runtime requires camera_intrinsics; Pi3X intrinsics "
-            "estimation is not implemented in C++");
+            "SANA-WM native runtime requires camera_intrinsics or sana_wm_default_intrinsics; "
+            "Pi3X intrinsics estimation is not implemented in C++");
     }
 
     auto first_frame = sana_wm_prepare_vae_input_image(image.pixels, image.width, image.height,
@@ -904,7 +912,7 @@ SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
         throw std::runtime_error("SANA-WM native runtime failed to preprocess first frame");
 
     auto intrinsics =
-        crop_intrinsics(sana_wm_expand_intrinsics(cfg.camera_intrinsics,
+        crop_intrinsics(sana_wm_expand_intrinsics(intrinsics_values,
                                                   static_cast<int32_t>(poses.size())),
                         first_frame.plan);
     auto camera = sana_wm_prepare_camera_conditions(poses, intrinsics, config.height, config.width,
@@ -1603,6 +1611,8 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
         extract_json_int(config_json, "sana_wm_dit_text_embed_dim",
                          extract_json_int(config_json, "text_encoder_dim", cfg.text_encoder_dim));
     cfg.chi_prompt = extract_json_string(config_json, "sana_wm_chi_prompt", cfg.chi_prompt);
+    cfg.default_intrinsics =
+        extract_json_float_array(config_json, "sana_wm_default_intrinsics", 9U);
     cfg.require_official_script =
         extract_json_int(config_json, "sana_wm_require_official_script", 0) != 0;
     return cfg;
