@@ -109,6 +109,8 @@ struct GenerateConfig {
     float sde_gamma{-1.0f};               // diffusion/flow matching; <0 uses model default
     std::string image_path;               // image-conditioned diffusion/world models
     std::string camera_action;            // SANA-WM WASD/IJKL action DSL
+    std::vector<float> camera_poses;      // SANA-WM row-major [F,4,4] camera-to-world matrices
+    std::vector<float> camera_intrinsics; // SANA-WM (fx,fy,cx,cy), [3,3], or [F,3,3]
     float translation_speed{-1.0f};       // SANA-WM action rollout speed; <0 uses model default
     float rotation_speed_deg{-1.0f};      // SANA-WM action rollout speed; <0 uses model default
     int32_t num_frames{-1};               // image-to-video frame count; <0 uses model default

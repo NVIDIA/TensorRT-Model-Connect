@@ -116,6 +116,9 @@ struct SanaWmNativeModules {
 
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
+std::vector<SanaWmPose> sana_wm_row_major_c2w_to_poses(const std::vector<float>& c2w_values);
+std::vector<SanaWmIntrinsics> sana_wm_expand_intrinsics(const std::vector<float>& values,
+                                                        int32_t num_frames);
 
 SanaWmResizeCropPlan sana_wm_make_resize_crop_plan(int32_t src_width, int32_t src_height,
                                                    int32_t target_height, int32_t target_width);

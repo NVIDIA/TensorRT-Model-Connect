@@ -705,6 +705,45 @@ std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float t
     return poses;
 }
 
+std::vector<SanaWmPose> sana_wm_row_major_c2w_to_poses(const std::vector<float>& c2w_values) {
+    if (c2w_values.empty() || c2w_values.size() % 16U != 0U)
+        throw std::invalid_argument("SANA-WM camera poses must be flat row-major [F,4,4]");
+
+    const auto count = c2w_values.size() / 16U;
+    std::vector<SanaWmPose> poses(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        std::copy_n(c2w_values.data() + i * 16U, 16U, poses[i].c2w.begin());
+    }
+    return poses;
+}
+
+std::vector<SanaWmIntrinsics> sana_wm_expand_intrinsics(const std::vector<float>& values,
+                                                        int32_t num_frames) {
+    if (num_frames <= 0)
+        throw std::invalid_argument("SANA-WM intrinsics frame count must be positive");
+
+    auto from_four = [](const float* v) -> SanaWmIntrinsics { return {v[0], v[1], v[2], v[3]}; };
+    auto from_matrix = [](const float* v) -> SanaWmIntrinsics { return {v[0], v[4], v[2], v[5]}; };
+
+    if (values.size() == 4U)
+        return std::vector<SanaWmIntrinsics>(static_cast<std::size_t>(num_frames),
+                                             from_four(values.data()));
+    if (values.size() == 9U)
+        return std::vector<SanaWmIntrinsics>(static_cast<std::size_t>(num_frames),
+                                             from_matrix(values.data()));
+
+    const auto frames = static_cast<std::size_t>(num_frames);
+    if (values.size() == frames * 9U) {
+        std::vector<SanaWmIntrinsics> out(frames);
+        for (std::size_t i = 0; i < frames; ++i)
+            out[i] = from_matrix(values.data() + i * 9U);
+        return out;
+    }
+
+    throw std::invalid_argument(
+        "SANA-WM intrinsics must be (fx,fy,cx,cy), row-major [3,3], or row-major [F,3,3]");
+}
+
 SanaWmResizeCropPlan sana_wm_make_resize_crop_plan(int32_t src_width, int32_t src_height,
                                                    int32_t target_height, int32_t target_width) {
     if (src_width <= 0 || src_height <= 0 || target_height <= 0 || target_width <= 0)

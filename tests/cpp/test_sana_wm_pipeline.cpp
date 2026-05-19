@@ -139,6 +139,69 @@ void test_action_rollout_rejects_invalid_segments() {
     check(rejected_bad_key, "sana wm action: unknown key rejected");
 }
 
+void test_camera_pose_vector_parses_row_major_matrices() {
+    const auto poses = trtmc::sana_wm_row_major_c2w_to_poses({
+        1.0F, 0.0F, 0.0F, 0.1F,
+        0.0F, 1.0F, 0.0F, 0.2F,
+        0.0F, 0.0F, 1.0F, 0.3F,
+        0.0F, 0.0F, 0.0F, 1.0F,
+        0.0F, -1.0F, 0.0F, 1.1F,
+        1.0F, 0.0F, 0.0F, 1.2F,
+        0.0F, 0.0F, 1.0F, 1.3F,
+        0.0F, 0.0F, 0.0F, 1.0F,
+    });
+
+    check(poses.size() == 2, "sana wm camera: two row-major poses parsed");
+    check(near(poses[0].c2w[3], 0.1F) && near(poses[0].c2w[7], 0.2F) &&
+              near(poses[0].c2w[11], 0.3F),
+          "sana wm camera: first pose translation preserved");
+    check(near(poses[1].c2w[1], -1.0F) && near(poses[1].c2w[3], 1.1F),
+          "sana wm camera: second pose rotation and translation preserved");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::sana_wm_row_major_c2w_to_poses({1.0F, 2.0F});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "sana wm camera: malformed pose vector rejected");
+}
+
+void test_intrinsics_expand_model_card_shapes() {
+    const auto four = trtmc::sana_wm_expand_intrinsics({10.0F, 11.0F, 6.0F, 7.0F}, 2);
+    check(four.size() == 2 && near(four[1].fx, 10.0F) && near(four[1].cy, 7.0F),
+          "sana wm intrinsics: fx/fy/cx/cy expands to all frames");
+
+    const auto matrix = trtmc::sana_wm_expand_intrinsics({
+        20.0F, 0.0F, 8.0F,
+        0.0F, 21.0F, 9.0F,
+        0.0F, 0.0F, 1.0F,
+    }, 3);
+    check(matrix.size() == 3 && near(matrix[2].fx, 20.0F) && near(matrix[2].fy, 21.0F) &&
+              near(matrix[2].cx, 8.0F) && near(matrix[2].cy, 9.0F),
+          "sana wm intrinsics: single 3x3 matrix expands to all frames");
+
+    const auto per_frame = trtmc::sana_wm_expand_intrinsics({
+        30.0F, 0.0F, 12.0F,
+        0.0F, 31.0F, 13.0F,
+        0.0F, 0.0F, 1.0F,
+        40.0F, 0.0F, 14.0F,
+        0.0F, 41.0F, 15.0F,
+        0.0F, 0.0F, 1.0F,
+    }, 2);
+    check(per_frame.size() == 2 && near(per_frame[0].fx, 30.0F) &&
+              near(per_frame[1].fx, 40.0F) && near(per_frame[1].cy, 15.0F),
+          "sana wm intrinsics: per-frame 3x3 matrices parsed");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::sana_wm_expand_intrinsics({1.0F, 2.0F, 3.0F}, 2);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "sana wm intrinsics: malformed vector rejected");
+}
+
 void test_runtime_config_parses_native_sana_wm_fields() {
     const auto cfg = trtmc::parse_sana_wm_config(
         R"json({
@@ -409,6 +472,8 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
 int main() {
     test_action_rollout_matches_model_card_frame_count_and_translation();
     test_action_rollout_rejects_invalid_segments();
+    test_camera_pose_vector_parses_row_major_matrices();
+    test_intrinsics_expand_model_card_shapes();
     test_runtime_config_parses_native_sana_wm_fields();
     test_resize_crop_plan_matches_upstream_geometry();
     test_resize_center_crop_crops_hwc_pixels();
