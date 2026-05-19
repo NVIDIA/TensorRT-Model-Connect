@@ -291,16 +291,16 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    # Diffusion needs Python reference/runtime dependencies.
+    # Diffusion needs Python build/reference dependencies. SANA-WM's TRT-side
+    # runtime is native C++/TensorRT; only the official oracle uses Python.
     if task_strategy == "diffusion_media_generation":
         if runtime_strategy == "diffusion_sana_wm":
-            for phase in ("runtime", "reference"):
-                for module in ("diffusers", "torch", "PIL"):
-                    reqs.append(PreflightRequirement(
-                        kind="python_module_available",
-                        args={"module": module, "phase": phase},
-                        gating=True,
-                    ))
+            for module in ("diffusers", "torch", "PIL"):
+                reqs.append(PreflightRequirement(
+                    kind="python_module_available",
+                    args={"module": module, "phase": "reference"},
+                    gating=True,
+                ))
         else:
             reqs.append(PreflightRequirement(
                 kind="python_module_available",

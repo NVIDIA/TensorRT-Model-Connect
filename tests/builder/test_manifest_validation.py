@@ -357,8 +357,12 @@ class TestManifestValidation:
         }
         assert ("ftfy", "build") not in module_reqs
         assert {
-            ("diffusers", "runtime"),
             ("diffusers", "reference"),
-            ("PIL", "runtime"),
+            ("torch", "reference"),
             ("PIL", "reference"),
         }.issubset(module_reqs)
+        assert {
+            ("diffusers", "runtime"),
+            ("torch", "runtime"),
+            ("PIL", "runtime"),
+        }.isdisjoint(module_reqs)
