@@ -74,7 +74,7 @@ The package metadata is in `tensorrt_model_connect/pyproject.toml`. It provides 
 ./build/trtmc build <hf-repo-or-local-dir> -o <output.trtfb>
 ```
 
-The builder dependencies include `safetensors`, `numpy`, `ml_dtypes`, `onnx`, `onnxscript`, `transformers`, `huggingface_hub`, TensorRT, `PyYAML`, and `tomli` on Python 3.10. The packaged native backend DSO is built against the TensorRT ABI range declared in the package metadata.
+The builder dependencies include `safetensors`, `numpy`, `ml_dtypes`, `onnx`, `onnxscript`, `transformers`, `huggingface_hub`, TensorRT, `PyYAML`, and `tomli` on Python 3.10. The packaged native backend DSO is built against the minimum TensorRT ABI declared in the package metadata.
 
 ## C++ runtime build
 

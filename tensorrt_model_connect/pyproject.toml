@@ -15,11 +15,11 @@ dependencies = [
     "onnxscript>=0.2",
     "transformers>=4.40",
     "huggingface_hub>=0.23",
-    "tensorrt>=10.16,<10.17",
+    "tensorrt>=10.16",
     "PyYAML>=6.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
-# The native runtime backend DSO is built against the TensorRT ABI range above.
+# The native runtime backend DSO is built against the minimum TensorRT ABI above.
 
 [project.optional-dependencies]
 chronos = ["chronos-forecasting>=2.2.2"]
