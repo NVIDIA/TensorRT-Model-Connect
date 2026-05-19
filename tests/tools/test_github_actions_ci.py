@@ -39,6 +39,18 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
+def test_github_stage_wrapper_limits_gpu_options_to_gpu_stages() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    gpu_case = text.split("case \"$stage\" in", maxsplit=1)[1].split(
+        "*)",
+        maxsplit=1,
+    )[0]
+    assert "graph-ops|selective-e2e|full-e2e)" in gpu_case
+    assert "cpp-unit" not in gpu_case
+    assert "python-builder" not in gpu_case
+    assert "cpp-coverage" not in gpu_case
+
+
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text

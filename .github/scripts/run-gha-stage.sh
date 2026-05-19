@@ -35,7 +35,7 @@ fi
 
 container_options=()
 case "$stage" in
-  cpp-unit|python-builder|cpp-coverage|graph-ops|selective-e2e|full-e2e)
+  graph-ops|selective-e2e|full-e2e)
     # shellcheck disable=SC2206
     container_options=(${TRTMC_CONTAINER_OPTIONS:-})
     echo "Using GPU container options for stage '${stage}': ${TRTMC_CONTAINER_OPTIONS:-<none>}"
