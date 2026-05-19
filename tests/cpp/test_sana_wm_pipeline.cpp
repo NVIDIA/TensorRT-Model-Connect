@@ -200,6 +200,56 @@ void test_camera_conditions_relativize_to_first_pose() {
           "sana wm camera: second pose is relative to first pose");
 }
 
+void test_stage1_latents_anchor_first_frame() {
+    const std::vector<float> first_frame{10.0F, 11.0F, 20.0F, 21.0F};
+    const std::vector<float> initial{0.0F, 1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F};
+
+    const auto latents =
+        trtmc::sana_wm_prepare_stage1_latents(first_frame, initial, 2, 2, 1, 2, 42);
+
+    check(latents.channels == 2 && latents.frames == 2 && latents.height == 1 && latents.width == 2,
+          "sana wm latents: shape metadata propagated");
+    check(latents.values.size() == 8, "sana wm latents: output size is CTHW");
+    check(near(latents.values[0], 10.0F) && near(latents.values[1], 11.0F),
+          "sana wm latents: channel zero first frame anchored");
+    check(near(latents.values[4], 20.0F) && near(latents.values[5], 21.0F),
+          "sana wm latents: channel one first frame anchored");
+    check(near(latents.values[2], 2.0F) && near(latents.values[3], 3.0F) &&
+              near(latents.values[6], 6.0F) && near(latents.values[7], 7.0F),
+          "sana wm latents: later frames preserve caller noise");
+}
+
+void test_stage1_latents_seeded_noise_is_deterministic() {
+    const std::vector<float> first_frame{1.0F, 2.0F};
+
+    const auto a = trtmc::sana_wm_prepare_stage1_latents(first_frame, {}, 1, 3, 1, 2, 1234);
+    const auto b = trtmc::sana_wm_prepare_stage1_latents(first_frame, {}, 1, 3, 1, 2, 1234);
+
+    check(a.values == b.values, "sana wm latents: seeded noise is deterministic");
+    check(near(a.values[0], 1.0F) && near(a.values[1], 2.0F),
+          "sana wm latents: seeded path still anchors first frame");
+    check(!(near(a.values[2], 0.0F) && near(a.values[3], 0.0F)),
+          "sana wm latents: seeded path fills later frames");
+}
+
+void test_stage1_latents_reject_mismatched_buffers() {
+    bool rejected_first = false;
+    try {
+        (void)trtmc::sana_wm_prepare_stage1_latents({1.0F}, {}, 2, 1, 1, 1, 0);
+    } catch (const std::invalid_argument&) {
+        rejected_first = true;
+    }
+    check(rejected_first, "sana wm latents: mismatched first latent rejected");
+
+    bool rejected_initial = false;
+    try {
+        (void)trtmc::sana_wm_prepare_stage1_latents({1.0F}, {0.0F, 1.0F}, 1, 1, 1, 1, 0);
+    } catch (const std::invalid_argument&) {
+        rejected_initial = true;
+    }
+    check(rejected_initial, "sana wm latents: mismatched initial latents rejected");
+}
+
 void test_bridge_command_forwards_strict_sana_wm_contract() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
@@ -260,6 +310,9 @@ int main() {
     test_resize_center_crop_crops_hwc_pixels();
     test_camera_conditions_match_upstream_shapes_and_raymap();
     test_camera_conditions_relativize_to_first_pose();
+    test_stage1_latents_anchor_first_frame();
+    test_stage1_latents_seeded_noise_is_deterministic();
+    test_stage1_latents_reject_mismatched_buffers();
     test_bridge_command_forwards_strict_sana_wm_contract();
     return failures == 0 ? 0 : 1;
 }

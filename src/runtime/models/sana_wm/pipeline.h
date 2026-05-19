@@ -69,6 +69,16 @@ struct SanaWmCameraConditions {
     int32_t chunk_plucker_channels{0};
 };
 
+struct SanaWmStage1Latents {
+    // Flat [C, T, H, W] row-major tensor matching upstream Stage-1 latent shape
+    // after dropping the implicit batch dimension.
+    std::vector<float> values;
+    int32_t channels{0};
+    int32_t frames{0};
+    int32_t height{0};
+    int32_t width{0};
+};
+
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
 
@@ -84,6 +94,11 @@ sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
                                   const std::vector<SanaWmIntrinsics>& intrinsics,
                                   int32_t target_height, int32_t target_width,
                                   int32_t vae_time_stride, int32_t vae_spatial_stride);
+SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& first_frame_chw,
+                                                   const std::vector<float>& initial_latents_cthw,
+                                                   int32_t channels, int32_t latent_frames,
+                                                   int32_t latent_height, int32_t latent_width,
+                                                   uint64_t seed);
 
 class SanaWmPipeline final : public IPipeline {
   public:

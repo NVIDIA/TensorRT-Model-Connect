@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -482,6 +483,58 @@ void pack_chunk_plucker(std::vector<float>& chunk_plucker, const std::vector<Mat
     }
 }
 
+std::size_t stage1_latent_index(int32_t channel, int32_t frame, int32_t y, int32_t x,
+                                int32_t frames, int32_t height, int32_t width) {
+    return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(frames) +
+              static_cast<std::size_t>(frame)) *
+                 static_cast<std::size_t>(height) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(width) +
+            static_cast<std::size_t>(x));
+}
+
+void validate_stage1_latent_dims(int32_t channels, int32_t frames, int32_t height, int32_t width) {
+    if (channels <= 0 || frames <= 0 || height <= 0 || width <= 0)
+        throw std::invalid_argument("SANA-WM Stage-1 latent dimensions must be positive");
+}
+
+std::size_t stage1_latent_count(int32_t channels, int32_t frames, int32_t height, int32_t width) {
+    validate_stage1_latent_dims(channels, frames, height, width);
+    return static_cast<std::size_t>(channels) * static_cast<std::size_t>(frames) *
+           static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
+}
+
+std::vector<float> sample_stage1_noise(std::size_t count, uint64_t seed) {
+    std::vector<float> values(count);
+    std::mt19937 gen(static_cast<std::mt19937::result_type>(seed));
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    for (float& value : values)
+        value = dist(gen);
+    return values;
+}
+
+void overwrite_first_latent_frame(std::vector<float>& latents,
+                                  const std::vector<float>& first_frame, int32_t channels,
+                                  int32_t frames, int32_t height, int32_t width) {
+    const auto expected_first = static_cast<std::size_t>(channels) *
+                                static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
+    if (first_frame.size() != expected_first) {
+        throw std::invalid_argument("SANA-WM first-frame latent size does not match [C,H,W]");
+    }
+
+    for (int32_t c = 0; c < channels; ++c) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                const auto src = (static_cast<std::size_t>(c) * static_cast<std::size_t>(height) +
+                                  static_cast<std::size_t>(y)) *
+                                     static_cast<std::size_t>(width) +
+                                 static_cast<std::size_t>(x);
+                latents[stage1_latent_index(c, 0, y, x, frames, height, width)] = first_frame[src];
+            }
+        }
+    }
+}
+
 struct SanaWmRequest {
     std::string python;
     std::string image_path;
@@ -765,6 +818,29 @@ sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
                            latent_h, latent_w, chunk_count);
     }
     return out;
+}
+
+SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& first_frame_chw,
+                                                   const std::vector<float>& initial_latents_cthw,
+                                                   int32_t channels, int32_t latent_frames,
+                                                   int32_t latent_height, int32_t latent_width,
+                                                   uint64_t seed) {
+    const auto expected_total =
+        stage1_latent_count(channels, latent_frames, latent_height, latent_width);
+    std::vector<float> values;
+    if (initial_latents_cthw.empty()) {
+        values = sample_stage1_noise(expected_total, seed);
+    } else {
+        if (initial_latents_cthw.size() != expected_total) {
+            throw std::invalid_argument("SANA-WM initial latent size does not match [C,T,H,W]");
+        }
+        values = initial_latents_cthw;
+    }
+
+    overwrite_first_latent_frame(values, first_frame_chw, channels, latent_frames, latent_height,
+                                 latent_width);
+
+    return {std::move(values), channels, latent_frames, latent_height, latent_width};
 }
 
 SanaWmPipeline::SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
