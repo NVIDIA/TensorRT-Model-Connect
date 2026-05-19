@@ -30,8 +30,40 @@ struct SanaWmPose {
     std::array<float, 16> c2w{};
 };
 
+struct SanaWmResizeCropPlan {
+    int32_t src_width{0};
+    int32_t src_height{0};
+    int32_t resized_width{0};
+    int32_t resized_height{0};
+    int32_t crop_left{0};
+    int32_t crop_top{0};
+    int32_t target_width{0};
+    int32_t target_height{0};
+};
+
+struct SanaWmIntrinsics {
+    float fx{0.0F};
+    float fy{0.0F};
+    float cx{0.0F};
+    float cy{0.0F};
+};
+
+struct SanaWmPreprocessedImage {
+    std::vector<float> pixels_hwc;
+    SanaWmResizeCropPlan plan;
+    bool ok{false};
+};
+
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
+
+SanaWmResizeCropPlan sana_wm_make_resize_crop_plan(int32_t src_width, int32_t src_height,
+                                                   int32_t target_height, int32_t target_width);
+SanaWmIntrinsics sana_wm_transform_intrinsics_for_crop(const SanaWmIntrinsics& intrinsics,
+                                                       const SanaWmResizeCropPlan& plan);
+SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>& src_hwc,
+                                                       int32_t src_width, int32_t src_height,
+                                                       int32_t target_height, int32_t target_width);
 
 class SanaWmPipeline final : public IPipeline {
   public:

@@ -100,6 +100,43 @@ void test_action_rollout_rejects_invalid_segments() {
     check(rejected_bad_key, "sana wm action: unknown key rejected");
 }
 
+void test_resize_crop_plan_matches_upstream_geometry() {
+    const auto plan = trtmc::sana_wm_make_resize_crop_plan(640, 480, 704, 1280);
+
+    check(plan.resized_width == 1280, "sana wm crop: width scales to target");
+    check(plan.resized_height == 960, "sana wm crop: height preserves aspect");
+    check(plan.crop_left == 0, "sana wm crop: no horizontal crop for 4:3 source");
+    check(plan.crop_top == 128, "sana wm crop: centered vertical crop");
+
+    const auto intr = trtmc::sana_wm_transform_intrinsics_for_crop(
+        trtmc::SanaWmIntrinsics{100.0F, 120.0F, 320.0F, 240.0F}, plan);
+    check(near(intr.fx, 200.0F), "sana wm crop: fx scaled");
+    check(near(intr.fy, 240.0F), "sana wm crop: fy scaled");
+    check(near(intr.cx, 640.0F), "sana wm crop: cx scaled");
+    check(near(intr.cy, 352.0F), "sana wm crop: cy scaled and crop-adjusted");
+}
+
+void test_resize_center_crop_crops_hwc_pixels() {
+    const std::vector<float> src = {
+        1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F,
+        0.5F, 0.5F, 0.0F, 0.0F, 0.5F, 0.5F, 0.5F, 0.0F, 0.5F,
+    };
+    const auto image = trtmc::sana_wm_resize_and_center_crop(src, 3, 2, 2, 2);
+
+    check(image.ok, "sana wm crop: resize helper succeeds");
+    check(image.plan.resized_width == 3 && image.plan.resized_height == 2,
+          "sana wm crop: no-op resize shape preserved");
+    check(image.plan.crop_left == 0 && image.plan.crop_top == 0,
+          "sana wm crop: integer center crop starts at origin");
+    check(image.pixels_hwc.size() == 12, "sana wm crop: output is target HWC RGB");
+    check(near(image.pixels_hwc[0], 1.0F) && near(image.pixels_hwc[1], 0.0F) &&
+              near(image.pixels_hwc[2], 0.0F),
+          "sana wm crop: first RGB pixel preserved");
+    check(near(image.pixels_hwc[9], 0.0F) && near(image.pixels_hwc[10], 0.5F) &&
+              near(image.pixels_hwc[11], 0.5F),
+          "sana wm crop: last cropped pixel preserved");
+}
+
 void test_bridge_command_forwards_strict_sana_wm_contract() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
@@ -156,6 +193,8 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
 int main() {
     test_action_rollout_matches_model_card_frame_count_and_translation();
     test_action_rollout_rejects_invalid_segments();
+    test_resize_crop_plan_matches_upstream_geometry();
+    test_resize_center_crop_crops_hwc_pixels();
     test_bridge_command_forwards_strict_sana_wm_contract();
     return failures == 0 ? 0 : 1;
 }

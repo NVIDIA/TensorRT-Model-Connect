@@ -1,5 +1,6 @@
 #include "runtime/models/sana_wm/pipeline.h"
 
+#include "stb_image_resize2.h"
 #include "trtmc/trtmc_io.hpp"
 #include "utils/json_helpers.h"
 
@@ -211,6 +212,17 @@ bool has_key(const std::vector<char>& keys, char key) {
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 
+int32_t python_round_to_int(double value) {
+    const double floored = std::floor(value);
+    const double frac = value - floored;
+    if (frac < 0.5)
+        return static_cast<int32_t>(floored);
+    if (frac > 0.5)
+        return static_cast<int32_t>(floored + 1.0);
+    const auto floor_int = static_cast<long long>(floored);
+    return static_cast<int32_t>((floor_int % 2LL == 0LL) ? floor_int : floor_int + 1LL);
+}
+
 struct SanaWmRequest {
     std::string python;
     std::string image_path;
@@ -388,6 +400,85 @@ std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float t
     }
 
     return poses;
+}
+
+SanaWmResizeCropPlan sana_wm_make_resize_crop_plan(int32_t src_width, int32_t src_height,
+                                                   int32_t target_height, int32_t target_width) {
+    if (src_width <= 0 || src_height <= 0 || target_height <= 0 || target_width <= 0)
+        throw std::invalid_argument("SANA-WM resize/crop dimensions must be positive");
+
+    const double scale =
+        std::max(static_cast<double>(target_height) / static_cast<double>(src_height),
+                 static_cast<double>(target_width) / static_cast<double>(src_width));
+    const int32_t resized_width =
+        std::max(target_width, python_round_to_int(static_cast<double>(src_width) * scale));
+    const int32_t resized_height =
+        std::max(target_height, python_round_to_int(static_cast<double>(src_height) * scale));
+
+    SanaWmResizeCropPlan plan;
+    plan.src_width = src_width;
+    plan.src_height = src_height;
+    plan.resized_width = resized_width;
+    plan.resized_height = resized_height;
+    plan.crop_left = (resized_width - target_width) / 2;
+    plan.crop_top = (resized_height - target_height) / 2;
+    plan.target_width = target_width;
+    plan.target_height = target_height;
+    return plan;
+}
+
+SanaWmIntrinsics sana_wm_transform_intrinsics_for_crop(const SanaWmIntrinsics& intrinsics,
+                                                       const SanaWmResizeCropPlan& plan) {
+    if (plan.src_width <= 0 || plan.src_height <= 0)
+        throw std::invalid_argument("SANA-WM intrinsics transform requires a valid crop plan");
+    const float sx = static_cast<float>(plan.resized_width) / static_cast<float>(plan.src_width);
+    const float sy = static_cast<float>(plan.resized_height) / static_cast<float>(plan.src_height);
+    return {
+        intrinsics.fx * sx,
+        intrinsics.fy * sy,
+        intrinsics.cx * sx - static_cast<float>(plan.crop_left),
+        intrinsics.cy * sy - static_cast<float>(plan.crop_top),
+    };
+}
+
+SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>& src_hwc,
+                                                       int32_t src_width, int32_t src_height,
+                                                       int32_t target_height,
+                                                       int32_t target_width) {
+    SanaWmPreprocessedImage out;
+    out.plan = sana_wm_make_resize_crop_plan(src_width, src_height, target_height, target_width);
+
+    const auto expected_src =
+        static_cast<std::size_t>(src_width) * static_cast<std::size_t>(src_height) * 3U;
+    if (src_hwc.size() != expected_src)
+        throw std::invalid_argument("SANA-WM source image buffer size does not match dimensions");
+
+    std::vector<float> resized(static_cast<std::size_t>(out.plan.resized_width) *
+                               static_cast<std::size_t>(out.plan.resized_height) * 3U);
+    void* resize_result = stbir_resize(
+        src_hwc.data(), src_width, src_height, static_cast<int>(src_width * 3 * sizeof(float)),
+        resized.data(), out.plan.resized_width, out.plan.resized_height,
+        static_cast<int>(out.plan.resized_width * 3 * sizeof(float)), STBIR_RGB, STBIR_TYPE_FLOAT,
+        STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT);
+    if (resize_result == nullptr)
+        return out;
+
+    out.pixels_hwc.assign(static_cast<std::size_t>(target_width) *
+                              static_cast<std::size_t>(target_height) * 3U,
+                          0.0F);
+    for (int32_t y = 0; y < target_height; ++y) {
+        const int32_t src_y = out.plan.crop_top + y;
+        const float* src_row =
+            resized.data() +
+            (static_cast<std::size_t>(src_y) * static_cast<std::size_t>(out.plan.resized_width) +
+             static_cast<std::size_t>(out.plan.crop_left)) *
+                3U;
+        float* dst_row = out.pixels_hwc.data() +
+                         static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) * 3U;
+        std::copy_n(src_row, static_cast<std::size_t>(target_width) * 3U, dst_row);
+    }
+    out.ok = true;
+    return out;
 }
 
 SanaWmPipeline::SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
