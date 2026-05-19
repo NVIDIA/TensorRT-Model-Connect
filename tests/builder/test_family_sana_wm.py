@@ -244,6 +244,36 @@ def test_sana_wm_plugin_omits_buildable_text_encoder_from_builder_gap(tmp_path) 
     assert "LTX-2 VAE encoder" in message
 
 
+def test_sana_wm_plugin_downloads_stage1_text_encoder_when_opted_in(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    downloaded = tmp_path / "downloaded-gemma"
+    downloaded.mkdir()
+    (downloaded / "config.json").write_text('{"model_type": "gemma"}', encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_download(raw_config):
+        captured["raw_config"] = raw_config
+        return downloaded
+
+    monkeypatch.setenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", "1")
+    monkeypatch.setattr(
+        sana_wm_plugin_mod,
+        "_download_stage1_text_encoder_dir",
+        fake_download,
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert weights["_stage1_text_encoder_dir"] == str(downloaded)
+    assert captured["raw_config"] is cfg.raw
+    with pytest.raises(NotImplementedError) as exc_info:
+        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+    assert "stage-1 Gemma text encoder" not in str(exc_info.value)
+
+
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     _write_safetensors_header(

@@ -31,6 +31,18 @@ _DEFAULT_DEMO_INTRINSICS = (797.87866, 830.0503, 844.2675, 463.7225)
 _DEFAULT_VAE_STRIDE = (8, 32, 32)
 _STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
 _STAGE1_TEXT_ENCODER_REL = Path("text_encoder")
+_STAGE1_TEXT_ENCODER_HF_IDS = {
+    "gemma-2-2b-it": "google/gemma-2-2b-it",
+}
+_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS = (
+    "config.json",
+    "generation_config.json",
+    "model*.safetensors",
+    "model.safetensors.index.json",
+    "tokenizer*",
+    "tokenizer.model",
+    "special_tokens_map.json",
+)
 _REFINER_REL = Path("refiner") / "refiner.safetensors"
 _REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
 _FULL_SNAPSHOT_REQUIRED_PATHS = (
@@ -201,6 +213,9 @@ def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path
     for candidate in candidates:
         if (candidate / "config.json").is_file():
             return candidate
+    downloaded = _download_stage1_text_encoder_dir(raw_config)
+    if downloaded is not None and (downloaded / "config.json").is_file():
+        return downloaded
     return None
 
 
@@ -211,6 +226,43 @@ def _has_safetensors_weight_file(path: Path) -> bool:
         or (path / "diffusion_pytorch_model.safetensors").is_file()
         or (path / "diffusion_pytorch_model.safetensors.index.json").is_file()
         or any(path.glob("*.safetensors"))
+    )
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _stage1_text_encoder_hf_id(raw_config: dict) -> str:
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+    configured = (
+        raw_config.get("sana_wm_text_encoder_hf_id")
+        or text_encoder.get("text_encoder_hf_id")
+        or text_encoder.get("text_encoder_name")
+        or text_encoder.get("model")
+        or "gemma-2-2b-it"
+    )
+    name = str(configured)
+    return _STAGE1_TEXT_ENCODER_HF_IDS.get(name, name)
+
+
+def _download_stage1_text_encoder_dir(raw_config: dict) -> Path | None:
+    if not _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to download the SANA-WM stage-1 "
+            "Gemma text encoder. Install it or set SANA_WM_TEXT_ENCODER_DIR."
+        ) from exc
+    return Path(
+        snapshot_download(
+            repo_id=_stage1_text_encoder_hf_id(raw_config),
+            allow_patterns=list(_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS),
+        )
     )
 
 
