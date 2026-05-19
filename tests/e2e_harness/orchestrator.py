@@ -1035,6 +1035,11 @@ def _build_repro_commands(
                     infer_parts.extend(["--translation-speed", str(case.inputs["translation_speed"])])
                 if "rotation_speed_deg" in case.inputs:
                     infer_parts.extend(["--rotation-speed-deg", str(case.inputs["rotation_speed_deg"])])
+                if "camera_intrinsics" in case.inputs:
+                    infer_parts.extend([
+                        "--camera-intrinsics",
+                        _shell_quote(_csv_arg(case.inputs["camera_intrinsics"])),
+                    ])
                 num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames"))
                 if num_frames is not None:
                     infer_parts.extend(["--num-frames", str(num_frames)])

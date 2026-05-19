@@ -14,7 +14,7 @@
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> (--prompt "text" | --prompt-file PATH)
 //                        --output DIR [--num-steps N] [--image PATH]
-//                        [--action DSL] [--num-frames N]
+//                        [--action DSL] [--camera-intrinsics CSV] [--num-frames N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc inspect         <bundle.trtfb>
 //   trtmc version
@@ -65,6 +65,7 @@ struct CliArgs {
     std::string audio_in;
     std::string audio_out;
     std::string action;
+    std::string camera_intrinsics;
     std::string field_input;
     std::string branch_input;
     std::string trunk_input;
@@ -206,7 +207,7 @@ void print_usage() {
            "  trtmc generate-video  <bundle.trtfb> (--prompt \"text\" | --prompt-file PATH) "
            "--output DIR [--num-steps N] [--guidance-scale S] [--initial-latents-raw PATH] "
            "[--image PATH] [--action DSL] [--translation-speed F] "
-           "[--rotation-speed-deg F] [--num-frames N]\n"
+           "[--rotation-speed-deg F] [--camera-intrinsics CSV] [--num-frames N]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -390,6 +391,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--action" && need_value(arg)) {
             args.action = argv[++i];
+            continue;
+        }
+        if (arg == "--camera-intrinsics" && need_value(arg)) {
+            args.camera_intrinsics = argv[++i];
             continue;
         }
         if (arg == "--translation-speed" && need_value(arg)) {
@@ -583,6 +588,48 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
     if (!values.empty() &&
         !in.read(reinterpret_cast<char*>(values.data()), static_cast<std::streamsize>(bytes))) {
         error = "failed to read " + path;
+        return std::nullopt;
+    }
+    return values;
+}
+
+std::optional<std::vector<float>> parse_float_values(const std::string& csv,
+                                                     const std::string& flag_name,
+                                                     std::string& error) {
+    std::vector<float> values;
+    std::string token;
+    token.reserve(csv.size());
+
+    auto flush_token = [&]() -> bool {
+        if (token.empty())
+            return true;
+        std::size_t consumed = 0;
+        try {
+            values.push_back(std::stof(token, &consumed));
+        } catch (...) {
+            error = flag_name + " expects comma- or space-separated floats";
+            return false;
+        }
+        if (consumed != token.size()) {
+            error = flag_name + " contains an invalid float: " + token;
+            return false;
+        }
+        token.clear();
+        return true;
+    };
+
+    for (char ch : csv) {
+        if (ch == ',' || std::isspace(static_cast<unsigned char>(ch))) {
+            if (!flush_token())
+                return std::nullopt;
+            continue;
+        }
+        token.push_back(ch);
+    }
+    if (!flush_token())
+        return std::nullopt;
+    if (values.empty()) {
+        error = flag_name + " requires at least one float";
         return std::nullopt;
     }
     return values;
@@ -894,6 +941,15 @@ int cmd_generate_video(const CliArgs& args) {
     cfg.translation_speed = args.translation_speed;
     cfg.rotation_speed_deg = args.rotation_speed_deg;
     cfg.num_frames = args.num_frames;
+    if (!args.camera_intrinsics.empty()) {
+        std::string error;
+        auto intrinsics = parse_float_values(args.camera_intrinsics, "--camera-intrinsics", error);
+        if (!intrinsics) {
+            std::cerr << "Error: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.camera_intrinsics = std::move(*intrinsics);
+    }
     if (!args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);

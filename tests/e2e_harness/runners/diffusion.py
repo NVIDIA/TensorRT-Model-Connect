@@ -34,6 +34,12 @@ PROJECT_DIR = Path(__file__).resolve().parents[3]
 TOOLS_DIR = PROJECT_DIR / "tools"
 
 
+def _format_float_csv(value) -> str:
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
 def _find_trt_lib_dir() -> str:
     """Find TRT library directory from the Python tensorrt_libs package."""
     try:
@@ -523,6 +529,9 @@ class DiffusionMediaRunner:
                 rotation_speed_deg = case.inputs.get("rotation_speed_deg")
                 if rotation_speed_deg is not None:
                     cmd.extend(["--rotation-speed-deg", str(rotation_speed_deg)])
+                camera_intrinsics = case.inputs.get("camera_intrinsics")
+                if camera_intrinsics is not None:
+                    cmd.extend(["--camera-intrinsics", _format_float_csv(camera_intrinsics)])
                 num_frames = case.inputs.get("video_num_frames") or case.inputs.get("num_frames")
                 if num_frames is not None:
                     cmd.extend(["--num-frames", str(num_frames)])

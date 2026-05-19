@@ -65,6 +65,10 @@ preflight with `precheck_fail` and writes `preflight_details.json`.
 
 The TRTMC side is expected to run native TensorRT sections. Python fallback
 execution is not available for SANA-WM bundles.
+The C++ `generate-video` command accepts explicit SANA-WM intrinsics with
+`--camera-intrinsics fx,fy,cx,cy`; when omitted, the bundle-level
+`sana_wm_default_intrinsics` value is used because Pi3X estimation is not
+implemented in C++.
 Set `SANA_WM_NATIVE_PLAN_DIR` to a directory containing the required
 `trtmc_engines/*.plan` sections, or set `SANA_WM_MODEL_DIR` to a model
 directory with a `trtmc_engines/` subdirectory. The minimum native set is

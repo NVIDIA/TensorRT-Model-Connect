@@ -53,7 +53,7 @@ TriAttention options are also exposed for experimental KV compaction: `--triatte
 ./build/trtmc segment <bundle.trtfb> --image PATH --output PATH
 ./build/trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
 ./build/trtmc serve-audio <bundle.trtfb>
-./build/trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
+./build/trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR [--camera-intrinsics CSV]
 ./build/trtmc embed <bundle.trtfb> --prompt "text"
 ./build/trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
 ./build/trtmc solve <bundle.trtfb> --field-input CSV

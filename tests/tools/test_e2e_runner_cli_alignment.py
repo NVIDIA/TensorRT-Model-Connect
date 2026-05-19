@@ -176,6 +176,7 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
             "action": "w-80,jw-40,w-40,lw-60,w-100",
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
+            "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
         },
     )
@@ -207,6 +208,8 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert "0.055" in cmd
     assert "--rotation-speed-deg" in cmd
     assert "1.2" in cmd
+    assert "--camera-intrinsics" in cmd
+    assert "797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num-frames" in cmd
     assert "321" in cmd
     assert "--hf-python" in cmd

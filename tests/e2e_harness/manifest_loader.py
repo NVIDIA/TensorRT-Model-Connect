@@ -416,6 +416,7 @@ def _build_inputs(manifest: dict) -> dict:
         "action",
         "translation_speed",
         "rotation_speed_deg",
+        "camera_intrinsics",
         "sana_wm_script",
         "sana_wm_native_plan_dir",
         "sana_wm_model_dir",
@@ -534,7 +535,7 @@ def _build_metadata(manifest: dict) -> dict:
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
         "negative_prompt", "cfg_scale", "height", "width",
         "image_height", "image_width",
-        "action", "translation_speed", "rotation_speed_deg", "sana_wm_script",
+        "action", "translation_speed", "rotation_speed_deg", "camera_intrinsics", "sana_wm_script",
         "sana_wm_native_plan_dir", "sana_wm_model_dir", "sana_wm_tokenizer_dir",
         "sana_wm_require_official_script",
     }

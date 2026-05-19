@@ -104,6 +104,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
             "action": "w-80,jw-40,w-40,lw-60,w-100",
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
+            "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
         },
         stages=[],
@@ -126,6 +127,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
     assert "--action w-80,jw-40,w-40,lw-60,w-100" in cmd
     assert "--translation-speed 0.055" in cmd
     assert "--rotation-speed-deg 1.2" in cmd
+    assert "--camera-intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num-frames 321" in cmd
     assert "--hf-python /usr/bin/python3" in cmd
 
