@@ -66,6 +66,7 @@ struct CliArgs {
     std::string command;
     std::string model_or_bundle;
     std::string prompt;
+    std::string prompts_file;
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
@@ -82,6 +83,10 @@ struct CliArgs {
     float cfg_scale{-1.0F};
     float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
+    bool seed_was_set{false};
+    std::vector<std::uint64_t> seed_list;
+    int seed{-1};
+    int num_images{1};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -133,6 +138,31 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
         bytes > static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
         return std::nullopt;
     return static_cast<std::uint64_t>(bytes + 0.5L);
+}
+
+std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text) {
+    std::vector<std::uint64_t> seeds;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto comma = text.find(',', start);
+        const auto end = (comma == std::string::npos) ? text.size() : comma;
+        const std::string token = text.substr(start, end - start);
+        if (token.empty())
+            return std::nullopt;
+        try {
+            std::size_t consumed = 0;
+            const auto value = std::stoull(token, &consumed, 10);
+            if (consumed != token.size())
+                return std::nullopt;
+            seeds.push_back(value);
+        } catch (...) {
+            return std::nullopt;
+        }
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return seeds;
 }
 
 CliArgs parse_args(int argc, const char** argv) {
@@ -225,6 +255,51 @@ CliArgs parse_args(int argc, const char** argv) {
                 return args;
             }
             args.sde_gamma = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--seed") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            const std::string value = argv[++i];
+            args.seed_was_set = true;
+            if (value.find(',') != std::string::npos) {
+                auto seeds = parse_seed_csv(value);
+                if (!seeds) {
+                    args.parse_error = true;
+                    args.error_message = "--seed expects an integer or comma-separated integers";
+                    return args;
+                }
+                args.seed_list = std::move(*seeds);
+                args.seed = args.seed_list.empty() ? -1 : static_cast<int>(args.seed_list[0]);
+            } else {
+                args.seed = std::atoi(value.c_str());
+            }
+            continue;
+        }
+        if (arg == "--num-images") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.num_images = std::atoi(argv[++i]);
+            if (args.num_images < 1) {
+                args.parse_error = true;
+                args.error_message = "--num-images must be >= 1";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--prompts-file") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.prompts_file = argv[++i];
             continue;
         }
         if (arg == "--hf-python") {
@@ -346,6 +421,12 @@ CliArgs parse_args(int argc, const char** argv) {
             args.error_message = "Unexpected positional argument: " + arg;
             return args;
         }
+    }
+
+    if (!args.prompt.empty() && !args.prompts_file.empty()) {
+        args.parse_error = true;
+        args.error_message = "--prompt and --prompts-file are mutually exclusive";
+        return args;
     }
 
     return args;
@@ -541,6 +622,30 @@ static void test_kv_cache_size_equals_flag() {
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size equals parsed");
 }
 
+static void test_diffusion_batch_flags() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "4",
+                       "--seed", "0,1,2,3"});
+    check(!args.parse_error, "diffusion batch flags no parse error");
+    check(args.num_images == 4, "num-images parsed");
+    check(args.seed_was_set, "seed marked set");
+    check(args.seed_list == std::vector<std::uint64_t>({0, 1, 2, 3}), "seed csv parsed");
+}
+
+static void test_num_images_zero_errors() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "0"});
+    check(args.parse_error, "num-images zero errors");
+    check(args.error_message.find("--num-images must be >= 1") != std::string::npos,
+          "num-images zero message");
+}
+
+static void test_prompt_and_prompts_file_mutually_exclusive() {
+    auto args = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--prompts-file", "p.txt"});
+    check(args.parse_error, "prompt/prompts-file mutually exclusive");
+    check(args.error_message.find("mutually exclusive") != std::string::npos,
+          "prompt/prompts-file error message");
+}
+
 // -----------------------------------------------------------------------------
 // Intention: Verify detect alias flags parse exactly like canonical names.
 // Setup: Simulated argv with detect + --output-json + --score-threshold.
@@ -584,6 +689,9 @@ int main() {
     test_kv_cache_size_flag();
     test_kv_cache_size_alias_flag();
     test_kv_cache_size_equals_flag();
+    test_diffusion_batch_flags();
+    test_num_images_zero_errors();
+    test_prompt_and_prompts_file_mutually_exclusive();
     test_detect_alias_flags();
     test_detect_unknown_flag_still_errors();
 

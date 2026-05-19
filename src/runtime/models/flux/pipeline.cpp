@@ -168,8 +168,9 @@ bool prepare_flux_t5_conditioning(const std::vector<int32_t>& input_ids, int32_t
 // Latent initialization
 // ---------------------------------------------------------------------------
 
-void initialize_flux_latents(std::vector<float>& latents) {
-    std::mt19937 gen(42);
+void initialize_flux_latents(std::vector<float>& latents, int32_t seed) {
+    const auto normalized_seed = static_cast<std::mt19937::result_type>(seed >= 0 ? seed : 42);
+    std::mt19937 gen(normalized_seed);
     std::normal_distribution<float> dist(0.0F, 1.0F);
     for (auto& v : latents) {
         v = dist(gen);
@@ -1116,7 +1117,7 @@ void FluxPipeline::prepare_denoising_state(const diffusion::FluxGenerationPlan& 
                                            std::vector<float>& encoder_hidden,
                                            std::vector<float>& cos_vals,
                                            std::vector<float>& sin_vals,
-                                           std::vector<float>& latents) {
+                                           std::vector<float>& latents, int32_t seed) {
     using Clock = std::chrono::steady_clock;
     const int32_t dit_dim = plan.dit_dim;
     const int32_t text_seq = plan.text_seq;
@@ -1145,7 +1146,7 @@ void FluxPipeline::prepare_denoising_state(const diffusion::FluxGenerationPlan& 
 
     // 8. Initialize random latents
     latents.resize(plan.latent_size);
-    initialize_flux_latents(latents);
+    initialize_flux_latents(latents, seed);
     auto tp3 = Clock::now();
 
     auto ms = [](auto a, auto b) {
@@ -1291,7 +1292,8 @@ ImageResult FluxPipeline::generate_image(const std::string& prompt, const Genera
     std::vector<float> encoder_hidden;
     std::vector<float> cos_vals, sin_vals;
     std::vector<float> latents;
-    prepare_denoising_state(plan, text_embeddings, encoder_hidden, cos_vals, sin_vals, latents);
+    prepare_denoising_state(
+        plan, text_embeddings, encoder_hidden, cos_vals, sin_vals, latents, cfg.seed);
     const auto t_prep = Clock::now();
 
     // Step 10: Denoising loop

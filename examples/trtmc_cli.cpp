@@ -18,6 +18,7 @@
 //   trtmc version
 
 #include "stb_image_write.h"
+#include "runtime/domains/diffusion/batch_utils.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
@@ -49,6 +50,7 @@ struct CliArgs {
     std::string command;
     std::string bundle_path;
     std::string prompt;
+    std::string prompts_file;
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
@@ -77,6 +79,9 @@ struct CliArgs {
     float min_p{0.0F};
     int top_k{1};
     int seed{-1};
+    bool seed_was_set{false};
+    std::vector<std::uint64_t> seed_list;
+    int num_images{1};
     int num_steps{-1};
     float guidance_scale{-1.0F};
     float sde_gamma{-1.0F};
@@ -171,6 +176,63 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     return options;
 }
 
+std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text) {
+    std::vector<std::uint64_t> seeds;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto comma = text.find(',', start);
+        const auto end = (comma == std::string::npos) ? text.size() : comma;
+        const std::string token = text.substr(start, end - start);
+        if (token.empty())
+            return std::nullopt;
+        try {
+            std::size_t consumed = 0;
+            const auto value = std::stoull(token, &consumed, 10);
+            if (consumed != token.size())
+                return std::nullopt;
+            seeds.push_back(value);
+        } catch (...) {
+            return std::nullopt;
+        }
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return seeds;
+}
+
+std::vector<std::string> read_prompts_file(const std::string& path, std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "failed to open " + path;
+        return {};
+    }
+    std::vector<std::string> prompts;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (!line.empty())
+            prompts.push_back(line);
+    }
+    if (prompts.empty())
+        error = path + " contains no prompts";
+    return prompts;
+}
+
+std::string format_output_path(const std::string& path, int index, int total) {
+    if (total == 1)
+        return path;
+    const auto sep = path.find_last_of("/\\");
+    const auto dot = path.find_last_of('.');
+    const bool has_extension = dot != std::string::npos &&
+                               (sep == std::string::npos || dot > sep);
+    const std::string suffix = "_" + std::to_string(index);
+    if (!has_extension)
+        return path + suffix;
+    return path.substr(0, dot) + suffix + path.substr(dot);
+}
+
 void print_usage() {
     std::cerr
         << "Usage:\n"
@@ -184,7 +246,8 @@ void print_usage() {
            "[--output samples.jsonl]\n"
            "                        Diffusion text-to-image extras (Qwen-Image, FLUX, "
            "Z-Image): [--negative-prompt \"text\"] "
-           "[--num-inference-steps N] [--height N] [--width N]\n"
+           "[--num-inference-steps N] [--height N] [--width N] "
+           "[--num-images N] [--prompts-file PATH] [--seed N|N,N,...]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
@@ -301,7 +364,33 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--seed" && need_value(arg)) {
-            args.seed = std::atoi(argv[++i]);
+            const std::string value = argv[++i];
+            args.seed_was_set = true;
+            if (value.find(',') != std::string::npos) {
+                auto seeds = parse_seed_csv(value);
+                if (!seeds) {
+                    args.parse_error = true;
+                    args.error_message = "--seed expects an integer or comma-separated integers";
+                    return args;
+                }
+                args.seed_list = std::move(*seeds);
+                args.seed = args.seed_list.empty() ? -1 : static_cast<int>(args.seed_list[0]);
+            } else {
+                args.seed = std::atoi(value.c_str());
+            }
+            continue;
+        }
+        if (arg == "--num-images" && need_value(arg)) {
+            args.num_images = std::atoi(argv[++i]);
+            if (args.num_images < 1) {
+                args.parse_error = true;
+                args.error_message = "--num-images must be >= 1";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--prompts-file" && need_value(arg)) {
+            args.prompts_file = argv[++i];
             continue;
         }
         if (arg == "--tail-frames" && need_value(arg)) {
@@ -512,6 +601,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.error_message = "Unexpected positional argument: " + arg;
             return args;
         }
+    }
+
+    if (!args.prompt.empty() && !args.prompts_file.empty()) {
+        args.parse_error = true;
+        args.error_message = "--prompt and --prompts-file are mutually exclusive";
+        return args;
     }
 
     return args;
@@ -747,35 +842,88 @@ int cmd_run(const CliArgs& args) {
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
     } else if (is_diffusion) {
-        auto result = pipeline->generate_image(prompt, cfg);
-        if (result.pixels.empty()) {
-            std::cerr << "Error: image generation failed\n";
+        std::vector<std::string> base_prompts;
+        if (!args.prompts_file.empty()) {
+            std::string error;
+            base_prompts = read_prompts_file(args.prompts_file, error);
+            if (!error.empty()) {
+                std::cerr << "Error: " << error << '\n';
+                return EXIT_FAILURE;
+            }
+        } else {
+            base_prompts.push_back(prompt);
+        }
+
+        std::vector<std::string> prompts;
+        prompts.reserve(base_prompts.size() * static_cast<std::size_t>(args.num_images));
+        for (const auto& base_prompt : base_prompts) {
+            for (int i = 0; i < args.num_images; ++i)
+                prompts.push_back(base_prompt);
+        }
+        const int total = static_cast<int>(prompts.size());
+        if (!cfg.initial_latents.empty() && total > 1) {
+            std::cerr << "Error: --initial-latents-raw can only be used with one image\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<int32_t> per_sample_seeds;
+        try {
+            if (!args.seed_list.empty()) {
+                per_sample_seeds = trtmc::diffusion::derive_per_sample_seeds(
+                    args.seed_list, total);
+            } else if (args.seed_was_set && total == 1) {
+                per_sample_seeds = {args.seed};
+            } else if (total > 1 || args.seed_was_set) {
+                const std::uint64_t global_seed =
+                    args.seed >= 0 ? static_cast<std::uint64_t>(args.seed) : 42ULL;
+                per_sample_seeds =
+                    trtmc::diffusion::derive_per_sample_seeds(global_seed, total);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << '\n';
+            return EXIT_FAILURE;
+        }
+
+        auto results = pipeline->generate_images(prompts, per_sample_seeds, cfg);
+        if (results.size() != prompts.size()) {
+            std::cerr << "Error: image generation returned " << results.size()
+                      << " results for " << prompts.size() << " prompts\n";
             return EXIT_FAILURE;
         }
 
         // Save as PNG. If -o ends with .png, use as file path; otherwise
-        // treat as directory and write output.png inside it.
-        std::string out_path;
+        // treat as directory and write output.png inside it. Multiple images
+        // get _<i> before the extension.
+        std::string base_out_path;
         if (!args.output_dir.empty() && args.output_dir.size() > 4 &&
             args.output_dir.substr(args.output_dir.size() - 4) == ".png") {
-            out_path = args.output_dir;
-            auto parent = std::filesystem::path(out_path).parent_path();
+            base_out_path = args.output_dir;
+            auto parent = std::filesystem::path(base_out_path).parent_path();
             if (!parent.empty())
                 std::filesystem::create_directories(parent);
         } else {
             const std::string out_dir =
                 args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
             std::filesystem::create_directories(out_dir);
-            out_path = out_dir + "/output.png";
+            base_out_path = out_dir + "/output.png";
         }
 
-        try {
-            trtmc::io::save_png(result, out_path);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return EXIT_FAILURE;
+        for (int i = 0; i < total; ++i) {
+            const auto& result = results[static_cast<std::size_t>(i)];
+            if (result.pixels.empty()) {
+                std::cerr << "Error: image generation failed for sample " << i << '\n';
+                return EXIT_FAILURE;
+            }
+            const std::string out_path = format_output_path(base_out_path, i, total);
+            try {
+                trtmc::io::save_png(result, out_path);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << '\n';
+                return EXIT_FAILURE;
+            }
+            std::cout << "Saved " << out_path << " (" << result.width << "x"
+                      << result.height << ")\n";
         }
-        std::cout << "Saved " << out_path << " (" << result.width << "x" << result.height << ")\n";
     } else if (!args.image_path.empty()) {
         // Load image using trtmc_io
         auto image = trtmc::io::read_image(args.image_path);
@@ -1479,6 +1627,17 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "Max cache length:   " << info.max_cache_length << '\n';
         if (!info.runtime_strategy.empty())
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
+        const bool has_batch_caps = info.max_batch_size.dit != 1 ||
+                                    info.max_batch_size.text_encoder != 1 ||
+                                    info.max_batch_size.vae != 1;
+        const bool is_diffusion_bundle =
+            info.runtime_strategy == "diffusion" ||
+            info.family.find("diffusion") != std::string::npos;
+        if (is_diffusion_bundle || has_batch_caps) {
+            std::cout << "Max batch size:     dit=" << info.max_batch_size.dit
+                      << " text_encoder=" << info.max_batch_size.text_encoder
+                      << " vae=" << info.max_batch_size.vae << '\n';
+        }
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';

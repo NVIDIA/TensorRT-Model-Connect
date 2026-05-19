@@ -21,6 +21,16 @@ struct DiffusionConfig {
     int32_t max_image_seq_len{4096};
     float shift_terminal{0.0F};
 
+    // Per-call requested batch size. Defaults to 1 to preserve existing
+    // single-image behavior for old call sites.
+    int32_t batch_size{1};
+
+    struct {
+        int32_t dit{1};
+        int32_t text_encoder{1};
+        int32_t vae{1};
+    } max_batch_size;
+
     int32_t video_height{480};
     int32_t video_width{832};
     int32_t video_num_frames{81};

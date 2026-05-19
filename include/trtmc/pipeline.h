@@ -182,6 +182,24 @@ class IPipeline {
                                  " does not support generate_image()");
     }
 
+    virtual std::vector<ImageResult> generate_images(
+        const std::vector<std::string>& prompts,
+        const std::vector<int32_t>& per_sample_seeds,
+        const GenerateConfig& cfg = {}) {
+        if (!per_sample_seeds.empty() && per_sample_seeds.size() != prompts.size()) {
+            throw std::invalid_argument("per_sample_seeds size must match prompts size");
+        }
+        std::vector<ImageResult> results;
+        results.reserve(prompts.size());
+        for (std::size_t i = 0; i < prompts.size(); ++i) {
+            GenerateConfig sample_cfg = cfg;
+            if (!per_sample_seeds.empty())
+                sample_cfg.seed = per_sample_seeds[i];
+            results.push_back(generate_image(prompts[i], sample_cfg));
+        }
+        return results;
+    }
+
     virtual ImageResult generate_image(const TextEmbedding& emb, const GenerateConfig& cfg = {}) {
         (void)emb;
         (void)cfg;

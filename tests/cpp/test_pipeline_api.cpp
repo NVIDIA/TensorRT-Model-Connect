@@ -31,6 +31,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -46,6 +47,27 @@ class DummyPipeline final : public trtmc::IPipeline {
   public:
     const char* model_id() const override { return "dummy-model"; }
     const char* pipeline_type() const override { return "DummyPipeline"; }
+};
+
+class DummyImagePipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "dummy-image-model"; }
+    const char* pipeline_type() const override { return "DummyImagePipeline"; }
+
+    trtmc::ImageResult generate_image(const std::string& prompt,
+                                      const trtmc::GenerateConfig& cfg = {}) override {
+        prompts += prompt + ";";
+        seeds.push_back(cfg.seed);
+        trtmc::ImageResult result;
+        result.width = 1;
+        result.height = 1;
+        result.channels = 3;
+        result.pixels = {static_cast<float>(cfg.seed), 0.0F, 0.0F};
+        return result;
+    }
+
+    std::string prompts;
+    std::vector<int32_t> seeds;
 };
 
 static void test_null_input_returns_null() {
@@ -217,6 +239,19 @@ static void test_ipipeline_default_virtuals() {
     check(threw, "default detect throws");
 }
 
+static void test_generate_images_default_loops_generate_image() {
+    DummyImagePipeline pipeline;
+    trtmc::GenerateConfig cfg;
+    cfg.seed = 999;
+    const auto results = pipeline.generate_images({"a", "b"}, {7, 8}, cfg);
+
+    check(results.size() == 2U, "generate_images result count");
+    check(pipeline.prompts == "a;b;", "generate_images prompt order");
+    check(pipeline.seeds == std::vector<int32_t>({7, 8}), "generate_images seeds");
+    check(results[0].pixels[0] == 7.0F, "generate_images first result");
+    check(results[1].pixels[0] == 8.0F, "generate_images second result");
+}
+
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
@@ -225,6 +260,7 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_generate_images_default_loops_generate_image();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

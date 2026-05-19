@@ -166,6 +166,47 @@ def _sanitize_dynamic_kv_profile_rows(
     return sanitized
 
 
+def add_dynamic_batch_profile(
+    builder,
+    config,
+    network,
+    *,
+    input_names: list[str],
+    max_batch: int,
+    opt_batch: int,
+    static_shape: dict[str, tuple[int, ...]],
+) -> None:
+    """Attach one TensorRT profile with a dynamic leading batch dimension.
+
+    ``static_shape`` stores each input's shape without the leading batch dim.
+    The attached profile uses ``kMIN=1``, ``kOPT=opt_batch``, and
+    ``kMAX=max_batch`` for every named input.
+    """
+    del network  # The profile API is name-based; keep the arg for call-site clarity.
+    if max_batch < 1:
+        raise ValueError(f"max_batch must be >= 1 (got {max_batch})")
+    if not (1 <= opt_batch <= max_batch):
+        raise ValueError(
+            "opt_batch must satisfy 1 <= opt_batch <= max_batch "
+            f"(got opt_batch={opt_batch}, max_batch={max_batch})"
+        )
+
+    missing = [name for name in input_names if name not in static_shape]
+    if missing:
+        raise KeyError(f"static_shape missing entries for: {', '.join(missing)}")
+
+    profile = builder.create_optimization_profile()
+    for name in input_names:
+        tail = tuple(static_shape[name])
+        profile.set_shape(
+            name,
+            min=(1, *tail),
+            opt=(opt_batch, *tail),
+            max=(max_batch, *tail),
+        )
+    config.add_optimization_profile(profile)
+
+
 def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
     """Re-raise HF download errors with clear, actionable messages."""
     exc_type = type(exc).__name__
@@ -577,6 +618,7 @@ def build_bundle(
     # config.raw, same passthrough pattern.
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
+    max_batch_size: int = 1,
     build_timing_path: str | None = None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
@@ -617,6 +659,7 @@ def build_bundle(
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
+            max_batch_size=max_batch_size,
             build_timing=build_timing)
         return
 
@@ -1039,6 +1082,7 @@ def _build_diffusion_bundle(
     save_fp8_scales: str | None = None,
     rtx: bool = False,
     diffusion_overrides: dict | None = None,
+    max_batch_size: int = 1,
     build_timing: dict | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
@@ -1073,6 +1117,20 @@ def _build_diffusion_bundle(
     )
 
     print(f"[trtmc-build] Family: {plugin.name}", file=sys.stderr)
+    if max_batch_size < 1:
+        raise ValueError(f"--max-batch-size must be >= 1 (got {max_batch_size})")
+    if max_batch_size != 1:
+        raise NotImplementedError(
+            "--max-batch-size > 1 requires dynamic-batch diffusion component "
+            "builders, which are not enabled in this implementation slice yet"
+        )
+    diffusion_max_batch_size = {
+        "dit": int(max_batch_size),
+        "text_encoder": int(
+            max_batch_size if max_batch_size == 1 else min(max_batch_size * 2, 8)
+        ),
+        "vae": 1,
+    }
 
     # Load weights (lightweight — just paths for diffusion)
     t1 = time.monotonic()
@@ -1308,6 +1366,7 @@ def _build_diffusion_bundle(
         precision=precision,
         max_cache_length=max_cache_length,
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
+        max_batch_size=diffusion_max_batch_size,
     )
 
     write_t0 = time.monotonic()
@@ -1346,6 +1405,7 @@ def build(
     triattention_disable_trig: bool = False,
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
+    max_batch_size: int = 1,
     build_timing_path: str | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
@@ -1386,4 +1446,5 @@ def build(
                  triattention_disable_trig=triattention_disable_trig,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
                  diffusion_overrides=diffusion_overrides,
+                 max_batch_size=max_batch_size,
                  build_timing_path=build_timing_path)

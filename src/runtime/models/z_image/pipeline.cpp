@@ -109,8 +109,9 @@ int32_t pad_to_next_multiple(int32_t value, int32_t multiple) {
 // Latent initialization
 // ---------------------------------------------------------------------------
 
-void initialize_latents(std::vector<float>& latents) {
-    std::mt19937 gen(42);
+void initialize_latents(std::vector<float>& latents, int32_t seed) {
+    const auto normalized_seed = static_cast<std::mt19937::result_type>(seed >= 0 ? seed : 42);
+    std::mt19937 gen(normalized_seed);
     std::normal_distribution<float> dist(0.0F, 1.0F);
     for (auto& v : latents) {
         v = dist(gen);
@@ -587,7 +588,7 @@ ImageResult ZImagePipeline::generate_image(const std::string& prompt, const Gene
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
     std::vector<float> latents(latent_size);
-    initialize_latents(latents);
+    initialize_latents(latents, cfg.seed);
 
     // ── 7. Create FlowMatchEuler scheduler ──
     FlowMatchEulerState scheduler;

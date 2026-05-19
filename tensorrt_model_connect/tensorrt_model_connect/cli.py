@@ -157,6 +157,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             max_cache_length=args.max_cache_length,
             dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
             dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
+            max_batch_size=getattr(args, "max_batch_size", 1),
             precision=args.precision,
             quantize=quantize,
             quant_scales=args.quant_scales,
@@ -546,6 +547,10 @@ def main() -> None:
                          help="KV cache length (default: 256)")
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
+    build_p.add_argument(
+        "--max-batch-size", type=int, default=1,
+        help="Reserved diffusion engine batch cap. Only 1 is accepted until "
+             "dynamic-batch component builders are enabled. Default: 1.")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,

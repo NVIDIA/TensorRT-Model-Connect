@@ -160,6 +160,26 @@ class TestWriteBundle:
         assert header["num_attention_heads"] == 32
         assert header["num_key_value_heads"] == 8
 
+    def test_max_batch_size_roundtrip(self, tmp_path):
+        info = BundleInfo(
+            model_id="batch-test",
+            family="diffusion_flux",
+            max_batch_size={"dit": 4, "text_encoder": 8, "vae": 1},
+        )
+        out_path = str(tmp_path / "batch.trtfb")
+        write_bundle(out_path, info, [])
+
+        header, _ = self._read_bundle(out_path)
+        assert header["max_batch_size"] == {"dit": 4, "text_encoder": 8, "vae": 1}
+
+    def test_max_batch_size_omitted_when_unset(self, tmp_path):
+        info = BundleInfo(model_id="batch-default")
+        out_path = str(tmp_path / "batch-default.trtfb")
+        write_bundle(out_path, info, [])
+
+        header, _ = self._read_bundle(out_path)
+        assert "max_batch_size" not in header
+
 
 def _read_bundle_from_bytes(data: bytes) -> tuple[dict, dict[str, bytes]]:
     """Parse a .trtfb bundle from raw bytes. Raises on any format error."""

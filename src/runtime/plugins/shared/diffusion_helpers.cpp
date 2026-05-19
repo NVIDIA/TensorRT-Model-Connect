@@ -70,6 +70,10 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
     if (pw && !pw->empty())
         parts.weights = parse_preprocessor_weights(*pw);
 
+    parts.config.max_batch_size.dit = bundle.info.max_batch_size.dit;
+    parts.config.max_batch_size.text_encoder = bundle.info.max_batch_size.text_encoder;
+    parts.config.max_batch_size.vae = bundle.info.max_batch_size.vae;
+
     parts.tokenizer = create_tokenizer_from_bundle(bundle);
     return parts;
 }

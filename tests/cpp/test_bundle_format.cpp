@@ -230,6 +230,41 @@ static void test_tokenizer_add_special_tokens_header() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_max_batch_size_header() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "batch_caps.trtfb").string();
+
+    const std::string json = R"({
+  "model_id": "batch-caps",
+  "family": "diffusion_flux",
+  "max_batch_size": {"dit": 4, "text_encoder": 8, "vae": 1},
+  "sections": {}
+})";
+    write_minimal_bundle(path, json);
+
+    const auto loaded = trtmc::ReadBundleFile(path);
+    check(loaded.info.max_batch_size.dit == 4, "max_batch_size dit");
+    check(loaded.info.max_batch_size.text_encoder == 8, "max_batch_size text_encoder");
+    check(loaded.info.max_batch_size.vae == 1, "max_batch_size vae");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_max_batch_size_defaults_to_one() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "batch_caps_default.trtfb").string();
+
+    write_minimal_bundle(path, R"({"model_id": "batch-default", "sections": {}})");
+
+    const auto loaded = trtmc::ReadBundleFile(path);
+    check(loaded.info.max_batch_size.dit == 1, "default max_batch_size dit");
+    check(loaded.info.max_batch_size.text_encoder == 1,
+          "default max_batch_size text_encoder");
+    check(loaded.info.max_batch_size.vae == 1, "default max_batch_size vae");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
 static void test_truncated_bundle_throws() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "truncated.trtfb").string();
@@ -264,6 +299,8 @@ int main() {
     test_is_bundle_invalid();
     test_inspect_returns_metadata();
     test_tokenizer_add_special_tokens_header();
+    test_max_batch_size_header();
+    test_max_batch_size_defaults_to_one();
     test_truncated_bundle_throws();
 
     if (failures > 0) {

@@ -58,7 +58,8 @@ class FluxPipeline final : public IPipeline {
     void prepare_denoising_state(const diffusion::FluxGenerationPlan& plan,
                                  const std::vector<float>& text_embeddings,
                                  std::vector<float>& encoder_hidden, std::vector<float>& cos_vals,
-                                 std::vector<float>& sin_vals, std::vector<float>& latents);
+                                 std::vector<float>& sin_vals, std::vector<float>& latents,
+                                 int32_t seed);
     bool run_denoising(const diffusion::FluxGenerationPlan& plan,
                        const std::vector<float>& pooled_output, std::vector<float>& encoder_hidden,
                        std::vector<float>& cos_vals, std::vector<float>& sin_vals,

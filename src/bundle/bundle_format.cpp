@@ -146,6 +146,13 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
         info.tokenizer_add_special_tokens = (tokenizer_add_special != 0);
         info.tokenizer_add_special_tokens_present = true;
     }
+    const std::string max_batch_json = extract_json_object_text(json, "max_batch_size");
+    if (!max_batch_json.empty()) {
+        info.max_batch_size.dit = extract_json_int(max_batch_json, "dit", 1);
+        info.max_batch_size.text_encoder =
+            extract_json_int(max_batch_json, "text_encoder", 1);
+        info.max_batch_size.vae = extract_json_int(max_batch_json, "vae", 1);
+    }
 
     sections_out.clear();
     parse_sections_table(json, sections_out);

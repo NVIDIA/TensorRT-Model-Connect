@@ -48,6 +48,9 @@ class BundleInfo:
     quantization: str = "none"
     tokenizer_add_special_tokens: bool = False
     io_map: dict | None = None  # tensor name mapping; None = TRT API defaults
+    # Optional diffusion batch caps. Missing means old-bundle behavior: every
+    # component is treated as batch-cap 1 by the runtime.
+    max_batch_size: dict[str, int] | None = None
     # Namespaced defaults produced at build time. When non-empty, serialized
     # into the header as `defaults: {namespace: {field: value, ...}}` and
     # read back at runtime as the BUNDLE_DEFAULT layer — the lowest-priority
@@ -101,6 +104,8 @@ def write_bundle(
            if info.quantization != "none" else {}),
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
         **({"io_map": info.io_map} if info.io_map else {}),
+        **({"max_batch_size": dict(info.max_batch_size)}
+           if info.max_batch_size is not None else {}),
         **({"defaults": info.defaults} if info.defaults else {}),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
@@ -115,3 +120,19 @@ def write_bundle(
         f.write(header_json)
         for s in sections:
             f.write(s.data)
+
+
+def read_bundle_header(path: str | Path) -> dict[str, Any]:
+    """Read only the JSON header from a .trtfb bundle."""
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        if magic != BUNDLE_MAGIC:
+            raise ValueError(f"Bad bundle magic: {magic!r}")
+        header_len_data = f.read(8)
+        if len(header_len_data) != 8:
+            raise ValueError("Bundle truncated before header length")
+        header_len = struct.unpack("<Q", header_len_data)[0]
+        header_data = f.read(header_len)
+        if len(header_data) != header_len:
+            raise ValueError("Bundle truncated before full header")
+    return json.loads(header_data.decode("utf-8"))
