@@ -212,6 +212,9 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
         assert extras[section] == data
     assert extras["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
     assert extras["tokenizer_config.json"] == b'{"add_bos_token": true}'
+    assert sana_wm_mod.plugin.build_engine(
+        cfg, weights, 256
+    ) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
@@ -317,7 +320,7 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     )
 
     sections = {section.name: section.data for section in captured["sections"]}
-    assert sections["engine_plan"] == b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
+    assert sections["engine_plan"] == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
     for section, data in plans.items():
         assert sections[section] == data
     assert sections["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'

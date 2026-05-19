@@ -1,11 +1,10 @@
 """SANA-WM family plugin.
 
 The public SANA-WM release is not a standard diffusers directory: it ships a
-Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Full native
-TRT graph construction for this model family is separate work. Until that is
-complete, bridge-only bundles keep routing through the official SANA-WM Python
-inference contract; local directories may also package prebuilt native TRT
-component plans under ``trtmc_engines/`` for the C++ runtime to load.
+Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Local
+directories may package prebuilt native TRT component plans under
+``trtmc_engines/`` for the C++ runtime to load. The official Python bridge is a
+legacy compatibility path and is only bundled when explicitly enabled.
 """
 
 from __future__ import annotations
@@ -63,6 +62,8 @@ _TOKENIZER_FILES = (
     "tokenizer.model",
 )
 _MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
+_NATIVE_ENGINE_MARKER = b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+_PYTHON_BRIDGE_ENGINE_MARKER = b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
 
 
 def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
@@ -307,7 +308,9 @@ class SanaWmPlugin:
             )
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
-        return b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
+        if weights.get("_native_plan_paths"):
+            return _NATIVE_ENGINE_MARKER
+        return _PYTHON_BRIDGE_ENGINE_MARKER
 
     def build_extra_engines(
         self,

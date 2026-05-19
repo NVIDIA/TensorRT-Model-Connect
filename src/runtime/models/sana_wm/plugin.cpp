@@ -1,5 +1,6 @@
-// SANA-WM plugin: loads optional native TensorRT modules while preserving the
-// bridge-only bundle contract until native plan construction is complete.
+// SANA-WM plugin: loads native TensorRT modules from bundle sections. The
+// Python bridge remains an explicit compatibility fallback handled by
+// SanaWmPipeline when no native modules are present and bridge opt-in is set.
 
 #include "bundle/bundle_view.h"
 #include "runtime/models/sana_wm/pipeline.h"
