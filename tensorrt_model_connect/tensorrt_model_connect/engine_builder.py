@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sys
 import time
@@ -244,6 +245,28 @@ def _is_sana_wm_model_ref(model_ref: str) -> bool:
     return model_ref.rstrip("/") == "Efficient-Large-Model/SANA-WM_bidirectional"
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sana_wm_allow_patterns() -> list[str]:
+    if not _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
+        # The public SANA-WM repo is roughly 105 GB. Native bundle construction
+        # can start from the YAML contract and use externally supplied native
+        # plans, so keep the default download small and explicit.
+        return ["README.md", "config.yaml"]
+    return [
+        "README.md",
+        "config.yaml",
+        "asset/sana_wm/**",
+        "inference_video_scripts/**",
+        "dit/**",
+        "vae/**",
+        "text_encoder/**",
+        "refiner/**",
+    ]
+
+
 def _is_sana_wm_model_dir(path: Path) -> bool:
     config_path = path / "config.yaml"
     if not config_path.is_file():
@@ -316,10 +339,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         allow_patterns = _HF_ALLOW_PATTERNS + ["*.nemo"]
         if _is_sana_wm_model_ref(model_id_or_path):
-            # The public SANA-WM repo is 105 GB. Native bundle construction
-            # starts from the YAML contract and requires component plans from a
-            # local model/engine directory.
-            allow_patterns = ["README.md", "config.yaml"]
+            allow_patterns = _sana_wm_allow_patterns()
         local_dir = snapshot_download(repo_id=model_id_or_path, allow_patterns=allow_patterns)
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)

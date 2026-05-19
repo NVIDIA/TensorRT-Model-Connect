@@ -69,6 +69,11 @@ The C++ `generate-video` command accepts explicit SANA-WM intrinsics with
 `--camera-intrinsics fx,fy,cx,cy`; when omitted, the bundle-level
 `sana_wm_default_intrinsics` value is used because Pi3X estimation is not
 implemented in C++.
+Resolving `Efficient-Large-Model/SANA-WM_bidirectional` downloads only
+`README.md` and `config.yaml` by default because the full checkpoint is large;
+set `TRTMC_SANA_WM_DOWNLOAD_WEIGHTS=1` when you explicitly need the `dit/`,
+`vae/`, `refiner/`, demo asset, and official script directories in the local
+HF snapshot.
 Set `SANA_WM_NATIVE_PLAN_DIR` to a directory containing the required
 `trtmc_engines/*.plan` sections, or set `SANA_WM_MODEL_DIR` to a model
 directory with a `trtmc_engines/` subdirectory. The minimum native set is
