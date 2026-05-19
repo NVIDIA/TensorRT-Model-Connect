@@ -973,9 +973,18 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
                                  "sigma"});
     auto* refiner_denoiser_ptr = refiner_denoiser.get();
     modules.refiner_denoiser = std::move(refiner_denoiser);
-    auto refiner_decoder = std::make_unique<FakeTrtModule>(std::vector<float>(96, 255.0F),
-                                                           std::vector<int64_t>{2, 4, 4, 3},
-                                                           std::vector<std::string>{"latents"});
+    auto refiner_video = std::vector<float>(96, -1.0F);
+    const auto refiner_cthw_index = [](int32_t channel, int32_t frame, int32_t y, int32_t x) {
+        return (((static_cast<std::size_t>(channel) * 2U + static_cast<std::size_t>(frame)) * 4U +
+                 static_cast<std::size_t>(y)) *
+                    4U +
+                static_cast<std::size_t>(x));
+    };
+    refiner_video[refiner_cthw_index(0, 1, 0, 0)] = -1.0F;
+    refiner_video[refiner_cthw_index(1, 1, 0, 0)] = 0.0F;
+    refiner_video[refiner_cthw_index(2, 1, 0, 0)] = 1.0F;
+    auto refiner_decoder = std::make_unique<FakeTrtModule>(
+        refiner_video, std::vector<int64_t>{1, 3, 2, 4, 4}, std::vector<std::string>{"latents"});
     auto* refiner_decoder_ptr = refiner_decoder.get();
     modules.refiner_vae_decoder = std::move(refiner_decoder);
 
@@ -994,8 +1003,9 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     check(refiner_denoiser_ptr->call_count == 3,
           "sana wm native refiner: distilled denoiser steps");
     check(refiner_decoder_ptr->call_count == 1, "sana wm native refiner: VAE decoded once");
-    check(result.num_frames == 1 && result.pixels.size() == 48 && near(result.pixels[0], 1.0F),
-          "sana wm native refiner: drops sink frame and normalizes pixels");
+    check(result.num_frames == 1 && result.pixels.size() == 48 && near(result.pixels[0], 0.0F) &&
+              near(result.pixels[1], 0.5F) && near(result.pixels[2], 1.0F),
+          "sana wm native refiner: drops sink CTHW frame and normalizes pixels");
     check(refiner_denoiser_ptr->last_input_shapes["latent"] == std::vector<int64_t>({1, 8, 2}),
           "sana wm native refiner: combined latent shape");
     check(refiner_denoiser_ptr->last_input_shapes["clean_latent"] ==

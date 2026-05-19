@@ -1680,6 +1680,90 @@ float normalize_refiner_pixel(float value) {
     return std::max(0.0F, std::min(1.0F, value));
 }
 
+float normalize_refiner_cthw_pixel(float value) {
+    return std::max(0.0F, std::min(1.0F, value * 0.5F + 0.5F));
+}
+
+std::size_t cthw_video_index(int32_t channel, int32_t frame, int32_t y, int32_t x, int32_t frames,
+                             int32_t height, int32_t width) {
+    return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(frames) +
+              static_cast<std::size_t>(frame)) *
+                 static_cast<std::size_t>(height) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(width) +
+            static_cast<std::size_t>(x));
+}
+
+std::size_t hwc_video_index(int32_t frame, int32_t y, int32_t x, int32_t channel, int32_t height,
+                            int32_t width) {
+    return (((static_cast<std::size_t>(frame) * static_cast<std::size_t>(height) +
+              static_cast<std::size_t>(y)) *
+                 static_cast<std::size_t>(width) +
+             static_cast<std::size_t>(x)) *
+                3U +
+            static_cast<std::size_t>(channel));
+}
+
+bool copy_cthw_refiner_frames(const std::vector<float>& raw, const std::vector<int64_t>& shape,
+                              int32_t output_frames, int32_t height, int32_t width,
+                              std::vector<float>& out) {
+    int32_t frames = 0;
+    if (shape.size() == 5U && shape[0] == 1 && shape[1] == 3 && shape[3] == height &&
+        shape[4] == width) {
+        frames = static_cast<int32_t>(shape[2]);
+    } else if (shape.size() == 4U && shape[0] == 3 && shape[2] == height && shape[3] == width) {
+        frames = static_cast<int32_t>(shape[1]);
+    } else {
+        return false;
+    }
+    if (frames != output_frames && frames != output_frames + 1)
+        return false;
+    if (raw.size() < static_cast<std::size_t>(3) * static_cast<std::size_t>(frames) *
+                         static_cast<std::size_t>(height) * static_cast<std::size_t>(width))
+        return false;
+
+    const int32_t frame_offset = frames == output_frames + 1 ? 1 : 0;
+    for (int32_t f = 0; f < output_frames; ++f) {
+        for (int32_t y = 0; y < height; ++y) {
+            for (int32_t x = 0; x < width; ++x) {
+                const auto dst = hwc_video_index(f, y, x, 0, height, width);
+                for (int32_t c = 0; c < 3; ++c) {
+                    const auto src =
+                        cthw_video_index(c, f + frame_offset, y, x, frames, height, width);
+                    out[dst + static_cast<std::size_t>(c)] = normalize_refiner_cthw_pixel(raw[src]);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool copy_hwc_refiner_frames(const std::vector<float>& raw, const std::vector<int64_t>& shape,
+                             int32_t output_frames, int32_t height, int32_t width,
+                             std::vector<float>& out) {
+    int32_t frames = 0;
+    std::size_t offset = 0;
+    if (shape.size() == 5U && shape[0] == 1 && shape[2] == height && shape[3] == width &&
+        shape[4] == 3) {
+        frames = static_cast<int32_t>(shape[1]);
+    } else if (shape.size() == 4U && shape[1] == height && shape[2] == width && shape[3] == 3) {
+        frames = static_cast<int32_t>(shape[0]);
+    } else {
+        return false;
+    }
+    if (frames != output_frames && frames != output_frames + 1)
+        return false;
+    const auto frame_stride =
+        static_cast<std::size_t>(height) * static_cast<std::size_t>(width) * 3U;
+    if (raw.size() < static_cast<std::size_t>(frames) * frame_stride)
+        return false;
+
+    offset = frames == output_frames + 1 ? frame_stride : 0U;
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = normalize_refiner_pixel(raw[offset + i]);
+    return true;
+}
+
 ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
                                       const SanaWmRuntimeConfig& config) {
     if (!vae_decoder.ok())
@@ -1717,6 +1801,12 @@ ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage
     result.width = config.width;
     result.num_frames = output_frames;
     result.pixels.resize(direct_count, 0.0F);
+    if (copy_cthw_refiner_frames(raw, it->second.shape, output_frames, config.height, config.width,
+                                 result.pixels))
+        return result;
+    if (copy_hwc_refiner_frames(raw, it->second.shape, output_frames, config.height, config.width,
+                                result.pixels))
+        return result;
     const auto src_offset = drop_sink ? frame_stride : 0U;
     for (std::size_t i = 0; i < direct_count; ++i)
         result.pixels[i] = normalize_refiner_pixel(raw[src_offset + i]);
