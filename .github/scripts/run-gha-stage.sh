@@ -33,10 +33,21 @@ if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
   echo "Using workspace mount without host chmod: ${GITHUB_WORKSPACE}"
 fi
 
+container_options=()
+case "$stage" in
+  graph-ops|selective-e2e|full-e2e)
+    # shellcheck disable=SC2206
+    container_options=(${TRTMC_CONTAINER_OPTIONS:-})
+    echo "Using GPU container options for stage '${stage}': ${TRTMC_CONTAINER_OPTIONS:-<none>}"
+    ;;
+  *)
+    echo "Skipping GPU container options for non-GPU stage '${stage}'"
+    ;;
+esac
+
 echo "Starting TensorRT-Model-Connect CI container for stage '${stage}'"
-# shellcheck disable=SC2086
 docker run --rm \
-  $TRTMC_CONTAINER_OPTIONS \
+  "${container_options[@]}" \
   "${extra_mounts[@]}" \
   -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
   -w "$GITHUB_WORKSPACE" \
