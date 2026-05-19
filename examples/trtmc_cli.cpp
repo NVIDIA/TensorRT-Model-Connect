@@ -14,7 +14,7 @@
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> (--prompt "text" | --prompt-file PATH)
 //                        --output DIR [--num-steps N] [--image PATH]
-//                        [--action DSL] [--camera-intrinsics CSV] [--num-frames N]
+//                        [--action DSL] [--camera-intrinsics CSV|--intrinsics CSV] [--num-frames N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc inspect         <bundle.trtfb>
 //   trtmc version
@@ -88,6 +88,7 @@ struct CliArgs {
     float sde_gamma{-1.0F};
     float translation_speed{-1.0F};
     float rotation_speed_deg{-1.0F};
+    bool no_refiner{false};
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
     // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
@@ -207,7 +208,8 @@ void print_usage() {
            "  trtmc generate-video  <bundle.trtfb> (--prompt \"text\" | --prompt-file PATH) "
            "--output DIR [--num-steps N] [--guidance-scale S] [--initial-latents-raw PATH] "
            "[--image PATH] [--action DSL] [--translation-speed F] "
-           "[--rotation-speed-deg F] [--camera-intrinsics CSV] [--num-frames N]\n"
+           "[--rotation-speed-deg F] [--camera-intrinsics CSV|--intrinsics CSV] [--num-frames N] "
+           "[--no-refiner]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -353,7 +355,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.image_path = argv[++i];
             continue;
         }
-        if ((arg == "--output" || arg == "-o") && need_value(arg)) {
+        if ((arg == "--output" || arg == "--output-dir" || arg == "--output_dir" || arg == "-o") &&
+            need_value(arg)) {
             args.output_dir = argv[++i];
             continue;
         }
@@ -381,7 +384,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.num_steps = std::atoi(argv[++i]);
             continue;
         }
-        if (arg == "--num-frames" && need_value(arg)) {
+        if ((arg == "--num-frames" || arg == "--num_frames") && need_value(arg)) {
             args.num_frames = std::atoi(argv[++i]);
             continue;
         }
@@ -393,16 +396,20 @@ CliArgs parse_args(int argc, char** argv) {
             args.action = argv[++i];
             continue;
         }
-        if (arg == "--camera-intrinsics" && need_value(arg)) {
+        if ((arg == "--camera-intrinsics" || arg == "--intrinsics") && need_value(arg)) {
             args.camera_intrinsics = argv[++i];
             continue;
         }
-        if (arg == "--translation-speed" && need_value(arg)) {
+        if ((arg == "--translation-speed" || arg == "--translation_speed") && need_value(arg)) {
             args.translation_speed = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
-        if (arg == "--rotation-speed-deg" && need_value(arg)) {
+        if ((arg == "--rotation-speed-deg" || arg == "--rotation_speed_deg") && need_value(arg)) {
             args.rotation_speed_deg = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--no-refiner" || arg == "--no_refiner") {
+            args.no_refiner = true;
             continue;
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
@@ -940,6 +947,7 @@ int cmd_generate_video(const CliArgs& args) {
     cfg.translation_speed = args.translation_speed;
     cfg.rotation_speed_deg = args.rotation_speed_deg;
     cfg.num_frames = args.num_frames;
+    cfg.no_refiner = args.no_refiner;
     if (!args.camera_intrinsics.empty()) {
         std::string error;
         auto intrinsics = parse_float_values(args.camera_intrinsics, "--camera-intrinsics", error);

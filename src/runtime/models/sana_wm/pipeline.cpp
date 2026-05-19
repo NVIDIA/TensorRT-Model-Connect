@@ -1728,7 +1728,7 @@ ImageResult run_native_image_path(SanaWmNativeModules& modules,
                                   const SanaWmRuntimeConfig& config, const SanaWmRequest& request,
                                   const GenerateConfig& cfg, const std::string& prompt) {
     auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
-    if (has_any_refiner_module(modules)) {
+    if (has_any_refiner_module(modules) && !cfg.no_refiner) {
         if (!modules.has_refiner() || !tokenizer) {
             throw std::runtime_error("SANA-WM native refiner execution requires refiner text, "
                                      "denoiser, VAE, and tokenizer");

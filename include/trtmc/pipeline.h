@@ -114,6 +114,7 @@ struct GenerateConfig {
     float translation_speed{-1.0f};       // SANA-WM action rollout speed; <0 uses model default
     float rotation_speed_deg{-1.0f};      // SANA-WM action rollout speed; <0 uses model default
     int32_t num_frames{-1};               // image-to-video frame count; <0 uses model default
+    bool no_refiner{false}; // SANA-WM: skip Stage-2 refiner when a Stage-1 decoder is available
     std::vector<float> initial_latents;   // diffusion: optional packed initial latents
     std::vector<float> condition_latents; // ELF: [max_length, text_encoder_dim] cond seq
     std::vector<float> condition_mask;    // ELF: [max_length], >0 marks fixed cond tokens
