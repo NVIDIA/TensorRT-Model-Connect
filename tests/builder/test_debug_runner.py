@@ -248,6 +248,14 @@ class TestRunnerFromBundle:
         assert kwargs["engine_plan"] == b"RANK1_ENGINE"
         assert kwargs["distributed_communicator"] is communicator
 
+    def test_mpi_rank_info_uses_single_node_rank(self, monkeypatch):
+        from tensorrt_model_connect.debug_runner import _mpi_rank_info_from_env
+
+        monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "3")
+        monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
+
+        assert _mpi_rank_info_from_env() == (3, 4)
+
     def test_triattention_bundle_uses_triattention_runner(self, tmp_path):
         from tensorrt_model_connect.debug_runner import runner_from_bundle
 

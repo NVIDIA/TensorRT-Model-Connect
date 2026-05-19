@@ -2019,15 +2019,11 @@ def _env_int(names: tuple[str, ...], default: int | None = None) -> int | None:
     return default
 
 
-def _mpi_rank_info_from_env() -> tuple[int, int, int]:
+def _mpi_rank_info_from_env() -> tuple[int, int]:
     rank = _env_int(("OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "RANK"), 0)
     world_size = _env_int(
         ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMIX_SIZE", "WORLD_SIZE"), 1)
-    local_rank = _env_int(
-        ("OMPI_COMM_WORLD_LOCAL_RANK", "MPI_LOCALRANKID", "SLURM_LOCALID", "LOCAL_RANK"),
-        rank,
-    )
-    return int(rank or 0), int(world_size or 1), int(local_rank or 0)
+    return int(rank or 0), int(world_size or 1)
 
 
 def _default_nccl_rendezvous_path() -> str:
@@ -2102,7 +2098,7 @@ class TensorParallelNcclGroup:
         set_device: bool = True,
     ):
         _require_trt_runtime()
-        self.rank, detected_world_size, self.local_rank = _mpi_rank_info_from_env()
+        self.rank, detected_world_size = _mpi_rank_info_from_env()
         self.world_size = int(world_size or detected_world_size)
         if self.world_size <= 1:
             raise RuntimeError("TensorParallelNcclGroup requires world_size > 1")
@@ -2116,7 +2112,7 @@ class TensorParallelNcclGroup:
                 f"MPI rank {self.rank} is outside world size {self.world_size}")
 
         if set_device:
-            status = cudart.cudaSetDevice(self.local_rank)
+            status = cudart.cudaSetDevice(self.rank)
             _check_cuda(status[0] if isinstance(status, tuple) else status)
 
         self.rendezvous_path = rendezvous_path or _default_nccl_rendezvous_path()

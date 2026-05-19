@@ -67,16 +67,6 @@ int detect_rank() {
     return env_int("RANK", 0);
 }
 
-int detect_local_rank() {
-    int rank = env_int("OMPI_COMM_WORLD_LOCAL_RANK", -1);
-    if (rank >= 0)
-        return rank;
-    rank = env_int("MPI_LOCALRANKID", -1);
-    if (rank >= 0)
-        return rank;
-    return env_int("LOCAL_RANK", 0);
-}
-
 std::filesystem::path rendezvous_path() {
     std::string base = env_string("TRTMC_NCCL_RENDEZVOUS", "");
     if (!base.empty())
@@ -193,12 +183,15 @@ NcclUniqueId read_unique_id(const std::filesystem::path& path) {
     return id;
 }
 
-void bind_local_cuda_device(int local_rank) {
+void bind_cuda_device_for_rank(int rank) {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0)
         return;
-    const int device = local_rank % count;
-    auto status = cudaSetDevice(device);
+    if (rank >= count) {
+        throw std::runtime_error("Tensor-parallel rank requires a visible CUDA device with the "
+                                 "same ordinal for this single-node runtime");
+    }
+    auto status = cudaSetDevice(rank);
     if (status != cudaSuccess)
         throw std::runtime_error(std::string("cudaSetDevice failed for tensor parallel rank: ") +
                                  cudaGetErrorString(status));
@@ -211,7 +204,6 @@ DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
     group.tp_size = tp_size;
     group.world_size = detect_world_size();
     group.rank = detect_rank();
-    group.local_rank = detect_local_rank();
 
     if (tp_size <= 1)
         return group;
@@ -222,7 +214,7 @@ DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
     if (group.rank < 0 || group.rank >= tp_size)
         throw std::runtime_error("Tensor-parallel rank is outside [0, tp_size)");
 
-    bind_local_cuda_device(group.local_rank);
+    bind_cuda_device_for_rank(group.rank);
     auto runtime = std::make_shared<NcclRuntime>();
     const auto path = rendezvous_path();
     NcclUniqueId id{};

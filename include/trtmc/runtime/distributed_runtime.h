@@ -7,8 +7,9 @@ namespace trtmc {
 
 struct DistributedRuntimeGroup {
     int world_size{1};
+    // Single-node tensor-parallel rank. Used for communicator position,
+    // engine shard selection, and CUDA device binding in this initial runtime.
     int rank{0};
-    int local_rank{0};
     int tp_size{1};
     void* communicator{nullptr};
     std::shared_ptr<void> owner;
