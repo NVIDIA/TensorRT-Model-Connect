@@ -25,6 +25,7 @@ env:
   HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}
   TRTMC_CI_IMAGE: ${{ vars.TRTMC_CI_IMAGE || 'trtf-dev-gb300:latest' }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+  TRTMC_GPU_DEVICES: ${{ vars.TRTMC_GPU_DEVICES || '1,2' }}
   PYTHONHASHSEED: "0"
   PYTHON_COVERAGE_MIN_LINE: "38"
   PYTHON_COVERAGE_MIN_BRANCH: "25"

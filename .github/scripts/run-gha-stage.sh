@@ -34,15 +34,47 @@ if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
 fi
 
 container_options=()
+configured_container_options=()
+if [ -n "${TRTMC_CONTAINER_OPTIONS:-}" ]; then
+  # shellcheck disable=SC2206
+  configured_container_options=(${TRTMC_CONTAINER_OPTIONS})
+fi
+
+append_non_gpu_container_options() {
+  local skip_next=0
+  local opt
+  for opt in "${configured_container_options[@]}"; do
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    case "$opt" in
+      --gpus)
+        skip_next=1
+        ;;
+      --gpus=*)
+        ;;
+      *)
+        container_options+=("$opt")
+        ;;
+    esac
+  done
+}
+
 case "$stage" in
   cpp-unit|cpp-coverage)
     export TRTMC_CPP_CPU_ONLY=1
     echo "Skipping GPU container options for CPU-safe C++ stage '${stage}'"
     ;;
   graph-ops|selective-e2e|full-e2e)
-    # shellcheck disable=SC2206
-    container_options=(${TRTMC_CONTAINER_OPTIONS:-})
-    echo "Using GPU container options for stage '${stage}': ${TRTMC_CONTAINER_OPTIONS:-<none>}"
+    if [ -n "${TRTMC_GPU_DEVICES:-}" ] && [ "${TRTMC_GPU_DEVICES}" != "all" ]; then
+      container_options+=(--gpus "\"device=${TRTMC_GPU_DEVICES}\"")
+      append_non_gpu_container_options
+      echo "Using GPU devices for stage '${stage}': ${TRTMC_GPU_DEVICES}"
+    else
+      container_options=("${configured_container_options[@]}")
+      echo "Using GPU container options for stage '${stage}': ${TRTMC_CONTAINER_OPTIONS:-<none>}"
+    fi
     ;;
   *)
     echo "Skipping GPU container options for non-GPU stage '${stage}'"
@@ -58,6 +90,7 @@ docker run --rm \
   -e CI_BASE_REF \
   -e ENGINE_DIR \
   -e TRTMC_STORAGE_ROOT \
+  -e TRTMC_GPU_DEVICES \
   -e HF_HOME \
   -e HF_HUB_CACHE \
   -e HUGGINGFACE_HUB_CACHE \

@@ -31,6 +31,7 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         assert f'mkdir_if_set "${{{name}:-}}"' in text
         assert f"-e {name}" in text
     assert "/workspace/users/yifeif:/workspace/users/yifeif" in text
+    assert "-e TRTMC_GPU_DEVICES" in text
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
@@ -46,6 +47,8 @@ def test_github_stage_wrapper_keeps_cpp_unit_stages_cpu_only() -> None:
         maxsplit=1,
     )[0]
     assert "graph-ops|selective-e2e|full-e2e)" in gpu_case
+    assert 'container_options+=(--gpus "\\"device=${TRTMC_GPU_DEVICES}\\"")' in gpu_case
+    assert "append_non_gpu_container_options" in gpu_case
     assert "python-builder" not in gpu_case
     assert "cpp-unit|cpp-coverage)" in text
     assert "TRTMC_CPP_CPU_ONLY=1" in text
@@ -72,6 +75,12 @@ def test_github_cpp_coverage_uses_cpu_only_thresholds() -> None:
         assert 'CPP_CPU_ONLY_COVERAGE_MIN_LINE: "33"' in workflow_text
         assert 'CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION: "43"' in workflow_text
         assert 'CPP_CPU_ONLY_COVERAGE_MIN_BRANCH: "19"' in workflow_text
+
+
+def test_github_workflows_default_to_filtered_gpu_devices() -> None:
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        workflow_text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "TRTMC_GPU_DEVICES: ${{ vars.TRTMC_GPU_DEVICES || '1,2' }}" in workflow_text
 
 
 def test_cpp_coverage_ci_wrapper_forwards_ctest_filters() -> None:
