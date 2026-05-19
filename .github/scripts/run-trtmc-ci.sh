@@ -341,6 +341,10 @@ run_cpp_coverage() {
   if [ "${TRTMC_CPP_CPU_ONLY:-}" = "1" ]; then
     coverage_ctest_args=(-LE requires_gpu)
     echo "Excluding C++ tests labeled requires_gpu from CPU-only coverage container"
+    export CPP_COVERAGE_MIN_LINE="${CPP_CPU_ONLY_COVERAGE_MIN_LINE:-33}"
+    export CPP_COVERAGE_MIN_FUNCTION="${CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION:-43}"
+    export CPP_COVERAGE_MIN_BRANCH="${CPP_CPU_ONLY_COVERAGE_MIN_BRANCH:-19}"
+    echo "Using CPU-only C++ coverage gates: line>=${CPP_COVERAGE_MIN_LINE}% function>=${CPP_COVERAGE_MIN_FUNCTION}% branch>=${CPP_COVERAGE_MIN_BRANCH}%"
   fi
   run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh "${coverage_ctest_args[@]}"
 }

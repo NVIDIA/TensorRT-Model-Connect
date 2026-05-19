@@ -50,6 +50,9 @@ def test_github_stage_wrapper_keeps_cpp_unit_stages_cpu_only() -> None:
     assert "cpp-unit|cpp-coverage)" in text
     assert "TRTMC_CPP_CPU_ONLY=1" in text
     assert "-e TRTMC_CPP_CPU_ONLY" in text
+    assert "-e CPP_CPU_ONLY_COVERAGE_MIN_LINE" in text
+    assert "-e CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION" in text
+    assert "-e CPP_CPU_ONLY_COVERAGE_MIN_BRANCH" in text
 
 
 def test_github_cpp_unit_stages_exclude_gpu_labeled_ctests() -> None:
@@ -57,6 +60,18 @@ def test_github_cpp_unit_stages_exclude_gpu_labeled_ctests() -> None:
     assert "-LE requires_gpu" in text
     assert "Excluding C++ tests labeled requires_gpu in CPU-only CI container" in text
     assert "Excluding C++ tests labeled requires_gpu from CPU-only coverage container" in text
+
+
+def test_github_cpp_coverage_uses_cpu_only_thresholds() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'CPP_COVERAGE_MIN_LINE="${CPP_CPU_ONLY_COVERAGE_MIN_LINE:-33}"' in text
+    assert 'CPP_COVERAGE_MIN_FUNCTION="${CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION:-43}"' in text
+    assert 'CPP_COVERAGE_MIN_BRANCH="${CPP_CPU_ONLY_COVERAGE_MIN_BRANCH:-19}"' in text
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        workflow_text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert 'CPP_CPU_ONLY_COVERAGE_MIN_LINE: "33"' in workflow_text
+        assert 'CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION: "43"' in workflow_text
+        assert 'CPP_CPU_ONLY_COVERAGE_MIN_BRANCH: "19"' in workflow_text
 
 
 def test_cpp_coverage_ci_wrapper_forwards_ctest_filters() -> None:
