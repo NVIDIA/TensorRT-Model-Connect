@@ -24,6 +24,12 @@ NATIVE_LIB_PATTERNS = (
     "libtrtmc*.dylib",
     "trtmc*.dll",
 )
+NATIVE_BACKEND_PATTERNS = (
+    "libtrtmc_backend*.so",
+    "libtrtmc_backend*.so.*",
+    "libtrtmc_backend*.dylib",
+    "trtmc_backend*.dll",
+)
 
 
 def _truthy(value: str | None) -> bool:
@@ -81,6 +87,7 @@ class build_py(_build_py):
         dest_dir.mkdir(parents=True, exist_ok=True)
         self._copy_executable(binary, dest_dir / "trtmc")
         seen = {binary.resolve()}
+        copied_backends: list[Path] = []
 
         for lib_dir in _native_library_dirs(binary):
             if not lib_dir.is_dir():
@@ -92,6 +99,15 @@ class build_py(_build_py):
                         continue
                     seen.add(resolved)
                     self._copy_file(source, dest_dir / source.name)
+                    if _matches_any(source.name, NATIVE_BACKEND_PATTERNS):
+                        copied_backends.append(source)
+
+        if _truthy(os.environ.get("TRTMC_REQUIRE_NATIVE_LIBS")) and not copied_backends:
+            dirs = ", ".join(str(path) for path in _native_library_dirs(binary))
+            raise RuntimeError(
+                "TRTMC native backend libraries were not found; "
+                f"checked {dirs}. Build the TensorRT backend DSO before packaging."
+            )
 
     def _copy_file(self, source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
@@ -101,6 +117,10 @@ class build_py(_build_py):
         self._copy_file(source, destination)
         mode = destination.stat().st_mode
         destination.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(Path(name).match(pattern) for pattern in patterns)
 
 
 cmdclass = {"build_py": build_py}

@@ -502,6 +502,7 @@ build_pip_package() {
     TRTMC_NATIVE_BIN="$native_bin" \
     TRTMC_NATIVE_LIB_DIR="$native_lib_dir" \
     TRTMC_REQUIRE_NATIVE_BIN=1 \
+    TRTMC_REQUIRE_NATIVE_LIBS=1 \
     python -m build --wheel --outdir "$PWD/dist" tensorrt_model_connect
 
   mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
@@ -518,17 +519,24 @@ build_pip_package() {
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
   "$smoke_venv/bin/trtmc" version
   "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
+  "$smoke_venv/bin/trtmc" run --help >/tmp/trtmc-run-help.txt
   "$smoke_venv/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib.resources as resources
 from pathlib import Path
 
 dist = metadata.distribution("tensorrt-model-connect")
-native = Path(resources.files("tensorrt_model_connect").joinpath("bin", "trtmc"))
+native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
+native = native_dir / "trtmc"
+backends = sorted(native_dir.glob("libtrtmc_backend*.so*"))
 print(f"wheel={dist.metadata['Name']} {dist.version}")
 print(f"native_trtmc={native}")
 if not native.is_file():
     raise SystemExit("packaged native trtmc executable is missing")
+if not backends:
+    raise SystemExit("packaged native TensorRT backend DSO is missing")
+for backend in backends:
+    print(f"native_backend={backend}")
 PY
 }
 

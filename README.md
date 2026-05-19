@@ -47,7 +47,8 @@ If CMake says the TensorRT backend was skipped, follow the [Installation](websit
 
 Nightly GitHub Releases include a Linux wheel for the unified CLI. The wheel
 installs a `trtmc` console command that dispatches to the packaged native
-executable and uses the installing Python environment for `trtmc build`.
+executable, includes the native TensorRT backend DSO, and uses the installing
+Python environment for `trtmc build`.
 
 ## Useful Docs
 
