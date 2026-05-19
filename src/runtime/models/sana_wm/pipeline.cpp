@@ -761,8 +761,7 @@ void keep_stage1_anchor_frame(std::vector<float>& next, const std::vector<float>
 }
 
 std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& model_output,
-                                                     std::size_t latent_count,
-                                                     float cfg_scale) {
+                                                     std::size_t latent_count, float cfg_scale) {
     std::vector<float> velocity(latent_count, 0.0F);
     if (cfg_scale <= 1.0F) {
         if (model_output.size() != latent_count)
@@ -793,8 +792,7 @@ std::size_t refiner_patched_index(int32_t token, int32_t channel, int32_t channe
 
 std::vector<float> patchify_refiner_latents(const std::vector<float>& cthw, int32_t channels,
                                             int32_t frame_offset, int32_t frames,
-                                            int32_t total_frames, int32_t height,
-                                            int32_t width) {
+                                            int32_t total_frames, int32_t height, int32_t width) {
     std::vector<float> out(refiner_token_count(frames, height, width) *
                            static_cast<std::size_t>(channels));
     int32_t token = 0;
@@ -802,9 +800,8 @@ std::vector<float> patchify_refiner_latents(const std::vector<float>& cthw, int3
         for (int32_t y = 0; y < height; ++y) {
             for (int32_t x = 0; x < width; ++x, ++token) {
                 for (int32_t c = 0; c < channels; ++c) {
-                    out[refiner_patched_index(token, c, channels)] =
-                        cthw[stage1_latent_index(c, frame_offset + f, y, x, total_frames, height,
-                                                 width)];
+                    out[refiner_patched_index(token, c, channels)] = cthw[stage1_latent_index(
+                        c, frame_offset + f, y, x, total_frames, height, width)];
                 }
             }
         }
@@ -863,8 +860,8 @@ std::vector<float> concatenate_float_vectors(const std::vector<float>& a,
     return out;
 }
 
-std::vector<SanaWmIntrinsics>
-crop_intrinsics(const std::vector<SanaWmIntrinsics>& intrinsics, const SanaWmResizeCropPlan& plan) {
+std::vector<SanaWmIntrinsics> crop_intrinsics(const std::vector<SanaWmIntrinsics>& intrinsics,
+                                              const SanaWmResizeCropPlan& plan) {
     std::vector<SanaWmIntrinsics> out;
     out.reserve(intrinsics.size());
     for (const auto& value : intrinsics)
@@ -888,8 +885,7 @@ const std::vector<float>& resolve_native_intrinsics_values(const SanaWmRuntimeCo
 }
 
 SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
-                                         const SanaWmRequest& request,
-                                         const GenerateConfig& cfg) {
+                                         const SanaWmRequest& request, const GenerateConfig& cfg) {
     const auto image = io::read_image(request.image_path);
     if (image.empty())
         throw std::runtime_error("SANA-WM native runtime failed to load image: " +
@@ -911,13 +907,12 @@ SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
     if (!first_frame.ok)
         throw std::runtime_error("SANA-WM native runtime failed to preprocess first frame");
 
-    auto intrinsics =
-        crop_intrinsics(sana_wm_expand_intrinsics(intrinsics_values,
-                                                  static_cast<int32_t>(poses.size())),
-                        first_frame.plan);
-    auto camera = sana_wm_prepare_camera_conditions(poses, intrinsics, config.height, config.width,
-                                                    config.vae_time_stride,
-                                                    config.vae_spatial_stride);
+    auto intrinsics = crop_intrinsics(
+        sana_wm_expand_intrinsics(intrinsics_values, static_cast<int32_t>(poses.size())),
+        first_frame.plan);
+    auto camera =
+        sana_wm_prepare_camera_conditions(poses, intrinsics, config.height, config.width,
+                                          config.vae_time_stride, config.vae_spatial_stride);
     return {std::move(first_frame), std::move(camera)};
 }
 
@@ -928,18 +923,18 @@ std::vector<float> run_native_vae_encoder(ITrtModule& vae_encoder,
     if (!vae_encoder.ok())
         throw std::runtime_error("SANA-WM native VAE encoder is not ready");
 
-    const auto input_name = pick_input_name(vae_encoder, {"sample", "pixel_values", "images", "x"},
-                                           "VAE encoder");
+    const auto input_name =
+        pick_input_name(vae_encoder, {"sample", "pixel_values", "images", "x"}, "VAE encoder");
     const DType input_dtype = input_dtype_or(vae_encoder, input_name, DType::kBFloat16);
     std::vector<half_bits_t> input16;
     TensorMap inputs;
-    inputs[input_name] = make_model_tensor(
-        first_frame.pixels_chw, input16, input_dtype,
-        {1, 3, 1, static_cast<int64_t>(first_frame.height), static_cast<int64_t>(first_frame.width)});
+    inputs[input_name] = make_model_tensor(first_frame.pixels_chw, input16, input_dtype,
+                                           {1, 3, 1, static_cast<int64_t>(first_frame.height),
+                                            static_cast<int64_t>(first_frame.width)});
 
     auto outputs = vae_encoder.forward(inputs);
-    const auto it = find_output_tensor(outputs, {"latent", "latents", "output0", "sample",
-                                                 "encoder_output"});
+    const auto it =
+        find_output_tensor(outputs, {"latent", "latents", "output0", "sample", "encoder_output"});
     if (it == outputs.end())
         throw std::runtime_error("SANA-WM native VAE encoder output tensor not found");
 
@@ -972,7 +967,8 @@ std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
                                            const std::vector<int32_t>& attention_mask,
                                            int32_t text_dim, const char* label) {
     if (!text_encoder.ok())
-        throw std::runtime_error(std::string("SANA-WM native ") + label + " text encoder is not ready");
+        throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                 " text encoder is not ready");
 
     const int64_t seq_len = static_cast<int64_t>(input_ids.size());
     TensorMap inputs;
@@ -982,20 +978,20 @@ std::vector<float> run_native_text_encoder(ITrtModule& text_encoder,
         Tensor{const_cast<int32_t*>(attention_mask.data()), {1, seq_len}, DType::kInt32};
 
     auto outputs = text_encoder.forward(inputs);
-    const auto it = find_output_tensor(outputs, {"last_hidden_state", "hidden_states",
-                                                 "text_embeddings", "output0"});
+    const auto it = find_output_tensor(
+        outputs, {"last_hidden_state", "hidden_states", "text_embeddings", "output0"});
     if (it == outputs.end())
         throw std::runtime_error(std::string("SANA-WM native ") + label +
                                  " text encoder output tensor not found");
-    const auto count = static_cast<std::size_t>(input_ids.size()) *
-                       static_cast<std::size_t>(text_dim);
+    const auto count =
+        static_cast<std::size_t>(input_ids.size()) * static_cast<std::size_t>(text_dim);
     return tensor_to_float_vector(it->second, count, label);
 }
 
 std::vector<float> select_stage1_text_window(const std::vector<float>& encoded, int32_t encoded_len,
                                              int32_t max_length, int32_t text_dim) {
-    std::vector<float> out(static_cast<std::size_t>(max_length) * static_cast<std::size_t>(text_dim),
-                           0.0F);
+    std::vector<float> out(
+        static_cast<std::size_t>(max_length) * static_cast<std::size_t>(text_dim), 0.0F);
     auto copy_token = [&](int32_t src_token, int32_t dst_token) {
         const auto src = static_cast<std::size_t>(src_token) * static_cast<std::size_t>(text_dim);
         const auto dst = static_cast<std::size_t>(dst_token) * static_cast<std::size_t>(text_dim);
@@ -1008,7 +1004,8 @@ std::vector<float> select_stage1_text_window(const std::vector<float>& encoded, 
     return out;
 }
 
-std::vector<int32_t> select_stage1_mask_window(const std::vector<int32_t>& mask, int32_t max_length) {
+std::vector<int32_t> select_stage1_mask_window(const std::vector<int32_t>& mask,
+                                               int32_t max_length) {
     std::vector<int32_t> out(static_cast<std::size_t>(max_length), 0);
     out[0] = mask.empty() ? 0 : mask.front();
     const int32_t encoded_len = static_cast<int32_t>(mask.size());
@@ -1025,24 +1022,27 @@ SanaWmTextConditioning run_native_text_conditioning(ITrtModule& text_encoder,
                                                     const std::string& negative_prompt) {
     const auto conditioning_prompt = sana_wm_make_conditioning_prompt(prompt, config.chi_prompt);
     const int32_t chi_tokens =
-        config.chi_prompt.empty() ? 0 : static_cast<int32_t>(tokenizer.encode(config.chi_prompt).size());
+        config.chi_prompt.empty()
+            ? 0
+            : static_cast<int32_t>(tokenizer.encode(config.chi_prompt).size());
     const int32_t cond_len = config.chi_prompt.empty()
                                  ? config.text_encoder_max_length
                                  : chi_tokens + config.text_encoder_max_length - 2;
 
     auto cond_ids = tokenize_fixed(tokenizer, conditioning_prompt, cond_len);
     auto cond_mask_full = attention_mask_from_tokens(cond_ids);
-    auto cond_full =
-        run_native_text_encoder(text_encoder, cond_ids, cond_mask_full, config.text_encoder_dim, "cond");
+    auto cond_full = run_native_text_encoder(text_encoder, cond_ids, cond_mask_full,
+                                             config.text_encoder_dim, "cond");
 
     auto neg_ids = tokenize_fixed(tokenizer, negative_prompt, config.text_encoder_max_length);
     auto neg_mask = attention_mask_from_tokens(neg_ids);
-    auto neg =
-        run_native_text_encoder(text_encoder, neg_ids, neg_mask, config.text_encoder_dim, "negative");
+    auto neg = run_native_text_encoder(text_encoder, neg_ids, neg_mask, config.text_encoder_dim,
+                                       "negative");
 
     return {select_stage1_text_window(cond_full, cond_len, config.text_encoder_max_length,
                                       config.text_encoder_dim),
-            std::move(neg), select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length),
+            std::move(neg),
+            select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length),
             std::move(neg_mask)};
 }
 
@@ -1057,12 +1057,10 @@ Tensor make_mask_tensor(const std::vector<int32_t>& values, std::vector<float>& 
     return make_model_tensor(scratch, scratch16, dtype, std::move(shape));
 }
 
-std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
-                                              const SanaWmStage1Latents& latents,
-                                              const SanaWmTextConditioning& text,
-                                              const SanaWmCameraConditions& camera,
-                                              const SanaWmRuntimeConfig& config,
-                                              float timestep, float cfg_scale) {
+std::vector<float>
+run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& latents,
+                           const SanaWmTextConditioning& text, const SanaWmCameraConditions& camera,
+                           const SanaWmRuntimeConfig& config, float timestep, float cfg_scale) {
     if (!denoiser.ok())
         throw std::runtime_error("SANA-WM native Stage-1 denoiser is not ready");
 
@@ -1075,24 +1073,20 @@ std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
     auto plucker_input = repeat_batch(camera.chunk_plucker, batch);
     auto timestep_input = stage1_frame_timestep(batch, latents.frames, timestep);
 
-    const auto latent_name =
-        pick_input_name(denoiser, {"x", "sample", "latents", "hidden_states",
-                                   "noisy_image_or_video"},
-                        "Stage-1 denoiser latent");
+    const auto latent_name = pick_input_name(
+        denoiser, {"x", "sample", "latents", "hidden_states", "noisy_image_or_video"},
+        "Stage-1 denoiser latent");
     const auto timestep_name =
         pick_input_name(denoiser, {"timestep", "timesteps", "t"}, "Stage-1 denoiser timestep");
-    const auto text_name = pick_input_name(denoiser, {"y", "encoder_hidden_states", "condition",
-                                                      "prompt_embeds"},
-                                           "Stage-1 denoiser text");
-    const auto mask_name = pick_input_name(denoiser, {"mask", "encoder_attention_mask",
-                                                      "attention_mask"},
-                                           "Stage-1 denoiser mask");
-    const auto camera_name =
-        pick_input_name(denoiser, {"camera_conditions", "raymap", "camera"},
-                        "Stage-1 denoiser camera");
-    const auto plucker_name =
-        pick_input_name(denoiser, {"chunk_plucker", "plucker", "plucker_emb"},
-                        "Stage-1 denoiser chunk plucker");
+    const auto text_name =
+        pick_input_name(denoiser, {"y", "encoder_hidden_states", "condition", "prompt_embeds"},
+                        "Stage-1 denoiser text");
+    const auto mask_name = pick_input_name(
+        denoiser, {"mask", "encoder_attention_mask", "attention_mask"}, "Stage-1 denoiser mask");
+    const auto camera_name = pick_input_name(denoiser, {"camera_conditions", "raymap", "camera"},
+                                             "Stage-1 denoiser camera");
+    const auto plucker_name = pick_input_name(denoiser, {"chunk_plucker", "plucker", "plucker_emb"},
+                                              "Stage-1 denoiser chunk plucker");
 
     std::vector<half_bits_t> latent16;
     std::vector<half_bits_t> text16;
@@ -1108,15 +1102,15 @@ std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
     inputs[timestep_name] = make_model_tensor(
         timestep_input, timestep16, input_dtype_or(denoiser, timestep_name, DType::kFloat32),
         {batch, 1, latents.frames});
-    inputs[text_name] = make_model_tensor(
-        text_input, text16, input_dtype_or(denoiser, text_name, DType::kBFloat16),
-        {batch, 1, config.text_encoder_max_length, config.text_encoder_dim});
-    inputs[mask_name] = make_mask_tensor(
-        mask_input, mask_float, mask16, input_dtype_or(denoiser, mask_name, DType::kInt32),
-        {batch, config.text_encoder_max_length});
-    inputs[camera_name] = make_model_tensor(
-        raymap_input, raymap16, input_dtype_or(denoiser, camera_name, DType::kBFloat16),
-        {batch, camera.latent_frames, camera.raymap_width});
+    inputs[text_name] =
+        make_model_tensor(text_input, text16, input_dtype_or(denoiser, text_name, DType::kBFloat16),
+                          {batch, 1, config.text_encoder_max_length, config.text_encoder_dim});
+    inputs[mask_name] = make_mask_tensor(mask_input, mask_float, mask16,
+                                         input_dtype_or(denoiser, mask_name, DType::kInt32),
+                                         {batch, config.text_encoder_max_length});
+    inputs[camera_name] = make_model_tensor(raymap_input, raymap16,
+                                            input_dtype_or(denoiser, camera_name, DType::kBFloat16),
+                                            {batch, camera.latent_frames, camera.raymap_width});
     inputs[plucker_name] = make_model_tensor(
         plucker_input, plucker16, input_dtype_or(denoiser, plucker_name, DType::kBFloat16),
         {batch, camera.chunk_plucker_channels, camera.latent_frames, camera.latent_height,
@@ -1131,12 +1125,11 @@ std::vector<float> run_native_stage1_denoiser(ITrtModule& denoiser,
     return tensor_to_float_vector(it->second, count, "Stage-1 denoiser");
 }
 
-SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser,
-                                             SanaWmStage1Latents latents,
+SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser, SanaWmStage1Latents latents,
                                              const SanaWmTextConditioning& text,
                                              const SanaWmCameraConditions& camera,
-                                             const SanaWmRuntimeConfig& config,
-                                             int32_t num_steps, float cfg_scale) {
+                                             const SanaWmRuntimeConfig& config, int32_t num_steps,
+                                             float cfg_scale) {
     if (num_steps <= 0)
         throw std::runtime_error("SANA-WM Stage-1 solver requires num_steps > 0");
     diffusion::FlowMatchEulerState scheduler;
@@ -1147,11 +1140,12 @@ SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser,
 
     for (int32_t step = 0; step < num_steps; ++step) {
         const float timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
-        auto model_output =
-            run_native_stage1_denoiser(denoiser, latents, text, camera, config, timestep, cfg_scale);
+        auto model_output = run_native_stage1_denoiser(denoiser, latents, text, camera, config,
+                                                       timestep, cfg_scale);
         auto velocity =
             stage1_velocity_from_model_output(model_output, latents.values.size(), cfg_scale);
-        scheduler.step(velocity.data(), latents.values.data(), next.data(), latents.values.size(), step);
+        scheduler.step(velocity.data(), latents.values.data(), next.data(), latents.values.size(),
+                       step);
         keep_stage1_anchor_frame(next, latents.values, latents.channels, latents.frames,
                                  latents.height, latents.width);
         latents.values.swap(next);
@@ -1162,13 +1156,11 @@ SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser,
 SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
                                            const std::shared_ptr<ITokenizer>& tokenizer,
                                            const SanaWmRuntimeConfig& config,
-                                           const SanaWmRequest& request,
-                                           const GenerateConfig& cfg,
+                                           const SanaWmRequest& request, const GenerateConfig& cfg,
                                            const std::string& prompt) {
     auto native_inputs = prepare_native_inputs(config, request, cfg);
     if (!modules.vae_encoder) {
-        throw std::runtime_error(
-            "SANA-WM native TensorRT execution requires a VAE encoder module");
+        throw std::runtime_error("SANA-WM native TensorRT execution requires a VAE encoder module");
     }
     auto first_latent = run_native_vae_encoder(*modules.vae_encoder, native_inputs.first_frame,
                                                native_inputs.camera, config.vae_latent_dim);
@@ -1176,11 +1168,10 @@ SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
         throw std::runtime_error(
             "SANA-WM native TensorRT execution requires text encoder and tokenizer");
     }
-    auto text =
-        run_native_text_conditioning(*modules.text_encoder, *tokenizer, config, prompt,
-                                     cfg.negative_prompt);
-    const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
-                                    : static_cast<uint64_t>(config.seed);
+    auto text = run_native_text_conditioning(*modules.text_encoder, *tokenizer, config, prompt,
+                                             cfg.negative_prompt);
+    const auto seed =
+        cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed) : static_cast<uint64_t>(config.seed);
     auto latents = sana_wm_prepare_stage1_latents(
         first_latent, cfg.initial_latents, config.vae_latent_dim,
         native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
@@ -1190,10 +1181,9 @@ SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
             "SANA-WM native TensorRT execution requires a Stage-1 denoiser module");
     }
     const int32_t num_steps = cfg.num_steps > 0 ? cfg.num_steps : config.num_steps;
-    const float cfg_scale = cfg.cfg_scale >= 0.0F
-                                ? cfg.cfg_scale
-                                : (cfg.guidance_scale >= 0.0F ? cfg.guidance_scale
-                                                              : config.cfg_scale);
+    const float cfg_scale = cfg.cfg_scale >= 0.0F ? cfg.cfg_scale
+                                                  : (cfg.guidance_scale >= 0.0F ? cfg.guidance_scale
+                                                                                : config.cfg_scale);
     return run_native_stage1_solver(*modules.stage1_denoiser, std::move(latents), text,
                                     native_inputs.camera, config, num_steps, cfg_scale);
 }
@@ -1234,12 +1224,10 @@ std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
     if (!denoiser.ok())
         throw std::runtime_error("SANA-WM native refiner denoiser is not ready");
 
-    const auto latent_name =
-        pick_input_name(denoiser, {"latent", "hidden_states", "video_latent"},
-                        "refiner denoiser latent");
-    const auto clean_name =
-        pick_input_name(denoiser, {"clean_latent", "clean_video_latent"},
-                        "refiner denoiser clean latent");
+    const auto latent_name = pick_input_name(denoiser, {"latent", "hidden_states", "video_latent"},
+                                             "refiner denoiser latent");
+    const auto clean_name = pick_input_name(denoiser, {"clean_latent", "clean_video_latent"},
+                                            "refiner denoiser clean latent");
     const auto mask_name =
         pick_input_name(denoiser, {"denoise_mask", "mask"}, "refiner denoiser mask");
     const auto positions_name =
@@ -1257,26 +1245,24 @@ std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
     std::vector<half_bits_t> sigma16;
     std::vector<float> sigma_vec{sigma};
     TensorMap inputs;
-    inputs[latent_name] = make_model_tensor(
-        combined_latent, latent16, input_dtype_or(denoiser, latent_name, DType::kBFloat16),
-        {1, total_tokens, channels});
-    inputs[clean_name] = make_model_tensor(
-        clean_latent, clean16, input_dtype_or(denoiser, clean_name, DType::kBFloat16),
-        {1, total_tokens, channels});
-    inputs[mask_name] = Tensor{const_cast<float*>(denoise_mask.data()), {1, total_tokens, 1},
-                               DType::kFloat32};
+    inputs[latent_name] = make_model_tensor(combined_latent, latent16,
+                                            input_dtype_or(denoiser, latent_name, DType::kBFloat16),
+                                            {1, total_tokens, channels});
+    inputs[clean_name] = make_model_tensor(clean_latent, clean16,
+                                           input_dtype_or(denoiser, clean_name, DType::kBFloat16),
+                                           {1, total_tokens, channels});
+    inputs[mask_name] =
+        Tensor{const_cast<float*>(denoise_mask.data()), {1, total_tokens, 1}, DType::kFloat32};
     inputs[positions_name] = make_model_tensor(
         positions, positions16, input_dtype_or(denoiser, positions_name, DType::kBFloat16),
         {1, 3, total_tokens, 2});
-    inputs[text_name] = make_model_tensor(text.values, text16,
-                                          input_dtype_or(denoiser, text_name, DType::kBFloat16),
-                                          text.shape);
+    inputs[text_name] = make_model_tensor(
+        text.values, text16, input_dtype_or(denoiser, text_name, DType::kBFloat16), text.shape);
     inputs[sigma_name] = make_model_tensor(
         sigma_vec, sigma16, input_dtype_or(denoiser, sigma_name, DType::kFloat32), {1});
 
     auto outputs = denoiser.forward(inputs);
-    const auto it =
-        find_output_tensor(outputs, {"output0", "denoised", "sample", "pred", "x0"});
+    const auto it = find_output_tensor(outputs, {"output0", "denoised", "sample", "pred", "x0"});
     if (it == outputs.end())
         throw std::runtime_error("SANA-WM native refiner denoiser output tensor not found");
     return tensor_to_float_vector(it->second, it->second.numel(), "refiner denoiser");
@@ -1292,13 +1278,15 @@ std::vector<float> refiner_current_prediction(const std::vector<float>& output,
                                   output.end());
     }
     if (output.size() > current_values)
-        return std::vector<float>(output.begin(), output.begin() + static_cast<std::ptrdiff_t>(current_values));
-    throw std::runtime_error("SANA-WM native refiner denoiser output is smaller than current tokens");
+        return std::vector<float>(output.begin(),
+                                  output.begin() + static_cast<std::ptrdiff_t>(current_values));
+    throw std::runtime_error(
+        "SANA-WM native refiner denoiser output is smaller than current tokens");
 }
 
 std::vector<float> refiner_euler_step(const std::vector<float>& sample,
-                                      const std::vector<float>& denoised,
-                                      float sigma, float sigma_next) {
+                                      const std::vector<float>& denoised, float sigma,
+                                      float sigma_next) {
     if (sample.size() != denoised.size())
         throw std::runtime_error("SANA-WM native refiner sample/prediction size mismatch");
     std::vector<float> out(sample.size(), 0.0F);
@@ -1313,8 +1301,7 @@ std::vector<float> refiner_euler_step(const std::vector<float>& sample,
 SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& denoiser,
                                        const ITokenizer& tokenizer,
                                        const SanaWmStage1Latents& stage1,
-                                       const SanaWmRuntimeConfig& config,
-                                       const GenerateConfig& cfg,
+                                       const SanaWmRuntimeConfig& config, const GenerateConfig& cfg,
                                        const std::string& prompt) {
     constexpr int32_t kSinkFrames = 1;
     if (stage1.frames <= kSinkFrames)
@@ -1323,9 +1310,9 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
     const auto text = run_native_refiner_text_encoder(text_encoder, tokenizer, prompt);
     auto sink = patchify_refiner_latents(stage1.values, stage1.channels, 0, kSinkFrames,
                                          stage1.frames, stage1.height, stage1.width);
-    auto current_clean = patchify_refiner_latents(stage1.values, stage1.channels, kSinkFrames,
-                                                 current_frames, stage1.frames, stage1.height,
-                                                 stage1.width);
+    auto current_clean =
+        patchify_refiner_latents(stage1.values, stage1.channels, kSinkFrames, current_frames,
+                                 stage1.frames, stage1.height, stage1.width);
     auto noise = sample_stage1_noise(current_clean.size(),
                                      cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
                                                    : static_cast<uint64_t>(config.seed));
@@ -1333,29 +1320,28 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
     for (std::size_t i = 0; i < current.size(); ++i)
         current[i] = (1.0F - kRefinerSigmas[0]) * current_clean[i] + kRefinerSigmas[0] * noise[i];
 
-    const auto positions = refiner_positions(kSinkFrames, current_frames, stage1.height,
-                                             stage1.width, config.fps);
+    const auto positions =
+        refiner_positions(kSinkFrames, current_frames, stage1.height, stage1.width, config.fps);
     const auto context_values = sink.size();
     const auto current_values = current.size();
-    const int32_t total_tokens =
-        static_cast<int32_t>((context_values + current_values) / static_cast<std::size_t>(stage1.channels));
-    std::vector<float> clean = concatenate_float_vectors(sink, std::vector<float>(current_values, 0.0F));
+    const int32_t total_tokens = static_cast<int32_t>((context_values + current_values) /
+                                                      static_cast<std::size_t>(stage1.channels));
+    std::vector<float> clean =
+        concatenate_float_vectors(sink, std::vector<float>(current_values, 0.0F));
     std::vector<float> mask(static_cast<std::size_t>(total_tokens), 0.0F);
     std::fill(mask.begin() + static_cast<std::ptrdiff_t>(context_values / stage1.channels),
               mask.end(), 1.0F);
 
     for (std::size_t i = 0; i + 1U < kRefinerSigmas.size(); ++i) {
         auto combined = concatenate_float_vectors(sink, current);
-        auto output = run_native_refiner_denoiser(
-            denoiser, combined, clean, mask, positions, text, kRefinerSigmas[i], total_tokens,
-            stage1.channels);
+        auto output = run_native_refiner_denoiser(denoiser, combined, clean, mask, positions, text,
+                                                  kRefinerSigmas[i], total_tokens, stage1.channels);
         auto pred = refiner_current_prediction(output, context_values, current_values);
         current = refiner_euler_step(current, pred, kRefinerSigmas[i], kRefinerSigmas[i + 1U]);
     }
 
-    auto current_cthw =
-        unpatchify_refiner_current(current, stage1.channels, current_frames, stage1.height,
-                                   stage1.width);
+    auto current_cthw = unpatchify_refiner_current(current, stage1.channels, current_frames,
+                                                   stage1.height, stage1.width);
     SanaWmStage1Latents refined;
     refined.values = stage1.values;
     refined.channels = stage1.channels;
@@ -1368,8 +1354,8 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
                 for (int32_t x = 0; x < stage1.width; ++x)
                     refined.values[stage1_latent_index(c, f + kSinkFrames, y, x, stage1.frames,
                                                        stage1.height, stage1.width)] =
-                        current_cthw[stage1_latent_index(c, f, y, x, current_frames,
-                                                         stage1.height, stage1.width)];
+                        current_cthw[stage1_latent_index(c, f, y, x, current_frames, stage1.height,
+                                                         stage1.width)];
     return refined;
 }
 
@@ -1382,8 +1368,7 @@ ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1La
     if (!vae_decoder.ok())
         throw std::runtime_error("SANA-WM native VAE decoder is not ready");
 
-    const auto input_name =
-        pick_input_name(vae_decoder, {"latents", "sample", "z"}, "VAE decoder");
+    const auto input_name = pick_input_name(vae_decoder, {"latents", "sample", "z"}, "VAE decoder");
     std::vector<half_bits_t> latent16;
     TensorMap inputs;
     inputs[input_name] = make_model_tensor(
@@ -1391,15 +1376,13 @@ ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1La
         {1, latents.channels, latents.frames, latents.height, latents.width});
 
     auto outputs = vae_decoder.forward(inputs);
-    const auto it =
-        find_output_tensor(outputs, {"output0", "sample", "decoder_output", "video"});
+    const auto it = find_output_tensor(outputs, {"output0", "sample", "decoder_output", "video"});
     if (it == outputs.end())
         throw std::runtime_error("SANA-WM native VAE decoder output tensor not found");
 
-    const auto raw_count = static_cast<std::size_t>(3) *
-                           static_cast<std::size_t>(config.num_frames) *
-                           static_cast<std::size_t>(config.height) *
-                           static_cast<std::size_t>(config.width);
+    const auto raw_count =
+        static_cast<std::size_t>(3) * static_cast<std::size_t>(config.num_frames) *
+        static_cast<std::size_t>(config.height) * static_cast<std::size_t>(config.width);
     auto raw = tensor_to_float_vector(it->second, raw_count, "VAE decoder");
 
     ImageResult result;
@@ -1412,13 +1395,13 @@ ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1La
         for (int32_t y = 0; y < config.height; ++y) {
             for (int32_t x = 0; x < config.width; ++x) {
                 for (int32_t c = 0; c < 3; ++c) {
-                    const auto src =
-                        (((static_cast<std::size_t>(c) * static_cast<std::size_t>(config.num_frames) +
-                           static_cast<std::size_t>(t)) *
-                              static_cast<std::size_t>(config.height) +
-                          static_cast<std::size_t>(y)) *
-                             static_cast<std::size_t>(config.width) +
-                         static_cast<std::size_t>(x));
+                    const auto src = (((static_cast<std::size_t>(c) *
+                                            static_cast<std::size_t>(config.num_frames) +
+                                        static_cast<std::size_t>(t)) *
+                                           static_cast<std::size_t>(config.height) +
+                                       static_cast<std::size_t>(y)) *
+                                          static_cast<std::size_t>(config.width) +
+                                      static_cast<std::size_t>(x));
                     const auto dst =
                         (((static_cast<std::size_t>(t) * static_cast<std::size_t>(config.height) +
                            static_cast<std::size_t>(y)) *
@@ -1453,8 +1436,7 @@ ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage
         {1, latents.channels, latents.frames, latents.height, latents.width});
 
     auto outputs = vae_decoder.forward(inputs);
-    const auto it =
-        find_output_tensor(outputs, {"output0", "video", "sample", "decoder_output"});
+    const auto it = find_output_tensor(outputs, {"output0", "video", "sample", "decoder_output"});
     if (it == outputs.end())
         throw std::runtime_error("SANA-WM native refiner VAE decoder output tensor not found");
 
@@ -1486,24 +1468,20 @@ ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage
 
 ImageResult run_native_image_path(SanaWmNativeModules& modules,
                                   const std::shared_ptr<ITokenizer>& tokenizer,
-                                  const SanaWmRuntimeConfig& config,
-                                  const SanaWmRequest& request,
-                                  const GenerateConfig& cfg,
-                                  const std::string& prompt) {
+                                  const SanaWmRuntimeConfig& config, const SanaWmRequest& request,
+                                  const GenerateConfig& cfg, const std::string& prompt) {
     auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
     if (has_any_refiner_module(modules)) {
         if (!modules.has_refiner() || !tokenizer) {
-            throw std::runtime_error(
-                "SANA-WM native refiner execution requires refiner text, denoiser, VAE, and tokenizer");
+            throw std::runtime_error("SANA-WM native refiner execution requires refiner text, "
+                                     "denoiser, VAE, and tokenizer");
         }
-        auto refined =
-            run_native_refiner(*modules.refiner_text_encoder, *modules.refiner_denoiser,
-                               *tokenizer, latents, config, cfg, prompt);
+        auto refined = run_native_refiner(*modules.refiner_text_encoder, *modules.refiner_denoiser,
+                                          *tokenizer, latents, config, cfg, prompt);
         return decode_native_refiner_vae(*modules.refiner_vae_decoder, refined, config);
     }
     if (!modules.vae_decoder) {
-        throw std::runtime_error(
-            "SANA-WM native TensorRT execution requires a VAE decoder module");
+        throw std::runtime_error("SANA-WM native TensorRT execution requires a VAE decoder module");
     }
     return decode_native_sana_vae(*modules.vae_decoder, latents, config);
 }

@@ -91,15 +91,32 @@ ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
 
 bool append_json_escape(char escaped, std::string& out) {
     switch (escaped) {
-    case '"': out.push_back('"'); return true;
-    case '\\': out.push_back('\\'); return true;
-    case '/': out.push_back('/'); return true;
-    case 'b': out.push_back('\b'); return true;
-    case 'f': out.push_back('\f'); return true;
-    case 'n': out.push_back('\n'); return true;
-    case 'r': out.push_back('\r'); return true;
-    case 't': out.push_back('\t'); return true;
-    default: return false;
+    case '"':
+        out.push_back('"');
+        return true;
+    case '\\':
+        out.push_back('\\');
+        return true;
+    case '/':
+        out.push_back('/');
+        return true;
+    case 'b':
+        out.push_back('\b');
+        return true;
+    case 'f':
+        out.push_back('\f');
+        return true;
+    case 'n':
+        out.push_back('\n');
+        return true;
+    case 'r':
+        out.push_back('\r');
+        return true;
+    case 't':
+        out.push_back('\t');
+        return true;
+    default:
+        return false;
     }
 }
 

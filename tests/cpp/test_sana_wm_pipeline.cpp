@@ -10,7 +10,6 @@
 // =============================================================================
 
 #include "../../src/runtime/models/sana_wm/pipeline.h"
-
 #include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
@@ -69,9 +68,8 @@ std::vector<float> copy_float_tensor(const trtmc::Tensor& tensor) {
     return std::vector<float>(data, data + tensor.numel());
 }
 
-std::size_t stage1_bcthw_index(int32_t batch, int32_t channel, int32_t frame, int32_t y,
-                               int32_t x, int32_t channels, int32_t frames, int32_t height,
-                               int32_t width) {
+std::size_t stage1_bcthw_index(int32_t batch, int32_t channel, int32_t frame, int32_t y, int32_t x,
+                               int32_t channels, int32_t frames, int32_t height, int32_t width) {
     return ((((static_cast<std::size_t>(batch) * static_cast<std::size_t>(channels) +
                static_cast<std::size_t>(channel)) *
                   static_cast<std::size_t>(frames) +
@@ -142,7 +140,8 @@ class FakeTrtModule final : public trtmc::ITrtModule {
         std::vector<trtmc::TensorInfo> out;
         out.reserve(input_names_.size());
         for (const auto& name : input_names_)
-            out.push_back({name, {}, name == "mask" ? trtmc::DType::kInt32 : trtmc::DType::kFloat32, true});
+            out.push_back(
+                {name, {}, name == "mask" ? trtmc::DType::kInt32 : trtmc::DType::kFloat32, true});
         return out;
     }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
@@ -223,14 +222,9 @@ void test_action_rollout_rejects_invalid_segments() {
 
 void test_camera_pose_vector_parses_row_major_matrices() {
     const auto poses = trtmc::sana_wm_row_major_c2w_to_poses({
-        1.0F, 0.0F, 0.0F, 0.1F,
-        0.0F, 1.0F, 0.0F, 0.2F,
-        0.0F, 0.0F, 1.0F, 0.3F,
-        0.0F, 0.0F, 0.0F, 1.0F,
-        0.0F, -1.0F, 0.0F, 1.1F,
-        1.0F, 0.0F, 0.0F, 1.2F,
-        0.0F, 0.0F, 1.0F, 1.3F,
-        0.0F, 0.0F, 0.0F, 1.0F,
+        1.0F, 0.0F, 0.0F, 0.1F, 0.0F, 1.0F, 0.0F,  0.2F, 0.0F, 0.0F, 1.0F,
+        0.3F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, -1.0F, 0.0F, 1.1F, 1.0F, 0.0F,
+        0.0F, 1.2F, 0.0F, 0.0F, 1.0F, 1.3F, 0.0F,  0.0F, 0.0F, 1.0F,
     });
 
     check(poses.size() == 2, "sana wm camera: two row-major poses parsed");
@@ -254,25 +248,47 @@ void test_intrinsics_expand_model_card_shapes() {
     check(four.size() == 2 && near(four[1].fx, 10.0F) && near(four[1].cy, 7.0F),
           "sana wm intrinsics: fx/fy/cx/cy expands to all frames");
 
-    const auto matrix = trtmc::sana_wm_expand_intrinsics({
-        20.0F, 0.0F, 8.0F,
-        0.0F, 21.0F, 9.0F,
-        0.0F, 0.0F, 1.0F,
-    }, 3);
+    const auto matrix = trtmc::sana_wm_expand_intrinsics(
+        {
+            20.0F,
+            0.0F,
+            8.0F,
+            0.0F,
+            21.0F,
+            9.0F,
+            0.0F,
+            0.0F,
+            1.0F,
+        },
+        3);
     check(matrix.size() == 3 && near(matrix[2].fx, 20.0F) && near(matrix[2].fy, 21.0F) &&
               near(matrix[2].cx, 8.0F) && near(matrix[2].cy, 9.0F),
           "sana wm intrinsics: single 3x3 matrix expands to all frames");
 
-    const auto per_frame = trtmc::sana_wm_expand_intrinsics({
-        30.0F, 0.0F, 12.0F,
-        0.0F, 31.0F, 13.0F,
-        0.0F, 0.0F, 1.0F,
-        40.0F, 0.0F, 14.0F,
-        0.0F, 41.0F, 15.0F,
-        0.0F, 0.0F, 1.0F,
-    }, 2);
-    check(per_frame.size() == 2 && near(per_frame[0].fx, 30.0F) &&
-              near(per_frame[1].fx, 40.0F) && near(per_frame[1].cy, 15.0F),
+    const auto per_frame = trtmc::sana_wm_expand_intrinsics(
+        {
+            30.0F,
+            0.0F,
+            12.0F,
+            0.0F,
+            31.0F,
+            13.0F,
+            0.0F,
+            0.0F,
+            1.0F,
+            40.0F,
+            0.0F,
+            14.0F,
+            0.0F,
+            41.0F,
+            15.0F,
+            0.0F,
+            0.0F,
+            1.0F,
+        },
+        2);
+    check(per_frame.size() == 2 && near(per_frame[0].fx, 30.0F) && near(per_frame[1].fx, 40.0F) &&
+              near(per_frame[1].cy, 15.0F),
           "sana wm intrinsics: per-frame 3x3 matrices parsed");
 
     bool rejected = false;
@@ -548,8 +564,14 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{
-            0.1F, 0.2F, 0.3F, 0.4F,
-            0.5F, 0.6F, 0.7F, 0.8F,
+            0.1F,
+            0.2F,
+            0.3F,
+            0.4F,
+            0.5F,
+            0.6F,
+            0.7F,
+            0.8F,
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
 
@@ -578,10 +600,18 @@ void test_native_stage1_solver_decodes_without_bridge() {
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
     trtmc::io::save_png(image_path.string(),
                         {
-                            1.0F, 0.0F, 0.0F,
-                            0.0F, 1.0F, 0.0F,
-                            0.0F, 0.0F, 1.0F,
-                            1.0F, 1.0F, 1.0F,
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
                         },
                         2, 2);
 
@@ -609,13 +639,19 @@ void test_native_stage1_solver_decodes_without_bridge() {
     modules.stage1_denoiser = std::move(denoiser);
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{
-            0.1F, 0.2F, 0.3F, 0.4F,
-            0.5F, 0.6F, 0.7F, 0.8F,
+            0.1F,
+            0.2F,
+            0.3F,
+            0.4F,
+            0.5F,
+            0.6F,
+            0.7F,
+            0.8F,
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
-    auto decoder = std::make_unique<FakeTrtModule>(
-        std::vector<float>(96, 0.0F), std::vector<int64_t>{1, 3, 2, 4, 4},
-        std::vector<std::string>{"latents"});
+    auto decoder = std::make_unique<FakeTrtModule>(std::vector<float>(96, 0.0F),
+                                                   std::vector<int64_t>{1, 3, 2, 4, 4},
+                                                   std::vector<std::string>{"latents"});
     auto* decoder_ptr = decoder.get();
     modules.vae_decoder = std::move(decoder);
 
@@ -645,11 +681,9 @@ void test_native_stage1_solver_decodes_without_bridge() {
           "sana wm native: denoiser text shape");
     check(denoiser_ptr->last_input_shapes["mask"] == std::vector<int64_t>({2, 2}),
           "sana wm native: denoiser mask shape");
-    check(denoiser_ptr->last_input_shapes["camera_conditions"] ==
-              std::vector<int64_t>({2, 2, 20}),
+    check(denoiser_ptr->last_input_shapes["camera_conditions"] == std::vector<int64_t>({2, 2, 20}),
           "sana wm native: denoiser camera shape");
-    check(denoiser_ptr->last_input_shapes["chunk_plucker"] ==
-              std::vector<int64_t>({2, 6, 2, 2, 2}),
+    check(denoiser_ptr->last_input_shapes["chunk_plucker"] == std::vector<int64_t>({2, 6, 2, 2, 2}),
           "sana wm native: denoiser chunk plucker shape");
     check(denoiser_ptr->last_input_dtypes["mask"] == trtmc::DType::kInt32,
           "sana wm native: denoiser mask dtype");
@@ -684,10 +718,18 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_refiner_test.png";
     trtmc::io::save_png(image_path.string(),
                         {
-                            1.0F, 0.0F, 0.0F,
-                            0.0F, 1.0F, 0.0F,
-                            0.0F, 0.0F, 1.0F,
-                            1.0F, 1.0F, 1.0F,
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
+                            1.0F,
                         },
                         2, 2);
 
@@ -713,23 +755,29 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
                                  "chunk_plucker"});
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
         std::vector<float>{
-            0.1F, 0.2F, 0.3F, 0.4F,
-            0.5F, 0.6F, 0.7F, 0.8F,
+            0.1F,
+            0.2F,
+            0.3F,
+            0.4F,
+            0.5F,
+            0.6F,
+            0.7F,
+            0.8F,
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
-    auto refiner_text = std::make_unique<FakeTrtModule>(
-        std::vector<float>{0.1F, 0.2F, 0.3F, 0.4F}, std::vector<int64_t>{1, 2, 2});
+    auto refiner_text = std::make_unique<FakeTrtModule>(std::vector<float>{0.1F, 0.2F, 0.3F, 0.4F},
+                                                        std::vector<int64_t>{1, 2, 2});
     auto* refiner_text_ptr = refiner_text.get();
     modules.refiner_text_encoder = std::move(refiner_text);
     auto refiner_denoiser = std::make_unique<FakeTrtModule>(
         std::vector<float>(8, 0.0F), std::vector<int64_t>{1, 4, 2},
-        std::vector<std::string>{"latent", "clean_latent", "denoise_mask", "positions",
-                                 "v_context", "sigma"});
+        std::vector<std::string>{"latent", "clean_latent", "denoise_mask", "positions", "v_context",
+                                 "sigma"});
     auto* refiner_denoiser_ptr = refiner_denoiser.get();
     modules.refiner_denoiser = std::move(refiner_denoiser);
-    auto refiner_decoder = std::make_unique<FakeTrtModule>(
-        std::vector<float>(96, 255.0F), std::vector<int64_t>{2, 4, 4, 3},
-        std::vector<std::string>{"latents"});
+    auto refiner_decoder = std::make_unique<FakeTrtModule>(std::vector<float>(96, 255.0F),
+                                                           std::vector<int64_t>{2, 4, 4, 3},
+                                                           std::vector<std::string>{"latents"});
     auto* refiner_decoder_ptr = refiner_decoder.get();
     modules.refiner_vae_decoder = std::move(refiner_decoder);
 
@@ -762,8 +810,7 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     check(refiner_denoiser_ptr->last_input_shapes["positions"] ==
               std::vector<int64_t>({1, 3, 8, 2}),
           "sana wm native refiner: positions shape");
-    check(refiner_denoiser_ptr->last_input_shapes["v_context"] ==
-              std::vector<int64_t>({1, 2, 2}),
+    check(refiner_denoiser_ptr->last_input_shapes["v_context"] == std::vector<int64_t>({1, 2, 2}),
           "sana wm native refiner: text context shape");
     if (!refiner_denoiser_ptr->input_value_calls.empty()) {
         const auto& mask = refiner_denoiser_ptr->input_value_calls.front()["denoise_mask"];
