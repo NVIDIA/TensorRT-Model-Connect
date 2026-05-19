@@ -4,6 +4,7 @@
 #include "trtmc/runtime/domains/audio/subprocess_runner.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,6 +55,20 @@ struct SanaWmPreprocessedImage {
     bool ok{false};
 };
 
+struct SanaWmCameraConditions {
+    std::vector<float> raymap;
+    std::vector<float> chunk_plucker;
+    std::vector<int32_t> time_indices;
+    int32_t num_frames{0};
+    int32_t latent_frames{0};
+    int32_t latent_height{0};
+    int32_t latent_width{0};
+    int32_t vae_time_stride{0};
+    int32_t vae_spatial_stride{0};
+    int32_t raymap_width{20};
+    int32_t chunk_plucker_channels{0};
+};
+
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
 
@@ -64,6 +79,11 @@ SanaWmIntrinsics sana_wm_transform_intrinsics_for_crop(const SanaWmIntrinsics& i
 SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>& src_hwc,
                                                        int32_t src_width, int32_t src_height,
                                                        int32_t target_height, int32_t target_width);
+SanaWmCameraConditions
+sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
+                                  const std::vector<SanaWmIntrinsics>& intrinsics,
+                                  int32_t target_height, int32_t target_width,
+                                  int32_t vae_time_stride, int32_t vae_spatial_stride);
 
 class SanaWmPipeline final : public IPipeline {
   public:

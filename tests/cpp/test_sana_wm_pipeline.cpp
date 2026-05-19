@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -38,6 +39,16 @@ bool contains_arg(const std::vector<std::string>& argv, const std::string& arg) 
 
 bool near(float actual, float expected, float eps = 1.0e-4F) {
     return std::fabs(actual - expected) <= eps;
+}
+
+std::size_t chunk_plucker_offset(int32_t channel, int32_t chunk, int32_t y, int32_t x,
+                                 int32_t chunk_count, int32_t h, int32_t w) {
+    return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(chunk_count) +
+              static_cast<std::size_t>(chunk)) *
+                 static_cast<std::size_t>(h) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(w) +
+            static_cast<std::size_t>(x));
 }
 
 std::string value_after(const std::vector<std::string>& argv, const std::string& flag) {
@@ -137,6 +148,58 @@ void test_resize_center_crop_crops_hwc_pixels() {
           "sana wm crop: last cropped pixel preserved");
 }
 
+void test_camera_conditions_match_upstream_shapes_and_raymap() {
+    const auto poses = trtmc::sana_wm_action_to_c2w("w-2", 1.0F, 0.0F);
+    const std::vector<trtmc::SanaWmIntrinsics> intrinsics(poses.size(), {2.0F, 2.0F, 0.0F, 0.0F});
+
+    const auto conditions = trtmc::sana_wm_prepare_camera_conditions(poses, intrinsics, 4, 4, 2, 2);
+
+    check(conditions.num_frames == 3, "sana wm camera: frame count propagated");
+    check(conditions.latent_frames == 2, "sana wm camera: latent frame count");
+    check(conditions.latent_height == 2 && conditions.latent_width == 2,
+          "sana wm camera: latent spatial shape");
+    check(conditions.time_indices == std::vector<int32_t>({0, 2}),
+          "sana wm camera: latent time indices match upstream arange stride");
+    check(conditions.raymap.size() == 40, "sana wm camera: raymap is chunks x 20");
+    check(near(conditions.raymap[0], 1.0F) && near(conditions.raymap[5], 1.0F) &&
+              near(conditions.raymap[10], 1.0F) && near(conditions.raymap[15], 1.0F),
+          "sana wm camera: first raymap pose row is identity");
+    check(near(conditions.raymap[16], 1.0F) && near(conditions.raymap[17], 1.0F) &&
+              near(conditions.raymap[18], 0.0F) && near(conditions.raymap[19], 0.0F),
+          "sana wm camera: intrinsics scaled to latent grid");
+    check(conditions.chunk_plucker_channels == 12,
+          "sana wm camera: chunk plucker channel count is stride times six");
+    check(conditions.chunk_plucker.size() == 96, "sana wm camera: chunk plucker shape");
+
+    const auto z_dir = chunk_plucker_offset(2, 0, 0, 0, 2, 2, 2);
+    check(near(conditions.chunk_plucker[z_dir], 1.0F), "sana wm camera: first pixel looks down +Z");
+
+    const auto x_dir = chunk_plucker_offset(0, 0, 0, 1, 2, 2, 2);
+    check(near(conditions.chunk_plucker[x_dir], 1.0F / std::sqrt(2.0F)),
+          "sana wm camera: x ray direction is normalized");
+}
+
+void test_camera_conditions_relativize_to_first_pose() {
+    trtmc::SanaWmPose first;
+    first.c2w = {1.0F, 0.0F, 0.0F, 10.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                 0.0F, 0.0F, 1.0F, 5.0F,  0.0F, 0.0F, 0.0F, 1.0F};
+    trtmc::SanaWmPose second;
+    second.c2w = {1.0F, 0.0F, 0.0F, 10.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                  0.0F, 0.0F, 1.0F, 7.0F,  0.0F, 0.0F, 0.0F, 1.0F};
+
+    const std::vector<trtmc::SanaWmPose> poses{first, second};
+    const std::vector<trtmc::SanaWmIntrinsics> intrinsics{{1.0F, 1.0F, 0.0F, 0.0F}};
+    const auto conditions = trtmc::sana_wm_prepare_camera_conditions(poses, intrinsics, 2, 2, 1, 1);
+
+    check(conditions.time_indices == std::vector<int32_t>({0, 1}),
+          "sana wm camera: one latent frame per source frame");
+    check(near(conditions.raymap[0], 1.0F) && near(conditions.raymap[5], 1.0F) &&
+              near(conditions.raymap[10], 1.0F) && near(conditions.raymap[15], 1.0F),
+          "sana wm camera: first relative pose is identity");
+    check(near(conditions.raymap[20 + 11], 2.0F),
+          "sana wm camera: second pose is relative to first pose");
+}
+
 void test_bridge_command_forwards_strict_sana_wm_contract() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
@@ -195,6 +258,8 @@ int main() {
     test_action_rollout_rejects_invalid_segments();
     test_resize_crop_plan_matches_upstream_geometry();
     test_resize_center_crop_crops_hwc_pixels();
+    test_camera_conditions_match_upstream_shapes_and_raymap();
+    test_camera_conditions_relativize_to_first_pose();
     test_bridge_command_forwards_strict_sana_wm_contract();
     return failures == 0 ? 0 : 1;
 }

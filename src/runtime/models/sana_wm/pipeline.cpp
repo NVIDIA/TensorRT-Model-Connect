@@ -90,6 +90,7 @@ SanaWmPaths make_invocation_paths() {
 }
 
 using Mat3 = std::array<std::array<float, 3>, 3>;
+using Mat4 = std::array<float, 16>;
 using Vec3 = std::array<float, 3>;
 
 Mat3 identity3() {
@@ -125,6 +126,78 @@ Mat3 matmul3(const Mat3& a, const Mat3& b) {
 Vec3 column(const Mat3& m, int c) {
     return {m[0][static_cast<std::size_t>(c)], m[1][static_cast<std::size_t>(c)],
             m[2][static_cast<std::size_t>(c)]};
+}
+
+float m4_at(const Mat4& m, int row, int col) {
+    return m[static_cast<std::size_t>(row * 4 + col)];
+}
+
+void m4_set(Mat4& m, int row, int col, float value) {
+    m[static_cast<std::size_t>(row * 4 + col)] = value;
+}
+
+Mat4 identity4() {
+    return {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+}
+
+Mat4 matmul4(const Mat4& a, const Mat4& b) {
+    Mat4 out{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            float acc = 0.0F;
+            for (int k = 0; k < 4; ++k)
+                acc += m4_at(a, r, k) * m4_at(b, k, c);
+            m4_set(out, r, c, acc);
+        }
+    }
+    return out;
+}
+
+Mat4 inverse_rigid_pose(const Mat4& pose) {
+    Mat4 out = identity4();
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c)
+            m4_set(out, r, c, m4_at(pose, c, r));
+    }
+    for (int r = 0; r < 3; ++r) {
+        float translated = 0.0F;
+        for (int k = 0; k < 3; ++k)
+            translated += m4_at(out, r, k) * m4_at(pose, k, 3);
+        m4_set(out, r, 3, -translated);
+    }
+    return out;
+}
+
+Vec3 pose_origin(const Mat4& pose) {
+    return {m4_at(pose, 0, 3), m4_at(pose, 1, 3), m4_at(pose, 2, 3)};
+}
+
+Vec3 rotate_direction(const Mat4& pose, const Vec3& direction) {
+    return {
+        m4_at(pose, 0, 0) * direction[0] + m4_at(pose, 0, 1) * direction[1] +
+            m4_at(pose, 0, 2) * direction[2],
+        m4_at(pose, 1, 0) * direction[0] + m4_at(pose, 1, 1) * direction[1] +
+            m4_at(pose, 1, 2) * direction[2],
+        m4_at(pose, 2, 0) * direction[0] + m4_at(pose, 2, 1) * direction[1] +
+            m4_at(pose, 2, 2) * direction[2],
+    };
+}
+
+Vec3 normalized(Vec3 v) {
+    const float norm = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (norm <= 0.0F)
+        return {0.0F, 0.0F, 0.0F};
+    const float inv = 1.0F / norm;
+    return {v[0] * inv, v[1] * inv, v[2] * inv};
+}
+
+Vec3 cross3(const Vec3& a, const Vec3& b) {
+    return {
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    };
 }
 
 void normalize_horizontal(Vec3& v) {
@@ -293,6 +366,120 @@ int32_t python_round_to_int(double value) {
         return static_cast<int32_t>(floored + 1.0);
     const auto floor_int = static_cast<long long>(floored);
     return static_cast<int32_t>((floor_int % 2LL == 0LL) ? floor_int : floor_int + 1LL);
+}
+
+void validate_camera_condition_inputs(const std::vector<SanaWmPose>& c2w,
+                                      const std::vector<SanaWmIntrinsics>& intrinsics,
+                                      int32_t target_height, int32_t target_width,
+                                      int32_t vae_time_stride, int32_t vae_spatial_stride) {
+    if (c2w.empty())
+        throw std::invalid_argument("SANA-WM camera conditioning requires at least one pose");
+    if (intrinsics.empty())
+        throw std::invalid_argument("SANA-WM camera conditioning requires intrinsics");
+    if (intrinsics.size() != 1 && intrinsics.size() != c2w.size())
+        throw std::invalid_argument("SANA-WM intrinsics must have one row or match pose count");
+    if (target_height <= 0 || target_width <= 0 || vae_time_stride <= 0 ||
+        vae_spatial_stride <= 0) {
+        throw std::invalid_argument("SANA-WM camera conditioning dimensions must be positive");
+    }
+}
+
+SanaWmIntrinsics intrinsics_at(const std::vector<SanaWmIntrinsics>& intrinsics, std::size_t idx) {
+    return intrinsics.size() == 1 ? intrinsics.front() : intrinsics[idx];
+}
+
+SanaWmIntrinsics scale_intrinsics_to_latent(const SanaWmIntrinsics& intrinsics, int32_t latent_h,
+                                            int32_t latent_w, int32_t target_height,
+                                            int32_t target_width) {
+    if (intrinsics.fx <= 0.0F || intrinsics.fy <= 0.0F)
+        throw std::invalid_argument("SANA-WM intrinsics fx/fy must be positive");
+    return {
+        intrinsics.fx * static_cast<float>(latent_w) / static_cast<float>(target_width),
+        intrinsics.fy * static_cast<float>(latent_h) / static_cast<float>(target_height),
+        intrinsics.cx * static_cast<float>(latent_w) / static_cast<float>(target_width),
+        intrinsics.cy * static_cast<float>(latent_h) / static_cast<float>(target_height),
+    };
+}
+
+std::vector<Mat4> relative_poses_from_first(const std::vector<SanaWmPose>& c2w) {
+    std::vector<Mat4> poses;
+    poses.reserve(c2w.size());
+    const Mat4 first_inv = inverse_rigid_pose(c2w.front().c2w);
+    poses.push_back(identity4());
+    for (std::size_t i = 1; i < c2w.size(); ++i)
+        poses.push_back(matmul4(first_inv, c2w[i].c2w));
+    return poses;
+}
+
+std::vector<int32_t> camera_time_indices(int32_t num_frames, int32_t latent_frames,
+                                         int32_t vae_time_stride) {
+    std::vector<int32_t> indices;
+    for (int32_t t = 0; t < num_frames; t += vae_time_stride) {
+        if (static_cast<int32_t>(indices.size()) >= latent_frames)
+            break;
+        indices.push_back(t);
+    }
+    return indices;
+}
+
+Vec3 camera_ray_direction(const Mat4& pose, const SanaWmIntrinsics& intrinsics, int32_t y,
+                          int32_t x) {
+    const Vec3 camera_dir{
+        (static_cast<float>(x) - intrinsics.cx) / intrinsics.fx,
+        (static_cast<float>(y) - intrinsics.cy) / intrinsics.fy,
+        1.0F,
+    };
+    return normalized(rotate_direction(pose, camera_dir));
+}
+
+std::array<float, 6> plucker_for_pixel(const Mat4& pose, const SanaWmIntrinsics& intrinsics,
+                                       int32_t y, int32_t x) {
+    const Vec3 direction = camera_ray_direction(pose, intrinsics, y, x);
+    const Vec3 moment = cross3(pose_origin(pose), direction);
+    return {direction[0], direction[1], direction[2], moment[0], moment[1], moment[2]};
+}
+
+void pack_raymap_row(std::vector<float>& raymap, std::size_t row, const Mat4& pose,
+                     const SanaWmIntrinsics& intrinsics) {
+    constexpr std::size_t kWidth = 20;
+    const std::size_t offset = row * kWidth;
+    std::copy(pose.begin(), pose.end(), raymap.begin() + static_cast<std::ptrdiff_t>(offset));
+    raymap[offset + 16] = intrinsics.fx;
+    raymap[offset + 17] = intrinsics.fy;
+    raymap[offset + 18] = intrinsics.cx;
+    raymap[offset + 19] = intrinsics.cy;
+}
+
+std::size_t chunk_plucker_index(int32_t channel, int32_t chunk, int32_t y, int32_t x,
+                                int32_t chunk_count, int32_t latent_h, int32_t latent_w) {
+    return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(chunk_count) +
+              static_cast<std::size_t>(chunk)) *
+                 static_cast<std::size_t>(latent_h) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(latent_w) +
+            static_cast<std::size_t>(x));
+}
+
+void pack_chunk_plucker(std::vector<float>& chunk_plucker, const std::vector<Mat4>& poses,
+                        const std::vector<SanaWmIntrinsics>& intrinsics, int32_t chunk,
+                        int32_t time_index, int32_t vae_time_stride, int32_t latent_h,
+                        int32_t latent_w, int32_t chunk_count) {
+    const int32_t start = std::max(0, time_index - (vae_time_stride - 1));
+    const std::size_t max_pose_idx = poses.size() - 1;
+    for (int32_t local_t = 0; local_t < vae_time_stride; ++local_t) {
+        const auto pose_idx = std::min(static_cast<std::size_t>(start + local_t), max_pose_idx);
+        for (int32_t y = 0; y < latent_h; ++y) {
+            for (int32_t x = 0; x < latent_w; ++x) {
+                const auto plucker = plucker_for_pixel(poses[pose_idx], intrinsics[pose_idx], y, x);
+                for (int32_t c = 0; c < 6; ++c) {
+                    const int32_t channel = local_t * 6 + c;
+                    chunk_plucker[chunk_plucker_index(channel, chunk, y, x, chunk_count, latent_h,
+                                                      latent_w)] =
+                        plucker[static_cast<std::size_t>(c)];
+                }
+            }
+        }
+    }
 }
 
 struct SanaWmRequest {
@@ -522,6 +709,61 @@ SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>&
         std::copy_n(src_row, static_cast<std::size_t>(target_width) * 3U, dst_row);
     }
     out.ok = true;
+    return out;
+}
+
+SanaWmCameraConditions
+sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
+                                  const std::vector<SanaWmIntrinsics>& intrinsics,
+                                  int32_t target_height, int32_t target_width,
+                                  int32_t vae_time_stride, int32_t vae_spatial_stride) {
+    validate_camera_condition_inputs(c2w, intrinsics, target_height, target_width, vae_time_stride,
+                                     vae_spatial_stride);
+
+    const int32_t num_frames = static_cast<int32_t>(c2w.size());
+    const int32_t latent_h = target_height / vae_spatial_stride;
+    const int32_t latent_w = target_width / vae_spatial_stride;
+    if (latent_h <= 0 || latent_w <= 0)
+        throw std::invalid_argument("SANA-WM latent camera dimensions must be positive");
+
+    const int32_t latent_frames = (num_frames - 1) / vae_time_stride + 1;
+    const auto poses = relative_poses_from_first(c2w);
+
+    std::vector<SanaWmIntrinsics> latent_intrinsics;
+    latent_intrinsics.reserve(c2w.size());
+    for (std::size_t i = 0; i < c2w.size(); ++i) {
+        latent_intrinsics.push_back(scale_intrinsics_to_latent(
+            intrinsics_at(intrinsics, i), latent_h, latent_w, target_height, target_width));
+    }
+
+    SanaWmCameraConditions out;
+    out.num_frames = num_frames;
+    out.latent_frames = latent_frames;
+    out.latent_height = latent_h;
+    out.latent_width = latent_w;
+    out.vae_time_stride = vae_time_stride;
+    out.vae_spatial_stride = vae_spatial_stride;
+    out.time_indices = camera_time_indices(num_frames, latent_frames, vae_time_stride);
+    out.raymap_width = 20;
+    out.chunk_plucker_channels = vae_time_stride * 6;
+
+    out.raymap.assign(out.time_indices.size() * static_cast<std::size_t>(out.raymap_width), 0.0F);
+    for (std::size_t row = 0; row < out.time_indices.size(); ++row) {
+        const auto pose_idx = static_cast<std::size_t>(out.time_indices[row]);
+        pack_raymap_row(out.raymap, row, poses[pose_idx], latent_intrinsics[pose_idx]);
+    }
+
+    const int32_t chunk_count = static_cast<int32_t>(out.time_indices.size());
+    out.chunk_plucker.assign(static_cast<std::size_t>(out.chunk_plucker_channels) *
+                                 static_cast<std::size_t>(chunk_count) *
+                                 static_cast<std::size_t>(latent_h) *
+                                 static_cast<std::size_t>(latent_w),
+                             0.0F);
+    for (int32_t chunk = 0; chunk < chunk_count; ++chunk) {
+        pack_chunk_plucker(out.chunk_plucker, poses, latent_intrinsics, chunk,
+                           out.time_indices[static_cast<std::size_t>(chunk)], vae_time_stride,
+                           latent_h, latent_w, chunk_count);
+    }
     return out;
 }
 
