@@ -6,12 +6,14 @@
 
 #include "utils/json_helpers.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <string>
 #include <tvm/ffi/c_api.h>
+#include <tvm/ffi/extra/c_env_api.h>
 #include <utility>
 #include <vector>
 
@@ -291,11 +293,13 @@ void report_tvm_ffi_error(const std::string& kernel_name) {
 
 // Fill a DLTensor from a TRT tensor descriptor.
 void fill_dl_tensor(DLTensor& t, void* data, const nvinfer1::PluginTensorDesc& desc,
-                    int device_id) {
+                    int device_id, int64_t* shape_storage) {
+    for (int32_t i = 0; i < desc.dims.nbDims; ++i)
+        shape_storage[i] = desc.dims.d[i];
     t.data = data;
     t.device = {kDLCUDA, device_id};
     t.ndim = desc.dims.nbDims;
-    t.shape = const_cast<int64_t*>(reinterpret_cast<const int64_t*>(desc.dims.d));
+    t.shape = shape_storage;
     t.strides = nullptr;
     t.byte_offset = 0;
     t.dtype = (desc.type == nvinfer1::DataType::kFLOAT) ? DLDataType{kDLFloat, 32, 1}
@@ -305,10 +309,12 @@ void fill_dl_tensor(DLTensor& t, void* data, const nvinfer1::PluginTensorDesc& d
 // Bind tensor descriptors to DLTensor + TVMFFIAny argument arrays.
 // Returns the next argument index after all bound tensors.
 int32_t bind_tensors(DLTensor* dl_tensors, TVMFFIAny* args, nvinfer1::PluginTensorDesc const* descs,
-                     void const* const* buffers, int32_t count, int32_t arg_idx, int device_id) {
+                     void const* const* buffers, int32_t count, int32_t arg_idx, int device_id,
+                     std::array<int64_t, 8>* shape_storage) {
     for (int32_t i = 0; i < count; ++i, ++arg_idx) {
         auto tidx = static_cast<std::size_t>(arg_idx);
-        fill_dl_tensor(dl_tensors[tidx], const_cast<void*>(buffers[i]), descs[i], device_id);
+        fill_dl_tensor(dl_tensors[tidx], const_cast<void*>(buffers[i]), descs[i], device_id,
+                       shape_storage[tidx].data());
         args[arg_idx].type_index = kTVMFFIDLTensorPtr;
         args[arg_idx].v_ptr = &dl_tensors[tidx];
     }
@@ -342,7 +348,7 @@ void append_extra_args(TVMFFIAny* args, int32_t base_idx,
         if (ea.type_index == kTVMFFIInt)
             args[idx].v_int64 = ea.v_int;
         else if (ea.type_index == kTVMFFIFloat)
-            std::memcpy(&args[idx].v_int64, &ea.v_float, sizeof(double));
+            args[idx].v_float64 = ea.v_float;
         else
             args[idx].v_ptr = nullptr;
     }
@@ -370,6 +376,7 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
     const int32_t total_tensors = num_inputs_ + (has_workspace ? 1 : 0) + num_outputs_;
     const int32_t total_args = total_tensors + static_cast<int32_t>(extra_args_.size());
     std::vector<DLTensor> dl_tensors(static_cast<std::size_t>(total_tensors));
+    std::vector<std::array<int64_t, 8>> shape_storage(static_cast<std::size_t>(total_tensors));
     std::vector<TVMFFIAny> args(static_cast<std::size_t>(total_args));
 
     int device_id = 0;
@@ -377,7 +384,8 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
 
     // Bind inputs, optional workspace, outputs, and extra args
     int32_t arg_idx =
-        bind_tensors(dl_tensors.data(), args.data(), inputDesc, inputs, num_inputs_, 0, device_id);
+        bind_tensors(dl_tensors.data(), args.data(), inputDesc, inputs, num_inputs_, 0, device_id,
+                     shape_storage.data());
 
     int64_t workspace_shape[1] = {workspace_bytes_};
     if (has_workspace)
@@ -386,14 +394,23 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
 
     auto* out_bufs = reinterpret_cast<void const* const*>(outputs);
     arg_idx = bind_tensors(dl_tensors.data(), args.data(), outputDesc, out_bufs, num_outputs_,
-                           arg_idx, device_id);
+                           arg_idx, device_id, shape_storage.data());
 
     append_extra_args(args.data(), arg_idx, extra_args_);
 
-    // 3. Call the TVM-FFI function
+    // 3. Call the TVM-FFI function on TensorRT's stream
+    TVMFFIStreamHandle previous_stream = nullptr;
+    if (TVMFFIEnvSetStream(kDLCUDA, device_id, stream, &previous_stream) != 0) {
+        report_tvm_ffi_error(kernel_name_);
+        return -1;
+    }
     TVMFFIAny result;
     result.type_index = kTVMFFINone;
     int ret = TVMFFIFunctionCall(cached_fn_, args.data(), total_args, &result);
+    if (TVMFFIEnvSetStream(kDLCUDA, device_id, previous_stream, nullptr) != 0) {
+        report_tvm_ffi_error(kernel_name_);
+        return -1;
+    }
     if (ret != 0) {
         report_tvm_ffi_error(kernel_name_);
         return -1;

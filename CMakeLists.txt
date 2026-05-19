@@ -135,6 +135,9 @@ add_library(trtmc_core
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
   src/cabi/api/trtmc_c.cpp
+  src/runtime/deployment/artifact_store.cpp
+  src/runtime/deployment/deployment_manifest.cpp
+  src/runtime/deployment/runtime_provider.cpp
   # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
   src/runtime/core/trt_common.cpp
   src/runtime/core/gpu_matmul.cpp
@@ -278,6 +281,190 @@ if(_trtmc_can_build_trt_backend)
 else()
   message(STATUS "  Standard TRT backend SDK not detected; libtrtmc_backend_trt.so will be skipped")
 endif()
+
+# --- TensorRT Edge-LLM runtime provider (optional) ---
+option(TRTMC_ENABLE_EDGE_LLM_PROVIDER
+  "Build TensorRT Edge-LLM runtime provider DSO" OFF)
+set(TRTMC_EDGE_LLM_ROOT "" CACHE PATH "TensorRT Edge-LLM repository root")
+set(TRTMC_EDGE_LLM_BUILD_DIR "" CACHE PATH
+  "TensorRT Edge-LLM build directory containing edgellmCore/Tokenizer/plugin outputs")
+
+set(_trtmc_has_edge_llm_provider FALSE)
+if(TRTMC_ENABLE_EDGE_LLM_PROVIDER)
+  set(_trtmc_edge_llm_submodule_root
+    "${PROJECT_SOURCE_DIR}/third_party/tensorrt-edge-llm")
+  set(_trtmc_edge_llm_root_effective "")
+  set(_trtmc_edge_llm_root_source "")
+  if(TRTMC_EDGE_LLM_ROOT)
+    set(_trtmc_edge_llm_root_effective "${TRTMC_EDGE_LLM_ROOT}")
+    set(_trtmc_edge_llm_root_source "TRTMC_EDGE_LLM_ROOT")
+  elseif(DEFINED ENV{TRTMC_EDGE_LLM_ROOT} AND NOT "$ENV{TRTMC_EDGE_LLM_ROOT}" STREQUAL "")
+    set(_trtmc_edge_llm_root_effective "$ENV{TRTMC_EDGE_LLM_ROOT}")
+    set(_trtmc_edge_llm_root_source "environment TRTMC_EDGE_LLM_ROOT")
+  elseif(EXISTS "${_trtmc_edge_llm_submodule_root}/cpp/runtime/llmInferenceRuntime.h")
+    set(_trtmc_edge_llm_root_effective "${_trtmc_edge_llm_submodule_root}")
+    set(_trtmc_edge_llm_root_source "third_party/tensorrt-edge-llm submodule")
+  endif()
+
+  if(_trtmc_edge_llm_root_effective)
+    get_filename_component(_trtmc_edge_llm_root_effective
+      "${_trtmc_edge_llm_root_effective}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
+  endif()
+
+  set(_trtmc_edge_llm_build_dir_effective "")
+  if(TRTMC_EDGE_LLM_BUILD_DIR)
+    set(_trtmc_edge_llm_build_dir_effective "${TRTMC_EDGE_LLM_BUILD_DIR}")
+  elseif(DEFINED ENV{TRTMC_EDGE_LLM_BUILD_DIR} AND NOT "$ENV{TRTMC_EDGE_LLM_BUILD_DIR}" STREQUAL "")
+    set(_trtmc_edge_llm_build_dir_effective "$ENV{TRTMC_EDGE_LLM_BUILD_DIR}")
+  endif()
+  if(_trtmc_edge_llm_build_dir_effective)
+    get_filename_component(_trtmc_edge_llm_build_dir_effective
+      "${_trtmc_edge_llm_build_dir_effective}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
+  endif()
+
+  set(_trtmc_edge_llm_build_dirs)
+  if(_trtmc_edge_llm_build_dir_effective)
+    list(APPEND _trtmc_edge_llm_build_dirs "${_trtmc_edge_llm_build_dir_effective}")
+  endif()
+  if(_trtmc_edge_llm_root_effective)
+    list(APPEND _trtmc_edge_llm_build_dirs
+      "${_trtmc_edge_llm_root_effective}/build"
+      "${PROJECT_BINARY_DIR}/edge-llm")
+  endif()
+  list(REMOVE_DUPLICATES _trtmc_edge_llm_build_dirs)
+
+  set(_trtmc_edge_llm_library_search_paths)
+  foreach(_trtmc_edge_llm_build_dir IN LISTS _trtmc_edge_llm_build_dirs)
+    list(APPEND _trtmc_edge_llm_library_search_paths
+      "${_trtmc_edge_llm_build_dir}/cpp"
+      "${_trtmc_edge_llm_build_dir}"
+      "${_trtmc_edge_llm_build_dir}/lib"
+      "${_trtmc_edge_llm_build_dir}/lib64")
+  endforeach()
+  list(REMOVE_DUPLICATES _trtmc_edge_llm_library_search_paths)
+
+  unset(TRTMC_EDGE_LLM_INCLUDE_DIR CACHE)
+  unset(TRTMC_EDGE_LLM_CORE_LIBRARY CACHE)
+  unset(TRTMC_EDGE_LLM_TOKENIZER_LIBRARY CACHE)
+  unset(TRTMC_EDGE_LLM_PLUGIN_LIBRARY CACHE)
+
+  find_path(TRTMC_EDGE_LLM_INCLUDE_DIR runtime/llmInferenceRuntime.h
+    PATHS "${_trtmc_edge_llm_root_effective}/cpp"
+    NO_DEFAULT_PATH)
+  find_library(TRTMC_EDGE_LLM_CORE_LIBRARY
+    NAMES edgellmCore libedgellmCore.a
+    PATHS ${_trtmc_edge_llm_library_search_paths}
+    PATH_SUFFIXES "" lib lib64
+    NO_DEFAULT_PATH)
+  find_library(TRTMC_EDGE_LLM_TOKENIZER_LIBRARY
+    NAMES edgellmTokenizer libedgellmTokenizer.a
+    PATHS ${_trtmc_edge_llm_library_search_paths}
+    PATH_SUFFIXES "" lib lib64
+    NO_DEFAULT_PATH)
+  find_library(TRTMC_EDGE_LLM_PLUGIN_LIBRARY
+    NAMES NvInfer_edgellm_plugin libNvInfer_edgellm_plugin.so
+    PATHS ${_trtmc_edge_llm_library_search_paths}
+    PATH_SUFFIXES "" lib lib64
+    NO_DEFAULT_PATH)
+
+  set(_trtmc_edge_llm_missing)
+  if(NOT _trtmc_edge_llm_root_effective)
+    list(APPEND _trtmc_edge_llm_missing
+      "source root (run git submodule update --init --recursive third_party/tensorrt-edge-llm or pass -DTRTMC_EDGE_LLM_ROOT=...)")
+  endif()
+  if(NOT TRTMC_EDGE_LLM_INCLUDE_DIR)
+    list(APPEND _trtmc_edge_llm_missing
+      "headers: cpp/runtime/llmInferenceRuntime.h under the Edge-LLM source root")
+  endif()
+  if(_trtmc_edge_llm_root_effective AND NOT EXISTS
+     "${_trtmc_edge_llm_root_effective}/3rdParty/nlohmannJson/include/nlohmann/json.hpp")
+    list(APPEND _trtmc_edge_llm_missing
+      "Edge-LLM nested submodules (run git submodule update --init --recursive third_party/tensorrt-edge-llm)")
+  endif()
+  if(NOT TRTMC_EDGE_LLM_CORE_LIBRARY)
+    list(APPEND _trtmc_edge_llm_missing
+      "edgellmCore library in TRTMC_EDGE_LLM_BUILD_DIR, <root>/build, or <model-connect-build>/edge-llm")
+  endif()
+  if(NOT TRTMC_EDGE_LLM_TOKENIZER_LIBRARY)
+    list(APPEND _trtmc_edge_llm_missing
+      "edgellmTokenizer library in TRTMC_EDGE_LLM_BUILD_DIR, <root>/build, or <model-connect-build>/edge-llm")
+  endif()
+  if(NOT TRTMC_EDGE_LLM_PLUGIN_LIBRARY)
+    list(APPEND _trtmc_edge_llm_missing
+      "libNvInfer_edgellm_plugin.so in TRTMC_EDGE_LLM_BUILD_DIR, <root>/build, or <model-connect-build>/edge-llm")
+  endif()
+  if(NOT TRTMC_TRT_INCLUDE_DIR)
+    list(APPEND _trtmc_edge_llm_missing "TensorRT headers (TRTMC_TRT_INCLUDE_DIR)")
+  endif()
+  if(NOT TRTMC_TRT_LIBRARY)
+    list(APPEND _trtmc_edge_llm_missing "TensorRT runtime library (TRTMC_TRT_LIBRARY)")
+  endif()
+  if(NOT CMAKE_CUDA_COMPILER)
+    list(APPEND _trtmc_edge_llm_missing
+      "CUDA compiler, required to device-link the Edge-LLM provider DSO")
+  endif()
+
+  if(_trtmc_edge_llm_missing)
+    string(REPLACE ";" "\n  - " _trtmc_edge_llm_missing_text
+      "${_trtmc_edge_llm_missing}")
+    message(FATAL_ERROR
+      "TRTMC_ENABLE_EDGE_LLM_PROVIDER=ON but required TensorRT Edge-LLM inputs are missing:\n"
+      "  - ${_trtmc_edge_llm_missing_text}\n"
+      "Resolved source root: ${_trtmc_edge_llm_root_effective}\n"
+      "Source root source: ${_trtmc_edge_llm_root_source}\n"
+      "Build directories searched: ${_trtmc_edge_llm_build_dirs}\n"
+      "Library paths searched: ${_trtmc_edge_llm_library_search_paths}\n"
+      "Initialize the submodule with:\n"
+      "  git submodule update --init --recursive third_party/tensorrt-edge-llm\n"
+      "Then build Edge-LLM and pass -DTRTMC_EDGE_LLM_BUILD_DIR=/path/to/edge-llm/build if needed.")
+  endif()
+
+  set(_trtmc_has_edge_llm_provider TRUE)
+  add_library(trtmc_edge_llm_core STATIC IMPORTED)
+  set_target_properties(trtmc_edge_llm_core PROPERTIES
+    IMPORTED_LOCATION "${TRTMC_EDGE_LLM_CORE_LIBRARY}"
+    IMPORTED_LINK_INTERFACE_LANGUAGES "CUDA;CXX")
+  add_library(trtmc_edge_llm_tokenizer STATIC IMPORTED)
+  set_target_properties(trtmc_edge_llm_tokenizer PROPERTIES
+    IMPORTED_LOCATION "${TRTMC_EDGE_LLM_TOKENIZER_LIBRARY}"
+    IMPORTED_LINK_INTERFACE_LANGUAGES "CXX")
+  add_library(trtmc_provider_edgellm SHARED
+    src/runtime/deployment/edge_llm_provider_dso.cpp)
+  target_include_directories(trtmc_provider_edgellm
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}/include
+      ${TRTMC_EDGE_LLM_INCLUDE_DIR}
+      ${_trtmc_edge_llm_root_effective}/3rdParty/nlohmannJson/include
+      ${TRTMC_TRT_INCLUDE_DIR}
+      ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(trtmc_provider_edgellm PRIVATE
+    trtmc_edge_llm_core
+    trtmc_edge_llm_tokenizer
+    ${TRTMC_TRT_LIBRARY}
+    ${TRTMC_CUDART_LIBRARY}
+    ${CMAKE_DL_LIBS})
+  target_compile_definitions(trtmc_provider_edgellm PRIVATE
+    TRTMC_DEFAULT_EDGE_LLM_PLUGIN_PATH=\"${TRTMC_EDGE_LLM_PLUGIN_LIBRARY}\")
+  target_link_options(trtmc_provider_edgellm PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wl,--allow-multiple-definition>)
+  target_compile_options(trtmc_provider_edgellm PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(trtmc_provider_edgellm PROPERTIES
+    OUTPUT_NAME trtmc_provider_edgellm
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    LINKER_LANGUAGE CUDA
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  message(STATUS "TensorRT Edge-LLM provider DSO: enabled (libtrtmc_provider_edgellm.so)")
+  message(STATUS "  Edge-LLM source root : ${_trtmc_edge_llm_root_effective}")
+  message(STATUS "  Edge-LLM root source : ${_trtmc_edge_llm_root_source}")
+  message(STATUS "  Edge-LLM build dirs  : ${_trtmc_edge_llm_build_dirs}")
+  message(STATUS "  Edge-LLM include     : ${TRTMC_EDGE_LLM_INCLUDE_DIR}")
+  message(STATUS "  Edge-LLM core        : ${TRTMC_EDGE_LLM_CORE_LIBRARY}")
+  message(STATUS "  Edge-LLM tokenizer   : ${TRTMC_EDGE_LLM_TOKENIZER_LIBRARY}")
+  message(STATUS "  Edge-LLM plugin      : ${TRTMC_EDGE_LLM_PLUGIN_LIBRARY}")
+endif()
+target_compile_definitions(trtmc_core PUBLIC
+  TRTMC_HAS_EDGE_LLM=$<BOOL:${_trtmc_has_edge_llm_provider}>)
 
 # --- libtorch multinomial bridge (optional) ---
 set(_trtmc_torch_roots
@@ -555,6 +742,7 @@ endfunction()
 trtmc_add_test(test_bundle_format)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
+trtmc_add_test(test_deployment_manifest)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
@@ -713,6 +901,9 @@ trtmc_add_test(test_tvm_ffi_plugin REQUIRES_TRT)
 if(TARGET test_tvm_ffi_plugin AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+  if(TARGET trtmc_tvm_ffi_plugin)
+    target_link_libraries(test_tvm_ffi_plugin PRIVATE trtmc_tvm_ffi_plugin)
+  endif()
 endif()
 
 # TVM-FFI plugin V2 (self-contained test with IPluginV2DynamicExt)
@@ -723,10 +914,16 @@ trtmc_add_test(test_tvm_ffi_module_loader REQUIRES_TRT)
 if(TARGET test_tvm_ffi_module_loader AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_module_loader SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_module_loader PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+  if(TARGET trtmc_tvm_ffi_plugin)
+    target_link_libraries(test_tvm_ffi_module_loader PRIVATE trtmc_tvm_ffi_plugin)
+  endif()
 endif()
 if(TARGET test_tvm_ffi_plugin_v2 AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin_v2 SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+  if(TARGET trtmc_tvm_ffi_plugin)
+    target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE trtmc_tvm_ffi_plugin)
+  endif()
 endif()
 
 # --- Install ---

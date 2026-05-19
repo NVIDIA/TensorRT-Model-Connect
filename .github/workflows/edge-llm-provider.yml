@@ -1,0 +1,67 @@
+name: TensorRT Edge-LLM Provider Opt-In CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_dir:
+        description: HF repo ID or local model directory to export with Edge-LLM.
+        required: false
+        default: Qwen/Qwen3-0.6B
+      engine_dir:
+        description: Optional prebuilt Edge-LLM engine directory to package instead of exporting.
+        required: false
+        default: ""
+      target:
+        description: Deployment target label recorded in deployment_manifest.json.
+        required: false
+        default: gb300
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trtmc-edge-llm-provider-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TRTMC_CI_IMAGE: ${{ vars.TRTMC_CI_IMAGE || 'trtf-dev-gb300:latest' }}
+  TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+  TRT_PACKAGE_DIR: ${{ vars.TRT_PACKAGE_DIR || vars.TRTMC_TRT_PACKAGE_DIR || '' }}
+  TRTMC_TRT_PACKAGE_DIR: ${{ vars.TRTMC_TRT_PACKAGE_DIR || '' }}
+  TRTMC_EDGE_LLM_MODEL_DIR: ${{ inputs.model_dir }}
+  TRTMC_EDGE_LLM_ENGINE_DIR: ${{ inputs.engine_dir }}
+  TRTMC_EDGE_LLM_TARGET: ${{ inputs.target }}
+  TRTMC_EDGE_LLM_ARTIFACT_DIR: edge_llm_provider_artifacts
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+jobs:
+  edge-llm-provider:
+    name: Build And Run Edge-LLM Provider
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 480
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out source and Edge-LLM submodule
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: false
+          lfs: false
+          submodules: recursive
+
+      - name: Run Edge-LLM provider CI
+        run: bash .github/scripts/run-gha-stage.sh edge-llm-provider
+
+      - name: Upload Edge-LLM provider artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-edge-llm-provider-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: edge_llm_provider_artifacts/

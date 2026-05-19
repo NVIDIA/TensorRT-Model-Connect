@@ -18,6 +18,8 @@
 //   trtmc version
 
 #include "stb_image_write.h"
+#include "bundle/bundle_format.h"
+#include "runtime/deployment/deployment_manifest.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
@@ -44,6 +46,9 @@
 #include <vector>
 
 namespace {
+
+extern "C" int cudaMemGetInfo(std::size_t* free_bytes, std::size_t* total_bytes);
+constexpr int kCudaSuccess = 0;
 
 struct CliArgs {
     std::string command;
@@ -98,6 +103,7 @@ struct CliArgs {
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     bool cuda_graphs{false};
+    bool inspect_deployment{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -156,6 +162,16 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     return static_cast<std::uint64_t>(bytes + 0.5L);
 }
 
+std::optional<std::uint64_t> sampled_cuda_used_bytes() {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) != kCudaSuccess)
+        return std::nullopt;
+    if (total_bytes < free_bytes)
+        return std::nullopt;
+    return static_cast<std::uint64_t>(total_bytes - free_bytes);
+}
+
 trtmc::LoadOptions make_load_options(const CliArgs& args) {
     trtmc::LoadOptions options;
     options.hf_python = args.hf_python;
@@ -207,12 +223,12 @@ void print_usage() {
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-           "  trtmc inspect         <bundle.trtfb>\n"
+           "  trtmc inspect         <bundle.trtfb> [--deployment]\n"
            "  trtmc version\n"
            "\n"
            "Options:\n"
            "  --backend-dir PATH    Extra directory to search for libtrtmc_backend_*.so\n"
-           "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
+           "  --runtime-cache PATH   TRT-RTX JIT cache file, or deployment provider artifact cache dir\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n";
 }
 
@@ -487,6 +503,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.cuda_graphs = true;
             continue;
         }
+        if (arg == "--deployment") {
+            args.inspect_deployment = true;
+            continue;
+        }
         if (arg == "--config" && need_value(arg)) {
             args.config_path = argv[++i];
             continue;
@@ -719,8 +739,18 @@ int cmd_run(const CliArgs& args) {
         std::cerr << "[trtmc.benchmark] warmup=" << warmup_n << " iterations=" << bench_n
                   << " max_new_tokens=" << cfg.max_new_tokens << '\n';
 
+        const auto baseline_used_bytes = sampled_cuda_used_bytes();
+        auto peak_used_bytes = baseline_used_bytes;
+        auto sample_memory = [&]() {
+            if (const auto used = sampled_cuda_used_bytes()) {
+                if (!peak_used_bytes || *used > *peak_used_bytes)
+                    peak_used_bytes = used;
+            }
+        };
+
         for (int w = 0; w < warmup_n; ++w)
             pipeline->generate(prompt, cfg);
+        sample_memory();
 
         std::vector<double> prefill_ms_v, decode_ms_v;
         prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
@@ -730,6 +760,7 @@ int cmd_run(const CliArgs& args) {
             auto result = pipeline->generate(prompt, cfg);
             prefill_ms_v.push_back(result.prefill_ms);
             decode_ms_v.push_back(result.decode_ms);
+            sample_memory();
         }
 
         auto mean = [](const std::vector<double>& v) {
@@ -742,7 +773,16 @@ int cmd_run(const CliArgs& args) {
 
         std::cerr << std::fixed << std::setprecision(2);
         std::cerr << "[trtmc.benchmark] prefill_ms=" << pmean << " decode_ms=" << dmean
-                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
+                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0);
+        if (peak_used_bytes) {
+            const auto delta =
+                baseline_used_bytes && *peak_used_bytes >= *baseline_used_bytes
+                    ? (*peak_used_bytes - *baseline_used_bytes)
+                    : 0;
+            std::cerr << " sampled_peak_gpu_used_bytes=" << *peak_used_bytes
+                      << " sampled_peak_gpu_delta_bytes=" << delta;
+        }
+        std::cerr << '\n';
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
@@ -1460,6 +1500,16 @@ int cmd_inspect(const CliArgs& args) {
     }
 
     try {
+        if (args.inspect_deployment) {
+            const auto bundle = trtmc::ReadBundleFile(args.bundle_path);
+            const auto manifest = trtmc::deployment::read_manifest(bundle);
+            if (!manifest) {
+                std::cout << "Deployment:        <none>\n";
+                return EXIT_SUCCESS;
+            }
+            std::cout << trtmc::deployment::inspect_text(*manifest);
+            return EXIT_SUCCESS;
+        }
         const auto info = trtmc::InspectBundle(args.bundle_path);
         std::cout << "Model ID:           " << info.model_id << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';

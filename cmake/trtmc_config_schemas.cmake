@@ -15,6 +15,7 @@ set(TRTMC_CONFIG_SCHEMAS
   "audio_bark.cpp|register_audio_bark_schema"
   "audio_magpie.cpp|register_audio_magpie_schema"
   "platform.cpp|register_platform_schema"
+  "deployment.cpp|register_deployment_schema"
 )
 
 set(TRTMC_CONFIG_SCHEMA_REGISTRATION_SOURCE

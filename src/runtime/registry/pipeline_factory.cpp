@@ -4,6 +4,10 @@
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
+#include "runtime/deployment/artifact_store.h"
+#include "runtime/deployment/deployment_manifest.h"
+#include "runtime/deployment/runtime_provider.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -14,6 +18,7 @@
 #include "utils/json_helpers.h"
 
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -204,6 +209,13 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
     }
 }
 
+std::string deployment_cache_root(const std::string& bundle_path, const std::string& variant_id,
+                                  const std::string& runtime_cache_path) {
+    if (!runtime_cache_path.empty())
+        return (std::filesystem::path(runtime_cache_path) / "deployment" / variant_id).string();
+    return deployment::default_artifact_cache_root(bundle_path, variant_id).string();
+}
+
 } // namespace
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
@@ -229,6 +241,34 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
+    std::optional<config::ConfigBundle> resolved =
+        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
+                                   /*set_tokens=*/{});
+
+    const auto deployment_manifest = deployment::read_manifest(bundle);
+    const deployment::Variant* deployment_variant = nullptr;
+    if (deployment_manifest) {
+        deployment_variant = deployment::choose_variant(*deployment_manifest,
+                                                        resolved ? &*resolved : nullptr);
+        if (deployment_variant != nullptr) {
+            std::cerr << "[trtmc.deployment] selected variant=" << deployment_variant->id
+                      << " provider=" << deployment_variant->provider
+                      << " scope=" << deployment_variant->scope << std::endl;
+            if (!deployment_variant->runtime_strategy.empty())
+                strategy = deployment_variant->runtime_strategy;
+            if (deployment_variant->scope == "runtime" &&
+                deployment_variant->provider != "native_trt") {
+                deployment::ArtifactStore artifacts(
+                    bundle, bundle_path,
+                    deployment_cache_root(bundle_path, deployment_variant->id,
+                                          runtime_cache_path));
+                return deployment::load_runtime_provider(
+                    *deployment_variant, artifacts, bundle_path);
+            }
+            bundle = deployment::bundle_with_variant_artifacts(bundle, *deployment_variant);
+        }
+    }
+
     // Load backend DSO based on bundle metadata
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
@@ -244,12 +284,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         base_cfg.tokenizer_add_special_tokens_present = true;
     }
 
-    // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
-    // Best-effort: a malformed input prints to stderr and falls back to
-    // schema defaults so plugin construction isn't blocked.
-    std::optional<config::ConfigBundle> resolved =
-        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
-                                   /*set_tokens=*/{});
+    load_ffi_kernels_from_bundle(bundle);
 
     PipelineContext ctx{bundle,
                         base_cfg,
@@ -287,6 +322,33 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
+    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
+        config_text, bundle_path, options.config_path, options.set_tokens);
+
+    const auto deployment_manifest = deployment::read_manifest(bundle);
+    const deployment::Variant* deployment_variant = nullptr;
+    if (deployment_manifest) {
+        deployment_variant = deployment::choose_variant(*deployment_manifest,
+                                                        resolved ? &*resolved : nullptr);
+        if (deployment_variant != nullptr) {
+            std::cerr << "[trtmc.deployment] selected variant=" << deployment_variant->id
+                      << " provider=" << deployment_variant->provider
+                      << " scope=" << deployment_variant->scope << std::endl;
+            if (!deployment_variant->runtime_strategy.empty())
+                strategy = deployment_variant->runtime_strategy;
+            if (deployment_variant->scope == "runtime" &&
+                deployment_variant->provider != "native_trt") {
+                deployment::ArtifactStore artifacts(
+                    bundle, bundle_path,
+                    deployment_cache_root(bundle_path, deployment_variant->id,
+                                          options.runtime_cache_path));
+                return deployment::load_runtime_provider(
+                    *deployment_variant, artifacts, bundle_path);
+            }
+            bundle = deployment::bundle_with_variant_artifacts(bundle, *deployment_variant);
+        }
+    }
+
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
                                                 options.backend_search_paths);
@@ -296,8 +358,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
 
-    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
-        config_text, bundle_path, options.config_path, options.set_tokens);
+    load_ffi_kernels_from_bundle(bundle);
 
     PipelineContext ctx{bundle,
                         base_cfg,

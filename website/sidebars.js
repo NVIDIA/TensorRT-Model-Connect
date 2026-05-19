@@ -44,6 +44,8 @@ const sidebars = {
         'architecture/overview',
         'architecture/bundle-format',
         'architecture/runtime-plugins',
+        'architecture/deployment-specialization',
+        'architecture/edge-llm-submodule-integration',
         'architecture/build-system'
       ]
     },

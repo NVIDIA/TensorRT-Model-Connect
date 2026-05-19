@@ -156,7 +156,6 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
 class DecoderPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        load_ffi_kernels_from_bundle(ctx.bundle);
         apply_text_trace_from_registry(ctx.runtime_config);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);

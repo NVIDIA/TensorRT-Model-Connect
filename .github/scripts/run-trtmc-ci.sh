@@ -42,6 +42,10 @@ generate_e2e_report() {
 
 trap generate_e2e_report EXIT
 
+run_edge_llm_provider_ci() {
+  bash .github/scripts/run-edge-llm-provider-ci.sh
+}
+
 mkdir_if_set() {
   local path="${1:-}"
   if [ -n "$path" ]; then
@@ -528,6 +532,10 @@ run_stage() {
     coverage-map)
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Generate coverage map" generate_coverage_map
+      ;;
+    edge-llm-provider)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Edge-LLM provider CI" run_edge_llm_provider_ci
       ;;
     *)
       echo "ERROR: Unknown CI stage: $stage" >&2

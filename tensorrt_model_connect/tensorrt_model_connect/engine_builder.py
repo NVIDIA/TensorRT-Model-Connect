@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sys
 import time
@@ -61,6 +62,43 @@ def _untracked_compile_time(
     tracked_compile_elapsed = max(
         0.0, compile_after_components - compile_before_components)
     return max(0.0, measured_compile_elapsed - tracked_compile_elapsed)
+
+
+def _ensure_tvm_ffi_plugin_loaded(verbose: bool = False) -> None:
+    """Load the optional TVM-FFI TensorRT plugin for FFI specialization builds."""
+    import ctypes
+
+    lib_path = os.environ.get("TRTMC_TVM_FFI_LIBRARY")
+    if lib_path and "tvm_ffi" not in sys.modules:
+        ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+
+    candidates: list[str] = []
+    env_plugin = os.environ.get("TRTMC_TVM_FFI_PLUGIN")
+    if env_plugin:
+        candidates.append(env_plugin)
+    candidates.append("libtrtmc_tvm_ffi_plugin.so")
+
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            plugin = ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
+            try:
+                plugin.tvm_ffi_plugin_force_link()
+            except AttributeError:
+                pass
+            if verbose:
+                print(f"[trtmc-build] Loaded TVM-FFI plugin: {candidate}",
+                      file=sys.stderr)
+            return
+        except OSError as exc:
+            errors.append(f"{candidate}: {exc}")
+
+    raise RuntimeError(
+        "deployment.enable_ffi_attention requires libtrtmc_tvm_ffi_plugin.so. "
+        "Set TRTMC_TVM_FFI_PLUGIN to the plugin path and TRTMC_TVM_FFI_LIBRARY "
+        "to libtvm_ffi.so if it is not on LD_LIBRARY_PATH. Tried: "
+        + "; ".join(errors)
+    )
 
 
 # Standard HF file patterns to download (matches what the builder needs).
@@ -578,6 +616,7 @@ def build_bundle(
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
+    deployment_config=None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -683,6 +722,28 @@ def build_bundle(
               file=sys.stderr)
 
     # 4. Build TRT engine
+    deployment_target = "generic"
+    deployment_enable_ffi_attention = False
+    deployment_kernel_artifacts = list(kernel_artifacts or [])
+    if deployment_config is not None:
+        try:
+            deployment_target = str(deployment_config.get("deployment", "target") or "generic")
+        except KeyError:
+            deployment_target = "generic"
+        try:
+            deployment_enable_ffi_attention = bool(
+                deployment_config.get("deployment", "enable_ffi_attention"))
+        except KeyError:
+            deployment_enable_ffi_attention = False
+        try:
+            from .deployment import parse_kernel_artifacts
+
+            deployment_kernel_artifacts.extend(parse_kernel_artifacts(
+                str(deployment_config.get("deployment", "ffi_kernel_artifacts") or "")
+            ))
+        except KeyError:
+            pass
+
     triattention_cfg = None
     triattention_section = None
     runtime_strategy = getattr(plugin, "runtime_strategy", "") or "decoder_kv_cache"
@@ -774,16 +835,88 @@ def build_bundle(
         extra_kwargs['precision'] = precision
     if _call_supports_kwarg(plugin.build_engine, 'quant_ctx'):
         extra_kwargs['quant_ctx'] = quant_ctx
-    engine_t0 = time.monotonic()
-    try:
-        engine_plan = plugin.build_engine(
-            config, weights, max_cache_length, verbose=verbose,
-            **extra_kwargs)
-    finally:
-        engine_elapsed = time.monotonic() - engine_t0
-        _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
-        _add_build_timing(build_timing, "trt_compile_main_engine_s", engine_elapsed)
-        _write_build_timing(build_timing)
+    selected_ffi_engine_plan = None
+    selected_ffi_kernel_manifest = None
+    selected_ffi_kernel_sections = []
+    if deployment_enable_ffi_attention:
+        if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+            raise ValueError(
+                "deployment.enable_ffi_attention is only supported for decoder "
+                f"KV-cache runtimes. Found runtime_strategy={runtime_strategy!r}."
+            )
+        if config.num_key_value_heads != config.num_attention_heads:
+            raise ValueError(
+                "deployment.enable_ffi_attention currently requires "
+                "num_key_value_heads == num_attention_heads because the FFI "
+                "decoder-attention bridge does not expand GQA/MQA K/V heads."
+            )
+        head_dim = (
+            int(config.head_dim)
+            if getattr(config, "head_dim", 0)
+            else int(config.hidden_size // max(1, config.num_attention_heads))
+        )
+        if not deployment_kernel_artifacts:
+            from .kernels import flashinfer_decode
+
+            deployment_kernel_artifacts.append(
+                flashinfer_decode.setup(head_dim=head_dim)
+            )
+        if not deployment_kernel_artifacts:
+            raise ValueError(
+                "deployment.enable_ffi_attention requested but no FFI kernel "
+                "artifacts were available"
+            )
+        _ensure_tvm_ffi_plugin_loaded(verbose=verbose)
+        ffi_attention_kernel = deployment_kernel_artifacts[0][0]
+        print(
+            "[trtmc-build] Deployment specialization: building portable "
+            "fallback and FFI attention variant "
+            f"({ffi_attention_kernel})",
+            file=sys.stderr,
+        )
+        native_t0 = time.monotonic()
+        try:
+            engine_plan = plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
+        finally:
+            native_elapsed = time.monotonic() - native_t0
+            _add_build_timing(build_timing, "trt_compile_s", native_elapsed)
+            _add_build_timing(
+                build_timing, "trt_compile_main_engine_s", native_elapsed)
+            _write_build_timing(build_timing)
+        config.raw["_ffi_attention_kernel"] = ffi_attention_kernel
+        ffi_t0 = time.monotonic()
+        try:
+            selected_ffi_engine_plan = plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
+        finally:
+            config.raw.pop("_ffi_attention_kernel", None)
+            ffi_elapsed = time.monotonic() - ffi_t0
+            _add_build_timing(build_timing, "trt_compile_s", ffi_elapsed)
+            _add_build_timing(
+                build_timing, "trt_compile_ffi_attention_engine_s",
+                ffi_elapsed)
+            _write_build_timing(build_timing)
+        from .deployment import kernel_sections
+
+        selected_ffi_kernel_sections, selected_ffi_kernel_manifest = kernel_sections(
+            deployment_kernel_artifacts,
+            section_prefix="deployment/variants/ffi_attention/",
+        )
+        engine_elapsed = native_elapsed + ffi_elapsed
+    else:
+        engine_t0 = time.monotonic()
+        try:
+            engine_plan = plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
+        finally:
+            engine_elapsed = time.monotonic() - engine_t0
+            _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
+            _add_build_timing(build_timing, "trt_compile_main_engine_s", engine_elapsed)
+            _write_build_timing(build_timing)
     print(f"[trtmc-build] Engine built [{engine_elapsed:.1f}s] "
           f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
@@ -870,6 +1003,22 @@ def build_bundle(
     )
 
     sections = [BundleSection("engine_plan", engine_plan)]
+    if selected_ffi_engine_plan is not None and selected_ffi_kernel_manifest is not None:
+        from .deployment import ffi_attention_manifest, manifest_section
+
+        sections.append(BundleSection(
+            "deployment/variants/ffi_attention/engine_plan",
+            selected_ffi_engine_plan,
+        ))
+        sections.extend(selected_ffi_kernel_sections)
+        sections.append(BundleSection(
+            "deployment/variants/ffi_attention/kernel_manifest.json",
+            selected_ffi_kernel_manifest,
+        ))
+        sections.append(manifest_section(ffi_attention_manifest(
+            target=deployment_target,
+            runtime_strategy=runtime_strategy,
+        )))
 
     # Add vision engine section if present
     if vision_plan is not None:
@@ -1002,19 +1151,11 @@ def build_bundle(
         sections.append(BundleSection("config.json", make_runtime_config_json(None)))
 
     # Package FFI kernel .so files into the bundle
-    if kernel_artifacts:
-        import json as _json
-        manifest_entries = []
-        for global_name, so_path in kernel_artifacts:
-            section_name = f"kernel_{global_name.replace('.', '_')}.so"
-            so_data = Path(so_path).read_bytes()
-            sections.append(BundleSection(section_name, so_data))
-            manifest_entries.append({
-                "global_name": global_name,
-                "func_name": "run",
-                "section": section_name,
-            })
-        manifest_json = _json.dumps({"kernels": manifest_entries}).encode("utf-8")
+    if kernel_artifacts and not deployment_enable_ffi_attention:
+        from .deployment import kernel_sections
+
+        root_kernel_sections, manifest_json = kernel_sections(kernel_artifacts)
+        sections.extend(root_kernel_sections)
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
     write_t0 = time.monotonic()
@@ -1347,6 +1488,7 @@ def build(
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
+    deployment_config=None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1386,4 +1528,5 @@ def build(
                  triattention_disable_trig=triattention_disable_trig,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
                  diffusion_overrides=diffusion_overrides,
-                 build_timing_path=build_timing_path)
+                 build_timing_path=build_timing_path,
+                 deployment_config=deployment_config)

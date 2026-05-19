@@ -382,9 +382,9 @@ def build_standard_decoder_engine(
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
 
-    # FFI attention kernel: set by the perf agent on their branch.
+    # FFI attention kernel: deployment specialization may set this build-time field.
     # Default: None (use native TRT attention).
-    ffi_attention_kernel = None
+    ffi_attention_kernel = config.raw.get("_ffi_attention_kernel")
 
     # ---------------------------------------------------------------
     # Decoder layers

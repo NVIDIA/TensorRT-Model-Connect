@@ -39,12 +39,64 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     build_model_ref = args.model
 
+    # Resolve the registry-backed build-time config early so deployment
+    # providers can participate in backend selection instead of being forced
+    # through raw TRT family dispatch first.
+    cli_cfg = getattr(args, "config", None)
+    cli_sets = getattr(args, "set_flags", None) or []
+    resolved_bundle = None
+    if cli_cfg or cli_sets:
+        from .runtime_config import resolve_cli_config
+        from .runtime_config.schemas import load_all as _load_schemas
+        _load_schemas()
+        try:
+            resolved_bundle = resolve_cli_config(
+                config_path=cli_cfg, set_tokens=cli_sets)
+        except (ValueError, FileNotFoundError, KeyError) as exc:
+            print(f"Error resolving config: {exc}", file=sys.stderr)
+            return 1
+
+    deployment_provider = "native_trt"
+    if resolved_bundle is not None:
+        try:
+            deployment_provider = str(resolved_bundle.get(
+                "deployment", "provider"))
+        except KeyError:
+            deployment_provider = "native_trt"
+
     # Backend dispatch: default to auto-selection that prefers raw TRT and
     # falls back to Torch-TRT when raw support is unavailable.
     method_name = getattr(args, 'method', 'auto')
+    if deployment_provider == "tensorrt-edge-llm":
+        method_name = "edge_llm"
     if method_name == 'auto':
         try:
             method_name, build_model_ref = _auto_select_build_backend(args.model)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            return 1
+
+    if method_name == "edge_llm":
+        try:
+            from .edge_llm_provider import build_edge_llm_bundle
+            from .engine_builder import _resolve_model
+
+            build_edge_llm_bundle(
+                model_dir=_resolve_model(build_model_ref),
+                output_path=args.output,
+                max_cache_length=args.max_cache_length,
+                precision=args.precision,
+                deployment_config=resolved_bundle,
+                verbose=args.verbose,
+            )
+            if resolved_bundle is not None:
+                from .runtime_config import write_effective_config_next_to
+                path = write_effective_config_next_to(resolved_bundle, args.output)
+                print(f"[trtmc-build] Wrote effective config: {path}", file=sys.stderr)
+            return 0
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             if args.verbose:
@@ -125,23 +177,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
 
-    # Resolve the registry-backed build-time config up front (before build),
-    # so build-time namespaces can feed kwargs directly. Importing
-    # runtime_config triggers registration of any schema modules declared
-    # under tensorrt_model_connect.runtime_config.schemas.
-    cli_cfg = getattr(args, "config", None)
-    cli_sets = getattr(args, "set_flags", None) or []
-    resolved_bundle = None
-    if cli_cfg or cli_sets:
-        from .runtime_config import resolve_cli_config
-        from .runtime_config.schemas import load_all as _load_schemas
-        _load_schemas()
-        try:
-            resolved_bundle = resolve_cli_config(
-                config_path=cli_cfg, set_tokens=cli_sets)
-        except (ValueError, FileNotFoundError, KeyError) as exc:
-            print(f"Error resolving config: {exc}", file=sys.stderr)
-            return 1
+    # Consume resolved build-time config.  Importing runtime_config above
+    # triggers registration of schema modules when --config/--set is present.
+    if resolved_bundle is not None:
         try:
             audio_magpie_max_source_positions = int(resolved_bundle.get(
                 "audio_magpie", "max_source_positions"))
@@ -178,6 +216,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
             build_timing_path=getattr(args, "build_timing_json", None),
+            deployment_config=resolved_bundle,
             diffusion_overrides={
                 key: value
                 for key, value in {
@@ -389,6 +428,23 @@ def _read_bundle_header(bundle_path: str) -> dict:
     return json.loads(header_json)
 
 
+def _read_bundle_section(bundle_path: str, section_name: str) -> bytes | None:
+    """Read one bundle section by name without parsing all payloads."""
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header_json = f.read(header_len).decode("utf-8")
+        header = json.loads(header_json)
+        meta = header.get("sections", {}).get(section_name)
+        if meta is None:
+            return None
+        data_start = 16 + header_len
+        f.seek(data_start + int(meta["offset"]))
+        return f.read(int(meta["size"]))
+
+
 def list_engine_sections(bundle_path: str) -> list[dict]:
     """List all TRT engine plan sections in a bundle.
 
@@ -438,6 +494,52 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
     try:
         header = _read_bundle_header(bundle_path)
+
+        if getattr(args, 'deployment', False):
+            manifest_data = _read_bundle_section(bundle_path, "deployment_manifest.json")
+            if not manifest_data:
+                print("Deployment:        <none>")
+                return 0
+            manifest = json.loads(manifest_data.decode("utf-8"))
+            target = manifest.get("target", {})
+            print("Deployment:")
+            print(f"  target: {target.get('platform', '<unspecified>')}")
+            if target.get("objective"):
+                print(f"  objective: {target['objective']}")
+            print(f"  selected_variant: {manifest.get('selected_variant', '')}")
+            print(f"  default_variant: {manifest.get('default_variant', '')}")
+            print("  variants:")
+            for variant in manifest.get("variants", []):
+                print(f"    - id: {variant.get('id', '')}")
+                print(f"      scope: {variant.get('scope', '')}")
+                print(f"      provider: {variant.get('provider', '')}")
+                if variant.get("runtime_strategy"):
+                    print(f"      runtime_strategy: {variant['runtime_strategy']}")
+                if variant.get("compatibility"):
+                    print(
+                        "      compatibility: "
+                        f"{json.dumps(variant['compatibility'], sort_keys=True)}"
+                    )
+                if variant.get("performance"):
+                    print(
+                        "      performance: "
+                        f"{json.dumps(variant['performance'], sort_keys=True)}"
+                    )
+                print(f"      fallback: {str(bool(variant.get('fallback', False))).lower()}")
+                artifacts = variant.get("artifacts", [])
+                if artifacts:
+                    print("      artifacts:")
+                    for artifact in artifacts:
+                        suffix = ""
+                        if artifact.get("section"):
+                            suffix += f" section={artifact['section']}"
+                        if artifact.get("section_prefix"):
+                            suffix += f" section_prefix={artifact['section_prefix']}"
+                        print(
+                            f"        - {artifact.get('name', '')} "
+                            f"({artifact.get('kind', '')}){suffix}"
+                        )
+            return 0
 
         if getattr(args, 'list_engines', False):
             # Engine-only listing mode
@@ -650,6 +752,8 @@ def main() -> None:
     inspect_p.add_argument("bundle_path", help=".trtfb file to inspect")
     inspect_p.add_argument("--list-engines", action="store_true",
                            help="List only TRT engine plan sections with roles")
+    inspect_p.add_argument("--deployment", action="store_true",
+                           help="Show deployment-specialization variants")
 
     # trtmc-build version
     subparsers.add_parser("version", help="Show version info")
