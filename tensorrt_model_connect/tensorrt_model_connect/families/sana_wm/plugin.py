@@ -9,6 +9,10 @@ SANA-WM Python inference contract, while preserving the same inputs in e2e.
 
 from __future__ import annotations
 
+import json
+import struct
+from pathlib import Path
+
 from ...checkpoint_mapper import WeightDict
 from ...config import ModelConfig
 
@@ -24,6 +28,10 @@ _DEFAULT_FPS = 16
 _DEFAULT_NUM_STEPS = 60
 _DEFAULT_GUIDANCE_SCALE = 5.0
 _DEFAULT_VAE_STRIDE = (8, 32, 32)
+_STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
+_REFINER_REL = Path("refiner") / "refiner.safetensors"
+_REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
+_MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
 
 
 def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
@@ -36,6 +44,72 @@ def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
     if len(values) == 2:
         values = [values[0], values[1], values[1]]
     return values[0], values[1], values[2]
+
+
+def _read_safetensors_header(path: Path) -> dict:
+    with path.open("rb") as f:
+        prefix = f.read(8)
+        if len(prefix) != 8:
+            raise ValueError(f"{path} is too small to be a safetensors file")
+        header_len = struct.unpack("<Q", prefix)[0]
+        if header_len <= 0 or header_len > _MAX_SAFETENSORS_HEADER_BYTES:
+            raise ValueError(f"{path} has an invalid safetensors header size: {header_len}")
+        header = f.read(header_len)
+        if len(header) != header_len:
+            raise ValueError(f"{path} ended before its safetensors header was complete")
+    return json.loads(header)
+
+
+def _tensor_shape(header: dict, name: str) -> list[int]:
+    entry = header.get(name)
+    if not isinstance(entry, dict) or "shape" not in entry:
+        raise ValueError(f"SANA-WM DiT safetensors missing tensor {name!r}")
+    return [int(v) for v in entry["shape"]]
+
+
+def _block_count(header: dict) -> int:
+    block_ids = set()
+    for name in header:
+        parts = name.split(".", 2)
+        if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit():
+            block_ids.add(int(parts[1]))
+    return max(block_ids) + 1 if block_ids else 0
+
+
+def _summarize_stage1_dit(path: Path) -> dict:
+    header = _read_safetensors_header(path)
+    tensor_count = sum(1 for name in header if name != "__metadata__")
+    hidden_size, latent_channels, _, _, _ = _tensor_shape(header, "x_embedder.proj.weight")
+    text_hidden, text_dim = _tensor_shape(header, "y_embedder.y_proj.fc1.weight")
+    text_length, y_dim = _tensor_shape(header, "y_embedder.y_embedding")
+    out_channels, out_hidden = _tensor_shape(header, "final_layer.linear.weight")
+    plucker_hidden, chunk_plucker_channels, _, _, _ = _tensor_shape(
+        header, "plucker_embedder.proj.weight"
+    )
+    raymap_hidden, raymap_channels, _, _, _ = _tensor_shape(header, "raymap_embedder.proj.weight")
+    qkv_rows, qkv_cols = _tensor_shape(header, "blocks.0.attn.qkv.weight")
+
+    if not (
+        hidden_size == text_hidden == out_hidden == plucker_hidden == raymap_hidden == qkv_cols
+    ):
+        raise ValueError("SANA-WM DiT metadata has inconsistent hidden-size dimensions")
+    if text_dim != y_dim:
+        raise ValueError("SANA-WM DiT metadata has inconsistent text embedding dimensions")
+    if out_channels != latent_channels:
+        raise ValueError("SANA-WM DiT metadata has inconsistent latent channel dimensions")
+    if qkv_rows != hidden_size * 3:
+        raise ValueError("SANA-WM DiT qkv tensor does not match 3x hidden size")
+
+    return {
+        "tensor_count": tensor_count,
+        "num_layers": _block_count(header),
+        "hidden_size": hidden_size,
+        "latent_channels": latent_channels,
+        "text_max_length": text_length,
+        "text_embed_dim": text_dim,
+        "chunk_plucker_channels": chunk_plucker_channels,
+        "raymap_channels": raymap_channels,
+    }
 
 
 class SanaWmPlugin:
@@ -51,9 +125,20 @@ class SanaWmPlugin:
         )
 
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
-        del model_dir
+        model_path = Path(model_dir)
         weights = WeightDict()
         weights["_model_format"] = "sana_wm_yaml"
+        weights["_model_dir"] = str(model_path)
+        weights["_stage1_dit_path"] = str(model_path / _STAGE1_DIT_REL)
+        weights["_vae_dir"] = str(model_path / "vae")
+        weights["_refiner_checkpoint"] = str(model_path / _REFINER_REL)
+        weights["_refiner_gemma_root"] = str(model_path / _REFINER_GEMMA_REL)
+
+        stage1_path = model_path / _STAGE1_DIT_REL
+        if stage1_path.is_file():
+            summary = _summarize_stage1_dit(stage1_path)
+            weights["_stage1_dit_summary"] = summary
+            config.raw["_sana_wm_stage1_dit_summary"] = summary
         return weights
 
     def build_engine(
@@ -88,7 +173,7 @@ class SanaWmPlugin:
         video_num_frames = int(raw.get("video_num_frames", _DEFAULT_NUM_FRAMES))
         vae_stride = _vae_stride(vae, raw)
 
-        return {
+        overrides = {
             "model_type": "sana_wm",
             "runtime_strategy": self.runtime_strategy,
             "engine_backend": "none",
@@ -131,6 +216,17 @@ class SanaWmPlugin:
             "text_encoder_max_length": int(text_encoder.get("model_max_length", 300)),
             "flow_shift": float(scheduler.get("inference_flow_shift", 9.8)),
         }
+        stage1_summary = raw.get("_sana_wm_stage1_dit_summary")
+        if isinstance(stage1_summary, dict):
+            overrides.update(
+                {
+                    "sana_wm_dit_num_layers": int(stage1_summary.get("num_layers", 0)),
+                    "sana_wm_dit_hidden_size": int(stage1_summary.get("hidden_size", 0)),
+                    "sana_wm_dit_text_embed_dim": int(stage1_summary.get("text_embed_dim", 0)),
+                    "sana_wm_dit_tensor_count": int(stage1_summary.get("tensor_count", 0)),
+                }
+            )
+        return overrides
 
 
 plugin = SanaWmPlugin()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 
 import pytest
 
@@ -41,6 +42,26 @@ scheduler:
   inference_flow_shift: 9.8
   vis_sampler: flow_dpm-solver
 """
+
+
+def _write_safetensors_header(path, tensors: dict[str, tuple[str, list[int]]]) -> None:
+    offset = 0
+    header = {}
+    dtype_size = {"F32": 4, "BF16": 2}
+    for name, (dtype, shape) in tensors.items():
+        count = 1
+        for dim in shape:
+            count *= int(dim)
+        size = count * dtype_size[dtype]
+        header[name] = {
+            "dtype": dtype,
+            "shape": shape,
+            "data_offsets": [offset, offset + size],
+        }
+        offset += size
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded)
 
 
 def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
@@ -90,6 +111,44 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["flow_shift"] == 9.8
     assert overrides["text_encoder_name"] == "gemma-2-2b-it"
     assert overrides["text_encoder_max_length"] == 300
+
+
+def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_safetensors_header(
+        tmp_path / "dit" / "sana_wm_1600m_720p.safetensors",
+        {
+            "x_embedder.proj.weight": ("F32", [2240, 128, 1, 1, 1]),
+            "y_embedder.y_proj.fc1.weight": ("F32", [2240, 2304]),
+            "y_embedder.y_embedding": ("BF16", [300, 2304]),
+            "final_layer.linear.weight": ("F32", [128, 2240]),
+            "plucker_embedder.proj.weight": ("F32", [2240, 48, 1, 1, 1]),
+            "raymap_embedder.proj.weight": ("F32", [2240, 3, 1, 1, 1]),
+            "blocks.0.attn.qkv.weight": ("F32", [6720, 2240]),
+            "blocks.1.attn.qkv.weight": ("F32", [6720, 2240]),
+        },
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert weights["_stage1_dit_path"].endswith("dit/sana_wm_1600m_720p.safetensors")
+    assert weights["_vae_dir"].endswith("vae")
+    assert weights["_refiner_checkpoint"].endswith("refiner/refiner.safetensors")
+    summary = weights["_stage1_dit_summary"]
+    assert summary["num_layers"] == 2
+    assert summary["hidden_size"] == 2240
+    assert summary["latent_channels"] == 128
+    assert summary["text_max_length"] == 300
+    assert summary["text_embed_dim"] == 2304
+    assert summary["chunk_plucker_channels"] == 48
+    assert summary["raymap_channels"] == 3
+
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert overrides["sana_wm_dit_num_layers"] == 2
+    assert overrides["sana_wm_dit_hidden_size"] == 2240
+    assert overrides["sana_wm_dit_text_embed_dim"] == 2304
+    assert overrides["sana_wm_dit_tensor_count"] == 8
 
 
 def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> None:
