@@ -518,8 +518,8 @@ build_pip_package() {
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
   "$smoke_venv/bin/trtmc" version
+  "$smoke_venv/bin/trtmc" --help >/tmp/trtmc-help.txt
   "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
-  "$smoke_venv/bin/trtmc" run --help >/tmp/trtmc-run-help.txt
   "$smoke_venv/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib.resources as resources

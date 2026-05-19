@@ -437,6 +437,8 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   set_target_properties(trtmc_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    SKIP_BUILD_RPATH TRUE
+    INSTALL_RPATH ""
   )
   if(TRTMC_TRT_BACKEND_ABI)
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD

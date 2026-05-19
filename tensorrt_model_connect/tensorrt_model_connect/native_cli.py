@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from importlib import util as importlib_util
 from importlib import resources
 from pathlib import Path
 from typing import Iterable
@@ -43,14 +44,38 @@ def _missing_binary_message() -> str:
     )
 
 
+def _tensorrt_library_dir() -> Path | None:
+    spec = importlib_util.find_spec("tensorrt_libs")
+    if spec is None:
+        return None
+    locations = spec.submodule_search_locations
+    if locations:
+        path = Path(next(iter(locations)))
+        return path if path.is_dir() else None
+    if spec.origin:
+        path = Path(spec.origin).parent
+        return path if path.is_dir() else None
+    return None
+
+
+def _configure_runtime_environment() -> None:
+    os.environ.setdefault("TRTMC_PYTHON", sys.executable)
+    os.environ.setdefault("TRTMC_DISABLE_SOURCE_PYTHONPATH", "1")
+    if sys.prefix != sys.base_prefix:
+        os.environ.setdefault("VIRTUAL_ENV", sys.prefix)
+
+    trt_lib_dir = _tensorrt_library_dir()
+    if trt_lib_dir is not None:
+        os.environ.setdefault("TRTMC_TRT_LIBRARY_DIR", str(trt_lib_dir))
+
+
 def main() -> int:
     binary = _existing_executable(_native_binary_candidates())
     if binary is None:
         print(_missing_binary_message(), file=sys.stderr)
         return 127
 
-    os.environ.setdefault("TRTMC_PYTHON", sys.executable)
-    os.environ.setdefault("TRTMC_DISABLE_SOURCE_PYTHONPATH", "1")
+    _configure_runtime_environment()
     argv = [str(binary), *sys.argv[1:]]
 
     if os.name == "posix":
