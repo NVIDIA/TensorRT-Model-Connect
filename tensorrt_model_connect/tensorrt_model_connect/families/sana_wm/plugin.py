@@ -353,9 +353,20 @@ def _missing_full_snapshot_paths(model_path: Path) -> list[str]:
     return missing
 
 
+def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
+    missing = list(_NATIVE_BUILDER_COMPONENTS)
+    if weights.get("_stage1_text_encoder_dir"):
+        missing = [
+            component
+            for component in missing
+            if component != "stage-1 Gemma text encoder"
+        ]
+    return tuple(missing)
+
+
 def _native_build_error(weights: WeightDict) -> str:
     model_path = Path(str(weights.get("_model_dir", "")))
-    components = "; ".join(_NATIVE_BUILDER_COMPONENTS)
+    components = "; ".join(_missing_native_builder_components(weights))
     message = (
         "SANA-WM pure C++ builds require native TensorRT component plans under "
         "trtmc_engines/ or sana_wm_native_plan_paths. Building those plans "

@@ -221,6 +221,20 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     assert "complete LTX-2 refiner stack" in message
 
 
+def test_sana_wm_plugin_omits_buildable_text_encoder_from_builder_gap(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_text_encoder_config(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+    message = str(exc_info.value)
+    assert "stage-1 Gemma text encoder" not in message
+    assert "SanaMSVideoCamCtrl DiT" in message
+    assert "LTX-2 VAE encoder" in message
+
+
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     _write_safetensors_header(
