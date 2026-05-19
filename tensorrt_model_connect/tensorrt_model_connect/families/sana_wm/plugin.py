@@ -184,6 +184,26 @@ def _append_model_native_plan_dir(candidates: list[Path], model_path: Path, valu
         candidates.append(path)
 
 
+def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_text_encoder_dir"),
+        text_encoder.get("text_encoder_dir"),
+        os.environ.get("SANA_WM_TEXT_ENCODER_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / _STAGE1_TEXT_ENCODER_REL)
+
+    for candidate in candidates:
+        if (candidate / "config.json").is_file():
+            return candidate
+    return None
+
+
 def _discover_native_plan_dirs(model_path: Path, raw_config: dict) -> list[Path]:
     candidates: list[Path] = []
     _append_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_native_plan_dir"))
@@ -218,33 +238,67 @@ def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str,
     return paths
 
 
-def _validate_native_plan_paths(paths: dict[str, Path]) -> None:
+def _effective_native_sections(
+    paths: dict[str, Path],
+    *,
+    can_build_stage1_text_encoder: bool,
+) -> list[str]:
+    present = set(paths)
+    if can_build_stage1_text_encoder:
+        present.add("text_encoder_0_plan")
+    return [section for section in _NATIVE_PLAN_SECTIONS if section in present]
+
+
+def _native_sections_are_complete(sections: list[str]) -> bool:
+    present = set(sections)
+    if not all(section in present for section in _STAGE1_CORE_PLAN_SECTIONS):
+        return False
+    present_refiner = [section for section in _REFINER_PLAN_SECTIONS if section in present]
+    if present_refiner:
+        return all(section in present for section in _REFINER_PLAN_SECTIONS)
+    return "vae_decoder_plan" in present
+
+
+def _validate_native_plan_paths(
+    paths: dict[str, Path],
+    *,
+    can_build_stage1_text_encoder: bool = False,
+) -> None:
     if not paths:
         return
-    missing_core = [section for section in _STAGE1_CORE_PLAN_SECTIONS if section not in paths]
+    effective_sections = _effective_native_sections(
+        paths,
+        can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+    )
+    missing_core = [
+        section
+        for section in _STAGE1_CORE_PLAN_SECTIONS
+        if section not in effective_sections
+    ]
     if missing_core:
-        present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
         raise ValueError(
             "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
-            f"missing {missing_core!r} with only {present!r} present"
+            f"missing {missing_core!r} with only {effective_sections!r} present"
         )
 
-    present_refiner = [section for section in _REFINER_PLAN_SECTIONS if section in paths]
+    present_refiner = [section for section in _REFINER_PLAN_SECTIONS if section in effective_sections]
     if present_refiner:
-        missing_refiner = [section for section in _REFINER_PLAN_SECTIONS if section not in paths]
+        missing_refiner = [
+            section
+            for section in _REFINER_PLAN_SECTIONS
+            if section not in effective_sections
+        ]
         if missing_refiner:
-            present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
             raise ValueError(
                 "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
-                f"missing {missing_refiner!r} with only {present!r} present"
+                f"missing {missing_refiner!r} with only {effective_sections!r} present"
             )
         return
 
-    if "vae_decoder_plan" not in paths:
-        present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
+    if "vae_decoder_plan" not in effective_sections:
         raise ValueError(
             "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
-            f"missing ['vae_decoder_plan'] with only {present!r} present"
+            f"missing ['vae_decoder_plan'] with only {effective_sections!r} present"
         )
 
 
@@ -319,6 +373,37 @@ def _native_build_error(weights: WeightDict) -> str:
     return message
 
 
+def _build_stage1_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    from ..gemma.plugin import plugin as gemma_plugin
+    from ..gemma.standard_decoder_builder import build_standard_decoder_engine
+
+    text_config = ModelConfig.from_dir(text_encoder_dir)
+    if not gemma_plugin.matches(text_config.model_type):
+        raise ValueError(
+            "SANA-WM stage-1 text encoder builder currently supports Gemma only; "
+            f"found model_type={text_config.model_type!r} in {text_encoder_dir}"
+        )
+    text_weights = gemma_plugin.load_weights(
+        str(text_encoder_dir),
+        text_config,
+        precision=precision,
+    )
+    return build_standard_decoder_engine(
+        text_config,
+        text_weights,
+        max_cache_length,
+        precision=precision,
+        verbose=verbose,
+        hidden_state_output=True,
+    )
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -347,7 +432,12 @@ class SanaWmPlugin:
             weights["_stage1_dit_summary"] = summary
             config.raw["_sana_wm_stage1_dit_summary"] = summary
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
-        _validate_native_plan_paths(native_plan_paths)
+        stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
+        can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
+        _validate_native_plan_paths(
+            native_plan_paths,
+            can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+        )
         tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
         if native_plan_paths:
             _validate_native_tokenizer_sections(tokenizer_sections)
@@ -355,7 +445,14 @@ class SanaWmPlugin:
             weights["_native_plan_paths"] = {
                 section: str(path) for section, path in native_plan_paths.items()
             }
-            config.raw["_sana_wm_native_plan_sections"] = list(native_plan_paths)
+            effective_sections = _effective_native_sections(
+                native_plan_paths,
+                can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            )
+            if _native_sections_are_complete(effective_sections):
+                config.raw["_sana_wm_native_plan_sections"] = effective_sections
+        if stage1_text_encoder_dir is not None:
+            weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
         if tokenizer_sections:
             weights["_tokenizer_sections"] = {
                 section: str(path) for section, path in tokenizer_sections.items()
@@ -373,7 +470,12 @@ class SanaWmPlugin:
         verbose: bool = False,
     ) -> bytes:
         del max_cache_length, precision, quant_ctx, verbose
-        if not weights.get("_native_plan_paths"):
+        native_plan_paths = weights.get("_native_plan_paths")
+        effective_sections = _effective_native_sections(
+            native_plan_paths if isinstance(native_plan_paths, dict) else {},
+            can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
+        )
+        if not _native_sections_are_complete(effective_sections):
             raise NotImplementedError(_native_build_error(weights))
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
@@ -388,7 +490,7 @@ class SanaWmPlugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> dict:
-        del config, max_cache_length, precision, verbose
+        del config
         result = {}
         plan_paths = weights.get("_native_plan_paths", {})
         if isinstance(plan_paths, dict):
@@ -398,6 +500,14 @@ class SanaWmPlugin:
                     for section, path in plan_paths.items()
                     if section in _NATIVE_PLAN_SECTIONS
                 }
+            )
+        text_encoder_dir = weights.get("_stage1_text_encoder_dir")
+        if "text_encoder_0_plan" not in result and text_encoder_dir:
+            result["text_encoder_0_plan"] = _build_stage1_text_encoder_plan(
+                Path(str(text_encoder_dir)),
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
             )
         tokenizer_sections = weights.get("_tokenizer_sections", {})
         if isinstance(tokenizer_sections, dict):
