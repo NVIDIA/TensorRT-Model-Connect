@@ -111,6 +111,35 @@ void test_action_rollout_rejects_invalid_segments() {
     check(rejected_bad_key, "sana wm action: unknown key rejected");
 }
 
+void test_runtime_config_parses_native_sana_wm_fields() {
+    const auto cfg = trtmc::parse_sana_wm_config(
+        R"json({
+          "sana_wm_hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+          "video_height": 704,
+          "video_width": 1280,
+          "video_num_frames": 321,
+          "fps": 16,
+          "num_inference_steps": 60,
+          "guidance_scale": 5.0,
+          "flow_shift": 9.8,
+          "seed": 42,
+          "vae_latent_dim": 128,
+          "vae_time_stride": 8,
+          "vae_spatial_stride": 32,
+          "text_encoder_max_length": 300
+        })json");
+
+    check(cfg.height == 704 && cfg.width == 1280 && cfg.num_frames == 321,
+          "sana wm config: model-card video shape parsed");
+    check(cfg.fps == 16 && cfg.num_steps == 60 && near(cfg.cfg_scale, 5.0F),
+          "sana wm config: generation defaults parsed");
+    check(near(cfg.flow_shift, 9.8F) && cfg.seed == 42,
+          "sana wm config: scheduler seed defaults parsed");
+    check(cfg.vae_latent_dim == 128 && cfg.vae_time_stride == 8 && cfg.vae_spatial_stride == 32,
+          "sana wm config: vae shape contract parsed");
+    check(cfg.text_encoder_max_length == 300, "sana wm config: text encoder length parsed");
+}
+
 void test_resize_crop_plan_matches_upstream_geometry() {
     const auto plan = trtmc::sana_wm_make_resize_crop_plan(640, 480, 704, 1280);
 
@@ -325,6 +354,7 @@ void test_bridge_command_forwards_strict_sana_wm_contract() {
 int main() {
     test_action_rollout_matches_model_card_frame_count_and_translation();
     test_action_rollout_rejects_invalid_segments();
+    test_runtime_config_parses_native_sana_wm_fields();
     test_resize_crop_plan_matches_upstream_geometry();
     test_resize_center_crop_crops_hwc_pixels();
     test_prepare_vae_input_image_matches_upstream_tensor_layout();

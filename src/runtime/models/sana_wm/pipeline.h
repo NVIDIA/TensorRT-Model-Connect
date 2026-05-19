@@ -21,6 +21,15 @@ struct SanaWmRuntimeConfig {
     int32_t num_frames{321};
     int32_t height{704};
     int32_t width{1280};
+    int32_t fps{16};
+    int32_t num_steps{60};
+    float cfg_scale{5.0F};
+    float flow_shift{9.8F};
+    int32_t seed{42};
+    int32_t vae_latent_dim{128};
+    int32_t vae_time_stride{8};
+    int32_t vae_spatial_stride{32};
+    int32_t text_encoder_max_length{300};
     bool require_official_script{false};
 };
 

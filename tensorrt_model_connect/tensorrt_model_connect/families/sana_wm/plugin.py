@@ -20,6 +20,22 @@ _DEFAULT_ROTATION_SPEED_DEG = 1.2
 _DEFAULT_NUM_FRAMES = 321
 _DEFAULT_HEIGHT = 704
 _DEFAULT_WIDTH = 1280
+_DEFAULT_FPS = 16
+_DEFAULT_NUM_STEPS = 60
+_DEFAULT_GUIDANCE_SCALE = 5.0
+_DEFAULT_VAE_STRIDE = (8, 32, 32)
+
+
+def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
+    stride = raw_vae.get("vae_stride", raw_config.get("vae_stride", _DEFAULT_VAE_STRIDE))
+    if not isinstance(stride, (list, tuple)) or len(stride) == 0:
+        return _DEFAULT_VAE_STRIDE
+    values = [int(v) for v in stride]
+    if len(values) == 1:
+        values = [values[0], values[0], values[0]]
+    if len(values) == 2:
+        values = [values[0], values[1], values[1]]
+    return values[0], values[1], values[2]
 
 
 class SanaWmPlugin:
@@ -70,6 +86,7 @@ class SanaWmPlugin:
         video_height = int(raw.get("video_height", _DEFAULT_HEIGHT))
         video_width = int(raw.get("video_width", _DEFAULT_WIDTH))
         video_num_frames = int(raw.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+        vae_stride = _vae_stride(vae, raw)
 
         return {
             "model_type": "sana_wm",
@@ -93,10 +110,19 @@ class SanaWmPlugin:
             "video_height": video_height,
             "video_width": video_width,
             "video_num_frames": video_num_frames,
+            "fps": int(raw.get("fps", _DEFAULT_FPS)),
+            "num_inference_steps": int(
+                raw.get("num_inference_steps", _DEFAULT_NUM_STEPS)
+            ),
+            "guidance_scale": float(
+                raw.get("guidance_scale", _DEFAULT_GUIDANCE_SCALE)
+            ),
             "vae_latent_dim": int(vae.get("vae_latent_dim", raw.get("vae_latent_dim", 128))),
             "vae_downsample_rate": int(
                 vae.get("vae_downsample_rate", raw.get("vae_downsample_rate", 32))
             ),
+            "vae_time_stride": int(vae_stride[0]),
+            "vae_spatial_stride": int(vae_stride[-1]),
             "text_encoder_name": str(
                 text_encoder.get("text_encoder_name")
                 or text_encoder.get("model")

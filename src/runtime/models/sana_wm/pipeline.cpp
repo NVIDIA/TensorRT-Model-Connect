@@ -650,6 +650,18 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
     cfg.num_frames = extract_json_int(config_json, "video_num_frames", cfg.num_frames);
     cfg.height = extract_json_int(config_json, "video_height", cfg.height);
     cfg.width = extract_json_int(config_json, "video_width", cfg.width);
+    cfg.fps = extract_json_int(config_json, "fps", cfg.fps);
+    cfg.num_steps = extract_json_int(config_json, "num_inference_steps", cfg.num_steps);
+    cfg.cfg_scale = extract_json_float(config_json, "guidance_scale", cfg.cfg_scale);
+    cfg.flow_shift = extract_json_float(config_json, "flow_shift", cfg.flow_shift);
+    cfg.seed = extract_json_int(config_json, "seed", cfg.seed);
+    cfg.vae_latent_dim = extract_json_int(config_json, "vae_latent_dim", cfg.vae_latent_dim);
+    cfg.vae_time_stride = extract_json_int(config_json, "vae_time_stride", cfg.vae_time_stride);
+    cfg.vae_spatial_stride = extract_json_int(
+        config_json, "vae_spatial_stride",
+        extract_json_int(config_json, "vae_downsample_rate", cfg.vae_spatial_stride));
+    cfg.text_encoder_max_length =
+        extract_json_int(config_json, "text_encoder_max_length", cfg.text_encoder_max_length);
     cfg.require_official_script =
         extract_json_int(config_json, "sana_wm_require_official_script", 0) != 0;
     return cfg;
