@@ -702,6 +702,7 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     cfg.text_encoder_max_length = 2;
     cfg.text_encoder_dim = 2;
     cfg.num_steps = 1;
+    cfg.default_intrinsics = {2.0F, 2.0F, 1.0F, 1.0F};
 
     trtmc::SanaWmNativeModules modules;
     modules.text_encoder = std::make_unique<FakeTrtModule>(
@@ -739,7 +740,6 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = image_path.string();
     gen_cfg.camera_action = "w-1";
-    gen_cfg.camera_intrinsics = {4.0F, 4.0F, 2.0F, 2.0F};
     gen_cfg.num_frames = 2;
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
