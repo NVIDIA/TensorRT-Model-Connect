@@ -171,6 +171,19 @@ class DiffusionComparator:
         metrics["num_frames"] = MetricResult(
             value=float(num_frames), threshold=None, operator=">=", passed=True,
         )
+        ref_num_frames = ref.data.get("num_frames")
+        if ref_num_frames:
+            frame_delta = int(num_frames) - int(ref_num_frames)
+            frame_count_match = frame_delta == 0
+            metrics["frame_count_match"] = MetricResult(
+                value=0.0 if frame_count_match else float(abs(frame_delta)),
+                threshold=0.0,
+                operator="==",
+                passed=frame_count_match,
+                note=f"trt={num_frames}, ref={ref_num_frames}",
+            )
+            if not frame_count_match:
+                all_pass = False
 
         frame_stats = trt.data.get("frame_stats", {})
         if frame_stats:

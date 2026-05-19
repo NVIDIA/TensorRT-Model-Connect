@@ -103,3 +103,31 @@ def test_comparator_fails_contrast_ratio_even_when_absolute_std_passes():
     ratio = result.metrics["reference_pixel_std_ratio"]
     assert ratio.value < ratio.threshold
     assert not ratio.passed
+
+
+def test_comparator_fails_when_frame_count_differs_from_reference():
+    comparator = DiffusionComparator()
+    trt = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "returncode": 0,
+            "num_frames": 320,
+            "frame_stats": {"mean": 0.5462, "std": 0.2509},
+        },
+    )
+    ref = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "num_frames": 321,
+            "frame_stats": {"mean": 0.5245, "std": 0.2509},
+        },
+    )
+
+    result = comparator._compare_frames(trt, ref, _threshold().metrics)
+
+    assert not result.passed
+    frame_count = result.metrics["frame_count_match"]
+    assert frame_count.value == 1.0
+    assert frame_count.threshold == 0.0
+    assert not frame_count.passed
+    assert frame_count.note == "trt=320, ref=321"
