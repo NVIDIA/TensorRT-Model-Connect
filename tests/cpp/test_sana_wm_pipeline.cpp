@@ -11,6 +11,8 @@
 
 #include "../../src/runtime/models/sana_wm/pipeline.h"
 
+#include "trtmc/trtmc_io.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -451,20 +453,68 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
 
     trtmc::GenerateConfig gen_cfg;
-    gen_cfg.image_path = "asset/sana_wm/demo_0.png";
+    gen_cfg.image_path = "/tmp/trtmc_sana_wm_missing_input.png";
 
-    bool native_incomplete_reported = false;
+    bool native_input_error_reported = false;
     try {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
-        native_incomplete_reported =
-            std::string(exc.what()).find("native TensorRT module sections") != std::string::npos;
+        native_input_error_reported =
+            std::string(exc.what()).find("failed to load image") != std::string::npos;
     }
 
     check(pipeline.has_native_modules(), "sana wm native: modules recorded");
     check(!pipeline.has_native_stage1(), "sana wm native: partial stage1 is not complete");
-    check(native_incomplete_reported, "sana wm native: incomplete native path reported");
+    check(native_input_error_reported, "sana wm native: native input errors reported");
     check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
+}
+
+void test_native_input_preparation_reaches_solver_boundary() {
+    const auto image_path =
+        std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
+    trtmc::io::save_png(image_path.string(),
+                        {
+                            1.0F, 0.0F, 0.0F,
+                            0.0F, 1.0F, 0.0F,
+                            0.0F, 0.0F, 1.0F,
+                            1.0F, 1.0F, 1.0F,
+                        },
+                        2, 2);
+
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+    cfg.height = 4;
+    cfg.width = 4;
+    cfg.num_frames = 2;
+    cfg.vae_time_stride = 1;
+    cfg.vae_spatial_stride = 2;
+
+    trtmc::SanaWmNativeModules modules;
+    modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+
+    auto runner = std::make_shared<FakeSubprocessRunner>();
+    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = image_path.string();
+    gen_cfg.camera_action = "w-1";
+    gen_cfg.camera_intrinsics = {4.0F, 4.0F, 2.0F, 2.0F};
+    gen_cfg.num_frames = 2;
+
+    bool solver_boundary_reported = false;
+    try {
+        (void)pipeline.generate_image("drive forward", gen_cfg);
+    } catch (const std::runtime_error& exc) {
+        solver_boundary_reported =
+            std::string(exc.what()).find("solver/refiner execution is not implemented") !=
+            std::string::npos;
+    }
+
+    check(solver_boundary_reported, "sana wm native: input prep reaches solver boundary");
+    check(runner->call_count == 0, "sana wm native: prepared inputs without bridge");
+
+    std::error_code ec;
+    std::filesystem::remove(image_path, ec);
 }
 
 } // namespace
@@ -485,5 +535,6 @@ int main() {
     test_stage1_latents_reject_mismatched_buffers();
     test_bridge_command_forwards_strict_sana_wm_contract();
     test_native_module_sections_do_not_fall_back_to_bridge();
+    test_native_input_preparation_reaches_solver_boundary();
     return failures == 0 ? 0 : 1;
 }

@@ -563,6 +563,61 @@ SanaWmRequest resolve_request(const SanaWmRuntimeConfig& config, const GenerateC
     };
 }
 
+struct SanaWmNativeInputs {
+    SanaWmVaeInputImage first_frame;
+    SanaWmCameraConditions camera;
+};
+
+std::vector<SanaWmIntrinsics>
+crop_intrinsics(const std::vector<SanaWmIntrinsics>& intrinsics, const SanaWmResizeCropPlan& plan) {
+    std::vector<SanaWmIntrinsics> out;
+    out.reserve(intrinsics.size());
+    for (const auto& value : intrinsics)
+        out.push_back(sana_wm_transform_intrinsics_for_crop(value, plan));
+    return out;
+}
+
+std::vector<SanaWmPose> resolve_native_poses(const SanaWmRequest& request,
+                                             const GenerateConfig& cfg) {
+    if (!cfg.camera_poses.empty())
+        return sana_wm_row_major_c2w_to_poses(cfg.camera_poses);
+    return sana_wm_action_to_c2w(request.action, request.translation_speed,
+                                 request.rotation_speed_deg);
+}
+
+SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
+                                         const SanaWmRequest& request,
+                                         const GenerateConfig& cfg) {
+    const auto image = io::read_image(request.image_path);
+    if (image.empty())
+        throw std::runtime_error("SANA-WM native runtime failed to load image: " +
+                                 request.image_path);
+
+    auto poses = resolve_native_poses(request, cfg);
+    if (request.num_frames > 0 && static_cast<int32_t>(poses.size()) != request.num_frames) {
+        throw std::runtime_error("SANA-WM native camera pose count does not match num_frames");
+    }
+    if (cfg.camera_intrinsics.empty()) {
+        throw std::runtime_error(
+            "SANA-WM native runtime requires camera_intrinsics; Pi3X intrinsics "
+            "estimation is not implemented in C++");
+    }
+
+    auto first_frame = sana_wm_prepare_vae_input_image(image.pixels, image.width, image.height,
+                                                       config.height, config.width);
+    if (!first_frame.ok)
+        throw std::runtime_error("SANA-WM native runtime failed to preprocess first frame");
+
+    auto intrinsics =
+        crop_intrinsics(sana_wm_expand_intrinsics(cfg.camera_intrinsics,
+                                                  static_cast<int32_t>(poses.size())),
+                        first_frame.plan);
+    auto camera = sana_wm_prepare_camera_conditions(poses, intrinsics, config.height, config.width,
+                                                    config.vae_time_stride,
+                                                    config.vae_spatial_stride);
+    return {std::move(first_frame), std::move(camera)};
+}
+
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
                                            const SanaWmRequest& request, const SanaWmPaths& paths,
                                            const std::string& prompt) {
@@ -960,6 +1015,7 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
+        (void)prepare_native_inputs(config_, request, cfg);
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
             "SANA-WM solver/refiner execution is not implemented yet");
