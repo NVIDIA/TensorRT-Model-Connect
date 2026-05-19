@@ -652,6 +652,35 @@ void test_native_module_sections_require_complete_native_set() {
     check(incomplete_stage1_reported, "sana wm native: incomplete module set reported");
 }
 
+void test_native_default_requires_refiner_plan_set() {
+    trtmc::SanaWmRuntimeConfig cfg;
+    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
+
+    trtmc::SanaWmNativeModules modules;
+    modules.text_encoder = std::make_unique<FakeTrtModule>();
+    modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+    modules.vae_encoder = std::make_unique<FakeTrtModule>();
+    modules.vae_decoder = std::make_unique<FakeTrtModule>();
+
+    trtmc::SanaWmPipeline pipeline(cfg, std::move(modules), std::make_shared<FakeTokenizer>());
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.image_path = "/tmp/trtmc_sana_wm_default_requires_refiner.png";
+
+    bool refiner_required_reported = false;
+    try {
+        (void)pipeline.generate_image("drive forward", gen_cfg);
+    } catch (const std::runtime_error& exc) {
+        const std::string message = exc.what();
+        refiner_required_reported =
+            message.find("native refiner execution requires") != std::string::npos &&
+            message.find("--no_refiner") != std::string::npos;
+    }
+
+    check(refiner_required_reported,
+          "sana wm native: model-card default requires refiner plan set");
+}
+
 void test_native_stage1_solver_decodes_with_native_modules() {
     const auto image_path =
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
@@ -719,6 +748,7 @@ void test_native_stage1_solver_decodes_with_native_modules() {
     gen_cfg.image_path = image_path.string();
     gen_cfg.camera_action = "w-1";
     gen_cfg.num_frames = 2;
+    gen_cfg.no_refiner = true;
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
@@ -833,6 +863,7 @@ void test_native_stage1_accepts_decoder_style_text_encoder() {
     gen_cfg.image_path = image_path.string();
     gen_cfg.camera_action = "w-1";
     gen_cfg.num_frames = 2;
+    gen_cfg.no_refiner = true;
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
@@ -1202,6 +1233,7 @@ int main() {
     test_stage1_latents_reject_mismatched_buffers();
     test_pipeline_requires_native_tensor_rt_modules();
     test_native_module_sections_require_complete_native_set();
+    test_native_default_requires_refiner_plan_set();
     test_native_stage1_solver_decodes_with_native_modules();
     test_native_stage1_accepts_decoder_style_text_encoder();
     test_native_refiner_decodes_and_drops_sink_frame();

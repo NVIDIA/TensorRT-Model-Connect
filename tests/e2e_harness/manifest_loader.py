@@ -242,6 +242,7 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
                 "plan_dir": manifest.get("sana_wm_native_plan_dir", ""),
                 "model_dir": manifest.get("sana_wm_model_dir", ""),
                 "tokenizer_dir": manifest.get("sana_wm_tokenizer_dir", ""),
+                "no_refiner": bool(manifest.get("no_refiner", False)),
             },
             gating=True,
         ))

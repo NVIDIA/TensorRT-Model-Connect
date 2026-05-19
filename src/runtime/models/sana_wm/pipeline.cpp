@@ -1727,12 +1727,15 @@ ImageResult run_native_image_path(SanaWmNativeModules& modules,
                                   const std::shared_ptr<ITokenizer>& tokenizer,
                                   const SanaWmRuntimeConfig& config, const SanaWmRequest& request,
                                   const GenerateConfig& cfg, const std::string& prompt) {
-    auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
-    if (has_any_refiner_module(modules) && !cfg.no_refiner) {
+    if (!cfg.no_refiner) {
         if (!modules.has_refiner() || !tokenizer) {
             throw std::runtime_error("SANA-WM native refiner execution requires refiner text, "
-                                     "denoiser, VAE, and tokenizer");
+                                     "denoiser, VAE, and tokenizer. Pass --no_refiner only when "
+                                     "intentionally running a stage1-only bundle.");
         }
+    }
+    auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
+    if (!cfg.no_refiner) {
         auto refined = run_native_refiner(*modules.refiner_text_encoder, *modules.refiner_denoiser,
                                           *tokenizer, latents, config, cfg, prompt);
         return decode_native_refiner_vae(*modules.refiner_vae_decoder, refined, config);

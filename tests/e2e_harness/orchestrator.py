@@ -369,6 +369,7 @@ def _check_sana_wm_native_plans_available(
     tokenizer_checked: list[str] = []
     tokenizer_candidates = _sana_wm_tokenizer_candidates(project_root, req, candidates)
     saw_complete_plans = False
+    require_refiner = not bool(req.args.get("no_refiner", False))
     for path in candidates:
         candidate = path if path.is_absolute() else project_root / path
         checked.append(str(candidate))
@@ -390,6 +391,10 @@ def _check_sana_wm_native_plans_available(
             section for section in _SANA_WM_REFINER_PLAN_SECTIONS
             if section not in present
         ]
+        if (require_refiner and missing_refiner) or (
+            not require_refiner and not (has_stage1_decoder or not missing_refiner)
+        ):
+            continue
         if has_stage1_decoder or not missing_refiner:
             saw_complete_plans = True
             tokenizer_ok, tokenizer_checked = _sana_wm_tokenizer_available(tokenizer_candidates)
@@ -410,11 +415,11 @@ def _check_sana_wm_native_plans_available(
             "Checked tokenizers: " + (", ".join(tokenizer_checked) if tokenizer_checked else "<none>"),
         )
 
-    required = (
-        ", ".join(_SANA_WM_STAGE1_CORE_PLAN_SECTIONS)
-        + " plus vae_decoder_plan or "
-        + ", ".join(_SANA_WM_REFINER_PLAN_SECTIONS)
-    )
+    if require_refiner:
+        required_tail = " plus " + ", ".join(_SANA_WM_REFINER_PLAN_SECTIONS)
+    else:
+        required_tail = " plus vae_decoder_plan or " + ", ".join(_SANA_WM_REFINER_PLAN_SECTIONS)
+    required = ", ".join(_SANA_WM_STAGE1_CORE_PLAN_SECTIONS) + required_tail
     return (
         False,
         "SANA-WM native TensorRT plans not found for pure C++ TRTMC execution. "
