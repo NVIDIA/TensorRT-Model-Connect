@@ -214,7 +214,7 @@ def _has_safetensors_weight_file(path: Path) -> bool:
     )
 
 
-def _resolve_vae_decoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+def _resolve_vae_dir(model_path: Path, raw_config: dict) -> Path | None:
     vae = raw_config.get("vae", {})
     if not isinstance(vae, dict):
         vae = {}
@@ -232,6 +232,34 @@ def _resolve_vae_decoder_dir(model_path: Path, raw_config: dict) -> Path | None:
         if candidate.is_dir() and _has_safetensors_weight_file(candidate):
             return candidate
     return None
+
+
+def _resolve_vae_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    return _resolve_vae_dir(model_path, raw_config)
+
+
+def _resolve_vae_decoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    return _resolve_vae_dir(model_path, raw_config)
+
+
+def _load_vae_config(vae_dir: Path) -> dict:
+    config_path = vae_dir / "config.json"
+    if not config_path.is_file():
+        return {}
+    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _int_tuple(value, fallback: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(int(v) for v in value)
+
+
+def _bool_tuple(value, fallback: tuple[bool, ...]) -> tuple[bool, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(bool(v) for v in value)
 
 
 def _discover_native_plan_dirs(model_path: Path, raw_config: dict) -> list[Path]:
@@ -272,11 +300,14 @@ def _effective_native_sections(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool,
+    can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
 ) -> list[str]:
     present = set(paths)
     if can_build_stage1_text_encoder:
         present.add("text_encoder_0_plan")
+    if can_build_vae_encoder:
+        present.add("sana_wm_vae_encoder_plan")
     if can_build_vae_decoder:
         present.add("vae_decoder_plan")
     return [section for section in _NATIVE_PLAN_SECTIONS if section in present]
@@ -296,6 +327,7 @@ def _validate_native_plan_paths(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool = False,
+    can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
 ) -> None:
     if not paths:
@@ -303,6 +335,7 @@ def _validate_native_plan_paths(
     effective_sections = _effective_native_sections(
         paths,
         can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+        can_build_vae_encoder=can_build_vae_encoder,
         can_build_vae_decoder=can_build_vae_decoder,
     )
     missing_core = [
@@ -396,6 +429,10 @@ def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
             for component in missing
             if component != "stage-1 Gemma text encoder"
         ]
+    if weights.get("_sana_wm_vae_encoder_dir"):
+        missing = [
+            component for component in missing if component != "LTX-2 VAE encoder"
+        ]
     if weights.get("_sana_wm_vae_decoder_dir"):
         missing = [
             component
@@ -456,6 +493,52 @@ def _build_stage1_text_encoder_plan(
     )
 
 
+def _build_sana_wm_vae_encoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from ..ltx_video.ltx_vae_builder import (
+        build_ltx_vae_encoder_engine,
+        load_ltx_vae_encoder_weights,
+    )
+
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    vae_config = _load_vae_config(vae_dir)
+    video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
+    video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
+    weights = load_ltx_vae_encoder_weights(vae_dir, precision=precision)
+    return build_ltx_vae_encoder_engine(
+        weights,
+        sample_frames=1,
+        sample_height=video_height,
+        sample_width=video_width,
+        in_channels=int(vae_config.get("in_channels", 3)),
+        latent_channels=int(
+            vae_config.get("latent_channels", vae.get("vae_latent_dim", 128))
+        ),
+        block_out_channels=_int_tuple(
+            vae_config.get("block_out_channels"), (128, 256, 512, 512)
+        ),
+        layers_per_block=_int_tuple(
+            vae_config.get("layers_per_block"), (4, 3, 3, 3, 4)
+        ),
+        spatio_temporal_scaling=_bool_tuple(
+            vae_config.get("spatio_temporal_scaling"), (True, True, True, False)
+        ),
+        patch_size=int(vae_config.get("patch_size", 4)),
+        patch_size_t=int(vae_config.get("patch_size_t", 1)),
+        precision=precision,
+        normalize_output=True,
+        scaling_factor=float(vae_config.get("scaling_factor", 1.0)),
+        verbose=verbose,
+    )
+
+
 def _build_sana_wm_vae_decoder_plan(
     vae_dir: Path,
     raw_config: dict,
@@ -474,6 +557,7 @@ def _build_sana_wm_vae_decoder_plan(
     video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
     video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
     video_num_frames = int(raw_config.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+    vae_config = _load_vae_config(vae_dir)
     vae_stride = _vae_stride(vae, raw_config)
     latent_frames = (video_num_frames - 1) // vae_stride[0] + 1
     latent_height = video_height // vae_stride[-1]
@@ -484,8 +568,33 @@ def _build_sana_wm_vae_decoder_plan(
         latent_frames=latent_frames,
         latent_height=latent_height,
         latent_width=latent_width,
-        latent_channels=int(vae.get("vae_latent_dim", raw_config.get("vae_latent_dim", 128))),
+        latent_channels=int(
+            vae_config.get(
+                "latent_channels",
+                vae.get("vae_latent_dim", raw_config.get("vae_latent_dim", 128)),
+            )
+        ),
+        block_out_channels=_int_tuple(
+            vae_config.get("decoder_block_out_channels")
+            or vae_config.get("block_out_channels"),
+            (128, 256, 512, 512),
+        ),
+        layers_per_block=_int_tuple(
+            vae_config.get("decoder_layers_per_block")
+            or vae_config.get("layers_per_block"),
+            (4, 3, 3, 3, 4),
+        ),
+        spatio_temporal_scaling=_bool_tuple(
+            vae_config.get("decoder_spatio_temporal_scaling")
+            or vae_config.get("spatio_temporal_scaling"),
+            (True, True, True, False),
+        ),
+        patch_size=int(vae_config.get("patch_size", 4)),
+        patch_size_t=int(vae_config.get("patch_size_t", 1)),
+        out_channels=int(vae_config.get("out_channels", 3)),
         precision=precision,
+        denormalize_input=True,
+        scaling_factor=float(vae_config.get("scaling_factor", 1.0)),
         verbose=verbose,
     )
 
@@ -520,11 +629,14 @@ class SanaWmPlugin:
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
         stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
         can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
+        vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
+        can_build_vae_encoder = vae_encoder_dir is not None
         vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
         can_build_vae_decoder = vae_decoder_dir is not None
         _validate_native_plan_paths(
             native_plan_paths,
             can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            can_build_vae_encoder=can_build_vae_encoder,
             can_build_vae_decoder=can_build_vae_decoder,
         )
         tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
@@ -537,12 +649,15 @@ class SanaWmPlugin:
             effective_sections = _effective_native_sections(
                 native_plan_paths,
                 can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+                can_build_vae_encoder=can_build_vae_encoder,
                 can_build_vae_decoder=can_build_vae_decoder,
             )
             if _native_sections_are_complete(effective_sections):
                 config.raw["_sana_wm_native_plan_sections"] = effective_sections
         if stage1_text_encoder_dir is not None:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
+        if vae_encoder_dir is not None:
+            weights["_sana_wm_vae_encoder_dir"] = str(vae_encoder_dir)
         if vae_decoder_dir is not None:
             weights["_sana_wm_vae_decoder_dir"] = str(vae_decoder_dir)
         if tokenizer_sections:
@@ -566,6 +681,7 @@ class SanaWmPlugin:
         effective_sections = _effective_native_sections(
             native_plan_paths if isinstance(native_plan_paths, dict) else {},
             can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
+            can_build_vae_encoder=bool(weights.get("_sana_wm_vae_encoder_dir")),
             can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
         )
         if not _native_sections_are_complete(effective_sections):
@@ -598,6 +714,14 @@ class SanaWmPlugin:
             result["text_encoder_0_plan"] = _build_stage1_text_encoder_plan(
                 Path(str(text_encoder_dir)),
                 max_cache_length,
+                precision=precision,
+                verbose=verbose,
+            )
+        vae_encoder_dir = weights.get("_sana_wm_vae_encoder_dir")
+        if "sana_wm_vae_encoder_plan" not in result and vae_encoder_dir:
+            result["sana_wm_vae_encoder_plan"] = _build_sana_wm_vae_encoder_plan(
+                Path(str(vae_encoder_dir)),
+                config.raw,
                 precision=precision,
                 verbose=verbose,
             )
