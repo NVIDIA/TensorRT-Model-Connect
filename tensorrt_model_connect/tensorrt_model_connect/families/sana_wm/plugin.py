@@ -204,6 +204,36 @@ def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path
     return None
 
 
+def _has_safetensors_weight_file(path: Path) -> bool:
+    return (
+        (path / "model.safetensors").is_file()
+        or (path / "model.safetensors.index.json").is_file()
+        or (path / "diffusion_pytorch_model.safetensors").is_file()
+        or (path / "diffusion_pytorch_model.safetensors.index.json").is_file()
+        or any(path.glob("*.safetensors"))
+    )
+
+
+def _resolve_vae_decoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_vae_dir"),
+        vae.get("vae_dir"),
+        os.environ.get("SANA_WM_VAE_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / "vae")
+
+    for candidate in candidates:
+        if candidate.is_dir() and _has_safetensors_weight_file(candidate):
+            return candidate
+    return None
+
+
 def _discover_native_plan_dirs(model_path: Path, raw_config: dict) -> list[Path]:
     candidates: list[Path] = []
     _append_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_native_plan_dir"))
@@ -242,10 +272,13 @@ def _effective_native_sections(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool,
+    can_build_vae_decoder: bool = False,
 ) -> list[str]:
     present = set(paths)
     if can_build_stage1_text_encoder:
         present.add("text_encoder_0_plan")
+    if can_build_vae_decoder:
+        present.add("vae_decoder_plan")
     return [section for section in _NATIVE_PLAN_SECTIONS if section in present]
 
 
@@ -263,12 +296,14 @@ def _validate_native_plan_paths(
     paths: dict[str, Path],
     *,
     can_build_stage1_text_encoder: bool = False,
+    can_build_vae_decoder: bool = False,
 ) -> None:
     if not paths:
         return
     effective_sections = _effective_native_sections(
         paths,
         can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+        can_build_vae_decoder=can_build_vae_decoder,
     )
     missing_core = [
         section
@@ -361,6 +396,12 @@ def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
             for component in missing
             if component != "stage-1 Gemma text encoder"
         ]
+    if weights.get("_sana_wm_vae_decoder_dir"):
+        missing = [
+            component
+            for component in missing
+            if component != "LTX-2/SANA VAE decoder or complete LTX-2 refiner stack"
+        ]
     return tuple(missing)
 
 
@@ -415,6 +456,40 @@ def _build_stage1_text_encoder_plan(
     )
 
 
+def _build_sana_wm_vae_decoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from ..ltx_video.ltx_vae_builder import (
+        build_ltx_vae_decoder_engine,
+        load_ltx_vae_weights,
+    )
+
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
+    video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
+    video_num_frames = int(raw_config.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+    vae_stride = _vae_stride(vae, raw_config)
+    latent_frames = (video_num_frames - 1) // vae_stride[0] + 1
+    latent_height = video_height // vae_stride[-1]
+    latent_width = video_width // vae_stride[-1]
+    weights = load_ltx_vae_weights(vae_dir, precision=precision)
+    return build_ltx_vae_decoder_engine(
+        weights,
+        latent_frames=latent_frames,
+        latent_height=latent_height,
+        latent_width=latent_width,
+        latent_channels=int(vae.get("vae_latent_dim", raw_config.get("vae_latent_dim", 128))),
+        precision=precision,
+        verbose=verbose,
+    )
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -445,9 +520,12 @@ class SanaWmPlugin:
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
         stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
         can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
+        vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
+        can_build_vae_decoder = vae_decoder_dir is not None
         _validate_native_plan_paths(
             native_plan_paths,
             can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            can_build_vae_decoder=can_build_vae_decoder,
         )
         tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
         if native_plan_paths:
@@ -459,11 +537,14 @@ class SanaWmPlugin:
             effective_sections = _effective_native_sections(
                 native_plan_paths,
                 can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+                can_build_vae_decoder=can_build_vae_decoder,
             )
             if _native_sections_are_complete(effective_sections):
                 config.raw["_sana_wm_native_plan_sections"] = effective_sections
         if stage1_text_encoder_dir is not None:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
+        if vae_decoder_dir is not None:
+            weights["_sana_wm_vae_decoder_dir"] = str(vae_decoder_dir)
         if tokenizer_sections:
             weights["_tokenizer_sections"] = {
                 section: str(path) for section, path in tokenizer_sections.items()
@@ -485,6 +566,7 @@ class SanaWmPlugin:
         effective_sections = _effective_native_sections(
             native_plan_paths if isinstance(native_plan_paths, dict) else {},
             can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
+            can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
         )
         if not _native_sections_are_complete(effective_sections):
             raise NotImplementedError(_native_build_error(weights))
@@ -501,7 +583,6 @@ class SanaWmPlugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> dict:
-        del config
         result = {}
         plan_paths = weights.get("_native_plan_paths", {})
         if isinstance(plan_paths, dict):
@@ -517,6 +598,14 @@ class SanaWmPlugin:
             result["text_encoder_0_plan"] = _build_stage1_text_encoder_plan(
                 Path(str(text_encoder_dir)),
                 max_cache_length,
+                precision=precision,
+                verbose=verbose,
+            )
+        vae_decoder_dir = weights.get("_sana_wm_vae_decoder_dir")
+        if "vae_decoder_plan" not in result and vae_decoder_dir:
+            result["vae_decoder_plan"] = _build_sana_wm_vae_decoder_plan(
+                Path(str(vae_decoder_dir)),
+                config.raw,
                 precision=precision,
                 verbose=verbose,
             )

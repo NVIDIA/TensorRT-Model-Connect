@@ -121,6 +121,12 @@ def _write_text_encoder_config(model_dir) -> None:
     )
 
 
+def _write_vae_weights_marker(model_dir) -> None:
+    vae_dir = model_dir / "vae"
+    vae_dir.mkdir(parents=True, exist_ok=True)
+    (vae_dir / "diffusion_pytorch_model.safetensors").write_bytes(b"placeholder")
+
+
 def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
 
@@ -361,6 +367,60 @@ def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(
     assert set(overrides["sana_wm_native_plan_sections"]) == set(plans) | {
         "text_encoder_0_plan"
     }
+
+
+def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    plans = _write_native_plan_set(tmp_path)
+    (tmp_path / "trtmc_engines" / "vae_decoder_plan.plan").unlink()
+    plans.pop("vae_decoder_plan")
+    _write_tokenizer(tmp_path)
+    _write_vae_weights_marker(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_build_vae_decoder_plan(vae_dir, raw_config, *, precision, verbose):
+        captured["vae_dir"] = vae_dir
+        captured["raw_config"] = raw_config
+        captured["precision"] = precision
+        captured["verbose"] = verbose
+        return b"generated-vae-decoder-plan"
+
+    monkeypatch.setattr(
+        sana_wm_plugin_mod,
+        "_build_sana_wm_vae_decoder_plan",
+        fake_build_vae_decoder_plan,
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert "vae_decoder_plan" not in weights["_native_plan_paths"]
+    assert weights["_sana_wm_vae_decoder_dir"].endswith("vae")
+    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
+        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+    )
+
+    extras = sana_wm_mod.plugin.build_extra_engines(
+        cfg,
+        weights,
+        256,
+        precision="fp16",
+        verbose=True,
+    )
+
+    assert extras["vae_decoder_plan"] == b"generated-vae-decoder-plan"
+    for section, data in plans.items():
+        assert extras[section] == data
+    assert captured["vae_dir"] == tmp_path / "vae"
+    assert captured["raw_config"] is cfg.raw
+    assert captured["precision"] == "fp16"
+    assert captured["verbose"] is True
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert "engine_backend" not in overrides
+    assert "vae_decoder_plan" in overrides["sana_wm_native_plan_sections"]
 
 
 def test_sana_wm_plugin_discovers_native_plan_dir_from_config(tmp_path) -> None:
