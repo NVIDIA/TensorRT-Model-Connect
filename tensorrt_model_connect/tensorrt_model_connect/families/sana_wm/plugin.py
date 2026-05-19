@@ -399,6 +399,18 @@ def _text_encoder_model_type(text_encoder_dir: Path) -> str:
     return ""
 
 
+def _can_build_legacy_refiner_text_encoder(
+    text_encoder_dir: Path | None,
+    connectors_dir: Path | None,
+) -> bool:
+    if text_encoder_dir is None or connectors_dir is not None:
+        return False
+    model_type = _text_encoder_model_type(text_encoder_dir).lower()
+    return bool(model_type) and model_type.startswith("gemma") and not model_type.startswith(
+        "gemma3"
+    )
+
+
 def _int_tuple(value, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not isinstance(value, (list, tuple)):
         return fallback
@@ -852,8 +864,8 @@ class SanaWmPlugin:
         refiner_text_encoder_dir = _resolve_refiner_text_encoder_dir(model_path, config.raw)
         refiner_transformer_dir = _resolve_refiner_transformer_dir(model_path, config.raw)
         refiner_connectors_dir = _resolve_refiner_connectors_dir(model_path, config.raw)
-        can_build_refiner_text_encoder = (
-            refiner_text_encoder_dir is not None and refiner_connectors_dir is None
+        can_build_refiner_text_encoder = _can_build_legacy_refiner_text_encoder(
+            refiner_text_encoder_dir, refiner_connectors_dir
         )
         vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
         can_build_vae_encoder = vae_encoder_dir is not None
