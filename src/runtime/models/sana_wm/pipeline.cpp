@@ -1899,7 +1899,7 @@ bool SanaWmNativeModules::has_any() const {
 }
 
 bool SanaWmNativeModules::has_stage1() const {
-    return text_encoder && stage1_denoiser && vae_encoder && vae_decoder;
+    return text_encoder && stage1_denoiser && vae_encoder;
 }
 
 bool SanaWmNativeModules::has_refiner() const {

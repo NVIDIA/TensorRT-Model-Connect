@@ -819,6 +819,8 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
     check(runner->call_count == 0, "sana wm native refiner: generated without bridge");
+    check(pipeline.has_native_stage1(),
+          "sana wm native refiner: stage1 core is complete without stage1 VAE decoder");
     check(refiner_text_ptr->call_count == 1, "sana wm native refiner: text encoded once");
     check(refiner_denoiser_ptr->call_count == 3,
           "sana wm native refiner: distilled denoiser steps");
