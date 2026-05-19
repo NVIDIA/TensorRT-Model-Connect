@@ -1012,9 +1012,10 @@ def _build_repro_commands(
                     ) / "initial_latents.raw"
                     infer_parts.extend(["--initial-latents-raw", str(qi_latent_path)])
             else:
+                output_flag = "--output_dir" if case.family == "sana_wm" else "--output"
                 infer_parts = [
                     ctx.binary_path, "generate-video", bundle_path,
-                    "--output", "/tmp/trtmc_frames",
+                    output_flag, "/tmp/trtmc_frames",
                 ]
                 if case.family != "sana_wm":
                     infer_parts.extend(["--num-steps", str(case.inputs.get("num_inference_steps", 30))])
@@ -1032,17 +1033,23 @@ def _build_repro_commands(
                 if action:
                     infer_parts.extend(["--action", _shell_quote(str(action))])
                 if "translation_speed" in case.inputs:
-                    infer_parts.extend(["--translation-speed", str(case.inputs["translation_speed"])])
+                    flag = "--translation_speed" if case.family == "sana_wm" else "--translation-speed"
+                    infer_parts.extend([flag, str(case.inputs["translation_speed"])])
                 if "rotation_speed_deg" in case.inputs:
-                    infer_parts.extend(["--rotation-speed-deg", str(case.inputs["rotation_speed_deg"])])
+                    flag = "--rotation_speed_deg" if case.family == "sana_wm" else "--rotation-speed-deg"
+                    infer_parts.extend([flag, str(case.inputs["rotation_speed_deg"])])
                 if "camera_intrinsics" in case.inputs:
+                    flag = "--intrinsics" if case.family == "sana_wm" else "--camera-intrinsics"
                     infer_parts.extend([
-                        "--camera-intrinsics",
+                        flag,
                         _shell_quote(_csv_arg(case.inputs["camera_intrinsics"])),
                     ])
                 num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames"))
                 if num_frames is not None:
-                    infer_parts.extend(["--num-frames", str(num_frames)])
+                    flag = "--num_frames" if case.family == "sana_wm" else "--num-frames"
+                    infer_parts.extend([flag, str(num_frames)])
+                if case.family == "sana_wm" and case.inputs.get("no_refiner"):
+                    infer_parts.append("--no_refiner")
                 guidance_scale = case.inputs.get("guidance_scale")
                 if guidance_scale is not None:
                     infer_parts.extend(["--guidance-scale", str(guidance_scale)])
@@ -1128,7 +1135,7 @@ def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> s
     translation_speed = case.inputs.get("translation_speed", 0.055)
     rotation_speed_deg = case.inputs.get("rotation_speed_deg", 1.2)
     num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames", 321))
-    return " ".join([
+    parts = [
         ctx.reference_python_path() or "python",
         "inference_video_scripts/inference_sana_wm.py",
         "--image",
@@ -1145,7 +1152,10 @@ def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> s
         str(num_frames),
         "--output_dir",
         "results/demo",
-    ])
+    ]
+    if case.inputs.get("no_refiner"):
+        parts.append("--no_refiner")
+    return " ".join(parts)
 
 
 def _shell_quote(s: str) -> str:

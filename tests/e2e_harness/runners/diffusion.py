@@ -506,9 +506,10 @@ class DiffusionMediaRunner:
                     cmd.extend([
                         "--initial-latents-raw", qwen_image_initial_latents_raw])
             else:
+                output_flag = "--output_dir" if case.family == "sana_wm" else "--output"
                 cmd = [
                     binary, "generate-video", bundle_path,
-                    "--output", frame_dir,
+                    output_flag, frame_dir,
                 ]
                 if case.family != "sana_wm":
                     cmd.extend(["--num-steps", str(num_steps)])
@@ -525,16 +526,22 @@ class DiffusionMediaRunner:
                     cmd.extend(["--action", str(action)])
                 translation_speed = case.inputs.get("translation_speed")
                 if translation_speed is not None:
-                    cmd.extend(["--translation-speed", str(translation_speed)])
+                    flag = "--translation_speed" if case.family == "sana_wm" else "--translation-speed"
+                    cmd.extend([flag, str(translation_speed)])
                 rotation_speed_deg = case.inputs.get("rotation_speed_deg")
                 if rotation_speed_deg is not None:
-                    cmd.extend(["--rotation-speed-deg", str(rotation_speed_deg)])
+                    flag = "--rotation_speed_deg" if case.family == "sana_wm" else "--rotation-speed-deg"
+                    cmd.extend([flag, str(rotation_speed_deg)])
                 camera_intrinsics = case.inputs.get("camera_intrinsics")
                 if camera_intrinsics is not None:
-                    cmd.extend(["--camera-intrinsics", _format_float_csv(camera_intrinsics)])
+                    flag = "--intrinsics" if case.family == "sana_wm" else "--camera-intrinsics"
+                    cmd.extend([flag, _format_float_csv(camera_intrinsics)])
                 num_frames = case.inputs.get("video_num_frames") or case.inputs.get("num_frames")
                 if num_frames is not None:
-                    cmd.extend(["--num-frames", str(num_frames)])
+                    flag = "--num_frames" if case.family == "sana_wm" else "--num-frames"
+                    cmd.extend([flag, str(num_frames)])
+                if case.family == "sana_wm" and case.inputs.get("no_refiner"):
+                    cmd.append("--no_refiner")
                 guidance_scale = case.inputs.get("guidance_scale")
                 if guidance_scale is not None:
                     cmd.extend(["--guidance-scale", str(guidance_scale)])

@@ -106,6 +106,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
+            "no_refiner": True,
         },
         stages=[],
     )
@@ -125,10 +126,12 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
     assert "--num-steps" not in cmd
     assert "--image asset/sana_wm/demo_0.png" in cmd
     assert "--action w-80,jw-40,w-40,lw-60,w-100" in cmd
-    assert "--translation-speed 0.055" in cmd
-    assert "--rotation-speed-deg 1.2" in cmd
-    assert "--camera-intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
-    assert "--num-frames 321" in cmd
+    assert "--output_dir /tmp/trtmc_frames" in cmd
+    assert "--translation_speed 0.055" in cmd
+    assert "--rotation_speed_deg 1.2" in cmd
+    assert "--intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
+    assert "--num_frames 321" in cmd
+    assert "--no_refiner" in cmd
     assert "--hf-python" not in cmd
 
     reference_cmd = repro["sana_wm_python_reference"]
@@ -140,5 +143,6 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
         "--translation_speed 0.055 "
         "--rotation_speed_deg 1.2 "
         "--num_frames 321 "
-        "--output_dir results/demo"
+        "--output_dir results/demo "
+        "--no_refiner"
     )

@@ -692,6 +692,8 @@ print(f"Generated {{len(frames)}} frames")
             cmd.extend(["--image", image_path])
         else:
             cmd.extend(["--image", ""])
+        if case.inputs.get("no_refiner"):
+            cmd.append("--no_refiner")
         env = _ref_subprocess_env()
         sana_script = case.inputs.get("sana_wm_script")
         if sana_script:

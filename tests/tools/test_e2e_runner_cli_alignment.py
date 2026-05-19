@@ -178,6 +178,7 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
+            "no_refiner": True,
         },
     )
     ctx = _make_ctx(case, tmp_path)
@@ -204,14 +205,16 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert any(str(arg).endswith("asset/sana_wm/demo_0.png") for arg in cmd)
     assert "--action" in cmd
     assert "w-80,jw-40,w-40,lw-60,w-100" in cmd
-    assert "--translation-speed" in cmd
+    assert "--output_dir" in cmd
+    assert "--translation_speed" in cmd
     assert "0.055" in cmd
-    assert "--rotation-speed-deg" in cmd
+    assert "--rotation_speed_deg" in cmd
     assert "1.2" in cmd
-    assert "--camera-intrinsics" in cmd
+    assert "--intrinsics" in cmd
     assert "797.87866,830.0503,844.2675,463.7225" in cmd
-    assert "--num-frames" in cmd
+    assert "--num_frames" in cmd
     assert "321" in cmd
+    assert "--no_refiner" in cmd
     assert "--hf-python" not in cmd
     assert "/opt/trtmc-python/bin/python" not in cmd
     assert out.metadata["command"] == cmd
@@ -232,6 +235,7 @@ def test_sana_wm_reference_uses_model_card_script_contract(
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
             "video_num_frames": 321,
+            "no_refiner": True,
             "sana_wm_require_official_script": True,
         },
     )
@@ -255,6 +259,7 @@ def test_sana_wm_reference_uses_model_card_script_contract(
     assert "--translation_speed" in cmd
     assert "--rotation_speed_deg" in cmd
     assert "--num_frames" in cmd
+    assert "--no_refiner" in cmd
     assert out.metadata["command"] == cmd
 
 
