@@ -55,6 +55,17 @@ struct SanaWmPreprocessedImage {
     bool ok{false};
 };
 
+struct SanaWmVaeInputImage {
+    // Flat [3, H, W] float tensor in [-1, 1], matching upstream ToTensor()*2-1
+    // after aspect-preserving resize and center crop.
+    std::vector<float> pixels_chw;
+    SanaWmResizeCropPlan plan;
+    int32_t height{0};
+    int32_t width{0};
+    int32_t channels{3};
+    bool ok{false};
+};
+
 struct SanaWmCameraConditions {
     std::vector<float> raymap;
     std::vector<float> chunk_plucker;
@@ -89,6 +100,9 @@ SanaWmIntrinsics sana_wm_transform_intrinsics_for_crop(const SanaWmIntrinsics& i
 SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>& src_hwc,
                                                        int32_t src_width, int32_t src_height,
                                                        int32_t target_height, int32_t target_width);
+SanaWmVaeInputImage sana_wm_prepare_vae_input_image(const std::vector<float>& src_hwc,
+                                                    int32_t src_width, int32_t src_height,
+                                                    int32_t target_height, int32_t target_width);
 SanaWmCameraConditions
 sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
                                   const std::vector<SanaWmIntrinsics>& intrinsics,

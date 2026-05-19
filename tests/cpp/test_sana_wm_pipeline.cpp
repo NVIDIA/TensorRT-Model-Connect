@@ -148,6 +148,25 @@ void test_resize_center_crop_crops_hwc_pixels() {
           "sana wm crop: last cropped pixel preserved");
 }
 
+void test_prepare_vae_input_image_matches_upstream_tensor_layout() {
+    const std::vector<float> src = {
+        1.0F, 0.5F, 0.0F, 0.25F, 0.75F, 1.0F,
+    };
+
+    const auto image = trtmc::sana_wm_prepare_vae_input_image(src, 2, 1, 1, 2);
+
+    check(image.ok, "sana wm vae input: conversion succeeds");
+    check(image.height == 1 && image.width == 2 && image.channels == 3,
+          "sana wm vae input: shape metadata propagated");
+    check(image.pixels_chw.size() == 6, "sana wm vae input: output is CHW RGB");
+    check(near(image.pixels_chw[0], 1.0F) && near(image.pixels_chw[1], -0.5F),
+          "sana wm vae input: red channel is normalized CHW");
+    check(near(image.pixels_chw[2], 0.0F) && near(image.pixels_chw[3], 0.5F),
+          "sana wm vae input: green channel is normalized CHW");
+    check(near(image.pixels_chw[4], -1.0F) && near(image.pixels_chw[5], 1.0F),
+          "sana wm vae input: blue channel is normalized CHW");
+}
+
 void test_camera_conditions_match_upstream_shapes_and_raymap() {
     const auto poses = trtmc::sana_wm_action_to_c2w("w-2", 1.0F, 0.0F);
     const std::vector<trtmc::SanaWmIntrinsics> intrinsics(poses.size(), {2.0F, 2.0F, 0.0F, 0.0F});
@@ -308,6 +327,7 @@ int main() {
     test_action_rollout_rejects_invalid_segments();
     test_resize_crop_plan_matches_upstream_geometry();
     test_resize_center_crop_crops_hwc_pixels();
+    test_prepare_vae_input_image_matches_upstream_tensor_layout();
     test_camera_conditions_match_upstream_shapes_and_raymap();
     test_camera_conditions_relativize_to_first_pose();
     test_stage1_latents_anchor_first_frame();

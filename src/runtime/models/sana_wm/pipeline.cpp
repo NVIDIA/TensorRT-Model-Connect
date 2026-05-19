@@ -535,6 +535,13 @@ void overwrite_first_latent_frame(std::vector<float>& latents,
     }
 }
 
+std::size_t chw_index(int32_t channel, int32_t y, int32_t x, int32_t height, int32_t width) {
+    return (static_cast<std::size_t>(channel) * static_cast<std::size_t>(height) +
+            static_cast<std::size_t>(y)) *
+               static_cast<std::size_t>(width) +
+           static_cast<std::size_t>(x);
+}
+
 struct SanaWmRequest {
     std::string python;
     std::string image_path;
@@ -760,6 +767,36 @@ SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>&
         float* dst_row = out.pixels_hwc.data() +
                          static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) * 3U;
         std::copy_n(src_row, static_cast<std::size_t>(target_width) * 3U, dst_row);
+    }
+    out.ok = true;
+    return out;
+}
+
+SanaWmVaeInputImage sana_wm_prepare_vae_input_image(const std::vector<float>& src_hwc,
+                                                    int32_t src_width, int32_t src_height,
+                                                    int32_t target_height, int32_t target_width) {
+    SanaWmVaeInputImage out;
+    auto cropped =
+        sana_wm_resize_and_center_crop(src_hwc, src_width, src_height, target_height, target_width);
+    out.plan = cropped.plan;
+    out.height = target_height;
+    out.width = target_width;
+    if (!cropped.ok)
+        return out;
+
+    out.pixels_chw.assign(static_cast<std::size_t>(target_height) *
+                              static_cast<std::size_t>(target_width) * 3U,
+                          0.0F);
+    for (int32_t y = 0; y < target_height; ++y) {
+        for (int32_t x = 0; x < target_width; ++x) {
+            const auto src = (static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) +
+                              static_cast<std::size_t>(x)) *
+                             3U;
+            for (int32_t c = 0; c < 3; ++c) {
+                out.pixels_chw[chw_index(c, y, x, target_height, target_width)] =
+                    cropped.pixels_hwc[src + static_cast<std::size_t>(c)] * 2.0F - 1.0F;
+            }
+        }
     }
     out.ok = true;
     return out;
