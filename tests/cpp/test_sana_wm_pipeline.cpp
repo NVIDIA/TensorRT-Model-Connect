@@ -581,17 +581,17 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = "/tmp/trtmc_sana_wm_missing_input.png";
 
-    bool native_input_error_reported = false;
+    bool incomplete_stage1_reported = false;
     try {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
-        native_input_error_reported =
-            std::string(exc.what()).find("failed to load image") != std::string::npos;
+        incomplete_stage1_reported =
+            std::string(exc.what()).find("complete stage1 module set") != std::string::npos;
     }
 
     check(pipeline.has_native_modules(), "sana wm native: modules recorded");
     check(!pipeline.has_native_stage1(), "sana wm native: partial stage1 is not complete");
-    check(native_input_error_reported, "sana wm native: native input errors reported");
+    check(incomplete_stage1_reported, "sana wm native: incomplete module set reported");
     check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
 }
 

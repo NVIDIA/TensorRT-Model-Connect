@@ -67,6 +67,23 @@ def _write_safetensors_header(path, tensors: dict[str, tuple[str, list[int]]]) -
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded)
 
 
+def _write_native_plan_set(model_dir) -> dict[str, bytes]:
+    engine_dir = model_dir / "trtmc_engines"
+    engine_dir.mkdir()
+    plans = {
+        "text_encoder_0_plan": b"text-encoder-plan",
+        "denoiser_plan": b"stage1-dit-plan",
+        "sana_wm_vae_encoder_plan": b"vae-encoder-plan",
+        "vae_decoder_plan": b"stage1-vae-decoder-plan",
+        "sana_wm_refiner_text_encoder_plan": b"refiner-text-encoder-plan",
+        "sana_wm_refiner_denoiser_plan": b"refiner-denoiser-plan",
+        "sana_wm_refiner_vae_decoder_plan": b"refiner-vae-decoder-plan",
+    }
+    for section, data in plans.items():
+        (engine_dir / f"{section}.plan").write_bytes(data)
+    return plans
+
+
 def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
 
@@ -160,10 +177,7 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
 
 def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
-    engine_dir = tmp_path / "trtmc_engines"
-    engine_dir.mkdir()
-    (engine_dir / "denoiser_plan.plan").write_bytes(b"stage1-dit-plan")
-    (engine_dir / "sana_wm_vae_encoder_plan.plan").write_bytes(b"vae-encoder-plan")
+    plans = _write_native_plan_set(tmp_path)
     tokenizer_dir = tmp_path / "text_encoder"
     tokenizer_dir.mkdir()
     (tokenizer_dir / "tokenizer.json").write_text('{"model": {"type": "Unigram"}}', encoding="utf-8")
@@ -179,17 +193,26 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
     assert weights["_tokenizer_sections"]["tokenizer.json"].endswith("text_encoder/tokenizer.json")
 
     extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
-    assert extras["denoiser_plan"] == b"stage1-dit-plan"
-    assert extras["sana_wm_vae_encoder_plan"] == b"vae-encoder-plan"
+    for section, data in plans.items():
+        assert extras[section] == data
     assert extras["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
     assert extras["tokenizer_config.json"] == b'{"add_bos_token": true}'
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
-    assert overrides["sana_wm_native_plan_sections"] == [
-        "denoiser_plan",
-        "sana_wm_vae_encoder_plan",
-    ]
+    assert overrides["sana_wm_native_plan_sections"] == list(plans)
+
+
+def test_sana_wm_plugin_rejects_partial_native_plan_sections(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    engine_dir = tmp_path / "trtmc_engines"
+    engine_dir.mkdir()
+    (engine_dir / "denoiser_plan.plan").write_bytes(b"stage1-dit-plan")
+
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    with pytest.raises(ValueError, match="complete prebuilt plan set"):
+        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
 
 def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> None:
@@ -249,9 +272,7 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
-    engine_dir = model_dir / "trtmc_engines"
-    engine_dir.mkdir()
-    (engine_dir / "denoiser_plan.plan").write_bytes(b"stage1-dit-plan")
+    plans = _write_native_plan_set(model_dir)
     tokenizer_dir = model_dir / "text_encoder"
     tokenizer_dir.mkdir()
     (tokenizer_dir / "tokenizer.json").write_text('{"model": {"type": "Unigram"}}', encoding="utf-8")
@@ -280,8 +301,9 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
 
     sections = {section.name: section.data for section in captured["sections"]}
     assert sections["engine_plan"] == b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
-    assert sections["denoiser_plan"] == b"stage1-dit-plan"
+    for section, data in plans.items():
+        assert sections[section] == data
     assert sections["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
     config = json.loads(sections["config.json"].decode("utf-8"))
     assert config["engine_backend"] == "trt"
-    assert config["sana_wm_native_plan_sections"] == ["denoiser_plan"]
+    assert config["sana_wm_native_plan_sections"] == list(plans)

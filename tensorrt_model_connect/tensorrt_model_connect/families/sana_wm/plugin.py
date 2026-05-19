@@ -44,6 +44,16 @@ _NATIVE_PLAN_SECTIONS = (
     "sana_wm_refiner_denoiser_plan",
     "sana_wm_refiner_vae_decoder_plan",
 )
+_STAGE1_CORE_PLAN_SECTIONS = (
+    "text_encoder_0_plan",
+    "denoiser_plan",
+    "sana_wm_vae_encoder_plan",
+)
+_REFINER_PLAN_SECTIONS = (
+    "sana_wm_refiner_text_encoder_plan",
+    "sana_wm_refiner_denoiser_plan",
+    "sana_wm_refiner_vae_decoder_plan",
+)
 _TOKENIZER_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -169,6 +179,36 @@ def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str,
     return paths
 
 
+def _validate_native_plan_paths(paths: dict[str, Path]) -> None:
+    if not paths:
+        return
+    missing_core = [section for section in _STAGE1_CORE_PLAN_SECTIONS if section not in paths]
+    if missing_core:
+        present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
+        raise ValueError(
+            "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+            f"missing {missing_core!r} with only {present!r} present"
+        )
+
+    present_refiner = [section for section in _REFINER_PLAN_SECTIONS if section in paths]
+    if present_refiner:
+        missing_refiner = [section for section in _REFINER_PLAN_SECTIONS if section not in paths]
+        if missing_refiner:
+            present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
+            raise ValueError(
+                "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+                f"missing {missing_refiner!r} with only {present!r} present"
+            )
+        return
+
+    if "vae_decoder_plan" not in paths:
+        present = [section for section in _NATIVE_PLAN_SECTIONS if section in paths]
+        raise ValueError(
+            "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+            f"missing ['vae_decoder_plan'] with only {present!r} present"
+        )
+
+
 def _join_chi_prompt(text_encoder: dict) -> str:
     chi_prompt = text_encoder.get("chi_prompt", [])
     if isinstance(chi_prompt, str):
@@ -231,6 +271,7 @@ class SanaWmPlugin:
             weights["_stage1_dit_summary"] = summary
             config.raw["_sana_wm_stage1_dit_summary"] = summary
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
+        _validate_native_plan_paths(native_plan_paths)
         if native_plan_paths:
             weights["_native_plan_paths"] = {
                 section: str(path) for section, path in native_plan_paths.items()

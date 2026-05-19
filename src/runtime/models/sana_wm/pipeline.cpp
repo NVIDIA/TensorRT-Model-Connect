@@ -1363,6 +1363,31 @@ bool has_any_refiner_module(const SanaWmNativeModules& modules) {
     return modules.refiner_text_encoder || modules.refiner_denoiser || modules.refiner_vae_decoder;
 }
 
+bool has_stage1_core_modules(const SanaWmNativeModules& modules) {
+    return modules.text_encoder && modules.stage1_denoiser && modules.vae_encoder;
+}
+
+void validate_native_module_set(const SanaWmNativeModules& modules) {
+    if (!modules.has_any())
+        return;
+    if (!has_stage1_core_modules(modules)) {
+        throw std::runtime_error("SANA-WM native TensorRT execution requires a complete stage1 "
+                                 "module set: text encoder, denoiser, and VAE encoder");
+    }
+    if (has_any_refiner_module(modules)) {
+        if (!modules.has_refiner()) {
+            throw std::runtime_error("SANA-WM native TensorRT execution requires a complete "
+                                     "refiner module set: refiner text encoder, refiner denoiser, "
+                                     "and refiner VAE decoder");
+        }
+        return;
+    }
+    if (!modules.vae_decoder) {
+        throw std::runtime_error("SANA-WM native TensorRT execution requires a VAE decoder module "
+                                 "when no native refiner is bundled");
+    }
+}
+
 ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
                                    const SanaWmRuntimeConfig& config) {
     if (!vae_decoder.ok())
@@ -1898,6 +1923,7 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
+        validate_native_module_set(native_modules_);
         return run_native_image_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
     }
 

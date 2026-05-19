@@ -1,5 +1,5 @@
 // SANA-WM plugin: loads optional native TensorRT modules while preserving the
-// bridge-only bundle contract until the native solver/refiner loop is complete.
+// bridge-only bundle contract until native plan construction is complete.
 
 #include "bundle/bundle_view.h"
 #include "runtime/models/sana_wm/pipeline.h"
