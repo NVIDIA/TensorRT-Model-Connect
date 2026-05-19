@@ -257,9 +257,12 @@ def _sana_wm_allow_patterns() -> list[str]:
         return ["README.md", "config.yaml"]
     return [
         "README.md",
+        "model_index.json",
         "config.yaml",
+        "pipeline*.py",
         "asset/sana_wm/**",
         "inference_video_scripts/**",
+        "scheduler/**",
         "dit/**",
         "vae/**",
         "text_encoder/**",

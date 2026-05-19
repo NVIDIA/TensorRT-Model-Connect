@@ -33,6 +33,18 @@ _STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
 _STAGE1_TEXT_ENCODER_REL = Path("text_encoder")
 _REFINER_REL = Path("refiner") / "refiner.safetensors"
 _REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
+_FULL_SNAPSHOT_REQUIRED_PATHS = (
+    _STAGE1_DIT_REL,
+    Path("vae"),
+    _REFINER_REL,
+    _REFINER_GEMMA_REL,
+)
+_NATIVE_BUILDER_COMPONENTS = (
+    "stage-1 Gemma text encoder",
+    "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks",
+    "LTX-2 VAE encoder",
+    "LTX-2/SANA VAE decoder or complete LTX-2 refiner stack",
+)
 _NATIVE_PLAN_DIR = Path("trtmc_engines")
 _NATIVE_PLAN_SECTIONS = (
     "text_encoder_0_plan",
@@ -279,6 +291,34 @@ def _validate_native_tokenizer_sections(tokenizer_sections: dict[str, Path]) -> 
         )
 
 
+def _missing_full_snapshot_paths(model_path: Path) -> list[str]:
+    missing: list[str] = []
+    for rel in _FULL_SNAPSHOT_REQUIRED_PATHS:
+        if not (model_path / rel).exists():
+            missing.append(str(rel))
+    return missing
+
+
+def _native_build_error(weights: WeightDict) -> str:
+    model_path = Path(str(weights.get("_model_dir", "")))
+    components = "; ".join(_NATIVE_BUILDER_COMPONENTS)
+    message = (
+        "SANA-WM pure C++ builds require native TensorRT component plans under "
+        "trtmc_engines/ or sana_wm_native_plan_paths. Building those plans "
+        "directly from raw SANA-WM weights is not implemented yet; missing "
+        f"native builders: {components}."
+    )
+    missing = _missing_full_snapshot_paths(model_path)
+    if missing:
+        message += (
+            " The resolved model snapshot is also missing raw SANA-WM weight "
+            f"paths: {', '.join(missing)}. Set TRTMC_SANA_WM_DOWNLOAD_WEIGHTS=1 "
+            "when resolving Efficient-Large-Model/SANA-WM_bidirectional, or "
+            "point SANA_WM_MODEL_DIR at a full local snapshot."
+        )
+    return message
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -334,10 +374,7 @@ class SanaWmPlugin:
     ) -> bytes:
         del max_cache_length, precision, quant_ctx, verbose
         if not weights.get("_native_plan_paths"):
-            raise NotImplementedError(
-                "SANA-WM pure C++ builds require native TensorRT component plans under "
-                "trtmc_engines/ or sana_wm_native_plan_paths."
-            )
+            raise NotImplementedError(_native_build_error(weights))
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
         return _NATIVE_ENGINE_MARKER

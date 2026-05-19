@@ -146,9 +146,12 @@ class TestResolveModel:
         assert result == str(dl_dir)
         assert calls
         allow_patterns = calls[0]["allow_patterns"]
+        assert "model_index.json" in allow_patterns
         assert "config.yaml" in allow_patterns
+        assert "pipeline*.py" in allow_patterns
         assert "asset/sana_wm/**" in allow_patterns
         assert "inference_video_scripts/**" in allow_patterns
+        assert "scheduler/**" in allow_patterns
         assert "dit/**" in allow_patterns
         assert "vae/**" in allow_patterns
         assert "text_encoder/**" in allow_patterns

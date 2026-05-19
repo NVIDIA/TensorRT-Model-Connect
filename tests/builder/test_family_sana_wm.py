@@ -147,12 +147,47 @@ def test_sana_wm_plugin_rejects_build_without_native_plans(tmp_path) -> None:
 
     weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
-    with pytest.raises(NotImplementedError, match="pure C\\+\\+ builds require native"):
+    with pytest.raises(NotImplementedError) as exc_info:
         sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+    message = str(exc_info.value)
+    assert "pure C++ builds require native TensorRT component plans" in message
+    assert "SanaMSVideoCamCtrl DiT" in message
+    assert "LTX-2 VAE encoder" in message
+    assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS=1" in message
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert overrides["engine_backend"] == "none"
     assert "sana_wm_allow_python_bridge" not in overrides
+
+
+def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_safetensors_header(
+        tmp_path / "dit" / "sana_wm_1600m_720p.safetensors",
+        {
+            "x_embedder.proj.weight": ("F32", [2240, 128, 1, 1, 1]),
+            "y_embedder.y_proj.fc1.weight": ("F32", [2240, 2304]),
+            "y_embedder.y_embedding": ("BF16", [300, 2304]),
+            "final_layer.linear.weight": ("F32", [128, 2240]),
+            "plucker_embedder.proj.weight": ("F32", [2240, 48, 1, 1, 1]),
+            "raymap_embedder.proj.weight": ("F32", [2240, 3, 1, 1, 1]),
+            "blocks.0.attn.qkv.weight": ("F32", [6720, 2240]),
+        },
+    )
+    (tmp_path / "vae").mkdir()
+    (tmp_path / "refiner").mkdir()
+    (tmp_path / "refiner" / "refiner.safetensors").write_bytes(b"placeholder")
+    (tmp_path / "refiner" / "text_encoder").mkdir()
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+    message = str(exc_info.value)
+    assert "Building those plans directly from raw SANA-WM weights is not implemented yet" in message
+    assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS" not in message
+    assert "stage-1 Gemma text encoder" in message
+    assert "complete LTX-2 refiner stack" in message
 
 
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
