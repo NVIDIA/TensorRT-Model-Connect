@@ -593,9 +593,8 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
     return values;
 }
 
-std::optional<std::vector<float>> parse_float_values(const std::string& csv,
-                                                     const std::string& flag_name,
-                                                     std::string& error) {
+std::optional<std::vector<float>>
+parse_float_values(const std::string& csv, const std::string& flag_name, std::string& error) {
     std::vector<float> values;
     std::string token;
     token.reserve(csv.size());
