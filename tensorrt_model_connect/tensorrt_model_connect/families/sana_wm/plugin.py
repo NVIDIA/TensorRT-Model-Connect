@@ -1,10 +1,11 @@
 """SANA-WM family plugin.
 
 The public SANA-WM release is not a standard diffusers directory: it ships a
-Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Building a
-native TRT graph for this model family is separate work. This plugin creates a
-TRTMC control bundle that routes runtime execution through the official
-SANA-WM Python inference contract, while preserving the same inputs in e2e.
+Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Full native
+TRT graph construction for this model family is separate work. Until that is
+complete, bridge-only bundles keep routing through the official SANA-WM Python
+inference contract; local directories may also package prebuilt native TRT
+component plans under ``trtmc_engines/`` for the C++ runtime to load.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ _DEFAULT_VAE_STRIDE = (8, 32, 32)
 _STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
 _REFINER_REL = Path("refiner") / "refiner.safetensors"
 _REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
+_NATIVE_PLAN_DIR = Path("trtmc_engines")
+_NATIVE_PLAN_SECTIONS = (
+    "text_encoder_0_plan",
+    "denoiser_plan",
+    "sana_wm_vae_encoder_plan",
+    "vae_decoder_plan",
+    "sana_wm_refiner_text_encoder_plan",
+    "sana_wm_refiner_denoiser_plan",
+    "sana_wm_refiner_vae_decoder_plan",
+)
 _MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
 
 
@@ -112,6 +123,36 @@ def _summarize_stage1_dit(path: Path) -> dict:
     }
 
 
+def _resolve_native_plan_path(model_path: Path, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = model_path / path
+    return path
+
+
+def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    configured = raw_config.get("sana_wm_native_plan_paths")
+    if isinstance(configured, dict):
+        for section in _NATIVE_PLAN_SECTIONS:
+            value = configured.get(section)
+            if value:
+                path = _resolve_native_plan_path(model_path, str(value))
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"SANA-WM native plan {section!r} does not exist: {path}"
+                    )
+                paths[section] = path
+
+    for section in _NATIVE_PLAN_SECTIONS:
+        if section in paths:
+            continue
+        path = model_path / _NATIVE_PLAN_DIR / f"{section}.plan"
+        if path.is_file():
+            paths[section] = path
+    return paths
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -139,6 +180,12 @@ class SanaWmPlugin:
             summary = _summarize_stage1_dit(stage1_path)
             weights["_stage1_dit_summary"] = summary
             config.raw["_sana_wm_stage1_dit_summary"] = summary
+        native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
+        if native_plan_paths:
+            weights["_native_plan_paths"] = {
+                section: str(path) for section, path in native_plan_paths.items()
+            }
+            config.raw["_sana_wm_native_plan_sections"] = list(native_plan_paths)
         return weights
 
     def build_engine(
@@ -155,6 +202,25 @@ class SanaWmPlugin:
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
         return b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
+
+    def build_extra_engines(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+    ) -> dict:
+        del config, max_cache_length, precision, verbose
+        plan_paths = weights.get("_native_plan_paths", {})
+        if not isinstance(plan_paths, dict):
+            return {}
+        return {
+            section: Path(path).read_bytes()
+            for section, path in plan_paths.items()
+            if section in _NATIVE_PLAN_SECTIONS
+        }
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         raw = config.raw
@@ -173,10 +239,12 @@ class SanaWmPlugin:
         video_num_frames = int(raw.get("video_num_frames", _DEFAULT_NUM_FRAMES))
         vae_stride = _vae_stride(vae, raw)
 
+        native_sections = raw.get("_sana_wm_native_plan_sections")
+        has_native_sections = isinstance(native_sections, list) and len(native_sections) > 0
+
         overrides = {
             "model_type": "sana_wm",
             "runtime_strategy": self.runtime_strategy,
-            "engine_backend": "none",
             "sana_wm_hf_id": _HF_ID,
             "sana_wm_config_path": f"hf://{_HF_ID}/config.yaml",
             "sana_wm_model_path": f"hf://{_HF_ID}/dit/sana_wm_1600m_720p.safetensors",
@@ -216,6 +284,10 @@ class SanaWmPlugin:
             "text_encoder_max_length": int(text_encoder.get("model_max_length", 300)),
             "flow_shift": float(scheduler.get("inference_flow_shift", 9.8)),
         }
+        if not has_native_sections:
+            overrides["engine_backend"] = "none"
+        if has_native_sections:
+            overrides["sana_wm_native_plan_sections"] = [str(v) for v in native_sections]
         stage1_summary = raw.get("_sana_wm_stage1_dit_summary")
         if isinstance(stage1_summary, dict):
             overrides.update(

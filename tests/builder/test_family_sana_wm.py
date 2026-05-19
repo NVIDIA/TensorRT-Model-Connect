@@ -151,6 +151,33 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     assert overrides["sana_wm_dit_tensor_count"] == 8
 
 
+def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    engine_dir = tmp_path / "trtmc_engines"
+    engine_dir.mkdir()
+    (engine_dir / "denoiser_plan.plan").write_bytes(b"stage1-dit-plan")
+    (engine_dir / "sana_wm_vae_encoder_plan.plan").write_bytes(b"vae-encoder-plan")
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert weights["_native_plan_paths"]["denoiser_plan"].endswith("denoiser_plan.plan")
+    assert weights["_native_plan_paths"]["sana_wm_vae_encoder_plan"].endswith(
+        "sana_wm_vae_encoder_plan.plan"
+    )
+
+    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    assert extras["denoiser_plan"] == b"stage1-dit-plan"
+    assert extras["sana_wm_vae_encoder_plan"] == b"vae-encoder-plan"
+
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert "engine_backend" not in overrides
+    assert overrides["sana_wm_native_plan_sections"] == [
+        "denoiser_plan",
+        "sana_wm_vae_encoder_plan",
+    ]
+
+
 def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -198,3 +225,41 @@ def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> Non
     assert config["vae_time_stride"] == 8
     assert config["vae_spatial_stride"] == 32
     assert config["num_inference_steps"] == 60
+
+
+def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    engine_dir = model_dir / "trtmc_engines"
+    engine_dir.mkdir()
+    (engine_dir / "denoiser_plan.plan").write_bytes(b"stage1-dit-plan")
+    output_path = str(tmp_path / "sana-wm.trtfb")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)
+    monkeypatch.setattr(
+        engine_builder.trt_compat, "resolved_summary", lambda: "mock TensorRT"
+    )
+    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0.0")
+    monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "mock-gpu")
+
+    def fake_write_bundle(path, info, sections):
+        captured["path"] = path
+        captured["info"] = info
+        captured["sections"] = sections
+
+    monkeypatch.setattr(engine_builder, "write_bundle", fake_write_bundle)
+
+    engine_builder.build_bundle(
+        str(model_dir),
+        output_path,
+        build_timing_path=str(tmp_path / "timing.json"),
+    )
+
+    sections = {section.name: section.data for section in captured["sections"]}
+    assert sections["engine_plan"] == b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
+    assert sections["denoiser_plan"] == b"stage1-dit-plan"
+    config = json.loads(sections["config.json"].decode("utf-8"))
+    assert config["engine_backend"] == "trt"
+    assert config["sana_wm_native_plan_sections"] == ["denoiser_plan"]
