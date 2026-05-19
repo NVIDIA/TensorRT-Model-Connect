@@ -70,6 +70,7 @@ _NATIVE_BUILDER_COMPONENTS = (
     "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks",
     "LTX-2 VAE encoder",
     "LTX-2/SANA VAE decoder",
+    "LTX-2 refiner text connector stack",
     "LTX-2 refiner transformer/connectors denoiser",
     "LTX-2 refiner VAE decoder",
 )
@@ -570,6 +571,12 @@ def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
             for component in missing
             if component != "stage-1 Gemma text encoder"
         ]
+    if weights.get("_refiner_text_encoder_dir") and not weights.get("_refiner_connectors_dir"):
+        missing = [
+            component
+            for component in missing
+            if component != "LTX-2 refiner text connector stack"
+        ]
     if weights.get("_sana_wm_vae_encoder_dir"):
         missing = [
             component for component in missing if component != "LTX-2 VAE encoder"
@@ -825,9 +832,11 @@ class SanaWmPlugin:
         stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
         can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
         refiner_text_encoder_dir = _resolve_refiner_text_encoder_dir(model_path, config.raw)
-        can_build_refiner_text_encoder = refiner_text_encoder_dir is not None
         refiner_transformer_dir = _resolve_refiner_transformer_dir(model_path, config.raw)
         refiner_connectors_dir = _resolve_refiner_connectors_dir(model_path, config.raw)
+        can_build_refiner_text_encoder = (
+            refiner_text_encoder_dir is not None and refiner_connectors_dir is None
+        )
         vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
         can_build_vae_encoder = vae_encoder_dir is not None
         vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
@@ -862,6 +871,8 @@ class SanaWmPlugin:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
         if refiner_text_encoder_dir is not None:
             weights["_refiner_text_encoder_dir"] = str(refiner_text_encoder_dir)
+        if can_build_refiner_text_encoder:
+            weights["_can_build_refiner_text_encoder_plan"] = True
         if refiner_transformer_dir is not None:
             weights["_refiner_transformer_dir"] = str(refiner_transformer_dir)
         if refiner_connectors_dir is not None:
@@ -892,7 +903,9 @@ class SanaWmPlugin:
         effective_sections = _effective_native_sections(
             native_plan_paths if isinstance(native_plan_paths, dict) else {},
             can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
-            can_build_refiner_text_encoder=bool(weights.get("_refiner_text_encoder_dir")),
+            can_build_refiner_text_encoder=bool(
+                weights.get("_can_build_refiner_text_encoder_plan")
+            ),
             can_build_vae_encoder=bool(weights.get("_sana_wm_vae_encoder_dir")),
             can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
             can_build_refiner_vae_decoder=bool(
@@ -938,6 +951,7 @@ class SanaWmPlugin:
             refiner_requested
             and "sana_wm_refiner_text_encoder_plan" not in result
             and refiner_text_encoder_dir
+            and weights.get("_can_build_refiner_text_encoder_plan")
         ):
             result["sana_wm_refiner_text_encoder_plan"] = _build_refiner_text_encoder_plan(
                 Path(str(refiner_text_encoder_dir)),

@@ -249,6 +249,7 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     assert "Building those plans directly from raw SANA-WM weights is not implemented yet" in message
     assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS" not in message
     assert "stage-1 Gemma text encoder" in message
+    assert "LTX-2 refiner text connector stack" in message
     assert "LTX-2 refiner transformer/connectors denoiser" in message
     assert weights["_refiner_checkpoint"].endswith("refiner")
     assert weights["_refiner_transformer_dir"].endswith("refiner/transformer")
@@ -511,6 +512,24 @@ def test_sana_wm_plugin_builds_missing_refiner_text_encoder_plan(
     assert "sana_wm_refiner_text_encoder_plan" in overrides[
         "sana_wm_native_plan_sections"
     ]
+
+
+def test_sana_wm_plugin_rejects_gemma_only_refiner_text_with_connectors(
+    tmp_path,
+) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_native_plan_set(tmp_path, include_refiner_text_encoder=False)
+    _write_tokenizer(tmp_path)
+    _write_refiner_diffusers_markers(tmp_path)
+    (tmp_path / "refiner" / "text_encoder" / "config.json").write_text(
+        json.dumps({"model_type": "gemma"}),
+        encoding="utf-8",
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    with pytest.raises(ValueError, match="sana_wm_refiner_text_encoder_plan"):
+        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
 
 def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
