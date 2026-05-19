@@ -868,9 +868,17 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
         extract_json_int(config_json, "vae_downsample_rate", cfg.vae_spatial_stride));
     cfg.text_encoder_max_length =
         extract_json_int(config_json, "text_encoder_max_length", cfg.text_encoder_max_length);
+    cfg.chi_prompt = extract_json_string(config_json, "sana_wm_chi_prompt", cfg.chi_prompt);
     cfg.require_official_script =
         extract_json_int(config_json, "sana_wm_require_official_script", 0) != 0;
     return cfg;
+}
+
+std::string sana_wm_make_conditioning_prompt(const std::string& prompt,
+                                             const std::string& chi_prompt) {
+    if (chi_prompt.empty())
+        return prompt;
+    return chi_prompt + prompt;
 }
 
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
@@ -1174,12 +1182,14 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
         auto first_latent =
             run_native_vae_encoder(*native_modules_.vae_encoder, native_inputs.first_frame,
                                    native_inputs.camera, config_.vae_latent_dim);
+        const auto conditioning_prompt = sana_wm_make_conditioning_prompt(prompt, config_.chi_prompt);
         const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
                                         : static_cast<uint64_t>(config_.seed);
         (void)sana_wm_prepare_stage1_latents(
             first_latent, cfg.initial_latents, config_.vae_latent_dim,
             native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
             native_inputs.camera.latent_width, seed);
+        (void)conditioning_prompt;
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
             "SANA-WM text encoding/solver/refiner execution is not implemented yet");

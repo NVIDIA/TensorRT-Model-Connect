@@ -35,6 +35,9 @@ vae:
 text_encoder:
   model: gemma-2-2b-it
   model_max_length: 300
+  chi_prompt:
+    - 'Generate an "Enhanced prompt".'
+    - 'User Prompt: '
 scheduler:
   predict_flow_v: true
   noise_schedule: linear_flow
@@ -111,6 +114,7 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["flow_shift"] == 9.8
     assert overrides["text_encoder_name"] == "gemma-2-2b-it"
     assert overrides["text_encoder_max_length"] == 300
+    assert overrides["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
 
 
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
@@ -221,6 +225,7 @@ def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> Non
     assert config["sana_wm_translation_speed"] == 0.055
     assert config["sana_wm_rotation_speed_deg"] == 1.2
     assert config["sana_wm_require_official_script"] == 1
+    assert config["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
     assert config["video_num_frames"] == 321
     assert config["vae_time_stride"] == 8
     assert config["vae_spatial_stride"] == 32

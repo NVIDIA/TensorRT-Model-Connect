@@ -89,20 +89,41 @@ ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
     return ArrayParseState::kReady;
 }
 
+bool append_json_escape(char escaped, std::string& out) {
+    switch (escaped) {
+    case '"': out.push_back('"'); return true;
+    case '\\': out.push_back('\\'); return true;
+    case '/': out.push_back('/'); return true;
+    case 'b': out.push_back('\b'); return true;
+    case 'f': out.push_back('\f'); return true;
+    case 'n': out.push_back('\n'); return true;
+    case 'r': out.push_back('\r'); return true;
+    case 't': out.push_back('\t'); return true;
+    default: return false;
+    }
+}
+
 bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
     if (pos >= text.size() || text[pos] != '"') {
         return false;
     }
 
-    const std::size_t first_quote = pos;
-    const std::size_t second_quote = text.find('"', first_quote + 1);
-    if (second_quote == std::string::npos || second_quote <= first_quote + 1) {
-        return false;
+    out.clear();
+    ++pos;
+    while (pos < text.size()) {
+        const char c = text[pos++];
+        if (c == '"') {
+            return !out.empty();
+        }
+        if (c != '\\') {
+            out.push_back(c);
+            continue;
+        }
+        if (pos >= text.size() || !append_json_escape(text[pos++], out)) {
+            return false;
+        }
     }
-
-    out = text.substr(first_quote + 1, second_quote - first_quote - 1);
-    pos = second_quote + 1;
-    return true;
+    return false;
 }
 
 template <typename T, typename Parser>

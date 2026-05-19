@@ -240,7 +240,8 @@ void test_runtime_config_parses_native_sana_wm_fields() {
           "vae_latent_dim": 128,
           "vae_time_stride": 8,
           "vae_spatial_stride": 32,
-          "text_encoder_max_length": 300
+          "text_encoder_max_length": 300,
+          "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: "
         })json");
 
     check(cfg.height == 704 && cfg.width == 1280 && cfg.num_frames == 321,
@@ -252,6 +253,17 @@ void test_runtime_config_parses_native_sana_wm_fields() {
     check(cfg.vae_latent_dim == 128 && cfg.vae_time_stride == 8 && cfg.vae_spatial_stride == 32,
           "sana wm config: vae shape contract parsed");
     check(cfg.text_encoder_max_length == 300, "sana wm config: text encoder length parsed");
+    check(cfg.chi_prompt == "Generate an \"Enhanced prompt\".\nUser Prompt: ",
+          "sana wm config: chi prompt parsed");
+}
+
+void test_conditioning_prompt_matches_upstream_chi_prefix() {
+    const std::string chi = "Generate an \"Enhanced prompt\".\nUser Prompt: ";
+    check(trtmc::sana_wm_make_conditioning_prompt("drive forward", chi) ==
+              "Generate an \"Enhanced prompt\".\nUser Prompt: drive forward",
+          "sana wm prompt: chi prompt prepended without extra separator");
+    check(trtmc::sana_wm_make_conditioning_prompt("drive forward", "") == "drive forward",
+          "sana wm prompt: empty chi prompt leaves prompt unchanged");
 }
 
 void test_resize_crop_plan_matches_upstream_geometry() {
@@ -559,6 +571,7 @@ int main() {
     test_camera_pose_vector_parses_row_major_matrices();
     test_intrinsics_expand_model_card_shapes();
     test_runtime_config_parses_native_sana_wm_fields();
+    test_conditioning_prompt_matches_upstream_chi_prefix();
     test_resize_crop_plan_matches_upstream_geometry();
     test_resize_center_crop_crops_hwc_pixels();
     test_prepare_vae_input_image_matches_upstream_tensor_layout();

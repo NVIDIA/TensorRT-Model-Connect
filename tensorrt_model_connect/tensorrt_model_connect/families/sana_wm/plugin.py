@@ -153,6 +153,15 @@ def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str,
     return paths
 
 
+def _join_chi_prompt(text_encoder: dict) -> str:
+    chi_prompt = text_encoder.get("chi_prompt", [])
+    if isinstance(chi_prompt, str):
+        return chi_prompt
+    if isinstance(chi_prompt, (list, tuple)):
+        return "\n".join(str(line) for line in chi_prompt)
+    return ""
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -282,6 +291,9 @@ class SanaWmPlugin:
                 or "gemma-2-2b-it"
             ),
             "text_encoder_max_length": int(text_encoder.get("model_max_length", 300)),
+            "sana_wm_chi_prompt": str(
+                raw.get("sana_wm_chi_prompt", _join_chi_prompt(text_encoder))
+            ),
             "flow_shift": float(scheduler.get("inference_flow_shift", 9.8)),
         }
         if not has_native_sections:

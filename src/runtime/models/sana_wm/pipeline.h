@@ -31,6 +31,7 @@ struct SanaWmRuntimeConfig {
     int32_t vae_time_stride{8};
     int32_t vae_spatial_stride{32};
     int32_t text_encoder_max_length{300};
+    std::string chi_prompt;
     bool require_official_script{false};
 };
 
@@ -116,6 +117,8 @@ struct SanaWmNativeModules {
 
 std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float translation_speed,
                                               float rotation_speed_deg);
+std::string sana_wm_make_conditioning_prompt(const std::string& prompt,
+                                             const std::string& chi_prompt);
 std::vector<SanaWmPose> sana_wm_row_major_c2w_to_poses(const std::vector<float>& c2w_values);
 std::vector<SanaWmIntrinsics> sana_wm_expand_intrinsics(const std::vector<float>& values,
                                                         int32_t num_frames);
