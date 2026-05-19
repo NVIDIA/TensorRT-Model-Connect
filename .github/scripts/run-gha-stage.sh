@@ -30,12 +30,10 @@ mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
 mkdir_if_set "${HF_MODULES_CACHE:-}"
 
 if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
-  echo "Checking workspace mount permissions: ${GITHUB_WORKSPACE}"
-  chmod a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
-    echo "::warning::Could not update top-level workspace permissions; continuing into the CI container."
-  }
+  echo "Using workspace mount without host chmod: ${GITHUB_WORKSPACE}"
 fi
 
+echo "Starting TensorRT-Model-Connect CI container for stage '${stage}'"
 # shellcheck disable=SC2086
 docker run --rm \
   $TRTMC_CONTAINER_OPTIONS \
