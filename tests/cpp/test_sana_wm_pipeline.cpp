@@ -4,15 +4,14 @@
 // Trace ID:       UT-SANAWM-CPP-01
 // Architecture:   ARCH-RUNTIME-001
 // Unit Design:    UD-SANAWM-01
-// Intent:         SANA-WM C++ runtime forwards official action-control contract
-// Preconditions:  Bundle config requests strict official-script execution
-// Postconditions: Bridge argv includes action/speed/frame flags and strict mode
+// Intent:         SANA-WM C++ runtime enforces native TensorRT execution
+// Preconditions:  Bundle has complete native component sections
+// Postconditions: Runtime decodes without Python subprocess fallback
 // =============================================================================
 
 #include "../../src/runtime/models/sana_wm/pipeline.h"
 #include "trtmc/trtmc_io.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,10 +35,6 @@ void check(bool condition, const char* test_name) {
     }
 }
 
-bool contains_arg(const std::vector<std::string>& argv, const std::string& arg) {
-    return std::find(argv.begin(), argv.end(), arg) != argv.end();
-}
-
 bool near(float actual, float expected, float eps = 1.0e-4F) {
     return std::fabs(actual - expected) <= eps;
 }
@@ -52,13 +47,6 @@ std::size_t chunk_plucker_offset(int32_t channel, int32_t chunk, int32_t y, int3
              static_cast<std::size_t>(y)) *
                 static_cast<std::size_t>(w) +
             static_cast<std::size_t>(x));
-}
-
-std::string value_after(const std::vector<std::string>& argv, const std::string& flag) {
-    auto it = std::find(argv.begin(), argv.end(), flag);
-    if (it == argv.end() || ++it == argv.end())
-        return "";
-    return *it;
 }
 
 std::vector<float> copy_float_tensor(const trtmc::Tensor& tensor) {
@@ -79,26 +67,6 @@ std::size_t stage1_bcthw_index(int32_t batch, int32_t channel, int32_t frame, in
                 static_cast<std::size_t>(width) +
             static_cast<std::size_t>(x));
 }
-
-class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
-  public:
-    std::vector<std::string> last_argv;
-    int call_count{0};
-
-    int run(const std::vector<std::string>& argv, const void*, std::size_t,
-            std::vector<char>& out_stdout, std::string& out_stderr) override {
-        ++call_count;
-        last_argv = argv;
-        out_stdout.clear();
-        out_stderr.clear();
-
-        if (value_after(argv, "--frames-dir").empty()) {
-            out_stderr = "missing --frames-dir";
-            return 2;
-        }
-        return 0;
-    }
-};
 
 class FakeTrtModule final : public trtmc::ITrtModule {
   public:
@@ -318,7 +286,6 @@ void test_runtime_config_parses_native_sana_wm_fields() {
           "text_encoder_max_length": 300,
           "sana_wm_dit_text_embed_dim": 2304,
           "sana_wm_chi_prompt": "Generate an \"Enhanced prompt\".\nUser Prompt: ",
-          "sana_wm_allow_python_bridge": 1,
           "sana_wm_default_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225]
         })json");
 
@@ -334,7 +301,6 @@ void test_runtime_config_parses_native_sana_wm_fields() {
     check(cfg.text_encoder_dim == 2304, "sana wm config: text encoder dim parsed");
     check(cfg.chi_prompt == "Generate an \"Enhanced prompt\".\nUser Prompt: ",
           "sana wm config: chi prompt parsed");
-    check(cfg.allow_python_bridge, "sana wm config: bridge opt-in parsed");
     check(cfg.default_intrinsics.size() == 4 && near(cfg.default_intrinsics[0], 797.87866F) &&
               near(cfg.default_intrinsics[3], 463.7225F),
           "sana wm config: default demo intrinsics parsed");
@@ -507,82 +473,28 @@ void test_stage1_latents_reject_mismatched_buffers() {
     check(rejected_initial, "sana wm latents: mismatched initial latents rejected");
 }
 
-void test_bridge_command_forwards_strict_sana_wm_contract() {
-    trtmc::SanaWmRuntimeConfig cfg;
-    cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
-    cfg.action = "bundle-action";
-    cfg.translation_speed = 0.01F;
-    cfg.rotation_speed_deg = 0.5F;
-    cfg.num_frames = 99;
-    cfg.require_official_script = true;
-    cfg.allow_python_bridge = true;
-
-    auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner);
-
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.image_path = "asset/sana_wm/demo_0.png";
-    gen_cfg.camera_action = "w-80,jw-40,w-40,lw-60,w-100";
-    gen_cfg.translation_speed = 0.055F;
-    gen_cfg.rotation_speed_deg = 1.2F;
-    gen_cfg.num_frames = 321;
-
-    bool missing_frames_reported = false;
-    try {
-        (void)pipeline.generate_image("drive forward", gen_cfg);
-    } catch (const std::runtime_error& exc) {
-        missing_frames_reported =
-            std::string(exc.what()).find("produced no frame_*.png") != std::string::npos;
-    }
-
-    check(runner->call_count == 1, "sana wm: subprocess invoked once");
-    check(missing_frames_reported, "sana wm: requires bridge to materialize frames");
-    check(contains_arg(runner->last_argv, "-m"), "sana wm: python module mode");
-    check(contains_arg(runner->last_argv, "tensorrt_model_connect.sana_wm_bridge"),
-          "sana wm: bridge module");
-    check(value_after(runner->last_argv, "--hf-id") ==
-              "Efficient-Large-Model/SANA-WM_bidirectional",
-          "sana wm: hf id forwarded");
-    check(value_after(runner->last_argv, "--image") == "asset/sana_wm/demo_0.png",
-          "sana wm: image forwarded");
-    check(value_after(runner->last_argv, "--prompt-text") == "drive forward",
-          "sana wm: prompt forwarded");
-    check(value_after(runner->last_argv, "--action") == "w-80,jw-40,w-40,lw-60,w-100",
-          "sana wm: action forwarded");
-    check(value_after(runner->last_argv, "--translation-speed").rfind("0.055", 0) == 0,
-          "sana wm: translation speed forwarded");
-    check(value_after(runner->last_argv, "--rotation-speed-deg").rfind("1.200", 0) == 0,
-          "sana wm: rotation speed forwarded");
-    check(value_after(runner->last_argv, "--num-frames") == "321",
-          "sana wm: frame count forwarded");
-    check(contains_arg(runner->last_argv, "--no-diffusers-fallback"),
-          "sana wm: strict official runtime required");
-}
-
-void test_bridge_path_requires_explicit_opt_in() {
+void test_pipeline_requires_native_tensor_rt_modules() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
 
-    auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner);
+    trtmc::SanaWmPipeline pipeline(cfg);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = "asset/sana_wm/demo_0.png";
 
-    bool bridge_disabled_reported = false;
+    bool native_required_reported = false;
     try {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
-        bridge_disabled_reported =
-            std::string(exc.what()).find("Python bridge execution is disabled") !=
+        native_required_reported =
+            std::string(exc.what()).find("pure C++ execution requires native TensorRT plan") !=
             std::string::npos;
     }
 
-    check(bridge_disabled_reported, "sana wm bridge: disabled unless explicitly opted in");
-    check(runner->call_count == 0, "sana wm bridge: subprocess not invoked when disabled");
+    check(native_required_reported, "sana wm native: missing native plans rejected");
 }
 
-void test_native_module_sections_do_not_fall_back_to_bridge() {
+void test_native_module_sections_require_complete_native_set() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
 
@@ -601,8 +513,7 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
         },
         std::vector<int64_t>{1, 2, 1, 2, 2});
 
-    auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
+    trtmc::SanaWmPipeline pipeline(cfg, std::move(modules));
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = "/tmp/trtmc_sana_wm_missing_input.png";
@@ -618,10 +529,9 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
     check(pipeline.has_native_modules(), "sana wm native: modules recorded");
     check(!pipeline.has_native_stage1(), "sana wm native: partial stage1 is not complete");
     check(incomplete_stage1_reported, "sana wm native: incomplete module set reported");
-    check(runner->call_count == 0, "sana wm native: bridge not used when native sections exist");
 }
 
-void test_native_stage1_solver_decodes_without_bridge() {
+void test_native_stage1_solver_decodes_with_native_modules() {
     const auto image_path =
         std::filesystem::temp_directory_path() / "trtmc_sana_wm_native_input_test.png";
     trtmc::io::save_png(image_path.string(),
@@ -681,9 +591,7 @@ void test_native_stage1_solver_decodes_without_bridge() {
     auto* decoder_ptr = decoder.get();
     modules.vae_decoder = std::move(decoder);
 
-    auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules),
-                                   std::make_shared<FakeTokenizer>());
+    trtmc::SanaWmPipeline pipeline(cfg, std::move(modules), std::make_shared<FakeTokenizer>());
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = image_path.string();
@@ -692,7 +600,6 @@ void test_native_stage1_solver_decodes_without_bridge() {
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
-    check(runner->call_count == 0, "sana wm native: generated without bridge");
     check(denoiser_ptr->call_count == 2, "sana wm native: denoiser invoked per solver step");
     check(decoder_ptr->call_count == 1, "sana wm native: VAE decoder invoked once");
     check(result.num_frames == 2 && result.height == 4 && result.width == 4,
@@ -807,9 +714,7 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
     auto* refiner_decoder_ptr = refiner_decoder.get();
     modules.refiner_vae_decoder = std::move(refiner_decoder);
 
-    auto runner = std::make_shared<FakeSubprocessRunner>();
-    trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules),
-                                   std::make_shared<FakeTokenizer>());
+    trtmc::SanaWmPipeline pipeline(cfg, std::move(modules), std::make_shared<FakeTokenizer>());
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.image_path = image_path.string();
@@ -818,7 +723,6 @@ void test_native_refiner_decodes_and_drops_sink_frame() {
 
     const auto result = pipeline.generate_image("drive forward", gen_cfg);
 
-    check(runner->call_count == 0, "sana wm native refiner: generated without bridge");
     check(pipeline.has_native_stage1(),
           "sana wm native refiner: stage1 core is complete without stage1 VAE decoder");
     check(refiner_text_ptr->call_count == 1, "sana wm native refiner: text encoded once");
@@ -867,10 +771,9 @@ int main() {
     test_stage1_latents_anchor_first_frame();
     test_stage1_latents_seeded_noise_is_deterministic();
     test_stage1_latents_reject_mismatched_buffers();
-    test_bridge_path_requires_explicit_opt_in();
-    test_bridge_command_forwards_strict_sana_wm_contract();
-    test_native_module_sections_do_not_fall_back_to_bridge();
-    test_native_stage1_solver_decodes_without_bridge();
+    test_pipeline_requires_native_tensor_rt_modules();
+    test_native_module_sections_require_complete_native_set();
+    test_native_stage1_solver_decodes_with_native_modules();
     test_native_refiner_decodes_and_drops_sink_frame();
     return failures == 0 ? 0 : 1;
 }

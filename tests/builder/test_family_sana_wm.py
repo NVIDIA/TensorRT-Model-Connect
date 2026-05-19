@@ -14,9 +14,8 @@ from tensorrt_model_connect import engine_builder
 import tensorrt_model_connect.families.sana_wm as sana_wm_mod
 
 
-def _sana_yaml(*, allow_bridge: bool = False) -> str:
-    bridge_cfg = "sana_wm_allow_python_bridge: 1\n" if allow_bridge else ""
-    return bridge_cfg + """
+def _sana_yaml() -> str:
+    return """
 model:
   model: SanaMSVideoCamCtrl_1600M_P1_D20
   image_size: 720
@@ -108,8 +107,8 @@ def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
     assert cfg.raw["sana_wm_config"]["vae"]["vae_latent_dim"] == 128
 
 
-def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
-    (tmp_path / "config.yaml").write_text(_sana_yaml(allow_bridge=True), encoding="utf-8")
+def test_sana_wm_plugin_emits_native_runtime_config(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     cfg = ModelConfig.from_dir(tmp_path)
 
     plugin = sana_wm_mod.plugin
@@ -119,12 +118,10 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
 
     weights = plugin.load_weights(str(tmp_path), cfg)
     assert weights["_model_format"] == "sana_wm_yaml"
-    assert plugin.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
 
     overrides = plugin.get_bundle_config_overrides(cfg)
     assert overrides["runtime_strategy"] == "diffusion_sana_wm"
     assert overrides["engine_backend"] == "none"
-    assert overrides["sana_wm_allow_python_bridge"] == 1
     assert overrides["sana_wm_hf_id"] == "Efficient-Large-Model/SANA-WM_bidirectional"
     assert overrides["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
     assert overrides["sana_wm_translation_speed"] == 0.055
@@ -132,7 +129,6 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["sana_wm_default_intrinsics"] == pytest.approx(
         [797.87866, 830.0503, 844.2675, 463.7225]
     )
-    assert overrides["sana_wm_require_official_script"] == 1
     assert overrides["video_num_frames"] == 321
     assert overrides["fps"] == 16
     assert overrides["num_inference_steps"] == 60
@@ -145,7 +141,7 @@ def test_sana_wm_plugin_emits_bridge_runtime_config(tmp_path) -> None:
     assert overrides["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
 
 
-def test_sana_wm_plugin_rejects_bridge_build_without_native_plans(tmp_path) -> None:
+def test_sana_wm_plugin_rejects_build_without_native_plans(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     cfg = ModelConfig.from_dir(tmp_path)
 
@@ -155,7 +151,8 @@ def test_sana_wm_plugin_rejects_bridge_build_without_native_plans(tmp_path) -> N
         sana_wm_mod.plugin.build_engine(cfg, weights, 256)
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
-    assert overrides["sana_wm_allow_python_bridge"] == 0
+    assert overrides["engine_backend"] == "none"
+    assert "sana_wm_allow_python_bridge" not in overrides
 
 
 def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
@@ -225,7 +222,6 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
 
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
-    assert overrides["sana_wm_allow_python_bridge"] == 0
     assert overrides["sana_wm_native_plan_sections"] == list(plans)
 
 
@@ -319,12 +315,11 @@ def test_sana_wm_plugin_rejects_native_plan_sections_without_tokenizer(tmp_path)
         sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
 
-def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> None:
+def test_sana_wm_build_bundle_rejects_missing_native_sections(tmp_path, monkeypatch) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "config.yaml").write_text(_sana_yaml(allow_bridge=True), encoding="utf-8")
+    (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     output_path = str(tmp_path / "sana-wm.trtfb")
-    captured: dict[str, object] = {}
 
     monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)
     monkeypatch.setattr(
@@ -333,44 +328,12 @@ def test_sana_wm_build_bundle_embeds_bridge_config(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0.0")
     monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "mock-gpu")
 
-    def fake_write_bundle(path, info, sections):
-        captured["path"] = path
-        captured["info"] = info
-        captured["sections"] = sections
-
-    monkeypatch.setattr(engine_builder, "write_bundle", fake_write_bundle)
-
-    engine_builder.build_bundle(
-        str(model_dir),
-        output_path,
-        build_timing_path=str(tmp_path / "timing.json"),
-    )
-
-    assert captured["path"] == output_path
-    info = captured["info"]
-    assert info.family == "sana_wm"
-    assert info.runtime_strategy == "diffusion_sana_wm"
-
-    sections = {section.name: section.data for section in captured["sections"]}
-    assert sections["engine_plan"] == b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
-    config = json.loads(sections["config.json"].decode("utf-8"))
-    assert config["model_type"] == "sana_wm"
-    assert config["runtime_strategy"] == "diffusion_sana_wm"
-    assert config["engine_backend"] == "none"
-    assert config["sana_wm_allow_python_bridge"] == 1
-    assert config["sana_wm_hf_id"] == "Efficient-Large-Model/SANA-WM_bidirectional"
-    assert config["sana_wm_action"] == "w-80,jw-40,w-40,lw-60,w-100"
-    assert config["sana_wm_translation_speed"] == 0.055
-    assert config["sana_wm_rotation_speed_deg"] == 1.2
-    assert config["sana_wm_default_intrinsics"] == pytest.approx(
-        [797.87866, 830.0503, 844.2675, 463.7225]
-    )
-    assert config["sana_wm_require_official_script"] == 1
-    assert config["sana_wm_chi_prompt"] == 'Generate an "Enhanced prompt".\nUser Prompt: '
-    assert config["video_num_frames"] == 321
-    assert config["vae_time_stride"] == 8
-    assert config["vae_spatial_stride"] == 32
-    assert config["num_inference_steps"] == 60
+    with pytest.raises(NotImplementedError, match="pure C\\+\\+ builds require native"):
+        engine_builder.build_bundle(
+            str(model_dir),
+            output_path,
+            build_timing_path=str(tmp_path / "timing.json"),
+        )
 
 
 def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> None:
@@ -409,5 +372,5 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     assert sections["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
     config = json.loads(sections["config.json"].decode("utf-8"))
     assert config["engine_backend"] == "trt"
-    assert config["sana_wm_allow_python_bridge"] == 0
+    assert "sana_wm_allow_python_bridge" not in config
     assert config["sana_wm_native_plan_sections"] == list(plans)

@@ -214,7 +214,7 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert out.metadata["command"] == cmd
 
 
-def test_sana_wm_reference_requires_official_script_when_manifest_requests_it(
+def test_sana_wm_reference_uses_model_card_script_contract(
     monkeypatch, tmp_path
 ):
     case = _make_case(
@@ -246,11 +246,12 @@ def test_sana_wm_reference_requires_official_script_when_manifest_requests_it(
         case, StageSpec(name="end_to_end"), ctx)
 
     cmd = captured["cmd"]
-    assert cmd[1:3] == ["-m", "tensorrt_model_connect.sana_wm_bridge"]
-    assert "--no-diffusers-fallback" in cmd
-    assert "--translation-speed" in cmd
-    assert "--rotation-speed-deg" in cmd
-    assert "--num-frames" in cmd
+    assert cmd[1].endswith("inference_video_scripts/inference_sana_wm.py")
+    assert "--prompt" in cmd
+    assert "--output_dir" in cmd
+    assert "--translation_speed" in cmd
+    assert "--rotation_speed_deg" in cmd
+    assert "--num_frames" in cmd
     assert out.metadata["command"] == cmd
 
 

@@ -316,9 +316,9 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         allow_patterns = _HF_ALLOW_PATTERNS + ["*.nemo"]
         if _is_sana_wm_model_ref(model_id_or_path):
-            # The public SANA-WM repo is 105 GB and the runtime bridge fetches
-            # weights on demand through the official inference path. Bundle
-            # construction only needs the YAML contract.
+            # The public SANA-WM repo is 105 GB. Native bundle construction
+            # starts from the YAML contract and requires component plans from a
+            # local model/engine directory.
             allow_patterns = ["README.md", "config.yaml"]
         local_dir = snapshot_download(repo_id=model_id_or_path, allow_patterns=allow_patterns)
     except Exception as exc:

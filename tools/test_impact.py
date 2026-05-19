@@ -1045,20 +1045,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestDeclarativeClassificationRules.test_specialized_builder_rule",),
         ),
         ClassificationRule(
-            priority=95,
-            name="sana_wm_bridge",
-            matcher=_path_equals(
-                "tensorrt_model_connect/tensorrt_model_connect/sana_wm_bridge.py"
-            ),
-            resolver=_match_result(
-                "sana_wm_bridge",
-                _fixed_runtime_strategy_models(["diffusion_sana_wm"]),
-                ["builder", "tools"],
-                False,
-            ),
-            covered_by=("TestSanaWmImpactRules.test_sana_wm_scoped_paths",),
-        ),
-        ClassificationRule(
             priority=100,
             name="shared_builder_module",
             matcher=_path_startswith("tensorrt_model_connect/"),

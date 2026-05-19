@@ -63,9 +63,8 @@ the upstream checkpoint does not include `inference_video_scripts/inference_sana
 or an action-capable Diffusers `model_index.json`, the case skips during
 preflight with `precheck_fail` and writes `preflight_details.json`.
 
-The TRTMC side is expected to run native TensorRT sections. Bridge execution is
-disabled by default and is only available when `sana_wm_allow_python_bridge=1`
-is explicitly set for legacy bridge testing.
+The TRTMC side is expected to run native TensorRT sections. Python fallback
+execution is not available for SANA-WM bundles.
 Set `SANA_WM_NATIVE_PLAN_DIR` to a directory containing the required
 `trtmc_engines/*.plan` sections, or set `SANA_WM_MODEL_DIR` to a model
 directory with a `trtmc_engines/` subdirectory. The minimum native set is

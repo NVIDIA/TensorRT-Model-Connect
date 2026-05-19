@@ -3,8 +3,7 @@
 The public SANA-WM release is not a standard diffusers directory: it ships a
 Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Local
 directories may package prebuilt native TRT component plans under
-``trtmc_engines/`` for the C++ runtime to load. The official Python bridge is a
-legacy compatibility path and is only bundled when explicitly enabled.
+``trtmc_engines/`` for the C++ runtime to load.
 """
 
 from __future__ import annotations
@@ -64,7 +63,6 @@ _TOKENIZER_FILES = (
 )
 _MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
 _NATIVE_ENGINE_MARKER = b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-_PYTHON_BRIDGE_ENGINE_MARKER = b"TRTMC_SANA_WM_PYTHON_BRIDGE\n"
 
 
 def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
@@ -83,10 +81,6 @@ def _float_list(value, fallback: tuple[float, ...]) -> list[float]:
     if isinstance(value, (list, tuple)):
         return [float(v) for v in value]
     return list(fallback)
-
-
-def _allow_python_bridge(raw_config: dict) -> bool:
-    return int(raw_config.get("sana_wm_allow_python_bridge", 0)) != 0
 
 
 def _read_safetensors_header(path: Path) -> dict:
@@ -339,17 +333,14 @@ class SanaWmPlugin:
         verbose: bool = False,
     ) -> bytes:
         del max_cache_length, precision, quant_ctx, verbose
-        if not weights.get("_native_plan_paths") and not _allow_python_bridge(config.raw):
+        if not weights.get("_native_plan_paths"):
             raise NotImplementedError(
                 "SANA-WM pure C++ builds require native TensorRT component plans under "
-                "trtmc_engines/ or sana_wm_native_plan_paths. The Python bridge is disabled "
-                "by default; set sana_wm_allow_python_bridge=1 only for legacy bridge testing."
+                "trtmc_engines/ or sana_wm_native_plan_paths."
             )
         # The runtime plugin ignores engine_plan. A small marker section keeps
         # the bundle shape compatible with the generic builder/writer path.
-        if weights.get("_native_plan_paths"):
-            return _NATIVE_ENGINE_MARKER
-        return _PYTHON_BRIDGE_ENGINE_MARKER
+        return _NATIVE_ENGINE_MARKER
 
     def build_extra_engines(
         self,
@@ -410,10 +401,6 @@ class SanaWmPlugin:
             "sana_wm_model_path": f"hf://{_HF_ID}/dit/sana_wm_1600m_720p.safetensors",
             "sana_wm_refiner_checkpoint": f"hf://{_HF_ID}/refiner/refiner.safetensors",
             "sana_wm_refiner_gemma_root": f"hf://{_HF_ID}/refiner/text_encoder",
-            "sana_wm_require_official_script": int(
-                raw.get("sana_wm_require_official_script", 1)
-            ),
-            "sana_wm_allow_python_bridge": int(_allow_python_bridge(raw)),
             "sana_wm_action": str(raw.get("sana_wm_action", _DEFAULT_ACTION)),
             "sana_wm_translation_speed": float(
                 raw.get("sana_wm_translation_speed", _DEFAULT_TRANSLATION_SPEED)

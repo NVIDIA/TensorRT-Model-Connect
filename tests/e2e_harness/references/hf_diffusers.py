@@ -651,7 +651,7 @@ print(f"Generated {{len(frames)}} frames")
     def _run_sana_wm_pipeline(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run SANA-WM through the official-script bridge used as the oracle."""
+        """Run SANA-WM through the official script used as the oracle."""
         prompt = case.inputs.get("prompt", "")
         prompt_file = _resolve_input_path(case.inputs.get("prompt_file"), ctx)
         if prompt_file and os.path.isfile(prompt_file):
@@ -668,36 +668,39 @@ print(f"Generated {{len(frames)}} frames")
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         frames_dir = os.path.join(model_dir, "hf_frames")
         output_dir = os.path.join(model_dir, "hf_sana_wm_output")
-        meta_json = os.path.join(model_dir, "hf_sana_wm_metadata.json")
         shutil.rmtree(frames_dir, ignore_errors=True)
         os.makedirs(frames_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
+        if prompt_file and os.path.isfile(prompt_file):
+            prompt_path = prompt_file
+        else:
+            prompt_path = os.path.join(model_dir, "hf_sana_wm_prompt.txt")
+            Path(prompt_path).write_text(prompt, encoding="utf-8")
 
         python = ctx.reference_python_path() or sys.executable
+        script = PROJECT_DIR / "inference_video_scripts" / "inference_sana_wm.py"
         cmd = [
-            python, "-m", "tensorrt_model_connect.sana_wm_bridge",
-            "--hf-id", case.hf_id,
-            "--prompt-text", prompt,
-            "--output-dir", output_dir,
-            "--frames-dir", frames_dir,
-            "--meta-json", meta_json,
+            python, str(script),
+            "--prompt", str(prompt_path),
+            "--output_dir", frames_dir,
             "--action", str(case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")),
-            "--translation-speed", str(case.inputs.get("translation_speed", 0.055)),
-            "--rotation-speed-deg", str(case.inputs.get("rotation_speed_deg", 1.2)),
-            "--num-frames", str(case.inputs.get("video_num_frames", 321)),
+            "--translation_speed", str(case.inputs.get("translation_speed", 0.055)),
+            "--rotation_speed_deg", str(case.inputs.get("rotation_speed_deg", 1.2)),
+            "--num_frames", str(case.inputs.get("video_num_frames", 321)),
         ]
         if image_path:
             cmd.extend(["--image", image_path])
+        else:
+            cmd.extend(["--image", ""])
+        env = _ref_subprocess_env()
         sana_script = case.inputs.get("sana_wm_script")
         if sana_script:
-            cmd.extend(["--sana-script", str(sana_script)])
-        if case.inputs.get("sana_wm_require_official_script", False):
-            cmd.append("--no-diffusers-fallback")
+            env["SANA_WM_SCRIPT"] = str(sana_script)
 
         t0 = time.monotonic()
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=3600,
-            env=_ref_subprocess_env())
+            env=env)
         elapsed = time.monotonic() - t0
 
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/domains/audio/subprocess_runner.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -15,7 +14,6 @@ namespace trtmc {
 
 struct SanaWmRuntimeConfig {
     std::string hf_id{"Efficient-Large-Model/SANA-WM_bidirectional"};
-    std::string script_path;
     std::string default_image;
     std::string action{"w-80,jw-40,w-40,lw-60,w-100"};
     float translation_speed{0.055F};
@@ -35,8 +33,6 @@ struct SanaWmRuntimeConfig {
     int32_t text_encoder_dim{2304};
     std::string chi_prompt;
     std::vector<float> default_intrinsics;
-    bool require_official_script{false};
-    bool allow_python_bridge{false};
 };
 
 SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json);
@@ -150,9 +146,7 @@ SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& fir
 
 class SanaWmPipeline final : public IPipeline {
   public:
-    SanaWmPipeline(SanaWmRuntimeConfig config, std::string hf_python,
-                   std::shared_ptr<ISubprocessRunner> subprocess_runner = nullptr,
-                   SanaWmNativeModules native_modules = {},
+    SanaWmPipeline(SanaWmRuntimeConfig config, SanaWmNativeModules native_modules = {},
                    std::shared_ptr<ITokenizer> tokenizer = nullptr);
 
     const char* model_id() const override { return config_.hf_id.c_str(); }
@@ -166,8 +160,6 @@ class SanaWmPipeline final : public IPipeline {
 
   private:
     SanaWmRuntimeConfig config_;
-    std::string hf_python_;
-    std::shared_ptr<ISubprocessRunner> subprocess_runner_;
     SanaWmNativeModules native_modules_;
     std::shared_ptr<ITokenizer> tokenizer_;
 };

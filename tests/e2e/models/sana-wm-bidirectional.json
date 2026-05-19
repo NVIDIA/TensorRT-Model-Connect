@@ -39,5 +39,5 @@
     "contract_min_pixel_std": 0.01
   },
   "skip_text_comparison": true,
-  "notes": "Runs the SANA-WM image-to-video contract from the model card: image asset/sana_wm/demo_0.png, prompt file asset/sana_wm/demo_0.txt, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, and 321 output frames. The HF reference uses the official SANA-WM script/Diffusers bridge as the oracle; the TRTMC side requires native TensorRT plan sections unless sana_wm_allow_python_bridge=1 is explicitly set for legacy bridge testing."
+  "notes": "Runs the SANA-WM image-to-video contract from the model card: image asset/sana_wm/demo_0.png, prompt file asset/sana_wm/demo_0.txt, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, and 321 output frames. The HF reference uses the official SANA-WM script as the oracle; the TRTMC side requires native TensorRT plan sections."
 }

@@ -772,7 +772,7 @@ class TestE2EDataFiles:
 
 class TestSanaWmImpactRules:
     def test_sana_wm_scoped_paths(self, mock_repo):
-        """SANA-WM bridge/runtime assets select only the SANA-WM manifest."""
+        """SANA-WM runtime assets select only the SANA-WM manifest."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         _write_json(
             models_dir / "sana-wm-bidirectional.json",
@@ -788,11 +788,6 @@ class TestSanaWmImpactRules:
         imap = test_impact.build_impact_map(mock_repo)
 
         scoped = [
-            (
-                "tensorrt_model_connect/tensorrt_model_connect/sana_wm_bridge.py",
-                "sana_wm_bridge",
-                ["builder", "tools"],
-            ),
             (
                 "inference_video_scripts/inference_sana_wm.py",
                 "sana_wm_inference_script",

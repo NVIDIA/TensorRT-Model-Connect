@@ -1,6 +1,4 @@
-// SANA-WM plugin: loads native TensorRT modules from bundle sections. The
-// Python bridge remains an explicit compatibility fallback handled by
-// SanaWmPipeline when no native modules are present and bridge opt-in is set.
+// SANA-WM plugin: loads native TensorRT modules from bundle sections.
 
 #include "bundle/bundle_view.h"
 #include "runtime/models/sana_wm/pipeline.h"
@@ -51,8 +49,8 @@ class SanaWmPlugin final : public IPipelinePlugin {
         auto config = parse_sana_wm_config(ctx.config_json);
         auto native_modules = load_sana_wm_native_modules(ctx);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
-        return std::make_unique<SanaWmPipeline>(std::move(config), ctx.hf_python, nullptr,
-                                                std::move(native_modules), std::move(tokenizer));
+        return std::make_unique<SanaWmPipeline>(std::move(config), std::move(native_modules),
+                                                std::move(tokenizer));
     }
 };
 
