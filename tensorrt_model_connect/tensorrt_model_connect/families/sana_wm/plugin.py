@@ -276,6 +276,15 @@ def _discover_tokenizer_sections(model_path: Path, raw_config: dict) -> dict[str
     return {}
 
 
+def _validate_native_tokenizer_sections(tokenizer_sections: dict[str, Path]) -> None:
+    if not tokenizer_sections:
+        raise ValueError(
+            "SANA-WM native TensorRT bundles require tokenizer assets for the C++ "
+            "text-encoder path. Place tokenizer.json under text_encoder/ or "
+            "refiner/text_encoder/, or set sana_wm_tokenizer_dir."
+        )
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -305,12 +314,14 @@ class SanaWmPlugin:
             config.raw["_sana_wm_stage1_dit_summary"] = summary
         native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
         _validate_native_plan_paths(native_plan_paths)
+        tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
+        if native_plan_paths:
+            _validate_native_tokenizer_sections(tokenizer_sections)
         if native_plan_paths:
             weights["_native_plan_paths"] = {
                 section: str(path) for section, path in native_plan_paths.items()
             }
             config.raw["_sana_wm_native_plan_sections"] = list(native_plan_paths)
-        tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
         if tokenizer_sections:
             weights["_tokenizer_sections"] = {
                 section: str(path) for section, path in tokenizer_sections.items()

@@ -85,6 +85,12 @@ def _write_native_plan_set(model_dir, *, plan_dir=None) -> dict[str, bytes]:
     return plans
 
 
+def _write_tokenizer(model_dir) -> None:
+    tokenizer_dir = model_dir / "text_encoder"
+    tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    (tokenizer_dir / "tokenizer.json").write_text('{"model": {"type": "Unigram"}}', encoding="utf-8")
+
+
 def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
 
@@ -193,10 +199,11 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
 def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     plans = _write_native_plan_set(tmp_path)
-    tokenizer_dir = tmp_path / "text_encoder"
-    tokenizer_dir.mkdir()
-    (tokenizer_dir / "tokenizer.json").write_text('{"model": {"type": "Unigram"}}', encoding="utf-8")
-    (tokenizer_dir / "tokenizer_config.json").write_text('{"add_bos_token": true}', encoding="utf-8")
+    _write_tokenizer(tmp_path)
+    (tmp_path / "text_encoder" / "tokenizer_config.json").write_text(
+        '{"add_bos_token": true}',
+        encoding="utf-8",
+    )
 
     cfg = ModelConfig.from_dir(tmp_path)
     weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
@@ -227,6 +234,7 @@ def test_sana_wm_plugin_discovers_native_plan_dir_from_config(tmp_path) -> None:
     model_dir.mkdir()
     plan_dir = tmp_path / "native_plans"
     plans = _write_native_plan_set(model_dir, plan_dir=plan_dir)
+    _write_tokenizer(model_dir)
     (model_dir / "config.yaml").write_text(
         _sana_yaml() + f"\nsana_wm_native_plan_dir: {plan_dir}\n",
         encoding="utf-8",
@@ -251,6 +259,7 @@ def test_sana_wm_plugin_discovers_native_plan_dir_from_env(tmp_path, monkeypatch
     model_dir.mkdir()
     plan_dir = tmp_path / "env_native_plans"
     _write_native_plan_set(model_dir, plan_dir=plan_dir)
+    _write_tokenizer(model_dir)
     (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     monkeypatch.setenv("SANA_WM_NATIVE_PLAN_DIR", str(plan_dir))
 
@@ -270,6 +279,7 @@ def test_sana_wm_plugin_discovers_native_plan_model_dir_from_config(tmp_path) ->
     model_dir.mkdir()
     external_model_dir = tmp_path / "native_model"
     plans = _write_native_plan_set(external_model_dir)
+    _write_tokenizer(model_dir)
     (model_dir / "config.yaml").write_text(
         _sana_yaml() + f"\nsana_wm_model_dir: {external_model_dir}\n",
         encoding="utf-8",
@@ -296,6 +306,16 @@ def test_sana_wm_plugin_rejects_partial_native_plan_sections(tmp_path) -> None:
     cfg = ModelConfig.from_dir(tmp_path)
 
     with pytest.raises(ValueError, match="complete prebuilt plan set"):
+        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+
+def test_sana_wm_plugin_rejects_native_plan_sections_without_tokenizer(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_native_plan_set(tmp_path)
+
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    with pytest.raises(ValueError, match="require tokenizer assets"):
         sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
 
@@ -358,9 +378,7 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     model_dir.mkdir()
     (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     plans = _write_native_plan_set(model_dir)
-    tokenizer_dir = model_dir / "text_encoder"
-    tokenizer_dir.mkdir()
-    (tokenizer_dir / "tokenizer.json").write_text('{"model": {"type": "Unigram"}}', encoding="utf-8")
+    _write_tokenizer(model_dir)
     output_path = str(tmp_path / "sana-wm.trtfb")
     captured: dict[str, object] = {}
 
