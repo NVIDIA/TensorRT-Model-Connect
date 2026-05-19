@@ -342,7 +342,7 @@ def _resolve_bundle(
             cmd.extend([cli_arg, str(value)])
     if build_method:
         cmd.extend(["--method", build_method])
-    _append_manifest_config_args(cmd, build_args)
+    _append_manifest_build_args(cmd, build_args)
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
@@ -689,7 +689,7 @@ def _build_repro_commands(
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))
     if build_method:
         build_parts.extend(["--method", build_method])
-    _append_manifest_config_args(build_parts, case.metadata.get("build_args", {}))
+    _append_manifest_build_args(build_parts, case.metadata.get("build_args", {}))
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
@@ -834,15 +834,7 @@ def _build_repro_commands(
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python and task_strategy != "neural_operator":
             infer_parts.extend(["--hf-python", runtime_cli_python])
-        distributed = case.metadata.get("distributed_runtime", {})
-        if isinstance(distributed, dict) and distributed.get("enabled"):
-            launcher = str(distributed.get("launcher", "mpirun") or "mpirun")
-            world_size = int(distributed.get("world_size", distributed.get("tp_size", 2)) or 2)
-            launcher_args = distributed.get("launcher_args")
-            if isinstance(launcher_args, list):
-                infer_parts = [launcher] + [str(arg) for arg in launcher_args] + infer_parts
-            else:
-                infer_parts = [launcher, "--tag-output", "-np", str(world_size)] + infer_parts
+        infer_parts = _wrap_distributed_repro_command(infer_parts, case)
         repro["trt_inference"] = " ".join(infer_parts)
 
     # Rerun this exact test case
@@ -852,6 +844,8 @@ def _build_repro_commands(
         "--trtmc-binary", ctx.binary_path,
         "--hf-python", ctx.hf_python or "python",
     ]
+    if _distributed_runtime_config(case):
+        rerun_parts.append("--multi-device-only")
     repro["rerun_test"] = " ".join(rerun_parts)
 
     profile_exports: list[str] = []
@@ -910,34 +904,48 @@ def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
     return None
 
 
-def _iter_manifest_config_sets(build_args: dict[str, Any]) -> list[str]:
-    """Translate manifest build_args config overrides to repeated CLI --set tokens."""
-    values = build_args.get("set", build_args.get("sets", []))
-    tokens: list[str] = []
-    if isinstance(values, str):
-        tokens.append(values)
-    elif isinstance(values, list):
-        tokens.extend(str(item) for item in values)
-
-    config_overrides = build_args.get("config_overrides", {})
-    if isinstance(config_overrides, dict):
-        for key, value in config_overrides.items():
-            tokens.append(f"{key}={value}")
-
+def _manifest_tensor_parallel_size(build_args: dict[str, Any]) -> int | None:
+    if not isinstance(build_args, dict):
+        return None
     parallel = build_args.get("parallel", {})
     if isinstance(parallel, dict):
-        for key, value in parallel.items():
-            tokens.append(f"parallel.{key}={value}")
+        value = parallel.get("tp_size", parallel.get("tensor_parallel_size"))
+        mode = str(parallel.get("mode", "") or "").lower()
+    else:
+        value = build_args.get("tp_size", build_args.get("tensor_parallel_size"))
+        mode = str(build_args.get("parallel_mode", "") or "").lower()
+    if value is None:
+        return None
+    try:
+        tp_size = int(value)
+    except (TypeError, ValueError):
+        return None
+    if tp_size > 1 or mode == "tensor_parallel":
+        return tp_size
+    return None
 
-    return [token for token in tokens if token]
+
+def _append_manifest_build_args(cmd: list[str], build_args: dict[str, Any]) -> None:
+    tp_size = _manifest_tensor_parallel_size(build_args)
+    if tp_size is not None and tp_size > 1:
+        cmd.extend(["--tp-size", str(tp_size)])
 
 
-def _append_manifest_config_args(cmd: list[str], build_args: dict[str, Any]) -> None:
-    config_path = build_args.get("config")
-    if config_path:
-        cmd.extend(["--config", str(config_path)])
-    for token in _iter_manifest_config_sets(build_args):
-        cmd.extend(["--set", token])
+def _distributed_runtime_config(case: E2ECase) -> dict[str, Any]:
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _wrap_distributed_repro_command(cmd: list[str], case: E2ECase) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        return [launcher] + [str(arg) for arg in launcher_args] + cmd
+    return [launcher, "--tag-output", "-np", str(world_size)] + cmd
 
 
 def _load_build_timing(path: Path | None) -> dict[str, Any]:

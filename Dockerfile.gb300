@@ -102,14 +102,9 @@ RUN TRT_LIB=$(python3 -c \
     ldconfig
 
 # ── Environment ─────────────────────────────────────────────────────────────
-# Pre-compute paths so cmake / runtime find TRT without manual exports.
-# The ARG defaults preserve the GB300 image behavior. A100 x86 TRT11 helper
-# scripts override them to reuse this dependency stack without a copied
-# Dockerfile.
-ARG TRT_INC_DIR=/usr/include/aarch64-linux-gnu
-ARG TRTMC_CUBLAS_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
+# Pre-compute paths so cmake / runtime find TRT without manual exports
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
-ENV TRT_INC_DIR=${TRT_INC_DIR}
+ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 
 # cuBLAS fix for GB300 (Blackwell, sm_103): the pip-installed nvidia-cu13
@@ -117,7 +112,7 @@ ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 # GEMM.  The system CUDA 13.0 toolkit cuBLAS has the correct kernels.
 # LD_PRELOAD forces PyTorch/HF/NeMo to use the system cuBLAS instead of the
 # pip one, enabling all torch.mm / F.linear / HF reference inference on GB300.
-ENV LD_PRELOAD=${TRTMC_CUBLAS_PRELOAD}
+ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
 # Coverage tooling verification (run inside container):
 #   python3 -m coverage --version && pytest --version && \

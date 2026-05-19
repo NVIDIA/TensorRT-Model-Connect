@@ -155,23 +155,30 @@ class TestQwenPlugin:
 
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
+        tp_size = 4
+        rank = 3
+        hidden_start = rank * self.HIDDEN // tp_size
+        hidden_end = (rank + 1) * self.HIDDEN // tp_size
+        mlp_start = rank * self.MLP // tp_size
+        mlp_end = (rank + 1) * self.MLP // tp_size
         shard = shard_standard_decoder_weights(
-            cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=2, rank=1))
+            cfg, weights,
+            ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=rank))
 
         np.testing.assert_allclose(
-            shard["layer.0.w_q"], weights["layer.0.w_q"][:, self.HIDDEN // 2:])
+            shard["layer.0.w_q"], weights["layer.0.w_q"][:, hidden_start:hidden_end])
         np.testing.assert_allclose(
-            shard["layer.0.w_k"], weights["layer.0.w_k"][:, self.HIDDEN // 2:])
+            shard["layer.0.w_k"], weights["layer.0.w_k"][:, hidden_start:hidden_end])
         np.testing.assert_allclose(
-            shard["layer.0.w_o"], weights["layer.0.w_o"][self.HIDDEN // 2:, :])
+            shard["layer.0.w_o"], weights["layer.0.w_o"][hidden_start:hidden_end, :])
         np.testing.assert_allclose(
-            shard["layer.0.w_gate"], weights["layer.0.w_gate"][:, self.MLP // 2:])
+            shard["layer.0.w_gate"], weights["layer.0.w_gate"][:, mlp_start:mlp_end])
         np.testing.assert_allclose(
-            shard["layer.0.w_down"], weights["layer.0.w_down"][self.MLP // 2:, :])
+            shard["layer.0.w_down"], weights["layer.0.w_down"][mlp_start:mlp_end, :])
         np.testing.assert_allclose(shard["w_out"], weights["w_out"])
-        assert shard["_attention_size"] == self.HIDDEN // 2
-        assert shard["_kv_attention_size"] == self.HIDDEN // 2
-        assert shard["_mlp_size"] == self.MLP // 2
+        assert shard["_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_kv_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_mlp_size"] == self.MLP // tp_size
 
 
 # =========================================================================

@@ -11,7 +11,6 @@ import numpy as np
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
     from .config import ModelConfig
-    from .runtime_config import ConfigBundle
 
 
 @dataclass(frozen=True)
@@ -61,19 +60,6 @@ class ParallelConfig:
         }
 
 
-def parallel_config_from_bundle(bundle: "ConfigBundle | None") -> ParallelConfig:
-    if bundle is None:
-        return ParallelConfig()
-    cfg = ParallelConfig(
-        mode=str(bundle.get("parallel", "mode")),
-        tp_size=int(bundle.get("parallel", "tp_size")),
-        rank=int(bundle.get("parallel", "rank")),
-        require_mpirun=bool(bundle.get("parallel", "require_mpirun")),
-    )
-    cfg.validate()
-    return cfg
-
-
 def normalize_parallel_config(value: ParallelConfig | None) -> ParallelConfig:
     cfg = value or ParallelConfig()
     cfg.validate()
@@ -117,16 +103,16 @@ def validate_standard_decoder_tp(
     tp = parallel.tp_size
     if model_config.num_attention_heads % tp != 0:
         raise ValueError(
-            "Qwen tensor parallel requires num_attention_heads divisible by tp_size "
+            "Standard decoder tensor parallel requires num_attention_heads divisible by tp_size "
             f"({model_config.num_attention_heads} vs {tp})")
     if model_config.num_key_value_heads % tp != 0:
         raise ValueError(
-            "Qwen tensor parallel requires num_key_value_heads divisible by tp_size "
+            "Standard decoder tensor parallel requires num_key_value_heads divisible by tp_size "
             f"({model_config.num_key_value_heads} vs {tp})")
     mlp_size = int(weights.get("_mlp_size", model_config.intermediate_size))
     if mlp_size % tp != 0:
         raise ValueError(
-            f"Qwen tensor parallel requires intermediate size divisible by tp_size "
+            f"Standard decoder tensor parallel requires intermediate size divisible by tp_size "
             f"({mlp_size} vs {tp})")
 
 
@@ -145,21 +131,19 @@ def shard_standard_decoder_weights(
     weights: "WeightDict",
     parallel: ParallelConfig,
 ) -> "WeightDict":
-    """Return rank-local Qwen/standard-decoder weights.
+    """Return rank-local standard-decoder weights.
 
     The current TP policy keeps embeddings, norms, and the LM head replicated.
     Attention and MLP inner dimensions are sharded. Row-parallel projections
     are followed by TRT distributed all-reduce in the builder.
     """
-    from .checkpoint_mapper import WeightDict
-
     validate_standard_decoder_tp(model_config, weights, parallel)
     if not parallel.enabled:
         return weights
 
     rank = parallel.rank
     tp = parallel.tp_size
-    out = WeightDict()
+    out = type(weights)()
     for key, value in weights.items():
         if not isinstance(value, np.ndarray):
             out[key] = value
@@ -197,7 +181,7 @@ def add_all_reduce_sum(network, tensor, tp_size: int):
     add_collective = getattr(network, "add_dist_collective", None)
     if add_collective is None:
         raise RuntimeError(
-            "Tensor-parallel Qwen builds require TensorRT 11.0+ Python bindings "
+            "Tensor-parallel decoder builds require TensorRT 11.0+ Python bindings "
             "with INetworkDefinition.add_dist_collective")
     layer = add_collective(
         tensor,
@@ -210,7 +194,7 @@ def add_all_reduce_sum(network, tensor, tp_size: int):
         raise RuntimeError("TensorRT failed to add ALL_REDUCE distributed collective")
     if not hasattr(layer, "num_ranks"):
         raise RuntimeError(
-            "Tensor-parallel Qwen builds require TensorRT 11.0+ Python bindings "
+            "Tensor-parallel decoder builds require TensorRT 11.0+ Python bindings "
             "with IDistCollectiveLayer.num_ranks")
     layer.num_ranks = tp_size
     return layer.get_output(0)

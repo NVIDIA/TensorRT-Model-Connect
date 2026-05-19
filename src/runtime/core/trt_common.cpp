@@ -109,11 +109,7 @@ bool CudaGraphExec::end_capture(cudaStream_t stream) {
         return false;
     }
 
-#if defined(CUDART_VERSION) && CUDART_VERSION < 12000
-    err = cudaGraphInstantiate(&exec_, graph_, nullptr, nullptr, 0);
-#else
     err = cudaGraphInstantiate(&exec_, graph_, 0);
-#endif
     if (err != cudaSuccess) {
         std::cerr << "[cuda_graph] instantiate failed: " << cudaGetErrorString(err) << '\n';
         cudaGraphDestroy(graph_);

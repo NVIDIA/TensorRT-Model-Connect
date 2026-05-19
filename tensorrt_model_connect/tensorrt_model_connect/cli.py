@@ -125,6 +125,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
 
+    from .parallel_config import ParallelConfig
+
+    tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
+    parallel_config = (
+        ParallelConfig(mode="tensor_parallel", tp_size=tp_size)
+        if tp_size > 1
+        else None
+    )
+
     # Resolve the registry-backed build-time config up front (before build),
     # so build-time namespaces can feed kwargs directly. Importing
     # runtime_config triggers registration of any schema modules declared
@@ -132,11 +141,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
     cli_cfg = getattr(args, "config", None)
     cli_sets = getattr(args, "set_flags", None) or []
     resolved_bundle = None
-    parallel_config = None
     if cli_cfg or cli_sets:
         from .runtime_config import resolve_cli_config
         from .runtime_config.schemas import load_all as _load_schemas
-        from .parallel_config import parallel_config_from_bundle
         _load_schemas()
         try:
             resolved_bundle = resolve_cli_config(
@@ -149,11 +156,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 "audio_magpie", "max_source_positions"))
         except KeyError:
             audio_magpie_max_source_positions = 0
-        try:
-            parallel_config = parallel_config_from_bundle(resolved_bundle)
-        except (ValueError, KeyError) as exc:
-            print(f"Error resolving parallel config: {exc}", file=sys.stderr)
-            return 1
     else:
         audio_magpie_max_source_positions = 0
 
@@ -557,6 +559,15 @@ def main() -> None:
                          help="KV cache length (default: 256)")
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
+    # TP is a narrow build-only path, not a generic runtime-config namespace.
+    build_p.add_argument(
+        "--tensor-parallel-size",
+        "--tp-size",
+        dest="tensor_parallel_size",
+        type=int,
+        choices=[1, 2, 4, 8],
+        default=1,
+        help="Build a tensor-parallel decoder bundle with this TP size")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,

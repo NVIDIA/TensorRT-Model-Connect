@@ -90,9 +90,7 @@ class TextGenerationPipeline final : public IPipeline {
     static int32_t argmax(const std::vector<float>& logits);
 
   private:
-    // Kept before TRT modules so it is destroyed after prefill_/decoders_.
-    // TensorRT sampleDistCollective destroys its context/engine before
-    // ncclCommDestroy; this member preserves that ordering for TP pipelines.
+    // Kept before TRT modules so TP communicators outlive contexts/engines.
     std::shared_ptr<void> distributed_owner_;
     std::vector<DecoderContext> decoders_;
     std::unique_ptr<TrtModule> prefill_;

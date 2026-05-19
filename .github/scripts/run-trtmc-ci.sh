@@ -347,17 +347,8 @@ run_selective_e2e() {
 
   python3 -c "
 import json
-from tests.e2e_harness.manifest_loader import get_case_by_name
-
 d = json.load(open('impact.json'))
 models = d.get('e2e_models', [])
-models = [
-    m for m in models
-    if not (
-        (case := get_case_by_name(m)) is not None
-        and str(case.metadata.get('ci_tier', '')) == 'multi_device'
-    )
-]
 with open('e2e_models.txt', 'w') as f:
     for m in models:
         f.write(m + '\n')
@@ -404,7 +395,7 @@ run_full_e2e() {
   nvidia-smi
   configure_e2e_timing_cache
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
-  python scripts/warm_hf_cache.py --exclude-ci-tier l0_only --exclude-ci-tier multi_device
+  python scripts/warm_hf_cache.py --exclude-ci-tier l0_only
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
   local args=(
     --engine-dir "$ENGINE_DIR"
@@ -412,92 +403,11 @@ run_full_e2e() {
     --trtmc-binary ./build/trtmc
     --workers-per-gpu 4
     --exclude-ci-tier l0_only
-    --exclude-ci-tier multi_device
   )
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
   run_e2e_with_diffusion_vlm "${FULL_E2E_TIMEOUT:-6h}" "${args[@]}"
-}
-
-run_multi_device_e2e() {
-  if [ "${TRTMC_MULTI_DEVICE_E2E:-false}" != "true" ]; then
-    echo "Skipping: multi-device E2E was not requested"
-    return 0
-  fi
-  if ! command -v mpirun >/dev/null 2>&1; then
-    echo "ERROR: multi-device E2E requires mpirun on PATH" >&2
-    return 1
-  fi
-  python3 -c '
-from tensorrt_model_connect import trt_compat
-
-version = trt_compat.tensorrt_version()
-abi = trt_compat.tensorrt_abi(version)
-major = int(abi.split(".", 1)[0]) if abi else 0
-if major < 11:
-    raise SystemExit(
-        f"ERROR: multi-device E2E requires TensorRT 11.0+; found {version or 'unavailable'}"
-    )
-print(f"Multi-device E2E TensorRT check: {version}")
-'
-
-  local model_file="e2e_multi_device_models.txt"
-  python3 -c '
-from tests.e2e_harness.manifest_loader import load_all_manifests
-
-models = [
-    case.name for case in load_all_manifests()
-    if str(case.metadata.get("ci_tier", "")) == "multi_device"
-]
-with open("e2e_multi_device_models.txt", "w", encoding="utf-8") as f:
-    for name in models:
-        f.write(name + "\n")
-print(f"Multi-device E2E: {len(models)} models")
-for name in models:
-    print(f"  {name}")
-'
-  if [ ! -s "$model_file" ]; then
-    echo "No multi-device E2E manifests found"
-    mkdir -p e2e_artifacts/artifacts
-    return 0
-  fi
-
-  export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
-  configure_e2e_timing_cache
-
-  echo "=== Multi-device E2E: warming HF cache ==="
-  env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file "$model_file"
-
-  echo "=== Multi-device E2E: pytest under manifest-controlled mpirun ==="
-  local pytest_args=()
-  while IFS= read -r model || [ -n "$model" ]; do
-    [ -n "$model" ] && pytest_args+=("tests/test_e2e.py::test_e2e[${model}]")
-  done < "$model_file"
-
-  local visible_devices="${TRTMC_MULTI_DEVICE_VISIBLE_DEVICES:-}"
-  local env_args=(env HF_HUB_OFFLINE=1)
-  if [ -n "$visible_devices" ]; then
-    env_args+=(CUDA_VISIBLE_DEVICES="$visible_devices")
-  fi
-  if [ -n "${TRTMC_NCCL_LIB_DIR:-}" ]; then
-    env_args+=(TRTMC_NCCL_LIB_DIR="$TRTMC_NCCL_LIB_DIR")
-  fi
-  local rebuild_args=()
-  if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
-    rebuild_args+=(--rebuild-engines)
-  fi
-
-  # TODO: When CI has multi-GPU support for this stage, fail the lane if every
-  # selected multi-device manifest skips on gpu_count_min preflight.
-  run_with_timeout "${MULTI_DEVICE_E2E_TIMEOUT:-2h}" "${env_args[@]}" \
-    python -m pytest "${pytest_args[@]}" -v \
-      --engine-dir "$ENGINE_DIR" \
-      --trtmc-binary ./build/trtmc \
-      --hf-python "${HF_PYTHON:-/opt/venv/bin/python}" \
-      --e2e-artifacts-dir e2e_artifacts/artifacts \
-      --junitxml=e2e_artifacts/junit-multi-device.xml \
-      "${rebuild_args[@]}"
 }
 
 run_e2e_with_diffusion_vlm() {
@@ -615,10 +525,6 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Full E2E tests" run_full_e2e
       ;;
-    multi-device-e2e)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
-      run_step "Multi-device E2E tests" run_multi_device_e2e
-      ;;
     coverage-map)
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Generate coverage map" generate_coverage_map
@@ -647,5 +553,4 @@ run_step "C++ coverage" run_cpp_coverage
 run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
-run_step "Multi-device E2E tests" run_multi_device_e2e
 run_step "Generate coverage map" generate_coverage_map

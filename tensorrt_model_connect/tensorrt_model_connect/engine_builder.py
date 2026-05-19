@@ -778,7 +778,11 @@ def build_bundle(
     if parallel.enabled:
         require_tensorrt_11_for_tensor_parallel(parallel)
         if quant_ctx is not None:
-            raise ValueError("Tensor-parallel Qwen builds do not support quantization yet")
+            raise ValueError("Tensor-parallel decoder builds do not support quantization yet")
+        if enable_dynamic_kv_cache:
+            raise NotImplementedError(
+                "Tensor-parallel decoder builds do not support dynamic_kv_cache "
+                "or TriAttention yet")
         if not _call_supports_kwarg(plugin.build_engine, "parallel_config"):
             raise ValueError(
                 f"Plugin {plugin.name} does not support tensor-parallel builds")
@@ -1092,7 +1096,7 @@ def _build_diffusion_bundle(
     if parallel.enabled:
         raise NotImplementedError(
             "Tensor-parallel diffusion builds are not implemented yet; "
-            "Qwen decoder TP is the active first target.")
+            "decoder TP is the active first target.")
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())

@@ -10,6 +10,8 @@ def pytest_addoption(parser):
                                 help='Only run core E2E models')),
         ('--e2e-exclude-ci-tier', dict(action='append', default=[],
                                       help='Exclude manifests with this ci_tier')),
+        ('--multi-device-only', dict(action='store_true', default=False,
+                                     help='Only run multi-device E2E models')),
         ('--e2e-platform', dict(default='',
                                help='Platform name used to select platform-prefixed waives')),
         ('--e2e-partition-id', dict(type=int, default=None,

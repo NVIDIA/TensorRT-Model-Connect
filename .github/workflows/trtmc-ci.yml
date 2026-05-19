@@ -34,10 +34,6 @@ env:
   FULL_E2E: "false"
   RUN_COVERAGE_MAP: "false"
   REBUILD_ENGINES: "true"
-  TRTMC_MULTI_DEVICE_E2E: ${{ vars.TRTMC_MULTI_DEVICE_E2E || 'false' }}
-  TRTMC_MULTI_DEVICE_VISIBLE_DEVICES: ${{ vars.TRTMC_MULTI_DEVICE_VISIBLE_DEVICES || '' }}
-  TRTMC_NCCL_LIB_DIR: ${{ vars.TRTMC_NCCL_LIB_DIR || '' }}
-  MULTI_DEVICE_E2E_TIMEOUT: "120m"
   DIFFUSION_VLM_ASSESSMENT: "true"
   DIFFUSION_VLM_MODEL_ID: ${{ vars.TRTMC_DIFFUSION_VLM_MODEL_ID || 'Qwen/Qwen2.5-VL-3B-Instruct' }}
   DIFFUSION_VLM_MAX_SIDE: "512"
@@ -176,11 +172,6 @@ jobs:
         if: ${{ github.event_name == 'pull_request' && env.FULL_E2E != 'true' }}
         timeout-minutes: 240
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
-
-      - name: Multi-device E2E tests
-        if: ${{ env.TRTMC_MULTI_DEVICE_E2E == 'true' }}
-        timeout-minutes: 120
-        run: bash .github/scripts/run-gha-stage.sh multi-device-e2e
 
       - name: Write CI summary
         if: always()

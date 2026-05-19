@@ -129,12 +129,11 @@ def _wrap_distributed_command(
         prefix = [launcher, "--tag-output", "-np", str(world_size)]
 
     export_env = config.get("export_env", ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"])
-    if isinstance(export_env, list) and launcher == "mpirun":
+    if isinstance(export_env, list) and Path(launcher).name == "mpirun":
         export_names = [str(name) for name in export_env]
         if "TRTMC_NCCL_RENDEZVOUS" in env and "TRTMC_NCCL_RENDEZVOUS" not in export_names:
             export_names.append("TRTMC_NCCL_RENDEZVOUS")
         for name in export_names:
-            name = str(name)
             if name in env:
                 prefix.extend(["-x", name])
 
@@ -346,8 +345,6 @@ class TextGenerationCausalRunner:
             logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
                 ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
             )
-            if logits_path is None and _distributed_debug_logits_required(case):
-                raise RuntimeError(_format_debug_runner_error(case, "full", debug_meta))
             text = str(debug_meta.get("full_text") or debug_meta.get("generated_text") or "")
             cpp_rc = int(debug_meta.get("returncode", -1))
             data = {
@@ -377,21 +374,12 @@ class TextGenerationCausalRunner:
 
         # Debug runner for per-step logits — skip in acceptance lane when
         # a contract plugin handles verification (only needs text, not logits)
-        distributed_runtime = _distributed_runtime_config(case)
-        distributed_debug_logits = bool(distributed_runtime.get("debug_logits", True))
-        skip_debug = (has_contract and is_acceptance) or (
-            bool(distributed_runtime) and not distributed_debug_logits
-        )
+        skip_debug = has_contract and is_acceptance
 
         if skip_debug:
             logits_path = None
             debug_time = 0.0
-            reason = (
-                "distributed debug logits disabled"
-                if distributed_runtime
-                else "contract plugin active in acceptance lane"
-            )
-            debug_meta = {"skipped": reason}
+            debug_meta = {"skipped": "contract plugin active in acceptance lane"}
         else:
             logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
                 ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
@@ -524,7 +512,7 @@ class TextGenerationCausalRunner:
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
         distributed_runtime = _distributed_runtime_config(case)
-        if distributed_runtime:
+        if distributed_runtime and case is not None:
             _ensure_distributed_runtime_env(case, ctx, env)
             extra_env = distributed_runtime.get("env", {})
             if isinstance(extra_env, dict):
@@ -677,10 +665,11 @@ class TextGenerationCausalRunner:
                 logits_list = [r["logits"].flatten() for r in results]
 
                 should_write = group is None or group.rank == 0
+                rank = 0 if group is None else group.rank
                 if len(logits_list) == 0:
                     if should_write:
                         np.save(logits_path, np.zeros((0, 0), dtype=np.float32))
-                    print(f"OK rank={{0 if group is None else group.rank}} steps=0 vocab=0")
+                    print(f"OK rank={{rank}} steps=0 vocab=0")
                 else:
                     max_len = max(l.shape[0] for l in logits_list)
                     padded = np.zeros((len(logits_list), max_len), dtype=np.float32)
@@ -688,14 +677,13 @@ class TextGenerationCausalRunner:
                         padded[i, :l.shape[0]] = l
                     if should_write:
                         np.save(logits_path, padded)
-                    print(f"OK rank={{0 if group is None else group.rank}} "
-                          f"steps={{len(logits_list)}} vocab={{max_len}}")
+                    print(f"OK rank={{rank}} steps={{len(logits_list)}} vocab={{max_len}}")
                 if should_write:
                     print("TRTMC_DEBUG_META " + json.dumps({{
                         "generated_text": generated_text,
                         "full_text": full_text,
                         "generated_token_count": len(generated_tokens),
-                        "distributed_rank": 0 if group is None else group.rank,
+                        "distributed_rank": rank,
                     }}))
             finally:
                 if runner is not None:

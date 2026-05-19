@@ -5,7 +5,6 @@ markers = [
     "e2e: end-to-end tests requiring GPU and engine bundles",
     "unit: Unit tests — no GPU, no TRT",
     "gpu: Requires NVIDIA GPU",
-    "multi_device: Requires multiple visible NVIDIA GPUs and an MPI launcher",
     "slow: Slow tests (>30s)",
     "text: Text generation models",
     "vision: Vision/VL models",
