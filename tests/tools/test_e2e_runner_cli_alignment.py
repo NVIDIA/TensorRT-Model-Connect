@@ -178,7 +178,6 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
-            "no_refiner": True,
         },
     )
     ctx = _make_ctx(case, tmp_path)
@@ -214,10 +213,32 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert "797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num_frames" in cmd
     assert "321" in cmd
-    assert "--no_refiner" in cmd
+    assert "--no_refiner" not in cmd
     assert "--hf-python" not in cmd
     assert "/opt/trtmc-python/bin/python" not in cmd
     assert out.metadata["command"] == cmd
+
+
+def test_diffusion_runner_maps_sana_wm_optional_no_refiner(monkeypatch, tmp_path):
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        inputs={"prompt": "drive forward", "no_refiner": True},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(diffusion.subprocess, "run", _fake_run)
+
+    diffusion.DiffusionMediaRunner().run_stage(case, StageSpec(name="end_to_end"), ctx)
+
+    assert "--no_refiner" in captured["cmd"]
 
 
 def test_sana_wm_reference_uses_model_card_script_contract(
@@ -235,7 +256,6 @@ def test_sana_wm_reference_uses_model_card_script_contract(
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
             "video_num_frames": 321,
-            "no_refiner": True,
             "sana_wm_require_official_script": True,
         },
     )
@@ -259,8 +279,30 @@ def test_sana_wm_reference_uses_model_card_script_contract(
     assert "--translation_speed" in cmd
     assert "--rotation_speed_deg" in cmd
     assert "--num_frames" in cmd
-    assert "--no_refiner" in cmd
+    assert "--no_refiner" not in cmd
     assert out.metadata["command"] == cmd
+
+
+def test_sana_wm_reference_passes_optional_no_refiner(monkeypatch, tmp_path):
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        inputs={"prompt": "drive forward", "no_refiner": True},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", _fake_run)
+
+    hf_diffusers.HfDiffusersReference().run_stage(case, StageSpec(name="end_to_end"), ctx)
+
+    assert "--no_refiner" in captured["cmd"]
 
 
 def test_omni_runner_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path):

@@ -499,7 +499,6 @@ def test_sana_wm_preflight_skip_keeps_model_card_reference_command(
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
             "video_num_frames": 321,
-            "no_refiner": True,
         },
         stages=[StageSpec(name="end_to_end")],
     )
@@ -520,8 +519,7 @@ def test_sana_wm_preflight_skip_keeps_model_card_reference_command(
         "--translation_speed 0.055 "
         "--rotation_speed_deg 1.2 "
         "--num_frames 321 "
-        "--output_dir results/demo "
-        "--no_refiner"
+        "--output_dir results/demo"
     )
     assert result.status == E2EStatus.SKIP.value
     assert result.repro_commands["sana_wm_python_reference"] == expected

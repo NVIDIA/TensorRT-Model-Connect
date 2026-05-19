@@ -106,7 +106,6 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
-            "no_refiner": True,
         },
         stages=[],
     )
@@ -131,7 +130,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
     assert "--rotation_speed_deg 1.2" in cmd
     assert "--intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num_frames 321" in cmd
-    assert "--no_refiner" in cmd
+    assert "--no_refiner" not in cmd
     assert "--hf-python" not in cmd
 
     reference_cmd = repro["sana_wm_python_reference"]
@@ -143,6 +142,30 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
         "--translation_speed 0.055 "
         "--rotation_speed_deg 1.2 "
         "--num_frames 321 "
-        "--output_dir results/demo "
-        "--no_refiner"
+        "--output_dir results/demo"
     )
+
+
+def test_repro_commands_include_optional_sana_wm_no_refiner(tmp_path) -> None:
+    case = E2ECase(
+        name="sana-wm-bidirectional",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        task_strategy="diffusion_media_generation",
+        bundle="sana-wm-bidirectional.trtfb",
+        inputs={"prompt": "drive forward", "no_refiner": True},
+        stages=[],
+    )
+    ctx = _make_ctx(tmp_path)
+    ctx.case = case
+
+    repro = _build_repro_commands(
+        case,
+        ctx,
+        "/tmp/engines/sana-wm-bidirectional.trtfb",
+        {},
+    )
+
+    assert "--no_refiner" in repro["trt_inference"]
+    assert "--no_refiner" in repro["sana_wm_python_reference"]
