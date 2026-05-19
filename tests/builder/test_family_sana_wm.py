@@ -133,6 +133,21 @@ def _write_vae_weights_marker(model_dir) -> None:
     (vae_dir / "diffusion_pytorch_model.safetensors").write_bytes(b"placeholder")
 
 
+def _write_refiner_diffusers_markers(model_dir) -> None:
+    transformer_dir = model_dir / "refiner" / "transformer"
+    connectors_dir = model_dir / "refiner" / "connectors"
+    text_encoder_dir = model_dir / "refiner" / "text_encoder"
+    transformer_dir.mkdir(parents=True, exist_ok=True)
+    connectors_dir.mkdir(parents=True, exist_ok=True)
+    text_encoder_dir.mkdir(parents=True, exist_ok=True)
+    (transformer_dir / "diffusion_pytorch_model.safetensors").write_bytes(
+        b"refiner-transformer"
+    )
+    (connectors_dir / "diffusion_pytorch_model.safetensors").write_bytes(
+        b"refiner-connectors"
+    )
+
+
 def test_sana_wm_yaml_config_parses_from_dir(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
 
@@ -218,9 +233,7 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
         },
     )
     (tmp_path / "vae").mkdir()
-    (tmp_path / "refiner").mkdir()
-    (tmp_path / "refiner" / "refiner.safetensors").write_bytes(b"placeholder")
-    (tmp_path / "refiner" / "text_encoder").mkdir()
+    _write_refiner_diffusers_markers(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
     weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
 
@@ -231,6 +244,9 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS" not in message
     assert "stage-1 Gemma text encoder" in message
     assert "complete LTX-2 refiner stack" in message
+    assert weights["_refiner_checkpoint"].endswith("refiner")
+    assert weights["_refiner_transformer_dir"].endswith("refiner/transformer")
+    assert weights["_refiner_connectors_dir"].endswith("refiner/connectors")
 
 
 def test_sana_wm_plugin_omits_buildable_text_encoder_from_builder_gap(tmp_path) -> None:
@@ -298,7 +314,7 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
 
     assert weights["_stage1_dit_path"].endswith("dit/sana_wm_1600m_720p.safetensors")
     assert weights["_vae_dir"].endswith("vae")
-    assert weights["_refiner_checkpoint"].endswith("refiner/refiner.safetensors")
+    assert weights["_refiner_checkpoint"].endswith("refiner")
     summary = weights["_stage1_dit_summary"]
     assert summary["num_layers"] == 2
     assert summary["hidden_size"] == 2240
@@ -313,6 +329,20 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     assert overrides["sana_wm_dit_hidden_size"] == 2240
     assert overrides["sana_wm_dit_text_embed_dim"] == 2304
     assert overrides["sana_wm_dit_tensor_count"] == 8
+
+
+def test_sana_wm_plugin_accepts_legacy_single_file_refiner_layout(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    refiner_dir = tmp_path / "refiner"
+    refiner_dir.mkdir()
+    (refiner_dir / "refiner.safetensors").write_bytes(b"legacy-refiner")
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert weights["_refiner_checkpoint"].endswith("refiner/refiner.safetensors")
+    assert weights["_refiner_transformer_dir"].endswith("refiner")
+    assert weights["_refiner_connectors_dir"].endswith("refiner")
 
 
 def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:

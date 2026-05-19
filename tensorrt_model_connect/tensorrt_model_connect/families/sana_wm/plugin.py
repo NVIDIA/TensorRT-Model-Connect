@@ -43,13 +43,27 @@ _STAGE1_TEXT_ENCODER_ALLOW_PATTERNS = (
     "tokenizer.model",
     "special_tokens_map.json",
 )
-_REFINER_REL = Path("refiner") / "refiner.safetensors"
+_LEGACY_REFINER_REL = Path("refiner") / "refiner.safetensors"
+_REFINER_DIR_REL = Path("refiner")
+_REFINER_TRANSFORMER_REL = (
+    Path("refiner") / "transformer" / "diffusion_pytorch_model.safetensors"
+)
+_REFINER_CONNECTORS_REL = (
+    Path("refiner") / "connectors" / "diffusion_pytorch_model.safetensors"
+)
 _REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
-_FULL_SNAPSHOT_REQUIRED_PATHS = (
-    _STAGE1_DIT_REL,
-    Path("vae"),
-    _REFINER_REL,
-    _REFINER_GEMMA_REL,
+_FULL_SNAPSHOT_REQUIRED_PATH_GROUPS = (
+    ("dit/sana_wm_1600m_720p.safetensors", (_STAGE1_DIT_REL,)),
+    ("vae/", (Path("vae"),)),
+    (
+        "refiner transformer",
+        (_LEGACY_REFINER_REL, _REFINER_TRANSFORMER_REL),
+    ),
+    (
+        "refiner connectors",
+        (_LEGACY_REFINER_REL, _REFINER_CONNECTORS_REL),
+    ),
+    ("refiner/text_encoder/", (_REFINER_GEMMA_REL,)),
 )
 _NATIVE_BUILDER_COMPONENTS = (
     "stage-1 Gemma text encoder",
@@ -232,6 +246,52 @@ def _resolve_refiner_text_encoder_dir(model_path: Path, raw_config: dict) -> Pat
     for candidate in candidates:
         if (candidate / "config.json").is_file():
             return candidate
+    return None
+
+
+def _resolve_refiner_root(model_path: Path, raw_config: dict) -> Path:
+    for value in (
+        raw_config.get("sana_wm_refiner_dir"),
+        os.environ.get("SANA_WM_REFINER_DIR"),
+    ):
+        if value:
+            return _resolve_native_plan_path(model_path, str(value))
+    return model_path / _REFINER_DIR_REL
+
+
+def _resolve_refiner_checkpoint_path(model_path: Path, raw_config: dict) -> Path:
+    configured = raw_config.get("sana_wm_refiner_checkpoint")
+    if configured:
+        return _resolve_native_plan_path(model_path, str(configured))
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    transformer_path = refiner_root / "transformer" / "diffusion_pytorch_model.safetensors"
+    if transformer_path.is_file():
+        return refiner_root
+    return model_path / _REFINER_DIR_REL
+
+
+def _resolve_refiner_transformer_dir(model_path: Path, raw_config: dict) -> Path | None:
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    transformer_dir = refiner_root / "transformer"
+    if _has_safetensors_weight_file(transformer_dir):
+        return transformer_dir
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path.parent
+    return None
+
+
+def _resolve_refiner_connectors_dir(model_path: Path, raw_config: dict) -> Path | None:
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    connectors_dir = refiner_root / "connectors"
+    if _has_safetensors_weight_file(connectors_dir):
+        return connectors_dir
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path.parent
     return None
 
 
@@ -488,9 +548,9 @@ def _validate_native_tokenizer_sections(tokenizer_sections: dict[str, Path]) -> 
 
 def _missing_full_snapshot_paths(model_path: Path) -> list[str]:
     missing: list[str] = []
-    for rel in _FULL_SNAPSHOT_REQUIRED_PATHS:
-        if not (model_path / rel).exists():
-            missing.append(str(rel))
+    for label, alternatives in _FULL_SNAPSHOT_REQUIRED_PATH_GROUPS:
+        if not any((model_path / rel).exists() for rel in alternatives):
+            missing.append(label)
     return missing
 
 
@@ -724,7 +784,9 @@ class SanaWmPlugin:
         weights["_model_dir"] = str(model_path)
         weights["_stage1_dit_path"] = str(model_path / _STAGE1_DIT_REL)
         weights["_vae_dir"] = str(model_path / "vae")
-        weights["_refiner_checkpoint"] = str(model_path / _REFINER_REL)
+        weights["_refiner_checkpoint"] = str(
+            _resolve_refiner_checkpoint_path(model_path, config.raw)
+        )
         weights["_refiner_gemma_root"] = str(model_path / _REFINER_GEMMA_REL)
 
         stage1_path = model_path / _STAGE1_DIT_REL
@@ -737,6 +799,8 @@ class SanaWmPlugin:
         can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
         refiner_text_encoder_dir = _resolve_refiner_text_encoder_dir(model_path, config.raw)
         can_build_refiner_text_encoder = refiner_text_encoder_dir is not None
+        refiner_transformer_dir = _resolve_refiner_transformer_dir(model_path, config.raw)
+        refiner_connectors_dir = _resolve_refiner_connectors_dir(model_path, config.raw)
         vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
         can_build_vae_encoder = vae_encoder_dir is not None
         vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
@@ -768,6 +832,10 @@ class SanaWmPlugin:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
         if refiner_text_encoder_dir is not None:
             weights["_refiner_text_encoder_dir"] = str(refiner_text_encoder_dir)
+        if refiner_transformer_dir is not None:
+            weights["_refiner_transformer_dir"] = str(refiner_transformer_dir)
+        if refiner_connectors_dir is not None:
+            weights["_refiner_connectors_dir"] = str(refiner_connectors_dir)
         if vae_encoder_dir is not None:
             weights["_sana_wm_vae_encoder_dir"] = str(vae_encoder_dir)
         if vae_decoder_dir is not None:
@@ -891,7 +959,13 @@ class SanaWmPlugin:
             "sana_wm_hf_id": _HF_ID,
             "sana_wm_config_path": f"hf://{_HF_ID}/config.yaml",
             "sana_wm_model_path": f"hf://{_HF_ID}/dit/sana_wm_1600m_720p.safetensors",
-            "sana_wm_refiner_checkpoint": f"hf://{_HF_ID}/refiner/refiner.safetensors",
+            "sana_wm_refiner_checkpoint": f"hf://{_HF_ID}/refiner",
+            "sana_wm_refiner_transformer": (
+                f"hf://{_HF_ID}/refiner/transformer/diffusion_pytorch_model.safetensors"
+            ),
+            "sana_wm_refiner_connectors": (
+                f"hf://{_HF_ID}/refiner/connectors/diffusion_pytorch_model.safetensors"
+            ),
             "sana_wm_refiner_gemma_root": f"hf://{_HF_ID}/refiner/text_encoder",
             "sana_wm_action": str(raw.get("sana_wm_action", _DEFAULT_ACTION)),
             "sana_wm_translation_speed": float(
