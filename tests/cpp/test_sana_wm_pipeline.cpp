@@ -22,6 +22,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -82,7 +83,15 @@ class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
 
 class FakeTrtModule final : public trtmc::ITrtModule {
   public:
-    trtmc::TensorMap forward(const trtmc::TensorMap&) override { return {}; }
+    FakeTrtModule() = default;
+    FakeTrtModule(std::vector<float> output, std::vector<int64_t> shape)
+        : output_(std::move(output)), output_shape_(std::move(shape)) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap&) override {
+        if (output_.empty())
+            return {};
+        return {{"latent", trtmc::Tensor{output_.data(), output_shape_, trtmc::DType::kFloat32}}};
+    }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
     void forward_async(const trtmc::TensorMap&) override {}
@@ -91,10 +100,18 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     void enable_cuda_graph() override {}
     bool cuda_graph_active() const override { return false; }
     int32_t profile_idx() const override { return 0; }
-    std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
+    std::vector<trtmc::TensorInfo> input_info() const override {
+        if (output_.empty())
+            return {};
+        return {{"sample", {1, 3, 1, 4, 4}, trtmc::DType::kFloat32, true}};
+    }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
-    bool has_input(const std::string&) const override { return false; }
-    bool has_output(const std::string&) const override { return false; }
+    bool has_input(const std::string& name) const override {
+        return !output_.empty() && name == "sample";
+    }
+    bool has_output(const std::string& name) const override {
+        return !output_.empty() && name == "latent";
+    }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
     std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
@@ -106,6 +123,10 @@ class FakeTrtModule final : public trtmc::ITrtModule {
     void bind_external(const std::string&, void*) override {}
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
+
+  private:
+    std::vector<float> output_;
+    std::vector<int64_t> output_shape_;
 };
 
 void test_action_rollout_matches_model_card_frame_count_and_translation() {
@@ -448,6 +469,12 @@ void test_native_module_sections_do_not_fall_back_to_bridge() {
 
     trtmc::SanaWmNativeModules modules;
     modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+    modules.vae_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{
+            0.1F, 0.2F, 0.3F, 0.4F,
+            0.5F, 0.6F, 0.7F, 0.8F,
+        },
+        std::vector<int64_t>{1, 2, 1, 2, 2});
 
     auto runner = std::make_shared<FakeSubprocessRunner>();
     trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
@@ -486,11 +513,18 @@ void test_native_input_preparation_reaches_solver_boundary() {
     cfg.height = 4;
     cfg.width = 4;
     cfg.num_frames = 2;
+    cfg.vae_latent_dim = 2;
     cfg.vae_time_stride = 1;
     cfg.vae_spatial_stride = 2;
 
     trtmc::SanaWmNativeModules modules;
     modules.stage1_denoiser = std::make_unique<FakeTrtModule>();
+    modules.vae_encoder = std::make_unique<FakeTrtModule>(
+        std::vector<float>{
+            0.1F, 0.2F, 0.3F, 0.4F,
+            0.5F, 0.6F, 0.7F, 0.8F,
+        },
+        std::vector<int64_t>{1, 2, 1, 2, 2});
 
     auto runner = std::make_shared<FakeSubprocessRunner>();
     trtmc::SanaWmPipeline pipeline(cfg, "/usr/bin/python3", runner, std::move(modules));
@@ -505,9 +539,9 @@ void test_native_input_preparation_reaches_solver_boundary() {
     try {
         (void)pipeline.generate_image("drive forward", gen_cfg);
     } catch (const std::runtime_error& exc) {
-        solver_boundary_reported =
-            std::string(exc.what()).find("solver/refiner execution is not implemented") !=
-            std::string::npos;
+        solver_boundary_reported = std::string(exc.what()).find(
+                                       "text encoding/solver/refiner execution is not implemented") !=
+                                   std::string::npos;
     }
 
     check(solver_boundary_reported, "sana wm native: input prep reaches solver boundary");

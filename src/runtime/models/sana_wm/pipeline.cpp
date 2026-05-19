@@ -9,6 +9,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <random>
 #include <set>
@@ -24,6 +25,7 @@ namespace {
 
 constexpr float kDefaultPitchLimitDeg = 85.0F;
 constexpr float kPi = 3.14159265358979323846F;
+using half_bits_t = uint16_t;
 
 std::string first_nonempty(std::string a, const std::string& b) {
     if (!a.empty())
@@ -542,6 +544,127 @@ std::size_t chw_index(int32_t channel, int32_t y, int32_t x, int32_t height, int
            static_cast<std::size_t>(x);
 }
 
+half_bits_t fp32_to_fp16(float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    const uint32_t sign = (bits >> 16U) & 0x8000U;
+    const int32_t exp = static_cast<int32_t>((bits >> 23U) & 0xFFU) - 127 + 15;
+    const uint32_t mant = bits & 0x7FFFFFU;
+    if (exp <= 0)
+        return static_cast<half_bits_t>(sign);
+    if (exp >= 31)
+        return static_cast<half_bits_t>(sign | 0x7C00U);
+    return static_cast<half_bits_t>(sign | (static_cast<uint32_t>(exp) << 10U) | (mant >> 13U));
+}
+
+float fp16_to_fp32(half_bits_t h) {
+    const uint32_t sign = (static_cast<uint32_t>(h) & 0x8000U) << 16U;
+    const uint32_t exp = (h >> 10U) & 0x1FU;
+    const uint32_t mant = h & 0x3FFU;
+    uint32_t bits = sign;
+    if (exp == 31U) {
+        bits |= 0x7F800000U | (mant << 13U);
+    } else if (exp != 0U) {
+        const auto fp32_exp = static_cast<uint32_t>(static_cast<int32_t>(exp) - 15 + 127);
+        bits |= fp32_exp << 23U;
+        bits |= mant << 13U;
+    }
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+half_bits_t fp32_to_bf16(float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return static_cast<half_bits_t>(bits >> 16U);
+}
+
+float bf16_to_fp32(half_bits_t h) {
+    const uint32_t bits = static_cast<uint32_t>(h) << 16U;
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+std::vector<half_bits_t> convert_float_to_16(const std::vector<float>& src, DType dtype) {
+    std::vector<half_bits_t> dst(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i)
+        dst[i] = dtype == DType::kBFloat16 ? fp32_to_bf16(src[i]) : fp32_to_fp16(src[i]);
+    return dst;
+}
+
+Tensor make_model_tensor(const std::vector<float>& values, std::vector<half_bits_t>& scratch16,
+                         DType dtype, std::vector<int64_t> shape) {
+    if (dtype == DType::kFloat32)
+        return Tensor{const_cast<float*>(values.data()), std::move(shape), DType::kFloat32};
+    scratch16 = convert_float_to_16(values, dtype);
+    return Tensor{scratch16.data(), std::move(shape), dtype};
+}
+
+std::vector<float> tensor_to_float_vector(const Tensor& tensor, std::size_t count,
+                                          const std::string& label) {
+    if (tensor.data == nullptr)
+        throw std::runtime_error("SANA-WM " + label + " output tensor is null");
+    if (tensor.numel() < count) {
+        throw std::runtime_error("SANA-WM " + label + " output tensor has " +
+                                 std::to_string(tensor.numel()) + " values, expected at least " +
+                                 std::to_string(count));
+    }
+
+    std::vector<float> out(count, 0.0F);
+    if (tensor.dtype == DType::kFloat32) {
+        const auto* src = static_cast<const float*>(tensor.data);
+        std::copy_n(src, count, out.data());
+        return out;
+    }
+    if (tensor.dtype == DType::kFloat16) {
+        const auto* src = static_cast<const half_bits_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = fp16_to_fp32(src[i]);
+        return out;
+    }
+    if (tensor.dtype == DType::kBFloat16) {
+        const auto* src = static_cast<const half_bits_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = bf16_to_fp32(src[i]);
+        return out;
+    }
+    throw std::runtime_error("SANA-WM " + label + " output tensor has unsupported dtype");
+}
+
+DType input_dtype_or(const ITrtModule& module, const std::string& name, DType fallback) {
+    for (const auto& info : module.input_info()) {
+        if (info.name == name)
+            return info.dtype;
+    }
+    return fallback;
+}
+
+std::string pick_input_name(const ITrtModule& module, std::initializer_list<const char*> names,
+                            const std::string& label) {
+    for (const char* name : names) {
+        if (module.has_input(name))
+            return name;
+    }
+    const auto inputs = module.input_info();
+    if (inputs.size() == 1U)
+        return inputs.front().name;
+    throw std::runtime_error("SANA-WM " + label + " input tensor not found");
+}
+
+TensorMap::const_iterator find_output_tensor(const TensorMap& outputs,
+                                             std::initializer_list<const char*> names) {
+    for (const char* name : names) {
+        auto it = outputs.find(name);
+        if (it != outputs.end())
+            return it;
+    }
+    if (outputs.size() == 1U)
+        return outputs.begin();
+    return outputs.end();
+}
+
 struct SanaWmRequest {
     std::string python;
     std::string image_path;
@@ -616,6 +739,34 @@ SanaWmNativeInputs prepare_native_inputs(const SanaWmRuntimeConfig& config,
                                                     config.vae_time_stride,
                                                     config.vae_spatial_stride);
     return {std::move(first_frame), std::move(camera)};
+}
+
+std::vector<float> run_native_vae_encoder(ITrtModule& vae_encoder,
+                                          const SanaWmVaeInputImage& first_frame,
+                                          const SanaWmCameraConditions& camera,
+                                          int32_t expected_channels) {
+    if (!vae_encoder.ok())
+        throw std::runtime_error("SANA-WM native VAE encoder is not ready");
+
+    const auto input_name = pick_input_name(vae_encoder, {"sample", "pixel_values", "images", "x"},
+                                           "VAE encoder");
+    const DType input_dtype = input_dtype_or(vae_encoder, input_name, DType::kBFloat16);
+    std::vector<half_bits_t> input16;
+    TensorMap inputs;
+    inputs[input_name] = make_model_tensor(
+        first_frame.pixels_chw, input16, input_dtype,
+        {1, 3, 1, static_cast<int64_t>(first_frame.height), static_cast<int64_t>(first_frame.width)});
+
+    auto outputs = vae_encoder.forward(inputs);
+    const auto it = find_output_tensor(outputs, {"latent", "latents", "output0", "sample",
+                                                 "encoder_output"});
+    if (it == outputs.end())
+        throw std::runtime_error("SANA-WM native VAE encoder output tensor not found");
+
+    const auto count = static_cast<std::size_t>(expected_channels) *
+                       static_cast<std::size_t>(camera.latent_height) *
+                       static_cast<std::size_t>(camera.latent_width);
+    return tensor_to_float_vector(it->second, count, "VAE encoder");
 }
 
 std::vector<std::string> build_bridge_argv(const SanaWmRuntimeConfig& config,
@@ -1015,10 +1166,23 @@ ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const Gene
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
-        (void)prepare_native_inputs(config_, request, cfg);
+        auto native_inputs = prepare_native_inputs(config_, request, cfg);
+        if (!native_modules_.vae_encoder) {
+            throw std::runtime_error(
+                "SANA-WM native TensorRT execution requires a VAE encoder module");
+        }
+        auto first_latent =
+            run_native_vae_encoder(*native_modules_.vae_encoder, native_inputs.first_frame,
+                                   native_inputs.camera, config_.vae_latent_dim);
+        const auto seed = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
+                                        : static_cast<uint64_t>(config_.seed);
+        (void)sana_wm_prepare_stage1_latents(
+            first_latent, cfg.initial_latents, config_.vae_latent_dim,
+            native_inputs.camera.latent_frames, native_inputs.camera.latent_height,
+            native_inputs.camera.latent_width, seed);
         throw std::runtime_error(
             "SANA-WM native TensorRT module sections were loaded, but native "
-            "SANA-WM solver/refiner execution is not implemented yet");
+            "SANA-WM text encoding/solver/refiner execution is not implemented yet");
     }
 
     const auto paths = make_invocation_paths();
