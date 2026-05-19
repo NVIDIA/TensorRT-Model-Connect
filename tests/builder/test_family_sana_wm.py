@@ -79,6 +79,8 @@ def _write_native_plan_set(
     include_text_encoder: bool = True,
     include_vae_encoder: bool = True,
     include_refiner_text_encoder: bool = True,
+    include_refiner_denoiser: bool = True,
+    include_refiner_vae_decoder: bool = True,
 ) -> dict[str, bytes]:
     engine_dir = plan_dir or model_dir / "trtmc_engines"
     engine_dir.mkdir(parents=True)
@@ -97,6 +99,10 @@ def _write_native_plan_set(
         plans.pop("sana_wm_vae_encoder_plan")
     if not include_refiner_text_encoder:
         plans.pop("sana_wm_refiner_text_encoder_plan")
+    if not include_refiner_denoiser:
+        plans.pop("sana_wm_refiner_denoiser_plan")
+    if not include_refiner_vae_decoder:
+        plans.pop("sana_wm_refiner_vae_decoder_plan")
     for section, data in plans.items():
         (engine_dir / f"{section}.plan").write_bytes(data)
     return plans
@@ -243,7 +249,7 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     assert "Building those plans directly from raw SANA-WM weights is not implemented yet" in message
     assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS" not in message
     assert "stage-1 Gemma text encoder" in message
-    assert "complete LTX-2 refiner stack" in message
+    assert "LTX-2 refiner transformer/connectors denoiser" in message
     assert weights["_refiner_checkpoint"].endswith("refiner")
     assert weights["_refiner_transformer_dir"].endswith("refiner/transformer")
     assert weights["_refiner_connectors_dir"].endswith("refiner/connectors")
@@ -559,6 +565,102 @@ def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "vae_decoder_plan" in overrides["sana_wm_native_plan_sections"]
+
+
+def test_sana_wm_plugin_builds_missing_refiner_vae_decoder_plan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    plans = _write_native_plan_set(tmp_path, include_refiner_vae_decoder=False)
+    _write_tokenizer(tmp_path)
+    _write_vae_weights_marker(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_build_refiner_vae_decoder_plan(vae_dir, raw_config, *, precision, verbose):
+        captured["vae_dir"] = vae_dir
+        captured["raw_config"] = raw_config
+        captured["precision"] = precision
+        captured["verbose"] = verbose
+        return b"generated-refiner-vae-decoder-plan"
+
+    monkeypatch.setattr(
+        sana_wm_plugin_mod,
+        "_build_sana_wm_refiner_vae_decoder_plan",
+        fake_build_refiner_vae_decoder_plan,
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert "sana_wm_refiner_vae_decoder_plan" not in weights["_native_plan_paths"]
+    assert weights["_sana_wm_refiner_vae_decoder_dir"].endswith("vae")
+    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
+        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+    )
+
+    extras = sana_wm_mod.plugin.build_extra_engines(
+        cfg,
+        weights,
+        256,
+        precision="fp16",
+        verbose=True,
+    )
+
+    assert (
+        extras["sana_wm_refiner_vae_decoder_plan"]
+        == b"generated-refiner-vae-decoder-plan"
+    )
+    for section, data in plans.items():
+        assert extras[section] == data
+    assert captured["vae_dir"] == tmp_path / "vae"
+    assert captured["raw_config"] is cfg.raw
+    assert captured["precision"] == "fp16"
+    assert captured["verbose"] is True
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert "engine_backend" not in overrides
+    assert "sana_wm_refiner_vae_decoder_plan" in overrides[
+        "sana_wm_native_plan_sections"
+    ]
+
+
+def test_sana_wm_plugin_does_not_force_refiner_for_stage1_only_bundle(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    plans = _write_native_plan_set(
+        tmp_path,
+        include_refiner_text_encoder=False,
+        include_refiner_denoiser=False,
+        include_refiner_vae_decoder=False,
+    )
+    _write_tokenizer(tmp_path)
+    _write_vae_weights_marker(tmp_path)
+    refiner_text_encoder_dir = tmp_path / "refiner" / "text_encoder"
+    refiner_text_encoder_dir.mkdir(parents=True)
+    (refiner_text_encoder_dir / "config.json").write_text(
+        json.dumps({"model_type": "gemma"}),
+        encoding="utf-8",
+    )
+
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
+        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+    )
+    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+
+    for section, data in plans.items():
+        assert extras[section] == data
+    assert "sana_wm_refiner_text_encoder_plan" not in extras
+    assert "sana_wm_refiner_vae_decoder_plan" not in extras
+    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    assert "engine_backend" not in overrides
+    assert "sana_wm_refiner_text_encoder_plan" not in overrides[
+        "sana_wm_native_plan_sections"
+    ]
+    assert "sana_wm_refiner_vae_decoder_plan" not in overrides[
+        "sana_wm_native_plan_sections"
+    ]
 
 
 def test_sana_wm_plugin_builds_missing_vae_encoder_plan(

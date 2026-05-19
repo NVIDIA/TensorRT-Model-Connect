@@ -69,7 +69,9 @@ _NATIVE_BUILDER_COMPONENTS = (
     "stage-1 Gemma text encoder",
     "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks",
     "LTX-2 VAE encoder",
-    "LTX-2/SANA VAE decoder or complete LTX-2 refiner stack",
+    "LTX-2/SANA VAE decoder",
+    "LTX-2 refiner transformer/connectors denoiser",
+    "LTX-2 refiner VAE decoder",
 )
 _NATIVE_PLAN_DIR = Path("trtmc_engines")
 _NATIVE_PLAN_SECTIONS = (
@@ -431,16 +433,20 @@ def _effective_native_sections(
     can_build_refiner_text_encoder: bool = False,
     can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
+    can_build_refiner_vae_decoder: bool = False,
 ) -> list[str]:
     present = set(paths)
+    refiner_requested = bool(present.intersection(_REFINER_PLAN_SECTIONS))
     if can_build_stage1_text_encoder:
         present.add("text_encoder_0_plan")
-    if can_build_refiner_text_encoder:
+    if refiner_requested and can_build_refiner_text_encoder:
         present.add("sana_wm_refiner_text_encoder_plan")
     if can_build_vae_encoder:
         present.add("sana_wm_vae_encoder_plan")
     if can_build_vae_decoder:
         present.add("vae_decoder_plan")
+    if refiner_requested and can_build_refiner_vae_decoder:
+        present.add("sana_wm_refiner_vae_decoder_plan")
     return [section for section in _NATIVE_PLAN_SECTIONS if section in present]
 
 
@@ -461,6 +467,7 @@ def _validate_native_plan_paths(
     can_build_refiner_text_encoder: bool = False,
     can_build_vae_encoder: bool = False,
     can_build_vae_decoder: bool = False,
+    can_build_refiner_vae_decoder: bool = False,
 ) -> None:
     if not paths:
         return
@@ -470,6 +477,7 @@ def _validate_native_plan_paths(
         can_build_refiner_text_encoder=can_build_refiner_text_encoder,
         can_build_vae_encoder=can_build_vae_encoder,
         can_build_vae_decoder=can_build_vae_decoder,
+        can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
     )
     missing_core = [
         section
@@ -570,7 +578,11 @@ def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
         missing = [
             component
             for component in missing
-            if component != "LTX-2/SANA VAE decoder or complete LTX-2 refiner stack"
+            if component
+            not in {
+                "LTX-2/SANA VAE decoder",
+                "LTX-2 refiner VAE decoder",
+            }
         ]
     return tuple(missing)
 
@@ -765,6 +777,21 @@ def _build_sana_wm_vae_decoder_plan(
     )
 
 
+def _build_sana_wm_refiner_vae_decoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    return _build_sana_wm_vae_decoder_plan(
+        vae_dir,
+        raw_config,
+        precision=precision,
+        verbose=verbose,
+    )
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -805,12 +832,14 @@ class SanaWmPlugin:
         can_build_vae_encoder = vae_encoder_dir is not None
         vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
         can_build_vae_decoder = vae_decoder_dir is not None
+        can_build_refiner_vae_decoder = vae_decoder_dir is not None
         _validate_native_plan_paths(
             native_plan_paths,
             can_build_stage1_text_encoder=can_build_stage1_text_encoder,
             can_build_refiner_text_encoder=can_build_refiner_text_encoder,
             can_build_vae_encoder=can_build_vae_encoder,
             can_build_vae_decoder=can_build_vae_decoder,
+            can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
         )
         tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
         if native_plan_paths:
@@ -825,6 +854,7 @@ class SanaWmPlugin:
                 can_build_refiner_text_encoder=can_build_refiner_text_encoder,
                 can_build_vae_encoder=can_build_vae_encoder,
                 can_build_vae_decoder=can_build_vae_decoder,
+                can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
             )
             if _native_sections_are_complete(effective_sections):
                 config.raw["_sana_wm_native_plan_sections"] = effective_sections
@@ -840,6 +870,7 @@ class SanaWmPlugin:
             weights["_sana_wm_vae_encoder_dir"] = str(vae_encoder_dir)
         if vae_decoder_dir is not None:
             weights["_sana_wm_vae_decoder_dir"] = str(vae_decoder_dir)
+            weights["_sana_wm_refiner_vae_decoder_dir"] = str(vae_decoder_dir)
         if tokenizer_sections:
             weights["_tokenizer_sections"] = {
                 section: str(path) for section, path in tokenizer_sections.items()
@@ -864,6 +895,9 @@ class SanaWmPlugin:
             can_build_refiner_text_encoder=bool(weights.get("_refiner_text_encoder_dir")),
             can_build_vae_encoder=bool(weights.get("_sana_wm_vae_encoder_dir")),
             can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
+            can_build_refiner_vae_decoder=bool(
+                weights.get("_sana_wm_refiner_vae_decoder_dir")
+            ),
         )
         if not _native_sections_are_complete(effective_sections):
             raise NotImplementedError(_native_build_error(weights))
@@ -899,7 +933,12 @@ class SanaWmPlugin:
                 verbose=verbose,
             )
         refiner_text_encoder_dir = weights.get("_refiner_text_encoder_dir")
-        if "sana_wm_refiner_text_encoder_plan" not in result and refiner_text_encoder_dir:
+        refiner_requested = bool(set(result).intersection(_REFINER_PLAN_SECTIONS))
+        if (
+            refiner_requested
+            and "sana_wm_refiner_text_encoder_plan" not in result
+            and refiner_text_encoder_dir
+        ):
             result["sana_wm_refiner_text_encoder_plan"] = _build_refiner_text_encoder_plan(
                 Path(str(refiner_text_encoder_dir)),
                 max(max_cache_length, 256),
@@ -921,6 +960,21 @@ class SanaWmPlugin:
                 config.raw,
                 precision=precision,
                 verbose=verbose,
+            )
+        refiner_vae_decoder_dir = weights.get("_sana_wm_refiner_vae_decoder_dir")
+        refiner_requested = bool(set(result).intersection(_REFINER_PLAN_SECTIONS))
+        if (
+            refiner_requested
+            and "sana_wm_refiner_vae_decoder_plan" not in result
+            and refiner_vae_decoder_dir
+        ):
+            result["sana_wm_refiner_vae_decoder_plan"] = (
+                _build_sana_wm_refiner_vae_decoder_plan(
+                    Path(str(refiner_vae_decoder_dir)),
+                    config.raw,
+                    precision=precision,
+                    verbose=verbose,
+                )
             )
         tokenizer_sections = weights.get("_tokenizer_sections", {})
         if isinstance(tokenizer_sections, dict):
