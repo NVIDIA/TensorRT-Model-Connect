@@ -249,11 +249,38 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     assert "Building those plans directly from raw SANA-WM weights is not implemented yet" in message
     assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS" not in message
     assert "stage-1 Gemma text encoder" in message
-    assert "LTX-2 refiner text connector stack" in message
+    assert "Gemma3 refiner text encoder plus LTX-2 text connector stack" in message
     assert "LTX-2 refiner transformer/connectors denoiser" in message
     assert weights["_refiner_checkpoint"].endswith("refiner")
     assert weights["_refiner_transformer_dir"].endswith("refiner/transformer")
     assert weights["_refiner_connectors_dir"].endswith("refiner/connectors")
+
+
+def test_sana_wm_plugin_records_current_refiner_gemma3_connector_gap(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
+    _write_refiner_diffusers_markers(tmp_path)
+    (tmp_path / "refiner" / "text_encoder" / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Gemma3ForConditionalGeneration"],
+                "model_type": "gemma3",
+                "text_config": {"model_type": "gemma3_text"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+
+    assert weights["_refiner_text_encoder_dir"].endswith("refiner/text_encoder")
+    assert weights["_refiner_text_encoder_model_type"] == "gemma3"
+    assert "_can_build_refiner_text_encoder_plan" not in weights
+    with pytest.raises(NotImplementedError) as exc_info:
+        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+    message = str(exc_info.value)
+    assert "Gemma3 refiner text encoder plus LTX-2 text connector stack" in message
+    assert "LTX-2 refiner transformer/connectors denoiser" in message
 
 
 def test_sana_wm_plugin_omits_buildable_text_encoder_from_builder_gap(tmp_path) -> None:

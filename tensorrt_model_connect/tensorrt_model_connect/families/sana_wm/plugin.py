@@ -70,7 +70,7 @@ _NATIVE_BUILDER_COMPONENTS = (
     "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks",
     "LTX-2 VAE encoder",
     "LTX-2/SANA VAE decoder",
-    "LTX-2 refiner text connector stack",
+    "Gemma3 refiner text encoder plus LTX-2 text connector stack",
     "LTX-2 refiner transformer/connectors denoiser",
     "LTX-2 refiner VAE decoder",
 )
@@ -381,6 +381,24 @@ def _load_vae_config(vae_dir: Path) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _load_json_config(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _text_encoder_model_type(text_encoder_dir: Path) -> str:
+    parsed = _load_json_config(text_encoder_dir / "config.json")
+    model_type = parsed.get("model_type")
+    if model_type:
+        return str(model_type)
+    text_config = parsed.get("text_config")
+    if isinstance(text_config, dict) and text_config.get("model_type"):
+        return str(text_config["model_type"])
+    return ""
+
+
 def _int_tuple(value, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not isinstance(value, (list, tuple)):
         return fallback
@@ -571,11 +589,11 @@ def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
             for component in missing
             if component != "stage-1 Gemma text encoder"
         ]
-    if weights.get("_refiner_text_encoder_dir") and not weights.get("_refiner_connectors_dir"):
+    if weights.get("_can_build_refiner_text_encoder_plan"):
         missing = [
             component
             for component in missing
-            if component != "LTX-2 refiner text connector stack"
+            if component != "Gemma3 refiner text encoder plus LTX-2 text connector stack"
         ]
     if weights.get("_sana_wm_vae_encoder_dir"):
         missing = [
@@ -871,6 +889,9 @@ class SanaWmPlugin:
             weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
         if refiner_text_encoder_dir is not None:
             weights["_refiner_text_encoder_dir"] = str(refiner_text_encoder_dir)
+            model_type = _text_encoder_model_type(refiner_text_encoder_dir)
+            if model_type:
+                weights["_refiner_text_encoder_model_type"] = model_type
         if can_build_refiner_text_encoder:
             weights["_can_build_refiner_text_encoder_plan"] = True
         if refiner_transformer_dir is not None:
