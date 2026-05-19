@@ -145,13 +145,92 @@ SanaWmPose make_pose(const Mat3& r, const Vec3& t) {
     return pose;
 }
 
-std::vector<std::vector<char>> parse_action_string(const std::string& action) {
-    std::string cleaned;
-    cleaned.reserve(action.size());
+struct ParsedActionSegment {
+    std::vector<char> keys;
+    int32_t duration{0};
+};
+
+std::string remove_action_whitespace(const std::string& action) {
+    std::string out;
+    out.reserve(action.size());
     for (unsigned char ch : action) {
         if (!std::isspace(ch))
-            cleaned.push_back(static_cast<char>(ch));
+            out.push_back(static_cast<char>(ch));
     }
+    return out;
+}
+
+bool is_action_key(char key) {
+    switch (key) {
+    case 'w':
+    case 'a':
+    case 's':
+    case 'd':
+    case 'i':
+    case 'j':
+    case 'k':
+    case 'l':
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::string lowercase_keys(const std::string& keys_part) {
+    std::string keys_lower;
+    keys_lower.reserve(keys_part.size());
+    for (unsigned char ch : keys_part)
+        keys_lower.push_back(static_cast<char>(std::tolower(ch)));
+    return keys_lower;
+}
+
+int32_t parse_action_duration(const std::string& segment, const std::string& duration_text) {
+    int32_t duration = 0;
+    for (char ch : duration_text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch)))
+            throw std::invalid_argument("Invalid SANA-WM action duration: " + segment);
+        duration = duration * 10 + (ch - '0');
+    }
+    if (duration <= 0)
+        throw std::invalid_argument("SANA-WM action duration must be positive: " + segment);
+    return duration;
+}
+
+std::vector<char> parse_action_keys(const std::string& segment, const std::string& keys_part) {
+    const std::string keys_lower = lowercase_keys(keys_part);
+    if (keys_lower == "none")
+        return {};
+
+    std::set<char> unique;
+    for (char key : keys_lower) {
+        if (!is_action_key(key))
+            throw std::invalid_argument("Unknown SANA-WM action key in segment: " + segment);
+        unique.insert(key);
+    }
+    return {unique.begin(), unique.end()};
+}
+
+ParsedActionSegment parse_action_segment(const std::string& segment) {
+    if (segment.empty())
+        throw std::invalid_argument("Invalid empty SANA-WM action segment");
+
+    const std::size_t dash = segment.rfind('-');
+    if (dash == std::string::npos || dash == 0 || dash + 1 >= segment.size())
+        throw std::invalid_argument("Invalid SANA-WM action segment: " + segment);
+
+    const std::string keys_part = segment.substr(0, dash);
+    const std::string duration_text = segment.substr(dash + 1);
+    return {parse_action_keys(segment, keys_part), parse_action_duration(segment, duration_text)};
+}
+
+void append_segment_frames(std::vector<std::vector<char>>& per_frame,
+                           const ParsedActionSegment& segment) {
+    for (int32_t i = 0; i < segment.duration; ++i)
+        per_frame.push_back(segment.keys);
+}
+
+std::vector<std::vector<char>> parse_action_string(const std::string& action) {
+    const std::string cleaned = remove_action_whitespace(action);
     if (cleaned.empty())
         throw std::invalid_argument("SANA-WM action string is empty");
 
@@ -159,48 +238,9 @@ std::vector<std::vector<char>> parse_action_string(const std::string& action) {
     std::size_t start = 0;
     while (start <= cleaned.size()) {
         const std::size_t end = cleaned.find(',', start);
-        const std::string segment =
-            cleaned.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (segment.empty())
-            throw std::invalid_argument("Invalid empty SANA-WM action segment");
-
-        const std::size_t dash = segment.rfind('-');
-        if (dash == std::string::npos || dash == 0 || dash + 1 >= segment.size())
-            throw std::invalid_argument("Invalid SANA-WM action segment: " + segment);
-
-        const std::string keys_part = segment.substr(0, dash);
-        const std::string duration_text = segment.substr(dash + 1);
-        int duration = 0;
-        for (char ch : duration_text) {
-            if (!std::isdigit(static_cast<unsigned char>(ch)))
-                throw std::invalid_argument("Invalid SANA-WM action duration: " + segment);
-            duration = duration * 10 + (ch - '0');
-        }
-        if (duration <= 0)
-            throw std::invalid_argument("SANA-WM action duration must be positive: " + segment);
-
-        std::string keys_lower;
-        keys_lower.reserve(keys_part.size());
-        for (unsigned char ch : keys_part)
-            keys_lower.push_back(static_cast<char>(std::tolower(ch)));
-
-        std::vector<char> keys;
-        if (keys_lower != "none") {
-            std::set<char> unique;
-            for (char key : keys_lower) {
-                const bool allowed = key == 'w' || key == 'a' || key == 's' || key == 'd' ||
-                                     key == 'i' || key == 'j' || key == 'k' || key == 'l';
-                if (!allowed)
-                    throw std::invalid_argument("Unknown SANA-WM action key in segment: " +
-                                                segment);
-                unique.insert(key);
-            }
-            keys.assign(unique.begin(), unique.end());
-        }
-
-        for (int i = 0; i < duration; ++i)
-            per_frame.push_back(keys);
-
+        append_segment_frames(
+            per_frame, parse_action_segment(cleaned.substr(
+                           start, end == std::string::npos ? std::string::npos : end - start)));
         if (end == std::string::npos)
             break;
         start = end + 1;
@@ -210,6 +250,38 @@ std::vector<std::vector<char>> parse_action_string(const std::string& action) {
 
 bool has_key(const std::vector<char>& keys, char key) {
     return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+int32_t key_direction(const std::vector<char>& keys, char positive, char negative) {
+    const int32_t plus = has_key(keys, positive) ? 1 : 0;
+    const int32_t minus = has_key(keys, negative) ? 1 : 0;
+    return plus - minus;
+}
+
+float limited_pitch_delta(const std::vector<char>& keys, float rotate_rad, float current_pitch,
+                          float pitch_limit_rad, float& next_pitch) {
+    const float pitch_delta = static_cast<float>(key_direction(keys, 'i', 'k')) * rotate_rad;
+    next_pitch = current_pitch;
+    const float candidate = current_pitch + pitch_delta;
+    if (candidate < -pitch_limit_rad || candidate > pitch_limit_rad)
+        return 0.0F;
+    next_pitch = candidate;
+    return pitch_delta;
+}
+
+Vec3 camera_ground_motion(const std::vector<char>& keys, const Mat3& r, float translation_speed) {
+    Vec3 forward = column(r, 2);
+    Vec3 right = column(r, 0);
+    normalize_horizontal(forward);
+    normalize_horizontal(right);
+
+    const float forward_step = static_cast<float>(key_direction(keys, 'w', 's'));
+    const float right_step = static_cast<float>(key_direction(keys, 'd', 'a'));
+    return {
+        (forward[0] * forward_step + right[0] * right_step) * translation_speed,
+        0.0F,
+        (forward[2] * forward_step + right[2] * right_step) * translation_speed,
+    };
 }
 
 int32_t python_round_to_int(double value) {
@@ -356,43 +428,15 @@ std::vector<SanaWmPose> sana_wm_action_to_c2w(const std::string& action, float t
     poses.push_back(make_pose(r, t));
 
     for (const auto& keys : per_frame) {
-        float pitch_delta =
-            (has_key(keys, 'i') ? rotate_rad : 0.0F) - (has_key(keys, 'k') ? rotate_rad : 0.0F);
-        const float new_pitch = current_pitch + pitch_delta;
-        if (new_pitch < -pitch_limit_rad || new_pitch > pitch_limit_rad) {
-            pitch_delta = 0.0F;
-        } else {
-            current_pitch = new_pitch;
-        }
-
-        const float yaw_delta =
-            (has_key(keys, 'l') ? rotate_rad : 0.0F) - (has_key(keys, 'j') ? rotate_rad : 0.0F);
+        float next_pitch = current_pitch;
+        const float pitch_delta =
+            limited_pitch_delta(keys, rotate_rad, current_pitch, pitch_limit_rad, next_pitch);
+        const float yaw_delta = static_cast<float>(key_direction(keys, 'l', 'j')) * rotate_rad;
         const Mat3 r_new = matmul3(matmul3(rot_y(yaw_delta), r), rot_x(pitch_delta));
-
-        Vec3 forward = column(r_new, 2);
-        Vec3 right = column(r_new, 0);
-        normalize_horizontal(forward);
-        normalize_horizontal(right);
-
-        Vec3 move{0.0F, 0.0F, 0.0F};
-        if (has_key(keys, 'w')) {
-            move[0] += forward[0] * translation_speed;
-            move[2] += forward[2] * translation_speed;
-        }
-        if (has_key(keys, 's')) {
-            move[0] -= forward[0] * translation_speed;
-            move[2] -= forward[2] * translation_speed;
-        }
-        if (has_key(keys, 'd')) {
-            move[0] += right[0] * translation_speed;
-            move[2] += right[2] * translation_speed;
-        }
-        if (has_key(keys, 'a')) {
-            move[0] -= right[0] * translation_speed;
-            move[2] -= right[2] * translation_speed;
-        }
+        const Vec3 move = camera_ground_motion(keys, r_new, translation_speed);
 
         r = r_new;
+        current_pitch = next_pitch;
         t[0] += move[0];
         t[1] += move[1];
         t[2] += move[2];
