@@ -30,6 +30,7 @@ _DEFAULT_NUM_STEPS = 60
 _DEFAULT_GUIDANCE_SCALE = 5.0
 _DEFAULT_VAE_STRIDE = (8, 32, 32)
 _STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
+_STAGE1_TEXT_ENCODER_REL = Path("text_encoder")
 _REFINER_REL = Path("refiner") / "refiner.safetensors"
 _REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
 _NATIVE_PLAN_DIR = Path("trtmc_engines")
@@ -41,6 +42,14 @@ _NATIVE_PLAN_SECTIONS = (
     "sana_wm_refiner_text_encoder_plan",
     "sana_wm_refiner_denoiser_plan",
     "sana_wm_refiner_vae_decoder_plan",
+)
+_TOKENIZER_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
 )
 _MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
 
@@ -162,6 +171,31 @@ def _join_chi_prompt(text_encoder: dict) -> str:
     return ""
 
 
+def _discover_tokenizer_sections(model_path: Path, raw_config: dict) -> dict[str, Path]:
+    configured = raw_config.get("sana_wm_tokenizer_dir")
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(_resolve_native_plan_path(model_path, str(configured)))
+    candidates.extend(
+        [
+            model_path / _STAGE1_TEXT_ENCODER_REL,
+            model_path / _REFINER_GEMMA_REL,
+        ]
+    )
+
+    for candidate in candidates:
+        if not candidate.is_dir() or candidate == model_path:
+            continue
+        sections = {
+            name: candidate / name
+            for name in _TOKENIZER_FILES
+            if (candidate / name).is_file()
+        }
+        if "tokenizer.json" in sections:
+            return sections
+    return {}
+
+
 class SanaWmPlugin:
     name = "sana_wm"
     runtime_strategy = "diffusion_sana_wm"
@@ -195,6 +229,11 @@ class SanaWmPlugin:
                 section: str(path) for section, path in native_plan_paths.items()
             }
             config.raw["_sana_wm_native_plan_sections"] = list(native_plan_paths)
+        tokenizer_sections = _discover_tokenizer_sections(model_path, config.raw)
+        if tokenizer_sections:
+            weights["_tokenizer_sections"] = {
+                section: str(path) for section, path in tokenizer_sections.items()
+            }
         return weights
 
     def build_engine(
@@ -222,14 +261,26 @@ class SanaWmPlugin:
         verbose: bool = False,
     ) -> dict:
         del config, max_cache_length, precision, verbose
+        result = {}
         plan_paths = weights.get("_native_plan_paths", {})
-        if not isinstance(plan_paths, dict):
-            return {}
-        return {
-            section: Path(path).read_bytes()
-            for section, path in plan_paths.items()
-            if section in _NATIVE_PLAN_SECTIONS
-        }
+        if isinstance(plan_paths, dict):
+            result.update(
+                {
+                    section: Path(path).read_bytes()
+                    for section, path in plan_paths.items()
+                    if section in _NATIVE_PLAN_SECTIONS
+                }
+            )
+        tokenizer_sections = weights.get("_tokenizer_sections", {})
+        if isinstance(tokenizer_sections, dict):
+            result.update(
+                {
+                    section: Path(path).read_bytes()
+                    for section, path in tokenizer_sections.items()
+                    if section in _TOKENIZER_FILES
+                }
+            )
+        return result
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         raw = config.raw
