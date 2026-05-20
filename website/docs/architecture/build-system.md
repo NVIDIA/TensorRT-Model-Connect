@@ -61,7 +61,11 @@ The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
 
 ## Python package
 
-`tensorrt_model_connect/pyproject.toml` defines the Python builder package consumed by `trtmc build`. The package metadata declares TensorRT and the other builder dependencies. Release wheels also include the native `trtmc` executable and backend DSOs under `tensorrt_model_connect/bin/`.
+`tensorrt_model_connect/pyproject.toml` defines the editable Python builder package consumed by `trtmc build`. Use it for source development with `pip install -e tensorrt_model_connect/`.
+
+The repository-root `pyproject.toml` is the release-wheel build entry point. It uses `conan-py-build` and the root `conanfile.py` to run the native CMake build, then stages only the wheel runtime artifacts under `tensorrt_model_connect/bin/`: the native `trtmc` executable and TensorRT backend DSOs. The release wheel metadata declares TensorRT and the other Python builder dependencies.
+
+The Conan package recipe manages `nlohmann_json` for native wheel builds. TensorRT and CUDA are still supplied by the build environment and by pip/host runtime dependencies rather than by Conan recipes.
 
 ## Generated registration files
 

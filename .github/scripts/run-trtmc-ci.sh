@@ -549,37 +549,65 @@ PY
 }
 
 build_pip_package() {
-  local native_bin="${TRTMC_NATIVE_BIN:-build/trtmc}"
-  if [[ "$native_bin" != /* ]]; then
-    native_bin="$PWD/$native_bin"
+  local trt_include="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
+  local trt_library="${TRTMC_TRT_LIBRARY:-}"
+  if [ -z "$trt_library" ] && [ -n "${TRT_LIB_DIR:-}" ]; then
+    trt_library="${TRT_LIB_DIR%/}/libnvinfer.so"
   fi
-  if [ ! -x "$native_bin" ]; then
-    echo "ERROR: native trtmc executable is missing or not executable: $native_bin" >&2
-    exit 1
+  if [ -z "$trt_library" ]; then
+    for candidate in \
+      /opt/venv/lib/python*/site-packages/tensorrt_libs/libnvinfer.so \
+      /usr/lib/aarch64-linux-gnu/libnvinfer.so \
+      /usr/lib/x86_64-linux-gnu/libnvinfer.so \
+      /usr/local/tensorrt/lib/libnvinfer.so; do
+      if [ -f "$candidate" ]; then
+        trt_library="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "$trt_include" ]; then
+    for candidate in /usr/local/tensorrt/include /usr/include/aarch64-linux-gnu /usr/include/x86_64-linux-gnu /usr/include; do
+      if [ -f "$candidate/NvInfer.h" ]; then
+        trt_include="$candidate"
+        break
+      fi
+    done
   fi
 
-  local native_lib_dir="${TRTMC_NATIVE_LIB_DIR:-$(dirname "$native_bin")}"
-  if [[ "$native_lib_dir" != /* ]]; then
-    native_lib_dir="$PWD/$native_lib_dir"
-  fi
+  local cuda_include="${TRTMC_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
+  local cudart_library="${TRTMC_CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
+
+  : "${trt_include:?TensorRT include directory was not found}"
+  : "${trt_library:?TensorRT libnvinfer.so was not found}"
+  : "${cuda_include:?CUDA include directory was not found}"
+  : "${cudart_library:?CUDA runtime library was not found}"
 
   python -m pip install --disable-pip-version-check --quiet "auditwheel>=6.2" "build>=1.2"
-  rm -rf dist tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+  local package_build_root="${TRTMC_PACKAGE_BUILD_ROOT:-/tmp/trtmc-conan-py-wheel-${GITHUB_RUN_ID:-local}}"
+  rm -rf dist "$package_build_root" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+  find tensorrt_model_connect/tensorrt_model_connect -type d -name __pycache__ -prune -exec rm -rf {} +
   mkdir -p dist
 
   local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
+  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64}"
   local expected_wheels=0
   local tag
   for tag in $python_tags; do
     expected_wheels=$((expected_wheels + 1))
-    rm -rf tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+    rm -rf "$package_build_root/$tag" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
     env \
-      TRTMC_NATIVE_BIN="$native_bin" \
-      TRTMC_NATIVE_LIB_DIR="$native_lib_dir" \
-      TRTMC_REQUIRE_NATIVE_BIN=1 \
-      TRTMC_REQUIRE_NATIVE_LIBS=1 \
-      TRTMC_WHEEL_PYTHON_TAG="$tag" \
-      python -m build --wheel --outdir "$PWD/dist" tensorrt_model_connect
+      CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+      TRTMC_TRT_INCLUDE_DIR="$trt_include" \
+      TRTMC_TRT_LIBRARY="$trt_library" \
+      TRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
+      TRTMC_CUDART_LIBRARY="$cudart_library" \
+      WHEEL_PYVER="$tag" \
+      WHEEL_ABI=none \
+      WHEEL_ARCH="$wheel_arch" \
+      python -m build --wheel --outdir "$PWD/dist" \
+        -C "build-dir=$package_build_root/$tag" \
+        .
   done
 
   mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
@@ -589,14 +617,18 @@ build_pip_package() {
     exit 1
   fi
 
-  python - "${wheels[@]}" <<'PY'
+  TRTMC_PACKAGE_WHEEL_ARCH="$wheel_arch" python - "${wheels[@]}" <<'PY'
+import os
 import re
 import subprocess
 import sys
 import zipfile
 
-EXPECTED_PLATFORM = "manylinux_2_35_aarch64"
-MAX_GLIBC_MINOR = 35
+EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_35_aarch64")
+platform_match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", EXPECTED_PLATFORM)
+if not platform_match:
+    raise SystemExit(f"expected a manylinux aarch64 platform tag, got {EXPECTED_PLATFORM}")
+MAX_GLIBC_MINOR = int(platform_match.group(1))
 
 for wheel in sys.argv[1:]:
     if not wheel.endswith(f"-{EXPECTED_PLATFORM}.whl"):

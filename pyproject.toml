@@ -1,3 +1,48 @@
+[build-system]
+requires = ["conan-py-build==0.4.3"]
+build-backend = "conan_py_build.build"
+
+[project]
+name = "tensorrt-model-connect"
+version = "0.1.0"
+description = "TensorRT-Model-Connect builder for HuggingFace models and .trtfb bundles"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "safetensors>=0.4",
+    "numpy>=1.24",
+    "ml_dtypes>=0.4",
+    "onnx>=1.16",
+    "onnxscript>=0.2",
+    "transformers>=4.40",
+    "huggingface_hub>=0.23",
+    "tensorrt>=10.16",
+    "PyYAML>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+chronos = ["chronos-forecasting>=2.2.2"]
+test = ["pytest>=7.0", "torch>=2.0"]
+
+[project.scripts]
+trtmc = "tensorrt_model_connect.native_cli:main"
+
+[tool.conan-py-build.wheel]
+packages = ["tensorrt_model_connect/tensorrt_model_connect"]
+
+[tool.conan-py-build.sdist]
+include = [
+    "tensorrt_model_connect",
+    "third_party",
+]
+exclude = [
+    "__pycache__",
+    "*.pyc",
+    "tensorrt_model_connect/build",
+    "tensorrt_model_connect/*.egg-info",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/builder", "tests/tools", "tests/e2e"]
 markers = [

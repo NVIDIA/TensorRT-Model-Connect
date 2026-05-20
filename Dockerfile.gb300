@@ -21,6 +21,7 @@ RUN add-apt-repository -y ppa:deadsnakes/ppa && \
     build-essential \
     cmake \
     ninja-build \
+    patchelf \
     git \
     pkg-config \
     python3.12 \

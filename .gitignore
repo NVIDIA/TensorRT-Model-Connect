@@ -54,6 +54,7 @@ __pycache__/
 *.egg-info/
 dist/
 *.egg
+conan-py-build.profile
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

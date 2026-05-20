@@ -43,6 +43,8 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     for name in (
         "TRTMC_PACKAGE_PYTHON_TAGS",
+        "TRTMC_PACKAGE_WHEEL_ARCH",
+        "TRTMC_PACKAGE_BUILD_ROOT",
         "TRTMC_PACKAGE_SMOKE_VENV",
         "TRTMC_WHEEL_QWEN_SMOKE_ROOT",
         "TRTMC_WHEEL_QWEN_MODEL_ID",
@@ -138,7 +140,9 @@ def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
-    assert 'TRTMC_WHEEL_PYTHON_TAG="$tag"' in text
+    assert 'WHEEL_PYVER="$tag"' in text
+    assert "python -m build --wheel --outdir \"$PWD/dist\"" in text
+    assert 'build-dir=$package_build_root/$tag' in text
     assert "manylinux_2_35_aarch64" in text
     assert "wheel-qwen-smoke)" in text
     assert "Qwen smoke test from trtmc pip package" in text
@@ -146,11 +150,29 @@ def test_package_stage_builds_py310_and_py312_wheels() -> None:
 
 def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'EXPECTED_PLATFORM = "manylinux_2_35_aarch64"' in text
+    assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64' in text
+    assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
     assert 'native wheel must not contain .data/purelib entries' in text
     assert '"auditwheel>=6.2"' in text
     assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
     assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
+
+
+def test_package_stage_uses_conan_py_build_inputs() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "CONAN_PY_BUILD_PROFILE_AUTODETECT=1" in text
+    assert 'TRTMC_TRT_INCLUDE_DIR="$trt_include"' in text
+    assert 'TRTMC_TRT_LIBRARY="$trt_library"' in text
+    assert 'TRTMC_CUDA_INCLUDE_DIR="$cuda_include"' in text
+    assert 'TRTMC_CUDART_LIBRARY="$cudart_library"' in text
+
+
+def test_root_pyproject_configures_conan_py_build_wheel() -> None:
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    assert 'requires = ["conan-py-build==0.4.3"]' in text
+    assert 'build-backend = "conan_py_build.build"' in text
+    assert 'packages = ["tensorrt_model_connect/tensorrt_model_connect"]' in text
+    assert 'trtmc = "tensorrt_model_connect.native_cli:main"' in text
 
 
 def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
