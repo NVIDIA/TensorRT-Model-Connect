@@ -526,28 +526,6 @@ select_wheel_by_tag() {
   printf '%s\n' "${candidates[0]}"
 }
 
-python312_bin() {
-  local candidates=()
-  if [ -n "${TRTMC_WHEEL_QWEN_PYTHON:-}" ]; then
-    candidates+=("$TRTMC_WHEEL_QWEN_PYTHON")
-  fi
-  candidates+=(python3.12 python)
-
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" - <<'PY' >/dev/null 2>&1; then
-import sys
-raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)
-PY
-      command -v "$candidate"
-      return 0
-    fi
-  done
-
-  echo "ERROR: Python 3.12 is required for the py312 wheel Qwen smoke test" >&2
-  exit 1
-}
-
 validate_manylinux_build_environment() {
   local wheel_arch="$1"
   if [[ "$wheel_arch" =~ ^manylinux_2_([0-9]+)_aarch64$ ]]; then
@@ -718,7 +696,7 @@ PY
 
   local install_wheel
   install_wheel="$(select_compatible_wheel dist)"
-  local smoke_venv="${TRTMC_PACKAGE_SMOKE_VENV:-/tmp/trtmc-wheel-smoke-${GITHUB_RUN_ID:-local}}"
+  local smoke_venv="/tmp/trtmc-wheel-smoke-${GITHUB_RUN_ID:-local}"
   rm -rf "$smoke_venv"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
@@ -757,10 +735,18 @@ PY
 run_wheel_qwen_smoke() {
   local wheel
   wheel="$(select_wheel_by_tag py312 dist)"
-  local smoke_python
-  smoke_python="$(python312_bin)"
 
-  local smoke_root="${TRTMC_WHEEL_QWEN_SMOKE_ROOT:-/tmp/trtmc-wheel-qwen-smoke-${GITHUB_RUN_ID:-local}}"
+  python - <<'PY'
+import sys
+
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit(
+        "Python 3.12 is required for the py312 wheel Qwen smoke test; "
+        f"got {sys.version.split()[0]} from {sys.executable}"
+    )
+PY
+
+  local smoke_root="/tmp/trtmc-wheel-qwen-smoke-${GITHUB_RUN_ID:-local}"
   local smoke_venv="${smoke_root}/venv"
   local bundle="${smoke_root}/qwen3-0.6b.trtfb"
   local timing_cache="${smoke_root}/qwen3-0.6b.timing.cache"
@@ -770,7 +756,7 @@ run_wheel_qwen_smoke() {
 
   rm -rf "$smoke_root"
   mkdir -p "$smoke_root"
-  "$smoke_python" -m venv "$smoke_venv"
+  python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   "$smoke_venv/bin/python" -m pip check

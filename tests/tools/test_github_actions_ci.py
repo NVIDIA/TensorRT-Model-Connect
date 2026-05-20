@@ -45,15 +45,12 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         "TRTMC_PACKAGE_PYTHON_TAGS",
         "TRTMC_PACKAGE_WHEEL_ARCH",
         "TRTMC_PACKAGE_BUILD_ROOT",
-        "TRTMC_PACKAGE_SMOKE_VENV",
-        "TRTMC_WHEEL_QWEN_SMOKE_ROOT",
         "TRTMC_WHEEL_QWEN_MODEL_ID",
         "TRTMC_WHEEL_QWEN_MAX_CACHE",
         "TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS",
         "TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL",
         "TRTMC_WHEEL_QWEN_BUILD_TIMEOUT",
         "TRTMC_WHEEL_QWEN_RUN_TIMEOUT",
-        "TRTMC_WHEEL_QWEN_PYTHON",
     ):
         assert f"-e {name}" in text
 
@@ -200,7 +197,8 @@ def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
         maxsplit=1,
     )[0]
     assert "select_wheel_by_tag py312 dist" in smoke_block
-    assert "python312_bin" in smoke_block
+    assert "sys.version_info[:2] != (3, 12)" in smoke_block
+    assert "TRTMC_WHEEL_QWEN_PYTHON" not in smoke_block
     assert "select_compatible_wheel" not in smoke_block
     assert 'PATH="$smoke_venv/bin:$PATH"' not in smoke_block
     assert '"$smoke_venv/bin/trtmc" build "$model_id"' in smoke_block
