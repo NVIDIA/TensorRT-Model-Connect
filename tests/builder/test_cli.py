@@ -84,6 +84,43 @@ class TestBuildArgs:
             _parse_profile_rows(" , ")
 
 
+class TestMainParser:
+    def test_build_accepts_trust_remote_code(self, monkeypatch, tmp_path):
+        """The real build parser accepts E2E manifest trust-remote-code commands."""
+        import tensorrt_model_connect.build_cli as cli
+
+        captured: dict[str, argparse.Namespace] = {}
+
+        def _fake_cmd_build(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(cli, "_cmd_build", _fake_cmd_build)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "trtmc",
+                "build",
+                "Qwen/Qwen3.5-9B",
+                "-o",
+                str(tmp_path / "out.trtfb"),
+                "--max-cache-length",
+                "256",
+                "--trust-remote-code",
+                "--build-timing-json",
+                str(tmp_path / "timing.json"),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        assert captured["args"].trust_remote_code is True
+        assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
+
+
 class TestInspectArgs:
     def test_inspect_parses(self):
         parser = argparse.ArgumentParser()

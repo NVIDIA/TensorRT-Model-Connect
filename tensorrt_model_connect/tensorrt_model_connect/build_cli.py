@@ -559,6 +559,8 @@ def main() -> None:
                          help="HF repo ID (e.g. Qwen/Qwen3-0.6B) or local directory")
     build_p.add_argument("-o", "--output", required=True,
                          help="Output .trtfb file path")
+    build_p.add_argument("--trust-remote-code", action="store_true",
+                         help="Allow Hugging Face model code that requires trust_remote_code")
     build_p.add_argument("--max-cache-length", type=int, default=256,
                          help="KV cache length (default: 256)")
     build_p.add_argument(
