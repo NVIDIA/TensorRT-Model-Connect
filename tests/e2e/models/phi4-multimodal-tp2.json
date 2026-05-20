@@ -56,7 +56,9 @@
     }
   ],
   "threshold_overrides": {
-    "normalized_text_edit_distance": 0.5
+    "normalized_text_edit_distance": 0.5,
+    "logit_cosine_p5": 0.95,
+    "logit_rel_l2_p95": 0.15
   },
   "notes": "TensorRT 11.0 tensor-parallel Phi-4-multimodal TP=2 lane. Uses families/phi4_multimodal/dual_profile_decoder_tp_builder.py (leaner Phi-4-only TP builder, partial RoPE 0.75) under PR #49's TP infrastructure. The C++ VLPlugin is extended to detect TP metadata and load rank-local text decoder sections (engine_plan_tp_rank<N>) while keeping vision_engine_plan replicated across ranks."
 }

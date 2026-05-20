@@ -6,5 +6,6 @@ fnet-base                 XFAIL  (encoder representation parity below minimum co
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
+phi4-multimodal-tp2       SKIP   (inherits dense phi4-multimodal HF reference incompatibility with transformers 5.x; TP build/run validated manually via mpirun -np 2)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
