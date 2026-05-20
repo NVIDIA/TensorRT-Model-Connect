@@ -186,7 +186,6 @@ shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_cli.py # shared Python builder CLI surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/cli.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py # shared Python builder surface; broad builder impact is intentional

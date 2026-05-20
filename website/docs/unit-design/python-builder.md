@@ -24,7 +24,7 @@ flowchart TD
 
 ## CLI
 
-`tensorrt_model_connect/tensorrt_model_connect/build_cli.py` owns command parsing for `trtmc build`. It handles early `--rtx` backend selection, auto method selection, Python profile re-exec, config resolution, quantization flags, and inspection. `tensorrt_model_connect/tensorrt_model_connect/cli.py` remains a compatibility alias for existing imports.
+`tensorrt_model_connect/tensorrt_model_connect/build_cli.py` owns command parsing for `trtmc build`. It handles early `--rtx` backend selection, auto method selection, Python profile re-exec, config resolution, quantization flags, and inspection.
 
 The CLI should stay thin. It should translate user intent into builder options and leave model-specific behavior to family plugins or engine builders.
 

@@ -24,16 +24,6 @@ import tensorrt_model_connect  # noqa: E402
 import tensorrt_model_connect.build_cli as cli  # noqa: E402
 
 
-def test_legacy_cli_module_aliases_build_cli():
-    """Intent: keep older `tensorrt_model_connect.cli` imports working after the rename.
-    Preconditions: Both module paths are importable.
-    Postconditions: The legacy module resolves to the build_cli module object.
-    """
-    import tensorrt_model_connect.cli as compat_cli
-
-    assert compat_cli is cli
-
-
 def test_get_version_prefers_importlib_metadata():
     """Intent: exercise the fast-path version lookup.
     Preconditions: importlib.metadata.version returns a concrete package version string.

@@ -68,7 +68,7 @@ The Python builder is a fully plugin-based system. Adding a new model family req
 ### 3.1 Package Structure
 
 - **Package root**: `tensorrt_model_connect/tensorrt_model_connect/`
-- **Entry points**: `build_cli.py` (builder CLI), `cli.py` (compatibility alias), `__init__.py` (Python API), `__main__.py`
+- **Entry points**: `build_cli.py` (builder CLI), `__init__.py` (Python API), `__main__.py`
 
 ### 3.2 Orchestration Flow
 
@@ -561,7 +561,6 @@ All paths below are relative to the repository root and have been verified to ex
 | `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
 | `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
 | `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` | Python builder CLI entry point |
-| `tensorrt_model_connect/tensorrt_model_connect/cli.py` | Compatibility alias for older builder CLI imports |
 
 ### C++ Runtime -- Public API
 | Path | Purpose |
