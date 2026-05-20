@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect.config import ModelConfig
@@ -150,6 +151,42 @@ def test_qwen_image_plugin_claims_edit_pipeline_classes() -> None:
     assert plugin is not None
     assert plugin.name == "qwen_image"
     assert find_plugin("qwen_image_edit") is plugin
+
+
+def test_qwen_image_dit_rope_tables_support_edit_condition_grids() -> None:
+    pytest.importorskip("tensorrt")
+    from tensorrt_model_connect.families.qwen_image.qwen_image_dit_builder import (
+        _precompute_qwen_rope_tables,
+        _precompute_qwen_rope_tables_for_shapes,
+    )
+
+    axes = [16, 56, 56]
+    gen_shape = (2, 3)
+    cond_shape = (4, 5)
+
+    cos, sin = _precompute_qwen_rope_tables_for_shapes(
+        axes, [gen_shape, cond_shape], n_text=7, theta=10000.0)
+
+    assert cos.shape == (
+        gen_shape[0] * gen_shape[1] + cond_shape[0] * cond_shape[1] + 7,
+        128,
+    )
+    assert sin.shape == cos.shape
+
+    gen_cos, gen_sin = _precompute_qwen_rope_tables(
+        axes, gen_shape[0], gen_shape[1], n_text=0, theta=10000.0)
+    np.testing.assert_allclose(cos[: gen_cos.shape[0]], gen_cos, rtol=0, atol=0)
+    np.testing.assert_allclose(sin[: gen_sin.shape[0]], gen_sin, rtol=0, atol=0)
+
+    cond_offset = gen_shape[0] * gen_shape[1]
+    cond_single_cos, _ = _precompute_qwen_rope_tables(
+        axes, cond_shape[0], cond_shape[1], n_text=0, theta=10000.0)
+    # The second image grid uses frame index 1, so its frame-axis RoPE rows
+    # intentionally differ from a standalone single-image table.
+    assert not np.allclose(
+        cos[cond_offset : cond_offset + cond_single_cos.shape[0], : axes[0]],
+        cond_single_cos[:, : axes[0]],
+    )
 
 
 def test_qwen_image_edit_build_fails_before_t2i_engine_build(tmp_path: Path) -> None:

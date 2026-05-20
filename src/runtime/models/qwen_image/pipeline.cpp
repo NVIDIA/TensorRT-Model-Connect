@@ -117,6 +117,12 @@ void validate_caller_initial_latents(const std::vector<float>& initial_latents, 
 
 ImageResult QwenImagePipeline::generate_image(const std::string& prompt,
                                               const GenerateConfig& cfg) {
+    if (config_.task_mode == QwenImageTaskMode::Edit) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Edit bundles require an input image; "
+            "call generate_image(prompt, image_pixels, image_height, image_width, cfg)");
+    }
+
     validate_generate_image_engines(text_engine_ != nullptr, denoiser_engine_ != nullptr,
                                     vae_decoder_engine_ != nullptr);
 
@@ -164,6 +170,37 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt,
     result.num_frames = 1;
     result.pixels = std::move(image.pixels);
     return result;
+}
+
+ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const float* image_pixels,
+                                              int32_t image_height, int32_t image_width,
+                                              const GenerateConfig& cfg) {
+    if (config_.task_mode != QwenImageTaskMode::Edit) {
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(
+                "QwenImagePipeline::generate_image: text-to-image Qwen-Image bundles do not "
+                "accept an input image");
+        }
+        return generate_image(prompt, cfg);
+    }
+
+    if (image_pixels == nullptr || image_height <= 0 || image_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
+    }
+    if (!text_engine_ || !denoiser_engine_ || !vae_decoder_engine_ || !vision_engine_ ||
+        !vae_encoder_engine_) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Qwen-Image Edit runtime is not complete; "
+            "required engines are text, vision, denoiser, vae_encoder, and vae_decoder");
+    }
+
+    (void)prompt;
+    (void)cfg;
+    throw std::runtime_error(
+        "QwenImagePipeline::generate_image: Qwen-Image Edit denoising is not implemented yet; "
+        "the denoiser now supports concatenated image-token grids, but multimodal text "
+        "encoding, VAE image encoding, and runtime latent concatenation still need wiring");
 }
 
 // -----------------------------------------------------------------------------

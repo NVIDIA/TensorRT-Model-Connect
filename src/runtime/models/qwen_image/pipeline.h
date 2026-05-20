@@ -51,6 +51,9 @@ class QwenImagePipeline final : public IPipeline {
     ~QwenImagePipeline() override;
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+    ImageResult generate_image(const std::string& prompt, const float* image_pixels,
+                               int32_t image_height, int32_t image_width,
+                               const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "QwenImagePipeline"; }

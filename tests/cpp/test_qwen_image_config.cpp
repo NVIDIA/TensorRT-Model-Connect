@@ -1,7 +1,11 @@
 #include "runtime/domains/diffusion/qwen_image_types.h"
+#include "runtime/models/qwen_image/pipeline.h"
 
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace {
 
@@ -11,6 +15,20 @@ void check(bool cond, const char* name) {
     if (!cond) {
         std::cerr << "FAIL: " << name << "\n";
         ++failures;
+    }
+}
+
+template <typename Fn>
+void check_throws_contains(const char* name, const std::string& needle, Fn&& fn) {
+    try {
+        fn();
+        std::cerr << "FAIL: " << name << " did not throw\n";
+        ++failures;
+    } catch (const std::runtime_error& e) {
+        if (std::string(e.what()).find(needle) == std::string::npos) {
+            std::cerr << "FAIL: " << name << " threw unexpected message: " << e.what() << "\n";
+            ++failures;
+        }
     }
 }
 
@@ -75,6 +93,19 @@ int main() {
     check(cfg.vision_encoder.out_hidden_size == 3584, "vision out hidden");
     check(cfg.image_conditioning.vae_concat_axis == "sequence", "vae concat axis");
     check(cfg.image_conditioning.max_input_images == 1, "max input images");
+
+    trtmc::QwenImagePipeline::Construction construction;
+    construction.config = cfg;
+    construction.model_id = "qwen-image-edit-2511";
+    auto pipeline = trtmc::QwenImagePipeline(std::move(construction));
+
+    check_throws_contains("edit requires image overload", "require an input image", [&]() {
+        (void)pipeline.generate_image("make it watercolor");
+    });
+    float one_pixel[3] = {0.0F, 0.0F, 0.0F};
+    check_throws_contains("edit missing engines guard", "runtime is not complete", [&]() {
+        (void)pipeline.generate_image("make it watercolor", one_pixel, 1, 1);
+    });
 
     if (failures) {
         std::cerr << failures << " failures\n";

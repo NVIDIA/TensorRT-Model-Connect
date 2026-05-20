@@ -182,6 +182,15 @@ class IPipeline {
                                  " does not support generate_image()");
     }
 
+    virtual ImageResult generate_image(const std::string& prompt, const float* image_pixels,
+                                       int32_t image_height, int32_t image_width,
+                                       const GenerateConfig& cfg = {}) {
+        (void)image_pixels;
+        (void)image_height;
+        (void)image_width;
+        return generate_image(prompt, cfg);
+    }
+
     virtual ImageResult generate_image(const TextEmbedding& emb, const GenerateConfig& cfg = {}) {
         (void)emb;
         (void)cfg;
