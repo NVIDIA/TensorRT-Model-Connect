@@ -748,6 +748,98 @@ class TestBuildBundleOrchestration:
             "split-qwen3-h64-l2-bf16-noquant-decode",
         ]
 
+    @pytest.mark.parametrize(
+        ("pipeline_class", "plugin_name", "runtime_strategy"),
+        [
+            ("FluxPipeline", "flux", "diffusion_flux"),
+            ("PixArtSigmaPipeline", "pixart", "diffusion_pixart"),
+            ("WanPipeline", "wan_t2v", "diffusion_wan"),
+        ],
+    )
+    def test_supported_diffusion_tensor_parallel_builds_rank_denoisers(
+        self, tmp_path, pipeline_class, plugin_name, runtime_strategy,
+    ):
+        """Supported diffusion TP families reach build_components and package rank plans."""
+        from tensorrt_model_connect.parallel_config import ParallelConfig
+
+        model_dir = tmp_path / f"{plugin_name}_diffusers"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": pipeline_class}))
+        output_path = str(tmp_path / f"{plugin_name}.trtfb")
+        seen = {}
+
+        class _DiffusionPlugin:
+            def load_weights(self, model_dir, config):
+                seen["model_type"] = config.model_type
+                return {}
+
+            def build_components(
+                self,
+                model_dir,
+                config,
+                weights,
+                *,
+                parallel_config=None,
+                verbose=False,
+                fp8_scales=None,
+            ):
+                seen["parallel"] = parallel_config
+                return {
+                    "text_encoders": [("t5", b"t5")],
+                    "denoiser_ranks": {
+                        0: b"denoiser0",
+                        1: b"denoiser1",
+                        2: b"denoiser2",
+                        3: b"denoiser3",
+                    },
+                    "vae_decoder": b"vae",
+                }
+
+            def get_diffusion_config(self, config):
+                return {}
+
+        plugin = _DiffusionPlugin()
+        plugin.name = plugin_name
+        plugin.runtime_strategy = runtime_strategy
+
+        with patch("tensorrt_model_connect.engine_builder.find_diffusion_plugin",
+                    return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._setup_trt_import"):
+                with patch("tensorrt_model_connect.trt_compat.tensorrt_version",
+                            return_value="11.0.0"):
+                    with patch("tensorrt_model_connect.trt_compat.resolved_summary",
+                                return_value="TensorRT: version=11.0.0"):
+                        with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                                    return_value="NVIDIA A100"):
+                            with patch(
+                                "tensorrt_model_connect.engine_builder._detect_diffusion_tokenizer_add_special_tokens",
+                                return_value=False,
+                            ):
+                                with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                                    build_bundle(
+                                        str(model_dir),
+                                        output_path,
+                                        parallel_config=ParallelConfig(
+                                            mode="tensor_parallel",
+                                            tp_size=4,
+                                        ),
+                                    )
+
+        assert seen["model_type"] == plugin_name
+        assert seen["parallel"].enabled
+        assert seen["parallel"].tp_size == 4
+
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        assert section_map["denoiser_plan_tp_rank0"] == b"denoiser0"
+        assert section_map["denoiser_plan_tp_rank1"] == b"denoiser1"
+        assert section_map["denoiser_plan_tp_rank2"] == b"denoiser2"
+        assert section_map["denoiser_plan_tp_rank3"] == b"denoiser3"
+
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        assert cfg["tensor_parallel_mode"] == "tensor_parallel"
+        assert cfg["tensor_parallel_size"] == 4
+
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""
         model_dir = self._make_model_dir(tmp_path, model_type="qwen3")

@@ -175,6 +175,104 @@ def test_build_components_calls_all_subbuilders(
     assert calls["build_vae_2d_decoder_engine"][1]["w_lat"] == 96
 
 
+def test_build_components_tensor_parallel_builds_rank_denoisers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intent: verify Z-Image TP packaging builds rank-local DiTs only.
+
+    Preconditions: builder modules are monkeypatched and TensorRT version is 11.0.
+    Postconditions: denoiser_ranks contains TP=2 rank plans while text/VAE remain single-copy.
+    """
+    from tensorrt_model_connect import trt_compat
+    from tensorrt_model_connect.parallel_config import ParallelConfig
+
+    calls: dict[str, object] = {"dit_ranks": []}
+
+    monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
+
+    def load_qwen3_encoder_weights(path, **kwargs):
+        calls["load_qwen3_encoder_weights"] = (path, kwargs)
+        return {"te": np.array([1], dtype=np.float32)}
+
+    def build_qwen3_encoder_engine(weights, **kwargs):
+        calls["build_qwen3_encoder_engine"] = (weights, kwargs)
+        return b"te-plan"
+
+    def load_z_image_dit_weights(path, **kwargs):
+        calls["load_z_image_dit_weights"] = (path, kwargs)
+        return {"dit": np.array([2], dtype=np.float32)}
+
+    def build_z_image_dit_engine(_weights, **_kwargs):
+        raise AssertionError("single-device Z-Image DiT builder used for TP build")
+
+    def build_z_image_dit_tp_engine(weights, **kwargs):
+        parallel = kwargs["parallel_config"]
+        calls["dit_ranks"].append(parallel.rank)
+        return f"dit-rank-{parallel.rank}".encode()
+
+    def build_vae_2d_decoder_engine(path, **kwargs):
+        calls["build_vae_2d_decoder_engine"] = (path, kwargs)
+        return b"vae-plan"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+        _module(
+            "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+            load_qwen3_encoder_weights=load_qwen3_encoder_weights,
+            build_qwen3_encoder_engine=build_qwen3_encoder_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+        _module(
+            "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+            load_z_image_dit_weights=load_z_image_dit_weights,
+            build_z_image_dit_engine=build_z_image_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.z_image.z_image_dit_tp_builder",
+        _module(
+            "tensorrt_model_connect.families.z_image.z_image_dit_tp_builder",
+            build_z_image_dit_engine=build_z_image_dit_tp_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.z_image.vae_2d_builder",
+        _module(
+            "tensorrt_model_connect.families.z_image.vae_2d_builder",
+            build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
+        ),
+    )
+    monkeypatch.setattr(zimg_mod, "_serialize_preprocessor_weights", lambda _w: b"zimg-pre")
+
+    weights = {
+        "_text_encoder_dir": "/model/text_encoder",
+        "_transformer_dir": "/model/transformer",
+        "_vae_dir": "/model/vae",
+    }
+
+    out = zimg_mod.plugin.build_components(
+        "/model",
+        _cfg(image_height=512, image_width=512),
+        weights,
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=2),
+    )
+
+    assert out["text_encoders"] == [("qwen3", b"te-plan")]
+    assert out["denoiser_ranks"] == {
+        0: b"dit-rank-0",
+        1: b"dit-rank-1",
+    }
+    assert "denoiser" not in out
+    assert out["vae_decoder"] == b"vae-plan"
+    assert calls["dit_ranks"] == [0, 1]
+
+
 def test_get_diffusion_config_uses_correct_latent_math() -> None:
     """Intent: validate latent-dimension and patch-count wiring in diffusion config.
 

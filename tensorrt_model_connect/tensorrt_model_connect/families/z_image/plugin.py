@@ -103,7 +103,8 @@ class ZImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False, **_kwargs,
+        *, precision: str = "fp32", verbose: bool = False,
+        parallel_config=None, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -111,8 +112,26 @@ class ZImagePlugin:
             build_qwen3_encoder_engine, load_qwen3_encoder_weights)
         from .z_image_dit_builder import (
             build_z_image_dit_engine, load_z_image_dit_weights)
+        from .z_image_dit_tp_builder import (
+            build_z_image_dit_engine as build_z_image_dit_tp_engine)
         from .vae_2d_builder import build_vae_2d_decoder_engine
+        from ...parallel_config import (
+            normalize_parallel_config,
+            require_tensorrt_11_for_tensor_parallel,
+            validate_dit_tp,
+        )
         build_timing = _kwargs.get("build_timing")
+        parallel = normalize_parallel_config(parallel_config)
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Z-Image tensor-parallel builds")
+        if parallel.enabled:
+            validate_dit_tp(
+                dim=self._DIT_DIM,
+                num_heads=self._DIT_NUM_HEADS,
+                ffn_dim=self._DIT_FFN_DIM,
+                parallel=parallel.for_rank(0),
+                feature="Z-Image tensor parallel",
+            )
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -173,20 +192,44 @@ class ZImagePlugin:
                 num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
                 ffn_dim=self._DIT_FFN_DIM,
             )
+        dit_plan = None
+        dit_rank_plans = None
         with timed_trt_compile(build_timing, "z_image_dit"):
-            dit_plan = build_z_image_dit_engine(
-                dit_weights,
-                dim=self._DIT_DIM,
-                num_heads=self._DIT_NUM_HEADS,
-                num_layers=self._DIT_NUM_LAYERS,
-                num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
-                ffn_dim=self._DIT_FFN_DIM,
-                num_patches=num_patches,
-                text_seq_len=self._TEXT_MAX_SEQ_LEN,
-                head_dim=self._DIT_HEAD_DIM,
-                adaln_embed_dim=self._ADALN_EMBED_DIM,
-                verbose=verbose,
-            )
+            if parallel.enabled:
+                dit_rank_plans = {}
+                for rank in range(parallel.tp_size):
+                    print(
+                        f"[z-image] Building DiT TP rank {rank}/{parallel.tp_size} ...",
+                        file=sys.stderr,
+                    )
+                    dit_rank_plans[rank] = build_z_image_dit_tp_engine(
+                        dit_weights,
+                        dim=self._DIT_DIM,
+                        num_heads=self._DIT_NUM_HEADS,
+                        num_layers=self._DIT_NUM_LAYERS,
+                        num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
+                        ffn_dim=self._DIT_FFN_DIM,
+                        num_patches=num_patches,
+                        text_seq_len=self._TEXT_MAX_SEQ_LEN,
+                        head_dim=self._DIT_HEAD_DIM,
+                        adaln_embed_dim=self._ADALN_EMBED_DIM,
+                        verbose=verbose,
+                        parallel_config=parallel.for_rank(rank),
+                    )
+            else:
+                dit_plan = build_z_image_dit_engine(
+                    dit_weights,
+                    dim=self._DIT_DIM,
+                    num_heads=self._DIT_NUM_HEADS,
+                    num_layers=self._DIT_NUM_LAYERS,
+                    num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
+                    ffn_dim=self._DIT_FFN_DIM,
+                    num_patches=num_patches,
+                    text_seq_len=self._TEXT_MAX_SEQ_LEN,
+                    head_dim=self._DIT_HEAD_DIM,
+                    adaln_embed_dim=self._ADALN_EMBED_DIM,
+                    verbose=verbose,
+                )
 
         # 3. VAE decoder
         print("[z-image] Building VAE decoder engine ...", file=sys.stderr)
@@ -205,12 +248,16 @@ class ZImagePlugin:
         # 4. Serialize preprocessor weights for C++ runtime
         preprocessor_weights = _serialize_preprocessor_weights(dit_weights)
 
-        return {
+        out = {
             "text_encoders": [("qwen3", te_plan)],
-            "denoiser": dit_plan,
             "vae_decoder": vae_plan,
             "preprocessor_weights": preprocessor_weights,
         }
+        if parallel.enabled:
+            out["denoiser_ranks"] = dit_rank_plans or {}
+        else:
+            out["denoiser"] = dit_plan
+        return out
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         image_height = config.raw.get("image_height", 1024)

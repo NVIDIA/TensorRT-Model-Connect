@@ -152,6 +152,7 @@ class FluxPlugin:
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
         fp8_scales: dict | None = None, build_timing: dict | None = None,
+        parallel_config=None,
     ) -> dict:
         """Build all component engines.
 
@@ -170,24 +171,36 @@ class FluxPlugin:
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
                 fp8_scales=fp8_scales, precision=precision,
-                build_timing=build_timing)
+                build_timing=build_timing, parallel_config=parallel_config)
 
         return self._build_flux1_components(
             model_dir, config, weights, tc=tc, verbose=verbose,
-            precision=precision, build_timing=build_timing)
+            precision=precision, build_timing=build_timing,
+            parallel_config=parallel_config)
 
     def _build_flux1_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, tc: dict, precision: str = "fp32", verbose: bool = False,
         build_timing: dict | None = None,
+        parallel_config=None,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
         from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from .clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
         from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
+        from .flux_dit_tp_builder import (
+            build_flux_dit_engine as build_flux_dit_tp_engine)
+        from ...parallel_config import (
+            normalize_parallel_config,
+            require_tensorrt_11_for_tensor_parallel,
+        )
         import json
         from pathlib import Path
+
+        parallel = normalize_parallel_config(parallel_config)
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Flux tensor-parallel builds")
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -330,17 +343,36 @@ class FluxPlugin:
                 num_single_layers=num_single_layers,
             )
 
+        dit_plan = None
+        dit_rank_plans = None
         with timed_trt_compile(build_timing, "flux_dit"):
-            dit_plan = build_flux_dit_engine(
-                dit_weights,
-                dim=dit_dim,
-                num_heads=num_heads,
-                num_layers=num_layers,
-                num_single_layers=num_single_layers,
-                num_img_tokens=num_img_tokens,
-                text_seq_len=self._T5_MAX_SEQ_LEN,
-                verbose=verbose,
-            )
+            if parallel.enabled:
+                dit_rank_plans = {}
+                for rank in range(parallel.tp_size):
+                    print(f"[flux] Building FLUX DiT TP rank {rank}/{parallel.tp_size} ...",
+                          file=sys.stderr)
+                    dit_rank_plans[rank] = build_flux_dit_tp_engine(
+                        dit_weights,
+                        dim=dit_dim,
+                        num_heads=num_heads,
+                        num_layers=num_layers,
+                        num_single_layers=num_single_layers,
+                        num_img_tokens=num_img_tokens,
+                        text_seq_len=self._T5_MAX_SEQ_LEN,
+                        verbose=verbose,
+                        parallel_config=parallel.for_rank(rank),
+                    )
+            else:
+                dit_plan = build_flux_dit_engine(
+                    dit_weights,
+                    dim=dit_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    num_single_layers=num_single_layers,
+                    num_img_tokens=num_img_tokens,
+                    text_seq_len=self._T5_MAX_SEQ_LEN,
+                    verbose=verbose,
+                )
 
         # 4. VAE decoder - native TRT engine
         from .flux_vae_builder import build_flux_vae_decoder_engine
@@ -359,18 +391,23 @@ class FluxPlugin:
         # 5. Serialize preprocessor weights
         preprocessor_weights = _serialize_flux_preprocessor(dit_weights, guidance_embeds)
 
-        return {
+        out = {
             "text_encoders": text_encoders,
-            "denoiser": dit_plan,
             "vae_decoder": vae_plan,
             "preprocessor_weights": preprocessor_weights,
         }
+        if parallel.enabled:
+            out["denoiser_ranks"] = dit_rank_plans or {}
+        else:
+            out["denoiser"] = dit_plan
+        return out
 
     def _build_flux2_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, tc: dict, precision: str = "fp32", verbose: bool = False,
         fp8_scales: dict | None = None,
         build_timing: dict | None = None,
+        parallel_config=None,
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -378,6 +415,13 @@ class FluxPlugin:
             build_mistral_encoder_engine, load_mistral_encoder_weights)
         from .flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
         from .flux_vae_builder import build_flux_vae_decoder_engine
+        from ...parallel_config import normalize_parallel_config
+
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            raise NotImplementedError(
+                "Flux.2 tensor-parallel DiT builds are not implemented yet; "
+                "Flux.1 DiT TP is the supported Flux path.")
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]

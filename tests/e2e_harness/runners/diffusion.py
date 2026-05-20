@@ -27,6 +27,14 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from .text_generation import (
+    _distributed_runtime_config,
+    _ensure_distributed_runtime_env,
+    _extract_rank_zero_stdout,
+    _maybe_start_gpu_memory_sampler,
+    _strip_mpi_stream_tags,
+    _wrap_distributed_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -456,7 +464,6 @@ class DiffusionMediaRunner:
                 cmd = [
                     binary, "run", bundle_path,
                     "--prompt", prompt,
-                    "--output", output_png,
                     "--num-inference-steps", str(num_steps),
                 ]
                 negative_prompt = case.inputs.get("negative_prompt")
@@ -478,11 +485,11 @@ class DiffusionMediaRunner:
                 if qwen_image_initial_latents_raw:
                     cmd.extend([
                         "--initial-latents-raw", qwen_image_initial_latents_raw])
+                output_target = output_png
             else:
                 cmd = [
                     binary, "generate-video", bundle_path,
                     "--prompt", prompt,
-                    "--output", frame_dir,
                     "--num-steps", str(num_steps),
                 ]
                 if initial_latents_raw:
@@ -492,25 +499,59 @@ class DiffusionMediaRunner:
                     cmd.extend(["--guidance-scale", str(guidance_scale)])
                 if "seed" in case.inputs:
                     cmd.extend(["--seed", str(case.inputs["seed"])])
+                output_target = frame_dir
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
+            distributed_runtime = _distributed_runtime_config(case)
+            output_frame_dir = frame_dir
+            if distributed_runtime:
+                _ensure_distributed_runtime_env(case, ctx, env)
+                extra_env = distributed_runtime.get("env", {})
+                if isinstance(extra_env, dict):
+                    env.update({str(k): str(v) for k, v in extra_env.items()})
+                wrapper = (
+                    'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${RANK:-0}}}"; '
+                    'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                    'exec "$@" --output "$out"'
+                )
+                cmd = [
+                    "bash", "-lc", wrapper, "trtmc_rank_output", frame_dir,
+                ] + cmd
+                output_frame_dir = os.path.join(frame_dir, "rank_0")
+                cmd = _wrap_distributed_command(cmd, case, env)
+            else:
+                cmd.extend(["--output", output_target])
 
             t0 = time.monotonic()
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=3600, env=env)
+            memory_sampler = _maybe_start_gpu_memory_sampler(
+                distributed_runtime, ctx, case, env)
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=3600, env=env)
+            finally:
+                memory_meta = (
+                    memory_sampler.stop() if memory_sampler is not None else None)
             elapsed = time.monotonic() - t0
+            stdout_text = (
+                _extract_rank_zero_stdout(result.stdout)
+                if distributed_runtime else result.stdout
+            )
+            stderr_text = (
+                _strip_mpi_stream_tags(result.stderr)
+                if distributed_runtime else result.stderr
+            )
 
             # Count frames
-            frame_files = sorted(Path(frame_dir).glob("frame_*.png"))
+            frame_files = sorted(Path(output_frame_dir).glob("frame_*.png"))
             num_frames = len(frame_files)
 
             # Compute frame statistics if frames exist
             frame_stats = {}
             if num_frames > 0:
-                frame_stats = self._compute_frame_stats(frame_dir)
+                frame_stats = self._compute_frame_stats(output_frame_dir)
 
             # Copy frame paths for artifact persistence
             frame_paths = [str(f) for f in frame_files]
@@ -529,7 +570,7 @@ class DiffusionMediaRunner:
                 ]
 
             stderr_truncated, stderr_log = save_full_stderr(
-                result.stderr or "", ctx.artifacts_dir or "",
+                stderr_text or "", ctx.artifacts_dir or "",
                 "end_to_end", case.name)
             e2e_data: dict = {
                 "returncode": result.returncode,
@@ -537,18 +578,27 @@ class DiffusionMediaRunner:
                 "frame_stats": frame_stats,
                 "frames_dir": artifact_frames_dir or frame_dir,
                 "frame_paths": frame_paths,
-                "stdout": result.stdout,
+                "stdout": stdout_text,
                 "stderr": stderr_truncated,
             }
             if stderr_log:
                 e2e_data["stderr_log"] = stderr_log
+            if distributed_runtime:
+                e2e_data["raw_stdout"] = result.stdout
+                e2e_data["distributed_runtime"] = distributed_runtime
+            if memory_meta is not None:
+                e2e_data["gpu_memory"] = memory_meta
 
+            metadata = {"command": cmd}
+            if distributed_runtime:
+                metadata["distributed_runtime"] = distributed_runtime
+                metadata["rank_zero_stdout"] = stdout_text
             return StageOutput(
                 stage_name=stage.name,
                 data=e2e_data,
-                text=result.stdout,
+                text=stdout_text,
                 timing_s=elapsed,
-                metadata={"command": cmd},
+                metadata=metadata,
             )
 
     def _run_frame_quality(

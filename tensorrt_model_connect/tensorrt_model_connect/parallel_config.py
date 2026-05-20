@@ -70,6 +70,10 @@ def rank_engine_section(rank: int) -> str:
     return f"engine_plan_tp_rank{int(rank)}"
 
 
+def rank_denoiser_section(rank: int) -> str:
+    return f"denoiser_plan_tp_rank{int(rank)}"
+
+
 def require_tensorrt_11_for_tensor_parallel(
     parallel: ParallelConfig,
     *,
@@ -114,6 +118,50 @@ def validate_standard_decoder_tp(
         raise ValueError(
             f"Standard decoder tensor parallel requires intermediate size divisible by tp_size "
             f"({mlp_size} vs {tp})")
+
+
+def validate_dit_tp(
+    *,
+    dim: int,
+    num_heads: int,
+    ffn_dim: int,
+    parallel: ParallelConfig,
+    feature: str = "DiT tensor parallel",
+) -> None:
+    """Validate common DiT tensor-parallel dimensions."""
+    parallel.validate()
+    if not parallel.enabled:
+        return
+    if parallel.rank < 0:
+        raise ValueError(f"{feature} engine build requires a concrete rank")
+    tp = parallel.tp_size
+    if dim % tp != 0:
+        raise ValueError(
+            f"{feature} requires hidden dim divisible by tp_size ({dim} vs {tp})")
+    if num_heads % tp != 0:
+        raise ValueError(
+            f"{feature} requires num_attention_heads divisible by tp_size "
+            f"({num_heads} vs {tp})")
+    if ffn_dim % tp != 0:
+        raise ValueError(
+            f"{feature} requires FFN size divisible by tp_size ({ffn_dim} vs {tp})")
+
+
+def validate_flux_dit_tp(
+    *,
+    dim: int,
+    num_heads: int,
+    ffn_dim: int,
+    parallel: ParallelConfig,
+) -> None:
+    """Validate FLUX.1 DiT tensor-parallel dimensions."""
+    validate_dit_tp(
+        dim=dim,
+        num_heads=num_heads,
+        ffn_dim=ffn_dim,
+        parallel=parallel,
+        feature="Flux tensor parallel",
+    )
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -181,7 +229,7 @@ def add_all_reduce_sum(network, tensor, tp_size: int):
     add_collective = getattr(network, "add_dist_collective", None)
     if add_collective is None:
         raise RuntimeError(
-            "Tensor-parallel decoder builds require TensorRT 11.0+ Python bindings "
+            "Tensor-parallel builds require TensorRT 11.0+ Python bindings "
             "with INetworkDefinition.add_dist_collective")
     layer = add_collective(
         tensor,
@@ -194,7 +242,7 @@ def add_all_reduce_sum(network, tensor, tp_size: int):
         raise RuntimeError("TensorRT failed to add ALL_REDUCE distributed collective")
     if not hasattr(layer, "num_ranks"):
         raise RuntimeError(
-            "Tensor-parallel decoder builds require TensorRT 11.0+ Python bindings "
+            "Tensor-parallel builds require TensorRT 11.0+ Python bindings "
             "with IDistCollectiveLayer.num_ranks")
     layer.num_ranks = tp_size
     return layer.get_output(0)

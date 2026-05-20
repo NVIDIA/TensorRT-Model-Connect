@@ -110,16 +110,26 @@ class PixArtPlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False, **_kwargs,
+        *, precision: str = "fp32", verbose: bool = False,
+        parallel_config=None, **_kwargs,
     ) -> dict:
         """Build all three component engines."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
         from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from .standard_dit_builder import build_standard_dit_engine
+        from .standard_dit_tp_builder import (
+            build_standard_dit_engine as build_standard_dit_tp_engine)
         from .vae_2d_builder import build_vae_2d_decoder_engine
+        from ...parallel_config import (
+            normalize_parallel_config,
+            require_tensorrt_11_for_tensor_parallel,
+        )
         import json
         from pathlib import Path
         build_timing = _kwargs.get("build_timing")
+        parallel = normalize_parallel_config(parallel_config)
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="PixArt tensor-parallel builds")
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -199,22 +209,48 @@ class PixArtPlugin:
                 cross_attn_dim=cross_attn_dim,
             )
 
+        dit_plan = None
+        dit_rank_plans = None
         with timed_trt_compile(build_timing, "pixart_dit"):
-            dit_plan = build_standard_dit_engine(
-                dit_weights,
-                dim=dit_dim,
-                num_heads=num_heads,
-                num_layers=num_layers,
-                ffn_dim=ffn_dim,
-                context_dim=cross_attn_dim,
-                num_patches=num_patches,
-                text_seq_len=self._T5_MAX_SEQ_LEN,
-                qk_norm=False,
-                cross_attn_norm=False,
-                ffn_activation="gelu_approximate",
-                use_rope=False,
-                verbose=verbose,
-            )
+            if parallel.enabled:
+                dit_rank_plans = {}
+                for rank in range(parallel.tp_size):
+                    print(
+                        f"[pixart] Building PixArt DiT TP rank {rank}/{parallel.tp_size} ...",
+                        file=sys.stderr,
+                    )
+                    dit_rank_plans[rank] = build_standard_dit_tp_engine(
+                        dit_weights,
+                        dim=dit_dim,
+                        num_heads=num_heads,
+                        num_layers=num_layers,
+                        ffn_dim=ffn_dim,
+                        context_dim=cross_attn_dim,
+                        num_patches=num_patches,
+                        text_seq_len=self._T5_MAX_SEQ_LEN,
+                        qk_norm=False,
+                        cross_attn_norm=False,
+                        ffn_activation="gelu_approximate",
+                        use_rope=False,
+                        verbose=verbose,
+                        parallel_config=parallel.for_rank(rank),
+                    )
+            else:
+                dit_plan = build_standard_dit_engine(
+                    dit_weights,
+                    dim=dit_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    ffn_dim=ffn_dim,
+                    context_dim=cross_attn_dim,
+                    num_patches=num_patches,
+                    text_seq_len=self._T5_MAX_SEQ_LEN,
+                    qk_norm=False,
+                    cross_attn_norm=False,
+                    ffn_activation="gelu_approximate",
+                    use_rope=False,
+                    verbose=verbose,
+                )
 
         # 3. VAE decoder
         print("[pixart] Building VAE decoder engine ...", file=sys.stderr)
@@ -234,12 +270,16 @@ class PixArtPlugin:
         preprocessor_weights = _serialize_preprocessor_weights(
             dit_weights, t5_d_model, dit_dim)
 
-        return {
+        out = {
             "text_encoders": [("t5", t5_plan)],
-            "denoiser": dit_plan,
             "vae_decoder": vae_plan,
             "preprocessor_weights": preprocessor_weights,
         }
+        if parallel.enabled:
+            out["denoiser_ranks"] = dit_rank_plans or {}
+        else:
+            out["denoiser"] = dit_plan
+        return out
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         """Return diffusion pipeline configuration."""

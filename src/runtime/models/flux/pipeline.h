@@ -22,7 +22,8 @@ class FluxPipeline final : public IPipeline {
                  std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
                  DiffusionConfig config, PreprocessorWeights weights,
                  std::shared_ptr<ITokenizer> tokenizer, std::unique_ptr<ITokenizer> clip_tokenizer,
-                 std::string model_id_str);
+                 std::string model_id_str, std::shared_ptr<void> distributed_owner = nullptr,
+                 int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
 
     ~FluxPipeline() override;
 
@@ -66,6 +67,10 @@ class FluxPipeline final : public IPipeline {
     bool decode_and_convert(const diffusion::FluxGenerationPlan& plan, std::vector<float>& latents,
                             ImageResult& result);
 
+    // Keep TP communicator ownership until after TRT modules are destroyed.
+    std::shared_ptr<void> distributed_owner_;
+    int32_t tensor_parallel_rank_{0};
+    int32_t tensor_parallel_size_{1};
     std::vector<std::unique_ptr<TrtModule>> text_encoders_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;

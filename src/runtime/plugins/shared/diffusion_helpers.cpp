@@ -42,11 +42,16 @@ DiffusionConfig make_diffusion_config(const std::string& json) {
 }
 
 DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
-                                    const std::string& json, const ModuleCreateOptions& options) {
+                                    const std::string& json, const ModuleCreateOptions& options,
+                                    const std::string& denoiser_section_name,
+                                    const ModuleCreateOptions* denoiser_options) {
     DiffusionParts parts;
 
-    parts.denoiser = load_trt_module_from_plan(backend, find_section(bundle, "denoiser_plan"),
-                                               "denoiser_plan", options);
+    const ModuleCreateOptions& effective_denoiser_options =
+        denoiser_options != nullptr ? *denoiser_options : options;
+    parts.denoiser =
+        load_trt_module_from_plan(backend, find_section(bundle, denoiser_section_name),
+                                  denoiser_section_name.c_str(), effective_denoiser_options);
     parts.vae = load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder_plan"),
                                           "vae_decoder_plan", options);
 

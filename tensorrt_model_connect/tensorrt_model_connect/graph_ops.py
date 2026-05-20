@@ -2067,7 +2067,8 @@ def add_layer_norm_native(
     Replaces the manual reduce/elementwise chain in add_layer_norm with a
     single fused layer that TRT can optimize end-to-end. In strongly typed
     networks, input/scale/bias must have identical tensor types; compute
-    precision is set to FP32 for numerical stability.
+    precision is set to FP32 for numerical stability when the TensorRT Python
+    layer exposes that control.
 
     Note: INormalizationLayer computes (x - mean) / sqrt(var + eps) * gamma + beta.
     This is LayerNorm, NOT RMSNorm.  Use add_rms_norm for RMSNorm models.
@@ -2094,7 +2095,10 @@ def add_layer_norm_native(
     # hidden dimension is always the last axis for [*, hidden_size] tensors.
     norm = network.add_normalization_v2(inp, gamma_t, beta_t, 1 << (rank - 1))
     norm.epsilon = eps
-    norm.compute_precision = trt.float32
+    # TensorRT 11 removed the Python INormalizationLayer.compute_precision
+    # attribute. Keep the TRT 10 hint, and let TRT 11 infer the precision.
+    if hasattr(norm, "compute_precision"):
+        norm.compute_precision = trt.float32
     return norm.get_output(0)
 
 

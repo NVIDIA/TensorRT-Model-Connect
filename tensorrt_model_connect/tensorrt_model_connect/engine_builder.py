@@ -26,6 +26,7 @@ from .triattention_export import (
 from .parallel_config import (
     ParallelConfig,
     normalize_parallel_config,
+    rank_denoiser_section,
     rank_engine_section,
     require_tensorrt_11_for_tensor_parallel,
 )
@@ -1244,10 +1245,6 @@ def _build_diffusion_bundle(
     if build_timing is None:
         build_timing = _new_build_timing()
     parallel = normalize_parallel_config(parallel_config)
-    if parallel.enabled:
-        raise NotImplementedError(
-            "Tensor-parallel diffusion builds are not implemented yet; "
-            "decoder TP is the active first target.")
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
@@ -1268,6 +1265,9 @@ def _build_diffusion_bundle(
             f"Supported: {supported}")
 
     model_type = getattr(plugin, 'name', pipeline_class.lower())
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Diffusion tensor-parallel builds")
     config = ModelConfig(model_type=model_type, raw=model_index)
     config.raw["max_cache_length"] = max_cache_length
     if diffusion_overrides:
@@ -1344,6 +1344,11 @@ def _build_diffusion_bundle(
             build_components_kwargs["precision"] = precision
         if _call_supports_kwarg(build_components, "build_timing"):
             build_components_kwargs["build_timing"] = build_timing
+        if _call_supports_kwarg(build_components, "parallel_config"):
+            build_components_kwargs["parallel_config"] = parallel
+        elif parallel.enabled:
+            raise NotImplementedError(
+                f"Plugin {plugin.name} does not accept parallel_config for diffusion TP")
         components = build_components(
             str(model_dir_path), config, weights, **build_components_kwargs)
     finally:
@@ -1378,11 +1383,29 @@ def _build_diffusion_bundle(
             file=sys.stderr,
         )
 
-    # Denoiser plan
-    denoiser_plan = components["denoiser"]
-    sections.append(BundleSection("denoiser_plan", denoiser_plan))
-    print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
-          file=sys.stderr)
+    # Denoiser plan(s)
+    if parallel.enabled:
+        denoiser_rank_plans = components.get("denoiser_ranks")
+        if not isinstance(denoiser_rank_plans, dict):
+            raise ValueError(
+                f"Plugin {plugin.name}.build_components() did not return denoiser_ranks")
+        for rank in range(parallel.tp_size):
+            denoiser_plan = denoiser_rank_plans.get(rank)
+            if denoiser_plan is None:
+                denoiser_plan = denoiser_rank_plans.get(str(rank))
+            if denoiser_plan is None:
+                raise ValueError(f"Missing tensor-parallel denoiser plan for rank {rank}")
+            section_name = rank_denoiser_section(rank)
+            sections.append(BundleSection(section_name, denoiser_plan))
+            print(
+                f"  {section_name}: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
+                file=sys.stderr,
+            )
+    else:
+        denoiser_plan = components["denoiser"]
+        sections.append(BundleSection("denoiser_plan", denoiser_plan))
+        print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
 
     # VAE decoder plan
     vae_plan = components["vae_decoder"]
@@ -1442,6 +1465,7 @@ def _build_diffusion_bundle(
             diff_cfg = get_diff_config(config)
             if diff_cfg is not None:
                 cfg_dict.update(diff_cfg)
+        cfg_dict.update(parallel.to_bundle_config_fields())
 
         cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
 

@@ -683,11 +683,14 @@ FluxPipeline::FluxPipeline(std::vector<std::unique_ptr<TrtModule>> text_encoders
                            std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
                            DiffusionConfig config, PreprocessorWeights weights,
                            std::shared_ptr<ITokenizer> tokenizer,
-                           std::unique_ptr<ITokenizer> clip_tokenizer, std::string model_id_str)
-    : text_encoders_(std::move(text_encoders)), denoiser_(std::move(denoiser)),
-      vae_(std::move(vae)), config_(std::move(config)), weights_(std::move(weights)),
-      tokenizer_(std::move(tokenizer)), clip_tokenizer_(std::move(clip_tokenizer)),
-      model_id_(std::move(model_id_str)) {
+                           std::unique_ptr<ITokenizer> clip_tokenizer, std::string model_id_str,
+                           std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
+                           int32_t tensor_parallel_size)
+    : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
+      tensor_parallel_size_(tensor_parallel_size), text_encoders_(std::move(text_encoders)),
+      denoiser_(std::move(denoiser)), vae_(std::move(vae)), config_(std::move(config)),
+      weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
+      clip_tokenizer_(std::move(clip_tokenizer)), model_id_(std::move(model_id_str)) {
     // Compute FLUX latent layout
     h_latent_ = config_.video_height / config_.scale_factor_spatial;
     w_latent_ = config_.video_width / config_.scale_factor_spatial;
@@ -1235,6 +1238,16 @@ bool FluxPipeline::run_denoising(const diffusion::FluxGenerationPlan& plan,
 // Steps 11-13: VAE decode and convert to ImageResult
 bool FluxPipeline::decode_and_convert(const diffusion::FluxGenerationPlan& plan,
                                       std::vector<float>& latents, ImageResult& result) {
+    if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
+        std::cerr << "[flux] TP rank " << tensor_parallel_rank_
+                  << " skips VAE decode; rank 0 writes image artifacts\n";
+        result.pixels.clear();
+        result.height = 0;
+        result.width = 0;
+        result.num_frames = 0;
+        return true;
+    }
+
     const bool is_flux2 = plan.is_flux2;
     const int32_t z_dim = plan.z_dim;
     const auto& layout = plan.layout;

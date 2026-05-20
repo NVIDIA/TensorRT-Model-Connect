@@ -271,6 +271,108 @@ def test_build_components_uses_transformer_and_t5_configs(
     assert calls["_serialize_preprocessor_weights"][0][2] == 32
 
 
+def test_build_components_tensor_parallel_uses_tp_dit_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Intent: verify PixArt TP dispatch leaves the single-device DiT builder unused.
+
+    Preconditions: component builders are monkeypatched and TensorRT version is 11.0.
+    Postconditions: denoiser_ranks contains one TP DiT plan per rank from the TP builder.
+    """
+    from tensorrt_model_connect import trt_compat
+    from tensorrt_model_connect.parallel_config import ParallelConfig
+
+    monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
+    calls: dict[str, object] = {"dit_ranks": []}
+
+    model_dir = tmp_path / "pixart_tp"
+    (model_dir / "text_encoder").mkdir(parents=True)
+    (model_dir / "transformer").mkdir(parents=True)
+    (model_dir / "vae").mkdir(parents=True)
+
+    def build_standard_dit_engine(_weights, **_kwargs):
+        raise AssertionError("single-device PixArt DiT builder used for TP build")
+
+    def build_standard_dit_tp_engine(_weights, **kwargs):
+        parallel = kwargs["parallel_config"]
+        calls["dit_ranks"].append(parallel.rank)
+        return f"dit-rank-{parallel.rank}".encode()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+        _module(
+            "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+            load_t5_weights=lambda *_args, **_kwargs: {},
+            build_t5_encoder_engine=lambda *_args, **_kwargs: b"t5-plan",
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.pixart.standard_dit_builder",
+        _module(
+            "tensorrt_model_connect.families.pixart.standard_dit_builder",
+            build_standard_dit_engine=build_standard_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.pixart.standard_dit_tp_builder",
+        _module(
+            "tensorrt_model_connect.families.pixart.standard_dit_tp_builder",
+            build_standard_dit_engine=build_standard_dit_tp_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.pixart.vae_2d_builder",
+        _module(
+            "tensorrt_model_connect.families.pixart.vae_2d_builder",
+            build_vae_2d_decoder_engine=lambda *_args, **_kwargs: b"vae-plan",
+        ),
+    )
+    monkeypatch.setattr(
+        pixart_mod,
+        "_load_pixart_dit_weights",
+        lambda *_args, **_kwargs: {"dit": np.array([1], dtype=np.float32)},
+    )
+    monkeypatch.setattr(
+        pixart_mod,
+        "_serialize_preprocessor_weights",
+        lambda *_args, **_kwargs: b"pixart-pre",
+    )
+
+    out = pixart_mod.plugin.build_components(
+        str(model_dir),
+        _cfg(image_height=256, image_width=384),
+        {
+            "_text_encoder_dir": str(model_dir / "text_encoder"),
+            "_transformer_dir": str(model_dir / "transformer"),
+            "_vae_dir": str(model_dir / "vae"),
+            "_transformer_config": {
+                "num_attention_heads": 4,
+                "attention_head_dim": 8,
+                "num_layers": 1,
+                "patch_size": 4,
+                "cross_attention_dim": 64,
+            },
+        },
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4),
+    )
+
+    assert out["text_encoders"] == [("t5", b"t5-plan")]
+    assert out["denoiser_ranks"] == {
+        0: b"dit-rank-0",
+        1: b"dit-rank-1",
+        2: b"dit-rank-2",
+        3: b"dit-rank-3",
+    }
+    assert "denoiser" not in out
+    assert out["vae_decoder"] == b"vae-plan"
+    assert calls["dit_ranks"] == [0, 1, 2, 3]
+
+
 def test_get_diffusion_config_uses_transformer_overrides() -> None:
     """Intent: verify derived diffusion config values from transformer overrides.
 

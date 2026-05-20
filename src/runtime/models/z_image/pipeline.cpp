@@ -197,9 +197,12 @@ ZImagePipeline::ZImagePipeline(std::unique_ptr<TrtModule> text_encoder,
                                DiffusionConfig config, PreprocessorWeights weights,
                                ZImagePreprocessorWeights z_weights,
                                std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                               std::string bundle_path)
-    : text_encoder_(std::move(text_encoder)), denoiser_(std::move(denoiser)), vae_(std::move(vae)),
-      config_(std::move(config)), weights_(std::move(weights)), z_weights_(std::move(z_weights)),
+                               std::string bundle_path, std::shared_ptr<void> distributed_owner,
+                               int32_t tensor_parallel_rank, int32_t tensor_parallel_size)
+    : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
+      tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
+      denoiser_(std::move(denoiser)), vae_(std::move(vae)), config_(std::move(config)),
+      weights_(std::move(weights)), z_weights_(std::move(z_weights)),
       tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       bundle_path_(std::move(bundle_path)) {
     std::cerr << "[z-image] ZImagePipeline initialized"
@@ -523,6 +526,43 @@ void ZImagePipeline::unpatchify_2d(const std::vector<float>& patches, int32_t c,
     }
 }
 
+ImageResult ZImagePipeline::decode_z_image_result(int32_t z_dim, int32_t h_lat, int32_t w_lat,
+                                                  std::vector<float>& latents, ImageResult result) {
+    denormalize_latents(latents);
+
+    if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
+        std::cerr << "[z-image] TP rank " << tensor_parallel_rank_
+                  << " skips VAE decode; rank 0 writes image artifacts\n";
+        ImageResult empty;
+        empty.num_frames = 0;
+        return empty;
+    }
+
+    std::cerr << "[z-image] Decoding latents via VAE ...\n";
+    if (!vae_) {
+        std::cerr << "[z-image] No VAE decoder module\n";
+        return result;
+    }
+
+    const int32_t h_out = h_lat * 8;
+    const int32_t w_out = w_lat * 8;
+
+    TensorMap vae_inputs;
+    vae_inputs["latent_input"] = Tensor{
+        latents.data(),
+        {1, static_cast<int64_t>(z_dim), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)},
+        DType::kFloat32};
+
+    auto vae_outputs = vae_->forward(vae_inputs);
+
+    const auto& vae_out = vae_outputs["decoder_output"];
+    const auto* raw_pixels = static_cast<const float*>(vae_out.data);
+
+    result = convert_vae_output(raw_pixels, h_out, w_out);
+    std::cerr << "[z-image] Image generated: " << result.width << "x" << result.height << "\n";
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // generate_image — full Z-Image pipeline
 // ---------------------------------------------------------------------------
@@ -673,37 +713,7 @@ ImageResult ZImagePipeline::generate_image(const std::string& prompt, const Gene
         log_step_stats(step, num_inference_steps, raw_timestep, latents);
     }
 
-    // ── 9. Denormalize latents ──
-    denormalize_latents(latents);
-
-    // ── 10. Run VAE decode via TrtModule::forward() ──
-    std::cerr << "[z-image] Decoding latents via VAE ...\n";
-    if (!vae_) {
-        std::cerr << "[z-image] No VAE decoder module\n";
-        return result;
-    }
-
-    {
-        const int32_t h_out = layout.h_lat * 8;
-        const int32_t w_out = layout.w_lat * 8;
-
-        TensorMap vae_inputs;
-        vae_inputs["latent_input"] =
-            Tensor{latents.data(),
-                   {1, static_cast<int64_t>(layout.z_dim), static_cast<int64_t>(layout.h_lat),
-                    static_cast<int64_t>(layout.w_lat)},
-                   DType::kFloat32};
-
-        auto vae_outputs = vae_->forward(vae_inputs);
-
-        const auto& vae_out = vae_outputs["decoder_output"];
-        const auto* raw_pixels = static_cast<const float*>(vae_out.data);
-
-        result = convert_vae_output(raw_pixels, h_out, w_out);
-    }
-
-    std::cerr << "[z-image] Image generated: " << result.width << "x" << result.height << "\n";
-    return result;
+    return decode_z_image_result(layout.z_dim, layout.h_lat, layout.w_lat, latents, result);
 }
 
 } // namespace trtmc
