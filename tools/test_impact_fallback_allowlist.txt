@@ -11,6 +11,7 @@ catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all
 catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile.gb300 # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_cli.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -180,6 +181,7 @@ no_impact tools/validate_dit.py # developer utility script; no CI test impact is
 no_impact tools/validate_t5.py # developer utility script; no CI test impact is intentional
 no_impact tools/validation/timm_vit/benchmark_trt_paths.py # developer validation helper; no CI test impact is intentional
 shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/setup.py # editable package compatibility and release packaging shim; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
@@ -204,6 +206,7 @@ shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_ops.py
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/native_cli.py # packaged trtmc console wrapper; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
