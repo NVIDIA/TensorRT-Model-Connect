@@ -66,11 +66,31 @@ void test_build_forwards_args_verbatim() {
 }
 
 void test_run_parses_common_flags() {
-    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello",
-                       "--max-new-tokens", "8", "--temperature", "0.5", "--top-p", "0.9",
-                       "--top-k", "4", "--seed", "123", "--greedy", "--chat-template",
-                       "--no-thinking", "--kv-cache-size", "2GiB", "--backend-dir", "/tmp/lib",
-                       "--runtime-cache", "/tmp/cache", "--cuda-graphs"});
+    auto args = parse({"trtmc",
+                       "run",
+                       "bundle.trtfb",
+                       "--prompt",
+                       "hello",
+                       "--max-new-tokens",
+                       "8",
+                       "--temperature",
+                       "0.5",
+                       "--top-p",
+                       "0.9",
+                       "--top-k",
+                       "4",
+                       "--seed",
+                       "123",
+                       "--greedy",
+                       "--chat-template",
+                       "--no-thinking",
+                       "--kv-cache-size",
+                       "2GiB",
+                       "--backend-dir",
+                       "/tmp/lib",
+                       "--runtime-cache",
+                       "/tmp/cache",
+                       "--cuda-graphs"});
     check(args.command == "run", "run command");
     check(args.bundle_path == "bundle.trtfb", "run bundle");
     check(args.prompt == "hello", "run prompt");
@@ -89,10 +109,9 @@ void test_run_parses_common_flags() {
 }
 
 void test_diffusion_flags() {
-    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "paint",
-                       "--negative-prompt", "blur", "--num-inference-steps", "20",
-                       "--height", "512", "--width", "768", "--cfg-scale", "7.5",
-                       "--initial-latents-raw", "latents.raw"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "paint", "--negative-prompt",
+                       "blur", "--num-inference-steps", "20", "--height", "512", "--width", "768",
+                       "--cfg-scale", "7.5", "--initial-latents-raw", "latents.raw"});
     check(args.negative_prompt == "blur", "diffusion negative prompt");
     check(args.num_steps == 20, "diffusion num steps");
     check(args.diffusion_height == 512, "diffusion height");
@@ -102,8 +121,8 @@ void test_diffusion_flags() {
 }
 
 void test_detect_parses_contract_flags() {
-    auto args = parse({"trtmc", "detect", "bundle.trtfb", "--image", "img.jpg",
-                       "--output-json", "detections.json", "--score-threshold", "0.42"});
+    auto args = parse({"trtmc", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
+                       "detections.json", "--score-threshold", "0.42"});
     check(args.command == "detect", "detect command");
     check(args.bundle_path == "bundle.trtfb", "detect bundle");
     check(args.image_path == "img.jpg", "detect image");
@@ -122,9 +141,9 @@ void test_inspect_and_config_flags() {
 }
 
 void test_audio_and_solve_flags() {
-    auto transcribe = parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "input.wav",
-                             "--stream", "--chunk-ms", "80", "--att-context-size", "5,2",
-                             "--pad-and-drop-preencoded"});
+    auto transcribe =
+        parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "input.wav", "--stream",
+               "--chunk-ms", "80", "--att-context-size", "5,2", "--pad-and-drop-preencoded"});
     check(transcribe.audio_in == "input.wav", "transcribe audio");
     check(transcribe.stream, "transcribe stream");
     check(transcribe.chunk_ms == 80, "transcribe chunk ms");
@@ -132,8 +151,8 @@ void test_audio_and_solve_flags() {
           "transcribe att context");
     check(transcribe.pad_and_drop_preencoded, "transcribe pad/drop");
 
-    auto solve = parse({"trtmc", "solve", "bundle.trtfb", "--branch-input", "1,2",
-                        "--trunk-input", "3,4"});
+    auto solve =
+        parse({"trtmc", "solve", "bundle.trtfb", "--branch-input", "1,2", "--trunk-input", "3,4"});
     check(solve.branch_input == "1,2", "solve branch");
     check(solve.trunk_input == "3,4", "solve trunk");
 }

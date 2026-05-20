@@ -116,9 +116,9 @@ std::string build_pythonpath() {
         const auto rel_exe_path = std::filesystem::relative(exe_path, source_root, rel_ec);
         const auto first_component =
             rel_exe_path.empty() ? std::filesystem::path{} : *rel_exe_path.begin();
-        const bool running_from_source_build =
-            !source_ec && !exe_ec && !rel_ec && !rel_exe_path.empty() &&
-            first_component.string().rfind("build", 0) == 0;
+        const bool running_from_source_build = !source_ec && !exe_ec && !rel_ec &&
+                                               !rel_exe_path.empty() &&
+                                               first_component.string().rfind("build", 0) == 0;
         if (running_from_source_build) {
             const auto source_pkg =
                 std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
