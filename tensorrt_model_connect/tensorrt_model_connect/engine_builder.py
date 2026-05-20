@@ -1332,6 +1332,19 @@ def _build_diffusion_bundle(
     print(f"  vae_decoder: {len(vae_plan) / (1024 * 1024):.1f} MB",
           file=sys.stderr)
 
+    # Optional image-edit components. Text-to-image bundles omit these.
+    if "vision_engine" in components:
+        vision_plan = components["vision_engine"]
+        sections.append(BundleSection("vision_engine_plan", vision_plan))
+        print(f"  vision_engine: {len(vision_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
+
+    if "vae_encoder" in components:
+        vae_encoder_plan = components["vae_encoder"]
+        sections.append(BundleSection("vae_encoder_plan", vae_encoder_plan))
+        print(f"  vae_encoder: {len(vae_encoder_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
+
     # Preprocessor weights (patch embedding, timestep MLP, text projection)
     if "preprocessor_weights" in components:
         pp_data = components["preprocessor_weights"]

@@ -52,9 +52,8 @@ class QwenImagePlugin final : public IPipelinePlugin {
         c.text_engine = std::move(text_module);
         c.denoiser_engine = std::move(parts.denoiser.module);
         c.vae_decoder_engine = std::move(parts.vae.module);
-        // Edit-mode engines (vision_engine, vae_encoder_engine) remain null
-        // for T2I bundles; image-editing variants would populate these from
-        // additional bundle sections.
+        c.vision_engine = std::move(parts.vision.module);
+        c.vae_encoder_engine = std::move(parts.vae_encoder.module);
         c.tokenizer = std::move(parts.tokenizer);
         c.config = std::move(qi_config);
         c.preprocessor = std::move(qi_preprocessor);

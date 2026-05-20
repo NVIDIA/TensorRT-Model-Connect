@@ -154,6 +154,27 @@ void parse_tokenizer(const std::string& obj, QwenImageTokenizerConfig& tk) {
     tk.add_special_tokens = extract_json_bool(obj, "add_special_tokens", tk.add_special_tokens);
 }
 
+void parse_vision_encoder(const std::string& obj, QwenImageVisionEncoderConfig& vc) {
+    if (obj.empty())
+        return;
+    vc.type = extract_json_string(obj, "type", vc.type);
+    vc.image_size = extract_json_int(obj, "image_size", vc.image_size);
+    vc.patch_size = extract_json_int(obj, "patch_size", vc.patch_size);
+    vc.merge_size = extract_json_int(obj, "merge_size", vc.merge_size);
+    vc.hidden_size = extract_json_int(obj, "hidden_size", vc.hidden_size);
+    vc.num_layers = extract_json_int(obj, "num_layers", vc.num_layers);
+    vc.out_hidden_size = extract_json_int(obj, "out_hidden_size", vc.out_hidden_size);
+}
+
+void parse_image_conditioning(const std::string& obj, QwenImageConditioningConfig& ic) {
+    if (obj.empty())
+        return;
+    ic.vl_image_size = extract_json_int(obj, "vl_image_size", ic.vl_image_size);
+    ic.vae_image_size = extract_json_int(obj, "vae_image_size", ic.vae_image_size);
+    ic.vae_concat_axis = extract_json_string(obj, "vae_concat_axis", ic.vae_concat_axis);
+    ic.max_input_images = extract_json_int(obj, "max_input_images", ic.max_input_images);
+}
+
 } // namespace
 
 QwenImageConfig QwenImageConfig::parse(std::string_view config_json) {
@@ -177,6 +198,9 @@ QwenImageConfig QwenImageConfig::parse(std::string_view config_json) {
     parse_vae(extract_json_object_text(text, "vae"), cfg.vae);
     parse_image(extract_json_object_text(text, "image"), cfg.image);
     parse_tokenizer(extract_json_object_text(text, "tokenizer"), cfg.tokenizer);
+    parse_vision_encoder(extract_json_object_text(text, "vision_encoder"), cfg.vision_encoder);
+    parse_image_conditioning(extract_json_object_text(text, "image_conditioning"),
+                             cfg.image_conditioning);
 
     return cfg;
 }

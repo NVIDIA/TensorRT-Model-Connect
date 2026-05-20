@@ -661,6 +661,7 @@ trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
 trtmc_add_test(test_ltx_video_pipeline)
+trtmc_add_test(test_qwen_image_config)
 
 # Recurrent (Mamba / RWKV)
 trtmc_add_test(test_recurrent_step_contracts)

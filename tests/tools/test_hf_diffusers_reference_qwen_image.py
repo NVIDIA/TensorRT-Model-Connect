@@ -202,7 +202,8 @@ def test_qwen_image_reference_forward_compat_edit_variants(monkeypatch, tmp_path
     assert "QwenImageEditPipeline" in script
     assert "QwenImagePipeline" in script
     # The runtime guard against picking Edit when no image is present.
-    assert 'if "Edit" in cls_name and not False' in script
+    assert 'if "Edit" in cls_name and not bool(qi_image_path)' in script
+    assert "qi_image_path = ''" in script
 
     # With image input -> Edit variants are eligible.
     case_with_image = _make_qwen_image_case(
@@ -214,7 +215,9 @@ def test_qwen_image_reference_forward_compat_edit_variants(monkeypatch, tmp_path
     hf_diffusers.HfDiffusersReference().run_stage(
         case_with_image, StageSpec(name="end_to_end"), ctx2)
     script2 = _extract_script(captured2["cmd"])
-    assert 'if "Edit" in cls_name and not True' in script2
+    assert "qi_image_path = '/tmp/x.png'" in script2
+    assert "qi_input_image = Image.open(qi_image_path).convert(\"RGB\")" in script2
+    assert 'qi_call_kwargs["image"] = qi_input_image' in script2
 
 
 def test_flux_branch_unaffected(monkeypatch, tmp_path):
