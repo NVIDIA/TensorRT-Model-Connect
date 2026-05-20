@@ -1537,6 +1537,20 @@ class TestCoverageMapIntegration:
         assert result.tools_tests == ["tests/tools/test_z_image_model_card_contract.py"]
         assert "tools" not in result.fallback_tiers
 
+    def test_direct_builder_test_does_not_suppress_shared_source_fallback(self, imap):
+        """Direct tests must not hide fallback required by changed shared builder code."""
+        result = test_impact.analyze_impact(
+            [
+                "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py",
+                "tests/builder/test_family_timm_vit.py",
+            ],
+            imap,
+            coverage_map={},
+        )
+
+        assert result.builder_tests == ["tests/builder/test_family_timm_vit.py"]
+        assert "builder" in result.fallback_tiers
+
     def test_changed_e2e_harness_unit_test_selected_directly(self, imap):
         """Changed e2e_harness test files run directly without broad E2E impact."""
         result = test_impact.analyze_impact(

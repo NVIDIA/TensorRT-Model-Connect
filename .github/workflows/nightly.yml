@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 10 * * *"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test with the full nightly workflow"
+        required: false
+        default: "main"
 
 permissions:
   contents: read
@@ -35,12 +40,13 @@ env:
   DIFFUSION_VLM_MAX_SIDE: "512"
   DIFFUSION_VLM_MAX_NEW_TOKENS: "384"
   DIFFUSION_VLM_TIMEOUT: "45m"
+  NIGHTLY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'main' }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   nightly-ci:
-    name: Nightly Full CI on GitHub main
+    name: Nightly Full CI
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 
@@ -76,10 +82,10 @@ jobs:
               '
           fi
 
-      - name: Check out GitHub main tip
+      - name: Check out nightly ref
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ env.NIGHTLY_REF }}
           fetch-depth: 0
           clean: false
           lfs: false
@@ -88,13 +94,18 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main --quiet
-          echo "CI_BASE_REF=HEAD~1" >> "$GITHUB_ENV"
-          echo "Running nightly on GitHub main tip: $(git rev-parse HEAD)"
+          if [ "$NIGHTLY_REF" = "main" ]; then
+            base="HEAD~1"
+          else
+            base="origin/main"
+          fi
+          echo "CI_BASE_REF=$base" >> "$GITHUB_ENV"
+          echo "Running nightly on GitHub ref '$NIGHTLY_REF': $(git rev-parse HEAD)"
 
       - name: Report CI mode
         run: |
           set -euo pipefail
-          echo "CI mode: nightly/full E2E on GitHub main"
+          echo "CI mode: nightly/full E2E on GitHub ref '$NIGHTLY_REF'"
           echo "FULL_E2E=$FULL_E2E"
           echo "RUN_COVERAGE_MAP=$RUN_COVERAGE_MAP"
           echo "REBUILD_ENGINES=$REBUILD_ENGINES"
@@ -104,46 +115,57 @@ jobs:
         run: bash .github/scripts/run-gha-stage.sh setup
 
       - name: Impact analysis
+        if: ${{ always() }}
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh impact
 
       - name: Build all
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh build
 
       - name: Check family coverage
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh family-coverage
 
       - name: Check cyclomatic complexity
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh complexity
 
       - name: Lint changed files
+        if: ${{ always() }}
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh lint
 
       - name: C++ unit tests
+        if: ${{ always() }}
         timeout-minutes: 20
         run: bash .github/scripts/run-gha-stage.sh cpp-unit
 
       - name: Python builder and tools tests
+        if: ${{ always() }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh python-builder
 
       - name: C++ coverage
+        if: ${{ always() }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh cpp-coverage
 
       - name: Graph-op GPU tests
+        if: ${{ always() }}
         timeout-minutes: 20
         run: bash .github/scripts/run-gha-stage.sh graph-ops
 
       - name: Full E2E tests
+        if: ${{ always() }}
         timeout-minutes: 360
         run: bash .github/scripts/run-gha-stage.sh full-e2e
 
       - name: Generate coverage map
+        if: ${{ always() }}
         timeout-minutes: 90
         run: bash .github/scripts/run-gha-stage.sh coverage-map
 

@@ -68,8 +68,15 @@ def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace | No
     if module_name.endswith("encoder_builder"):
         _drop_imported_module("tensorrt_model_connect.graph_ops")
         _drop_imported_module("tensorrt_model_connect.graph_blocks")
-    with patch.dict(sys.modules, {"tensorrt": fake_trt}):
+    previous_trt = sys.modules.get("tensorrt")
+    sys.modules["tensorrt"] = fake_trt
+    try:
         return importlib.import_module(module_name)
+    finally:
+        if previous_trt is None:
+            sys.modules.pop("tensorrt", None)
+        else:
+            sys.modules["tensorrt"] = previous_trt
 
 
 @pytest.mark.unit
@@ -108,9 +115,10 @@ def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
     mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder")
 
     class _FakeTensor:
-        def __init__(self, name: str, dtype=np.float32):
+        def __init__(self, name: str, dtype=np.float32, shape: tuple[int, ...] = (3, 4)):
             self.name = name
             self.dtype = dtype
+            self.shape = shape
 
     class _FakeNormLayer:
         def __init__(self):

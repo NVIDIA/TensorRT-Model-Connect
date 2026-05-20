@@ -30,17 +30,19 @@ if str(_PKG_ROOT) not in sys.path:
 class _FakeTensor:
     _next_id = 0
 
-    def __init__(self, name: str | None = None):
+    def __init__(self, name: str | None = None, shape: tuple[int, ...] = (1, 4)):
         if name is None:
             type(self)._next_id += 1
             name = f"t{type(self)._next_id}"
         self.name = name
         self.dtype = None
+        self.shape = shape
 
 
 class _FakeLayer:
-    def __init__(self, output: _FakeTensor | None = None):
+    def __init__(self, output: _FakeTensor | None = None, shape: tuple[int, ...] = (1, 4)):
         self._output = output or _FakeTensor()
+        self._output.shape = shape
         self.reshape_dims = None
         self.second_transpose = None
         self.first_transpose = None
@@ -67,17 +69,19 @@ class _FakeNetwork:
 
     def _record(self, op: str, *args, **kwargs) -> _FakeLayer:
         self.calls.append((op, args, kwargs))
-        return _FakeLayer()
+        shape = next((tuple(arg.shape) for arg in args if hasattr(arg, "shape")), (1, 4))
+        return _FakeLayer(shape=shape)
 
     def add_input(self, name: str, dtype: object, shape: tuple[int, ...]) -> _FakeTensor:
         self.inputs.append((name, dtype, shape))
-        out = _FakeTensor(name)
+        out = _FakeTensor(name, shape=shape)
         out.dtype = dtype
         self.calls.append(("add_input", (name, dtype, shape), {}))
         return out
 
     def add_constant(self, shape: tuple[int, ...], weights: object) -> _FakeLayer:
-        return self._record("add_constant", shape, weights)
+        self.calls.append(("add_constant", (shape, weights), {}))
+        return _FakeLayer(shape=tuple(shape))
 
     def add_cast(self, tensor, target_dtype, **kwargs) -> _FakeLayer:
         layer = self._record("add_cast", tensor, target_dtype, **kwargs)
@@ -213,8 +217,15 @@ def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace):
     ):
         if mod_name is not None:
             _drop_imported_module(mod_name)
-    with patch.dict(sys.modules, {"tensorrt": fake_trt}):
+    previous_trt = sys.modules.get("tensorrt")
+    sys.modules["tensorrt"] = fake_trt
+    try:
         return importlib.import_module(module_name)
+    finally:
+        if previous_trt is None:
+            sys.modules.pop("tensorrt", None)
+        else:
+            sys.modules["tensorrt"] = previous_trt
 
 
 def _import_qwen3_with_fake_trt(fake_trt: types.SimpleNamespace):

@@ -173,7 +173,7 @@ lint_changed_files() {
 
   local base_ref="$CI_BASE_REF"
   if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] || [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
-    base_ref="origin/${GITHUB_REF_NAME:-main}"
+    base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"
   fi
 
   local changed_py

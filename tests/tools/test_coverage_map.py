@@ -280,6 +280,21 @@ class TestSelectTests:
         assert "builder" in result.fallback_tiers
         assert result.builder_tests == []
 
+    def test_direct_python_test_file_runs_directly_without_fallback(self, sample_map):
+        """Changed Python tests should run directly without forcing full-tier fallback."""
+        result = select_tests([
+            "tests/builder/test_family_timm_vit.py",
+            "tests/tools/test_test_impact.py",
+            "tests/e2e_harness/test_orchestrator_phases.py",
+        ], sample_map)
+
+        assert result.builder_tests == ["tests/builder/test_family_timm_vit.py"]
+        assert result.tools_tests == [
+            "tests/e2e_harness/test_orchestrator_phases.py",
+            "tests/tools/test_test_impact.py",
+        ]
+        assert result.fallback_tiers == []
+
     def test_multiple_files_union(self, sample_map):
         """Multiple changed files produce union of tests."""
         result = select_tests([

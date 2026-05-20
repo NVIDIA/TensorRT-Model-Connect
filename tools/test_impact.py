@@ -1574,10 +1574,8 @@ def analyze_impact(
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
     if direct_builder_tests:
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
-        fallback_tiers = [tier for tier in fallback_tiers if tier != "builder"]
     if direct_tools_tests:
         tools_tests = sorted(set(tools_tests).union(direct_tools_tests))
-        fallback_tiers = [tier for tier in fallback_tiers if tier != "tools"]
 
     return ImpactResult(
         e2e_models=e2e_models,

@@ -100,6 +100,39 @@ def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
         assert "!e2e_artifacts/e2e_report.html" not in text
 
 
+def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "workflow_dispatch:" in text
+    assert "NIGHTLY_REF:" in text
+    assert "ref: ${{ env.NIGHTLY_REF }}" in text
+    assert 'base="origin/main"' in text
+
+
+def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"' in text
+
+
+def test_nightly_attempts_all_test_stages_after_failures() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    required_steps = (
+        "Impact analysis",
+        "Build all",
+        "Check family coverage",
+        "Check cyclomatic complexity",
+        "Lint changed files",
+        "C++ unit tests",
+        "Python builder and tools tests",
+        "C++ coverage",
+        "Graph-op GPU tests",
+        "Full E2E tests",
+        "Generate coverage map",
+    )
+    for step_name in required_steps:
+        block = text.split(f"- name: {step_name}", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+        assert "if: ${{ always() }}" in block
+
+
 def test_github_workflows_write_e2e_markdown_summary() -> None:
     for workflow in ("trtmc-ci.yml", "nightly.yml"):
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
