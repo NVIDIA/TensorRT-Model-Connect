@@ -33,6 +33,34 @@ inline const char* kPromptTemplatePrefix =
     "and background:<|im_end|>\n<|im_start|>user\n";
 inline const char* kPromptTemplateSuffix = "<|im_end|>\n<|im_start|>assistant\n";
 
+struct ImageSize {
+    int height{0};
+    int width{0};
+};
+
+int floor_to_multiple(int value, int multiple) {
+    if (multiple <= 0) {
+        throw std::runtime_error("QwenImagePipeline: invalid alignment multiple");
+    }
+    return (value / multiple) * multiple;
+}
+
+ImageSize calculate_aspect_size_from_area(int target_side, int image_height, int image_width) {
+    if (target_side <= 0 || image_height <= 0 || image_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: image dimensions and target sizes must "
+            "be positive");
+    }
+    const double ratio = static_cast<double>(image_width) / static_cast<double>(image_height);
+    const double target_area = static_cast<double>(target_side) * static_cast<double>(target_side);
+    const double raw_width = std::sqrt(target_area * ratio);
+    const double raw_height = raw_width / ratio;
+    ImageSize out;
+    out.width = std::max(32, static_cast<int>(std::round(raw_width / 32.0)) * 32);
+    out.height = std::max(32, static_cast<int>(std::round(raw_height / 32.0)) * 32);
+    return out;
+}
+
 } // namespace
 
 QwenImagePipeline::QwenImagePipeline(Construction c)
@@ -188,6 +216,7 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const f
         throw std::runtime_error(
             "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
     }
+    const EditImagePlan image_plan = compute_edit_image_plan(image_height, image_width, cfg);
     if (!text_engine_ || !denoiser_engine_ || !vae_decoder_engine_ || !vision_engine_ ||
         !vae_encoder_engine_) {
         throw std::runtime_error(
@@ -197,6 +226,7 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const f
 
     (void)prompt;
     (void)cfg;
+    (void)image_plan;
     throw std::runtime_error(
         "QwenImagePipeline::generate_image: Qwen-Image Edit denoising is not implemented yet; "
         "the denoiser now supports concatenated image-token grids, but multimodal text "
@@ -224,6 +254,60 @@ QwenImagePipeline::LatentShape QwenImagePipeline::compute_latent_shape(int heigh
     s.packed_w = s.latent_w / patch;
     s.n_img_tokens = s.packed_h * s.packed_w;
     return s;
+}
+
+QwenImagePipeline::EditImagePlan
+QwenImagePipeline::compute_edit_image_plan(int image_height, int image_width,
+                                           const GenerateConfig& cfg) const {
+    if (image_height <= 0 || image_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: input image dimensions must be positive");
+    }
+    if (config_.image_conditioning.max_input_images != 1) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: only one input image is supported");
+    }
+    if (config_.image_conditioning.vae_concat_axis != "sequence") {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: only sequence-axis VAE condition "
+            "concatenation is supported");
+    }
+
+    const int vae_scale = config_.vae.spatial_scale_factor;
+    const int patch = config_.denoiser.patch_size;
+    if (vae_scale <= 0 || patch <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: invalid vae_scale_factor or patch_size");
+    }
+    const int output_alignment = vae_scale * patch;
+
+    const auto default_output = calculate_aspect_size_from_area(
+        config_.image_conditioning.vae_image_size, image_height, image_width);
+    const auto condition = calculate_aspect_size_from_area(
+        config_.image_conditioning.vl_image_size, image_height, image_width);
+    const auto vae_condition = calculate_aspect_size_from_area(
+        config_.image_conditioning.vae_image_size, image_height, image_width);
+
+    EditImagePlan plan;
+    plan.output_height = cfg.height > 0 ? cfg.height : default_output.height;
+    plan.output_width = cfg.width > 0 ? cfg.width : default_output.width;
+    plan.output_height = floor_to_multiple(plan.output_height, output_alignment);
+    plan.output_width = floor_to_multiple(plan.output_width, output_alignment);
+    if (plan.output_height <= 0 || plan.output_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: output dimensions align to zero");
+    }
+
+    plan.condition_height = condition.height;
+    plan.condition_width = condition.width;
+    plan.vae_height = vae_condition.height;
+    plan.vae_width = vae_condition.width;
+    plan.output_tokens = compute_latent_shape(plan.output_height, plan.output_width);
+    plan.condition_tokens = compute_latent_shape(plan.vae_height, plan.vae_width);
+    plan.scheduler_image_tokens = plan.output_tokens.n_img_tokens;
+    plan.denoiser_image_tokens =
+        plan.output_tokens.n_img_tokens + plan.condition_tokens.n_img_tokens;
+    return plan;
 }
 
 float QwenImagePipeline::normalize_timestep(float scalar_t) const {
