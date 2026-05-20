@@ -227,6 +227,56 @@ def _call_supports_kwarg(func, name: str) -> bool:
     )
 
 
+def _plugin_uses_standard_decoder_builder(plugin) -> bool:
+    """Best-effort check for family plugins routed through the standard decoder."""
+    try:
+        source = inspect.getsource(plugin.build_engine)
+    except (OSError, TypeError):
+        return False
+    return "build_standard_decoder_engine" in source
+
+
+def _plugin_supports_split_decoder_roles(plugin) -> bool:
+    """Return True when the family's standard builder honors split roles."""
+    if not _plugin_uses_standard_decoder_builder(plugin):
+        return False
+    build_globals = getattr(plugin.build_engine, "__globals__", {})
+    standard_builder = build_globals.get("build_standard_decoder_engine")
+    if standard_builder is None:
+        return False
+    try:
+        source = inspect.getsource(standard_builder)
+    except (OSError, TypeError):
+        return False
+    return (
+        "_decoder_engine_role" in source
+        and "profile_mode" in source
+    )
+
+
+def _can_build_split_decoder_engines(
+    plugin,
+    runtime_strategy: str,
+    *,
+    dynamic_kv_cache: bool,
+    triattention_enabled: bool,
+) -> bool:
+    """Return True when split prefill/decode engines are supported.
+
+    The split layout relies on ``standard_decoder_builder`` honoring the
+    internal ``_decoder_engine_role`` passthrough. Custom MoE, recurrent,
+    VL/embed-input, TriAttention, and dynamic-KV runtimes keep their existing
+    single-engine behavior until they opt into the same contract.
+    """
+    if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+        return False
+    if dynamic_kv_cache or triattention_enabled:
+        return False
+    if bool(getattr(plugin, "embed_input", False)):
+        return False
+    return _plugin_supports_split_decoder_roles(plugin)
+
+
 def _load_plugin_weights(
     plugin,
     model_dir: str,
@@ -560,6 +610,7 @@ def build_bundle(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
@@ -592,8 +643,15 @@ def build_bundle(
         model_dir: Path to HF model directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
         max_cache_length: KV cache length for the engine.
+        decoder_engine_layout: ``"split"`` builds separate prefill/decode
+            engines for supported decoder LLMs. ``"dual_profile"`` keeps the
+            low-VRAM single-engine/multi-profile layout.
         verbose: Print detailed logs.
     """
+    if decoder_engine_layout not in ("split", "dual_profile"):
+        raise ValueError(
+            "decoder_engine_layout must be 'split' or 'dual_profile', "
+            f"got {decoder_engine_layout!r}")
     _setup_trt_import(rtx)
     parallel = normalize_parallel_config(parallel_config)
     try:
@@ -631,6 +689,7 @@ def build_bundle(
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
+    config.raw["_decoder_engine_layout"] = decoder_engine_layout
     config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
     print(f"[trtmc-build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
@@ -791,9 +850,7 @@ def build_bundle(
             f"(tp={parallel.tp_size}, cache={max_cache_length}) ...",
             file=sys.stderr,
         )
-    else:
-        print(f"[trtmc-build] Building TRT engine (cache={max_cache_length}) ...",
-              file=sys.stderr)
+
     # Pass precision/quant_ctx only if the plugin accepts them (not all do).
     extra_kwargs = {}
     if _call_supports_kwarg(plugin.build_engine, 'precision'):
@@ -802,9 +859,48 @@ def build_bundle(
         extra_kwargs['quant_ctx'] = quant_ctx
     if _call_supports_kwarg(plugin.build_engine, 'parallel_config'):
         extra_kwargs['parallel_config'] = parallel
+
+    def _split_timing_cache_scope(role: str) -> str:
+        quant_label = quantize or "noquant"
+        return (
+            f"split-{config.model_type}-h{config.hidden_size}"
+            f"-l{config.num_hidden_layers}-{precision}-{quant_label}-{role}"
+        )
+
+    def _build_plugin_engine_with_role(role: str) -> bytes:
+        previous_role = config.raw.get("_decoder_engine_role")
+        config.raw["_decoder_engine_role"] = role
+        try:
+            return plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
+        finally:
+            if previous_role is None:
+                config.raw.pop("_decoder_engine_role", None)
+            else:
+                config.raw["_decoder_engine_role"] = previous_role
+
+    def _build_split_plugin_engine_with_role(role: str) -> bytes:
+        with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
+            return _build_plugin_engine_with_role(role)
+
+    split_supported = (
+        not parallel.enabled and
+        decoder_engine_layout == "split" and
+        _can_build_split_decoder_engines(
+            plugin,
+            runtime_strategy,
+            dynamic_kv_cache=enable_dynamic_kv_cache,
+            triattention_enabled=triattention_cfg is not None,
+        )
+    )
+
+    engine_plan: bytes
+    prefill_engine_plan: bytes | None = None
+    tp_engine_plans: dict[int, bytes] = {}
+    actual_decoder_engine_layout = "single"
     engine_t0 = time.monotonic()
     try:
-        tp_engine_plans: dict[int, bytes] = {}
         if parallel.enabled:
             for rank in range(parallel.tp_size):
                 rank_kwargs = dict(extra_kwargs)
@@ -815,17 +911,66 @@ def build_bundle(
                     config, weights, max_cache_length, verbose=verbose,
                     **rank_kwargs)
             engine_plan = tp_engine_plans[0]
+            actual_decoder_engine_layout = "dual_profile"
+        elif split_supported:
+            print(
+                f"[trtmc-build] Building split decoder engines "
+                f"(cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
+            prefill_t0 = time.monotonic()
+            prefill_engine_plan = _build_split_plugin_engine_with_role("prefill")
+            prefill_elapsed = time.monotonic() - prefill_t0
+            _add_build_timing(
+                build_timing, "trt_compile_prefill_engine_s", prefill_elapsed)
+            print(
+                f"[trtmc-build] Prefill engine built [{prefill_elapsed:.1f}s] "
+                f"({len(prefill_engine_plan) / (1024 * 1024):.1f} MB)",
+                file=sys.stderr,
+            )
+
+            decode_t0 = time.monotonic()
+            engine_plan = _build_split_plugin_engine_with_role("decode")
+            decode_elapsed = time.monotonic() - decode_t0
+            _add_build_timing(
+                build_timing, "trt_compile_decode_engine_s", decode_elapsed)
+            print(
+                f"[trtmc-build] Decode engine built [{decode_elapsed:.1f}s] "
+                f"({len(engine_plan) / (1024 * 1024):.1f} MB)",
+                file=sys.stderr,
+            )
+            actual_decoder_engine_layout = "split"
         else:
-            engine_plan = plugin.build_engine(
-                config, weights, max_cache_length, verbose=verbose,
-                **extra_kwargs)
+            if decoder_engine_layout == "split" and runtime_strategy in (
+                "decoder_kv_cache", "decoder_moe"
+            ):
+                print(
+                    "[trtmc-build] Split decoder layout is not supported for "
+                    f"family={plugin.name}; using existing single-engine path",
+                    file=sys.stderr,
+                )
+            print(f"[trtmc-build] Building TRT engine (cache={max_cache_length}) ...",
+                  file=sys.stderr)
+            role = "dual_profile" if decoder_engine_layout == "dual_profile" else "decode"
+            engine_plan = _build_plugin_engine_with_role(role)
+            if decoder_engine_layout == "dual_profile":
+                actual_decoder_engine_layout = "dual_profile"
     finally:
         engine_elapsed = time.monotonic() - engine_t0
         _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
         _add_build_timing(build_timing, "trt_compile_main_engine_s", engine_elapsed)
         _write_build_timing(build_timing)
-    print(f"[trtmc-build] Engine built [{engine_elapsed:.1f}s] "
-          f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
+    if actual_decoder_engine_layout == "split":
+        total_mb = (len(engine_plan) + len(prefill_engine_plan or b"")) / (1024 * 1024)
+        print(f"[trtmc-build] Split engines built [{engine_elapsed:.1f}s] "
+              f"({total_mb:.1f} MB total)", file=sys.stderr)
+    elif parallel.enabled:
+        total_mb = sum(len(plan) for plan in tp_engine_plans.values()) / (1024 * 1024)
+        print(f"[trtmc-build] Tensor-parallel engines built [{engine_elapsed:.1f}s] "
+              f"({total_mb:.1f} MB total)", file=sys.stderr)
+    else:
+        print(f"[trtmc-build] Engine built [{engine_elapsed:.1f}s] "
+              f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
     # 4b. Build vision engine (optional, VL models only)
     vision_plan = None
@@ -915,7 +1060,12 @@ def build_bundle(
             for rank, plan in sorted(tp_engine_plans.items())
         ]
     else:
+        # For split decoder bundles, keep ``engine_plan`` as the decode-only
+        # engine for compatibility with existing tools and add the prefill engine
+        # under a role-specific section.
         sections = [BundleSection("engine_plan", engine_plan)]
+        if prefill_engine_plan is not None:
+            sections.append(BundleSection("prefill_engine_plan", prefill_engine_plan))
 
     # Add vision engine section if present
     if vision_plan is not None:
@@ -967,6 +1117,7 @@ def build_bundle(
         cfg_dict["precision"] = precision
         cfg_dict["tokenizer_add_special_tokens"] = int(
             tokenizer_add_special_tokens)
+        cfg_dict["decoder_engine_layout"] = actual_decoder_engine_layout
         if quant_plan is not None:
             cfg_dict["quantization"] = quant_plan.as_config_dict()
         elif quantize:
@@ -1378,6 +1529,7 @@ def build(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
@@ -1412,6 +1564,7 @@ def build(
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
         max_cache_length: KV cache length for the engine.
+        decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
@@ -1421,6 +1574,7 @@ def build(
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
+                 decoder_engine_layout=decoder_engine_layout,
                  dynamic_kv_cache=dynamic_kv_cache,
                  dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
                  precision=precision,

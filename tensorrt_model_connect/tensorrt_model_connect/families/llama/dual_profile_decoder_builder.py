@@ -222,8 +222,9 @@ def build_dual_profile_decoder_engine(
     alibi_bias_scale: float = 1.0,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
+    profile_mode: str = "dual_profile",
 ) -> bytes:
-    """Build a dual-profile prefill+decode engine with two optimization profiles.
+    """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
     ``norm_type`` / ``mlp_type`` / ``position_type`` / ``activation`` /
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
@@ -236,14 +237,25 @@ def build_dual_profile_decoder_engine(
     ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
     when ``None`` the matmuls are plain fp16 / bf16 / fp32.
 
-    When ``dynamic_kv_profile_rows`` is provided, the engine carries one
-    prefill profile (profile 0) followed by N decode profiles (profile 1..N),
-    one per bucket — letting TriAttention pick the smallest active KV cache
-    bucket at runtime while still benefitting from batched prefill on the
-    prompt. The cache_k/cache_v inputs are declared dynamic so each profile
-    can constrain their row count independently.
+    ``profile_mode`` controls which optimization profiles are emitted:
+
+    * ``"dual_profile"``: one prefill profile followed by one or more decode
+      profiles. When ``dynamic_kv_profile_rows`` is provided, the decode side
+      gets one profile per bucket — letting TriAttention pick the smallest
+      active KV cache bucket at runtime while still benefitting from batched
+      prefill on the prompt.
+    * ``"prefill"``: one prefill profile only. This is used by split-engine
+      bundles, where decode is served by a separate fixed-Sq=1 engine.
+
+    Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
+    mode. In either mode, cache_k/cache_v inputs are declared dynamic when
+    bucket profiles are requested so each profile can constrain their row count.
     """
     _supports_config(config, weights)
+    if profile_mode not in ("dual_profile", "prefill"):
+        raise ValueError(
+            "profile_mode must be 'dual_profile' or 'prefill', "
+            f"got {profile_mode!r}")
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -347,16 +359,42 @@ def build_dual_profile_decoder_engine(
                         (cmx, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
-    _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                 cache_rows_min=1, cache_rows_opt=max_cache_length,
-                 cache_rows_max=max_cache_length)
-    if multi_bucket_decode:
-        for bucket in decode_buckets:
-            _add_profile(1, 1, fixed=True,
-                         cache_rows_min=1, cache_rows_opt=bucket,
-                         cache_rows_max=bucket)
-    else:
+    import os as _os_dbg
+    if profile_mode == "prefill":
+        _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                     cache_rows_min=1, cache_rows_opt=max_cache_length,
+                     cache_rows_max=max_cache_length)
+    elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
+        # Diagnostic: build a one-profile engine with dynamic-shape inputs
+        # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
+        # overhead from per-profile kernel specialisation.
         _add_profile(1, 1, fixed=True)
+    else:
+        _reverse = _os_dbg.environ.get("TRTMC_REVERSE_PROFILE_ORDER", "0") == "1"
+        if _reverse:
+            # Decode profile registered first so it commits its preferred
+            # weight layout before the prefill profile compiles.
+            if multi_bucket_decode:
+                for bucket in decode_buckets:
+                    _add_profile(1, 1, fixed=True,
+                                 cache_rows_min=1, cache_rows_opt=bucket,
+                                 cache_rows_max=bucket)
+            else:
+                _add_profile(1, 1, fixed=True)
+            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                         cache_rows_min=1, cache_rows_opt=max_cache_length,
+                         cache_rows_max=max_cache_length)
+        else:
+            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                         cache_rows_min=1, cache_rows_opt=max_cache_length,
+                         cache_rows_max=max_cache_length)
+            if multi_bucket_decode:
+                for bucket in decode_buckets:
+                    _add_profile(1, 1, fixed=True,
+                                 cache_rows_min=1, cache_rows_opt=bucket,
+                                 cache_rows_max=bucket)
+            else:
+                _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
@@ -648,7 +686,8 @@ def build_dual_profile_decoder_engine(
         network.mark_output(pv)
 
     if verbose:
-        print(f"[trtmc-build] Building dual-profile engine "
+        mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
+        print(f"[trtmc-build] Building {mode_label} engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
               f"kv={kv_attention_size}, "
               f"mlp={mlp_size}, cache={max_cache_length}, "

@@ -101,10 +101,15 @@ def build_standard_decoder_engine(
         Serialized engine plan bytes.
     """
     import os as _os
-    # Dispatch to the dual-profile builder by default (one engine, two
-    # optimization profiles — Profile 0 = batched prefill, Profile 1 =
-    # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
-    # insertion through every projection matmul via
+    # Mark the graph as honoring the internal decoder role contract. This is
+    # embedded in the mutable config for family helpers that need to branch on
+    # the active engine layout while building.
+    config.raw["_decoder_engine_layout_supported"] = True
+    decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
+
+    # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
+    # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
+    # every projection matmul via
     # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
     #
     # The legacy single-profile graph below stays in place for paths the
@@ -125,7 +130,11 @@ def build_standard_decoder_engine(
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
-    if not _dual_profile_disabled_for:
+    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "split prefill engine is not supported for this standard decoder "
+            "configuration")
+    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -140,6 +149,7 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
+            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)

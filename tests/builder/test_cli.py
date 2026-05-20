@@ -166,6 +166,44 @@ class TestCmdInspect:
         assert "qwen" in captured.out
         assert "engine_plan" in captured.out
 
+    def test_list_engine_sections_marks_split_decoder_roles(self, tmp_path):
+        """Split decoder bundles should label decode and prefill plans distinctly."""
+        import json
+        import struct
+
+        bundle_path = tmp_path / "split.trtfb"
+        header = {
+            "model_id": "test-model",
+            "model_type": "qwen3",
+            "family": "qwen",
+            "trt_version": "10.0.0",
+            "gpu_name": "A100",
+            "created_at": "2025-01-01T00:00:00Z",
+            "vocab_size": 32000,
+            "hidden_size": 1024,
+            "num_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "max_cache_length": 256,
+            "sections": {
+                "engine_plan": {"offset": 0, "size": 100},
+                "prefill_engine_plan": {"offset": 100, "size": 200},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+
+        with open(bundle_path, "wb") as f:
+            f.write(b"TRTFB\x00\x01\x00")
+            f.write(struct.pack("<Q", len(header_json)))
+            f.write(header_json)
+            f.write(b"\x00" * 300)
+
+        from tensorrt_model_connect.cli import list_engine_sections
+
+        roles = {entry["name"]: entry["role"] for entry in list_engine_sections(str(bundle_path))}
+        assert roles["engine_plan"] == "decode"
+        assert roles["prefill_engine_plan"] == "prefill"
+
     def test_inspect_nonexistent_file(self):
         """_cmd_inspect returns 1 for non-existent file."""
         from tensorrt_model_connect.cli import _cmd_inspect
@@ -368,6 +406,52 @@ class TestCmdBuildMocked:
             )
             _cmd_build(args)
             assert received == [[32, 64, 128]]
+        finally:
+            eb.build = original_build
+
+    def test_decoder_engine_layout_propagated(self, tmp_path):
+        """Verify --decoder-engine-layout is forwarded to engine_builder.build()."""
+        from tensorrt_model_connect.cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        received = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       decoder_engine_layout="split", **kwargs):
+            received.append(decoder_engine_layout)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                decoder_engine_layout="dual_profile",
+                dynamic_kv_cache=False,
+                dynamic_kv_profile_rows=None,
+                precision="fp32",
+                quantize=None,
+                quant_scales=None,
+                quant_calibration_samples=512,
+                verbose=False,
+                fp8=False,
+                fp8_scales=None,
+                save_fp8_scales=None,
+                triattention_stats=None,
+                triattention_kv_budget=None,
+                triattention_divide_length=128,
+                triattention_recent_window=128,
+                triattention_score_aggregation="mean",
+                triattention_count_prompt_tokens=True,
+                triattention_protect_prefill=True,
+                triattention_disable_mlr=False,
+                triattention_disable_trig=False,
+                method="trt",
+                _skip_profile_resolution=True,
+            )
+            _cmd_build(args)
+            assert received == ["dual_profile"]
         finally:
             eb.build = original_build
 

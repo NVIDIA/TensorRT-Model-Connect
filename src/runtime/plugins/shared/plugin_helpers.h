@@ -54,8 +54,8 @@ std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
 // and both modules share the CUDA stream. Use `decode->stream()` to obtain
 // the shared stream.
 struct DualProfileModules {
-    std::unique_ptr<ITrtModule> prefill; // profile 0 — batched Sq (null if single-profile)
-    std::unique_ptr<ITrtModule> decode;  // profile 1, or the only profile if single-profile
+    std::unique_ptr<ITrtModule> prefill; // batched Sq profile (null if single-profile)
+    std::unique_ptr<ITrtModule> decode;  // Sq=1 profile, or the only profile if single-profile
 };
 
 // Load an engine from a serialized plan via the backend and create two

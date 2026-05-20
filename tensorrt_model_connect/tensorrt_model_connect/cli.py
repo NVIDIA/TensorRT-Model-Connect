@@ -164,6 +164,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             model_id_or_path=build_model_ref,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
+            decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
             dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
             dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
             precision=args.precision,
@@ -417,7 +418,9 @@ def list_engine_sections(bundle_path: str) -> list[dict]:
 
         # Infer role from section name
         if name == "engine_plan":
-            role = "primary"
+            role = "decode" if "prefill_engine_plan" in sections else "primary"
+        elif name == "prefill_engine_plan":
+            role = "prefill"
         elif is_tp_rank_plan:
             role = name.replace("engine_plan_", "")
         elif "vision" in name:
@@ -557,6 +560,14 @@ def main() -> None:
                          help="Output .trtfb file path")
     build_p.add_argument("--max-cache-length", type=int, default=256,
                          help="KV cache length (default: 256)")
+    build_p.add_argument(
+        "--decoder-engine-layout",
+        choices=["split", "dual_profile"],
+        default="split",
+        help="Decoder engine layout for supported LLMs: split builds separate "
+             "prefill/decode engines (default); dual_profile keeps one "
+             "low-VRAM engine with multiple optimization profiles",
+    )
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
     # TP is a narrow build-only path, not a generic runtime-config namespace.

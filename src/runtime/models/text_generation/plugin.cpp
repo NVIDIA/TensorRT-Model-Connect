@@ -43,6 +43,17 @@ struct TensorParallelRuntime {
     DistributedRuntimeGroup group;
 };
 
+struct DecoderProfileInfo {
+    int32_t profile_idx{0};
+    int32_t kv_rows{0};
+};
+
+struct DecoderProfileRoles {
+    int32_t prefill_profile_idx{-1};
+    int32_t prefill_max_length{0};
+    std::vector<DecoderProfileInfo> decode_profiles;
+};
+
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
     if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
         return -1;
@@ -99,6 +110,63 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t profile_token_max_length(const TrtModule& module, const std::string& token_id_name,
+                                 int32_t profile_idx) {
+    return dim_at(
+        module.input_profile_shape(token_id_name, profile_idx, ProfileShapeSelector::kMax), 0);
+}
+
+int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
+                           int32_t profile_idx, int32_t fallback_rows) {
+    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
+    if (static_rows > 0)
+        return static_rows;
+
+    if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
+        const int32_t max_rows = dim_at(
+            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
+        if (max_rows > 0)
+            return max_rows;
+    }
+    return fallback_rows;
+}
+
+DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
+                                                 const std::string& token_id_name,
+                                                 const std::string& cache_k_name,
+                                                 int32_t fallback_rows) {
+    DecoderProfileRoles roles;
+    const int32_t num_profiles = module.optimization_profile_count();
+    if (num_profiles <= 0) {
+        roles.decode_profiles.push_back(DecoderProfileInfo{0, fallback_rows});
+        return roles;
+    }
+
+    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
+        const int32_t token_max = profile_token_max_length(module, token_id_name, profile_idx);
+        if (token_max > 1) {
+            if (token_max > roles.prefill_max_length) {
+                roles.prefill_profile_idx = profile_idx;
+                roles.prefill_max_length = token_max;
+            }
+            continue;
+        }
+
+        roles.decode_profiles.push_back(DecoderProfileInfo{
+            profile_idx, profile_cache_rows(module, cache_k_name, profile_idx, fallback_rows)});
+    }
+
+    if (roles.decode_profiles.empty()) {
+        const int32_t fallback_profile =
+            roles.prefill_profile_idx >= 0 ? roles.prefill_profile_idx : 0;
+        roles.decode_profiles.push_back(DecoderProfileInfo{
+            fallback_profile,
+            profile_cache_rows(module, cache_k_name, fallback_profile, fallback_rows)});
+    }
+
+    return roles;
 }
 
 std::string format_bytes(std::uint64_t bytes) {
@@ -197,7 +265,11 @@ class DecoderPlugin final : public IPipelinePlugin {
         if (tp_runtime.config.enabled)
             tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
 
-        auto profile_modules = load_decoder_profile_modules(ctx, tp_runtime);
+        const std::string engine_section = tp_runtime.config.enabled
+                                               ? tp_engine_section_name(tp_runtime.group.rank)
+                                               : std::string("engine_plan");
+        auto profile_modules =
+            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime);
         if (profile_modules.modules.empty())
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
@@ -206,13 +278,34 @@ class DecoderPlugin final : public IPipelinePlugin {
         const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
                                                             cache_dtype, tri_cfg, kv_dim);
 
-        const int32_t prefill_max_length = detect_prefill_max_length(metadata_module, io.token_id);
-        const int32_t first_decode_profile = prefill_max_length > 0 ? 1 : 0;
+        const auto decode_profile_roles = detect_decoder_profile_roles(
+            metadata_module, io.token_id, kv_names.cache_k.front(), ctx.config.max_cache_length);
 
         std::unique_ptr<TrtModule> prefill_module;
-        auto decoders = build_decoder_contexts(ctx, std::move(profile_modules), sizing.runtime_rows,
-                                               first_decode_profile, prefill_module);
+        auto decoders = build_decoder_contexts(std::move(profile_modules), sizing.runtime_rows,
+                                               decode_profile_roles, prefill_module);
         cudaStream_t stream = decoders.front().module->stream();
+
+        int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
+        int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
+        std::string prefill_log_label;
+        if (!tp_runtime.config.enabled &&
+            find_section(ctx.bundle, "prefill_engine_plan") != nullptr) {
+            auto split_prefill_modules =
+                load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
+            if (!split_prefill_modules.modules.empty()) {
+                const auto prefill_roles = detect_decoder_profile_roles(
+                    *split_prefill_modules.modules.front().module, io.token_id,
+                    kv_names.cache_k.front(), ctx.config.max_cache_length);
+                prefill_profile_idx = prefill_roles.prefill_profile_idx;
+                prefill_max_length = prefill_roles.prefill_max_length;
+                prefill_module = extract_prefill_module(std::move(split_prefill_modules),
+                                                        prefill_roles, "prefill_engine_plan");
+                if (prefill_module)
+                    prefill_log_label = "prefill engine";
+            }
+        }
+
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -224,6 +317,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         // through `prefill_module` (TRT optimization profile 0) and copies
         // per-layer K/V into the shared cache via write_prefill_kv.
         tgc.prefill_max_length = prefill_max_length;
+        tgc.prefill_profile_index = prefill_profile_idx;
+        tgc.prefill_log_label = std::move(prefill_log_label);
         tgc.num_layers = ctx.config.num_layers;
         tgc.kv_dim = kv_dim;
         tgc.present_k_pattern = io.present_k_pattern;
@@ -250,11 +345,8 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 
     static BackendProfileModules
-    load_decoder_profile_modules(const PipelineContext& ctx,
-                                 const TensorParallelRuntime& tp_runtime) {
-        const std::string section_name = tp_runtime.config.enabled
-                                             ? tp_engine_section_name(tp_runtime.group.rank)
-                                             : std::string("engine_plan");
+    load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
+                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
         auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
             throw std::runtime_error(section_name + " section is missing");
@@ -270,10 +362,13 @@ class DecoderPlugin final : public IPipelinePlugin {
             profile_indices.push_back(i);
 
         ModuleCreateOptions opts;
+        opts.stream = stream;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
-        opts.distributed_communicator = tp_runtime.group.communicator;
-        opts.distributed_owner = tp_runtime.group.owner;
+        if (tp_runtime != nullptr && tp_runtime->config.enabled) {
+            opts.distributed_communicator = tp_runtime->group.communicator;
+            opts.distributed_owner = tp_runtime->group.owner;
+        }
 
         const auto t0 = std::chrono::steady_clock::now();
         auto modules =
@@ -300,47 +395,61 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    // Returns the prefill optimization profile's MAX seq-len if the engine
-    // ships with a "prefill" profile (i.e. profile 0 lets `token_id` be
-    // multi-row); 0 otherwise. Bundles built by the dual-profile decoder
-    // builder put prefill at profile 0; legacy bundles only have single-
-    // token decode profiles (Sq=1 across all profiles).
-    static int32_t detect_prefill_max_length(const TrtModule& module,
-                                             const std::string& token_id_name) {
-        if (module.optimization_profile_count() <= 0)
-            return 0;
-        const int32_t max_tokens =
-            dim_at(module.input_profile_shape(token_id_name, 0, ProfileShapeSelector::kMax), 0);
-        return max_tokens > 1 ? max_tokens : 0;
+    static std::unique_ptr<TrtModule>
+    extract_prefill_module(BackendProfileModules profile_modules,
+                           const DecoderProfileRoles& profile_roles, const char* section_name) {
+        if (profile_roles.prefill_profile_idx < 0)
+            return nullptr;
+        for (auto& entry : profile_modules.modules) {
+            if (entry.profile_idx != profile_roles.prefill_profile_idx)
+                continue;
+            entry.module->set_timing_label(std::string(section_name) + ":prefill");
+            return std::move(entry.module);
+        }
+        return nullptr;
+    }
+
+    static BackendProfileModule* find_profile_module(BackendProfileModules& profile_modules,
+                                                     int32_t profile_idx) {
+        auto found = std::find_if(
+            profile_modules.modules.begin(), profile_modules.modules.end(),
+            [&](const BackendProfileModule& entry) { return entry.profile_idx == profile_idx; });
+        if (found == profile_modules.modules.end())
+            return nullptr;
+        return &*found;
+    }
+
+    static void extract_engine_plan_prefill_module(BackendProfileModules& profile_modules,
+                                                   const DecoderProfileRoles& profile_roles,
+                                                   std::unique_ptr<TrtModule>& prefill_module) {
+        if (profile_roles.prefill_profile_idx < 0)
+            return;
+        auto* entry = find_profile_module(profile_modules, profile_roles.prefill_profile_idx);
+        if (entry == nullptr || !entry->module)
+            return;
+        entry->module->set_timing_label("engine_plan:prefill");
+        prefill_module = std::move(entry->module);
     }
 
     static std::vector<TextGenerationPipeline::DecoderContext>
-    build_decoder_contexts(const PipelineContext& ctx, BackendProfileModules profile_modules,
-                           int32_t runtime_rows, int32_t first_decode_profile,
+    build_decoder_contexts(BackendProfileModules profile_modules, int32_t runtime_rows,
+                           const DecoderProfileRoles& profile_roles,
                            std::unique_ptr<TrtModule>& prefill_module) {
-        auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        if (profile_rows.empty())
-            profile_rows.push_back(ctx.config.max_cache_length);
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(profile_modules.modules.size());
-        for (auto& entry : profile_modules.modules) {
-            if (entry.profile_idx == 0 && first_decode_profile == 1) {
-                entry.module->set_timing_label("engine_plan:prefill");
-                prefill_module = std::move(entry.module);
-                continue;
-            }
-            if (entry.profile_idx < first_decode_profile)
-                continue;
-            const int32_t row_idx = entry.profile_idx - first_decode_profile;
-            if (row_idx >= static_cast<int32_t>(profile_rows.size()))
-                continue;
-            const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(row_idx)];
-            if (row_idx > 0 && profile_max_rows > runtime_rows)
+        for (const auto& profile : profile_roles.decode_profiles) {
+            if (profile.kv_rows > runtime_rows && !decoders.empty())
                 break;
-            entry.module->set_timing_label("engine_plan:decode");
+            auto* found = find_profile_module(profile_modules, profile.profile_idx);
+            if (found == nullptr || !found->module)
+                continue;
+            found->module->set_timing_label("engine_plan:decode");
             decoders.push_back(
-                TextGenerationPipeline::DecoderContext{profile_max_rows, std::move(entry.module)});
+                TextGenerationPipeline::DecoderContext{profile.kv_rows, std::move(found->module)});
         }
+
+        extract_engine_plan_prefill_module(profile_modules, profile_roles, prefill_module);
+
         if (decoders.empty())
             throw std::runtime_error("No decoder profile available for engine_plan");
         return decoders;
