@@ -95,12 +95,28 @@ def test_parse_csv_skips_row_with_fewer_than_eleven_columns() -> None:
     assert metrics[0].function == "ok_fn"
 
 
+def test_filter_excluded_drops_files_under_excluded_directory() -> None:
+    metrics = [
+        _make_metric(ccn=20, function="cli_fn", file="src/cli/main.cpp"),
+        _make_metric(ccn=4, function="runtime_fn", file="src/runtime/core.cpp"),
+    ]
+
+    filtered = ccm.filter_excluded(metrics, ["src/cli"])
+
+    assert [metric.function for metric in filtered] == ["runtime_fn"]
+
+
 # ---------------------------------------------------------------------------
 # evaluate_gate
 # ---------------------------------------------------------------------------
 
 
-def _make_metric(ccn: int, nloc: int = 10, function: str = "fn") -> ccm.FunctionMetric:
+def _make_metric(
+    ccn: int,
+    nloc: int = 10,
+    function: str = "fn",
+    file: str = "src/x.cpp",
+) -> ccm.FunctionMetric:
     """Build a FunctionMetric with the minimum fields needed for the gate.
 
     evaluate_gate only inspects ``ccn``; all other fields are filler so the
@@ -112,8 +128,8 @@ def _make_metric(ccn: int, nloc: int = 10, function: str = "fn") -> ccm.Function
         token=0,
         param=0,
         length=nloc,
-        location="src/x.cpp:1",
-        file="src/x.cpp",
+        location=f"{file}:1",
+        file=file,
         function=function,
         signature=f"{function}()",
         start_line=1,

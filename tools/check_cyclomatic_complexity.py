@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         help="How many top-complex functions to print (default: 25).",
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Exclude functions whose file is this path or under this directory. Repeatable.",
+    )
+    parser.add_argument(
         "--max-ccn",
         type=int,
         default=None,
@@ -122,6 +128,24 @@ def parse_csv(output: str) -> list[FunctionMetric]:
     return metrics
 
 
+def _normalize_path(path: str) -> str:
+    return Path(path).as_posix().rstrip("/")
+
+
+def filter_excluded(metrics: list[FunctionMetric], excludes: list[str]) -> list[FunctionMetric]:
+    excluded = [_normalize_path(path) for path in excludes if path]
+    if not excluded:
+        return metrics
+
+    kept: list[FunctionMetric] = []
+    for metric in metrics:
+        file_path = _normalize_path(metric.file)
+        if any(file_path == path or file_path.startswith(f"{path}/") for path in excluded):
+            continue
+        kept.append(metric)
+    return kept
+
+
 def print_report(metrics: list[FunctionMetric], top_n: int) -> None:
     if not metrics:
         print("[ccm] No functions found.")
@@ -192,7 +216,7 @@ def main() -> int:
         print(f"[ccm] ERROR: {exc}", file=sys.stderr)
         return 1 if args.fail_on_missing_lizard else 2
 
-    metrics = parse_csv(csv_output)
+    metrics = filter_excluded(parse_csv(csv_output), args.exclude)
     print_report(metrics, args.top)
 
     failures = evaluate_gate(

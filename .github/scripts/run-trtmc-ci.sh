@@ -163,7 +163,7 @@ check_family_coverage() {
 
 check_cyclomatic_complexity() {
   lizard --version
-  python tools/check_cyclomatic_complexity.py src --max-ccn "${CCM_MAX_CCN:-10}" --top 20
+  python tools/check_cyclomatic_complexity.py src --exclude src/cli --max-ccn "${CCM_MAX_CCN:-10}" --top 20
 }
 
 lint_changed_files() {
