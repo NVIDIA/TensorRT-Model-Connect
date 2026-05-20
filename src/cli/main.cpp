@@ -15,9 +15,11 @@
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
+//   trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.trtfb> [--list-engines]
 //   trtmc version
 
+#include "cli/args.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -50,118 +52,9 @@
 
 namespace {
 
-struct CliArgs {
-    std::string command;
-    std::vector<std::string> build_args;
-    std::string bundle_path;
-    std::string prompt;
-    std::string hf_python;
-    std::uint64_t kv_cache_size_bytes{0};
-    std::string image_path;
-    std::string output_dir;
-    std::string initial_latents_raw;
-    std::string condition_latents_raw;
-    std::string condition_mask_raw;
-    std::string sampling_steps_raw;
-    std::string sde_noise_raw;
-    std::string document;
-    std::string audio_in;
-    std::string audio_out;
-    std::string field_input;
-    std::string branch_input;
-    std::string trunk_input;
-    int tail_frames{0};
-    float point_x{0.5F};
-    float point_y{0.5F};
-    bool is_foreground{true};
-    int max_new_tokens{0};
-    int num_samples{1};
-    int benchmark{0}; // >0: run N timed iterations after warmup
-    int warmup{1};    // number of warmup iterations before timing
-    float temperature{1.0F};
-    float top_p{1.0F};
-    float min_p{0.0F};
-    int top_k{1};
-    int seed{-1};
-    int num_steps{-1};
-    float guidance_scale{-1.0F};
-    float sde_gamma{-1.0F};
-    float conf_threshold{-1.0F};
-    float cfg_scale{-1.0F};
-    // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
-    std::string negative_prompt;
-    int diffusion_height{0}; // 0 = use bundle default
-    int diffusion_width{0};  // 0 = use bundle default
-    bool greedy{false};
-    bool stream{false};
-    bool pad_and_drop_preencoded{false};
-    bool chat_template{false};
-    bool no_thinking{false};
-    int chunk_frames{32};
-    int chunk_ms{160};
-    int att_context_left{70};
-    int att_context_right{13};
-    std::string runtime_cache;
-    std::vector<std::string> backend_search_paths;
-    bool cuda_graphs{false};
-    bool list_engines{false};
-    bool show_help{false};
-    bool parse_error{false};
-    std::string error_message;
-    // Generic config surface — see include/trtmc/config/cli_support.h.
-    // New feature knobs should generally prefer these over adding flags.
-    std::string config_path;
-    std::vector<std::string> set_tokens;
-};
-
-std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
-    if (text.empty())
-        return std::nullopt;
-
-    std::size_t value_end = 0;
-    double value = 0.0;
-    try {
-        value = std::stod(text, &value_end);
-    } catch (...) {
-        return std::nullopt;
-    }
-    if (value <= 0.0)
-        return std::nullopt;
-
-    std::string suffix = text.substr(value_end);
-    std::transform(suffix.begin(), suffix.end(), suffix.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-
-    long double multiplier = 1.0L;
-    if (suffix.empty() || suffix == "B") {
-        multiplier = 1.0L;
-    } else if (suffix == "K" || suffix == "KB") {
-        multiplier = 1000.0L;
-    } else if (suffix == "M" || suffix == "MB") {
-        multiplier = 1000.0L * 1000.0L;
-    } else if (suffix == "G" || suffix == "GB") {
-        multiplier = 1000.0L * 1000.0L * 1000.0L;
-    } else if (suffix == "T" || suffix == "TB") {
-        multiplier = 1000.0L * 1000.0L * 1000.0L * 1000.0L;
-    } else if (suffix == "KIB") {
-        multiplier = 1024.0L;
-    } else if (suffix == "MIB") {
-        multiplier = 1024.0L * 1024.0L;
-    } else if (suffix == "GIB") {
-        multiplier = 1024.0L * 1024.0L * 1024.0L;
-    } else if (suffix == "TIB") {
-        multiplier = 1024.0L * 1024.0L * 1024.0L * 1024.0L;
-    } else {
-        return std::nullopt;
-    }
-
-    const long double bytes = static_cast<long double>(value) * multiplier;
-    if (bytes <= 0.0L ||
-        bytes > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
-        return std::nullopt;
-    }
-    return static_cast<std::uint64_t>(bytes + 0.5L);
-}
+using trtmc::cli::CliArgs;
+using trtmc::cli::parse_args;
+using trtmc::cli::print_usage;
 
 trtmc::LoadOptions make_load_options(const CliArgs& args) {
     trtmc::LoadOptions options;
@@ -176,366 +69,6 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     options.set_tokens = args.set_tokens;
     options.backend_search_paths = args.backend_search_paths;
     return options;
-}
-
-void print_usage() {
-    std::cerr
-        << "Usage:\n"
-           "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
-           "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
-           "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
-           "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
-           "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
-           "[--num-samples N] [--num-steps N] [--guidance-scale S] [--cfg-scale S] "
-           "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
-           "[--condition-mask-raw PATH] [--sampling-steps-raw PATH] [--sde-noise-raw PATH] "
-           "[--output samples.jsonl]\n"
-           "                        Diffusion text-to-image extras (Qwen-Image, FLUX, "
-           "Z-Image): [--negative-prompt \"text\"] "
-           "[--num-inference-steps N] [--height N] [--width N]\n"
-           "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
-           "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
-           "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
-           "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\n"
-           "  trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]\n"
-           "  trtmc generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
-           "[--max-new-tokens N] [--hf-python PATH]\n"
-           "  trtmc serve-audio     <bundle.trtfb> [--chunk-frames N] [--max-new-tokens N] "
-           "[--hf-python PATH]\n"
-           "                       Loads bundle once, reads prompts from stdin, streams PCM to "
-           "stdout.\n"
-           "  trtmc generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
-           "[--guidance-scale S] [--initial-latents-raw PATH]\n"
-           "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
-           "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
-           "[--hf-python PATH]\n"
-           "  trtmc solve           <bundle.trtfb> --field-input CSV\n"
-           "  trtmc solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
-           "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
-           "[--stream] [--chunk-ms N] [--att-context-size L,R] "
-           "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
-           "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-           "  trtmc inspect         <bundle.trtfb> [--list-engines]\n"
-           "  trtmc version\n"
-           "\n"
-           "Options:\n"
-           "  --backend-dir PATH    Extra directory to search for libtrtmc_backend_*.so\n"
-           "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
-           "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
-           "\n"
-           "Build uses Python module tensorrt_model_connect. Set TRTMC_PYTHON or PYTHON to "
-           "choose the build interpreter.\n";
-}
-
-CliArgs parse_args(int argc, char** argv) {
-    CliArgs args;
-
-    if (argc < 2) {
-        args.show_help = true;
-        return args;
-    }
-
-    args.command = argv[1];
-
-    if (args.command == "version" || args.command == "--version" || args.command == "-v") {
-        args.command = "version";
-        return args;
-    }
-
-    if (args.command == "help" || args.command == "--help" || args.command == "-h") {
-        args.show_help = true;
-        return args;
-    }
-
-    if (args.command == "build") {
-        for (int i = 2; i < argc; ++i)
-            args.build_args.emplace_back(argv[i]);
-        return args;
-    }
-
-    static const char* known_cmds[] = {"run",         "inspect",    "generate-video", "segment",
-                                       "segment-sam", "classify",   "generate-audio", "serve-audio",
-                                       "encode",      "embed",      "rerank",         "solve",
-                                       "speak",       "transcribe", nullptr};
-    bool valid = false;
-    for (const char** p = known_cmds; *p; ++p)
-        if (args.command == *p) {
-            valid = true;
-            break;
-        }
-    if (!valid) {
-        args.parse_error = true;
-        args.error_message = "Unknown command: " + args.command;
-        return args;
-    }
-
-    for (int i = 2; i < argc; ++i) {
-        const std::string arg = argv[i];
-
-        auto need_value = [&](const std::string& name) -> bool {
-            if (i + 1 >= argc) {
-                args.parse_error = true;
-                args.error_message = name + " requires a value";
-                return false;
-            }
-            return true;
-        };
-
-        if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
-            args.prompt = argv[++i];
-            continue;
-        }
-        if (arg == "--max-new-tokens" && need_value(arg)) {
-            args.max_new_tokens = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--num-samples" && need_value(arg)) {
-            args.num_samples = std::max(1, std::atoi(argv[++i]));
-            continue;
-        }
-        if (arg == "--benchmark" && need_value(arg)) {
-            args.benchmark = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--warmup" && need_value(arg)) {
-            args.warmup = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--temperature" && need_value(arg)) {
-            args.temperature = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--top-p" && need_value(arg)) {
-            args.top_p = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--min-p" && need_value(arg)) {
-            args.min_p = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--top-k" && need_value(arg)) {
-            args.top_k = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--seed" && need_value(arg)) {
-            args.seed = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--tail-frames" && need_value(arg)) {
-            args.tail_frames = std::max(0, std::atoi(argv[++i]));
-            continue;
-        }
-        if (arg == "--hf-python" && need_value(arg)) {
-            args.hf_python = argv[++i];
-            continue;
-        }
-        if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
-            if (!need_value(arg))
-                return args;
-            auto parsed = parse_byte_size(argv[++i]);
-            if (!parsed.has_value()) {
-                args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
-                return args;
-            }
-            args.kv_cache_size_bytes = *parsed;
-            continue;
-        }
-        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
-            const auto eq = arg.find('=');
-            auto parsed = parse_byte_size(arg.substr(eq + 1));
-            if (!parsed.has_value()) {
-                args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
-                return args;
-            }
-            args.kv_cache_size_bytes = *parsed;
-            continue;
-        }
-        if (arg == "--image" && need_value(arg)) {
-            args.image_path = argv[++i];
-            continue;
-        }
-        if ((arg == "--output" || arg == "-o") && need_value(arg)) {
-            args.output_dir = argv[++i];
-            continue;
-        }
-        if (arg == "--initial-latents-raw" && need_value(arg)) {
-            args.initial_latents_raw = argv[++i];
-            continue;
-        }
-        if (arg == "--condition-latents-raw" && need_value(arg)) {
-            args.condition_latents_raw = argv[++i];
-            continue;
-        }
-        if (arg == "--condition-mask-raw" && need_value(arg)) {
-            args.condition_mask_raw = argv[++i];
-            continue;
-        }
-        if (arg == "--sampling-steps-raw" && need_value(arg)) {
-            args.sampling_steps_raw = argv[++i];
-            continue;
-        }
-        if (arg == "--sde-noise-raw" && need_value(arg)) {
-            args.sde_noise_raw = argv[++i];
-            continue;
-        }
-        if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
-            args.num_steps = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--guidance-scale" && need_value(arg)) {
-            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--sde-gamma" && need_value(arg)) {
-            args.sde_gamma = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--negative-prompt" && need_value(arg)) {
-            args.negative_prompt = argv[++i];
-            continue;
-        }
-        if (arg == "--height" && need_value(arg)) {
-            args.diffusion_height = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--width" && need_value(arg)) {
-            args.diffusion_width = std::atoi(argv[++i]);
-            continue;
-        }
-        if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
-            args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--cfg-scale" && need_value(arg)) {
-            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--greedy") {
-            args.greedy = true;
-            continue;
-        }
-        if (arg == "--stream") {
-            args.stream = true;
-            continue;
-        }
-        if (arg == "--pad-and-drop-preencoded") {
-            args.pad_and_drop_preencoded = true;
-            continue;
-        }
-        if (arg == "--chunk-frames" && i + 1 < argc) {
-            args.chunk_frames = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--chunk-ms" && need_value(arg)) {
-            args.chunk_ms = std::atoi(argv[++i]);
-            continue;
-        }
-        if (arg == "--att-context-size" && need_value(arg)) {
-            const std::string value = argv[++i];
-            const auto comma = value.find(',');
-            if (comma == std::string::npos) {
-                args.parse_error = true;
-                args.error_message = "--att-context-size expects L,R";
-                return args;
-            }
-            args.att_context_left = std::atoi(value.substr(0, comma).c_str());
-            args.att_context_right = std::atoi(value.substr(comma + 1).c_str());
-            continue;
-        }
-        if (arg == "--document" && need_value(arg)) {
-            args.document = argv[++i];
-            continue;
-        }
-        if (arg == "--field-input" && need_value(arg)) {
-            args.field_input = argv[++i];
-            continue;
-        }
-        if (arg == "--branch-input" && need_value(arg)) {
-            args.branch_input = argv[++i];
-            continue;
-        }
-        if (arg == "--trunk-input" && need_value(arg)) {
-            args.trunk_input = argv[++i];
-            continue;
-        }
-        if (arg == "--audio-in" && need_value(arg)) {
-            args.audio_in = argv[++i];
-            continue;
-        }
-        if (arg == "--audio-out" && need_value(arg)) {
-            args.audio_out = argv[++i];
-            continue;
-        }
-        if (arg == "--audio" && need_value(arg)) {
-            args.audio_in = argv[++i];
-            continue;
-        }
-        if (arg == "--point-x" && need_value(arg)) {
-            args.point_x = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--point-y" && need_value(arg)) {
-            args.point_y = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-        if (arg == "--chat-template") {
-            args.chat_template = true;
-            continue;
-        }
-        if (arg == "--no-thinking") {
-            args.no_thinking = true;
-            continue;
-        }
-        if (arg == "--background") {
-            args.is_foreground = false;
-            continue;
-        }
-        if (arg == "--runtime-cache" && need_value(arg)) {
-            args.runtime_cache = argv[++i];
-            continue;
-        }
-        if (arg == "--backend-dir" && need_value(arg)) {
-            args.backend_search_paths.emplace_back(argv[++i]);
-            continue;
-        }
-        if (arg == "--cuda-graphs") {
-            args.cuda_graphs = true;
-            continue;
-        }
-        if (arg == "--list-engines") {
-            args.list_engines = true;
-            continue;
-        }
-        if (arg == "--config" && need_value(arg)) {
-            args.config_path = argv[++i];
-            continue;
-        }
-        if (arg == "--set" && need_value(arg)) {
-            args.set_tokens.emplace_back(argv[++i]);
-            continue;
-        }
-
-        if (args.parse_error)
-            return args;
-
-        if (arg[0] == '-') {
-            args.parse_error = true;
-            args.error_message = "Unknown flag: " + arg;
-            return args;
-        }
-
-        if (args.bundle_path.empty())
-            args.bundle_path = arg;
-        else {
-            args.parse_error = true;
-            args.error_message = "Unexpected positional argument: " + arg;
-            return args;
-        }
-    }
-
-    return args;
 }
 
 std::string build_pythonpath() {
@@ -1151,6 +684,45 @@ int cmd_classify(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+int cmd_detect(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty()) {
+        std::cerr << "Error: detect requires bundle + --image\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+
+    const float threshold = args.conf_threshold >= 0.0F ? args.conf_threshold : 0.5F;
+    const std::string detections =
+        pipeline->detect(image.pixels.data(), image.height, image.width, threshold);
+
+    if (!args.output_json.empty()) {
+        auto out_path = std::filesystem::path(args.output_json);
+        auto parent = out_path.parent_path();
+        if (!parent.empty())
+            std::filesystem::create_directories(parent);
+        std::ofstream out(out_path, std::ios::out | std::ios::trunc);
+        if (!out) {
+            std::cerr << "Error: failed to open " << args.output_json << " for writing\n";
+            return EXIT_FAILURE;
+        }
+        out << detections;
+        if (detections.empty() || detections.back() != '\n')
+            out << '\n';
+        std::cout << "Detections saved: " << args.output_json << '\n';
+    } else {
+        std::cout << detections;
+        if (detections.empty() || detections.back() != '\n')
+            std::cout << '\n';
+    }
+    return EXIT_SUCCESS;
+}
+
 int write_sam_overlay(const trtmc::PromptedSegmentationResult& result,
                       const trtmc::io::LoadedImage& image, const std::string& path) {
     if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty() ||
@@ -1714,6 +1286,8 @@ int main(int argc, char** argv) {
             return cmd_segment_sam(args);
         if (args.command == "classify")
             return cmd_classify(args);
+        if (args.command == "detect")
+            return cmd_detect(args);
         if (args.command == "generate-audio")
             return cmd_generate_audio(args);
         if (args.command == "serve-audio")

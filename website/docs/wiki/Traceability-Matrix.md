@@ -251,7 +251,7 @@ linking to entries in the matrix below.
 | ARCH ID | Architecture Contract | UD ID + Real Files | UT Evidence (Real Test Files) | IT Evidence (Real E2E Paths) | Status |
 |---------|----------------------|-------------------|-------------------------------|------------------------------|--------|
 | `ARCH-DBG-001` | Debug runner (Python) provides pure-Python TRT inference matching C++ runtime behavior for validation and debugging. | `UD-DBG-01`: `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` | `UT-DBG-PY-01`: `tests/builder/test_debug_runner_extended.py` (bundle section loading, runner cleanup, generate sequencing) | `IT-E2E-*`: E2E tests may use debug runner path for reference | verified |
-| `ARCH-CLI-001` | Unified CLI (`trtmc`) dispatches build/inspect/version commands correctly. Pipeline wrapper detects binary and manages subprocess. | `UD-CLI-01`: `tensorrt_model_connect/tensorrt_model_connect/cli.py`; `UD-CLI-02`: `tensorrt_model_connect/tensorrt_model_connect/pipeline.py` | `UT-CLI-PY-01`: `tests/builder/test_cli.py` (CLI inspect/build command dispatch); `UT-CLI-PY-02`: `tests/builder/test_pipeline.py` (pipeline subprocess wrapper, binary detection) | N/A (CLI tested at unit level) | verified |
+| `ARCH-CLI-001` | Unified CLI (`trtmc`) dispatches build/inspect/version commands correctly. Pipeline wrapper detects binary and manages subprocess. | `UD-CLI-01`: `tensorrt_model_connect/tensorrt_model_connect/build_cli.py`; `UD-CLI-02`: `tensorrt_model_connect/tensorrt_model_connect/pipeline.py` | `UT-CLI-PY-01`: `tests/builder/test_cli.py` (CLI inspect/build command dispatch); `UT-CLI-PY-02`: `tests/builder/test_pipeline.py` (pipeline subprocess wrapper, binary detection) | N/A (CLI tested at unit level) | verified |
 
 ---
 

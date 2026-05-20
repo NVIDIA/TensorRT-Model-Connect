@@ -36,7 +36,7 @@ The entire production-surface diff for landing a new feature is:
       plus one manifest line in cmake/trtmc_config_schemas.cmake
     - One test file here
 
-No edits to cli.py, engine_builder.py, pipeline_factory.cpp, or any
+No edits to build_cli.py, engine_builder.py, pipeline_factory.cpp, or any
 shared dispatcher. This test stands in for the "one-shot demo" that
 would exercise exactly that diff.
 """
@@ -133,7 +133,7 @@ def test_defaults_flow_through_without_any_contribution():
     assert bundle.source_of("demo_feature", "max_candidates") == Layer.SCHEMA_DEFAULT
 
 
-# ---- 3. --set flows through without touching cli.py ------------------------
+# ---- 3. --set flows through without touching build_cli.py ------------------------
 
 
 def test_set_token_routes_to_new_feature_without_cli_edit():

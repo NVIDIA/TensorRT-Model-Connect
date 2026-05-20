@@ -141,11 +141,11 @@ flowchart TB
 
 The Python builder is responsible for the messy part of model diversity.
 
-It starts in `tensorrt_model_connect/tensorrt_model_connect/cli.py`, then calls into `engine_builder.py`. The builder resolves a model directory, parses `ModelConfig`, selects a `FamilyPlugin`, asks that plugin to load weights and build engines, then writes a bundle through `bundle_writer.py`.
+It starts in `tensorrt_model_connect/tensorrt_model_connect/build_cli.py`, then calls into `engine_builder.py`. The builder resolves a model directory, parses `ModelConfig`, selects a `FamilyPlugin`, asks that plugin to load weights and build engines, then writes a bundle through `bundle_writer.py`.
 
 ```mermaid
 flowchart TD
-  CLI["cli.py<br/>parse trtmc build args"] --> Resolve["resolve model path and config"]
+  CLI["build_cli.py<br/>parse trtmc build args"] --> Resolve["resolve model path and config"]
   Resolve --> ModelConfig["ModelConfig.from_dir"]
   ModelConfig --> Match["families/__init__.py<br/>select FamilyPlugin"]
   Match --> LoadWeights["FamilyPlugin.load_weights"]
@@ -169,7 +169,7 @@ The important builder abstractions are:
 
 Primary source locations:
 
-- `tensorrt_model_connect/tensorrt_model_connect/cli.py`
+- `tensorrt_model_connect/tensorrt_model_connect/build_cli.py`
 - `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py`
 - `tensorrt_model_connect/tensorrt_model_connect/families/`
 - `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`

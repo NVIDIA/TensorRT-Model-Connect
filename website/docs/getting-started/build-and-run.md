@@ -92,7 +92,13 @@ $TRTMC segment /tmp/segformer.trtfb \
   --output /tmp/mask.png
 ```
 
-Object-detection runtime support exists through the `object_detection` strategy and `IPipeline::detect`, but the current `trtmc` CLI does not expose a `detect` subcommand. Use the C++ API or tests for that path until a CLI wrapper is added.
+Object-detection bundles use the same image-loading path through `trtmc detect`:
+
+```bash
+$TRTMC detect /tmp/detector.trtfb \
+  --image tests/assets/test_scene.jpg \
+  --output-json /tmp/detections.json
+```
 
 ## Time-series and neural-operator style solve
 

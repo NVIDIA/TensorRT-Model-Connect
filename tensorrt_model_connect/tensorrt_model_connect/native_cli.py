@@ -38,9 +38,9 @@ def _native_binary_candidates() -> list[Path]:
 
 def _missing_binary_message() -> str:
     return (
-        "trtmc native executable was not found. Install a wheel built with "
-        "TRTMC_NATIVE_BIN=/path/to/trtmc, or set TRTMC_NATIVE_BIN to an existing "
-        "native trtmc executable."
+        "trtmc native executable was not found. Install a release wheel that "
+        "includes native artifacts, build ./build/trtmc from source, or set "
+        "TRTMC_NATIVE_BIN to an existing native trtmc executable."
     )
 
 

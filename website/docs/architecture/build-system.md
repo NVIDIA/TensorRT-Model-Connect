@@ -35,7 +35,7 @@ Important CMake targets:
 | Target | Purpose |
 | --- | --- |
 | `trtmc_core` | Core runtime library, public API, registry, plugins, pipelines, tokenizers, CUDA helpers. |
-| `trtmc` | CLI executable implemented in `examples/trtmc_cli.cpp`. |
+| `trtmc` | CLI executable implemented under `src/cli/`. |
 | `trtf_dataset_benchmark` | Dataset benchmark executable. |
 | `trtmc_backend_trt` | Standard TensorRT backend DSO when TensorRT headers/libs are available. |
 | `trtmc_backend_rtx` | Optional TensorRT-RTX backend target. It outputs `libtrtmc_backend_trt_rtx.so`. |

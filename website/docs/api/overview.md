@@ -12,8 +12,8 @@ TensorRT-Model-Connect exposes three public API layers.
 
 The command-line interface is a thin adapter over these APIs:
 
-- `trtmc build` is implemented by `examples/trtmc_cli.cpp` delegating to `tensorrt_model_connect/tensorrt_model_connect/cli.py`.
-- Runtime subcommands such as `trtmc run` are implemented in `examples/trtmc_cli.cpp`.
+- `trtmc build` is implemented by `src/cli/main.cpp` delegating to `tensorrt_model_connect/tensorrt_model_connect/build_cli.py`.
+- Runtime subcommands such as `trtmc run` are implemented under `src/cli/`.
 
 The core contract is always the same:
 

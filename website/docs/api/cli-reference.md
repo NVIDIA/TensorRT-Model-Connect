@@ -57,6 +57,7 @@ TriAttention options are also exposed for experimental KV compaction: `--triatte
 trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
 trtmc encode <bundle.trtfb> --prompt "text"
 trtmc segment <bundle.trtfb> --image PATH --output PATH
+trtmc detect <bundle.trtfb> --image PATH [--output-json PATH]
 trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
 trtmc serve-audio <bundle.trtfb>
 trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
@@ -75,4 +76,4 @@ Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cud
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
-Object detection is available through the runtime API for pipelines that implement `IPipeline::detect`, but the current CLI command list does not include `detect`.
+Object detection is available through `trtmc detect` for pipelines that implement `IPipeline::detect`.

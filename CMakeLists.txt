@@ -520,7 +520,10 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
-add_executable(trtmc examples/trtmc_cli.cpp)
+add_executable(trtmc
+  src/cli/args.cpp
+  src/cli/main.cpp
+)
 target_link_libraries(trtmc PRIVATE trtmc_core)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
 
@@ -583,7 +586,8 @@ trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
-trtmc_add_test(test_cli_args            NO_SRC_INCLUDE)
+trtmc_add_test(test_cli_args)
+target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_chat_template)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)

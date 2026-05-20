@@ -1952,7 +1952,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "shared_builder_fp8_scales_cli",
-        "tensorrt_model_connect/tensorrt_model_connect/cli.py",
+        "tensorrt_model_connect/tensorrt_model_connect/build_cli.py",
         ("fp8_scales", "save_fp8_scales"),
         _fp8_scale_models,
     ),

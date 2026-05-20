@@ -27,7 +27,7 @@ Entry point: `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` f
 ```mermaid
 sequenceDiagram
     participant User
-    participant CLI as cli.py _cmd_build()
+    participant CLI as build_cli.py _cmd_build()
     participant EB as engine_builder.py build()
     participant Resolve as _resolve_model()
     participant Config as ModelConfig.from_dir()
@@ -72,7 +72,7 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `tensorrt_model_connect/tensorrt_model_connect/cli.py` -- CLI dispatch
+- `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` -- Python builder CLI dispatch
 - `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
 - `tensorrt_model_connect/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
 - `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`

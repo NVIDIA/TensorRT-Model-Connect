@@ -85,7 +85,7 @@ C++ runtime in 30 seconds instead of 10 hours.
 
 Zero edits outside the schema file is impossible because C++ linkers strip
 static-init registrars. The accepted bar:
-- Zero edits to any CLI parser (`cli.py`, `trtmc_cli.cpp`,
+- Zero edits to any CLI parser (`build_cli.py`, `src/cli/main.cpp`,
   `benchmark_*.py`).
 - Zero edits to any shared dispatcher (`pipeline_factory.cpp`,
   `engine_builder.py`).
@@ -113,8 +113,8 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
-- [x] `--config` + `--set` on `tensorrt_model_connect/tensorrt_model_connect/cli.py` (commit `4daa555e`)
-- [x] `--config` + `--set` on `examples/trtmc_cli.cpp` (commit `3bf3fbb8`)
+- [x] `--config` + `--set` on `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` (commit `4daa555e`)
+- [x] `--config` + `--set` on `src/cli/main.cpp` (commit `3bf3fbb8`)
 - [x] `--config` + `--set` on `examples/trtmc_dataset_benchmark.cpp` (commit TBD)
 - [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
       `tools/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
@@ -132,7 +132,7 @@ The prompt specified `tensorrt_model_connect/tensorrt_model_connect/config/` but
 unrelated concern). The two can't coexist without `ModelConfig` moving
 into the package, which is beyond this refactor's scope. C++ side keeps
 the shorter `trtmc::config` namespace (no collision there). Test
-imports, `cli.py`, and all internal imports updated.
+imports, `build_cli.py`, and all internal imports updated.
 
 ### Phase 3 — Bundle defaults
 - [x] `config.json` gains `defaults:` block; builder writes, runtime reads (commit TBD)
@@ -209,7 +209,7 @@ imports, `cli.py`, and all internal imports updated.
     pattern as `_dynamic_kv_opt_length`). `build_standard_decoder_engine`
     reads from there. Keeps family-plugin `build_engine` protocol
     signatures untouched, no 50-file churn.
-  - `tensorrt_model_connect/cli.py` resolves the registry up front when
+  - `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` resolves the registry up front when
     `--config`/`--set` is supplied, extracts
     `decode_policy.force_manual_attention`, passes as kwarg.
   - Cross-language schema match test auto-detects the new namespace
@@ -385,7 +385,7 @@ deleted (hard removal with no shims), tests updated.
   `extra_contributions` so callers can inject a platform profile or
   bundle `defaults:` block alongside the session layer.
 - Python package renamed `config/` → `runtime_config/` (see D8).
-- `tensorrt_model_connect/tensorrt_model_connect/cli.py` build subparser gains `--config FILE`
+- `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` build subparser gains `--config FILE`
   and `--set NS.FIELD=VALUE` (repeatable). When either flag is provided
   and at least one schema is registered, the builder writes an
   `effective_config.json` file next to the output bundle. When schemas
@@ -422,7 +422,7 @@ deleted (hard removal with no shims), tests updated.
   Scalars: string / int64 / double / bool / null. Null maps to an
   empty `std::any`, so `has_value()` is the canonical "null was
   present" check.
-- `examples/trtmc_cli.cpp` — argv parser gains `--config <file>` and
+- `src/cli/main.cpp` — argv parser gains `--config <file>` and
   `--set ns.field=value` (repeatable). A single `apply_cli_config()`
   helper runs once from `main()`, resolves the contributions, and
   writes `effective_config.json` next to the bundle path. No per-knob
@@ -640,7 +640,7 @@ Commit chain:
   `families/magpie_tts.py` reads from `config.raw` instead of
   `os.environ.get`; comment in the file docstring updated to the
   `--set audio_magpie.X=Y` form.
-- `cli.py` — extracts `audio_magpie.max_source_positions` from the
+- `build_cli.py` — extracts `audio_magpie.max_source_positions` from the
   resolved ConfigBundle, passes to `build()`.
 - Gates: 11 relevant ctests pass (config trio + triattention +
   magpie trio + bark + both C ABI regressions); 76 Python tests pass;
@@ -712,7 +712,7 @@ Commit chain:
     * Schema defaults flow through `resolve_cli_config` without any
       contribution.
     * `--set demo_feature.<field>=<value>` routes through the generic
-      CLI helper without any edit to `cli.py`.
+      CLI helper without any edit to `build_cli.py`.
     * `--config <file>` JSON profile routes the same way;
       `--set` beats `--config` within the session layer.
     * Validator rejects out-of-vocabulary values.
@@ -806,7 +806,7 @@ Commit chain:
   `build` gain `force_manual_attention: bool = False`.
   `build_bundle` stashes the value on `config.raw` before dispatching
   to the family plugin.
-- CLI wiring (`tensorrt_model_connect/tensorrt_model_connect/cli.py`): resolves the
+- CLI wiring (`tensorrt_model_connect/tensorrt_model_connect/build_cli.py`): resolves the
   ConfigBundle up front (before `build()`), imports
   `runtime_config.schemas.load_all()` so schemas are registered,
   reads `decode_policy.force_manual_attention` from the bundle via
@@ -1057,7 +1057,7 @@ Commit chain:
   expected "schemas not registered yet" message; benchmark `--help`
   shows all four new flags; both C++ config tests still pass; CCN gate
   passes (the only new C++ code is the argv-walking block and a
-  `resolve_cli_config` call — same patterns as `trtmc_cli.cpp`).
+  `resolve_cli_config` call — same patterns as `src/cli/main.cpp`).
 - Commit: pending end-of-tick.
 - Next tick (7) — start Phase 3 (bundle `defaults:` block):
     * Builder writes `defaults:` into `config.json` from a

@@ -1083,15 +1083,15 @@ class TestDiffAwareBuilderRefinement:
     def test_shared_builder_fp8_scales_cli_rule_refines_cli_fp8_diff(self, imap):
         """CLI fp8-only plumbing narrows to fp8-scales manifests."""
         diff_text = """
-diff --git a/tensorrt_model_connect/tensorrt_model_connect/cli.py b/tensorrt_model_connect/tensorrt_model_connect/cli.py
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/build_cli.py b/tensorrt_model_connect/tensorrt_model_connect/build_cli.py
 @@ -1 +1 @@
 +    save_fp8_scales = getattr(args, 'save_fp8_scales', None)
 +            save_fp8_scales=save_fp8_scales,
 +    build_p.add_argument("--save-fp8-scales", default=None,
 """
-        broad = test_impact.classify_file("tensorrt_model_connect/tensorrt_model_connect/cli.py", imap)
+        broad = test_impact.classify_file("tensorrt_model_connect/tensorrt_model_connect/build_cli.py", imap)
         refined = test_impact.maybe_refine_match_with_diff(
-            "tensorrt_model_connect/tensorrt_model_connect/cli.py", broad, diff_text, imap)
+            "tensorrt_model_connect/tensorrt_model_connect/build_cli.py", broad, diff_text, imap)
         assert refined.rule == "shared_builder_fp8_scales_cli"
         assert refined.models == ["flux-2-dev-fp8"]
 

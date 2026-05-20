@@ -141,22 +141,22 @@ def test_scheduler_protocol_declares_required_methods() -> None:
 
 
 @pytest.mark.unit
-def test_package_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intent: validate `python -m tensorrt_model_connect` delegates to cli.main.
+def test_package_main_module_invokes_build_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intent: validate `python -m tensorrt_model_connect` delegates to build_cli.main.
 
-    Preconditions: A fake `tensorrt_model_connect.cli` module with callable `main` is injected.
+    Preconditions: A fake `tensorrt_model_connect.build_cli` module with callable `main` is injected.
     Postconditions: Importing/executing `tensorrt_model_connect.__main__` calls fake `main` once.
     """
     calls: list[str] = []
 
-    fake_cli = types.ModuleType("tensorrt_model_connect.cli")
+    fake_cli = types.ModuleType("tensorrt_model_connect.build_cli")
 
     def _fake_main() -> None:
         calls.append("called")
 
     fake_cli.main = _fake_main  # type: ignore[attr-defined]
 
-    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.build_cli", fake_cli)
     sys.modules.pop("tensorrt_model_connect.__main__", None)
 
     runpy.run_module("tensorrt_model_connect.__main__", run_name="__main__")

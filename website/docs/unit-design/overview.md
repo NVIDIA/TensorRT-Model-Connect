@@ -10,12 +10,12 @@ The repository is organized around one rule: keep build-time model diversity in 
 flowchart TB
   subgraph Public["Public surfaces"]
     PublicAPI["include/trtmc<br/>C++ API"]
-    CLI["examples/trtmc_cli.cpp<br/>CLI wrapper"]
+    CLI["src/cli<br/>CLI wrapper"]
     CABI["src/cabi<br/>C ABI"]
   end
 
   subgraph Build["Python builder units"]
-    BuildCLI["tensorrt_model_connect/cli.py"]
+    BuildCLI["tensorrt_model_connect/.../build_cli.py"]
     Families["families/*.py"]
     Builders["graph and engine builders"]
     BundleWriter["bundle_writer.py"]
@@ -79,7 +79,7 @@ flowchart TB
 | Add a new runtime knob | `src/runtime/config/`, `include/trtmc/config/`, Python mirror under `runtime_config/` | Generated schema manifest, config tests, docs. |
 | Add quantization behavior | `tensorrt_model_connect/tensorrt_model_connect/quantization/` and family hooks | Calibration tests, E2E tolerance updates. |
 | Add a backend or ABI policy | `src/runtime/backend/` | Build system docs, backend tests, compatibility docs. |
-| Add a CLI command | `examples/trtmc_cli.cpp` | API docs, smoke tests, E2E harness if user-contract relevant. |
+| Add a CLI command | `src/cli/` | API docs, smoke tests, E2E harness if user-contract relevant. |
 
 ## Change rule
 

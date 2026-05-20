@@ -1,11 +1,11 @@
-"""Tests for cli.py — argument parsing edge cases.
+"""Tests for build_cli.py — argument parsing edge cases.
 
 Pure Python, no TRT needed. Tests the CLI argument parser without
 actually invoking engine builds.
 
 Trace: ARCH-ENG-001, UD-ENG-01
 Intent: Validate that the trtmc CLI correctly parses build/inspect/version subcommands and their arguments.
-Preconditions: tensorrt_model_connect.cli is importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect.build_cli is importable; no TRT or GPU required.
 Postconditions: Parsed arguments match expected values for all subcommands, defaults, and edge cases.
 """
 
@@ -71,14 +71,14 @@ class TestBuildArgs:
 
     def test_parse_dynamic_kv_profile_rows(self):
         """Comma-separated dynamic-KV profile rows parse into integer lists."""
-        from tensorrt_model_connect.cli import _parse_profile_rows
+        from tensorrt_model_connect.build_cli import _parse_profile_rows
 
         assert _parse_profile_rows("32,64,128") == [32, 64, 128]
         assert _parse_profile_rows(" 32, 64 ,128 ") == [32, 64, 128]
 
     def test_parse_dynamic_kv_profile_rows_rejects_empty(self):
         """Empty profile-row strings are rejected with a parser-style error."""
-        from tensorrt_model_connect.cli import _parse_profile_rows
+        from tensorrt_model_connect.build_cli import _parse_profile_rows
 
         with pytest.raises(argparse.ArgumentTypeError):
             _parse_profile_rows(" , ")
@@ -99,7 +99,7 @@ class TestInspectArgs:
 class TestVersionCommand:
     def test_version_exits_zero(self):
         """trtmc version should return 0."""
-        from tensorrt_model_connect.cli import _cmd_version
+        from tensorrt_model_connect.build_cli import _cmd_version
         result = _cmd_version(argparse.Namespace())
         assert result == 0
 
@@ -107,7 +107,7 @@ class TestVersionCommand:
 class TestCmdBuildValidation:
     def test_missing_model(self):
         """_cmd_build returns 1 when model is empty."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         args = argparse.Namespace(model="", output="out.trtfb", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
@@ -115,7 +115,7 @@ class TestCmdBuildValidation:
 
     def test_missing_output(self):
         """_cmd_build returns 1 when output is empty."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         args = argparse.Namespace(model="some-model", output="", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
@@ -156,7 +156,7 @@ class TestCmdInspect:
             f.write(header_json)
             f.write(b"\x00" * 100)  # fake engine plan
 
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path)))
         assert result == 0
 
@@ -198,7 +198,7 @@ class TestCmdInspect:
             f.write(header_json)
             f.write(b"\x00" * 300)
 
-        from tensorrt_model_connect.cli import list_engine_sections
+        from tensorrt_model_connect.build_cli import list_engine_sections
 
         roles = {entry["name"]: entry["role"] for entry in list_engine_sections(str(bundle_path))}
         assert roles["engine_plan"] == "decode"
@@ -206,7 +206,7 @@ class TestCmdInspect:
 
     def test_inspect_nonexistent_file(self):
         """_cmd_inspect returns 1 for non-existent file."""
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
             bundle_path="/nonexistent/path/bundle.trtfb"))
         assert result == 1
@@ -216,14 +216,14 @@ class TestCmdInspect:
         bundle_path = tmp_path / "bad.trtfb"
         bundle_path.write_bytes(b"NOT_TRTFB_MAGIC_1234567890")
 
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
             bundle_path=str(bundle_path)))
         assert result == 1
 
     def test_inspect_empty_bundle_path(self):
         """_cmd_inspect returns 1 when bundle_path is empty."""
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(bundle_path=""))
         assert result == 1
 
@@ -233,7 +233,7 @@ class TestCmdBuildMocked:
 
     def test_build_calls_engine_builder_with_correct_args(self, tmp_path):
         """Verify _cmd_build passes model, output, cache length, verbose to build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         captured_kwargs = {}
@@ -273,7 +273,7 @@ class TestCmdBuildMocked:
 
     def test_verbose_flag_propagated(self, tmp_path):
         """Verify verbose=True is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received_verbose = []
@@ -302,7 +302,7 @@ class TestCmdBuildMocked:
 
     def test_max_cache_length_propagated(self, tmp_path):
         """Verify max_cache_length value is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received_cache = []
@@ -332,7 +332,7 @@ class TestCmdBuildMocked:
 
     def test_dynamic_kv_cache_propagated(self, tmp_path):
         """Verify dynamic_kv_cache is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received = []
@@ -366,7 +366,7 @@ class TestCmdBuildMocked:
 
     def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
         """Verify explicit dynamic-KV profile rows are forwarded to build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received = []
@@ -411,7 +411,7 @@ class TestCmdBuildMocked:
 
     def test_decoder_engine_layout_propagated(self, tmp_path):
         """Verify --decoder-engine-layout is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received = []
@@ -457,7 +457,7 @@ class TestCmdBuildMocked:
 
     def test_build_exception_returns_1(self, tmp_path):
         """When engine_builder.build() raises, _cmd_build returns 1."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         def mock_build(*args, **kwargs):
@@ -481,7 +481,7 @@ class TestCmdBuildMocked:
 
     def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
         """Chronos-family builds should re-exec into their declared Python profile."""
-        import tensorrt_model_connect.cli as cli
+        import tensorrt_model_connect.build_cli as cli
         import tensorrt_model_connect.python_profiles as profile_mod
 
         captured: dict[str, object] = {}

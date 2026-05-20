@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
+
+from .native_cli import _existing_executable, _native_binary_candidates
 
 
 class Pipeline:
@@ -85,15 +86,9 @@ class Pipeline:
     @staticmethod
     def _find_binary() -> str:
         """Auto-detect the trtmc binary location."""
-        # Check common locations
-        candidates = [
-            "./build/trtmc",
-            "trtmc",
-        ]
-        for candidate in candidates:
-            path = Path(candidate)
-            if path.exists() and path.is_file():
-                return str(path)
+        native = _existing_executable(_native_binary_candidates())
+        if native is not None:
+            return str(native)
 
         # Check PATH
         found = shutil.which("trtmc")

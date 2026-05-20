@@ -1,11 +1,11 @@
-"""Tests for tensorrt_model_connect.cli — CLI argument parsing and dispatch."""
+"""Tests for tensorrt_model_connect.build_cli — CLI argument parsing and dispatch."""
 
 from __future__ import annotations
 
 import pytest
 
 try:
-    from tensorrt_model_connect import cli
+    import tensorrt_model_connect.build_cli as cli
 except ImportError:
     pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
