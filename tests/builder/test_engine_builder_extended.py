@@ -752,6 +752,7 @@ class TestBuildBundleOrchestration:
         ("pipeline_class", "plugin_name", "runtime_strategy"),
         [
             ("FluxPipeline", "flux", "diffusion_flux"),
+            ("Flux2Pipeline", "flux", "diffusion_flux"),
             ("PixArtSigmaPipeline", "pixart", "diffusion_pixart"),
             ("WanPipeline", "wan_t2v", "diffusion_wan"),
         ],

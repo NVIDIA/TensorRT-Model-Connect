@@ -414,14 +414,17 @@ class FluxPlugin:
         from .mistral_encoder_builder import (
             build_mistral_encoder_engine, load_mistral_encoder_weights)
         from .flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
+        from .flux2_dit_tp_builder import (
+            build_flux2_dit_engine as build_flux2_dit_tp_engine)
         from .flux_vae_builder import build_flux_vae_decoder_engine
-        from ...parallel_config import normalize_parallel_config
+        from ...parallel_config import (
+            normalize_parallel_config,
+            require_tensorrt_11_for_tensor_parallel,
+        )
 
         parallel = normalize_parallel_config(parallel_config)
-        if parallel.enabled:
-            raise NotImplementedError(
-                "Flux.2 tensor-parallel DiT builds are not implemented yet; "
-                "Flux.1 DiT TP is the supported Flux path.")
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Flux.2 tensor-parallel builds")
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -515,33 +518,72 @@ class FluxPlugin:
         text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * m_hidden
         _freq_dim = tc.get("timestep_guidance_channels", 256)
 
-        with timed_trt_compile(build_timing, "flux2_dit"):
-            dit_plan = build_flux2_dit_engine(
-                dit_weights,
-                dim=dit_dim,
-                num_heads=num_heads,
-                num_layers=num_layers,
-                num_single_layers=num_single_layers,
-                num_img_tokens=num_img_tokens,
-                text_seq_len=text_seq_len,
-                mlp_ratio=mlp_ratio,
-                packed_channels=packed_channels,
-                t5_dim=text_encoder_dim,
-                freq_dim=_freq_dim,
-                verbose=verbose,
-                cast_dtype=_cast_dtype,
-                fp8_scales=fp8_scales,
-            )
-
-        # Spill the large DiT plan before building the remaining components so
-        # only one TensorRT component build holds plan bytes at a time.
         import gc
         import os
         import tempfile
-        _dit_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
-        _dit_tmp.write(dit_plan)
-        _dit_tmp.close()
-        dit_plan = None  # type: ignore[assignment]
+        dit_plan = None
+        _dit_tmp = None
+        _dit_rank_tmps = {}
+        with timed_trt_compile(build_timing, "flux2_dit"):
+            if parallel.enabled:
+                for rank in range(parallel.tp_size):
+                    print(f"[flux] Building FLUX.2 DiT TP rank "
+                          f"{rank}/{parallel.tp_size} ...", file=sys.stderr)
+                    rank_plan = build_flux2_dit_tp_engine(
+                        dit_weights,
+                        dim=dit_dim,
+                        num_heads=num_heads,
+                        num_layers=num_layers,
+                        num_single_layers=num_single_layers,
+                        num_img_tokens=num_img_tokens,
+                        text_seq_len=text_seq_len,
+                        mlp_ratio=mlp_ratio,
+                        packed_channels=packed_channels,
+                        t5_dim=text_encoder_dim,
+                        freq_dim=_freq_dim,
+                        verbose=verbose,
+                        cast_dtype=_cast_dtype,
+                        fp8_scales=fp8_scales,
+                        parallel_config=parallel.for_rank(rank),
+                    )
+                    rank_tmp = tempfile.NamedTemporaryFile(
+                        suffix=f".rank{rank}.plan", delete=False)
+                    rank_tmp.write(rank_plan)
+                    rank_tmp.close()
+                    _dit_rank_tmps[rank] = rank_tmp.name
+                    rank_plan = None  # type: ignore[assignment]
+                    gc.collect()
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except ImportError:
+                        pass
+            else:
+                dit_plan = build_flux2_dit_engine(
+                    dit_weights,
+                    dim=dit_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    num_single_layers=num_single_layers,
+                    num_img_tokens=num_img_tokens,
+                    text_seq_len=text_seq_len,
+                    mlp_ratio=mlp_ratio,
+                    packed_channels=packed_channels,
+                    t5_dim=text_encoder_dim,
+                    freq_dim=_freq_dim,
+                    verbose=verbose,
+                    cast_dtype=_cast_dtype,
+                    fp8_scales=fp8_scales,
+                )
+
+        # Spill the large DiT plan before building the remaining components so
+        # only one TensorRT component build holds plan bytes at a time.
+        if not parallel.enabled:
+            _dit_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
+            _dit_tmp.write(dit_plan)
+            _dit_tmp.close()
+            dit_plan = None  # type: ignore[assignment]
         gc.collect()
         try:
             import torch
@@ -642,19 +684,32 @@ class FluxPlugin:
             with open(_te_tmp.name, "rb") as _f:
                 text_encoders[0] = (text_encoders[0][0], _f.read())
             os.unlink(_te_tmp.name)
-        with open(_dit_tmp.name, "rb") as _f:
-            dit_plan = _f.read()
-        os.unlink(_dit_tmp.name)
+        denoiser_ranks = None
+        if parallel.enabled:
+            denoiser_ranks = {}
+            for rank in range(parallel.tp_size):
+                rank_tmp = _dit_rank_tmps[rank]
+                with open(rank_tmp, "rb") as _f:
+                    denoiser_ranks[rank] = _f.read()
+                os.unlink(rank_tmp)
+        else:
+            with open(_dit_tmp.name, "rb") as _f:
+                dit_plan = _f.read()
+            os.unlink(_dit_tmp.name)
 
         print(f"[flux] FLUX.2 components built [{time.perf_counter() - build_start:.1f}s]",
               file=sys.stderr)
 
-        return {
+        out = {
             "text_encoders": text_encoders,
-            "denoiser": dit_plan,
             "vae_decoder": vae_plan,
             "preprocessor_weights": preprocessor_weights,
         }
+        if parallel.enabled:
+            out["denoiser_ranks"] = denoiser_ranks or {}
+        else:
+            out["denoiser"] = dit_plan
+        return out
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         """Return diffusion pipeline configuration."""

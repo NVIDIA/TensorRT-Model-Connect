@@ -564,6 +564,238 @@ def test_build_flux2_components_forwards_precision_to_mistral(
     assert calls["dit_build"][1]["cast_dtype"] == "fp16"
 
 
+def test_build_flux2_components_builds_rank_local_dit_for_tp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Intent: verify FLUX.2 TP builds one rank-local DiT plan per rank.
+
+    Preconditions: FLUX.2 component builders are replaced with deterministic stubs and TRT is 11.x.
+    Postconditions: Mistral/VAE stay single-copy while denoiser_ranks carries rank-local plans.
+    """
+    calls: dict[str, object] = {}
+    rank_calls: list[dict[str, object]] = []
+
+    model_dir = tmp_path / "flux2_tp_model"
+    (model_dir / "text_encoder").mkdir(parents=True)
+    (model_dir / "transformer").mkdir(parents=True)
+    (model_dir / "vae").mkdir(parents=True)
+
+    def load_flux2_dit_weights(path, **kwargs):
+        calls["dit_load"] = (path, kwargs)
+        return {"dit": np.array([2], dtype=np.float32)}
+
+    def build_flux2_dit_engine(_weights, **_kwargs):
+        raise AssertionError("single-device FLUX.2 DiT builder used for TP build")
+
+    def build_flux2_dit_tp_engine(_weights, **kwargs):
+        parallel = kwargs["parallel_config"]
+        rank_calls.append(kwargs)
+        return f"flux2-rank-{parallel.rank}".encode("ascii")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            load_mistral_encoder_weights=lambda *_a, **_k: {},
+            build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            load_flux2_dit_weights=load_flux2_dit_weights,
+            build_flux2_dit_engine=build_flux2_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            build_flux2_dit_engine=build_flux2_dit_tp_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
+        ),
+    )
+    monkeypatch.setattr(
+        flux_mod,
+        "_serialize_flux2_preprocessor",
+        lambda *_a, **_k: b"flux2-preproc",
+    )
+
+    from tensorrt_model_connect import trt_compat
+    monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
+
+    out = flux_mod.plugin.build_components(
+        str(model_dir),
+        _cfg(image_height=384, image_width=384, max_cache_length=256),
+        {
+            "_text_encoder_dir": str(model_dir / "text_encoder"),
+            "_transformer_dir": str(model_dir / "transformer"),
+            "_vae_dir": str(model_dir / "vae"),
+            "_transformer_config": {
+                "_class_name": "Flux2Transformer2DModel",
+                "num_attention_heads": 48,
+                "attention_head_dim": 128,
+                "num_layers": 8,
+                "num_single_layers": 48,
+                "timestep_guidance_channels": 256,
+            },
+            "_text_encoder_config": {
+                "text_config": {
+                    "hidden_size": 5120,
+                    "num_attention_heads": 32,
+                    "num_key_value_heads": 8,
+                    "head_dim": 128,
+                    "intermediate_size": 32768,
+                    "num_hidden_layers": 40,
+                    "vocab_size": 131072,
+                }
+            },
+            "_vae_config": {"latent_channels": 32},
+        },
+        precision="fp16",
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4),
+        verbose=False,
+    )
+
+    assert out["text_encoders"] == [("mistral", b"mistral-plan")]
+    assert out["vae_decoder"] == b"vae-plan"
+    assert out["preprocessor_weights"] == b"flux2-preproc"
+    assert out["denoiser_ranks"] == {
+        0: b"flux2-rank-0",
+        1: b"flux2-rank-1",
+        2: b"flux2-rank-2",
+        3: b"flux2-rank-3",
+    }
+    assert "denoiser" not in out
+    assert calls["dit_load"][1]["fp8_scales"] is None
+    assert [entry["parallel_config"].rank for entry in rank_calls] == [0, 1, 2, 3]
+    assert all(entry["parallel_config"].tp_size == 4 for entry in rank_calls)
+    assert all(entry["cast_dtype"] == "fp16" for entry in rank_calls)
+    assert all(entry["num_img_tokens"] == 576 for entry in rank_calls)
+    assert all(entry["text_seq_len"] == 256 for entry in rank_calls)
+
+
+def test_build_flux2_components_builds_rank_local_fp8_dit_for_tp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Intent: verify FLUX.2 FP8 TP forwards scales to each rank-local DiT build."""
+    calls: dict[str, object] = {}
+    rank_calls: list[dict[str, object]] = []
+
+    model_dir = tmp_path / "flux2_fp8_tp_model"
+    (model_dir / "transformer").mkdir(parents=True)
+    (model_dir / "vae").mkdir(parents=True)
+
+    def load_flux2_dit_weights(path, **kwargs):
+        calls["dit_load"] = (path, kwargs)
+        return {"dit": np.array([2], dtype=np.float32)}
+
+    def build_flux2_dit_engine(_weights, **_kwargs):
+        raise AssertionError("single-device FLUX.2 DiT builder used for FP8 TP build")
+
+    def build_flux2_dit_tp_engine(_weights, **kwargs):
+        parallel = kwargs["parallel_config"]
+        rank_calls.append(kwargs)
+        return f"flux2-fp8-rank-{parallel.rank}".encode("ascii")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            load_mistral_encoder_weights=lambda *_a, **_k: {},
+            build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            load_flux2_dit_weights=load_flux2_dit_weights,
+            build_flux2_dit_engine=build_flux2_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            build_flux2_dit_engine=build_flux2_dit_tp_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        _module(
+            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
+        ),
+    )
+    monkeypatch.setattr(
+        flux_mod,
+        "_serialize_flux2_preprocessor",
+        lambda *_a, **_k: b"flux2-preproc",
+    )
+
+    from tensorrt_model_connect import trt_compat
+    monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
+
+    fp8_scales = {
+        "transformer_blocks.0.attn.to_q": {
+            "input_scale": 0.1,
+            "weight_scale": 0.2,
+        }
+    }
+
+    out = flux_mod.plugin.build_components(
+        str(model_dir),
+        _cfg(image_height=384, image_width=384, max_cache_length=256),
+        {
+            "_transformer_dir": str(model_dir / "transformer"),
+            "_vae_dir": str(model_dir / "vae"),
+            "_transformer_config": {
+                "_class_name": "Flux2Transformer2DModel",
+                "num_attention_heads": 48,
+                "attention_head_dim": 128,
+                "num_layers": 8,
+                "num_single_layers": 48,
+                "timestep_guidance_channels": 256,
+            },
+            "_vae_config": {"latent_channels": 32},
+        },
+        precision="fp16",
+        fp8_scales=fp8_scales,
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4),
+        verbose=False,
+    )
+
+    assert out["denoiser_ranks"] == {
+        0: b"flux2-fp8-rank-0",
+        1: b"flux2-fp8-rank-1",
+        2: b"flux2-fp8-rank-2",
+        3: b"flux2-fp8-rank-3",
+    }
+    assert calls["dit_load"][1]["fp8_scales"] is fp8_scales
+    assert [entry["parallel_config"].rank for entry in rank_calls] == [0, 1, 2, 3]
+    assert all(entry["fp8_scales"] is fp8_scales for entry in rank_calls)
+    assert all(entry["cast_dtype"] == "bf16" for entry in rank_calls)
+    assert "denoiser" not in out
+
+
 def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
