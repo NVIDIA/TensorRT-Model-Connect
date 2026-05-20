@@ -71,26 +71,61 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     return options;
 }
 
+std::filesystem::path current_executable_path() {
+    char buf[4096];
+    const ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len <= 0)
+        return {};
+    buf[len] = '\0';
+    return std::filesystem::path(buf);
+}
+
+std::string build_python_executable() {
+    const auto current_exe = current_executable_path();
+    if (current_exe.empty())
+        return "python3";
+
+    std::error_code ec;
+    const std::filesystem::path exe_path = std::filesystem::weakly_canonical(current_exe, ec);
+    if (!ec && !exe_path.empty()) {
+        const std::filesystem::path exe_dir = exe_path.parent_path();
+        for (const char* name : {"python3", "python"}) {
+            const std::filesystem::path candidate = exe_dir / name;
+            std::error_code exists_ec;
+            if (std::filesystem::exists(candidate, exists_ec) &&
+                access(candidate.c_str(), X_OK) == 0) {
+                return candidate.string();
+            }
+        }
+    }
+
+    return "python3";
+}
+
 std::string build_pythonpath() {
     std::string pythonpath;
 
 #ifdef TRTMC_SOURCE_DIR
-    std::error_code source_ec;
-    std::error_code exe_ec;
-    const auto source_root = std::filesystem::weakly_canonical(TRTMC_SOURCE_DIR, source_ec);
-    const auto exe_path = std::filesystem::weakly_canonical("/proc/self/exe", exe_ec);
-    std::error_code rel_ec;
-    const auto rel_exe_path = std::filesystem::relative(exe_path, source_root, rel_ec);
-    const auto first_component =
-        rel_exe_path.empty() ? std::filesystem::path{} : *rel_exe_path.begin();
-    const bool running_from_source_build =
-        !source_ec && !exe_ec && !rel_ec && !rel_exe_path.empty() &&
-        first_component.string().rfind("build", 0) == 0;
-    if (running_from_source_build) {
-        const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
-        std::error_code ec;
-        if (std::filesystem::is_directory(source_pkg, ec)) {
-            pythonpath = source_pkg.string();
+    const auto current_exe = current_executable_path();
+    if (!current_exe.empty()) {
+        std::error_code source_ec;
+        std::error_code exe_ec;
+        const auto source_root = std::filesystem::weakly_canonical(TRTMC_SOURCE_DIR, source_ec);
+        const auto exe_path = std::filesystem::weakly_canonical(current_exe, exe_ec);
+        std::error_code rel_ec;
+        const auto rel_exe_path = std::filesystem::relative(exe_path, source_root, rel_ec);
+        const auto first_component =
+            rel_exe_path.empty() ? std::filesystem::path{} : *rel_exe_path.begin();
+        const bool running_from_source_build =
+            !source_ec && !exe_ec && !rel_ec && !rel_exe_path.empty() &&
+            first_component.string().rfind("build", 0) == 0;
+        if (running_from_source_build) {
+            const auto source_pkg =
+                std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
+            std::error_code ec;
+            if (std::filesystem::is_directory(source_pkg, ec)) {
+                pythonpath = source_pkg.string();
+            }
         }
     }
 #endif
@@ -151,7 +186,7 @@ int run_python_module(const std::vector<std::string>& argv) {
 
 int cmd_build(const CliArgs& args) {
     std::vector<std::string> command = {
-        "python3",
+        build_python_executable(),
         "-m",
         "tensorrt_model_connect",
         "build",

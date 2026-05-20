@@ -84,7 +84,7 @@ run_step() {
 
 # Step 1: Build bundle
 run_step "Build .trtfb bundle" \
-    env TRTMC_PYTHON="$HF_PYTHON" "$BINARY" build --method torchtrt "$MODEL" -o "$BUNDLE_PATH" \
+    "$BINARY" build --method torchtrt "$MODEL" -o "$BUNDLE_PATH" \
         --max-cache-length "$MAX_CACHE_LENGTH" \
         --precision "$PRECISION"
 

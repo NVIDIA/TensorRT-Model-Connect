@@ -25,9 +25,6 @@ dependencies = [
 chronos = ["chronos-forecasting>=2.2.2"]
 test = ["pytest>=7.0", "torch>=2.0"]
 
-[project.scripts]
-trtmc = "tensorrt_model_connect.native_cli:main"
-
 [tool.conan-py-build.wheel]
 packages = ["tensorrt_model_connect/tensorrt_model_connect"]
 

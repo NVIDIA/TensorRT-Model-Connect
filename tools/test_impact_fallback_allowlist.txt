@@ -204,7 +204,6 @@ shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_ops.py
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/native_cli.py # packaged trtmc console wrapper; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
@@ -235,3 +234,4 @@ shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/f
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/native_cli.py # removed packaged console wrapper; broad builder impact is intentional

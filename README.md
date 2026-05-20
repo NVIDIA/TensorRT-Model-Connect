@@ -28,8 +28,8 @@ trtmc run /tmp/qwen3.trtfb \
   --greedy
 ```
 
-The wheel installs a `trtmc` console command, the Python builder dependencies
-including TensorRT, the native `trtmc` executable, and the TensorRT backend DSO.
+The wheel installs the native `trtmc` executable into the environment, the
+Python builder dependencies including TensorRT, and the TensorRT backend DSO.
 CUDA driver/runtime libraries still come from the host system.
 
 For source development, open Codex or another repo-aware coding agent and ask:

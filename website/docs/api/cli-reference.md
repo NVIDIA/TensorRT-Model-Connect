@@ -10,13 +10,11 @@ title: CLI Reference
 trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
 ```
 
-The C++ bridge runs `python3 -m tensorrt_model_connect build ...` using
-`python3` from `PATH`. Activate the environment you installed into, or invoke
-`python -m tensorrt_model_connect build ...` directly when you need a specific
-interpreter.
-When installed from the release wheel, the `trtmc` console command dispatches
-to the packaged native executable. The launcher does not select a Python
-interpreter or synthesize virtual-environment variables.
+The C++ bridge runs `python -m tensorrt_model_connect build ...`. When
+installed from the release wheel, `trtmc` is the native executable installed in
+the environment's `bin/` directory and it uses the sibling `python3` or
+`python` from that same environment. A source-built `./build/trtmc` falls back
+to `python3` from the user's shell.
 
 Source builds use the same subcommands through `./build/trtmc`.
 

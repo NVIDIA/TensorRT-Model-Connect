@@ -33,17 +33,24 @@ trtmc version
 trtmc build --help
 ```
 
+If you do not activate the environment, call the executable by path:
+
+```bash
+.venv-trtmc/bin/trtmc version
+```
+
 Use the `py310` wheel with Python 3.10 and the `py312` wheel with Python 3.12.
 Do not install one tag into the other interpreter version.
 The published wheel platform tag is `manylinux_2_35_aarch64`, matching the
 TensorRT CUDA 13 aarch64 pip wheels and requiring a glibc 2.35 or newer Linux
 host.
 
-The wheel installs the `trtmc` console command, the Python builder package,
-declared Python dependencies including `tensorrt>=10.16`, the native `trtmc`
-executable, and the packaged TensorRT backend DSOs. The wheel wrapper points
-the native executable at the installing Python environment and the
-dependency-installed TensorRT libraries. CUDA driver/runtime libraries still
+The wheel installs the native `trtmc` executable into the environment's
+`bin/` directory, the Python builder package, declared Python dependencies
+including `tensorrt>=10.16`, and the packaged TensorRT backend DSOs. For
+`trtmc build`, the executable uses the Python interpreter from the same
+environment when it is installed next to `python3`; source-built binaries fall
+back to `python3` from the user's shell. CUDA driver/runtime libraries still
 come from the host environment.
 
 ```bash
@@ -110,12 +117,16 @@ Use this path when you need to produce the same pip-installable artifact that
 nightly CI publishes. Run it from the repository root in an aarch64 CUDA
 development environment with Python 3.12, CMake, Ninja, Conan, `patchelf`,
 CUDA headers/libraries, TensorRT headers, and a TensorRT `libnvinfer.so`
-available. The provided Docker images install those prerequisites.
+available. Build on the CI image or another glibc 2.35-compatible aarch64
+environment; building on a newer host can produce a wheel that auditwheel
+correctly reports as requiring a newer `manylinux` tag. The provided Docker
+images install the expected prerequisites.
 
 The release wheel build uses the repository-root `pyproject.toml`, not
 `tensorrt_model_connect/pyproject.toml`. The root build invokes
-`conan-py-build`, which runs the root `conanfile.py`, drives CMake, and stages
-the native runtime artifacts into the wheel.
+`conan-py-build`, which runs the root `conanfile.py`, drives CMake, stages the
+native runtime artifacts under `tensorrt_model_connect/bin/`, and installs the
+native `trtmc` executable directly into the wheel's scripts directory.
 
 Build one py312 wheel:
 
@@ -175,6 +186,10 @@ python3.12 -m venv /tmp/trtmc-wheel-smoke
   dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
 /tmp/trtmc-wheel-smoke/bin/trtmc version
 ```
+
+That smoke path intentionally does not activate the venv or prepend
+`/tmp/trtmc-wheel-smoke/bin` to `PATH`; it matches a user invoking the installed
+executable directly.
 
 Do not use `python -m build tensorrt_model_connect/` for release wheels. That
 subdirectory is the editable developer package; it does not run the Conan/CMake

@@ -63,7 +63,7 @@ The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
 
 `tensorrt_model_connect/pyproject.toml` defines the editable Python builder package consumed by `trtmc build`. Use it for source development with `pip install -e tensorrt_model_connect/`.
 
-The repository-root `pyproject.toml` is the release-wheel build entry point. It uses `conan-py-build` and the root `conanfile.py` to run the native CMake build, then stages only the wheel runtime artifacts under `tensorrt_model_connect/bin/`: the native `trtmc` executable and TensorRT backend DSOs. The release wheel metadata declares TensorRT and the other Python builder dependencies.
+The repository-root `pyproject.toml` is the release-wheel build entry point. It uses `conan-py-build` and the root `conanfile.py` to run the native CMake build, then stages the wheel runtime artifacts under `tensorrt_model_connect/bin/`: the native `trtmc` executable and TensorRT backend DSOs. The same native `trtmc` executable is also staged into the wheel scripts directory so pip installs it directly into the target environment's `bin/` directory. The release wheel metadata declares TensorRT and the other Python builder dependencies.
 
 The Conan package recipe manages `nlohmann_json` for native wheel builds. TensorRT and CUDA are still supplied by the build environment and by pip/host runtime dependencies rather than by Conan recipes.
 
@@ -104,5 +104,5 @@ This is why extension work normally changes local plugin/schema files plus a man
 | `libtrtmc_backend_trt.so` | Standard TensorRT backend DSO. |
 | `libtrtmc_backend_trt_rtx.so` | Optional TensorRT-RTX backend DSO. |
 | `libtrtmc_tvm_ffi_plugin.so` | Optional TensorRT plugin for TVM-FFI kernels. |
-| `dist/tensorrt_model_connect-*.whl` | Python wheel containing the builder package, `trtmc` console entry point, packaged native executable, and backend DSOs. |
+| `dist/tensorrt_model_connect-*.whl` | Python wheel containing the builder package, directly installed native `trtmc` executable, packaged native executable copy, and backend DSOs. |
 | `website/build/` | Static Docusaurus docs output. |

@@ -12,7 +12,7 @@ pip install -e tensorrt_model_connect/
 
 Use `pip install --no-deps -e tensorrt_model_connect/` only in a dev container that already has the declared dependencies installed. In a fresh Python environment, skipping dependencies will hide required packages such as `transformers`, `safetensors`, `onnx`, `onnxscript`, and `tensorrt`.
 The release wheel installs the same builder package plus the native `trtmc`
-launcher and declares TensorRT as a dependency; use the wheel when you want
+executable and declares TensorRT as a dependency; use the wheel when you want
 `trtmc build` and `trtmc run` available from one pip install.
 
 ## Python usage

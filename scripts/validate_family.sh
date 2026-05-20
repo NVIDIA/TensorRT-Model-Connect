@@ -88,7 +88,7 @@ run_step() {
 
 # Step 1: Build bundle
 run_step "Build bundle" \
-    env TRTMC_PYTHON="$HF_PYTHON" "$BINARY" build "$MODEL" -o "$BUNDLE_PATH" \
+    "$BINARY" build "$MODEL" -o "$BUNDLE_PATH" \
         --max-cache-length "$MAX_CACHE_LENGTH"
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools

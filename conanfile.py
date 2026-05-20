@@ -50,7 +50,13 @@ class TensorRTModelConnectConan(ConanFile):
 
     def package(self) -> None:
         package_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"
+        wheel_data_scripts = (
+            Path(self.package_folder)
+            / f"{self.name.replace('-', '_')}-{self.version}.data"
+            / "scripts"
+        )
         copy(self, "trtmc", src=self.build_folder, dst=str(package_bin), keep_path=False)
+        copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
         copy(
             self,
             "libtrtmc_backend_trt*.so*",
@@ -60,11 +66,15 @@ class TensorRTModelConnectConan(ConanFile):
         )
 
         native = package_bin / "trtmc"
+        installed_script = wheel_data_scripts / "trtmc"
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
         if not native.is_file():
             raise ConanException("TRTMC native executable was not staged into the wheel package")
+        if not installed_script.is_file():
+            raise ConanException("TRTMC native executable was not staged as the wheel script")
         if not backends:
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
 
-        mode = native.stat().st_mode
-        native.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        for executable in (native, installed_script):
+            mode = executable.stat().st_mode
+            executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

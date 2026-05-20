@@ -153,6 +153,8 @@ def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64' in text
     assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
     assert 'native wheel must not contain .data/purelib entries' in text
+    assert ".data/scripts/trtmc" in text
+    assert "native trtmc must be installed directly, not via console_scripts" in text
     assert '"auditwheel>=6.2"' in text
     assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
     assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
@@ -172,7 +174,7 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     assert 'requires = ["conan-py-build==0.4.3"]' in text
     assert 'build-backend = "conan_py_build.build"' in text
     assert 'packages = ["tensorrt_model_connect/tensorrt_model_connect"]' in text
-    assert 'trtmc = "tensorrt_model_connect.native_cli:main"' in text
+    assert "[project.scripts]" not in text
 
 
 def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
@@ -184,6 +186,9 @@ def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
     assert "select_wheel_by_tag py312 dist" in smoke_block
     assert "python312_bin" in smoke_block
     assert "select_compatible_wheel" not in smoke_block
+    assert 'PATH="$smoke_venv/bin:$PATH"' not in smoke_block
+    assert '"$smoke_venv/bin/trtmc" build "$model_id"' in smoke_block
+    assert 'b"\\x7fELF"' in smoke_block
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:

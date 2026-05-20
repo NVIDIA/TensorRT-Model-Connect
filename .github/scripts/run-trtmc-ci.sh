@@ -640,6 +640,7 @@ for wheel in sys.argv[1:]:
         if any(".data/purelib/" in name for name in names):
             raise SystemExit(f"{wheel}: native wheel must not install package files via purelib")
         bin_entries = [name for name in names if name.endswith("/bin/trtmc")]
+        script_entries = [name for name in names if name.endswith(".data/scripts/trtmc")]
         backend_entries = [
             name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
         ]
@@ -651,6 +652,10 @@ for wheel in sys.argv[1:]:
         ).decode()
     if len(bin_entries) != 1:
         raise SystemExit(f"{wheel}: expected one packaged trtmc executable")
+    if len(script_entries) != 1:
+        raise SystemExit(f"{wheel}: expected one native trtmc script executable")
+    if any(name.endswith(".dist-info/entry_points.txt") for name in names):
+        raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
     if "Requires-Dist: tensorrt>=10.16" not in metadata:
@@ -677,7 +682,7 @@ for wheel in sys.argv[1:]:
             f"manylinux_2_{MAX_GLIBC_MINOR}_aarch64 or older"
         )
     print(f"validated wheel={wheel}")
-    for entry in sorted([*bin_entries, *backend_entries]):
+    for entry in sorted([*bin_entries, *script_entries, *backend_entries]):
         print(f"  {entry}")
 PY
 
@@ -688,6 +693,14 @@ PY
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$install_wheel"
+  "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
+from pathlib import Path
+import sys
+
+trtmc = Path(sys.argv[1])
+if trtmc.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
+PY
   "$smoke_venv/bin/trtmc" version
   "$smoke_venv/bin/trtmc" --help >/tmp/trtmc-help.txt
   "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
@@ -731,13 +744,19 @@ run_wheel_qwen_smoke() {
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   "$smoke_venv/bin/python" -m pip check
-  env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
-    PATH="$smoke_venv/bin:$PATH" \
+  "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
+from pathlib import Path
+import sys
+
+trtmc = Path(sys.argv[1])
+if trtmc.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
+PY
+  env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
     "$smoke_venv/bin/trtmc" version
 
   run_with_timeout "${TRTMC_WHEEL_QWEN_BUILD_TIMEOUT:-45m}" \
-    env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
-      PATH="$smoke_venv/bin:$PATH" \
+    env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
       TRTMC_TRT_TIMING_CACHE_PATH="$timing_cache" \
       TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL:-1}" \
       "$smoke_venv/bin/trtmc" build "$model_id" \
@@ -745,13 +764,11 @@ run_wheel_qwen_smoke() {
         --max-cache-length "$max_cache" \
         --precision fp16
 
-  env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
-    PATH="$smoke_venv/bin:$PATH" \
+  env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
     "$smoke_venv/bin/trtmc" inspect --list-engines "$bundle"
 
   run_with_timeout "${TRTMC_WHEEL_QWEN_RUN_TIMEOUT:-10m}" \
-    env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
-      PATH="$smoke_venv/bin:$PATH" \
+    env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
       "$smoke_venv/bin/trtmc" run "$bundle" \
         --prompt "The capital of France is" \
         --max-new-tokens "$max_new_tokens" \
