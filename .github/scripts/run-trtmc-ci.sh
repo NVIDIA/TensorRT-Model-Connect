@@ -732,10 +732,12 @@ run_wheel_qwen_smoke() {
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   "$smoke_venv/bin/python" -m pip check
   env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    PATH="$smoke_venv/bin:$PATH" \
     "$smoke_venv/bin/trtmc" version
 
   run_with_timeout "${TRTMC_WHEEL_QWEN_BUILD_TIMEOUT:-45m}" \
     env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      PATH="$smoke_venv/bin:$PATH" \
       TRTMC_TRT_TIMING_CACHE_PATH="$timing_cache" \
       TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL:-1}" \
       "$smoke_venv/bin/trtmc" build "$model_id" \
@@ -744,10 +746,12 @@ run_wheel_qwen_smoke() {
         --precision fp16
 
   env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    PATH="$smoke_venv/bin:$PATH" \
     "$smoke_venv/bin/trtmc" inspect --list-engines "$bundle"
 
   run_with_timeout "${TRTMC_WHEEL_QWEN_RUN_TIMEOUT:-10m}" \
     env -u VIRTUAL_ENV -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      PATH="$smoke_venv/bin:$PATH" \
       "$smoke_venv/bin/trtmc" run "$bundle" \
         --prompt "The capital of France is" \
         --max-new-tokens "$max_new_tokens" \

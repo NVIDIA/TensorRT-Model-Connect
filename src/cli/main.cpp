@@ -75,8 +75,18 @@ std::string build_pythonpath() {
     std::string pythonpath;
 
 #ifdef TRTMC_SOURCE_DIR
-    const char* disable_source_pythonpath = std::getenv("TRTMC_DISABLE_SOURCE_PYTHONPATH");
-    if (!disable_source_pythonpath || disable_source_pythonpath[0] == '\0') {
+    std::error_code source_ec;
+    std::error_code exe_ec;
+    const auto source_root = std::filesystem::weakly_canonical(TRTMC_SOURCE_DIR, source_ec);
+    const auto exe_path = std::filesystem::weakly_canonical("/proc/self/exe", exe_ec);
+    std::error_code rel_ec;
+    const auto rel_exe_path = std::filesystem::relative(exe_path, source_root, rel_ec);
+    const auto first_component =
+        rel_exe_path.empty() ? std::filesystem::path{} : *rel_exe_path.begin();
+    const bool running_from_source_build =
+        !source_ec && !exe_ec && !rel_ec && !rel_exe_path.empty() &&
+        first_component.string().rfind("build", 0) == 0;
+    if (running_from_source_build) {
         const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
         std::error_code ec;
         if (std::filesystem::is_directory(source_pkg, ec)) {
@@ -92,39 +102,6 @@ std::string build_pythonpath() {
         pythonpath += existing;
     }
     return pythonpath;
-}
-
-std::optional<std::string> env_value(const char* name) {
-    const char* value = std::getenv(name);
-    if (!value || value[0] == '\0')
-        return std::nullopt;
-    return std::string(value);
-}
-
-std::optional<std::string> python_from_prefix(const std::string& prefix) {
-    for (const char* rel : {"bin/python", "bin/python3"}) {
-        const auto candidate = std::filesystem::path(prefix) / rel;
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(candidate, ec))
-            return candidate.string();
-    }
-    return std::nullopt;
-}
-
-std::string build_python_executable() {
-    if (auto python = env_value("TRTMC_PYTHON"))
-        return *python;
-    if (auto python = env_value("PYTHON"))
-        return *python;
-    if (auto venv = env_value("VIRTUAL_ENV")) {
-        if (auto python = python_from_prefix(*venv))
-            return *python;
-    }
-    if (auto conda = env_value("CONDA_PREFIX")) {
-        if (auto python = python_from_prefix(*conda))
-            return *python;
-    }
-    return "python3";
 }
 
 int run_python_module(const std::vector<std::string>& argv) {
@@ -174,7 +151,7 @@ int run_python_module(const std::vector<std::string>& argv) {
 
 int cmd_build(const CliArgs& args) {
     std::vector<std::string> command = {
-        build_python_executable(),
+        "python3",
         "-m",
         "tensorrt_model_connect",
         "build",
