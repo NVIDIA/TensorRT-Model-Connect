@@ -104,6 +104,82 @@ host loader path.
 
 The core runtime does not directly link `libnvinfer`. TensorRT execution lives behind backend DSOs loaded at runtime. The standard DSO is `libtrtmc_backend_trt.so`, with an ABI-suffixed alias when TensorRT headers expose a major/minor version.
 
+## Build a release wheel
+
+Use this path when you need to produce the same pip-installable artifact that
+nightly CI publishes. Run it from the repository root in an aarch64 CUDA
+development environment with Python 3.12, CMake, Ninja, Conan, `patchelf`,
+CUDA headers/libraries, TensorRT headers, and a TensorRT `libnvinfer.so`
+available. The provided Docker images install those prerequisites.
+
+The release wheel build uses the repository-root `pyproject.toml`, not
+`tensorrt_model_connect/pyproject.toml`. The root build invokes
+`conan-py-build`, which runs the root `conanfile.py`, drives CMake, and stages
+the native runtime artifacts into the wheel.
+
+Build one py312 wheel:
+
+```bash
+python -m pip install --upgrade build auditwheel
+rm -rf dist /tmp/trtmc-conan-py-wheel-py312
+
+CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+TRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+TRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+TRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+WHEEL_PYVER=py312 \
+WHEEL_ABI=none \
+WHEEL_ARCH=manylinux_2_35_aarch64 \
+python -m build --wheel --outdir "$PWD/dist" \
+  -C build-dir=/tmp/trtmc-conan-py-wheel-py312 \
+  .
+
+python -m auditwheel show dist/tensorrt_model_connect-*-py312-none-manylinux_2_35_aarch64.whl
+```
+
+Build both release tags:
+
+```bash
+python -m pip install --upgrade build auditwheel
+rm -rf dist /tmp/trtmc-conan-py-wheel
+
+for tag in py310 py312; do
+  CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+  TRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  TRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  TRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+  WHEEL_PYVER="$tag" \
+  WHEEL_ABI=none \
+  WHEEL_ARCH=manylinux_2_35_aarch64 \
+  python -m build --wheel --outdir "$PWD/dist" \
+    -C "build-dir=/tmp/trtmc-conan-py-wheel/$tag" \
+    .
+done
+```
+
+The expected outputs are:
+
+```text
+dist/tensorrt_model_connect-0.1.0-py310-none-manylinux_2_35_aarch64.whl
+dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
+```
+
+Install and smoke-test a built wheel in a fresh environment:
+
+```bash
+python3.12 -m venv /tmp/trtmc-wheel-smoke
+/tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
+/tmp/trtmc-wheel-smoke/bin/python -m pip install \
+  dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
+/tmp/trtmc-wheel-smoke/bin/trtmc version
+```
+
+Do not use `python -m build tensorrt_model_connect/` for release wheels. That
+subdirectory is the editable developer package; it does not run the Conan/CMake
+native build or stage the release wheel runtime artifacts.
+
 ## Optional build switches
 
 | Switch | Default | Purpose |
