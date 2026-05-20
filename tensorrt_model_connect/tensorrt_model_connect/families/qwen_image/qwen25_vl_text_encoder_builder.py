@@ -60,7 +60,7 @@ Trace: ARCH-FAM-001, UD-FAM-QWEN-IMAGE-01, UT-QWEN-IMAGE-TEXT-ENCODER-001.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -95,6 +95,7 @@ class Qwen25VLTextEncoderConfig:
     rms_norm_eps: float = 1e-6
     max_seq_len: int = 1024
     apply_final_norm: bool = True
+    mrope_section: list[int] = field(default_factory=lambda: [16, 24, 24])
 
 
 def _as_numpy(value, *, name: str) -> np.ndarray:
@@ -169,11 +170,159 @@ def _prepare_weights(
     return embed, wd, final_norm
 
 
+def _make_qwen25vl_mrope_full_tables(
+    *,
+    max_seq_len: int,
+    head_dim: int,
+    rope_theta: float,
+    mrope_section: list[int],
+    image_token_start: int,
+    image_grid_thw: tuple[int, int, int],
+    spatial_merge_size: int,
+    tokens_per_second: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute Qwen2.5-VL full-dim mRoPE cos/sin tables for one image.
+
+    HF applies mRoPE after expanding the single ``<|image_pad|>`` marker into
+    one token per merged vision patch. Text before the image uses standard 1D
+    positions. Image rows use temporal/height/width positions, offset by the
+    pre-image text length. Text after the image starts at ``max(image_pos)+1``,
+    not at the raw sequence index after all image placeholders.
+    """
+    if max_seq_len <= 0 or head_dim <= 0 or head_dim % 2 != 0:
+        raise ValueError("max_seq_len and even head_dim must be positive")
+    if len(mrope_section) != 3 or sum(mrope_section) != head_dim // 2:
+        raise ValueError(
+            "mrope_section must have three entries summing to head_dim // 2"
+        )
+    if image_token_start < 0:
+        raise ValueError("image_token_start must be non-negative")
+    if spatial_merge_size <= 0 or tokens_per_second <= 0:
+        raise ValueError("spatial_merge_size and tokens_per_second must be positive")
+
+    grid_t, grid_h, grid_w = (int(v) for v in image_grid_thw)
+    if grid_t <= 0 or grid_h <= 0 or grid_w <= 0:
+        raise ValueError("image_grid_thw entries must be positive")
+    if grid_h % spatial_merge_size or grid_w % spatial_merge_size:
+        raise ValueError("image_grid_thw spatial axes must be divisible by merge size")
+
+    llm_grid_h = grid_h // spatial_merge_size
+    llm_grid_w = grid_w // spatial_merge_size
+    image_tokens = grid_t * llm_grid_h * llm_grid_w
+    if image_token_start + image_tokens > max_seq_len:
+        raise ValueError(
+            "image_token_start + image tokens exceeds max_seq_len: "
+            f"{image_token_start} + {image_tokens} > {max_seq_len}"
+        )
+
+    position_ids = np.zeros((3, max_seq_len), dtype=np.int64)
+    if image_token_start:
+        text_before = np.arange(image_token_start, dtype=np.int64)
+        position_ids[:, :image_token_start] = text_before[None, :]
+
+    token_base = image_token_start
+    t_index = (
+        np.arange(grid_t, dtype=np.int64).reshape(-1, 1)
+        * int(tokens_per_second)
+    )
+    t_index = np.broadcast_to(t_index, (grid_t, llm_grid_h * llm_grid_w)).reshape(-1)
+    h_index = np.broadcast_to(
+        np.arange(llm_grid_h, dtype=np.int64).reshape(1, -1, 1),
+        (grid_t, llm_grid_h, llm_grid_w),
+    ).reshape(-1)
+    w_index = np.broadcast_to(
+        np.arange(llm_grid_w, dtype=np.int64).reshape(1, 1, -1),
+        (grid_t, llm_grid_h, llm_grid_w),
+    ).reshape(-1)
+    image_slice = slice(image_token_start, image_token_start + image_tokens)
+    position_ids[:, image_slice] = (
+        np.stack([t_index, h_index, w_index], axis=0) + token_base
+    )
+
+    tail_start = image_token_start + image_tokens
+    tail_len = max_seq_len - tail_start
+    if tail_len:
+        tail_pos_start = int(position_ids[:, image_slice].max()) + 1
+        tail = np.arange(tail_pos_start, tail_pos_start + tail_len, dtype=np.int64)
+        position_ids[:, tail_start:] = tail[None, :]
+
+    inv_freq = 1.0 / (
+        rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim)
+    )
+    freqs = position_ids[:, :, None].astype(np.float64) * inv_freq[None, None, :]
+    emb = np.concatenate([freqs, freqs], axis=-1)
+
+    section = [int(v) * 2 for v in mrope_section]
+    starts = np.cumsum([0] + section[:-1])
+    parts = [
+        emb[axis, :, start:start + width]
+        for axis, (start, width) in enumerate(zip(starts, section))
+    ]
+    full = np.concatenate(parts, axis=-1)
+    return np.cos(full).astype(np.float32), np.sin(full).astype(np.float32)
+
+
+def _apply_full_rope_table(
+    network: "trt.INetworkDefinition",
+    inp: "trt.ITensor",
+    *,
+    num_heads: int,
+    head_dim: int,
+    cos_full: "trt.ITensor",
+    sin_full: "trt.ITensor",
+    sequence_length: int,
+) -> "trt.ITensor":
+    """Apply rotate-half RoPE with full-dim per-position cos/sin tables."""
+    hidden_size = num_heads * head_dim
+    half = head_dim // 2
+
+    rows_heads = network.add_shuffle(inp)
+    rows_heads.reshape_dims = (sequence_length, num_heads, head_dim)
+
+    cos = network.add_shuffle(cos_full)
+    cos.reshape_dims = (sequence_length, 1, head_dim)
+    sin = network.add_shuffle(sin_full)
+    sin.reshape_dims = (sequence_length, 1, head_dim)
+
+    x1 = network.add_slice(
+        rows_heads.get_output(0),
+        start=(0, 0, 0),
+        shape=(sequence_length, num_heads, half),
+        stride=(1, 1, 1),
+    ).get_output(0)
+    x2 = network.add_slice(
+        rows_heads.get_output(0),
+        start=(0, 0, half),
+        shape=(sequence_length, num_heads, half),
+        stride=(1, 1, 1),
+    ).get_output(0)
+    neg_x2 = network.add_unary(x2, trt.UnaryOperation.NEG).get_output(0)
+    rotated = network.add_concatenation([neg_x2, x1])
+    rotated.axis = 2
+
+    direct = network.add_elementwise(
+        rows_heads.get_output(0), cos.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    cross = network.add_elementwise(
+        rotated.get_output(0), sin.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    out = network.add_elementwise(direct, cross, trt.ElementWiseOperation.SUM)
+
+    rows = network.add_shuffle(out.get_output(0))
+    rows.reshape_dims = (sequence_length, hidden_size)
+    return rows.get_output(0)
+
+
 def build_qwen25vl_text_encoder_engine(
     cfg: Qwen25VLTextEncoderConfig,
     weights: Mapping[str, "np.ndarray"],
     out_path: Path | str,
     *,
+    enable_image_inputs: bool = False,
+    image_token_start: int = 65,
+    image_grid_thw: tuple[int, int, int] | None = None,
+    vision_spatial_merge_size: int = 2,
+    vision_tokens_per_second: int = 2,
     verbose: bool = False,
 ) -> Path:
     """Build the TRT engine and serialize the plan to ``out_path``.
@@ -198,6 +347,15 @@ def build_qwen25vl_text_encoder_engine(
             Required when ``cfg.apply_final_norm=True``:
               - ``model.norm.weight``                                  [hidden]
         out_path: Where to write the serialized TRT plan.
+        enable_image_inputs: Add ``image_hidden`` and ``image_mask`` inputs
+            and splice image features into ``input_ids`` embeddings at masked
+            rows. Used by Qwen-Image Edit bundles.
+        image_token_start: Raw prompt-token index of the first expanded
+            ``<|image_pad|>`` marker. Used only when ``enable_image_inputs``.
+        image_grid_thw: Raw Qwen2.5-VL patch grid ``(T, H, W)`` for the image
+            used to build the static vision/text plan.
+        vision_spatial_merge_size: Qwen2.5-VL spatial merge size.
+        vision_tokens_per_second: Qwen2.5-VL temporal mRoPE scale.
         verbose: Enable TRT verbose logging.
 
     Returns:
@@ -243,6 +401,12 @@ def build_qwen25vl_text_encoder_engine(
     # ---- Engine inputs (stay fp32 -- C++ runtime / debug runner bind fp32). ----
     input_ids = network.add_input("input_ids", trt.int32, (max_S,))
     attn_mask_1d = network.add_input("attention_mask", trt.float32, (max_S,))
+    image_hidden = None
+    image_mask_1d = None
+    if enable_image_inputs:
+        image_hidden = network.add_input(
+            "image_hidden", trt.float32, (max_S, cfg.hidden_size))
+        image_mask_1d = network.add_input("image_mask", trt.float32, (max_S,))
 
     # ---- Shared constants. ----
     # eps stored in work dtype so it doesn't constantly need upcasting.
@@ -256,21 +420,67 @@ def build_qwen25vl_text_encoder_engine(
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
     if hidden.dtype != work_trt_dtype:
         hidden = network.add_cast(hidden, work_trt_dtype).get_output(0)
+    if enable_image_inputs:
+        assert image_hidden is not None
+        assert image_mask_1d is not None
+        image_hidden_bf16 = network.add_cast(image_hidden, work_trt_dtype).get_output(0)
+        mask_reshape = network.add_shuffle(image_mask_1d)
+        mask_reshape.reshape_dims = (max_S, 1)
+        image_mask_bf16 = network.add_cast(mask_reshape.get_output(0), work_trt_dtype).get_output(0)
+        one = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        one = graph_blocks.cast_to_dtype(network, one, work_trt_dtype)
+        text_mask_bf16 = network.add_elementwise(
+            one, image_mask_bf16, trt.ElementWiseOperation.SUB).get_output(0)
+        text_part = network.add_elementwise(
+            hidden, text_mask_bf16, trt.ElementWiseOperation.PROD).get_output(0)
+        image_part = network.add_elementwise(
+            image_hidden_bf16, image_mask_bf16, trt.ElementWiseOperation.PROD).get_output(0)
+        hidden = network.add_elementwise(
+            text_part, image_part, trt.ElementWiseOperation.SUM).get_output(0)
 
-    # RoPE half-dim cos/sin tables (TRT native IRotaryEmbeddingLayer contract).
-    # 1D positions [0..max_S-1] -- text-only path; see module docstring.
-    cos_half_np = graph_ops.make_rope_table_half_dim(
-        max_S, cfg.head_dim, cfg.rope_theta, cosine=True)
-    sin_half_np = graph_ops.make_rope_table_half_dim(
-        max_S, cfg.head_dim, cfg.rope_theta, cosine=False)
-    cos_half = graph_ops.add_constant(
-        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-    cos_half = graph_blocks.cast_to_dtype(network, cos_half, work_trt_dtype)
-    sin_half = graph_ops.add_constant(
-        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-    sin_half = graph_blocks.cast_to_dtype(network, sin_half, work_trt_dtype)
-    rope_position_ids = graph_ops.add_constant(
-        network, (max_S,), np.arange(max_S, dtype=np.int32), dtype=np.int32)
+    # RoPE tables. Text-only Qwen-Image uses standard 1D RoPE. Edit-mode
+    # Qwen2.5-VL needs full-dim mRoPE because image tokens occupy the middle
+    # of the sequence and the text tail resumes at max(image 3D position)+1.
+    cos_half = None
+    sin_half = None
+    rope_position_ids = None
+    cos_full = None
+    sin_full = None
+    if enable_image_inputs:
+        if image_grid_thw is None:
+            raise ValueError("image_grid_thw is required when enable_image_inputs=True")
+        cos_full_np, sin_full_np = _make_qwen25vl_mrope_full_tables(
+            max_seq_len=max_S,
+            head_dim=cfg.head_dim,
+            rope_theta=cfg.rope_theta,
+            mrope_section=list(cfg.mrope_section),
+            image_token_start=int(image_token_start),
+            image_grid_thw=image_grid_thw,
+            spatial_merge_size=int(vision_spatial_merge_size),
+            tokens_per_second=int(vision_tokens_per_second),
+        )
+        cos_full = graph_ops.add_constant(
+            network, cos_full_np.shape, cos_full_np, dtype=work_np_dtype)
+        cos_full = graph_blocks.cast_to_dtype(network, cos_full, work_trt_dtype)
+        sin_full = graph_ops.add_constant(
+            network, sin_full_np.shape, sin_full_np, dtype=work_np_dtype)
+        sin_full = graph_blocks.cast_to_dtype(network, sin_full, work_trt_dtype)
+    else:
+        # 1D positions [0..max_S-1] -- text-only path; see module docstring.
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            max_S, cfg.head_dim, cfg.rope_theta, cosine=True)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            max_S, cfg.head_dim, cfg.rope_theta, cosine=False)
+        cos_half = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+        cos_half = graph_blocks.cast_to_dtype(network, cos_half, work_trt_dtype)
+        sin_half = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+        sin_half = graph_blocks.cast_to_dtype(network, sin_half, work_trt_dtype)
+        rope_position_ids = graph_ops.add_constant(
+            network, (max_S,), np.arange(max_S, dtype=np.int32), dtype=np.int32)
 
     # ---- Combined causal + padding additive mask -> [1, 1, max_S, max_S]. ----
     # HF Qwen2.5-VL LM is causal (modeling_qwen2_5_vl.py: is_causal=True), so
@@ -319,15 +529,27 @@ def build_qwen25vl_text_encoder_engine(
         v = graph_ops.add_bias_sum(
             network, v, kv_dim, wd[f"{prefix}.v_bias"], dtype=work_np_dtype)
 
-        # Rotate-half RoPE via TRT native IRotaryEmbeddingLayer.
-        q = graph_ops.add_apply_rope_native(
-            network, q, cfg.num_heads, cfg.head_dim,
-            cos_half, sin_half, rope_position_ids,
-            cfg.head_dim, sequence_length=max_S)
-        k = graph_ops.add_apply_rope_native(
-            network, k, cfg.num_kv_heads, cfg.head_dim,
-            cos_half, sin_half, rope_position_ids,
-            cfg.head_dim, sequence_length=max_S)
+        if enable_image_inputs:
+            assert cos_full is not None
+            assert sin_full is not None
+            q = _apply_full_rope_table(
+                network, q, num_heads=cfg.num_heads, head_dim=cfg.head_dim,
+                cos_full=cos_full, sin_full=sin_full, sequence_length=max_S)
+            k = _apply_full_rope_table(
+                network, k, num_heads=cfg.num_kv_heads, head_dim=cfg.head_dim,
+                cos_full=cos_full, sin_full=sin_full, sequence_length=max_S)
+        else:
+            assert cos_half is not None
+            assert sin_half is not None
+            assert rope_position_ids is not None
+            q = graph_ops.add_apply_rope_native(
+                network, q, cfg.num_heads, cfg.head_dim,
+                cos_half, sin_half, rope_position_ids,
+                cfg.head_dim, sequence_length=max_S)
+            k = graph_ops.add_apply_rope_native(
+                network, k, cfg.num_kv_heads, cfg.head_dim,
+                cos_half, sin_half, rope_position_ids,
+                cfg.head_dim, sequence_length=max_S)
 
         # GQA scaled dot-product attention. ``add_attention_from_rows`` builds
         # the [1, H, S, D] reshape, applies 1/sqrt(D) Q-prescale, and runs
@@ -374,7 +596,9 @@ def build_qwen25vl_text_encoder_engine(
         f"[qwen25-vl-text-encoder] Building TRT engine (bf16 internal) "
         f"(layers={cfg.num_layers}, hidden={cfg.hidden_size}, "
         f"heads={cfg.num_heads}/{cfg.num_kv_heads}, head_dim={cfg.head_dim}, "
-        f"seq_len={max_S}, apply_final_norm={cfg.apply_final_norm}) ...",
+        f"seq_len={max_S}, apply_final_norm={cfg.apply_final_norm}, "
+        f"image_inputs={enable_image_inputs}, "
+        f"mrope={'on' if enable_image_inputs else 'off'}) ...",
         file=sys.stderr,
     )
 
@@ -482,6 +706,10 @@ def load_qwen25vl_text_encoder_weights(
         max_seq_len=int(max_seq_len),
         apply_final_norm=bool(apply_final_norm),
     )
+    rope_scaling = config_json.get("rope_scaling", inner.get("rope_scaling", {}))
+    mrope_section = rope_scaling.get("mrope_section") if isinstance(rope_scaling, dict) else None
+    if mrope_section:
+        cfg.mrope_section = [int(v) for v in mrope_section]
 
     safetensor_files = sorted(text_dir.glob("*.safetensors"))
     if not safetensor_files:

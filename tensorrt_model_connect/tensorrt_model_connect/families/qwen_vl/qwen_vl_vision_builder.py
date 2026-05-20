@@ -46,7 +46,10 @@ def _compute_vision_rope_tables(
     window_size: int = 112,
     patch_size: int = 14,
     rope_theta: float = 10000.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return_window_patch_counts: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     """Exact port of HF's rot_pos_emb() + get_window_index() for a fixed image.
 
     Matches HuggingFace's Qwen2_5_VisionTransformerPretrainedModel:
@@ -120,9 +123,13 @@ def _compute_vision_rope_tables(
     index_padded = index_padded.reshape(
         1, num_win_h, vit_merger_window_size,
         num_win_w, vit_merger_window_size)
-    index_padded = index_padded.transpose(0, 1, 3, 2, 4).reshape(-1)
+    index_padded = index_padded.transpose(0, 1, 3, 2, 4).reshape(
+        1, num_win_h * num_win_w, vit_merger_window_size, vit_merger_window_size)
 
-    window_index = index_padded[index_padded != -100].astype(np.int32)
+    window_group_counts = (index_padded != -100).sum(axis=(2, 3)).reshape(-1)
+    window_group_counts = window_group_counts[window_group_counts > 0].astype(np.int32)
+    index_flat = index_padded.reshape(-1)
+    window_index = index_flat[index_flat != -100].astype(np.int32)
     reverse_indices = np.argsort(window_index).astype(np.int32)
 
     # --- Step 5: Reorder pos_emb by window_index at merge-group level ---
@@ -140,6 +147,10 @@ def _compute_vision_rope_tables(
     cos_table = np.tile(cos, (1, num_heads))  # [num_patches, embed_dim]
     sin_table = np.tile(sin, (1, num_heads))
 
+    if return_window_patch_counts:
+        return cos_table, sin_table, window_index, reverse_indices, (
+            window_group_counts * merge_unit
+        ).astype(np.int32)
     return cos_table, sin_table, window_index, reverse_indices
 
 
@@ -152,6 +163,8 @@ def build_qwen_vl_vision_engine(
     weights: WeightDict,
     *,
     fixed_image_size: int = 448,
+    fixed_image_height: int | None = None,
+    fixed_image_width: int | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build complete Qwen2.5-VL vision encoder TRT engine.
@@ -162,7 +175,9 @@ def build_qwen_vl_vision_engine(
     Args:
         vision_config: The "vision_config" dict from the HF config.json.
         weights: Full weight dict (only "visual.*" keys are used).
-        fixed_image_size: Image height/width the engine is compiled for.
+        fixed_image_size: Square image height/width fallback.
+        fixed_image_height: Optional rectangular image height.
+        fixed_image_width: Optional rectangular image width.
         verbose: Print detailed logs.
 
     Returns:
@@ -183,9 +198,16 @@ def build_qwen_vl_vision_engine(
     eps_val = vision_config.get("layer_norm_eps", 1e-6)
     rope_theta = float(vision_config.get("rope_theta", 10000.0))
 
+    fixed_h = int(fixed_image_height if fixed_image_height is not None else fixed_image_size)
+    fixed_w = int(fixed_image_width if fixed_image_width is not None else fixed_image_size)
+    if fixed_h <= 0 or fixed_w <= 0:
+        raise ValueError("fixed image dimensions must be positive")
+    if fixed_h % patch_size or fixed_w % patch_size:
+        raise ValueError("fixed image dimensions must be divisible by patch_size")
+
     # Compute grid dimensions for fixed image size
-    grid_h = fixed_image_size // patch_size
-    grid_w = fixed_image_size // patch_size
+    grid_h = fixed_h // patch_size
+    grid_w = fixed_w // patch_size
     num_patches = grid_h * grid_w
     num_merged = num_patches // (merge_size * merge_size)
 
@@ -199,7 +221,7 @@ def build_qwen_vl_vision_engine(
         text_hidden_size = vision_config.get("text_hidden_size", embed_dim)
 
     if verbose:
-        print(f"[trtmc build] Vision: image={fixed_image_size}, "
+        print(f"[trtmc build] Vision: image={fixed_h}x{fixed_w}, "
               f"grid={grid_h}x{grid_w}, patches={num_patches}, "
               f"merged={num_merged}, embed={embed_dim}, "
               f"text_hidden={text_hidden_size}", file=sys.stderr)
@@ -220,7 +242,7 @@ def build_qwen_vl_vision_engine(
     input_channels = temporal_patch_size * in_channels
     pixel_values = network.add_input(
         "pixel_values", trt.float32,
-        (input_channels, fixed_image_size, fixed_image_size))
+        (input_channels, fixed_h, fixed_w))
 
     # ---------------------------------------------------------------
     # Stage 1: 3D Patch Embedding (conv)
@@ -247,11 +269,12 @@ def build_qwen_vl_vision_engine(
     window_size = int(vision_config.get("window_size", 112))
     merge_unit = merge_size * merge_size
 
-    cos_table, sin_table, window_index, reverse_indices = \
+    cos_table, sin_table, window_index, reverse_indices, window_patch_counts = \
         _compute_vision_rope_tables(
             grid_h, grid_w, embed_dim, num_heads,
             merge_size=merge_size, window_size=window_size,
-            patch_size=patch_size, rope_theta=rope_theta)
+            patch_size=patch_size, rope_theta=rope_theta,
+            return_window_patch_counts=True)
 
     # Windowed vs full attention config
     vit_merger_window_size = window_size // merge_size // patch_size
@@ -259,8 +282,9 @@ def build_qwen_vl_vision_engine(
     merged_per_window = vit_merger_window_size * vit_merger_window_size
     # Number of patches per window (e.g. 16 * 4 = 64)
     patches_per_window = merged_per_window * merge_unit
-    # Number of windows
-    num_windows = num_merged // merged_per_window
+    # Number of real, non-empty windows. Edge windows can be partial when the
+    # processor's smart-resized image is not window-aligned.
+    num_windows = int(len(window_patch_counts))
 
     fullatt_block_indexes = set(
         vision_config.get("fullatt_block_indexes", [7, 15, 23, 31]))
@@ -272,6 +296,7 @@ def build_qwen_vl_vision_engine(
               f"vit_merger_window_size={vit_merger_window_size}, "
               f"num_windows={num_windows}, "
               f"patches_per_window={patches_per_window}, "
+              f"actual_window_patch_counts={window_patch_counts.tolist()}, "
               f"fullatt_blocks={sorted(fullatt_block_indexes)}",
               file=sys.stderr)
 
@@ -364,7 +389,7 @@ def build_qwen_vl_vision_engine(
                 network, normed, **attn_kwargs)
         else:
             attn_out = graph_ops.add_windowed_self_attention_with_rope(
-                network, normed, num_windows=num_windows, **attn_kwargs)
+                network, normed, window_patch_counts=window_patch_counts, **attn_kwargs)
 
         # Residual
         res1 = network.add_elementwise(

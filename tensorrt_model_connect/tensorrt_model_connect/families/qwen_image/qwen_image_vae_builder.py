@@ -119,6 +119,7 @@ class QwenImageVAEConfig:
         default_factory=lambda: [False, True, True]
     )
     input_channels: int = 3
+    attn_scales: list[float] = field(default_factory=list)
     latents_mean: list[float] = field(
         default_factory=lambda: [
             -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517,
@@ -356,6 +357,51 @@ def _bf16_spatial_upsample_with_conv(
         kernel_size=(1, 3, 3),
         padding=(0, 1, 1),
     )
+
+
+def _bf16_spatial_downsample_with_conv(
+    network: "trt.INetworkDefinition",
+    inp: "trt.ITensor",
+    weight: np.ndarray,
+    bias: np.ndarray | None,
+) -> "trt.ITensor":
+    """ZeroPad2d((0,1,0,1)) + stride-2 Conv2d over each frame.
+
+    Mirrors QwenImageResample(mode="downsample2d"/"downsample3d") for the
+    first image frame. For downsample3d, HF caches the first frame and skips
+    the temporal convolution, so image-mode encoding only needs this spatial
+    branch.
+    """
+    b, c, t, h, w = inp.shape
+
+    # Pad right and bottom by 1: [B,C,T,H,W] -> [B*T,C,H+1,W+1].
+    reshape_in = network.add_shuffle(inp)
+    reshape_in.first_transpose = trt.Permutation([0, 2, 1, 3, 4])
+    reshape_in.reshape_dims = (b * t, c, h, w)
+
+    pad = network.add_padding_nd(
+        reshape_in.get_output(0),
+        pre_padding=(0, 0),
+        post_padding=(1, 1),
+    )
+
+    conv_out = _bf16_conv2d(
+        network,
+        pad.get_output(0),
+        weight,
+        bias,
+        out_channels=weight.shape[0],
+        kernel_hw=(3, 3),
+        stride_hw=(2, 2),
+        padding_hw=(0, 0),
+    )
+
+    h_out = (h + 1 - 3) // 2 + 1
+    w_out = (w + 1 - 3) // 2 + 1
+    reshape_out = network.add_shuffle(conv_out)
+    reshape_out.reshape_dims = (b, t, weight.shape[0], h_out, w_out)
+    reshape_out.second_transpose = trt.Permutation([0, 2, 1, 3, 4])
+    return reshape_out.get_output(0)
 
 
 def _bf16_l2_channel_norm(
@@ -599,6 +645,198 @@ def _make_unnorm_constants(
 # ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
+
+def build_qwen_image_vae_encoder_engine(
+    cfg: QwenImageVAEConfig,
+    weights: Mapping[str, "np.ndarray"],
+    out_path: Path | str,
+    *,
+    image_h: int = 1024,
+    image_w: int = 1024,
+    verbose: bool = False,
+) -> Path:
+    """Build the Qwen-Image VAE encoder TRT engine and serialise the plan.
+
+    The engine consumes an RGB image tensor in HF VAE convention
+    ``[1, 3, 1, H, W]`` with values in ``[-1, 1]`` and emits the posterior
+    mode/mean ``[1, z_dim, 1, H/8, W/8]`` named ``latent``. The C++ runtime
+    applies Qwen's `(latent - latents_mean) / latents_std` normalization
+    after this engine returns.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cfg.input_channels != 3:
+        raise ValueError(
+            "Qwen-Image VAE only supports input_channels=3 (RGB input)"
+        )
+    if image_h <= 0 or image_w <= 0:
+        raise ValueError("image_h/image_w must be positive")
+    if image_h % cfg.spatial_compression_ratio != 0 or image_w % cfg.spatial_compression_ratio != 0:
+        raise ValueError(
+            "VAE encoder image_h/image_w must be divisible by spatial_compression_ratio"
+        )
+
+    _BF16_WEIGHT_REFS.clear()
+
+    z_dim = cfg.z_dim
+    base = cfg.base_dim
+    dim_mult = list(cfg.dim_mult)
+    num_res = cfg.num_res_blocks
+    channels_list = [base * m for m in [1] + dim_mult]
+
+    def take(name: str) -> np.ndarray:
+        if name not in weights:
+            raise KeyError(f"missing required weight: {name!r}")
+        return _as_numpy(weights[name], name=name)
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    config.clear_flag(trt.BuilderFlag.TF32)
+
+    batch = 1
+    cur_h, cur_w = image_h, image_w
+
+    image_fp32 = network.add_input(
+        "image", trt.float32, (batch, 3, 1, image_h, image_w)
+    )
+    x = _to_bf16(network, image_fp32)
+
+    # Initial image-mode causal conv.
+    ci_cache = _zero_cache_constant(
+        network, batch=batch, channels=3, h=cur_h, w=cur_w)
+    x = _bf16_causal_conv3d(
+        network, x, ci_cache,
+        weight=take("encoder.conv_in.weight"),
+        bias=take("encoder.conv_in.bias"),
+        out_channels=channels_list[0],
+        kernel_size=(3, 3, 3),
+        padding_hw=(1, 1),
+    )
+    cur_ch = channels_list[0]
+
+    scale = 1.0
+    for level, (in_ch_base, out_ch) in enumerate(zip(channels_list[:-1], channels_list[1:])):
+        in_ch = in_ch_base
+        for block in range(num_res):
+            prefix = f"encoder.down_blocks.{level * (num_res + 1) + block}"
+            c1 = _zero_cache_constant(
+                network, batch=batch, channels=in_ch, h=cur_h, w=cur_w)
+            c2 = _zero_cache_constant(
+                network, batch=batch, channels=out_ch, h=cur_h, w=cur_w)
+            rb_weights = _gather_resblock_weights(weights, prefix, in_ch, out_ch)
+            x = _bf16_vae_resblock_3d(
+                network, x, c1, c2,
+                weights=rb_weights, prefix=prefix,
+                in_channels=in_ch, out_channels=out_ch,
+                eps=cfg.norm_eps,
+            )
+            in_ch = out_ch
+            cur_ch = out_ch
+
+            if scale in getattr(cfg, "attn_scales", []):
+                raise NotImplementedError(
+                    "Qwen-Image VAE encoder attention-in-down-blocks is not implemented"
+                )
+
+        if level != len(dim_mult) - 1:
+            down_prefix = f"encoder.down_blocks.{level * (num_res + 1) + num_res}.resample.1"
+            x = _bf16_spatial_downsample_with_conv(
+                network,
+                x,
+                weight=take(f"{down_prefix}.weight"),
+                bias=take(f"{down_prefix}.bias"),
+            )
+            cur_h //= 2
+            cur_w //= 2
+            scale /= 2.0
+            if verbose:
+                print(
+                    f"[qwen-image-vae-encoder] down{level}: ch={cur_ch}, {cur_h}x{cur_w}",
+                    file=sys.stderr,
+                )
+
+    # Middle block: resnet.0 -> attention.0 -> resnet.1.
+    mid_ch = cur_ch
+    for mi in range(2):
+        prefix = f"encoder.mid_block.resnets.{mi}"
+        c1 = _zero_cache_constant(
+            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        c2 = _zero_cache_constant(
+            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        rb_weights = _gather_resblock_weights(weights, prefix, mid_ch, mid_ch)
+        x = _bf16_vae_resblock_3d(
+            network, x, c1, c2,
+            weights=rb_weights, prefix=prefix,
+            in_channels=mid_ch, out_channels=mid_ch,
+            eps=cfg.norm_eps,
+        )
+        if mi == 0:
+            attn_prefix = "encoder.mid_block.attentions.0"
+            attn_weights = _gather_attention_weights(weights, attn_prefix, mid_ch)
+            x = _bf16_vae_spatial_attention(
+                network, x,
+                weights=attn_weights,
+                prefix=attn_prefix,
+                channels=mid_ch,
+                eps=cfg.norm_eps,
+            )
+
+    x = _bf16_l2_channel_norm(
+        network, x, cur_ch, take("encoder.norm_out.gamma"), cfg.norm_eps)
+    x = _bf16_silu(network, x)
+
+    co_cache = _zero_cache_constant(
+        network, batch=batch, channels=cur_ch, h=cur_h, w=cur_w)
+    x = _bf16_causal_conv3d(
+        network, x, co_cache,
+        weight=take("encoder.conv_out.weight"),
+        bias=take("encoder.conv_out.bias"),
+        out_channels=z_dim * 2,
+        kernel_size=(3, 3, 3),
+        padding_hw=(1, 1),
+    )
+
+    moments = _bf16_conv3d_as_conv2d(
+        network,
+        x,
+        weight=take("quant_conv.weight"),
+        bias=take("quant_conv.bias"),
+        out_channels=z_dim * 2,
+        kernel_size=(1, 1, 1),
+    )
+
+    # DiagonalGaussianDistribution.mode() returns the mean half.
+    mean = network.add_slice(
+        moments,
+        start=(0, 0, 0, 0, 0),
+        shape=(batch, z_dim, 1, cur_h, cur_w),
+        stride=(1, 1, 1, 1, 1),
+    ).get_output(0)
+    mean = _to_fp32(network, mean)
+    mean.name = "latent"
+    network.mark_output(mean)
+
+    if verbose:
+        print(
+            f"[qwen-image-vae-encoder] Building encoder "
+            f"(image={image_h}x{image_w}, latent={cur_h}x{cur_w}, z={z_dim})",
+            file=sys.stderr,
+        )
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TRT engine serialisation failed for Qwen-Image VAE encoder")
+
+    with open(out_path, "wb") as f:
+        f.write(bytes(plan))
+    return out_path
+
 
 def build_qwen_image_vae_decoder_engine(
     cfg: QwenImageVAEConfig,
@@ -961,11 +1199,12 @@ def load_qwen_image_vae_weights(
         num_res_blocks=int(raw.get("num_res_blocks", 2)),
         temporal_downsample=list(temp_ds),
         input_channels=int(raw.get("input_channels", 3)),
+        attn_scales=list(raw.get("attn_scales", [])),
         latents_mean=list(raw.get("latents_mean", [])) or QwenImageVAEConfig().latents_mean,
         latents_std=list(raw.get("latents_std", [])) or QwenImageVAEConfig().latents_std,
     )
 
-    # Pull only the decoder weights + post_quant_conv. We open via the torch
+    # Pull VAE weights needed by both T2I decode and Edit encode paths. We open via the torch
     # framework because Qwen-Image VAE checkpoints store bf16 weights and
     # numpy has no bf16 dtype; torch handles the conversion.
     weights: dict[str, np.ndarray] = {}
@@ -991,20 +1230,22 @@ def load_qwen_image_vae_weights(
         with safe_open(str(st_path), framework="pt") as st:
             for k in st.keys():
                 if not (
-                    k.startswith("decoder.") or k.startswith("post_quant_conv.")
+                    k.startswith("decoder.") or k.startswith("encoder.") or
+                    k.startswith("post_quant_conv.") or k.startswith("quant_conv.")
                 ):
                     continue
                 t = st.get_tensor(k)
                 weights[k] = t.detach().to(torch.float32).cpu().numpy()
     if not weights:
         raise RuntimeError(
-            f"no decoder weights found under {vae_dir!r}"
+            f"no VAE weights found under {vae_dir!r}"
         )
     return cfg, weights
 
 
 __all__ = [
     "QwenImageVAEConfig",
+    "build_qwen_image_vae_encoder_engine",
     "build_qwen_image_vae_decoder_engine",
     "load_qwen_image_vae_weights",
 ]

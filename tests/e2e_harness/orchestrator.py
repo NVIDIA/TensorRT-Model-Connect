@@ -372,6 +372,18 @@ def _resolve_bundle(
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()
     env = os.environ.copy()
+    edit_condition_image = build_args.get("edit_condition_image")
+    if (
+        not edit_condition_image
+        and case.family == "qwen_image"
+        and str(case.metadata.get("task_mode", "")).lower() == "edit"
+    ):
+        edit_condition_image = case.inputs.get("image")
+    if edit_condition_image:
+        edit_condition_path = Path(str(edit_condition_image))
+        if not edit_condition_path.is_absolute():
+            edit_condition_path = PROJECT_DIR / edit_condition_path
+        env["TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE"] = str(edit_condition_path)
     if ctx.build_profile and ctx.build_profile != "base":
         cmd.extend(["--active-python-profile", ctx.build_profile])
     build_timing_path: Path | None = None

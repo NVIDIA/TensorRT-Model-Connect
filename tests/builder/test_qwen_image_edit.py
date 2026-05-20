@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families import find_diffusion_plugin, find_plugin
 from tensorrt_model_connect.families.qwen_image.qwen_image_bundle_config import (
     build_bundle_config,
@@ -127,9 +126,22 @@ def test_qwen_image_edit_bundle_config_captures_edit_metadata(tmp_path: Path) ->
     assert cfg["diffusion"]["shift_terminal"] == 0.02
     assert cfg["diffusion"]["time_shift_type"] == "exponential"
     assert cfg["vision_encoder"]["type"] == "qwen2_5_vl_vision"
-    assert cfg["vision_encoder"]["image_size"] == 384
+    assert cfg["vision_encoder"]["image_size"] == 1008
+    assert cfg["vision_encoder"]["image_height"] == 1008
+    assert cfg["vision_encoder"]["image_width"] == 1008
+    assert cfg["text_encoder"]["max_seq_len"] == 1536
+    assert cfg["denoiser"]["max_text_tokens"] == 1536
+    assert cfg["image_conditioning"]["vl_image_size"] == 1024
+    assert cfg["image_conditioning"]["vae_image_height"] == 1024
+    assert cfg["image_conditioning"]["vae_image_width"] == 1024
     assert cfg["image_conditioning"]["vae_concat_axis"] == "sequence"
     assert cfg["image_conditioning"]["max_input_images"] == 1
+
+    aspect_cfg = build_bundle_config(repo, edit_condition_image_size=(382, 640))
+    assert aspect_cfg["vision_encoder"]["image_height"] == 392
+    assert aspect_cfg["vision_encoder"]["image_width"] == 644
+    assert aspect_cfg["image_conditioning"]["vae_image_height"] == 800
+    assert aspect_cfg["image_conditioning"]["vae_image_width"] == 1312
 
 
 def test_qwen_image_t2i_bundle_config_keeps_t2i_metadata(tmp_path: Path) -> None:
@@ -187,17 +199,3 @@ def test_qwen_image_dit_rope_tables_support_edit_condition_grids() -> None:
         cos[cond_offset : cond_offset + cond_single_cos.shape[0], : axes[0]],
         cond_single_cos[:, : axes[0]],
     )
-
-
-def test_qwen_image_edit_build_fails_before_t2i_engine_build(tmp_path: Path) -> None:
-    repo = _write_stub_qwen_image_repo(tmp_path, edit=True)
-    plugin = find_plugin("qwen_image")
-    assert plugin is not None
-    config = ModelConfig(
-        model_type="qwen_image",
-        raw=json.loads((repo / "model_index.json").read_text(encoding="utf-8")),
-    )
-    weights = plugin.load_weights(str(repo), config)
-
-    with pytest.raises(NotImplementedError, match="Qwen-Image Edit"):
-        plugin.build_components(str(repo), config, weights, precision="bf16")

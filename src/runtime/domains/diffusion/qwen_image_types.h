@@ -114,6 +114,8 @@ struct QwenImageTextEncoderConfig {
 struct QwenImageVisionEncoderConfig {
     std::string type{"qwen2_5_vl_vision"};
     int32_t image_size{384};
+    int32_t image_height{0};
+    int32_t image_width{0};
     int32_t patch_size{14};
     int32_t merge_size{2};
     int32_t hidden_size{1280};
@@ -124,6 +126,8 @@ struct QwenImageVisionEncoderConfig {
 struct QwenImageConditioningConfig {
     int32_t vl_image_size{384};
     int32_t vae_image_size{1024};
+    int32_t vae_image_height{0};
+    int32_t vae_image_width{0};
     std::string vae_concat_axis{"sequence"};
     int32_t max_input_images{1};
 };

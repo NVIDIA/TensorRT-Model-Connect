@@ -92,11 +92,8 @@ class QwenImagePipeline final : public IPipeline {
         int denoiser_image_tokens{0};  // Output + condition tokens.
     };
 
-    // Resolve Qwen-Image Edit's aspect-preserving image sizes and packed
-    // token counts. Mirrors QwenImageEditPlusPipeline.__call__:
-    // output defaults to a 1024*1024 target area matching the input aspect,
-    // condition image defaults to 384*384 area, and VAE-condition image
-    // defaults to 1024*1024 area. cfg.height/width override output size only.
+    // Resolve Edit output/condition image sizes and packed token counts.
+    // cfg.height/width override output size only.
     EditImagePlan compute_edit_image_plan(int image_height, int image_width,
                                           const GenerateConfig& cfg = {}) const;
 
@@ -191,6 +188,26 @@ class QwenImagePipeline final : public IPipeline {
                             int w_lat) const;
 
   private:
+    struct EditInputTensors {
+        EditImagePlan plan;
+        std::vector<float> condition_pixels_hwc;
+        std::vector<float> vae_pixels_ncthw;
+    };
+
+    EditInputTensors preprocess_edit_input_image(const float* image_pixels, int32_t image_height,
+                                                 int32_t image_width,
+                                                 const GenerateConfig& cfg = {}) const;
+    EncodedPrompt encode_text_with_image_conditioning(
+        const std::string& prompt, const std::vector<float>& image_features) const;
+    std::vector<float> vision_encode_edit_condition(const EditInputTensors& edit_inputs) const;
+    std::vector<float>
+    denoise_loop_with_cfg_image_conditioning(std::vector<float> latents_packed,
+                                             const std::vector<float>& condition_latents_packed,
+                                             const EncodedPrompt& pos, const EncodedPrompt& neg,
+                                             int n_img, int n_condition_img, int num_steps,
+                                             float cfg_scale) const;
+    std::vector<float> vae_encode_edit_condition(const EditInputTensors& edit_inputs) const;
+
     // Patchify a 4D latent tensor [1, C, H, W] (row-major C, H, W) into the
     // packed denoiser-input layout [1, n_img, C * patch_size * patch_size],
     // mirroring diffusers' QwenImagePipeline._pack_latents.

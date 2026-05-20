@@ -102,14 +102,14 @@ int main() {
     auto edit_plan = pipeline.compute_edit_image_plan(600, 800);
     check(edit_plan.output_height == 896, "edit output height follows input aspect");
     check(edit_plan.output_width == 1184, "edit output width follows input aspect");
-    check(edit_plan.condition_height == 320, "edit condition height");
+    check(edit_plan.condition_height == 336, "edit condition height");
     check(edit_plan.condition_width == 448, "edit condition width");
-    check(edit_plan.vae_height == 896, "edit vae condition height");
-    check(edit_plan.vae_width == 1184, "edit vae condition width");
+    check(edit_plan.vae_height == 1024, "edit vae condition height");
+    check(edit_plan.vae_width == 1024, "edit vae condition width");
     check(edit_plan.output_tokens.packed_h == 56, "edit output packed h");
     check(edit_plan.output_tokens.packed_w == 74, "edit output packed w");
     check(edit_plan.scheduler_image_tokens == 4144, "edit scheduler token count");
-    check(edit_plan.denoiser_image_tokens == 8288, "edit denoiser token count");
+    check(edit_plan.denoiser_image_tokens == 8240, "edit denoiser token count");
 
     trtmc::GenerateConfig override_cfg;
     override_cfg.height = 481;
@@ -117,8 +117,8 @@ int main() {
     auto override_plan = pipeline.compute_edit_image_plan(600, 800, override_cfg);
     check(override_plan.output_height == 480, "edit override height aligns down");
     check(override_plan.output_width == 640, "edit override width aligns down");
-    check(override_plan.condition_height == 320, "edit override condition height unchanged");
-    check(override_plan.vae_height == 896, "edit override vae condition height unchanged");
+    check(override_plan.condition_height == 336, "edit override condition height unchanged");
+    check(override_plan.vae_height == 1024, "edit override vae condition height unchanged");
 
     check_throws_contains("edit requires image overload", "require an input image", [&]() {
         (void)pipeline.generate_image("make it watercolor");

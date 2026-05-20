@@ -159,6 +159,8 @@ void parse_vision_encoder(const std::string& obj, QwenImageVisionEncoderConfig& 
         return;
     vc.type = extract_json_string(obj, "type", vc.type);
     vc.image_size = extract_json_int(obj, "image_size", vc.image_size);
+    vc.image_height = extract_json_int(obj, "image_height", vc.image_height);
+    vc.image_width = extract_json_int(obj, "image_width", vc.image_width);
     vc.patch_size = extract_json_int(obj, "patch_size", vc.patch_size);
     vc.merge_size = extract_json_int(obj, "merge_size", vc.merge_size);
     vc.hidden_size = extract_json_int(obj, "hidden_size", vc.hidden_size);
@@ -171,6 +173,8 @@ void parse_image_conditioning(const std::string& obj, QwenImageConditioningConfi
         return;
     ic.vl_image_size = extract_json_int(obj, "vl_image_size", ic.vl_image_size);
     ic.vae_image_size = extract_json_int(obj, "vae_image_size", ic.vae_image_size);
+    ic.vae_image_height = extract_json_int(obj, "vae_image_height", ic.vae_image_height);
+    ic.vae_image_width = extract_json_int(obj, "vae_image_width", ic.vae_image_width);
     ic.vae_concat_axis = extract_json_string(obj, "vae_concat_axis", ic.vae_concat_axis);
     ic.max_input_images = extract_json_int(obj, "max_input_images", ic.max_input_images);
 }
