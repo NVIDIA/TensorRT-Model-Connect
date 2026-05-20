@@ -117,6 +117,16 @@ static void test_ipipeline_default_virtuals() {
     }
     check(threw, "default generate_image throws");
 
+    // Default generate_image(string, image) should throw via the text-only
+    // image-generation overload.
+    threw = false;
+    try {
+        pipeline.generate_image("prompt", nullptr, 0, 0);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "default generate_image(string,image) throws");
+
     // Default generate_audio should throw
     threw = false;
     try {

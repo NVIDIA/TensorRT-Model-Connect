@@ -747,7 +747,18 @@ int cmd_run(const CliArgs& args) {
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
     } else if (is_diffusion) {
-        auto result = pipeline->generate_image(prompt, cfg);
+        trtmc::ImageResult result;
+        if (!args.image_path.empty()) {
+            auto image = trtmc::io::read_image(args.image_path);
+            if (image.pixels.empty()) {
+                std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+                return EXIT_FAILURE;
+            }
+            result = pipeline->generate_image(prompt, image.pixels.data(), image.height,
+                                              image.width, cfg);
+        } else {
+            result = pipeline->generate_image(prompt, cfg);
+        }
         if (result.pixels.empty()) {
             std::cerr << "Error: image generation failed\n";
             return EXIT_FAILURE;

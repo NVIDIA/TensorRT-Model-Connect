@@ -505,21 +505,10 @@ def _rope_params_complex(index: np.ndarray, dim: int, theta: float) -> np.ndarra
     return np.cos(angles) + 1j * np.sin(angles)
 
 
-def _precompute_qwen_rope_tables(
-    axes_dim: list[int],
-    h_lat: int,
-    w_lat: int,
-    n_text: int,
-    theta: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Pre-compute the [seq_len, head_dim] cos/sin tables in NumPy.
-
-    Mirrors :class:`diffusers.models.transformers.transformer_qwenimage.QwenEmbedRope`
-    with ``scale_rope=True``, ``frame=1``, ``max_txt_seq_len=n_text``.
-    """
-    head_dim = sum(axes_dim)
-    splits = [a // 2 for a in axes_dim]
-
+def _qwen_rope_axis_freqs(
+    axes_dim: list[int], theta: float,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Return positive/negative complex RoPE tables split by Qwen image axis."""
     pos_index = np.arange(_ROPE_PRECOMPUTE_LEN)
     neg_index = pos_index[::-1] * -1 - 1  # [-1, -2, ..., -_ROPE_PRECOMPUTE_LEN]
 
@@ -529,13 +518,35 @@ def _precompute_qwen_rope_tables(
     neg_axis_freqs = [
         _rope_params_complex(neg_index, axes_dim[k], theta) for k in range(3)
     ]
+    return pos_axis_freqs, neg_axis_freqs
+
+
+def _precompute_qwen_image_freqs(
+    *,
+    axes_dim: list[int],
+    pos_axis_freqs: list[np.ndarray],
+    neg_axis_freqs: list[np.ndarray],
+    h_lat: int,
+    w_lat: int,
+    frame_index: int,
+) -> np.ndarray:
+    """Pre-compute one image/grid chunk of Qwen 3-axis RoPE complex freqs.
+
+    ``frame_index`` mirrors ``QwenEmbedRope._compute_video_freqs(..., idx)``
+    and is what distinguishes multiple Edit condition-image grids from the
+    generated-image grid.
+    """
+    head_dim = sum(axes_dim)
+    splits = [a // 2 for a in axes_dim]
 
     frame = 1
     H, W = h_lat, w_lat
 
     # Frame axis (pos rows [0:1], shared across all (h, w)).
     freqs_frame = np.broadcast_to(
-        pos_axis_freqs[0][0:frame].reshape(frame, 1, 1, splits[0]),
+        pos_axis_freqs[0][frame_index : frame_index + frame].reshape(
+            frame, 1, 1, splits[0]
+        ),
         (frame, H, W, splits[0]),
     )
 
@@ -554,24 +565,96 @@ def _precompute_qwen_rope_tables(
         w_combined.reshape(1, 1, W, splits[2]), (frame, H, W, splits[2])
     )
 
-    vid_freqs = np.concatenate(
+    return np.concatenate(
         [freqs_frame, freqs_height, freqs_width], axis=-1
     ).reshape(frame * H * W, head_dim // 2)
 
-    # Text freqs: rows [max_vid_index, max_vid_index + n_text) from the
-    # concatenated pos_freqs across all axes.
-    max_vid_index = max(H // 2, W // 2)
-    pos_freqs_all = np.concatenate(pos_axis_freqs, axis=1)  # [4096, head_dim/2]
-    txt_freqs = pos_freqs_all[max_vid_index : max_vid_index + n_text]
 
-    combined = np.concatenate([vid_freqs, txt_freqs], axis=0)  # [seq, head_dim/2]
-
+def _expand_qwen_rope_complex(combined: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Expand complex Qwen RoPE freqs to duplicated real-valued cos/sin rows."""
     # Expand to [seq, head_dim] via interleaved duplication: each complex
     # entry contributes (cos, sin) repeated twice -- one for each of the
     # two real elements in a rotation pair.
     real = np.repeat(combined.real, 2, axis=-1).astype(np.float32)
     imag = np.repeat(combined.imag, 2, axis=-1).astype(np.float32)
     return np.ascontiguousarray(real), np.ascontiguousarray(imag)
+
+
+def _precompute_qwen_rope_tables_for_shapes(
+    axes_dim: list[int],
+    image_shapes: list[tuple[int, int]],
+    n_text: int,
+    theta: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pre-compute Qwen image/text RoPE tables for one or more image grids.
+
+    ``image_shapes`` contains packed-token grids ``(h, w)`` in the order they
+    are concatenated into the denoiser's image stream. T2I passes one shape.
+    Edit passes the generated-image shape first, followed by VAE-condition
+    image shapes. This mirrors diffusers ``QwenEmbedRope.forward`` where
+    ``img_shapes`` is a list like ``[(gen_f, gen_h, gen_w),
+    (cond_f, cond_h, cond_w)]``.
+    """
+    if len(axes_dim) != 3:
+        raise ValueError(f"axes_dim must have 3 entries, got {axes_dim!r}")
+    if any(a % 2 != 0 for a in axes_dim):
+        raise ValueError(f"each axis dim must be even, got {axes_dim!r}")
+    if not image_shapes:
+        raise ValueError("image_shapes must contain at least one image grid")
+    if n_text < 0:
+        raise ValueError(f"n_text must be non-negative, got {n_text}")
+
+    pos_axis_freqs, neg_axis_freqs = _qwen_rope_axis_freqs(axes_dim, theta)
+    vid_freqs: list[np.ndarray] = []
+    max_vid_index = 0
+    for idx, (h_lat, w_lat) in enumerate(image_shapes):
+        if h_lat <= 0 or w_lat <= 0:
+            raise ValueError(
+                f"image_shapes[{idx}] must be positive, got {(h_lat, w_lat)!r}"
+            )
+        max_vid_index = max(max_vid_index, h_lat // 2, w_lat // 2)
+        vid_freqs.append(
+            _precompute_qwen_image_freqs(
+                axes_dim=axes_dim,
+                pos_axis_freqs=pos_axis_freqs,
+                neg_axis_freqs=neg_axis_freqs,
+                h_lat=h_lat,
+                w_lat=w_lat,
+                frame_index=idx,
+            )
+        )
+
+    if max_vid_index + n_text > _ROPE_PRECOMPUTE_LEN:
+        raise ValueError(
+            "n_text + max image grid half-extent exceeds the 4096-row "
+            "Qwen RoPE pre-compute budget"
+        )
+
+    # Text freqs: rows [max_vid_index, max_vid_index + n_text) from the
+    # concatenated positive freqs across all axes.
+    pos_freqs_all = np.concatenate(pos_axis_freqs, axis=1)  # [4096, head_dim/2]
+    txt_freqs = pos_freqs_all[max_vid_index : max_vid_index + n_text]
+
+    combined = np.concatenate([*vid_freqs, txt_freqs], axis=0)  # [seq, head_dim/2]
+    return _expand_qwen_rope_complex(combined)
+
+
+def _precompute_qwen_rope_tables(
+    axes_dim: list[int],
+    h_lat: int,
+    w_lat: int,
+    n_text: int,
+    theta: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pre-compute the [seq_len, head_dim] cos/sin tables in NumPy.
+
+    Mirrors :class:`diffusers.models.transformers.transformer_qwenimage.QwenEmbedRope`
+    with ``scale_rope=True``, ``frame=1``, ``max_txt_seq_len=n_text`` for
+    the single-grid T2I case.
+    """
+    return _precompute_qwen_rope_tables_for_shapes(
+        axes_dim, [(h_lat, w_lat)], n_text, theta
+    )
 
 
 def build_rope_3axis_engine(
@@ -1727,6 +1810,7 @@ def build_qwen_image_dit_engine(
     h_lat: int,
     w_lat: int,
     n_text: int,
+    image_token_shapes: list[tuple[int, int]] | None = None,
     batch_size: int = 1,
     verbose: bool = False,
 ) -> Path:
@@ -1741,9 +1825,10 @@ def build_qwen_image_dit_engine(
       ``img_patched`` [B, N_img, in_channels]
           packed-patch latents (already produced by the patchify engine /
           diffusers pack_latents). For Qwen-Image: in_channels = 64.
-          ``N_img = h_lat * w_lat`` where (h_lat, w_lat) are the
-          packed-token grid dimensions (i.e. the latent-grid size AFTER
-          the 2x2 packing).
+          T2I uses ``N_img = h_lat * w_lat``. Edit may pass
+          ``image_token_shapes=[(gen_h, gen_w), (cond_h, cond_w), ...]``;
+          then ``N_img`` is the sum of those packed-token grids, matching
+          diffusers' ``torch.cat([latents, image_latents], dim=1)`` input.
       ``txt_hidden`` [B, N_txt = n_text, text_embed_dim]
           text encoder hidden states (Qwen2.5-VL hidden = 3584).
       ``timestep``  [B]
@@ -1758,6 +1843,9 @@ def build_qwen_image_dit_engine(
     ``h_lat`` and ``w_lat`` describe the packed-token grid (= latent-grid
     divided by ``cfg.patch_size``). They bake into the engine via the RoPE
     tables, so callers wanting a different grid must build a fresh engine.
+    For Edit, the first ``image_token_shapes`` entry must match
+    ``(h_lat, w_lat)`` and represents the generated-image tokens; subsequent
+    entries represent condition-image VAE latents.
 
     Real Qwen-Image-2512 weights load via the diffusers state-dict keys
     (no remapping); see ``_validate_full_weights`` for the full key list.
@@ -1785,7 +1873,18 @@ def build_qwen_image_dit_engine(
 
     _validate_full_weights(cfg, weights)
 
-    n_img = h_lat * w_lat
+    if image_token_shapes is None:
+        image_token_shapes = [(h_lat, w_lat)]
+    else:
+        image_token_shapes = [(int(h), int(w)) for h, w in image_token_shapes]
+        if not image_token_shapes:
+            raise ValueError("image_token_shapes must not be empty")
+        if image_token_shapes[0] != (h_lat, w_lat):
+            raise ValueError(
+                "image_token_shapes[0] must match (h_lat, w_lat); got "
+                f"{image_token_shapes[0]!r} vs {(h_lat, w_lat)!r}"
+            )
+    n_img = sum(h * w for h, w in image_token_shapes)
     H_dim = cfg.hidden_size
     head_dim = cfg.attention_head_dim
     in_ch = cfg.in_channels
@@ -1794,8 +1893,8 @@ def build_qwen_image_dit_engine(
     txt_d = cfg.text_embed_dim
 
     # Pre-compute RoPE tables (baked as constants).
-    cos_table_np, sin_table_np = _precompute_qwen_rope_tables(
-        list(cfg.rope_axes_dim), h_lat, w_lat, n_text, cfg.rope_theta,
+    cos_table_np, sin_table_np = _precompute_qwen_rope_tables_for_shapes(
+        list(cfg.rope_axes_dim), image_token_shapes, n_text, cfg.rope_theta,
     )
     seq_total = n_img + n_text
     assert cos_table_np.shape == (seq_total, head_dim), (
@@ -1899,6 +1998,7 @@ def build_qwen_image_dit_engine(
     print(
         f"[qwen-image-dit] Building full denoiser engine "
         f"(B={batch_size}, n_img={n_img}, n_text={n_text}, "
+        f"image_token_shapes={image_token_shapes}, "
         f"blocks={cfg.num_joint_blocks}, hidden={H_dim}, "
         f"heads={cfg.num_attention_heads}, head_dim={head_dim}, "
         f"text_d={txt_d}, in_ch={in_ch}, out_ch={out_ch}, p={p}) "
