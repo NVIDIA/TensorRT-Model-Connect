@@ -357,6 +357,7 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
             case.inputs.get("height", case.inputs.get("image_height", image_height)))
         qi_width = int(
             case.inputs.get("width", case.inputs.get("image_width", image_width)))
+        qi_image_path = case.inputs.get("image") or case.inputs.get("image_path") or ""
         script = f"""
 import torch
 import numpy as np
@@ -386,6 +387,7 @@ qi_negative_prompt = {qi_negative_prompt!r}
 qi_cfg_scale = {qi_cfg_scale}
 qi_height = {qi_height}
 qi_width = {qi_width}
+qi_image_path = {str(qi_image_path)!r}
 ltx_initial_latents_raw = {ltx_initial_latents_raw!r}
 qwen_image_initial_latents_raw = {qwen_image_initial_latents_raw!r}
 
@@ -403,7 +405,7 @@ if family in ("qwen_image",):
             continue
         # Pick Edit variants only when the manifest passes an image input;
         # for plain T2I, fall through to QwenImagePipeline.
-        if "Edit" in cls_name and not {bool(case.inputs.get("image"))}:
+        if "Edit" in cls_name and not bool(qi_image_path):
             continue
         pipeline_cls = cls
         break
@@ -413,6 +415,7 @@ if family in ("qwen_image",):
     # bf16 matches the PSNR-validated Python E2E gate.
     pipe = pipeline_cls.from_pretrained(model_ref, torch_dtype=torch.bfloat16)
     pipe.to("cuda")
+    qi_input_image = Image.open(qi_image_path).convert("RGB") if qi_image_path else None
     # Shared-initial-latents path: load the raw fp32 bytes written by the
     # runner-side helper, reshape to UNPACKED [1, 16, h_lat, w_lat], call
     # the pipeline's static ``_pack_latents`` to produce the packed
@@ -444,7 +447,7 @@ if family in ("qwen_image",):
                 device="cuda", dtype=torch.bfloat16)
         qi_latents = pipeline_cls._pack_latents(
             unpacked, 1, latent_channels, pack_h_lat, pack_w_lat)
-    output = pipe(
+    qi_call_kwargs = dict(
         prompt=prompt,
         negative_prompt=qi_negative_prompt,
         true_cfg_scale=qi_cfg_scale,
@@ -454,6 +457,9 @@ if family in ("qwen_image",):
         latents=qi_latents,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
+    if qi_input_image is not None:
+        qi_call_kwargs["image"] = qi_input_image
+    output = pipe(**qi_call_kwargs)
     frames = output.images
 elif family in ("flux",):
     if model_type in ("flux.2", "flux2"):

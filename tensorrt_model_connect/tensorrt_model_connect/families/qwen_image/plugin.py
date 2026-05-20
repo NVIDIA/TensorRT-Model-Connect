@@ -66,6 +66,7 @@ class QwenImagePlugin:
         weights["_transformer_dir"] = str(model_path / "transformer")
         weights["_vae_dir"] = str(model_path / "vae")
         weights["_tokenizer_dir"] = str(model_path / "tokenizer")
+        weights["_processor_dir"] = str(model_path / "processor")
         weights["_model_dir"] = str(model_path)
         return weights
 
@@ -133,6 +134,14 @@ class QwenImagePlugin:
         # 1. Bundle config.json blob -- pure file-IO transform, fast.
         print("[qwen-image] Building bundle config ...", file=sys.stderr)
         bundle_cfg = build_bundle_config(repo)
+        if bundle_cfg.get("task_mode") == "edit":
+            raise NotImplementedError(
+                "Qwen-Image Edit checkpoints are detected, but full Edit "
+                "runtime support is not implemented yet. The next phase must "
+                "build a vision-conditioned Qwen2.5-VL text encoder, a VAE "
+                "encoder plan, image-conditioning preprocessing, and runtime "
+                "image-latent concatenation before emitting a valid bundle."
+            )
         config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
 
         # Derive engine build-time shape constants from the bundle config so

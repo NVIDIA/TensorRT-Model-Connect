@@ -111,6 +111,23 @@ struct QwenImageTextEncoderConfig {
     std::string tokenizer_template_kind;
 };
 
+struct QwenImageVisionEncoderConfig {
+    std::string type{"qwen2_5_vl_vision"};
+    int32_t image_size{384};
+    int32_t patch_size{14};
+    int32_t merge_size{2};
+    int32_t hidden_size{1280};
+    int32_t num_layers{32};
+    int32_t out_hidden_size{3584};
+};
+
+struct QwenImageConditioningConfig {
+    int32_t vl_image_size{384};
+    int32_t vae_image_size{1024};
+    std::string vae_concat_axis{"sequence"};
+    int32_t max_input_images{1};
+};
+
 struct QwenImageConfig {
     std::string engine_backend;
     std::string runtime_strategy;
@@ -124,6 +141,8 @@ struct QwenImageConfig {
     QwenImageVAEConfig vae;
     QwenImageImageConfig image;
     QwenImageTokenizerConfig tokenizer;
+    QwenImageVisionEncoderConfig vision_encoder;
+    QwenImageConditioningConfig image_conditioning;
 
     // Parse a bundle config.json blob into a QwenImageConfig. Missing keys
     // / sections retain their struct defaults.

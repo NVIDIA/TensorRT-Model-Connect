@@ -12,6 +12,8 @@ DiffusionConfig make_diffusion_config(const std::string& json);
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
+    LoadedModule vision;
+    LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;
     DiffusionConfig config;
     PreprocessorWeights weights;

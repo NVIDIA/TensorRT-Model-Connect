@@ -28,6 +28,20 @@ def _load_json(path: Path) -> Mapping[str, Any]:
     return json.loads(path.read_text())
 
 
+def _get_float(cfg: Mapping[str, Any], key: str, default: float) -> float:
+    value = cfg.get(key)
+    if value is None:
+        value = default
+    return float(value)
+
+
+def _get_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
+    value = cfg.get(key)
+    if value is None:
+        value = default
+    return int(value)
+
+
 def _detect_task_mode(repo: Path) -> str:
     """Map ``model_index.json._class_name`` -> ``"t2i"`` or ``"edit"``."""
     index = _load_json(repo / "model_index.json")
@@ -60,7 +74,10 @@ def build_bundle_config(repo_dir: str | Path) -> dict[str, Any]:
     scheduler_cfg = _load_json(repo / "scheduler" / "scheduler_config.json")
     text_inner = text_cfg.get("text_config", text_cfg)
 
-    template_kind = _EDIT_TEMPLATE_KIND if task_mode == "edit" else _T2I_TEMPLATE_KIND
+    is_edit = task_mode == "edit"
+    template_kind = _EDIT_TEMPLATE_KIND if is_edit else _T2I_TEMPLATE_KIND
+    prompt_drop_idx = 64 if is_edit else 34
+    text_encoder_type = "qwen2_5_vl_multimodal" if is_edit else "qwen2_5_vl_lm"
 
     bundle: dict[str, Any] = {
         "engine_backend": "trt",
@@ -75,17 +92,21 @@ def build_bundle_config(repo_dir: str | Path) -> dict[str, Any]:
         "dtype": "bf16",
         "diffusion": {
             "scheduler": "flow_match_euler",
-            "num_train_timesteps": int(scheduler_cfg.get("num_train_timesteps", 1000)),
-            "shift": float(scheduler_cfg.get("shift", 1.0)),
+            "num_train_timesteps": _get_int(scheduler_cfg, "num_train_timesteps", 1000),
+            "shift": _get_float(scheduler_cfg, "shift", 1.0),
             "use_dynamic_shifting": bool(scheduler_cfg.get("use_dynamic_shifting", False)),
-            "base_image_seq_len": int(scheduler_cfg.get("base_image_seq_len", 256)),
-            "max_image_seq_len": int(scheduler_cfg.get("max_image_seq_len", 8192)),
+            "base_shift": _get_float(scheduler_cfg, "base_shift", 0.5),
+            "max_shift": _get_float(scheduler_cfg, "max_shift", 0.9),
+            "base_image_seq_len": _get_int(scheduler_cfg, "base_image_seq_len", 256),
+            "max_image_seq_len": _get_int(scheduler_cfg, "max_image_seq_len", 8192),
+            "shift_terminal": _get_float(scheduler_cfg, "shift_terminal", 0.0),
+            "time_shift_type": str(scheduler_cfg.get("time_shift_type") or ""),
             "default_num_inference_steps": 50,
             "default_cfg_scale": 4.0,
             "default_negative_prompt": " ",
         },
         "text_encoder": {
-            "type": "qwen2_5_vl_lm",
+            "type": text_encoder_type,
             "hidden_size": int(text_inner["hidden_size"]),
             "num_layers": int(text_inner["num_hidden_layers"]),
             "num_heads": int(text_inner["num_attention_heads"]),
@@ -150,13 +171,13 @@ def build_bundle_config(repo_dir: str | Path) -> dict[str, Any]:
             "kind": "hf_python",
             "class": "Qwen2Tokenizer",
             "prompt_template_kind": template_kind,
-            "prompt_template_drop_idx": 34,
+            "prompt_template_drop_idx": prompt_drop_idx,
             "tokenizer_max_length": 1024,
             "add_special_tokens": False,
         },
     }
 
-    if task_mode == "edit":
+    if is_edit:
         vision_cfg = text_cfg.get("vision_config", {})
         bundle["vision_encoder"] = {
             "type": "qwen2_5_vl_vision",
