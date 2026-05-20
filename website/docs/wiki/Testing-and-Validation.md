@@ -44,16 +44,16 @@ Every documented test must also carry trace IDs (`ARCH-*`, `UD-*`, and test ID s
 Python example:
 
 ```python
-def test_runtime_strategy_matrix_includes_vision_language():
+def test_vision_language_diff_runner_contract():
     """
     Intent: Validate that `vision_language` remains connected to the VL runner/comparator contract.
     Preconditions:
-      - tests/runtime_strategy_matrix.yaml defines runtime_strategies.vision_language.
-      - Registry modules for runner/comparator classes are importable.
+      - Diff framework registry modules are importable.
+      - Vision-language runner and comparator classes are registered.
     Postconditions:
       - runner_class resolves to VisionLanguageRunner.
       - comparator_class resolves to VisionLanguageComparator.
-    Trace: ARCH-RT-002, UD-REG-VISION-001, UT-TOOLS-STRATEGY-MATRIX-002
+    Trace: ARCH-RT-002, UD-REG-VISION-001, UT-TOOLS-DIFF-VL-002
     """
 ```
 
@@ -442,7 +442,6 @@ importing. Comparison logic tested with synthetic NumPy arrays.
 | `test_e2e_repro_commands.py` | E2E reproduction command generation |
 | `test_e2e_runner_cli_alignment.py` | E2E runner CLI alignment validation |
 | `test_e2e_runtime_path_guard.py` | E2E runtime path guard validation |
-| `test_runtime_strategy_matrix_checker.py` | Runtime strategy matrix consistency checks |
 | `test_prompted_segmentation_harness.py` | Prompted segmentation harness validation |
 
 ---

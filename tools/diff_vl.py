@@ -436,7 +436,10 @@ def test_vl_generation(
     max_new_tokens: int = 20,
 ) -> bool:
     """Run full VL generation in Python using VLTrtRunner."""
-    from tensorrt_model_connect.debug_runner import VLTrtRunner
+    from tensorrt_model_connect.debug_runner import (
+        VLTrtRunner,
+        load_section_from_bundle,
+    )
 
     print("[diff_vl] Loading VL runner from bundle ...", file=sys.stderr)
     runner = VLTrtRunner(bundle_path)
@@ -535,10 +538,6 @@ def test_cpp_binary(
     print(f"[diff_vl] C++ output: {output[:200]!r}", file=sys.stderr)
     print("[diff_vl] C++ binary: PASS", file=sys.stderr)
     return True
-
-
-# Need this import at module level for test_vl_generation
-from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
 
 def test_debug_layers(

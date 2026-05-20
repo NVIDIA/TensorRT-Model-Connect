@@ -309,7 +309,6 @@ class TestDeclarativeClassificationRules:
                 "harness_threshold_unknown",
             ),
             ("tests/e2e_harness/test_orchestrator_phases.py", "harness_unit_test"),
-            ("scripts/_gen_fp8_bf16.py", "fp8_gen_script"),
             ("tools/make_elf_replay_artifact.py", "elf_replay_tool"),
         ],
     )

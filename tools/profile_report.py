@@ -751,11 +751,11 @@ def main() -> None:
     parser.add_argument("--cpu-profile", metavar="JSON",
                         help="cpu_profile.json from cpu_profile.py")
     parser.add_argument("--nsight-trt", metavar="JSON",
-                        help="Nsight JSON for TRT (Python) backend from nsight_collect.py")
+                        help="Nsight JSON for TRT (Python) backend")
     parser.add_argument("--nsight-hf", metavar="JSON",
-                        help="Nsight JSON for HF backend from nsight_collect.py")
+                        help="Nsight JSON for HF backend")
     parser.add_argument("--nsight-cpp", metavar="JSON",
-                        help="Nsight JSON for C++ binary backend from nsight_collect.py")
+                        help="Nsight JSON for C++ binary backend")
     parser.add_argument("--output-dir", metavar="DIR",
                         help="Auto-discover *.json artifacts from this directory")
     parser.add_argument("-o", "--output", default="report.html",

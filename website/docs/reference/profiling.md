@@ -1,7 +1,7 @@
 # Profiling Guide
 
 Tools for measuring TRT vs HF performance, finding per-layer bottlenecks,
-breaking down CPU-side overhead, and collecting GPU kernel traces.
+and breaking down CPU-side overhead.
 
 ---
 
@@ -36,7 +36,6 @@ Prints a combined console report and saves `perf_compare.json` +
 | `tools/perf_compare.py` | E2E latency: TRT vs HF eager vs torch.compile |
 | `tools/layer_profiler.py` | TRT IProfiler wrapper (library, used by trtmc_profile.py) |
 | `tools/cpu_profile.py` | CPU-phase timing breakdown for TRT decode steps |
-| `tools/nsight_collect.py` | Nsight Systems / Nsight Compute kernel data collection |
 | `tools/profile_report.py` | HTML report from JSON artifacts |
 
 ---
@@ -197,68 +196,14 @@ TRT engine optimization or look at the per-layer profile. If `tensor_bind` or
 
 ---
 
-## nsight_collect.py — GPU kernel traces
+## Nsight data in reports
 
-Wraps `nsys` (Nsight Systems) and `ncu` (Nsight Compute) to automate profiling
-and parse results into structured JSON.
+This repo does not ship an Nsight capture wrapper. If you generate kernel
+summaries with Nsight Systems or Nsight Compute outside the repo, pass the
+parsed JSON to `tools/profile_report.py` with `--nsight-trt`, `--nsight-hf`,
+or `--nsight-cpp`.
 
-**Prerequisites:**
-
-- `nsys` — included in CUDA toolkit; works with standard container privileges.
-- `ncu` — requires `--privileged` Docker flag (needs `CAP_SYS_ADMIN`).
-
-```bash
-# nsys: TRT backend (kernel timelines + CUDA API summary)
-python tools/nsight_collect.py \
-  --mode nsys \
-  --backend trt \
-  --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3.trtfb \
-  --max-new-tokens 5 \
-  --output-dir /tmp/nsight_out \
-  --json nsight_trt.json
-
-# nsys: HuggingFace eager backend
-python tools/nsight_collect.py \
-  --mode nsys \
-  --backend hf \
-  --model Qwen/Qwen3-0.6B \
-  --output-dir /tmp/nsight_out \
-  --json nsight_hf.json
-
-# nsys: both backends in one run
-python tools/nsight_collect.py \
-  --mode nsys \
-  --backend all \
-  --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3.trtfb \
-  --output-dir /tmp/nsight_out
-
-# ncu: per-kernel hardware metrics (requires --privileged)
-python tools/nsight_collect.py \
-  --mode ncu \
-  --backend trt \
-  --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3.trtfb \
-  --output-dir /tmp/nsight_out
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mode` | `nsys` | `nsys` or `ncu` |
-| `--backend` | `trt` | `trt`, `hf`, `hf_compile`, or `all` |
-| `--model` | required | HF repo ID or local model dir |
-| `--bundle` | — | Pre-built `.trtfb` (TRT backend only; skips engine build) |
-| `--max-new-tokens` | 10 | Decode steps per profiling run |
-| `--dtype` | `float16` | HF model dtype |
-| `--compile-mode` | `reduce-overhead` | torch.compile mode for `hf_compile` backend |
-| `--top-n` | 20 | Number of top kernels to report |
-| `--json` | — | Path to save parsed JSON output |
-| `--verbose` | — | Show nsys/ncu stdout |
-
-**Output JSON schema (nsys):**
+Expected JSON shape:
 
 ```json
 {
@@ -275,23 +220,6 @@ python tools/nsight_collect.py \
   "gpu_utilization_pct": 87.3
 }
 ```
-
-**Output JSON schema (ncu):**
-
-```json
-{
-  "tool": "ncu",
-  "backend": "trt",
-  "kernel_metrics": [
-    {"kernel": "volta_fp16_s884gemm",
-     "sm_throughput_pct": 84.2,
-     "dram_bw_pct": 61.5,
-     "achieved_occupancy_pct": 78.0}
-  ]
-}
-```
-
----
 
 ## profile_report.py — HTML report
 
@@ -344,17 +272,9 @@ python tools/cpu_profile.py \
   --max-new-tokens 10 --warmup 3 --iterations 20 \
   --json "$OUT/cpu_profile.json"
 
-# 3. Nsight Systems (kernel timeline)
-python tools/nsight_collect.py \
-  --mode nsys --backend all \
-  --model "$MODEL" --bundle "$BUNDLE" \
-  --max-new-tokens 5 --output-dir "$OUT/nsight" \
-  --json "$OUT/nsight_trt.json"
-
-# 4. HTML report
+# 3. HTML report
 python tools/profile_report.py \
   --output-dir "$OUT" \
-  --nsight-trt "$OUT/nsight_trt.json" \
   -o "$OUT/report.html"
 
 echo "Report: $OUT/report.html"

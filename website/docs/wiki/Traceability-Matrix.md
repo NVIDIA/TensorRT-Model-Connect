@@ -27,9 +27,9 @@ Scope covers:
 - Unit tests (`tests/cpp/`, `tests/builder/`, `tests/tools/`)
 - Integration and E2E tests (`tests/test_e2e.py`, `tests/e2e_harness/`, `tests/e2e/models/`)
 
-This complements (does not replace) `tests/runtime_strategy_matrix.yaml`,
-which is machine-checked strategy parity. This page is human-maintained
-intent/design/test traceability.
+This page is the human-maintained intent/design/test traceability surface.
+Machine-checked runtime coverage lives in the E2E manifests, harness tests,
+and diff framework tests.
 
 ---
 

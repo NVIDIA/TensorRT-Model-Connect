@@ -307,7 +307,7 @@ def print_combined_report(
 # HTML report generation
 # ---------------------------------------------------------------------------
 
-def _generate_html_report(out_dir: Path, nsight_cpp_data: dict | None) -> None:
+def _generate_html_report(out_dir: Path) -> None:
     """Call profile_report.py to produce report.html from saved JSON artifacts."""
     import subprocess as _sp
     report_script = Path(__file__).parent / "profile_report.py"
@@ -316,8 +316,6 @@ def _generate_html_report(out_dir: Path, nsight_cpp_data: dict | None) -> None:
 
     cmd = [sys.executable, str(report_script), "--output-dir", str(out_dir),
            "-o", str(out_dir / "report.html")]
-    if nsight_cpp_data:
-        cmd += ["--nsight-cpp", str(out_dir / "nsight_cpp.json")]
 
     try:
         _sp.run(cmd, check=True)
@@ -364,9 +362,6 @@ def main():
                         help="Skip per-layer IProfiler pass (faster)")
     parser.add_argument("--cpu-profile", action="store_true",
                         help="Run CPU phase breakdown pass (adds ~1 min)")
-    parser.add_argument("--nsight", action="store_true",
-                        help="Run nsys capture of the C++ binary (requires "
-                             "--trtmc-binary and --bundle)")
     parser.add_argument("--output-dir", default=".",
                         help="Directory for JSON artifacts (default: .)")
     parser.add_argument("--json", action="store_true",
@@ -540,46 +535,6 @@ def main():
         except Exception as exc:
             print(f"[profile] CPU phase pass failed: {exc}", file=sys.stderr)
 
-    # -- Pass 5: nsight C++ capture (optional) --
-    nsight_cpp_data: dict | None = None
-    if getattr(args, "nsight", False) and args.trtmc_binary and args.bundle:
-        print("[profile] Nsight Systems C++ pass ...", file=sys.stderr)
-        import subprocess as _sp
-        import tempfile as _tf
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        nsight_json = str(Path(args.output_dir) / "nsight_cpp.json") if args.json else \
-                      str(Path(_tf.gettempdir()) / "nsight_cpp_tmp.json")
-        nsight_cmd = [
-            sys.executable, str(Path(__file__).parent / "nsight_collect.py"),
-            "--mode", "nsys",
-            "--backend", "cpp",
-            "--model", args.model,
-            "--bundle", args.bundle,
-            "--trtmc-binary", args.trtmc_binary,
-            "--prompt", args.prompt,
-            "--max-new-tokens", str(min(args.max_new_tokens, 20)),
-            "--output-dir", str(Path(args.output_dir) / "nsight_files"),
-            "--top-n", "15",
-            "--json", nsight_json,
-        ]
-        if getattr(args, "hf_python", None):
-            nsight_cmd += ["--hf-python", args.hf_python]
-        try:
-            env = {**os.environ}
-            result = _sp.run(nsight_cmd, capture_output=False, env=env)
-            if result.returncode == 0:
-                nsight_cpp_data = json.loads(Path(nsight_json).read_text())
-                print(f"[profile] Nsight C++ results saved to {nsight_json}",
-                      file=sys.stderr)
-            else:
-                print(f"[profile] Nsight pass exited with code {result.returncode}",
-                      file=sys.stderr)
-        except Exception as exc:
-            print(f"[profile] Nsight pass failed: {exc}", file=sys.stderr)
-    elif getattr(args, "nsight", False):
-        print("[profile] --nsight requires --trtmc-binary and --bundle; skipping.",
-              file=sys.stderr)
-
     # -- Report --
     gpu = pc._get_gpu_name()
     trt_ver = pc._get_trt_version()
@@ -640,13 +595,8 @@ def main():
                 cpu_path.write_text(json.dumps(cpu_profile_data, indent=2))
             print(f"[profile] CPU profile at {cpu_path}", file=sys.stderr)
 
-        if nsight_cpp_data:
-            # nsight_cpp.json was already written by the subprocess; confirm it
-            print(f"[profile] Nsight C++ data at {out_dir / 'nsight_cpp.json'}",
-                  file=sys.stderr)
-
         # Generate HTML report when JSON artifacts have been saved
-        _generate_html_report(out_dir, nsight_cpp_data)
+        _generate_html_report(out_dir)
 
     if trt_res["gen_ids"] != hf_res["gen_ids"]:
         print("WARNING: TRT and HF generated different tokens.",

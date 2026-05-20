@@ -827,11 +827,6 @@ def _e2e_data_file_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return imap.e2e_data_file_to_models[context.path]
 
 
-def _fp8_scale_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del context
-    return sorted(imap.manifest_field_to_models.get("fp8_scales", []))
-
-
 def _known_cpp_runtime_model(
     path: str, imap: ImpactMap, match: re.Match[str],
 ) -> bool:
@@ -1411,15 +1406,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
-        ),
-        ClassificationRule(
-            priority=480,
-            name="fp8_gen_script",
-            matcher=_path_equals("scripts/_gen_fp8_bf16.py"),
-            resolver=_match_result(
-                "fp8_gen_script", _fp8_scale_models, [], False,
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
             priority=485,

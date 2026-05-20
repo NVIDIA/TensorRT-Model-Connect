@@ -529,13 +529,11 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `diff.py` | Generic diff entry point |
 | `diff_framework/` | Diff framework infrastructure (DiffResult, registry, runner) |
 | `test_runner_parity.py` | Python vs C++ runtime parity verification |
-| `test_graph_ops.py` | TRT graph operation testing |
 | `perf_compare.py` | Performance benchmarking |
 | `tool_helpers.py` | Shared helper functions (cosine_sim, compare_arrays) |
 | `diffusion_helpers.py` | Diffusion-specific helpers |
 | `check_cyclomatic_complexity.py` | Cyclomatic complexity gate (max CCN 10) |
 | `check_legacy_runtime_freeze.py` | Legacy runtime freeze checker |
-| `check_runtime_strategy_matrix.py` | Runtime strategy matrix validator |
 | `validate_dit.py` | DiT model validation |
 | `validate_t5.py` | T5 encoder validation |
 | `debug_diffusion_pipeline.py` | Diffusion pipeline debugging |
