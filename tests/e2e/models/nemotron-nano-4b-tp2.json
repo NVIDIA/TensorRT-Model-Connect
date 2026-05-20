@@ -53,7 +53,9 @@
     }
   ],
   "threshold_overrides": {
-    "normalized_text_edit_distance": 0.5
+    "normalized_text_edit_distance": 0.5,
+    "logit_cosine_p5": 0.95,
+    "logit_rel_l2_p95": 0.15
   },
   "notes": "TensorRT 11.0 tensor-parallel Llama-3.1-Nemotron-Nano-4B TP=2 lane. Uses families/llama/dual_profile_decoder_tp_builder.py (leaner Llama-only TP builder) under PR #49's TP infrastructure."
 }
