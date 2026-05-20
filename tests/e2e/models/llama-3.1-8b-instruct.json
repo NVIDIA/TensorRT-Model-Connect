@@ -1,0 +1,15 @@
+{
+  "name": "llama-3.1-8b-instruct",
+  "trace_id": "IT-E2E-LL31-8B-01",
+  "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
+  "bundle": "llama-3.1-8b-instruct.trtfb",
+  "family": "llama",
+  "runtime_strategy": "decoder_kv_cache",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05
+}
