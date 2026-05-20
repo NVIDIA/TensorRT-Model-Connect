@@ -171,9 +171,29 @@ def build_z_image_dit_engine(
     head_dim: int = 128,
     adaln_embed_dim: int = 256,
     eps: float = 1e-5,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build Z-Image DiT TRT engine."""
+    if max_batch_size > 1:
+        return _build_z_image_dit_engine_batched(
+            weights,
+            dim=dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            num_refiner_layers=num_refiner_layers,
+            ffn_dim=ffn_dim,
+            num_patches=num_patches,
+            text_seq_len=text_seq_len,
+            head_dim=head_dim,
+            adaln_embed_dim=adaln_embed_dim,
+            eps=eps,
+            max_batch_size=max_batch_size,
+            opt_batch_size=opt_batch_size,
+            verbose=verbose,
+        )
+
     total_seq = num_patches + text_seq_len
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
     out_channels = weights["final_linear.weight"].shape[1]
@@ -412,6 +432,355 @@ def build_z_image_dit_engine(
     return bytes(plan)
 
 
+def _dynamic_batch_shape(network, reference, tail: tuple[int, ...]):
+    """Shape tensor [B, *tail] using dim 0 from a dynamic-batch tensor."""
+    ref_shape = network.add_shape(reference).get_output(0)
+    batch = network.add_slice(ref_shape, start=(0,), shape=(1,), stride=(1,))
+    tail_t = graph_ops.add_constant(
+        network, (len(tail),), np.asarray(tail, dtype=np.int64), dtype=np.int64)
+    target = network.add_concatenation([batch.get_output(0), tail_t])
+    target.axis = 0
+    return target.get_output(0)
+
+
+def _slice_batched_sequence(network, x, start_seq: int, length: int, width: int):
+    """Slice [B, S, D] along S while preserving runtime-dynamic B."""
+    s = network.add_slice(
+        x, start=(0, start_seq, 0), shape=(0, 0, 0), stride=(1, 1, 1))
+    s.set_input(2, _dynamic_batch_shape(network, x, (length, width)))
+    return s.get_output(0)
+
+
+def _slice_batched_rope_half(network, rope, seq_len: int, half: int):
+    """Slice interleaved full-dim RoPE cache [B, S, D] to [B, S, D/2]."""
+    s = network.add_slice(
+        rope, start=(0, 0, 0), shape=(0, 0, 0), stride=(1, 1, 2))
+    s.set_input(2, _dynamic_batch_shape(network, rope, (seq_len, half)))
+    return s.get_output(0)
+
+
+def _slice_batched_complex_part(network, x, seq_len: int, num_heads: int,
+                                half: int, complex_index: int):
+    """Slice real/imag part from [B, S, H, D/2, 2] to [B, S, H, D/2]."""
+    s = network.add_slice(
+        x, start=(0, 0, 0, 0, complex_index), shape=(0, 0, 0, 0, 0),
+        stride=(1, 1, 1, 1, 1))
+    s.set_input(2, _dynamic_batch_shape(network, x, (seq_len, num_heads, half, 1)))
+    r = network.add_shuffle(s.get_output(0))
+    r.reshape_dims = (-1, seq_len, num_heads, half)
+    return r.get_output(0)
+
+
+def _reshape_batched_rows_to_heads_4d(network, x, num_heads: int, head_dim: int,
+                                      seq_len: int):
+    """[B, S, H*D] -> [B, H, S, D]."""
+    r = network.add_shuffle(x)
+    r.reshape_dims = (-1, seq_len, num_heads, head_dim)
+    r.second_transpose = trt.Permutation([0, 2, 1, 3])
+    return r.get_output(0)
+
+
+def _reshape_heads_4d_to_batched_rows(network, x, num_heads: int, head_dim: int,
+                                      seq_len: int):
+    """[B, H, S, D] -> [B, S, H*D]."""
+    r = network.add_shuffle(x)
+    r.first_transpose = trt.Permutation([0, 2, 1, 3])
+    r.reshape_dims = (-1, seq_len, num_heads * head_dim)
+    return r.get_output(0)
+
+
+def _multi_head_attention_batched(network, q, k, v, num_heads: int, head_dim: int,
+                                  q_seq: int, kv_seq: int, scale_t):
+    """Standard multi-head attention for [B, S, H*D] tensors."""
+    q_4d = _reshape_batched_rows_to_heads_4d(network, q, num_heads, head_dim, q_seq)
+    k_4d = _reshape_batched_rows_to_heads_4d(network, k, num_heads, head_dim, kv_seq)
+    v_4d = _reshape_batched_rows_to_heads_4d(network, v, num_heads, head_dim, kv_seq)
+    ctx_4d = graph_ops.add_attention_core(
+        network, q_4d, k_4d, v_4d, causal=False, mask=None,
+        scale=float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0)
+    return _reshape_heads_4d_to_batched_rows(network, ctx_4d, num_heads, head_dim, q_seq)
+
+
+def _apply_rope_batched_from_full_cache(network, x, cos_t, sin_t, num_heads: int,
+                                        head_dim: int, seq_len: int):
+    """Apply Z-Image interleaved RoPE to [B, S, H*D] with [B, S, D] caches."""
+    half = head_dim // 2
+    x_pairs_r = network.add_shuffle(x)
+    x_pairs_r.reshape_dims = (-1, seq_len, num_heads, half, 2)
+    x_pairs = x_pairs_r.get_output(0)
+
+    x_real = _slice_batched_complex_part(network, x_pairs, seq_len, num_heads, half, 0)
+    x_imag = _slice_batched_complex_part(network, x_pairs, seq_len, num_heads, half, 1)
+
+    cos_half = _slice_batched_rope_half(network, cos_t, seq_len, half)
+    sin_half = _slice_batched_rope_half(network, sin_t, seq_len, half)
+    cos_4d = network.add_shuffle(cos_half)
+    cos_4d.reshape_dims = (-1, seq_len, 1, half)
+    sin_4d = network.add_shuffle(sin_half)
+    sin_4d.reshape_dims = (-1, seq_len, 1, half)
+
+    r_cos = network.add_elementwise(
+        x_real, cos_4d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+    i_sin = network.add_elementwise(
+        x_imag, sin_4d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+    new_real = network.add_elementwise(
+        r_cos, i_sin, trt.ElementWiseOperation.SUB).get_output(0)
+
+    r_sin = network.add_elementwise(
+        x_real, sin_4d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+    i_cos = network.add_elementwise(
+        x_imag, cos_4d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+    new_imag = network.add_elementwise(
+        r_sin, i_cos, trt.ElementWiseOperation.SUM).get_output(0)
+
+    nr = network.add_shuffle(new_real)
+    nr.reshape_dims = (-1, seq_len, num_heads, half, 1)
+    ni = network.add_shuffle(new_imag)
+    ni.reshape_dims = (-1, seq_len, num_heads, half, 1)
+    cat = network.add_concatenation([nr.get_output(0), ni.get_output(0)])
+    cat.axis = 4
+
+    flat = network.add_shuffle(cat.get_output(0))
+    flat.reshape_dims = (-1, seq_len, num_heads * head_dim)
+    return flat.get_output(0)
+
+
+def _layer_norm_last_dim_no_affine_batched(network, x, hidden_size: int, eps: float = 1e-6):
+    """LayerNorm without affine over final dim for [B, S, D]."""
+    eps_t = graph_ops.add_constant(network, (1, 1, 1), np.array([eps], dtype=np.float32))
+    mean = network.add_reduce(x, trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
+    centered = network.add_elementwise(
+        x, mean.get_output(0), trt.ElementWiseOperation.SUB).get_output(0)
+    sq = network.add_elementwise(centered, centered, trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
+    var_eps = network.add_elementwise(
+        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
+    std = network.add_unary(var_eps.get_output(0), trt.UnaryOperation.SQRT)
+    inv_std = network.add_unary(std.get_output(0), trt.UnaryOperation.RECIP)
+    return network.add_elementwise(
+        centered, inv_std.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+
+
+def _build_z_image_dit_engine_batched(
+    weights: WeightDict,
+    *,
+    dim: int,
+    num_heads: int,
+    num_layers: int,
+    num_refiner_layers: int,
+    ffn_dim: int,
+    num_patches: int,
+    text_seq_len: int,
+    head_dim: int,
+    adaln_embed_dim: int,
+    eps: float,
+    max_batch_size: int,
+    opt_batch_size: int | None,
+    verbose: bool,
+) -> bytes:
+    """Build a dynamic-leading-batch Z-Image DiT TRT engine."""
+    from ...engine_builder import add_dynamic_batch_profile
+
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
+    total_seq = num_patches + text_seq_len
+    out_channels = weights["final_linear.weight"].shape[1]
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+
+    noise_inp = network.add_input("hidden_states", trt.float32, (-1, num_patches, dim))
+    caption_inp = network.add_input(
+        "encoder_hidden_states", trt.float32, (-1, text_seq_len, dim))
+    temb_inp = network.add_input(
+        "timestep_embedding", trt.float32, (-1, 1, adaln_embed_dim))
+    rope_cos = network.add_input("rotary_cos", trt.float32, (-1, total_seq, head_dim))
+    rope_sin = network.add_input("rotary_sin", trt.float32, (-1, total_seq, head_dim))
+
+    add_dynamic_batch_profile(
+        builder,
+        config,
+        network,
+        input_names=[
+            "hidden_states",
+            "encoder_hidden_states",
+            "timestep_embedding",
+            "rotary_cos",
+            "rotary_sin",
+        ],
+        max_batch=max_batch_size,
+        opt_batch=opt_batch,
+        static_shape={
+            "hidden_states": (num_patches, dim),
+            "encoder_hidden_states": (text_seq_len, dim),
+            "timestep_embedding": (1, adaln_embed_dim),
+            "rotary_cos": (total_seq, head_dim),
+            "rotary_sin": (total_seq, head_dim),
+        },
+    )
+
+    eps_t = graph_ops.add_constant(network, (1, 1, 1), np.array([eps], dtype=np.float32))
+    scale_t = graph_ops.add_constant(
+        network, (1, 1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
+    ones_t = graph_ops.add_constant(network, (1, 1, 1), np.array([1.0], dtype=np.float32))
+
+    noise = noise_inp
+    caption = caption_inp
+
+    noise_cos = _slice_batched_sequence(network, rope_cos, 0, num_patches, head_dim)
+    noise_sin = _slice_batched_sequence(network, rope_sin, 0, num_patches, head_dim)
+    for i in range(num_refiner_layers):
+        tp = f"noise_refiner.{i}"
+        noise = _add_adaln_dit_block_batched(
+            network, noise, weights, tp, temb_inp,
+            dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
+            num_patches, eps_t, scale_t, noise_cos, noise_sin, ones_t,
+        )
+
+    cap_cos = _slice_batched_sequence(network, rope_cos, num_patches, text_seq_len, head_dim)
+    cap_sin = _slice_batched_sequence(network, rope_sin, num_patches, text_seq_len, head_dim)
+    for i in range(num_refiner_layers):
+        tp = f"context_refiner.{i}"
+        caption = _add_plain_dit_block_batched(
+            network, caption, weights, tp,
+            dim, num_heads, head_dim, ffn_dim, text_seq_len,
+            eps_t, scale_t, cap_cos, cap_sin,
+        )
+
+    for i in range(num_layers):
+        tp = f"main.{i}"
+
+        adaln_w = weights[f"{tp}.adaln.weight"]
+        adaln_b = weights[f"{tp}.adaln.bias"]
+        modulation = graph_ops.add_matmul_rhs_constant(
+            network, temb_inp, adaln_embed_dim, 4 * dim, adaln_w)
+        modulation = graph_ops.add_bias_sum(network, modulation, 4 * dim, adaln_b)
+
+        chunks = []
+        for ci in range(4):
+            s = network.add_slice(
+                modulation, start=(0, 0, ci * dim), shape=(0, 0, 0),
+                stride=(1, 1, 1))
+            s.set_input(2, _dynamic_batch_shape(network, modulation, (1, dim)))
+            chunks.append(s.get_output(0))
+        scale_msa, gate_msa_raw, scale_mlp, gate_mlp_raw = chunks
+
+        gate_msa = network.add_activation(gate_msa_raw, trt.ActivationType.TANH).get_output(0)
+        gate_mlp = network.add_activation(gate_mlp_raw, trt.ActivationType.TANH).get_output(0)
+        scale_msa_p1 = network.add_elementwise(
+            scale_msa, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+        scale_mlp_p1 = network.add_elementwise(
+            scale_mlp, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+
+        unified = network.add_concatenation([noise, caption])
+        unified.axis = 1
+        unified_t = unified.get_output(0)
+
+        unified_normed = graph_ops.add_rms_norm_last_dim(
+            network, unified_t, dim, weights[f"{tp}.attn_norm1"], eps_t)
+        unified_scaled = network.add_elementwise(
+            unified_normed, scale_msa_p1, trt.ElementWiseOperation.PROD).get_output(0)
+
+        q = graph_ops.add_matmul_rhs_constant(
+            network, unified_scaled, dim, dim, weights[f"{tp}.to_q"])
+        k = graph_ops.add_matmul_rhs_constant(
+            network, unified_scaled, dim, dim, weights[f"{tp}.to_k"])
+        v = graph_ops.add_matmul_rhs_constant(
+            network, unified_scaled, dim, dim, weights[f"{tp}.to_v"])
+
+        q_norm_tiled = np.tile(weights[f"{tp}.norm_q"].reshape(1, head_dim), (num_heads, 1))
+        k_norm_tiled = np.tile(weights[f"{tp}.norm_k"].reshape(1, head_dim), (num_heads, 1))
+        q = graph_ops.add_rms_norm_per_head_batched(
+            network, q, num_heads, head_dim, q_norm_tiled, eps_t,
+            sequence_length=total_seq)
+        k = graph_ops.add_rms_norm_per_head_batched(
+            network, k, num_heads, head_dim, k_norm_tiled, eps_t,
+            sequence_length=total_seq)
+
+        q = _apply_rope_batched_from_full_cache(
+            network, q, rope_cos, rope_sin, num_heads, head_dim, total_seq)
+        k = _apply_rope_batched_from_full_cache(
+            network, k, rope_cos, rope_sin, num_heads, head_dim, total_seq)
+
+        attn_out = _multi_head_attention_batched(
+            network, q, k, v, num_heads, head_dim, total_seq, total_seq, scale_t)
+        attn_out = graph_ops.add_matmul_rhs_constant(
+            network, attn_out, dim, dim, weights[f"{tp}.to_out"])
+        attn_out_normed = graph_ops.add_rms_norm_last_dim(
+            network, attn_out, dim, weights[f"{tp}.attn_norm2"], eps_t)
+
+        gated_attn = network.add_elementwise(
+            attn_out_normed, gate_msa, trt.ElementWiseOperation.PROD)
+        unified_t = network.add_elementwise(
+            unified_t, gated_attn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+
+        unified_ffn_normed = graph_ops.add_rms_norm_last_dim(
+            network, unified_t, dim, weights[f"{tp}.ffn_norm1"], eps_t)
+        unified_ffn_scaled = network.add_elementwise(
+            unified_ffn_normed, scale_mlp_p1, trt.ElementWiseOperation.PROD).get_output(0)
+
+        gate_proj = graph_ops.add_matmul_rhs_constant(
+            network, unified_ffn_scaled, dim, ffn_dim, weights[f"{tp}.ff_w1"])
+        up_proj = graph_ops.add_matmul_rhs_constant(
+            network, unified_ffn_scaled, dim, ffn_dim, weights[f"{tp}.ff_w3"])
+        gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
+        gate_silu = network.add_elementwise(
+            gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        gated_ffn = network.add_elementwise(
+            gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
+        down_proj = graph_ops.add_matmul_rhs_constant(
+            network, gated_ffn.get_output(0), ffn_dim, dim, weights[f"{tp}.ff_w2"])
+
+        ffn_out_normed = graph_ops.add_rms_norm_last_dim(
+            network, down_proj, dim, weights[f"{tp}.ffn_norm2"], eps_t)
+        gated_ffn_out = network.add_elementwise(
+            ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
+        unified_t = network.add_elementwise(
+            unified_t, gated_ffn_out.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+
+        noise = _slice_batched_sequence(network, unified_t, 0, num_patches, dim)
+        caption = _slice_batched_sequence(network, unified_t, num_patches, text_seq_len, dim)
+
+    temb_silu = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+    temb_silu_act = network.add_elementwise(
+        temb_inp, temb_silu.get_output(0), trt.ElementWiseOperation.PROD)
+    final_mod = graph_ops.add_matmul_rhs_constant(
+        network, temb_silu_act.get_output(0), adaln_embed_dim, dim,
+        weights["final_adaLN.weight"])
+    final_mod = graph_ops.add_bias_sum(network, final_mod, dim, weights["final_adaLN.bias"])
+    final_scale = network.add_elementwise(
+        final_mod, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+
+    noise_ln = _layer_norm_last_dim_no_affine_batched(network, noise, dim, eps=1e-6)
+    noise_final = network.add_elementwise(
+        noise_ln, final_scale, trt.ElementWiseOperation.PROD).get_output(0)
+
+    output = graph_ops.add_matmul_rhs_constant(
+        network, noise_final, dim, out_channels, weights["final_linear.weight"])
+    output = graph_ops.add_bias_sum(
+        network, output, out_channels, weights["final_linear.bias"])
+
+    cast_output = network.add_cast(output, trt.float32)
+    output_final = cast_output.get_output(0)
+    output_final.name = "output"
+    network.mark_output(output_final)
+
+    print(f"[z-image-dit] Building dynamic-batch TRT engine "
+          f"(B=1..{max_batch_size}, opt={opt_batch}, dim={dim}, layers={num_layers}, "
+          f"refiners={num_refiner_layers}, patches={num_patches}, "
+          f"text_seq={text_seq_len}, out_ch={out_channels}) ...",
+          file=sys.stderr)
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("Z-Image dynamic-batch DiT TRT engine build failed")
+    return bytes(plan)
+
+
 def _slice_rope(network, rope, start_seq, length, rope_dim):
     """Slice RoPE along sequence dimension."""
     s = network.add_slice(rope, start=(start_seq, 0), shape=(length, rope_dim), stride=(1, 1))
@@ -587,4 +956,144 @@ def _add_adaln_dit_block(
 
     gated_ffn = network.add_elementwise(ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
     x = network.add_elementwise(x, gated_ffn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+    return x
+
+
+def _add_plain_dit_block_batched(
+    network, x, weights, prefix,
+    dim, num_heads, head_dim, ffn_dim, seq_len,
+    eps_t, scale_t, cos_t, sin_t,
+):
+    """Plain DiT block for [B, S, D] tensors."""
+    normed = graph_ops.add_rms_norm_last_dim(
+        network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t)
+
+    q = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_q"])
+    k = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_k"])
+    v = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_v"])
+
+    q_norm = np.tile(weights[f"{prefix}.norm_q"].reshape(1, head_dim), (num_heads, 1))
+    k_norm = np.tile(weights[f"{prefix}.norm_k"].reshape(1, head_dim), (num_heads, 1))
+    q = graph_ops.add_rms_norm_per_head_batched(
+        network, q, num_heads, head_dim, q_norm, eps_t, sequence_length=seq_len)
+    k = graph_ops.add_rms_norm_per_head_batched(
+        network, k, num_heads, head_dim, k_norm, eps_t, sequence_length=seq_len)
+
+    q = _apply_rope_batched_from_full_cache(
+        network, q, cos_t, sin_t, num_heads, head_dim, seq_len)
+    k = _apply_rope_batched_from_full_cache(
+        network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
+
+    attn_out = _multi_head_attention_batched(
+        network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, attn_out, dim, dim, weights[f"{prefix}.to_out"])
+    attn_out_normed = graph_ops.add_rms_norm_last_dim(
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t)
+
+    x = network.add_elementwise(x, attn_out_normed, trt.ElementWiseOperation.SUM).get_output(0)
+
+    ffn_normed = graph_ops.add_rms_norm_last_dim(
+        network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t)
+    gate_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"])
+    up_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"])
+    gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
+    gate_silu = network.add_elementwise(
+        gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
+    down_proj = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"])
+
+    ffn_out_normed = graph_ops.add_rms_norm_last_dim(
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t)
+    x = network.add_elementwise(x, ffn_out_normed, trt.ElementWiseOperation.SUM).get_output(0)
+    return x
+
+
+def _add_adaln_dit_block_batched(
+    network, x, weights, prefix, temb,
+    dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
+    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t,
+):
+    """AdaLN DiT block for [B, S, D] tensors."""
+    adaln_w = weights[f"{prefix}.adaln.weight"]
+    adaln_b = weights[f"{prefix}.adaln.bias"]
+    mod = graph_ops.add_matmul_rhs_constant(
+        network, temb, adaln_embed_dim, 4 * dim, adaln_w)
+    mod = graph_ops.add_bias_sum(network, mod, 4 * dim, adaln_b)
+
+    chunks = []
+    for ci in range(4):
+        s = network.add_slice(
+            mod, start=(0, 0, ci * dim), shape=(0, 0, 0), stride=(1, 1, 1))
+        s.set_input(2, _dynamic_batch_shape(network, mod, (1, dim)))
+        chunks.append(s.get_output(0))
+    scale_msa, gate_msa_raw, scale_mlp, gate_mlp_raw = chunks
+
+    gate_msa = network.add_activation(gate_msa_raw, trt.ActivationType.TANH).get_output(0)
+    gate_mlp = network.add_activation(gate_mlp_raw, trt.ActivationType.TANH).get_output(0)
+    scale_msa_p1 = network.add_elementwise(
+        scale_msa, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+    scale_mlp_p1 = network.add_elementwise(
+        scale_mlp, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+
+    normed = graph_ops.add_rms_norm_last_dim(
+        network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t)
+    normed = network.add_elementwise(
+        normed, scale_msa_p1, trt.ElementWiseOperation.PROD).get_output(0)
+
+    q = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_q"])
+    k = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_k"])
+    v = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_v"])
+
+    q_norm = np.tile(weights[f"{prefix}.norm_q"].reshape(1, head_dim), (num_heads, 1))
+    k_norm = np.tile(weights[f"{prefix}.norm_k"].reshape(1, head_dim), (num_heads, 1))
+    q = graph_ops.add_rms_norm_per_head_batched(
+        network, q, num_heads, head_dim, q_norm, eps_t, sequence_length=seq_len)
+    k = graph_ops.add_rms_norm_per_head_batched(
+        network, k, num_heads, head_dim, k_norm, eps_t, sequence_length=seq_len)
+
+    q = _apply_rope_batched_from_full_cache(
+        network, q, cos_t, sin_t, num_heads, head_dim, seq_len)
+    k = _apply_rope_batched_from_full_cache(
+        network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
+
+    attn_out = _multi_head_attention_batched(
+        network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, attn_out, dim, dim, weights[f"{prefix}.to_out"])
+    attn_out_normed = graph_ops.add_rms_norm_last_dim(
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t)
+
+    gated_attn = network.add_elementwise(
+        attn_out_normed, gate_msa, trt.ElementWiseOperation.PROD)
+    x = network.add_elementwise(
+        x, gated_attn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+
+    ffn_normed = graph_ops.add_rms_norm_last_dim(
+        network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t)
+    ffn_normed = network.add_elementwise(
+        ffn_normed, scale_mlp_p1, trt.ElementWiseOperation.PROD).get_output(0)
+
+    gate_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"])
+    up_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"])
+    gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
+    gate_silu = network.add_elementwise(
+        gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
+    down_proj = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"])
+
+    ffn_out_normed = graph_ops.add_rms_norm_last_dim(
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t)
+    gated_ffn = network.add_elementwise(
+        ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
+    x = network.add_elementwise(
+        x, gated_ffn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
     return x

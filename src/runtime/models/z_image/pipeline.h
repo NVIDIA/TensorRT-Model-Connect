@@ -44,6 +44,10 @@ class ZImagePipeline final : public IPipeline {
     ~ZImagePipeline() override;
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+    std::vector<ImageResult> generate_images(
+        const std::vector<std::string>& prompts,
+        const std::vector<int32_t>& per_sample_seeds,
+        const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "ZImagePipeline"; }
@@ -54,6 +58,16 @@ class ZImagePipeline final : public IPipeline {
     bool run_denoiser(const std::vector<float>& hidden, const std::vector<float>& encoder_hidden,
                       const std::vector<float>& temb, const std::vector<float>& cos_vals,
                       const std::vector<float>& sin_vals, std::vector<float>& output);
+    bool run_denoiser_batched(const std::vector<float>& hidden,
+                              const std::vector<float>& encoder_hidden,
+                              const std::vector<float>& temb,
+                              const std::vector<float>& cos_vals,
+                              const std::vector<float>& sin_vals,
+                              int32_t batch_size, int32_t num_patches,
+                              int32_t dit_dim, int32_t text_seq,
+                              int32_t freq_dim, int32_t total_seq,
+                              int32_t head_dim, int32_t patch_dim,
+                              std::vector<float>& output);
 
     void project_caption(const std::vector<float>& text_emb, int32_t actual_len, int32_t padded_len,
                          std::vector<float>& projected) const;

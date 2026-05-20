@@ -1119,16 +1119,16 @@ def _build_diffusion_bundle(
     print(f"[trtmc-build] Family: {plugin.name}", file=sys.stderr)
     if max_batch_size < 1:
         raise ValueError(f"--max-batch-size must be >= 1 (got {max_batch_size})")
-    if max_batch_size != 1:
+    supports_dynamic_batch_dit = bool(
+        getattr(plugin, "supports_dynamic_batch_dit", False))
+    if max_batch_size != 1 and not supports_dynamic_batch_dit:
         raise NotImplementedError(
             "--max-batch-size > 1 requires dynamic-batch diffusion component "
             "builders, which are not enabled in this implementation slice yet"
         )
     diffusion_max_batch_size = {
-        "dit": int(max_batch_size),
-        "text_encoder": int(
-            max_batch_size if max_batch_size == 1 else min(max_batch_size * 2, 8)
-        ),
+        "dit": int(max_batch_size if supports_dynamic_batch_dit else 1),
+        "text_encoder": 1,
         "vae": 1,
     }
 
@@ -1198,6 +1198,8 @@ def _build_diffusion_bundle(
             build_components_kwargs["precision"] = precision
         if _call_supports_kwarg(build_components, "build_timing"):
             build_components_kwargs["build_timing"] = build_timing
+        if _call_supports_kwarg(build_components, "max_batch_size"):
+            build_components_kwargs["max_batch_size"] = max_batch_size
         components = build_components(
             str(model_dir_path), config, weights, **build_components_kwargs)
     finally:

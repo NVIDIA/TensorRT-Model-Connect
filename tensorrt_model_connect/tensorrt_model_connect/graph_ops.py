@@ -192,6 +192,117 @@ def add_rms_norm_per_head(
     return reshape_out.get_output(0)
 
 
+def _dynamic_batch_shape(
+    network: trt.INetworkDefinition,
+    reference: trt.ITensor,
+    tail: tuple[int, ...],
+) -> trt.ITensor:
+    """Return a shape tensor [B, *tail] using dim 0 from ``reference``."""
+    ref_shape = network.add_shape(reference).get_output(0)
+    batch_dim = network.add_slice(ref_shape, start=(0,), shape=(1,), stride=(1,))
+    tail_t = add_constant(
+        network,
+        (len(tail),),
+        np.asarray(tail, dtype=np.int64),
+        dtype=np.int64,
+    )
+    target = network.add_concatenation([batch_dim.get_output(0), tail_t])
+    target.axis = 0
+    return target.get_output(0)
+
+
+def add_rms_norm_last_dim(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    gamma: np.ndarray,
+    eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """RMSNorm over the final dimension for rank-2/rank-3 tensors."""
+    rank = len(tuple(inp.shape))
+    if rank < 2:
+        raise ValueError("add_rms_norm_last_dim expects rank >= 2")
+
+    need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
+
+    sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
+    mean = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << (rank - 1), keep_dims=True)
+    denom_in = network.add_elementwise(
+        mean.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    gamma_shape = (1,) * (rank - 1) + (hidden_size,)
+    gamma_t = add_constant(
+        network, gamma_shape, np.asarray(gamma).reshape(gamma_shape), dtype=np.float32)
+    scaled = network.add_elementwise(
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+    result = scaled.get_output(0)
+    if need_cast:
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
+    return result
+
+
+def add_rms_norm_per_head_batched(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    gamma: np.ndarray,
+    eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
+    sequence_length: int | None = None,
+) -> trt.ITensor:
+    """Per-head RMSNorm for [B, S, num_heads * head_dim] tensors."""
+    seq_dim = -1 if sequence_length is None else sequence_length
+    need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
+
+    reshape_in = network.add_shuffle(inp)
+    reshape_in.reshape_dims = (-1, seq_dim, num_heads, head_dim)
+    reshaped = reshape_in.get_output(0)
+    if need_cast:
+        reshaped = network.add_cast(reshaped, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
+
+    eps_4d = network.add_shuffle(eps_tensor)
+    eps_4d.reshape_dims = (1, 1, 1, 1)
+    sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
+    mean = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 3, keep_dims=True)
+    denom_in = network.add_elementwise(
+        mean.get_output(0), eps_4d.get_output(0), trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
+
+    gamma_arr = np.asarray(gamma, dtype=np.float32)
+    if gamma_arr.size == head_dim:
+        gamma_shape = (1, 1, 1, head_dim)
+        gamma_arr = gamma_arr.reshape(gamma_shape)
+    else:
+        gamma_shape = (1, 1, num_heads, head_dim)
+        gamma_arr = gamma_arr.reshape(gamma_shape)
+    gamma_t = add_constant(network, gamma_shape, gamma_arr, dtype=np.float32)
+    scaled = network.add_elementwise(
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+
+    result = scaled.get_output(0)
+    if need_cast:
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
+    reshape_out = network.add_shuffle(result)
+    reshape_out.reshape_dims = (-1, seq_dim, num_heads * head_dim)
+    return reshape_out.get_output(0)
+
+
 def add_l2_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

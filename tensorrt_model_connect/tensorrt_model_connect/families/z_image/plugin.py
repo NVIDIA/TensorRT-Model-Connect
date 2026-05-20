@@ -34,6 +34,7 @@ from ...checkpoint_mapper import WeightDict
 class ZImagePlugin:
     name = "z_image"
     runtime_strategy = "diffusion_zimage"
+    supports_dynamic_batch_dit = True
     pipeline_classes = ["ZImagePipeline"]
 
     # Z-Image Turbo architecture params
@@ -103,7 +104,8 @@ class ZImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False, **_kwargs,
+        *, precision: str = "fp32", verbose: bool = False,
+        max_batch_size: int = 1, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -185,6 +187,7 @@ class ZImagePlugin:
                 text_seq_len=self._TEXT_MAX_SEQ_LEN,
                 head_dim=self._DIT_HEAD_DIM,
                 adaln_embed_dim=self._ADALN_EMBED_DIM,
+                max_batch_size=max_batch_size,
                 verbose=verbose,
             )
 

@@ -161,6 +161,7 @@ def test_build_components_calls_all_subbuilders(
         "/model",
         _cfg(image_height=1024, image_width=768),
         weights,
+        max_batch_size=4,
         verbose=True,
     )
 
@@ -171,6 +172,7 @@ def test_build_components_calls_all_subbuilders(
 
     # h_lat=128, w_lat=96, patch=2x2 -> 3072 patches.
     assert calls["build_z_image_dit_engine"][1]["num_patches"] == 3072
+    assert calls["build_z_image_dit_engine"][1]["max_batch_size"] == 4
     assert calls["build_vae_2d_decoder_engine"][1]["h_lat"] == 128
     assert calls["build_vae_2d_decoder_engine"][1]["w_lat"] == 96
 
