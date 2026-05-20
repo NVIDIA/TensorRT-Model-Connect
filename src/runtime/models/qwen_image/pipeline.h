@@ -67,17 +67,38 @@ class QwenImagePipeline final : public IPipeline {
     // Latent + packed-token dimensions derived from a target image size,
     // using vae.spatial_scale_factor and denoiser.patch_size from config.
     struct LatentShape {
-        int latent_h;     // height / vae_scale_factor
-        int latent_w;     // width / vae_scale_factor
-        int packed_h;     // latent_h / patch_size
-        int packed_w;     // latent_w / patch_size
-        int n_img_tokens; // packed_h * packed_w
+        int latent_h{0};     // height / vae_scale_factor
+        int latent_w{0};     // width / vae_scale_factor
+        int packed_h{0};     // latent_h / patch_size
+        int packed_w{0};     // latent_w / patch_size
+        int n_img_tokens{0}; // packed_h * packed_w
     };
 
     // Compute latent + packed dims for a target image size. Reads vae and
     // denoiser config to derive vae_scale_factor and patch_size. Throws
     // std::runtime_error if either factor is non-positive.
     LatentShape compute_latent_shape(int height, int width) const;
+
+    struct EditImagePlan {
+        int output_height{0};
+        int output_width{0};
+        int condition_height{0}; // Qwen2.5-VL processor image height.
+        int condition_width{0};  // Qwen2.5-VL processor image width.
+        int vae_height{0};       // Input image height before VAE encode.
+        int vae_width{0};        // Input image width before VAE encode.
+        LatentShape output_tokens;
+        LatentShape condition_tokens;
+        int scheduler_image_tokens{0}; // Output-image tokens only.
+        int denoiser_image_tokens{0};  // Output + condition tokens.
+    };
+
+    // Resolve Qwen-Image Edit's aspect-preserving image sizes and packed
+    // token counts. Mirrors QwenImageEditPlusPipeline.__call__:
+    // output defaults to a 1024*1024 target area matching the input aspect,
+    // condition image defaults to 384*384 area, and VAE-condition image
+    // defaults to 1024*1024 area. cfg.height/width override output size only.
+    EditImagePlan compute_edit_image_plan(int image_height, int image_width,
+                                          const GenerateConfig& cfg = {}) const;
 
     // Normalize a raw timestep value to the [0, 1] range the engine expects.
     // Qwen-Image scheduler convention: divide by num_train_timesteps (1000).
