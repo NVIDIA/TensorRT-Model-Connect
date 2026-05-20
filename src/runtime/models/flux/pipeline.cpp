@@ -9,6 +9,7 @@
 #include "runtime/models/flux/pipeline.h"
 
 #include "runtime/core/gpu_matmul.h"
+#include "runtime/domains/diffusion/batch_utils.h"
 #include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 
 namespace trtmc {
 
@@ -859,6 +861,59 @@ bool FluxPipeline::run_flux_denoiser(const std::vector<float>& hidden,
     return true;
 }
 
+bool FluxPipeline::run_flux_denoiser_batched(const std::vector<float>& hidden,
+                                             const std::vector<float>& encoder_hidden,
+                                             const std::vector<float>& temb,
+                                             const std::vector<float>& cos_vals,
+                                             const std::vector<float>& sin_vals, int32_t batch,
+                                             int32_t hidden_cols,
+                                             int32_t expected_output_cols,
+                                             std::vector<float>& output) {
+    const int32_t dit_dim = config_.dit_dim;
+    const int32_t text_seq = config_.text_seq_len;
+    const int32_t head_dim = dit_dim / std::max(config_.dit_num_heads, 1);
+    const int32_t total_seq = text_seq + num_img_tokens_;
+
+    TensorMap inputs;
+    inputs["hidden_states"] =
+        Tensor{const_cast<float*>(hidden.data()),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(num_img_tokens_),
+                static_cast<int64_t>(hidden_cols)},
+               DType::kFloat32};
+    inputs["encoder_hidden_states"] =
+        Tensor{const_cast<float*>(encoder_hidden.data()),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(text_seq),
+                static_cast<int64_t>(dit_dim)},
+               DType::kFloat32};
+    inputs["temb"] =
+        Tensor{const_cast<float*>(temb.data()),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(dit_dim)}, DType::kFloat32};
+    inputs["rotary_cos"] =
+        Tensor{const_cast<float*>(cos_vals.data()),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(total_seq),
+                static_cast<int64_t>(head_dim)},
+               DType::kFloat32};
+    inputs["rotary_sin"] =
+        Tensor{const_cast<float*>(sin_vals.data()),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(total_seq),
+                static_cast<int64_t>(head_dim)},
+               DType::kFloat32};
+
+    auto outputs = denoiser_->forward(inputs);
+    auto& out_tensor = outputs.at("output");
+    const auto expected = static_cast<std::size_t>(batch) *
+                          static_cast<std::size_t>(num_img_tokens_) *
+                          static_cast<std::size_t>(expected_output_cols);
+    if (out_tensor.numel() < expected) {
+        std::cerr << "[flux] Batched DiT output too small: got " << out_tensor.numel()
+                  << ", expected at least " << expected << "\n";
+        return false;
+    }
+    const auto* out_data = static_cast<const float*>(out_tensor.data);
+    output.assign(out_data, out_data + expected);
+    return true;
+}
+
 // FLUX.2 denoiser: takes raw timestep/guidance scalars + raw T5 embeddings.
 // Context embedder and temb MLP are baked into the TRT engine.
 bool FluxPipeline::run_flux2_denoiser(const std::vector<float>& hidden,
@@ -1272,6 +1327,225 @@ bool FluxPipeline::decode_and_convert(const diffusion::FluxGenerationPlan& plan,
 // ===========================================================================
 // generate_image — Full FLUX pipeline
 // ===========================================================================
+
+std::vector<ImageResult> FluxPipeline::generate_images(
+    const std::vector<std::string>& prompts, const std::vector<int32_t>& per_sample_seeds,
+    const GenerateConfig& cfg) {
+    if (prompts.empty())
+        return {};
+    if (!per_sample_seeds.empty() && per_sample_seeds.size() != prompts.size()) {
+        throw std::invalid_argument("per_sample_seeds size must match prompts size");
+    }
+
+    std::vector<int32_t> resolved_seeds;
+    if (!per_sample_seeds.empty()) {
+        resolved_seeds = per_sample_seeds;
+    } else if (prompts.size() == 1U) {
+        resolved_seeds = {cfg.seed};
+    } else {
+        const std::uint64_t global_seed =
+            cfg.seed >= 0 ? static_cast<std::uint64_t>(cfg.seed) : 42ULL;
+        resolved_seeds =
+            diffusion::derive_per_sample_seeds(global_seed, static_cast<int>(prompts.size()));
+    }
+
+    if (!denoiser_ || config_.max_batch_size.dit <= 1 ||
+        denoiser_->input_rank("hidden_states") != 3 || !denoiser_->has_input("temb")) {
+        return IPipeline::generate_images(prompts, resolved_seeds, cfg);
+    }
+
+    int32_t cap = std::max(config_.max_batch_size.dit, 1);
+    const auto profile_max = denoiser_->input_profile_shape(
+        "hidden_states", denoiser_->profile_idx(), ProfileShapeSelector::kMax);
+    if (!profile_max.empty() && profile_max[0] > 0) {
+        cap = std::min(cap, static_cast<int32_t>(profile_max[0]));
+    }
+    if (cap <= 1) {
+        return IPipeline::generate_images(prompts, resolved_seeds, cfg);
+    }
+
+    const int32_t num_inference_steps =
+        diffusion::resolve_requested_steps(cfg.num_steps, config_.num_inference_steps, true);
+    const float guidance_scale =
+        diffusion::resolve_requested_guidance(cfg.guidance_scale, config_.guidance_scale);
+
+    const auto chunks = diffusion::plan_chunks(static_cast<int>(prompts.size()), cap);
+    std::vector<ImageResult> results;
+    results.reserve(prompts.size());
+
+    std::size_t prompt_offset = 0;
+    for (int32_t chunk_size : chunks) {
+        const int32_t batch = chunk_size;
+        std::cerr << "[flux] Batched DiT chunk B=" << batch << "/" << cap << ", prompts "
+                  << prompt_offset << ".."
+                  << (prompt_offset + static_cast<std::size_t>(batch) - 1U) << "\n";
+
+        diffusion::FluxGenerationPlan plan;
+        bool have_plan = false;
+        std::vector<std::vector<float>> pooled_by_sample(static_cast<std::size_t>(batch));
+
+        std::vector<float> encoder_hidden_batched;
+        std::vector<float> rope_cos_batched;
+        std::vector<float> rope_sin_batched;
+        std::vector<float> latents;
+
+        std::size_t latent_size = 0;
+        std::size_t encoder_hidden_size = 0;
+        std::size_t rope_size = 0;
+        int32_t total_seq = 0;
+        int32_t head_dim = 0;
+
+        for (int32_t b = 0; b < batch; ++b) {
+            const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
+
+            diffusion::FluxGenerationPlan sample_plan;
+            std::vector<float> text_embeddings;
+            if (!prepare_conditioning(
+                    prompts[sample_idx], cfg, sample_plan, pooled_by_sample[static_cast<std::size_t>(b)],
+                    text_embeddings)) {
+                return {};
+            }
+            if (sample_plan.is_flux2) {
+                return IPipeline::generate_images(prompts, resolved_seeds, cfg);
+            }
+            if (!have_plan) {
+                plan = sample_plan;
+                plan.num_inference_steps = num_inference_steps;
+                plan.guidance_scale = guidance_scale;
+
+                latent_size = static_cast<std::size_t>(plan.latent_size);
+                encoder_hidden_size = static_cast<std::size_t>(plan.text_seq) *
+                                      static_cast<std::size_t>(plan.dit_dim);
+                head_dim = plan.dit_dim / std::max(config_.dit_num_heads, 1);
+                total_seq = plan.text_seq + num_img_tokens_;
+                rope_size =
+                    static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(head_dim);
+
+                encoder_hidden_batched.resize(
+                    static_cast<std::size_t>(batch) * encoder_hidden_size);
+                rope_cos_batched.resize(static_cast<std::size_t>(batch) * rope_size);
+                rope_sin_batched.resize(static_cast<std::size_t>(batch) * rope_size);
+                latents.resize(static_cast<std::size_t>(batch) * latent_size);
+                have_plan = true;
+            }
+
+            std::vector<float> encoder_hidden;
+            std::vector<float> cos_vals, sin_vals;
+            std::vector<float> sample_latents;
+            prepare_denoising_state(
+                plan, text_embeddings, encoder_hidden, cos_vals, sin_vals, sample_latents,
+                resolved_seeds[sample_idx]);
+
+            std::copy(encoder_hidden.begin(), encoder_hidden.end(),
+                      encoder_hidden_batched.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(encoder_hidden_size));
+            std::copy(cos_vals.begin(), cos_vals.end(),
+                      rope_cos_batched.begin() +
+                          static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
+            std::copy(sin_vals.begin(), sin_vals.end(),
+                      rope_sin_batched.begin() +
+                          static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
+            std::copy(sample_latents.begin(), sample_latents.end(),
+                      latents.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(latent_size));
+        }
+
+        const int32_t dit_dim = plan.dit_dim;
+        const int32_t z_dim = plan.z_dim;
+        const auto& layout = plan.layout;
+        const int32_t hidden_dim = dit_dim;
+        const auto hidden_size = static_cast<std::size_t>(num_img_tokens_) *
+                                 static_cast<std::size_t>(hidden_dim);
+        const auto packed_size = static_cast<std::size_t>(num_img_tokens_) *
+                                 static_cast<std::size_t>(layout.packed_channels);
+
+        auto pack_latents_fn = make_flux_pack_fn(false, z_dim, h_latent_, w_latent_, layout);
+        auto unpack_velocity_fn = make_flux_unpack_fn(false, z_dim, h_latent_, w_latent_, layout);
+        auto embed_hidden =
+            make_flux_hidden_embedder(weights_.patch_embed_weight, weights_.patch_embed_bias,
+                                      num_img_tokens_, layout, dit_dim);
+
+        FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
+        log_flux_dynamic_shift(scheduler);
+
+        std::vector<float> hidden(static_cast<std::size_t>(batch) * hidden_size);
+        std::vector<float> temb_batched(static_cast<std::size_t>(batch) *
+                                        static_cast<std::size_t>(dit_dim));
+        std::vector<float> denoiser_output;
+        std::vector<float> velocity(static_cast<std::size_t>(batch) * latent_size);
+        std::vector<float> sample_latents;
+        std::vector<float> packed;
+        std::vector<float> sample_hidden(hidden_size);
+        std::vector<float> temb;
+        std::vector<float> sample_output;
+        std::vector<float> sample_velocity;
+
+        for (int32_t step = 0; step < num_inference_steps; ++step) {
+            const float raw_timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
+            const float t_for_embedding = raw_timestep / 1000.0F;
+
+            for (int32_t b = 0; b < batch; ++b) {
+                const auto sample_offset = static_cast<std::size_t>(b) * latent_size;
+                const auto* sample_latents_ptr = latents.data() + sample_offset;
+                sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
+
+                pack_latents_fn(sample_latents, packed);
+                embed_hidden(packed, sample_hidden);
+                std::copy(sample_hidden.begin(), sample_hidden.end(),
+                          hidden.begin() +
+                              static_cast<std::ptrdiff_t>(b) *
+                                  static_cast<std::ptrdiff_t>(hidden_size));
+
+                compute_flux_timestep_embedding(
+                    t_for_embedding, guidance_scale, pooled_by_sample[static_cast<std::size_t>(b)],
+                    temb);
+                std::copy(temb.begin(), temb.end(),
+                          temb_batched.begin() +
+                              static_cast<std::ptrdiff_t>(b) *
+                                  static_cast<std::ptrdiff_t>(dit_dim));
+            }
+
+            if (!run_flux_denoiser_batched(
+                    hidden, encoder_hidden_batched, temb_batched, rope_cos_batched,
+                    rope_sin_batched, batch, hidden_dim, layout.packed_channels,
+                    denoiser_output)) {
+                std::cerr << "[flux] Batched DiT failed at step " << step << "\n";
+                return {};
+            }
+
+            for (int32_t b = 0; b < batch; ++b) {
+                const auto* sample_output_ptr =
+                    denoiser_output.data() + static_cast<std::size_t>(b) * packed_size;
+                sample_output.assign(sample_output_ptr, sample_output_ptr + packed_size);
+                unpack_velocity_fn(sample_output, sample_velocity);
+                std::copy(sample_velocity.begin(), sample_velocity.end(),
+                          velocity.begin() +
+                              static_cast<std::ptrdiff_t>(b) *
+                                  static_cast<std::ptrdiff_t>(latent_size));
+            }
+
+            scheduler.step(velocity.data(), latents.data(), latents.data(), latents.size(), step);
+            log_flux_step_stats(step, num_inference_steps, scheduler, latents, velocity, hidden);
+        }
+
+        for (int32_t b = 0; b < batch; ++b) {
+            const auto* sample_latents_ptr =
+                latents.data() + static_cast<std::size_t>(b) * latent_size;
+            sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
+            ImageResult result;
+            if (!decode_and_convert(plan, sample_latents, result)) {
+                return {};
+            }
+            results.push_back(std::move(result));
+        }
+
+        prompt_offset += static_cast<std::size_t>(batch);
+    }
+
+    return results;
+}
 
 ImageResult FluxPipeline::generate_image(const std::string& prompt, const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;

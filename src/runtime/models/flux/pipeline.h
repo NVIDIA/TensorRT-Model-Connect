@@ -27,6 +27,10 @@ class FluxPipeline final : public IPipeline {
     ~FluxPipeline() override;
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+    std::vector<ImageResult> generate_images(
+        const std::vector<std::string>& prompts,
+        const std::vector<int32_t>& per_sample_seeds = {},
+        const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "FluxPipeline"; }
@@ -39,6 +43,13 @@ class FluxPipeline final : public IPipeline {
                            const std::vector<float>& encoder_hidden, const std::vector<float>& temb,
                            const std::vector<float>& cos_vals, const std::vector<float>& sin_vals,
                            std::vector<float>& output);
+    bool run_flux_denoiser_batched(const std::vector<float>& hidden,
+                                   const std::vector<float>& encoder_hidden,
+                                   const std::vector<float>& temb,
+                                   const std::vector<float>& cos_vals,
+                                   const std::vector<float>& sin_vals, int32_t batch,
+                                   int32_t hidden_cols, int32_t expected_output_cols,
+                                   std::vector<float>& output);
     // FLUX.2: denoiser with baked temb MLP + context embedder
     bool run_flux2_denoiser(const std::vector<float>& hidden,
                             const std::vector<float>& encoder_hidden, float timestep,

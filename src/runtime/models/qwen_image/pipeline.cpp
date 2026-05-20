@@ -7,6 +7,7 @@
 
 #include "runtime/models/qwen_image/pipeline.h"
 
+#include "runtime/domains/diffusion/batch_utils.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "trtmc/runtime/scheduler.h"
 
@@ -41,6 +42,7 @@ QwenImagePipeline::QwenImagePipeline(Construction c)
       vision_engine_(std::move(c.vision_engine)),
       vae_encoder_engine_(std::move(c.vae_encoder_engine)), tokenizer_(std::move(c.tokenizer)),
       config_(std::move(c.config)), preprocessor_(std::move(c.preprocessor)),
+      max_dit_batch_size_(std::max(c.max_dit_batch_size, 1)),
       model_id_(std::move(c.model_id)), bundle_path_(std::move(c.bundle_path)) {}
 
 QwenImagePipeline::~QwenImagePipeline() = default;
@@ -113,6 +115,12 @@ void validate_caller_initial_latents(const std::vector<float>& initial_latents, 
     }
 }
 
+FlowMatchEulerScheduler build_scheduler(const QwenImageDiffusionConfig& dc, int num_steps,
+                                        int n_img);
+void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
+                             const std::vector<float>& noise_neg, float cfg_scale, int n_img,
+                             std::size_t channels, std::vector<float>& out);
+
 } // namespace
 
 ImageResult QwenImagePipeline::generate_image(const std::string& prompt,
@@ -164,6 +172,163 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt,
     result.num_frames = 1;
     result.pixels = std::move(image.pixels);
     return result;
+}
+
+std::vector<ImageResult> QwenImagePipeline::generate_images(
+    const std::vector<std::string>& prompts, const std::vector<int32_t>& per_sample_seeds,
+    const GenerateConfig& cfg) {
+    if (prompts.empty())
+        return {};
+    if (!per_sample_seeds.empty() && per_sample_seeds.size() != prompts.size()) {
+        throw std::invalid_argument("per_sample_seeds size must match prompts size");
+    }
+
+    validate_generate_image_engines(text_engine_ != nullptr, denoiser_engine_ != nullptr,
+                                    vae_decoder_engine_ != nullptr);
+    const GenerateKnobs k = resolve_generate_knobs(cfg, config_);
+
+    std::vector<int32_t> resolved_seeds;
+    if (!per_sample_seeds.empty()) {
+        resolved_seeds = per_sample_seeds;
+    } else if (prompts.size() == 1U) {
+        resolved_seeds = {cfg.seed};
+    } else {
+        resolved_seeds =
+            diffusion::derive_per_sample_seeds(k.seed, static_cast<int>(prompts.size()));
+    }
+
+    if (!cfg.initial_latents.empty() || max_dit_batch_size_ <= 1 ||
+        denoiser_engine_->input_rank("img_patched") != 3) {
+        return IPipeline::generate_images(prompts, resolved_seeds, cfg);
+    }
+
+    int32_t cap = std::max(max_dit_batch_size_, 1);
+    const auto profile_max = denoiser_engine_->input_profile_shape(
+        "img_patched", denoiser_engine_->profile_idx(), ProfileShapeSelector::kMax);
+    if (!profile_max.empty() && profile_max[0] > 0) {
+        cap = std::min(cap, static_cast<int32_t>(profile_max[0]));
+    }
+    if (cap <= 1) {
+        return IPipeline::generate_images(prompts, resolved_seeds, cfg);
+    }
+
+    auto shape = compute_latent_shape(k.height, k.width);
+    validate_generate_image_shape(shape.latent_h, shape.latent_w, shape.n_img_tokens);
+    const int latent_channels = config_.vae.latent_channels;
+    const int in_channels = config_.denoiser.in_channels;
+    const int max_text_tokens = config_.denoiser.max_text_tokens;
+    const int text_embed_dim = config_.denoiser.text_embed_dim;
+    const std::size_t packed_size = static_cast<std::size_t>(shape.n_img_tokens) *
+                                    static_cast<std::size_t>(in_channels);
+    const std::size_t hidden_size = static_cast<std::size_t>(max_text_tokens) *
+                                    static_cast<std::size_t>(text_embed_dim);
+
+    const EncodedPrompt neg = encode_text(k.negative);
+    const bool do_cfg = k.cfg_scale > 1.0F;
+    const auto chunks = diffusion::plan_chunks(static_cast<int>(prompts.size()), cap);
+    std::vector<ImageResult> results;
+    results.reserve(prompts.size());
+
+    auto run_denoiser_batched = [&](const std::vector<float>& latents_packed,
+                                    const std::vector<float>& hidden_states, float normalized_t,
+                                    int32_t batch) {
+        std::vector<float> timestep_buf(static_cast<std::size_t>(batch), normalized_t);
+        TensorMap inputs;
+        inputs["img_patched"] =
+            Tensor{const_cast<float*>(latents_packed.data()),
+                   {static_cast<int64_t>(batch), static_cast<int64_t>(shape.n_img_tokens),
+                    static_cast<int64_t>(in_channels)},
+                   DType::kFloat32};
+        inputs["txt_hidden"] =
+            Tensor{const_cast<float*>(hidden_states.data()),
+                   {static_cast<int64_t>(batch), static_cast<int64_t>(max_text_tokens),
+                    static_cast<int64_t>(text_embed_dim)},
+                   DType::kFloat32};
+        inputs["timestep"] = Tensor{timestep_buf.data(), {static_cast<int64_t>(batch)},
+                                    DType::kFloat32};
+
+        auto outputs = denoiser_engine_->forward(inputs);
+        const auto& noise = outputs["noise_patched"];
+        const std::size_t expected = static_cast<std::size_t>(batch) * packed_size;
+        if (noise.numel() != expected) {
+            throw std::runtime_error(
+                "QwenImagePipeline::generate_images: batched denoiser output size " +
+                std::to_string(noise.numel()) + " does not match expected " +
+                std::to_string(expected));
+        }
+        std::vector<float> out(expected);
+        std::memcpy(out.data(), noise.data, out.size() * sizeof(float));
+        return out;
+    };
+
+    std::size_t prompt_offset = 0;
+    for (int32_t chunk_size : chunks) {
+        const int32_t batch = chunk_size;
+        std::vector<float> latents_packed(static_cast<std::size_t>(batch) * packed_size);
+        std::vector<float> pos_hidden(static_cast<std::size_t>(batch) * hidden_size);
+        std::vector<float> neg_hidden(static_cast<std::size_t>(batch) * hidden_size);
+
+        for (int32_t b = 0; b < batch; ++b) {
+            const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
+            const auto pos = encode_text(prompts[sample_idx]);
+            std::copy(pos.hidden_states.begin(), pos.hidden_states.end(),
+                      pos_hidden.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(hidden_size));
+            std::copy(neg.hidden_states.begin(), neg.hidden_states.end(),
+                      neg_hidden.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(hidden_size));
+
+            const uint64_t seed = resolved_seeds[sample_idx] >= 0
+                                      ? static_cast<uint64_t>(resolved_seeds[sample_idx])
+                                      : 42ULL;
+            auto latents =
+                prepare_initial_latents(shape.latent_h, shape.latent_w, latent_channels, seed);
+            auto packed = patchify_latents(latents, latent_channels, shape.latent_h,
+                                           shape.latent_w, config_.denoiser.patch_size);
+            std::copy(packed.begin(), packed.end(),
+                      latents_packed.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(packed_size));
+        }
+
+        auto scheduler = build_scheduler(config_.diffusion, k.num_steps, shape.n_img_tokens);
+        const auto& timesteps = scheduler.timesteps();
+        std::vector<float> noise_pred(static_cast<std::size_t>(batch) * packed_size);
+
+        for (int step = 0; step < k.num_steps; ++step) {
+            const float norm_t = normalize_timestep(timesteps[static_cast<std::size_t>(step)]);
+            auto noise_pos = run_denoiser_batched(latents_packed, pos_hidden, norm_t, batch);
+            if (do_cfg) {
+                auto noise_neg = run_denoiser_batched(latents_packed, neg_hidden, norm_t, batch);
+                combine_cfg_with_renorm(noise_pos, noise_neg, k.cfg_scale,
+                                        batch * shape.n_img_tokens,
+                                        static_cast<std::size_t>(in_channels), noise_pred);
+            } else {
+                noise_pred = std::move(noise_pos);
+            }
+            scheduler.step(latents_packed.data(), noise_pred.data(),
+                           static_cast<int32_t>(latents_packed.size()), step);
+        }
+
+        for (int32_t b = 0; b < batch; ++b) {
+            const auto* sample_ptr = latents_packed.data() + static_cast<std::size_t>(b) * packed_size;
+            std::vector<float> sample(sample_ptr, sample_ptr + packed_size);
+            auto image = vae_decode(sample, shape.n_img_tokens, shape.latent_h, shape.latent_w);
+            ImageResult result;
+            result.height = image.height;
+            result.width = image.width;
+            result.channels = 3;
+            result.num_frames = 1;
+            result.pixels = std::move(image.pixels);
+            results.push_back(std::move(result));
+        }
+
+        prompt_offset += static_cast<std::size_t>(batch);
+    }
+
+    return results;
 }
 
 // -----------------------------------------------------------------------------

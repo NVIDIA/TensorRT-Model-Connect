@@ -43,6 +43,7 @@ class QwenImagePipeline final : public IPipeline {
         std::shared_ptr<ITokenizer> tokenizer;
         QwenImageConfig config;
         QwenImagePreprocessorWeights preprocessor;
+        int32_t max_dit_batch_size{1};
         std::string model_id;
         std::string bundle_path;
     };
@@ -51,6 +52,10 @@ class QwenImagePipeline final : public IPipeline {
     ~QwenImagePipeline() override;
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+    std::vector<ImageResult> generate_images(
+        const std::vector<std::string>& prompts,
+        const std::vector<int32_t>& per_sample_seeds = {},
+        const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "QwenImagePipeline"; }
@@ -190,6 +195,7 @@ class QwenImagePipeline final : public IPipeline {
     std::shared_ptr<ITokenizer> tokenizer_;
     QwenImageConfig config_;
     QwenImagePreprocessorWeights preprocessor_;
+    int32_t max_dit_batch_size_{1};
     std::string model_id_;
     std::string bundle_path_;
 };

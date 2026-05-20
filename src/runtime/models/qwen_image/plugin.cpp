@@ -58,6 +58,7 @@ class QwenImagePlugin final : public IPipelinePlugin {
         c.tokenizer = std::move(parts.tokenizer);
         c.config = std::move(qi_config);
         c.preprocessor = std::move(qi_preprocessor);
+        c.max_dit_batch_size = ctx.bundle.info.max_batch_size.dit;
         c.model_id = ctx.bundle.info.model_id;
         c.bundle_path = ctx.bundle_path;
         return std::make_unique<QwenImagePipeline>(std::move(c));

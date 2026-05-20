@@ -26,6 +26,7 @@ from ...checkpoint_mapper import WeightDict
 class QwenImagePlugin:
     name = "qwen_image"
     runtime_strategy = "diffusion_qwen_image"
+    supports_dynamic_batch_dit = True
     pipeline_classes = [
         "QwenImagePipeline",
         "QwenImageEditPipeline",
@@ -80,7 +81,8 @@ class QwenImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "bf16", verbose: bool = False, **_kwargs,
+        *, precision: str = "bf16", verbose: bool = False,
+        max_batch_size: int = 1, **_kwargs,
     ) -> dict:
         """Build TRT engines and bundle blobs for a Qwen-Image T2I checkpoint.
 
@@ -207,6 +209,7 @@ class QwenImagePlugin:
             build_qwen_image_dit_engine(
                 dit_cfg, dit_w, dit_plan_path,
                 h_lat=h_lat, w_lat=w_lat, n_text=n_text,
+                batch_size=max_batch_size,
                 verbose=verbose,
             )
             dit_engine_bytes = dit_plan_path.read_bytes()

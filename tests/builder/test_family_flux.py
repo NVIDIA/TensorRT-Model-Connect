@@ -235,6 +235,7 @@ def test_build_components_with_clip_and_second_t5(
         str(model_dir),
         _cfg(image_height=80, image_width=96),
         weights,
+        max_batch_size=3,
         verbose=False,
     )
 
@@ -245,8 +246,22 @@ def test_build_components_with_clip_and_second_t5(
 
     # h_lat=10, w_lat=12, pack_size=2 -> num_img_tokens=30
     assert calls["build_flux_dit_engine"][1]["num_img_tokens"] == 30
+    assert calls["build_flux_dit_engine"][1]["max_batch_size"] == 3
     assert calls["load_flux_dit_weights"][1]["dim"] == 8
     assert calls["serialize"][0][1] is True
+
+
+def test_build_components_rejects_flux2_dynamic_batch(tmp_path) -> None:
+    """Intent: ensure FLUX.2 does not advertise DiT batching before its builder is converted."""
+    weights = {
+        "_transformer_dir": str(tmp_path / "transformer"),
+        "_vae_dir": str(tmp_path / "vae"),
+        "_transformer_config": {"_class_name": "Flux2Transformer2DModel"},
+    }
+
+    with pytest.raises(NotImplementedError, match="FLUX.2 dynamic-batch DiT"):
+        flux_mod.plugin.build_components(
+            str(tmp_path), _cfg(), weights, max_batch_size=2, verbose=False)
 
 
 def test_build_components_treats_text_encoder_as_t5_when_not_clip(

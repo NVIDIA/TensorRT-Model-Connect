@@ -374,6 +374,59 @@ def _add_linear(network, x, weight_np: np.ndarray, bias_np: np.ndarray):
     return y
 
 
+def _dynamic_batch_shape(network, reference, tail: tuple[int, ...]):
+    """Shape tensor [B, *tail] using dim 0 from a dynamic-batch tensor."""
+    ref_shape = network.add_shape(reference).get_output(0)
+    batch = network.add_slice(ref_shape, start=(0,), shape=(1,), stride=(1,))
+    tail_t = graph_ops.add_constant(
+        network, (len(tail),), np.asarray(tail, dtype=np.int64), dtype=np.int64)
+    target = network.add_concatenation([batch.get_output(0), tail_t])
+    target.axis = 0
+    return target.get_output(0)
+
+
+def _slice_batch_vector(network, x, start_width: int, width: int, batch_size: int):
+    """Slice [B, D] along D, preserving dynamic B when present."""
+    if batch_size == 1:
+        return network.add_slice(
+            x, start=(0, start_width), shape=(1, width), stride=(1, 1)).get_output(0)
+    s = network.add_slice(
+        x, start=(0, start_width), shape=(0, 0), stride=(1, 1))
+    s.set_input(2, _dynamic_batch_shape(network, x, (width,)))
+    return s.get_output(0)
+
+
+def _slice_batch_sequence(network, x, start_seq: int, length: int, width: int,
+                          batch_size: int):
+    """Slice [B, S, D] along S, preserving dynamic B when present."""
+    if batch_size == 1:
+        return network.add_slice(
+            x, start=(0, start_seq, 0), shape=(1, length, width),
+            stride=(1, 1, 1)).get_output(0)
+    s = network.add_slice(
+        x, start=(0, start_seq, 0), shape=(0, 0, 0), stride=(1, 1, 1))
+    s.set_input(2, _dynamic_batch_shape(network, x, (length, width)))
+    return s.get_output(0)
+
+
+def _slice_batch_complex_part(network, x, seq_len: int, num_heads: int, half: int,
+                              complex_index: int, batch_size: int):
+    """Slice real/imag part from [B, S, H, D/2, 2] to [B, S, H, D/2]."""
+    if batch_size == 1:
+        s = network.add_slice(
+            x, start=(0, 0, 0, 0, complex_index),
+            shape=(1, seq_len, num_heads, half, 1),
+            stride=(1, 1, 1, 1, 1))
+    else:
+        s = network.add_slice(
+            x, start=(0, 0, 0, 0, complex_index), shape=(0, 0, 0, 0, 0),
+            stride=(1, 1, 1, 1, 1))
+        s.set_input(2, _dynamic_batch_shape(network, x, (seq_len, num_heads, half, 1)))
+    r = network.add_shuffle(s.get_output(0))
+    r.reshape_dims = (-1, seq_len, num_heads, half)
+    return r.get_output(0)
+
+
 def build_timestep_embed_engine(
     out_path: PathLike,
     *,
@@ -852,33 +905,19 @@ def _add_gate_residual(network, residual_3d, gate_2d, branch_3d, hidden_size: in
 
 def _add_rms_norm_per_head(network, x_3d, num_heads: int, head_dim: int,
                            gamma: np.ndarray, eps: float, seq_len: int):
-    """RMSNorm over head_dim for [B, S, H*D] (B is fixed in static engine).
-
-    Reuses graph_ops.add_rms_norm_per_head, which auto-casts to fp32 for
-    numerical stability when its ``dtype`` parameter is non-fp32 and casts
-    back to the input dtype afterwards. The bf16 storage path is selected
-    here so the in/out tensor dtype stays bf16 while the reduction runs in
-    fp32 -- matches the QK-norm precision pattern of flux2/Qwen-VL.
-    """
-    # [B, S, H*D] -> [S, H*D] (B=1).
-    sq = network.add_shuffle(x_3d)
-    sq.reshape_dims = (seq_len, num_heads * head_dim)
+    """RMSNorm over head_dim for [B, S, H*D]."""
     eps_t = _add_2d_constant(network, np.array([eps], dtype=np.float32))
     eps_scalar = network.add_shuffle(eps_t)
     eps_scalar.reshape_dims = ()
-    out_2d = graph_ops.add_rms_norm_per_head(
-        network, sq.get_output(0), num_heads, head_dim, gamma,
+    return graph_ops.add_rms_norm_per_head_batched(
+        network, x_3d, num_heads, head_dim, gamma,
         eps_scalar.get_output(0), sequence_length=seq_len,
         dtype=np.float16,  # signal "non-fp32 in/out, fp32 compute internally"
     )
-    # [S, H*D] -> [B=1, S, H*D].
-    out_3d = network.add_shuffle(out_2d)
-    out_3d.reshape_dims = (1, seq_len, num_heads * head_dim)
-    return out_3d.get_output(0)
 
 
 def _add_rope_pair(network, x_3d, cos_2d, sin_2d, num_heads: int,
-                   head_dim: int, seq_len: int):
+                   head_dim: int, seq_len: int, batch_size: int = 1):
     """Apply Qwen pair-based RoPE.
 
     x_3d:    [B=1, S, H*D]
@@ -891,24 +930,17 @@ def _add_rope_pair(network, x_3d, cos_2d, sin_2d, num_heads: int,
 
     Returns [B=1, S, H*D].
     """
-    # [B=1, S, H*D] -> [S, H*D] -> [S, H, D] -> [S, H, D/2, 2]
+    # [B, S, H*D] -> [B, S, H, D/2, 2]
     rb = network.add_shuffle(x_3d)
-    rb.reshape_dims = (seq_len, num_heads, head_dim // 2, 2)
+    rb.reshape_dims = (-1, seq_len, num_heads, head_dim // 2, 2)
     x_pairs = rb.get_output(0)
 
     # x_real = x[..., 0], x_imag = x[..., 1]  (along last axis).
-    x_real_sl = network.add_slice(
-        x_pairs, start=(0, 0, 0, 0),
-        shape=(seq_len, num_heads, head_dim // 2, 1), stride=(1, 1, 1, 1),
-    )
-    x_imag_sl = network.add_slice(
-        x_pairs, start=(0, 0, 0, 1),
-        shape=(seq_len, num_heads, head_dim // 2, 1), stride=(1, 1, 1, 1),
-    )
-    x_real = network.add_shuffle(x_real_sl.get_output(0))
-    x_real.reshape_dims = (seq_len, num_heads, head_dim // 2)
-    x_imag = network.add_shuffle(x_imag_sl.get_output(0))
-    x_imag.reshape_dims = (seq_len, num_heads, head_dim // 2)
+    half = head_dim // 2
+    x_real = _slice_batch_complex_part(network, x_pairs, seq_len, num_heads, half, 0,
+                                       batch_size)
+    x_imag = _slice_batch_complex_part(network, x_pairs, seq_len, num_heads, half, 1,
+                                       batch_size)
 
     # cos_pair / sin_pair: take every-other element from cos/sin (they are
     # interleaved-duplicated, so cos_pair[..., j] = cos[..., 2j]).
@@ -925,16 +957,16 @@ def _add_rope_pair(network, x_3d, cos_2d, sin_2d, num_heads: int,
     sin_pair_c = _to_compute_dtype(network, sin_pair_sl.get_output(0))
     # Reshape cos/sin to [S, 1, D/2] for broadcast across heads.
     cos_3d = network.add_shuffle(cos_pair_c)
-    cos_3d.reshape_dims = (seq_len, 1, head_dim // 2)
+    cos_3d.reshape_dims = (1, seq_len, 1, head_dim // 2)
     sin_3d = network.add_shuffle(sin_pair_c)
-    sin_3d.reshape_dims = (seq_len, 1, head_dim // 2)
+    sin_3d.reshape_dims = (1, seq_len, 1, head_dim // 2)
 
     # new_real = x_real * cos - x_imag * sin
     r_cos = network.add_elementwise(
-        x_real.get_output(0), cos_3d.get_output(0), trt.ElementWiseOperation.PROD,
+        x_real, cos_3d.get_output(0), trt.ElementWiseOperation.PROD,
     ).get_output(0)
     i_sin = network.add_elementwise(
-        x_imag.get_output(0), sin_3d.get_output(0), trt.ElementWiseOperation.PROD,
+        x_imag, sin_3d.get_output(0), trt.ElementWiseOperation.PROD,
     ).get_output(0)
     new_real = network.add_elementwise(
         r_cos, i_sin, trt.ElementWiseOperation.SUB,
@@ -942,10 +974,10 @@ def _add_rope_pair(network, x_3d, cos_2d, sin_2d, num_heads: int,
 
     # new_imag = x_real * sin + x_imag * cos
     r_sin = network.add_elementwise(
-        x_real.get_output(0), sin_3d.get_output(0), trt.ElementWiseOperation.PROD,
+        x_real, sin_3d.get_output(0), trt.ElementWiseOperation.PROD,
     ).get_output(0)
     i_cos = network.add_elementwise(
-        x_imag.get_output(0), cos_3d.get_output(0), trt.ElementWiseOperation.PROD,
+        x_imag, cos_3d.get_output(0), trt.ElementWiseOperation.PROD,
     ).get_output(0)
     new_imag = network.add_elementwise(
         r_sin, i_cos, trt.ElementWiseOperation.SUM,
@@ -953,22 +985,22 @@ def _add_rope_pair(network, x_3d, cos_2d, sin_2d, num_heads: int,
 
     # Stack along the last dim: [S, H, D/2] + [S, H, D/2] -> [S, H, D/2, 2]
     nr_4d = network.add_shuffle(new_real)
-    nr_4d.reshape_dims = (seq_len, num_heads, head_dim // 2, 1)
+    nr_4d.reshape_dims = (-1, seq_len, num_heads, head_dim // 2, 1)
     ni_4d = network.add_shuffle(new_imag)
-    ni_4d.reshape_dims = (seq_len, num_heads, head_dim // 2, 1)
+    ni_4d.reshape_dims = (-1, seq_len, num_heads, head_dim // 2, 1)
     cat = network.add_concatenation([nr_4d.get_output(0), ni_4d.get_output(0)])
-    cat.axis = 3
+    cat.axis = 4
 
-    # [S, H, D/2, 2] -> [B=1, S, H*D]
+    # [B, S, H, D/2, 2] -> [B, S, H*D]
     flat = network.add_shuffle(cat.get_output(0))
-    flat.reshape_dims = (1, seq_len, num_heads * head_dim)
+    flat.reshape_dims = (-1, seq_len, num_heads * head_dim)
     return flat.get_output(0)
 
 
 def _add_joint_attention(
     network, q_img_3d, k_img_3d, v_img_3d,
     q_txt_3d, k_txt_3d, v_txt_3d,
-    num_heads: int, head_dim: int, n_img: int, n_txt: int,
+    num_heads: int, head_dim: int, n_img: int, n_txt: int, batch_size: int = 1,
 ):
     """Joint attention with concat order [txt, img].
 
@@ -987,7 +1019,7 @@ def _add_joint_attention(
     # Reshape [B=1, S, H*D] -> [B=1, S, H, D] -> [B=1, H, S, D].
     def to_4d(x_3d):
         r1 = network.add_shuffle(x_3d)
-        r1.reshape_dims = (1, seq_total, num_heads, head_dim)
+        r1.reshape_dims = (-1, seq_total, num_heads, head_dim)
         r1.second_transpose = trt.Permutation([0, 2, 1, 3])
         return r1.get_output(0)
 
@@ -1003,24 +1035,20 @@ def _add_joint_attention(
     # [B=1, H, S, D] -> [B=1, S, H, D] -> [B=1, S, H*D]
     out_shuffle = network.add_shuffle(ctx_4d)
     out_shuffle.first_transpose = trt.Permutation([0, 2, 1, 3])
-    out_shuffle.reshape_dims = (1, seq_total, num_heads * head_dim)
+    out_shuffle.reshape_dims = (-1, seq_total, num_heads * head_dim)
     out_3d = out_shuffle.get_output(0)
 
     # Split back into [B, N_txt, H*D] and [B, N_img, H*D].
-    txt_sl = network.add_slice(
-        out_3d, start=(0, 0, 0),
-        shape=(1, n_txt, num_heads * head_dim), stride=(1, 1, 1),
-    )
-    img_sl = network.add_slice(
-        out_3d, start=(0, n_txt, 0),
-        shape=(1, n_img, num_heads * head_dim), stride=(1, 1, 1),
-    )
-    return txt_sl.get_output(0), img_sl.get_output(0)
+    txt = _slice_batch_sequence(network, out_3d, 0, n_txt, num_heads * head_dim,
+                                batch_size)
+    img = _slice_batch_sequence(network, out_3d, n_txt, n_img, num_heads * head_dim,
+                                batch_size)
+    return txt, img
 
 
 def _add_mlp_block(network, x_3d, hidden_size: int, intermediate_size: int,
                    weights: Mapping[str, np.ndarray], prefix: str,
-                   seq_len: int):
+                   seq_len: int, batch_size: int = 1):
     """FeedForward block: Linear -> GELU(tanh) -> Linear.
 
     Diffusers FeedForward (gelu-approximate, mult=4, bias=True):
@@ -1035,15 +1063,13 @@ def _add_mlp_block(network, x_3d, hidden_size: int, intermediate_size: int,
     w2 = np.asarray(weights[f"{prefix}.net.2.weight"], dtype=np.float32)        # [hidden, inner]
     b2 = np.asarray(weights[f"{prefix}.net.2.bias"], dtype=np.float32)
 
-    # Flatten to [S, D] for matmul, then back to [B=1, S, D'].
-    flat = network.add_shuffle(x_3d)
-    flat.reshape_dims = (seq_len, hidden_size)
-    h = _add_linear_2d(network, flat.get_output(0), hidden_size, intermediate_size, w1, b1)
+    h = _add_linear_3d(
+        network, x_3d, hidden_size, intermediate_size, w1, b1,
+        seq_len=seq_len, batch_size=batch_size)
     h = graph_ops.add_gelu_tanh(network, h)
-    h = _add_linear_2d(network, h, intermediate_size, hidden_size, w2, b2)
-    unflat = network.add_shuffle(h)
-    unflat.reshape_dims = (1, seq_len, hidden_size)
-    return unflat.get_output(0)
+    return _add_linear_3d(
+        network, h, intermediate_size, hidden_size, w2, b2,
+        seq_len=seq_len, batch_size=batch_size)
 
 
 def _add_qkv_with_norm_and_rope(
@@ -1052,53 +1078,43 @@ def _add_qkv_with_norm_and_rope(
     q_key: str, k_key: str, v_key: str,
     norm_q_key: str | None, norm_k_key: str | None,
     rms_eps: float,
-    cos_2d, sin_2d,
+    cos_2d, sin_2d, batch_size: int = 1,
 ):
     """Compute QKV for one stream with q-norm/k-norm + RoPE.
 
     Inputs are [B=1, S, D]. Returns (q_3d, k_3d, v_3d) each [B=1, S, H*D].
     Q and K get q-norm/k-norm + RoPE applied. V is passed through.
     """
-    flat = network.add_shuffle(x_3d)
-    flat.reshape_dims = (seq_len, hidden_size)
-    x_flat = flat.get_output(0)
-
     def _proj(weight_key: str):
         w_hf = np.asarray(weights[f"{weight_key}.weight"], dtype=np.float32)
         b_hf = weights.get(f"{weight_key}.bias")
         b = np.asarray(b_hf, dtype=np.float32) if b_hf is not None else None
-        return _add_linear_2d(network, x_flat, hidden_size, hidden_size, w_hf, b)
+        return _add_linear_3d(
+            network, x_3d, hidden_size, hidden_size, w_hf, b,
+            seq_len=seq_len, batch_size=batch_size)
 
     q = _proj(q_key)
     k = _proj(k_key)
     v = _proj(v_key)
 
-    # Reshape to [B=1, S, H*D] for downstream helpers.
-    def to_3d(t):
-        s = network.add_shuffle(t)
-        s.reshape_dims = (1, seq_len, num_heads * head_dim)
-        return s.get_output(0)
-
-    q_3d = to_3d(q)
-    k_3d = to_3d(k)
-    v_3d = to_3d(v)
-
     # qk-norm: RMSNorm over head_dim with weight [head_dim].
     if norm_q_key is not None and f"{norm_q_key}.weight" in weights:
         gamma = np.asarray(weights[f"{norm_q_key}.weight"], dtype=np.float32)
-        q_3d = _add_rms_norm_per_head(
-            network, q_3d, num_heads, head_dim, gamma, rms_eps, seq_len,
+        q = _add_rms_norm_per_head(
+            network, q, num_heads, head_dim, gamma, rms_eps, seq_len,
         )
     if norm_k_key is not None and f"{norm_k_key}.weight" in weights:
         gamma = np.asarray(weights[f"{norm_k_key}.weight"], dtype=np.float32)
-        k_3d = _add_rms_norm_per_head(
-            network, k_3d, num_heads, head_dim, gamma, rms_eps, seq_len,
+        k = _add_rms_norm_per_head(
+            network, k, num_heads, head_dim, gamma, rms_eps, seq_len,
         )
 
     # RoPE on Q and K (V untouched).
-    q_3d = _add_rope_pair(network, q_3d, cos_2d, sin_2d, num_heads, head_dim, seq_len)
-    k_3d = _add_rope_pair(network, k_3d, cos_2d, sin_2d, num_heads, head_dim, seq_len)
-    return q_3d, k_3d, v_3d
+    q = _add_rope_pair(network, q, cos_2d, sin_2d, num_heads, head_dim, seq_len,
+                       batch_size)
+    k = _add_rope_pair(network, k, cos_2d, sin_2d, num_heads, head_dim, seq_len,
+                       batch_size)
+    return q, k, v
 
 
 # ---------------------------------------------------------------------------
@@ -1139,10 +1155,6 @@ def _add_joint_block_graph(
 
     Returns ``(img_out_3d, txt_out_3d)``, both [B, S_*, hidden].
     """
-    if batch_size != 1:
-        raise NotImplementedError(
-            "_add_joint_block_graph currently supports batch_size=1 only"
-        )
     H = cfg.num_attention_heads
     D = cfg.attention_head_dim
     dim = cfg.hidden_size
@@ -1189,11 +1201,7 @@ def _add_joint_block_graph(
     def _six_chunks(mod_params):
         chunks = []
         for i in range(6):
-            sl = network.add_slice(
-                mod_params, start=(0, i * dim),
-                shape=(batch_size, dim), stride=(1, 1),
-            )
-            chunks.append(sl.get_output(0))
+            chunks.append(_slice_batch_vector(network, mod_params, i * dim, dim, batch_size))
         return chunks
 
     img_shift_msa, img_scale_msa, img_gate_msa, \
@@ -1214,6 +1222,7 @@ def _add_joint_block_graph(
         q_key="attn.to_q", k_key="attn.to_k", v_key="attn.to_v",
         norm_q_key="attn.norm_q", norm_k_key="attn.norm_k",
         rms_eps=cfg.rms_norm_eps, cos_2d=cos_img, sin_2d=sin_img,
+        batch_size=batch_size,
     )
     txt_q, txt_k, txt_v = _add_qkv_with_norm_and_rope(
         network, txt_modulated, prefixed,
@@ -1221,24 +1230,22 @@ def _add_joint_block_graph(
         q_key="attn.add_q_proj", k_key="attn.add_k_proj", v_key="attn.add_v_proj",
         norm_q_key="attn.norm_added_q", norm_k_key="attn.norm_added_k",
         rms_eps=cfg.rms_norm_eps, cos_2d=cos_txt, sin_2d=sin_txt,
+        batch_size=batch_size,
     )
 
     # ----- joint attention; concat order [txt, img].
     attn_txt_3d, attn_img_3d = _add_joint_attention(
         network, img_q, img_k, img_v, txt_q, txt_k, txt_v,
         num_heads=H, head_dim=D, n_img=n_img, n_txt=n_text,
+        batch_size=batch_size,
     )
 
     # ----- output projections (separate for each stream).
     def _out_proj(x_3d, key_suffix: str, seq_len: int):
         w = _w(f"{key_suffix}.weight")
         b = _w_opt(f"{key_suffix}.bias")
-        flat = network.add_shuffle(x_3d)
-        flat.reshape_dims = (seq_len, dim)
-        proj = _add_linear_2d(network, flat.get_output(0), dim, dim, w, b)
-        unflat = network.add_shuffle(proj)
-        unflat.reshape_dims = (1, seq_len, dim)
-        return unflat.get_output(0)
+        return _add_linear_3d(network, x_3d, dim, dim, w, b,
+                              seq_len=seq_len, batch_size=batch_size)
 
     img_attn_out = _out_proj(attn_img_3d, "attn.to_out.0", n_img)
     txt_attn_out = _out_proj(attn_txt_3d, "attn.to_add_out", n_text)
@@ -1252,6 +1259,7 @@ def _add_joint_block_graph(
     img_mod2_out = _add_modulate(network, img_n2, img_shift_mlp, img_scale_mlp, dim)
     img_mlp_out = _add_mlp_block(
         network, img_mod2_out, dim, cfg.intermediate_size, prefixed, "img_mlp", n_img,
+        batch_size=batch_size,
     )
     img_out = _add_gate_residual(network, hs_img, img_gate_mlp, img_mlp_out, dim)
 
@@ -1259,6 +1267,7 @@ def _add_joint_block_graph(
     txt_mod2_out = _add_modulate(network, txt_n2, txt_shift_mlp, txt_scale_mlp, dim)
     txt_mlp_out = _add_mlp_block(
         network, txt_mod2_out, dim, cfg.intermediate_size, prefixed, "txt_mlp", n_text,
+        batch_size=batch_size,
     )
     txt_out = _add_gate_residual(network, hs_txt, txt_gate_mlp, txt_mlp_out, dim)
     return img_out, txt_out
@@ -1537,15 +1546,19 @@ def _add_linear_3d(network, x_3d, in_dim: int, out_dim: int, w_hf: np.ndarray,
                    b_hf: "np.ndarray | None", seq_len: int, batch_size: int = 1):
     """Linear on a [B, S, in_dim] tensor -> [B, S, out_dim].
 
-    Flattens to [B*S, in_dim], applies the existing _add_linear_2d helper,
-    then reshapes back. ``batch_size`` is bound statically.
+    Uses a rank-3 matmul so the leading batch dimension can be dynamic.
     """
-    flat = network.add_shuffle(x_3d)
-    flat.reshape_dims = (batch_size * seq_len, in_dim)
-    y = _add_linear_2d(network, flat.get_output(0), in_dim, out_dim, w_hf, b_hf)
-    unflat = network.add_shuffle(y)
-    unflat.reshape_dims = (batch_size, seq_len, out_dim)
-    return unflat.get_output(0)
+    x_c = _to_compute_dtype(network, x_3d)
+    w_t = np.ascontiguousarray(w_hf.T, dtype=np.float32)
+    w_const = _add_constant_reduced(network, (1, in_dim, out_dim), w_t.reshape(1, in_dim, out_dim))
+    mm = network.add_matrix_multiply(
+        x_c, trt.MatrixOperation.NONE, w_const, trt.MatrixOperation.NONE)
+    y = mm.get_output(0)
+    if b_hf is not None:
+        b_const = _add_constant_reduced(
+            network, (1, 1, out_dim), np.asarray(b_hf, dtype=np.float32).reshape(1, 1, out_dim))
+        y = network.add_elementwise(y, b_const, trt.ElementWiseOperation.SUM).get_output(0)
+    return y
 
 
 def _add_rms_norm_last_dim_3d(network, x_3d, hidden_size: int, gamma: np.ndarray,
@@ -1646,16 +1659,8 @@ def _add_norm_out_3d(
     temb_silu = graph_ops.add_silu(network, temb_2d)
     emb = _add_linear_2d(network, temb_silu, hidden_size, 2 * hidden_size, w, b)
     # chunk(2, dim=1) -> (scale, shift).  diffusers convention is scale-first.
-    scale_sl = network.add_slice(
-        emb, start=(0, 0),
-        shape=(batch_size, hidden_size), stride=(1, 1),
-    )
-    shift_sl = network.add_slice(
-        emb, start=(0, hidden_size),
-        shape=(batch_size, hidden_size), stride=(1, 1),
-    )
-    scale = scale_sl.get_output(0)
-    shift = shift_sl.get_output(0)
+    scale = _slice_batch_vector(network, emb, 0, hidden_size, batch_size)
+    shift = _slice_batch_vector(network, emb, hidden_size, hidden_size, batch_size)
 
     # LayerNorm(x), no affine.
     x_normed = _add_layernorm_no_affine_3d(network, x_3d, hidden_size, eps)
@@ -1728,6 +1733,7 @@ def build_qwen_image_dit_engine(
     w_lat: int,
     n_text: int,
     batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> Path:
     """Build the full Qwen-Image MMDiT denoiser as a single TRT engine.
@@ -1764,10 +1770,8 @@ def build_qwen_image_dit_engine(
 
     Returns the path to the written serialised plan.
     """
-    if batch_size != 1:
-        raise NotImplementedError(
-            "build_qwen_image_dit_engine currently supports batch_size=1 only"
-        )
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1 (got {batch_size})")
     if cfg.num_attention_heads * cfg.attention_head_dim != cfg.hidden_size:
         raise ValueError(
             f"hidden_size ({cfg.hidden_size}) != num_heads ({cfg.num_attention_heads}) "
@@ -1803,14 +1807,34 @@ def build_qwen_image_dit_engine(
     )
 
     builder, config, network = _make_builder(verbose)
+    dynamic_batch = batch_size > 1
+    input_batch = -1 if dynamic_batch else batch_size
 
     img_patched = network.add_input(
-        "img_patched", trt.float32, (batch_size, n_img, in_ch),
+        "img_patched", trt.float32, (input_batch, n_img, in_ch),
     )
     txt_hidden = network.add_input(
-        "txt_hidden", trt.float32, (batch_size, n_text, txt_d),
+        "txt_hidden", trt.float32, (input_batch, n_text, txt_d),
     )
-    timestep = network.add_input("timestep", trt.float32, (batch_size,))
+    timestep = network.add_input("timestep", trt.float32, (input_batch,))
+
+    if dynamic_batch:
+        from ...engine_builder import add_dynamic_batch_profile
+
+        opt_batch = min(batch_size, 4) if opt_batch_size is None else opt_batch_size
+        add_dynamic_batch_profile(
+            builder,
+            config,
+            network,
+            input_names=["img_patched", "txt_hidden", "timestep"],
+            max_batch=batch_size,
+            opt_batch=opt_batch,
+            static_shape={
+                "img_patched": (n_img, in_ch),
+                "txt_hidden": (n_text, txt_d),
+                "timestep": (),
+            },
+        )
 
     # ----- img_in: Linear(in_ch -> hidden) over [B, N_img, in_ch].
     img_in_w = np.asarray(weights["img_in.weight"], dtype=np.float32)
@@ -1898,7 +1922,8 @@ def build_qwen_image_dit_engine(
 
     print(
         f"[qwen-image-dit] Building full denoiser engine "
-        f"(B={batch_size}, n_img={n_img}, n_text={n_text}, "
+        f"(B={'1..' + str(batch_size) if dynamic_batch else str(batch_size)}, "
+        f"n_img={n_img}, n_text={n_text}, "
         f"blocks={cfg.num_joint_blocks}, hidden={H_dim}, "
         f"heads={cfg.num_attention_heads}, head_dim={head_dim}, "
         f"text_d={txt_d}, in_ch={in_ch}, out_ch={out_ch}, p={p}) "

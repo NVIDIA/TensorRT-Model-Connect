@@ -29,6 +29,7 @@ class FluxPlugin:
     name = "flux"
     runtime_strategy = "diffusion_flux"
     pipeline_classes = ["FluxPipeline", "Flux2Pipeline"]
+    supports_dynamic_batch_dit = True
 
     # Default FLUX.1-dev architecture params
     _CLIP_HIDDEN = 768
@@ -152,6 +153,7 @@ class FluxPlugin:
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
         fp8_scales: dict | None = None, build_timing: dict | None = None,
+        max_batch_size: int = 1,
     ) -> dict:
         """Build all component engines.
 
@@ -167,6 +169,11 @@ class FluxPlugin:
 
         # Detect FLUX.2 via transformer config
         if _is_flux2(tc):
+            if max_batch_size > 1:
+                raise NotImplementedError(
+                    "FLUX.2 dynamic-batch DiT build is not implemented yet; "
+                    "use --max-batch-size 1 for FLUX.2 models"
+                )
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
                 fp8_scales=fp8_scales, precision=precision,
@@ -174,12 +181,14 @@ class FluxPlugin:
 
         return self._build_flux1_components(
             model_dir, config, weights, tc=tc, verbose=verbose,
-            precision=precision, build_timing=build_timing)
+            precision=precision, build_timing=build_timing,
+            max_batch_size=max_batch_size)
 
     def _build_flux1_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, tc: dict, precision: str = "fp32", verbose: bool = False,
         build_timing: dict | None = None,
+        max_batch_size: int = 1,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -339,6 +348,7 @@ class FluxPlugin:
                 num_single_layers=num_single_layers,
                 num_img_tokens=num_img_tokens,
                 text_seq_len=self._T5_MAX_SEQ_LEN,
+                max_batch_size=max_batch_size,
                 verbose=verbose,
             )
 
