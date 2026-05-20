@@ -94,6 +94,39 @@ std::string build_pythonpath() {
     return pythonpath;
 }
 
+std::optional<std::string> env_value(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0')
+        return std::nullopt;
+    return std::string(value);
+}
+
+std::optional<std::string> python_from_prefix(const std::string& prefix) {
+    for (const char* rel : {"bin/python", "bin/python3"}) {
+        const auto candidate = std::filesystem::path(prefix) / rel;
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec))
+            return candidate.string();
+    }
+    return std::nullopt;
+}
+
+std::string build_python_executable() {
+    if (auto python = env_value("TRTMC_PYTHON"))
+        return *python;
+    if (auto python = env_value("PYTHON"))
+        return *python;
+    if (auto venv = env_value("VIRTUAL_ENV")) {
+        if (auto python = python_from_prefix(*venv))
+            return *python;
+    }
+    if (auto conda = env_value("CONDA_PREFIX")) {
+        if (auto python = python_from_prefix(*conda))
+            return *python;
+    }
+    return "python3";
+}
+
 int run_python_module(const std::vector<std::string>& argv) {
     if (argv.empty()) {
         std::cerr << "Error: empty Python command\n";
@@ -140,15 +173,8 @@ int run_python_module(const std::vector<std::string>& argv) {
 }
 
 int cmd_build(const CliArgs& args) {
-    const char* configured_python = std::getenv("TRTMC_PYTHON");
-    if (!configured_python || configured_python[0] == '\0')
-        configured_python = std::getenv("PYTHON");
-    const std::string python = (configured_python && configured_python[0] != '\0')
-                                   ? configured_python
-                                   : std::string("python3");
-
     std::vector<std::string> command = {
-        python,
+        build_python_executable(),
         "-m",
         "tensorrt_model_connect",
         "build",

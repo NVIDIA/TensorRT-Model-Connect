@@ -12,9 +12,12 @@ trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
 
 The C++ bridge runs `python -m tensorrt_model_connect build ...`. Set `TRTMC_PYTHON` or `PYTHON` to choose a specific build interpreter.
 When installed from the release wheel, the `trtmc` console command dispatches
-to the packaged native executable and sets `TRTMC_PYTHON` to that environment's
-Python interpreter. It also sets `TRTMC_TRT_LIBRARY_DIR` to the
-dependency-installed `tensorrt_libs` directory when that package is present.
+to the packaged native executable. The native executable resolves the build
+interpreter from `TRTMC_PYTHON`, `PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, then
+`python3`. The launcher preserves the install environment by setting
+`VIRTUAL_ENV` when it is running inside a virtual environment, and sets
+`TRTMC_TRT_LIBRARY_DIR` to the dependency-installed `tensorrt_libs` directory
+when that package is present.
 
 Source builds use the same subcommands through `./build/trtmc`.
 

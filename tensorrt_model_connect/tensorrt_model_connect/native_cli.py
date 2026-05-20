@@ -59,7 +59,7 @@ def _tensorrt_library_dir() -> Path | None:
 
 
 def _configure_runtime_environment() -> None:
-    os.environ.setdefault("TRTMC_PYTHON", sys.executable)
+    # Keep build-interpreter selection in the native C++ CLI, not this launcher.
     os.environ.setdefault("TRTMC_DISABLE_SOURCE_PYTHONPATH", "1")
     if sys.prefix != sys.base_prefix:
         os.environ.setdefault("VIRTUAL_ENV", sys.prefix)

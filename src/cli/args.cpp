@@ -104,8 +104,8 @@ void print_usage() {
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
            "\n"
-           "Build uses Python module tensorrt_model_connect. Set TRTMC_PYTHON or PYTHON to "
-           "choose the build interpreter.\n";
+           "Build uses Python module tensorrt_model_connect. Interpreter resolution order: "
+           "TRTMC_PYTHON, PYTHON, VIRTUAL_ENV/CONDA_PREFIX, then python3.\n";
 }
 
 CliArgs parse_args(int argc, char** argv) {

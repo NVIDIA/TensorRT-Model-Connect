@@ -21,7 +21,7 @@ def test_configure_runtime_environment_sets_venv_and_tensorrt_libs(
 
     native_cli._configure_runtime_environment()
 
-    assert native_cli.os.environ["TRTMC_PYTHON"] == "/tmp/trtmc-venv/bin/python"
+    assert "TRTMC_PYTHON" not in native_cli.os.environ
     assert native_cli.os.environ["TRTMC_DISABLE_SOURCE_PYTHONPATH"] == "1"
     assert native_cli.os.environ["VIRTUAL_ENV"] == "/tmp/trtmc-venv"
     assert native_cli.os.environ["TRTMC_TRT_LIBRARY_DIR"] == str(trt_lib_dir)
