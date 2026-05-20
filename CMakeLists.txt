@@ -20,6 +20,7 @@ option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
 option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
+option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
 
@@ -291,49 +292,52 @@ else()
 endif()
 
 # --- libtorch multinomial bridge (optional) ---
-set(_trtmc_torch_roots
-  /opt/venv/lib/python3.12/site-packages/torch
-  ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
-)
-if(DEFINED ENV{TRTMC_TORCH_ROOT})
-  list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL)
+  set(_trtmc_torch_roots
+    /opt/venv/lib/python3.12/site-packages/torch
+    ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
+  )
+  if(DEFINED ENV{TRTMC_TORCH_ROOT})
+    list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+  endif()
+
+  find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include
+  )
+  find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include/torch/csrc/api/include
+  )
+  find_library(TRTMC_TORCH_LIBRARY
+    NAMES torch libtorch.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CPU_LIBRARY
+    NAMES torch_cpu libtorch_cpu.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CUDA_LIBRARY
+    NAMES torch_cuda libtorch_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_LIBRARY
+    NAMES c10 libc10.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_CUDA_LIBRARY
+    NAMES c10_cuda libc10_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
 endif()
 
-find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include
-)
-find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include/torch/csrc/api/include
-)
-find_library(TRTMC_TORCH_LIBRARY
-  NAMES torch libtorch.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CPU_LIBRARY
-  NAMES torch_cpu libtorch_cpu.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CUDA_LIBRARY
-  NAMES torch_cuda libtorch_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_LIBRARY
-  NAMES c10 libc10.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_CUDA_LIBRARY
-  NAMES c10_cuda libc10_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-
-if(TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL
+   AND TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
    AND TRTMC_TORCH_LIBRARY AND TRTMC_TORCH_CPU_LIBRARY
    AND TRTMC_TORCH_CUDA_LIBRARY AND TRTMC_C10_LIBRARY AND TRTMC_C10_CUDA_LIBRARY)
   get_filename_component(TRTMC_TORCH_LIBRARY_DIR ${TRTMC_TORCH_LIBRARY} DIRECTORY)

@@ -30,6 +30,7 @@ class TensorRTModelConnectConan(ConanFile):
         toolchain = CMakeToolchain(self)
         toolchain.cache_variables["TRTMC_BUILD_TESTS"] = False
         toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = False
+        toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False
 
         for name in (
             "TRTMC_TRT_INCLUDE_DIR",

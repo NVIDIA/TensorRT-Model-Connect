@@ -169,6 +169,11 @@ def test_package_stage_uses_conan_py_build_inputs() -> None:
     assert 'TRTMC_CUDART_LIBRARY="$cudart_library"' in text
 
 
+def test_release_wheel_build_disables_libtorch_linkage() -> None:
+    text = (REPO_ROOT / "conanfile.py").read_text()
+    assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
+
+
 def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text()
     assert 'requires = ["conan-py-build==0.4.3"]' in text
