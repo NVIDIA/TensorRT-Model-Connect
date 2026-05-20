@@ -181,7 +181,6 @@ no_impact tools/validate_dit.py # developer utility script; no CI test impact is
 no_impact tools/validate_t5.py # developer utility script; no CI test impact is intentional
 no_impact tools/validation/timm_vit/benchmark_trt_paths.py # developer validation helper; no CI test impact is intentional
 shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/setup.py # editable package compatibility and release packaging shim; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
