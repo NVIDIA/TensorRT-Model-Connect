@@ -142,6 +142,10 @@ class Phi4MultimodalPlugin:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        # `shard_standard_decoder_weights` needs `_kv_attention_size` for TP
+        # builds. The shared `load_standard_weights` sets it; phi4mm's custom
+        # load path must do so explicitly.
+        weights["_kv_attention_size"] = kv_dim  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -149,9 +153,18 @@ class Phi4MultimodalPlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, parallel_config=None,
         debug_layer_outputs: bool = False,
     ) -> bytes:
+        from ...parallel_config import normalize_parallel_config
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            from .dual_profile_decoder_tp_builder import (
+                build_dual_profile_tp_decoder_engine,
+            )
+            return build_dual_profile_tp_decoder_engine(
+                config, weights, max_cache_length, precision=precision,
+                quant_ctx=quant_ctx, verbose=verbose, parallel_config=parallel)
         partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
         return build_standard_decoder_engine(
             config, weights, max_cache_length,

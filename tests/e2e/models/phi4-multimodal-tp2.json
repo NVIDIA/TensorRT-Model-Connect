@@ -1,0 +1,62 @@
+{
+  "name": "phi4-multimodal-tp2",
+  "trace_id": "IT-E2E-PHI4MM-TP2-01",
+  "hf_id": "microsoft/Phi-4-multimodal-instruct",
+  "bundle": "phi4-multimodal-tp2.trtfb",
+  "family": "phi4_multimodal",
+  "runtime_strategy": "vision_language",
+  "precision": "fp16",
+  "max_cache_length": 384,
+  "prompt": "Describe this image.",
+  "max_new_tokens": 20,
+  "logit_atol": 0.01,
+  "layer_atol": 0.1,
+  "trust_remote_code": true,
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 2
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "debug_logits": true,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 2
+      },
+      "gating": true
+    }
+  ],
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 0.5
+  },
+  "notes": "TensorRT 11.0 tensor-parallel Phi-4-multimodal TP=2 lane. Uses families/phi4_multimodal/dual_profile_decoder_tp_builder.py (leaner Phi-4-only TP builder, partial RoPE 0.75) under PR #49's TP infrastructure. The C++ VLPlugin is extended to detect TP metadata and load rank-local text decoder sections (engine_plan_tp_rank<N>) while keeping vision_engine_plan replicated across ranks."
+}

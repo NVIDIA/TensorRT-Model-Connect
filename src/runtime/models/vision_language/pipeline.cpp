@@ -14,11 +14,12 @@ VLPipeline::VLPipeline(std::unique_ptr<TrtModule> text_decoder,
                        std::unique_ptr<IInferenceState> state, VLConfig config,
                        VLPreprocessConfig vl_preprocess, cudaStream_t stream,
                        std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                       std::unique_ptr<ISampler> sampler)
+                       std::unique_ptr<ISampler> sampler,
+                       std::shared_ptr<void> distributed_owner)
     : text_decoder_(std::move(text_decoder)), vision_encoder_(std::move(vision_encoder)),
       state_(std::move(state)), config_(config), vl_preprocess_(std::move(vl_preprocess)),
       stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)) {
+      sampler_(std::move(sampler)), distributed_owner_(std::move(distributed_owner)) {
     if (!text_decoder_ || !text_decoder_->ok())
         throw std::runtime_error("VLPipeline: invalid text decoder");
     if (!state_ || !state_->ok())

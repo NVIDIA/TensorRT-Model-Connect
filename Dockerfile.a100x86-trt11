@@ -1,0 +1,11 @@
+ARG BASE_IMAGE=trtmc-dev-a100x86-trt11-base
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openmpi-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV OMPI_ALLOW_RUN_AS_ROOT=1
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1

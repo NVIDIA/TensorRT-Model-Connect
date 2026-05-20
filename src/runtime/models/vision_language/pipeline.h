@@ -34,7 +34,8 @@ class VLPipeline final : public IPipeline {
                std::unique_ptr<IInferenceState> state, VLConfig config,
                VLPreprocessConfig vl_preprocess, cudaStream_t stream,
                std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "",
-               std::unique_ptr<ISampler> sampler = nullptr);
+               std::unique_ptr<ISampler> sampler = nullptr,
+               std::shared_ptr<void> distributed_owner = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -66,6 +67,9 @@ class VLPipeline final : public IPipeline {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
     std::unique_ptr<ISampler> sampler_;
+    // Keeps the NCCL communicator alive for the pipeline's lifetime on
+    // tensor-parallel runs. Empty on single-device builds.
+    std::shared_ptr<void> distributed_owner_;
 
     std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens, const SamplingParams& params);
