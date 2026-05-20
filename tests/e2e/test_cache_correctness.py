@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -169,7 +168,7 @@ class TestCacheConsistency:
             f"  cache=64:  {out_64!r}\n"
             f"  cache=256: {out_256!r}")
 
-        print(f"\n[cache_consistency] Outputs match (cache=64 vs cache=256):")
+        print("\n[cache_consistency] Outputs match (cache=64 vs cache=256):")
         print(f"  {out_64!r}")
 
 
@@ -215,4 +214,4 @@ class TestCacheBoundary:
                     or "exceed" in combined
                     or "failed" in combined), (
                 f"Non-zero exit without clear error: {stderr}")
-            print(f"\n[cache_boundary] Clean failure at boundary (expected)")
+            print("\n[cache_boundary] Clean failure at boundary (expected)")

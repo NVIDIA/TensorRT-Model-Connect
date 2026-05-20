@@ -202,6 +202,7 @@ def _build_bench_cmd(
         config_flags += " --set runtime.prefer_gpu_greedy=true"
     binary = "/tmp/build/trtmc"
     hf = "--hf-python /opt/venv/bin/python"
+    env = ""
 
     if mode == "decode" or pipeline_type in (
         "text_to_text", "vision_language", "seq2seq_encoder_decoder", "marian_translation"):
