@@ -70,6 +70,9 @@ Nightly wheels are tagged `py310-none-manylinux_2_35_aarch64` and
 `py312-none-manylinux_2_35_aarch64`; use the tag matching your Python
 interpreter. The `manylinux_2_35_aarch64` platform tag matches the TensorRT
 CUDA 13 aarch64 wheels and requires a glibc 2.35 or newer Linux host.
+Nightly package jobs build the wheel in the repository Dockerfile image
+(`TRTMC_PACKAGE_CI_IMAGE`, default `trtmc-dev-gb300:manylinux_2_35`) so the
+compiled native executable is actually checked against that platform floor.
 
 ## Useful Docs
 

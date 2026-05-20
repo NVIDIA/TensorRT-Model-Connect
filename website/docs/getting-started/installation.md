@@ -119,8 +119,12 @@ development environment with Python 3.12, CMake, Ninja, Conan, `patchelf`,
 CUDA headers/libraries, TensorRT headers, and a TensorRT `libnvinfer.so`
 available. Build on the CI image or another glibc 2.35-compatible aarch64
 environment; building on a newer host can produce a wheel that auditwheel
-correctly reports as requiring a newer `manylinux` tag. The provided Docker
-images install the expected prerequisites.
+correctly reports as requiring a newer `manylinux` tag. Nightly CI builds and
+uses `TRTMC_PACKAGE_CI_IMAGE` (default
+`trtmc-dev-gb300:manylinux_2_35`) from the repository `Dockerfile` before the
+package stage so the native binary is compiled on Ubuntu 22.04 / glibc 2.35.
+The package script checks the build image glibc version before building and
+fails early if it is too new for the requested wheel tag.
 
 The release wheel build uses the repository-root `pyproject.toml`, not
 `tensorrt_model_connect/pyproject.toml`. The root build invokes

@@ -67,6 +67,7 @@ The repository-root `pyproject.toml` is the release-wheel build entry point. It 
 
 The Conan package recipe manages `nlohmann_json` for native wheel builds. TensorRT and CUDA are still supplied by the build environment and by pip/host runtime dependencies rather than by Conan recipes.
 Release wheel builds disable the optional libtorch-backed multinomial sampler so the wheel does not link against PyTorch's native DSOs or inherit their platform floor.
+Nightly release jobs build and use `TRTMC_PACKAGE_CI_IMAGE` from the repository `Dockerfile` for the package and wheel-smoke stages. That image is Ubuntu 22.04 / glibc 2.35 so `auditwheel` can verify the `manylinux_2_35_aarch64` tag instead of inheriting a newer general-purpose CI image floor.
 
 To build the release wheel manually, run `python -m build --wheel .` from the repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See [Installation](../getting-started/installation.md#build-a-release-wheel) for the full command.
 

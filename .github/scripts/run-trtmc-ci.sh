@@ -548,6 +548,35 @@ PY
   exit 1
 }
 
+validate_manylinux_build_environment() {
+  local wheel_arch="$1"
+  if [[ "$wheel_arch" =~ ^manylinux_2_([0-9]+)_aarch64$ ]]; then
+    local max_glibc_minor="${BASH_REMATCH[1]}"
+    local glibc_version
+    glibc_version="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
+    local glibc_major="${glibc_version%%.*}"
+    local glibc_minor="${glibc_version#*.}"
+    glibc_minor="${glibc_minor%%.*}"
+
+    if ! [[ "$glibc_major" =~ ^[0-9]+$ && "$glibc_minor" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: could not parse build image glibc version: ${glibc_version}" >&2
+      exit 1
+    fi
+    if [ "$glibc_major" -gt 2 ] || \
+      { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -gt "$max_glibc_minor" ]; }; then
+      echo "ERROR: ${wheel_arch} requires building on glibc 2.${max_glibc_minor} or older; this image has glibc ${glibc_version}." >&2
+      echo "Use TRTMC_PACKAGE_CI_IMAGE built from the repository Dockerfile, or another Ubuntu 22.04/glibc 2.35 aarch64 image." >&2
+      exit 1
+    fi
+    echo "manylinux build target=${wheel_arch} build_glibc=${glibc_version}"
+  fi
+
+  if ! command -v patchelf >/dev/null 2>&1; then
+    echo "ERROR: patchelf is required in the release wheel build image" >&2
+    exit 1
+  fi
+}
+
 build_pip_package() {
   local trt_include="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
   local trt_library="${TRTMC_TRT_LIBRARY:-}"
@@ -591,6 +620,7 @@ build_pip_package() {
 
   local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
   local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64}"
+  validate_manylinux_build_environment "$wheel_arch"
   local expected_wheels=0
   local tag
   for tag in $python_tags; do

@@ -137,6 +137,15 @@ def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
     assert "run-gha-stage.sh wheel-qwen-smoke" in text
 
 
+def test_nightly_uses_manylinux_package_image_for_release_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "TRTMC_PACKAGE_CI_IMAGE:" in text
+    assert "trtmc-dev-gb300:manylinux_2_35" in text
+    assert 'docker build -t "$TRTMC_PACKAGE_CI_IMAGE" -f Dockerfile .' in text
+    assert "package image glibc=" in text
+    assert "TRTMC_CI_IMAGE: ${{ env.TRTMC_PACKAGE_CI_IMAGE }}" in text
+
+
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
@@ -158,6 +167,8 @@ def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     assert '"auditwheel>=6.2"' in text
     assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
     assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
+    assert "validate_manylinux_build_environment" in text
+    assert "build_glibc=" in text
 
 
 def test_package_stage_uses_conan_py_build_inputs() -> None:
