@@ -7,8 +7,9 @@ Unlike the standard decoder builder, this:
   - Returns hidden_states from a configurable layer (default: layer -2)
 
 Engine I/O:
-    Inputs:  input_ids [seq_len] int32, attention_mask [seq_len] float32
-    Outputs: text_embeddings [seq_len, hidden_size] float32
+    Inputs:  input_ids [seq_len] or [B, seq_len] int32,
+             attention_mask [seq_len] or [B, seq_len] float32
+    Outputs: text_embeddings [seq_len, hidden_size] or [B, seq_len, hidden_size] float32
 """
 
 from __future__ import annotations
@@ -93,6 +94,8 @@ def build_qwen3_encoder_engine(
     rope_theta: float = 1000000.0,
     eps: float = 1e-6,
     output_layer: int = -2,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build Qwen3 text encoder TRT engine.
@@ -103,8 +106,12 @@ def build_qwen3_encoder_engine(
     """
     if output_layer < 0:
         output_layer = num_layers + output_layer  # e.g., 36 + (-2) = 34
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
 
     kv_dim = num_kv_heads * head_dim
+    use_batch = max_batch_size > 1
+    opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -114,11 +121,30 @@ def build_qwen3_encoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     # Inputs
-    input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
-    attn_mask = network.add_input("attention_mask", trt.float32, (max_seq_len,))
+    if use_batch:
+        from ...engine_builder import add_dynamic_batch_profile
+
+        input_ids = network.add_input("input_ids", trt.int32, (-1, max_seq_len))
+        attn_mask = network.add_input("attention_mask", trt.float32, (-1, max_seq_len))
+        add_dynamic_batch_profile(
+            builder,
+            config,
+            network,
+            input_names=["input_ids", "attention_mask"],
+            max_batch=max_batch_size,
+            opt_batch=opt_batch,
+            static_shape={
+                "input_ids": (max_seq_len,),
+                "attention_mask": (max_seq_len,),
+            },
+        )
+    else:
+        input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
+        attn_mask = network.add_input("attention_mask", trt.float32, (max_seq_len,))
 
     # Constants
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
+    eps_shape = (1, 1, 1) if use_batch else (1, 1)
+    eps_t = graph_ops.add_constant(network, eps_shape, np.array([eps], dtype=np.float32))
 
     # Embedding
     embed_table = graph_ops.add_constant(
@@ -143,7 +169,7 @@ def build_qwen3_encoder_engine(
     # and query positions.
     # We mask padded positions with -1e9
     mask_reshape = network.add_shuffle(attn_mask)
-    mask_reshape.reshape_dims = (1, 1, 1, max_seq_len)
+    mask_reshape.reshape_dims = (-1, 1, 1, max_seq_len) if use_batch else (1, 1, 1, max_seq_len)
 
     for layer_idx in range(num_layers):
         if layer_idx == output_layer:
@@ -151,9 +177,14 @@ def build_qwen3_encoder_engine(
             output_hidden = hidden
 
         # RMSNorm
-        normed = graph_ops.add_rms_norm(
-            network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.input_layernorm"], eps_t)
+        if use_batch:
+            normed = graph_ops.add_rms_norm_last_dim(
+                network, hidden, hidden_size,
+                weights[f"layer.{layer_idx}.input_layernorm"], eps_t)
+        else:
+            normed = graph_ops.add_rms_norm(
+                network, hidden, hidden_size,
+                weights[f"layer.{layer_idx}.input_layernorm"], eps_t)
 
         # QKV projections
         q = graph_ops.add_matmul_rhs_constant(
@@ -173,26 +204,48 @@ def build_qwen3_encoder_engine(
         q_norm_tiled = np.tile(q_norm_w.reshape(1, head_dim), (num_heads, 1))
         k_norm_tiled = np.tile(k_norm_w.reshape(1, head_dim), (num_kv_heads, 1))
 
-        q = _add_per_head_rms_norm(network, q, num_heads, head_dim, q_norm_tiled, eps_t, max_seq_len)
-        k = _add_per_head_rms_norm(network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t, max_seq_len)
+        if use_batch:
+            q = graph_ops.add_rms_norm_per_head_batched(
+                network, q, num_heads, head_dim, q_norm_tiled, eps_t,
+                sequence_length=max_seq_len)
+            k = graph_ops.add_rms_norm_per_head_batched(
+                network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t,
+                sequence_length=max_seq_len)
+            q = _add_apply_rope_native_batched(
+                network, q, rope_cos_half, rope_sin_half,
+                num_heads, head_dim, max_seq_len)
+            k = _add_apply_rope_native_batched(
+                network, k, rope_cos_half, rope_sin_half,
+                num_kv_heads, head_dim, max_seq_len)
+            ctx_flat = _add_attention_from_batched_rows(
+                network, q, k, v,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                q_seq=max_seq_len,
+                kv_seq=max_seq_len,
+                mask=mask_reshape.get_output(0))
+        else:
+            q = _add_per_head_rms_norm(network, q, num_heads, head_dim, q_norm_tiled, eps_t, max_seq_len)
+            k = _add_per_head_rms_norm(network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t, max_seq_len)
 
-        q = graph_ops.add_apply_rope_native(
-            network, q, num_heads, head_dim,
-            rope_cos_half, rope_sin_half, rope_position_ids,
-            head_dim, sequence_length=max_seq_len)
-        k = graph_ops.add_apply_rope_native(
-            network, k, num_kv_heads, head_dim,
-            rope_cos_half, rope_sin_half, rope_position_ids,
-            head_dim, sequence_length=max_seq_len)
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                rope_cos_half, rope_sin_half, rope_position_ids,
+                head_dim, sequence_length=max_seq_len)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_kv_heads, head_dim,
+                rope_cos_half, rope_sin_half, rope_position_ids,
+                head_dim, sequence_length=max_seq_len)
 
-        ctx_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            q_seq=max_seq_len, kv_seq=max_seq_len,
-            mask=mask_reshape.get_output(0),
-            tag=f"layer.{layer_idx}.attn")
+            ctx_flat = graph_ops.add_attention_from_rows(
+                network, q, k, v,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                q_seq=max_seq_len, kv_seq=max_seq_len,
+                mask=mask_reshape.get_output(0),
+                tag=f"layer.{layer_idx}.attn")
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
@@ -204,9 +257,14 @@ def build_qwen3_encoder_engine(
             hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
 
         # Post-attention RMSNorm
-        normed2 = graph_ops.add_rms_norm(
-            network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.post_attn_norm"], eps_t)
+        if use_batch:
+            normed2 = graph_ops.add_rms_norm_last_dim(
+                network, hidden, hidden_size,
+                weights[f"layer.{layer_idx}.post_attn_norm"], eps_t)
+        else:
+            normed2 = graph_ops.add_rms_norm(
+                network, hidden, hidden_size,
+                weights[f"layer.{layer_idx}.post_attn_norm"], eps_t)
 
         # SwiGLU MLP
         gate = graph_ops.add_matmul_rhs_constant(
@@ -244,7 +302,7 @@ def build_qwen3_encoder_engine(
 
     print(f"[qwen3-encoder] Building TRT engine "
           f"(layers={num_layers}, hidden={hidden_size}, output_layer={output_layer}, "
-          f"seq_len={max_seq_len}) ...", file=sys.stderr)
+          f"seq_len={max_seq_len}, max_batch={max_batch_size}) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -265,3 +323,133 @@ def _add_per_head_rms_norm(
     return graph_ops.add_rms_norm_per_head(
         network, inp, num_heads, head_dim, gamma, eps_t,
         sequence_length=seq_len)
+
+
+def _reshape_batched_rows_to_heads_4d(
+    network: trt.INetworkDefinition,
+    x: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    seq_len: int,
+) -> trt.ITensor:
+    """[B, S, H*D] -> [B, H, S, D]."""
+    r = network.add_shuffle(x)
+    r.reshape_dims = (-1, seq_len, num_heads, head_dim)
+    r.second_transpose = trt.Permutation([0, 2, 1, 3])
+    return r.get_output(0)
+
+
+def _reshape_heads_4d_to_batched_rows(
+    network: trt.INetworkDefinition,
+    x: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    seq_len: int,
+) -> trt.ITensor:
+    """[B, H, S, D] -> [B, S, H*D]."""
+    r = network.add_shuffle(x)
+    r.first_transpose = trt.Permutation([0, 2, 1, 3])
+    r.reshape_dims = (-1, seq_len, num_heads * head_dim)
+    return r.get_output(0)
+
+
+def _dynamic_batch_shape(
+    network: trt.INetworkDefinition,
+    reference: trt.ITensor,
+    tail: tuple[int, ...],
+) -> trt.ITensor:
+    ref_shape = network.add_shape(reference).get_output(0)
+    batch_dim = network.add_slice(ref_shape, start=(0,), shape=(1,), stride=(1,))
+    tail_t = graph_ops.add_constant(
+        network,
+        (len(tail),),
+        np.asarray(tail, dtype=np.int64),
+        dtype=np.int64,
+    )
+    target = network.add_concatenation([batch_dim.get_output(0), tail_t])
+    target.axis = 0
+    return target.get_output(0)
+
+
+def _slice_batched_last_dim(
+    network: trt.INetworkDefinition,
+    x: trt.ITensor,
+    seq_len: int,
+    num_heads: int,
+    start: int,
+    width: int,
+) -> trt.ITensor:
+    s = network.add_slice(
+        x, start=(0, 0, 0, start), shape=(0, 0, 0, 0), stride=(1, 1, 1, 1))
+    s.set_input(2, _dynamic_batch_shape(network, x, (seq_len, num_heads, width)))
+    return s.get_output(0)
+
+
+def _add_apply_rope_native_batched(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    seq_len: int,
+) -> trt.ITensor:
+    """Apply rotate-half RoPE to [B, S, H*D] using a static per-position cache."""
+    half = head_dim // 2
+    x = network.add_shuffle(inp)
+    x.reshape_dims = (-1, seq_len, num_heads, head_dim)
+    x_4d = x.get_output(0)
+
+    x1 = _slice_batched_last_dim(network, x_4d, seq_len, num_heads, 0, half)
+    x2 = _slice_batched_last_dim(network, x_4d, seq_len, num_heads, half, half)
+
+    cos = network.add_shuffle(cos_cache_2d)
+    cos.reshape_dims = (1, seq_len, 1, half)
+    sin = network.add_shuffle(sin_cache_2d)
+    sin.reshape_dims = (1, seq_len, 1, half)
+
+    x1_cos = network.add_elementwise(x1, cos.get_output(0), trt.ElementWiseOperation.PROD)
+    x2_sin = network.add_elementwise(x2, sin.get_output(0), trt.ElementWiseOperation.PROD)
+    first = network.add_elementwise(
+        x1_cos.get_output(0), x2_sin.get_output(0), trt.ElementWiseOperation.SUB)
+
+    x2_cos = network.add_elementwise(x2, cos.get_output(0), trt.ElementWiseOperation.PROD)
+    x1_sin = network.add_elementwise(x1, sin.get_output(0), trt.ElementWiseOperation.PROD)
+    second = network.add_elementwise(
+        x2_cos.get_output(0), x1_sin.get_output(0), trt.ElementWiseOperation.SUM)
+
+    rope = network.add_concatenation([first.get_output(0), second.get_output(0)])
+    rope.axis = 3
+    out = network.add_shuffle(rope.get_output(0))
+    out.reshape_dims = (-1, seq_len, num_heads * head_dim)
+    return out.get_output(0)
+
+
+def _add_attention_from_batched_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int,
+    kv_seq: int,
+    mask: trt.ITensor | None,
+) -> trt.ITensor:
+    """Native IAttention for [B, S, H*D] Q and [B, S, KVH*D] K/V."""
+    q_4d = _reshape_batched_rows_to_heads_4d(network, q, num_heads, head_dim, q_seq)
+    k_4d = _reshape_batched_rows_to_heads_4d(network, k, num_kv_heads, head_dim, kv_seq)
+    v_4d = _reshape_batched_rows_to_heads_4d(network, v, num_kv_heads, head_dim, kv_seq)
+    ctx_4d = graph_ops.add_attention_core(
+        network,
+        q_4d,
+        k_4d,
+        v_4d,
+        causal=False,
+        mask=mask,
+        scale=float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0,
+    )
+    return _reshape_heads_4d_to_batched_rows(
+        network, ctx_4d, num_heads, head_dim, q_seq)

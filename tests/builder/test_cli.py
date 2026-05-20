@@ -144,6 +144,8 @@ class TestCmdInspect:
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
             "max_cache_length": 256,
+            "runtime_strategy": "diffusion_qwen_image",
+            "max_batch_size": {"dit": 4, "text_encoder": 1, "vae": 1},
             "sections": {
                 "engine_plan": {"offset": 0, "size": 100},
             },
@@ -164,6 +166,7 @@ class TestCmdInspect:
         assert "qwen3" in captured.out
         assert "test-model" in captured.out
         assert "qwen" in captured.out
+        assert "dit=4 text_encoder=1 vae=1" in captured.out
         assert "engine_plan" in captured.out
 
     def test_inspect_nonexistent_file(self):

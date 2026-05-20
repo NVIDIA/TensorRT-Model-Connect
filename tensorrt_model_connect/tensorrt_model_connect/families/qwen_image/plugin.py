@@ -23,6 +23,16 @@ from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict
 
 
+def _apply_build_overrides(bundle_cfg: dict, config: ModelConfig) -> None:
+    if "image_height" in config.raw:
+        bundle_cfg["image"]["default_height"] = int(config.raw["image_height"])
+    if "image_width" in config.raw:
+        bundle_cfg["image"]["default_width"] = int(config.raw["image_width"])
+    if "num_inference_steps" in config.raw:
+        bundle_cfg["diffusion"]["default_num_inference_steps"] = int(
+            config.raw["num_inference_steps"])
+
+
 class QwenImagePlugin:
     name = "qwen_image"
     runtime_strategy = "diffusion_qwen_image"
@@ -135,7 +145,7 @@ class QwenImagePlugin:
         # 1. Bundle config.json blob -- pure file-IO transform, fast.
         print("[qwen-image] Building bundle config ...", file=sys.stderr)
         bundle_cfg = build_bundle_config(repo)
-        config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
+        _apply_build_overrides(bundle_cfg, config)
 
         # Derive engine build-time shape constants from the bundle config so
         # the static plans agree with the C++ runtime contract.
@@ -152,6 +162,7 @@ class QwenImagePlugin:
         latent_w = default_w // vae_scale
         h_lat = latent_h // patch_size
         w_lat = latent_w // patch_size
+        config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
 
         # 2. Qwen2.5-VL LM text encoder.
         print(

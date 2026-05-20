@@ -1376,9 +1376,6 @@ std::vector<ImageResult> FluxPipeline::generate_images(
     std::size_t prompt_offset = 0;
     for (int32_t chunk_size : chunks) {
         const int32_t batch = chunk_size;
-        std::cerr << "[flux] Batched DiT chunk B=" << batch << "/" << cap << ", prompts "
-                  << prompt_offset << ".."
-                  << (prompt_offset + static_cast<std::size_t>(batch) - 1U) << "\n";
 
         diffusion::FluxGenerationPlan plan;
         bool have_plan = false;

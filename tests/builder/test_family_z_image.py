@@ -171,6 +171,7 @@ def test_build_components_calls_all_subbuilders(
     assert out["preprocessor_weights"] == b"zimg-pre"
 
     # h_lat=128, w_lat=96, patch=2x2 -> 3072 patches.
+    assert calls["build_qwen3_encoder_engine"][1]["max_batch_size"] == 4
     assert calls["build_z_image_dit_engine"][1]["num_patches"] == 3072
     assert calls["build_z_image_dit_engine"][1]["max_batch_size"] == 4
     assert calls["build_vae_2d_decoder_engine"][1]["h_lat"] == 128

@@ -271,6 +271,99 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     return true;
 }
 
+bool ZImagePipeline::run_text_encoder_batched(
+    const std::vector<std::vector<int32_t>>& input_ids_batch,
+    std::vector<float>& text_embeddings) {
+    if (input_ids_batch.empty()) {
+        text_embeddings.clear();
+        return true;
+    }
+    if (!text_encoder_) {
+        std::cerr << "[z-image] No text encoder module\n";
+        return false;
+    }
+
+    const int32_t batch = static_cast<int32_t>(input_ids_batch.size());
+    const int32_t seq_len = config_.text_seq_len;
+    const int32_t te_dim = config_.text_encoder_dim;
+    const auto emb_size = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(te_dim);
+
+    auto run_serial = [&]() {
+        text_embeddings.resize(static_cast<std::size_t>(batch) * emb_size);
+        std::vector<float> sample_embeddings;
+        for (int32_t b = 0; b < batch; ++b) {
+            if (!run_text_encoder(input_ids_batch[static_cast<std::size_t>(b)], sample_embeddings))
+                return false;
+            std::copy(sample_embeddings.begin(), sample_embeddings.end(),
+                      text_embeddings.begin() +
+                          static_cast<std::ptrdiff_t>(b) *
+                              static_cast<std::ptrdiff_t>(emb_size));
+        }
+        return true;
+    };
+
+    if (text_encoder_->input_rank("input_ids") != 2)
+        return run_serial();
+
+    int32_t cap = std::max(config_.max_batch_size.text_encoder, 1);
+    const auto profile_max = text_encoder_->input_profile_shape(
+        "input_ids", text_encoder_->profile_idx(), ProfileShapeSelector::kMax);
+    if (!profile_max.empty() && profile_max[0] > 0)
+        cap = std::min(cap, static_cast<int32_t>(profile_max[0]));
+    if (batch > cap)
+        return run_serial();
+
+    std::vector<int32_t> padded_ids(static_cast<std::size_t>(batch) *
+                                    static_cast<std::size_t>(seq_len), 0);
+    std::vector<float> mask(static_cast<std::size_t>(batch) *
+                            static_cast<std::size_t>(seq_len), -1e9F);
+
+    for (int32_t b = 0; b < batch; ++b) {
+        const auto& ids = input_ids_batch[static_cast<std::size_t>(b)];
+        const auto copy_len = std::min(static_cast<std::size_t>(seq_len), ids.size());
+        auto row = static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len);
+        std::copy_n(ids.begin(), copy_len, padded_ids.begin() + static_cast<std::ptrdiff_t>(row));
+        for (int32_t i = 0; i < seq_len; ++i) {
+            if (padded_ids[row + static_cast<std::size_t>(i)] != 0)
+                mask[row + static_cast<std::size_t>(i)] = 0.0F;
+        }
+    }
+
+    TensorMap inputs;
+    inputs["input_ids"] =
+        Tensor{padded_ids.data(),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(seq_len)}, DType::kInt32};
+    inputs["attention_mask"] =
+        Tensor{mask.data(),
+               {static_cast<int64_t>(batch), static_cast<int64_t>(seq_len)}, DType::kFloat32};
+
+    auto outputs = text_encoder_->forward(inputs);
+    const auto& te_out = outputs["text_embeddings"];
+    const auto expected = static_cast<std::size_t>(batch) * emb_size;
+    if (te_out.numel() != expected) {
+        std::cerr << "[z-image] Batched text encoder output size " << te_out.numel()
+                  << " does not match expected " << expected << "\n";
+        return false;
+    }
+
+    text_embeddings.resize(expected);
+    std::memcpy(text_embeddings.data(), te_out.data, expected * sizeof(float));
+
+    for (int32_t b = 0; b < batch; ++b) {
+        const auto row = static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len);
+        for (int32_t i = 0; i < seq_len; ++i) {
+            if (padded_ids[row + static_cast<std::size_t>(i)] == 0) {
+                float* emb_row = text_embeddings.data() +
+                                 (row + static_cast<std::size_t>(i)) *
+                                     static_cast<std::size_t>(te_dim);
+                std::fill_n(emb_row, static_cast<std::size_t>(te_dim), 0.0F);
+            }
+        }
+    }
+
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Denoiser: Z-Image DiT (unified attention)
 // ---------------------------------------------------------------------------
@@ -657,6 +750,8 @@ std::vector<ImageResult> ZImagePipeline::generate_images(
                              static_cast<std::size_t>(layout.dit_dim);
     const auto caption_size = static_cast<std::size_t>(layout.text_seq) *
                               static_cast<std::size_t>(layout.dit_dim);
+    const auto text_embedding_size = static_cast<std::size_t>(layout.text_seq) *
+                                     static_cast<std::size_t>(config_.text_encoder_dim);
     const auto rope_size =
         static_cast<std::size_t>(layout.num_patches + layout.text_seq) *
         static_cast<std::size_t>(layout.head_dim);
@@ -665,9 +760,6 @@ std::vector<ImageResult> ZImagePipeline::generate_images(
     std::size_t prompt_offset = 0;
     for (int32_t chunk_size : chunks) {
         const int32_t batch = chunk_size;
-        std::cerr << "[z-image] Batched DiT chunk B=" << batch << "/" << cap
-                  << ", prompts " << prompt_offset << ".."
-                  << (prompt_offset + static_cast<std::size_t>(batch) - 1U) << "\n";
 
         std::vector<float> caption_projected_batched(
             static_cast<std::size_t>(batch) * caption_size);
@@ -675,22 +767,39 @@ std::vector<ImageResult> ZImagePipeline::generate_images(
         std::vector<float> rope_sin_batched(static_cast<std::size_t>(batch) * rope_size);
         std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
 
+        std::vector<std::vector<int32_t>> input_ids_batch(static_cast<std::size_t>(batch));
+        std::vector<int32_t> cap_ori_lens(static_cast<std::size_t>(batch));
+        std::vector<int32_t> cap_padded_lens(static_cast<std::size_t>(batch));
         for (int32_t b = 0; b < batch; ++b) {
             const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
             const std::string prepared = apply_chat_template(prompts[sample_idx]);
-            const std::vector<int32_t> input_ids = tokenizer_->encode(prepared);
+            input_ids_batch[static_cast<std::size_t>(b)] = tokenizer_->encode(prepared);
+            cap_ori_lens[static_cast<std::size_t>(b)] =
+                count_non_pad_tokens(input_ids_batch[static_cast<std::size_t>(b)]);
+            cap_padded_lens[static_cast<std::size_t>(b)] =
+                pad_to_next_multiple(cap_ori_lens[static_cast<std::size_t>(b)], kSeqMultipleOf);
+        }
 
-            std::vector<float> text_embeddings;
-            if (!run_text_encoder(input_ids, text_embeddings)) {
-                std::cerr << "[z-image] Text encoder failed for sample " << sample_idx << "\n";
-                return {};
-            }
+        std::vector<float> text_embeddings_batched;
+        if (!run_text_encoder_batched(input_ids_batch, text_embeddings_batched)) {
+            std::cerr << "[z-image] Text encoder failed for chunk at prompt " << prompt_offset
+                      << "\n";
+            return {};
+        }
 
-            const int32_t cap_ori_len = count_non_pad_tokens(input_ids);
-            const int32_t cap_padded_len = pad_to_next_multiple(cap_ori_len, kSeqMultipleOf);
-
+        for (int32_t b = 0; b < batch; ++b) {
+            const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
+            const auto text_offset = static_cast<std::size_t>(b) * text_embedding_size;
+            std::vector<float> text_embeddings(
+                text_embeddings_batched.begin() + static_cast<std::ptrdiff_t>(text_offset),
+                text_embeddings_batched.begin() +
+                    static_cast<std::ptrdiff_t>(text_offset + text_embedding_size));
             std::vector<float> caption_projected;
-            project_caption(text_embeddings, cap_ori_len, cap_padded_len, caption_projected);
+            project_caption(
+                text_embeddings,
+                cap_ori_lens[static_cast<std::size_t>(b)],
+                cap_padded_lens[static_cast<std::size_t>(b)],
+                caption_projected);
             std::copy(caption_projected.begin(), caption_projected.end(),
                       caption_projected_batched.begin() +
                           static_cast<std::ptrdiff_t>(b) *
@@ -698,7 +807,8 @@ std::vector<ImageResult> ZImagePipeline::generate_images(
 
             std::vector<float> rope_cos, rope_sin;
             compute_3d_rope(
-                cap_padded_len, layout.num_patches, layout.nh, layout.nw, rope_cos, rope_sin);
+                cap_padded_lens[static_cast<std::size_t>(b)], layout.num_patches,
+                layout.nh, layout.nw, rope_cos, rope_sin);
             std::copy(rope_cos.begin(), rope_cos.end(),
                       rope_cos_batched.begin() +
                           static_cast<std::ptrdiff_t>(b) *

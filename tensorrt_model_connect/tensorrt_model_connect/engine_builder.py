@@ -1121,14 +1121,16 @@ def _build_diffusion_bundle(
         raise ValueError(f"--max-batch-size must be >= 1 (got {max_batch_size})")
     supports_dynamic_batch_dit = bool(
         getattr(plugin, "supports_dynamic_batch_dit", False))
+    supports_dynamic_batch_text_encoder = bool(
+        getattr(plugin, "supports_dynamic_batch_text_encoder", False))
     if max_batch_size != 1 and not supports_dynamic_batch_dit:
         raise NotImplementedError(
             "--max-batch-size > 1 requires dynamic-batch diffusion component "
-            "builders, which are not enabled in this implementation slice yet"
+            f"builders, which are not supported for {plugin.name}"
         )
     diffusion_max_batch_size = {
         "dit": int(max_batch_size if supports_dynamic_batch_dit else 1),
-        "text_encoder": 1,
+        "text_encoder": int(max_batch_size if supports_dynamic_batch_text_encoder else 1),
         "vae": 1,
     }
 

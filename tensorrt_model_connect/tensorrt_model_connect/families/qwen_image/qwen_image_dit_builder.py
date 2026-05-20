@@ -1001,6 +1001,7 @@ def _add_joint_attention(
     network, q_img_3d, k_img_3d, v_img_3d,
     q_txt_3d, k_txt_3d, v_txt_3d,
     num_heads: int, head_dim: int, n_img: int, n_txt: int, batch_size: int = 1,
+    attention_mask=None,
 ):
     """Joint attention with concat order [txt, img].
 
@@ -1026,9 +1027,11 @@ def _add_joint_attention(
     q_4d = to_4d(q.get_output(0))
     k_4d = to_4d(k.get_output(0))
     v_4d = to_4d(v.get_output(0))
+    if attention_mask is not None and attention_mask.dtype != q_4d.dtype:
+        attention_mask = network.add_cast(attention_mask, q_4d.dtype).get_output(0)
 
     ctx_4d = graph_ops.add_attention_core(
-        network, q_4d, k_4d, v_4d, causal=False, mask=None,
+        network, q_4d, k_4d, v_4d, causal=False, mask=attention_mask,
         scale=float(1.0 / math.sqrt(head_dim)),
     )
 
@@ -1044,6 +1047,50 @@ def _add_joint_attention(
     img = _slice_batch_sequence(network, out_3d, n_txt, n_img, num_heads * head_dim,
                                 batch_size)
     return txt, img
+
+
+def _add_joint_attention_mask(
+    network,
+    encoder_hidden_states_mask,
+    *,
+    n_txt: int,
+    n_img: int,
+    batch_size: int,
+):
+    """Build additive joint attention mask [B, 1, 1, N_txt + N_img].
+
+    Diffusers passes a boolean mask with 1/True for valid text tokens and
+    concatenates all-valid image tokens. TRT IAttention uses an additive mask,
+    so invalid text key positions become -1e9 and valid text/image keys are 0.
+    """
+    if encoder_hidden_states_mask.dtype != trt.float32:
+        encoder_hidden_states_mask = network.add_cast(
+            encoder_hidden_states_mask, trt.float32).get_output(0)
+
+    ones = graph_ops.add_constant(
+        network, (1, n_txt), np.ones((1, n_txt), dtype=np.float32))
+    invalid = network.add_elementwise(
+        ones, encoder_hidden_states_mask, trt.ElementWiseOperation.SUB)
+    neg_large = graph_ops.add_constant(
+        network, (1, n_txt), np.full((1, n_txt), -1.0e9, dtype=np.float32))
+    txt_additive = network.add_elementwise(
+        invalid.get_output(0), neg_large, trt.ElementWiseOperation.PROD)
+
+    first_col = _slice_batch_vector(
+        network, encoder_hidden_states_mask, 0, 1, batch_size)
+    img_zero_rhs = graph_ops.add_constant(
+        network, (1, n_img), np.zeros((1, n_img), dtype=np.float32))
+    img_additive = network.add_matrix_multiply(
+        first_col, trt.MatrixOperation.NONE,
+        img_zero_rhs, trt.MatrixOperation.NONE,
+    )
+
+    joint = network.add_concatenation(
+        [txt_additive.get_output(0), img_additive.get_output(0)])
+    joint.axis = 1
+    mask_4d = network.add_shuffle(joint.get_output(0))
+    mask_4d.reshape_dims = (-1, 1, 1, n_txt + n_img)
+    return mask_4d.get_output(0)
 
 
 def _add_mlp_block(network, x_3d, hidden_size: int, intermediate_size: int,
@@ -1146,6 +1193,7 @@ def _add_joint_block_graph(
     n_img: int,
     n_text: int,
     batch_size: int = 1,
+    attention_mask=None,
 ):
     """Build the math of one Qwen-Image MMDiT joint block.
 
@@ -1237,7 +1285,7 @@ def _add_joint_block_graph(
     attn_txt_3d, attn_img_3d = _add_joint_attention(
         network, img_q, img_k, img_v, txt_q, txt_k, txt_v,
         num_heads=H, head_dim=D, n_img=n_img, n_txt=n_text,
-        batch_size=batch_size,
+        batch_size=batch_size, attention_mask=attention_mask,
     )
 
     # ----- output projections (separate for each stream).
@@ -1752,6 +1800,9 @@ def build_qwen_image_dit_engine(
           the 2x2 packing).
       ``txt_hidden`` [B, N_txt = n_text, text_embed_dim]
           text encoder hidden states (Qwen2.5-VL hidden = 3584).
+      ``encoder_hidden_states_mask`` [B, N_txt = n_text]
+          1.0 for valid text tokens, 0.0 for padded text tokens. The image
+          side is always treated as valid when constructing joint attention.
       ``timestep``  [B]
           diffusion timestep (fp32; will be cast/multiplied by ``scale=1000``
           inside the sinusoidal embedding, matching diffusers).
@@ -1816,6 +1867,9 @@ def build_qwen_image_dit_engine(
     txt_hidden = network.add_input(
         "txt_hidden", trt.float32, (input_batch, n_text, txt_d),
     )
+    encoder_hidden_states_mask = network.add_input(
+        "encoder_hidden_states_mask", trt.float32, (input_batch, n_text),
+    )
     timestep = network.add_input("timestep", trt.float32, (input_batch,))
 
     if dynamic_batch:
@@ -1826,12 +1880,18 @@ def build_qwen_image_dit_engine(
             builder,
             config,
             network,
-            input_names=["img_patched", "txt_hidden", "timestep"],
+            input_names=[
+                "img_patched",
+                "txt_hidden",
+                "encoder_hidden_states_mask",
+                "timestep",
+            ],
             max_batch=batch_size,
             opt_batch=opt_batch,
             static_shape={
                 "img_patched": (n_img, in_ch),
                 "txt_hidden": (n_text, txt_d),
+                "encoder_hidden_states_mask": (n_text,),
                 "timestep": (),
             },
         )
@@ -1878,6 +1938,13 @@ def build_qwen_image_dit_engine(
                                    shape=(n_text, head_dim), stride=(1, 1))
     sin_txt_sl = network.add_slice(sin_const, start=(n_img, 0),
                                    shape=(n_text, head_dim), stride=(1, 1))
+    joint_attention_mask = _add_joint_attention_mask(
+        network,
+        encoder_hidden_states_mask,
+        n_txt=n_text,
+        n_img=n_img,
+        batch_size=batch_size,
+    )
 
     # ----- Joint blocks loop.
     jb_cfg = _joint_block_cfg_from(cfg)
@@ -1900,6 +1967,7 @@ def build_qwen_image_dit_engine(
             n_img=n_img,
             n_text=n_text,
             batch_size=batch_size,
+            attention_mask=joint_attention_mask,
         )
 
     # ----- AdaLayerNormContinuous(elementwise_affine=False) -> proj_out.

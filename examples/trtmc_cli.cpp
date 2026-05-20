@@ -1631,7 +1631,7 @@ int cmd_inspect(const CliArgs& args) {
                                     info.max_batch_size.text_encoder != 1 ||
                                     info.max_batch_size.vae != 1;
         const bool is_diffusion_bundle =
-            info.runtime_strategy == "diffusion" ||
+            info.runtime_strategy.rfind("diffusion", 0) == 0 ||
             info.family.find("diffusion") != std::string::npos;
         if (is_diffusion_bundle || has_batch_caps) {
             std::cout << "Max batch size:     dit=" << info.max_batch_size.dit

@@ -224,14 +224,20 @@ std::vector<ImageResult> QwenImagePipeline::generate_images(
                                     static_cast<std::size_t>(text_embed_dim);
 
     const EncodedPrompt neg = encode_text(k.negative);
+    std::vector<float> neg_mask(static_cast<std::size_t>(max_text_tokens));
+    for (int i = 0; i < max_text_tokens; ++i) {
+        neg_mask[static_cast<std::size_t>(i)] =
+            neg.attention_mask[static_cast<std::size_t>(i)] != 0 ? 1.0F : 0.0F;
+    }
     const bool do_cfg = k.cfg_scale > 1.0F;
     const auto chunks = diffusion::plan_chunks(static_cast<int>(prompts.size()), cap);
     std::vector<ImageResult> results;
     results.reserve(prompts.size());
 
     auto run_denoiser_batched = [&](const std::vector<float>& latents_packed,
-                                    const std::vector<float>& hidden_states, float normalized_t,
-                                    int32_t batch) {
+                                    const std::vector<float>& hidden_states,
+                                    const std::vector<float>& text_mask,
+                                    float normalized_t, int32_t batch) {
         std::vector<float> timestep_buf(static_cast<std::size_t>(batch), normalized_t);
         TensorMap inputs;
         inputs["img_patched"] =
@@ -244,20 +250,26 @@ std::vector<ImageResult> QwenImagePipeline::generate_images(
                    {static_cast<int64_t>(batch), static_cast<int64_t>(max_text_tokens),
                     static_cast<int64_t>(text_embed_dim)},
                    DType::kFloat32};
+        if (denoiser_engine_->has_input("encoder_hidden_states_mask")) {
+            inputs["encoder_hidden_states_mask"] =
+                Tensor{const_cast<float*>(text_mask.data()),
+                       {static_cast<int64_t>(batch), static_cast<int64_t>(max_text_tokens)},
+                       DType::kFloat32};
+        }
         inputs["timestep"] = Tensor{timestep_buf.data(), {static_cast<int64_t>(batch)},
                                     DType::kFloat32};
 
         auto outputs = denoiser_engine_->forward(inputs);
         const auto& noise = outputs["noise_patched"];
         const std::size_t expected = static_cast<std::size_t>(batch) * packed_size;
-        if (noise.numel() != expected) {
+        if (noise.numel() < expected) {
             throw std::runtime_error(
                 "QwenImagePipeline::generate_images: batched denoiser output size " +
                 std::to_string(noise.numel()) + " does not match expected " +
                 std::to_string(expected));
         }
         std::vector<float> out(expected);
-        std::memcpy(out.data(), noise.data, out.size() * sizeof(float));
+        std::memcpy(out.data(), noise.data, expected * sizeof(float));
         return out;
     };
 
@@ -267,10 +279,16 @@ std::vector<ImageResult> QwenImagePipeline::generate_images(
         std::vector<float> latents_packed(static_cast<std::size_t>(batch) * packed_size);
         std::vector<float> pos_hidden(static_cast<std::size_t>(batch) * hidden_size);
         std::vector<float> neg_hidden(static_cast<std::size_t>(batch) * hidden_size);
+        std::vector<float> pos_mask(static_cast<std::size_t>(batch) *
+                                    static_cast<std::size_t>(max_text_tokens));
+        std::vector<float> neg_mask_batched(static_cast<std::size_t>(batch) *
+                                            static_cast<std::size_t>(max_text_tokens));
 
         for (int32_t b = 0; b < batch; ++b) {
             const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
             const auto pos = encode_text(prompts[sample_idx]);
+            const auto mask_offset = static_cast<std::size_t>(b) *
+                                     static_cast<std::size_t>(max_text_tokens);
             std::copy(pos.hidden_states.begin(), pos.hidden_states.end(),
                       pos_hidden.begin() +
                           static_cast<std::ptrdiff_t>(b) *
@@ -279,6 +297,12 @@ std::vector<ImageResult> QwenImagePipeline::generate_images(
                       neg_hidden.begin() +
                           static_cast<std::ptrdiff_t>(b) *
                               static_cast<std::ptrdiff_t>(hidden_size));
+            for (int i = 0; i < max_text_tokens; ++i) {
+                pos_mask[mask_offset + static_cast<std::size_t>(i)] =
+                    pos.attention_mask[static_cast<std::size_t>(i)] != 0 ? 1.0F : 0.0F;
+            }
+            std::copy(neg_mask.begin(), neg_mask.end(),
+                      neg_mask_batched.begin() + static_cast<std::ptrdiff_t>(mask_offset));
 
             const uint64_t seed = resolved_seeds[sample_idx] >= 0
                                       ? static_cast<uint64_t>(resolved_seeds[sample_idx])
@@ -299,9 +323,12 @@ std::vector<ImageResult> QwenImagePipeline::generate_images(
 
         for (int step = 0; step < k.num_steps; ++step) {
             const float norm_t = normalize_timestep(timesteps[static_cast<std::size_t>(step)]);
-            auto noise_pos = run_denoiser_batched(latents_packed, pos_hidden, norm_t, batch);
+            auto noise_pos =
+                run_denoiser_batched(latents_packed, pos_hidden, pos_mask, norm_t, batch);
             if (do_cfg) {
-                auto noise_neg = run_denoiser_batched(latents_packed, neg_hidden, norm_t, batch);
+                auto noise_neg =
+                    run_denoiser_batched(latents_packed, neg_hidden, neg_mask_batched, norm_t,
+                                         batch);
                 combine_cfg_with_renorm(noise_pos, noise_neg, k.cfg_scale,
                                         batch * shape.n_img_tokens,
                                         static_cast<std::size_t>(in_channels), noise_pred);
@@ -504,10 +531,21 @@ QwenImagePipeline::run_denoiser_once(const std::vector<float>& latents_packed, f
                                  " does not match max_text_tokens * text_embed_dim = " +
                                  std::to_string(expected_hidden_size));
     }
+    if (attention_mask.size() != static_cast<std::size_t>(max_text_tokens)) {
+        throw std::runtime_error("QwenImagePipeline::run_denoiser_once: attention_mask size " +
+                                 std::to_string(attention_mask.size()) +
+                                 " does not match max_text_tokens = " +
+                                 std::to_string(max_text_tokens));
+    }
 
     const int64_t n_img =
         static_cast<int64_t>(latents_packed.size() / static_cast<std::size_t>(in_channels));
     float timestep_buf = normalized_t;
+    std::vector<float> encoder_mask(static_cast<std::size_t>(max_text_tokens));
+    for (int i = 0; i < max_text_tokens; ++i) {
+        encoder_mask[static_cast<std::size_t>(i)] =
+            attention_mask[static_cast<std::size_t>(i)] != 0 ? 1.0F : 0.0F;
+    }
 
     TensorMap inputs;
     inputs["img_patched"] = Tensor{const_cast<float*>(latents_packed.data()),
@@ -517,12 +555,23 @@ QwenImagePipeline::run_denoiser_once(const std::vector<float>& latents_packed, f
         Tensor{const_cast<float*>(hidden_states.data()),
                {1, static_cast<int64_t>(max_text_tokens), static_cast<int64_t>(text_embed_dim)},
                DType::kFloat32};
+    if (denoiser_engine_->has_input("encoder_hidden_states_mask")) {
+        inputs["encoder_hidden_states_mask"] =
+            Tensor{encoder_mask.data(), {1, static_cast<int64_t>(max_text_tokens)},
+                   DType::kFloat32};
+    }
     inputs["timestep"] = Tensor{&timestep_buf, {1}, DType::kFloat32};
 
     auto outputs = denoiser_engine_->forward(inputs);
     const auto& noise = outputs["noise_patched"];
-    std::vector<float> result(noise.numel());
-    std::memcpy(result.data(), noise.data, result.size() * sizeof(float));
+    const std::size_t expected = latents_packed.size();
+    if (noise.numel() < expected) {
+        throw std::runtime_error("QwenImagePipeline::run_denoiser_once: denoiser output size " +
+                                 std::to_string(noise.numel()) + " does not match expected " +
+                                 std::to_string(expected));
+    }
+    std::vector<float> result(expected);
+    std::memcpy(result.data(), noise.data, expected * sizeof(float));
     return result;
 }
 

@@ -469,9 +469,26 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             ("Precision", "precision"),
             ("Quantization", "quantization"),
             ("Engine backend", "engine_backend"),
+            ("Runtime strategy", "runtime_strategy"),
         ]
         for label, key in fields:
             print(f"{label + ':':<20} {header.get(key, '')}")
+
+        max_batch = header.get("max_batch_size")
+        runtime_strategy = str(header.get("runtime_strategy", "") or "")
+        family = str(header.get("family", "") or "")
+        is_diffusion = (
+            runtime_strategy.startswith("diffusion") or "diffusion" in family
+        )
+        if max_batch is not None or is_diffusion:
+            max_batch = max_batch or {}
+            dit = int(max_batch.get("dit", 1))
+            text_encoder = int(max_batch.get("text_encoder", 1))
+            vae = int(max_batch.get("vae", 1))
+            print(
+                f"{'Max batch size:':<20} "
+                f"dit={dit} text_encoder={text_encoder} vae={vae}"
+            )
 
         sections = header.get("sections", {})
         if sections:
@@ -549,8 +566,9 @@ def main() -> None:
                          help="Build decoder bundles with runtime-resizable KV cache support")
     build_p.add_argument(
         "--max-batch-size", type=int, default=1,
-        help="Reserved diffusion engine batch cap. Only 1 is accepted until "
-             "dynamic-batch component builders are enabled. Default: 1.")
+        help="Diffusion DiT engine batch cap for families that support "
+             "dynamic-batch DiT engines. Text encoders and VAE decode remain "
+             "sliced at batch 1. Default: 1.")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,

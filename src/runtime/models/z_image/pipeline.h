@@ -55,6 +55,8 @@ class ZImagePipeline final : public IPipeline {
   private:
     bool run_text_encoder(const std::vector<int32_t>& input_ids,
                           std::vector<float>& text_embeddings);
+    bool run_text_encoder_batched(const std::vector<std::vector<int32_t>>& input_ids_batch,
+                                  std::vector<float>& text_embeddings);
     bool run_denoiser(const std::vector<float>& hidden, const std::vector<float>& encoder_hidden,
                       const std::vector<float>& temb, const std::vector<float>& cos_vals,
                       const std::vector<float>& sin_vals, std::vector<float>& output);

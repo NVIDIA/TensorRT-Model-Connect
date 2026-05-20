@@ -125,10 +125,9 @@ class QwenImagePipeline final : public IPipeline {
     // already-divided-by-1000 scalar. Returns the predicted noise as
     // [1, n_img, out_channels * patch_size^2 = 64] row-major fp32.
     //
-    // attention_mask is accepted for API parity with the Python runner but
-    // currently unused: the denoiser engine was baked WITHOUT an
-    // encoder_hidden_states_mask input so zero-padded text positions
-    // participate in attention (documented deviation).
+    // attention_mask is 1 for valid text tokens and 0 for padded text tokens.
+    // Newer denoiser engines consume it as encoder_hidden_states_mask; older
+    // bundles without that input still run without masking for compatibility.
     std::vector<float> run_denoiser_once(const std::vector<float>& latents_packed,
                                          float normalized_t,
                                          const std::vector<float>& hidden_states,

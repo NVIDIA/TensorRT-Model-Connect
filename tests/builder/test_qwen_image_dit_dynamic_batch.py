@@ -106,6 +106,7 @@ def test_qwen_image_dit_dynamic_batch_engine_builds_tiny_network(tmp_path):
     for batch in (1, 2):
         assert ctx.set_input_shape("img_patched", (batch, 2, 4))
         assert ctx.set_input_shape("txt_hidden", (batch, 3, 6))
+        assert ctx.set_input_shape("encoder_hidden_states_mask", (batch, 3))
         assert ctx.set_input_shape("timestep", (batch,))
         assert tuple(ctx.get_tensor_shape("noise_patched")) == (batch, 2, 4)
 

@@ -35,6 +35,7 @@ class ZImagePlugin:
     name = "z_image"
     runtime_strategy = "diffusion_zimage"
     supports_dynamic_batch_dit = True
+    supports_dynamic_batch_text_encoder = True
     pipeline_classes = ["ZImagePipeline"]
 
     # Z-Image Turbo architecture params
@@ -161,6 +162,7 @@ class ZImagePlugin:
                 max_seq_len=self._TEXT_MAX_SEQ_LEN,
                 rope_theta=self._TEXT_ROPE_THETA,
                 output_layer=self._TEXT_OUTPUT_LAYER,
+                max_batch_size=max_batch_size,
                 verbose=verbose,
             )
 
@@ -227,7 +229,7 @@ class ZImagePlugin:
         return {
             "diffusion_backend_type": "z_image_2d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": 9,
+            "num_inference_steps": config.raw.get("num_inference_steps", 9),
             "guidance_scale": 0.0,
             "flow_shift": 3.0,  # HF scheduler shift=3.0 (use_dynamic_shifting=False)
             "video_height": image_height,
