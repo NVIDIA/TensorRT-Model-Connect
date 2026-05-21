@@ -33,6 +33,11 @@ from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict
 from ...build_timing import timed_trt_compile
 from ... import graph_ops
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .decoder_tp_builder import build_bark_tp_decoder_engine
 
 
 trt = trt_compat.get_trt()
@@ -453,9 +458,27 @@ class BarkPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine for semantic decoder (primary engine)."""
         sem_cfg = weights["_semantic_cfg"]
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Bark semantic tensor-parallel decoder builds")
+            if quant_ctx is not None:
+                raise ValueError("Bark tensor-parallel builds do not support quantization")
+            sem_weights = _extract_bark_sub_weights(weights, "semantic")
+            return build_bark_tp_decoder_engine(
+                config,
+                sem_weights,
+                max_cache_length,
+                sub_model="semantic",
+                sub_cfg=sem_cfg,
+                precision=precision,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
         return _build_bark_standard_engine(
             weights, "semantic", sem_cfg, max_cache_length,
             embed_input=True, verbose=verbose)
@@ -465,19 +488,45 @@ class BarkPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
         build_timing: dict | None = None,
+        parallel_config=None,
     ) -> dict:
         """Build coarse, fine, codec engines + embedding tables for C++ runtime."""
         coarse_cfg = weights["_coarse_cfg"]
         fine_cfg = weights["_fine_cfg"]
+        parallel = normalize_parallel_config(parallel_config)
 
-        with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
-            coarse_plan = _build_bark_standard_engine(
-                weights, "coarse", coarse_cfg, max_cache_length,
-                embed_input=True, verbose=verbose)
-
-        result = {
-            "coarse_engine_plan": coarse_plan,
-        }
+        result = {}
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Bark coarse tensor-parallel decoder builds")
+            coarse_weights = _extract_bark_sub_weights(weights, "coarse")
+            with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
+                for rank in range(parallel.tp_size):
+                    rank_parallel = parallel.for_rank(rank)
+                    if verbose:
+                        print(
+                            f"[trtmc build]   Building coarse TP rank "
+                            f"{rank}/{parallel.tp_size} ...",
+                            file=sys.stderr,
+                        )
+                    result[f"coarse_engine_plan_tp_rank{rank}"] = (
+                        build_bark_tp_decoder_engine(
+                            config,
+                            coarse_weights,
+                            max_cache_length,
+                            sub_model="coarse",
+                            sub_cfg=coarse_cfg,
+                            precision=precision,
+                            verbose=verbose,
+                            parallel_config=rank_parallel,
+                        )
+                    )
+        else:
+            with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
+                coarse_plan = _build_bark_standard_engine(
+                    weights, "coarse", coarse_cfg, max_cache_length,
+                    embed_input=True, verbose=verbose)
+            result["coarse_engine_plan"] = coarse_plan
 
         # Add embedding tables as raw bundle sections.
         # The C++ runtime does host-side embedding lookup for embed_input mode.
@@ -606,6 +655,15 @@ class BarkPlugin:
         return cfg
 
 
+def _extract_bark_sub_weights(weights: WeightDict, sub_model: str) -> WeightDict:
+    """Extract semantic/coarse weights and strip the stored sub-model prefix."""
+    prefix = f"{sub_model}."
+    sub_weights = WeightDict()
+    for k, v in weights.items():
+        if k.startswith(prefix) and not k.startswith("_"):
+            sub_weights[k[len(prefix):]] = v
+    return sub_weights
+
 
 def _build_bark_standard_engine(
     weights: WeightDict,
@@ -619,11 +677,7 @@ def _build_bark_standard_engine(
     from .standard_decoder_builder import build_standard_decoder_engine
 
     # Extract sub-model weights (strip prefix)
-    prefix = f"{sub_model}."
-    sub_weights = WeightDict()
-    for k, v in weights.items():
-        if k.startswith(prefix) and not k.startswith("_"):
-            sub_weights[k[len(prefix):]] = v
+    sub_weights = _extract_bark_sub_weights(weights, sub_model)
 
     # Also need _attention_size and _mlp_size for the builder
     hidden = sub_cfg["hidden_size"]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -65,6 +66,30 @@ def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
     if os.path.isabs(bundle_name):
         return bundle_name
     return os.path.join(ctx.engine_dir, bundle_name)
+
+
+def _distributed_runtime_config(case: E2ECase) -> dict:
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _wrap_distributed_command(cmd: list[str], case: E2ECase) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        return [launcher] + [str(arg) for arg in launcher_args] + cmd
+    return [launcher, "--tag-output", "-np", str(world_size)] + cmd
+
+
+def _strip_mpirun_tags(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        lines.append(re.sub(r"^\[[^\]]+\]<std(?:out|err)>:\s?", "", line))
+    return "\n".join(lines)
 
 
 def _read_wav_rms(path: str) -> float:
@@ -157,6 +182,7 @@ class SpeechToTextRunner:
             cmd.extend(["--hf-python", runtime_cli_python])
 
         env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
+        cmd = _wrap_distributed_command(cmd, case)
 
         t0 = time.monotonic()
         result = subprocess.run(
@@ -165,12 +191,16 @@ class SpeechToTextRunner:
 
         # Parse output: expect transcript text on stdout.
         # Strip special tokens like <|notimestamp|>, <|endoftext|>, etc.
-        import re
-        transcript = re.sub(r'<\|[^|]+\|>', '', result.stdout).strip()
+        clean_stdout = _strip_mpirun_tags(result.stdout)
+        transcript_lines = [
+            re.sub(r'<\|[^|]+\|>', '', line).strip()
+            for line in clean_stdout.splitlines()
+        ]
+        transcript = next((line for line in transcript_lines if line), "")
 
         # Try to extract token IDs if the binary outputs them
         token_ids = []
-        for line in result.stderr.splitlines():
+        for line in _strip_mpirun_tags(result.stderr).splitlines():
             if line.startswith("tokens:"):
                 try:
                     token_ids = [int(t) for t in line.split(":", 1)[1].strip().split()]
@@ -238,13 +268,19 @@ class TextToAudioRunner:
         ld_path = _build_ld_library_path(ctx)
 
         with tempfile.TemporaryDirectory(prefix="trtmc_audio_") as tmpdir:
-            wav_path = os.path.join(tmpdir, "output.wav")
+            distributed_runtime = _distributed_runtime_config(case)
+            output_root = os.path.join(tmpdir, "rank_outputs")
+            wav_path = (
+                os.path.join(output_root, "rank_0", "output.wav")
+                if distributed_runtime else os.path.join(tmpdir, "output.wav")
+            )
 
             cmd = [
                 binary, "generate-audio", bundle_path,
                 "--prompt", prompt,
-                "--output", wav_path,
             ]
+            if not distributed_runtime:
+                cmd.extend(["--output", wav_path])
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])
@@ -265,9 +301,23 @@ class TextToAudioRunner:
                     bark_seed = int(seed)
                     cmd.extend(["--set", f"audio_bark.seed={int(seed)}"])
             # Dump intermediate tokens for diversity/degeneration checks.
-            bark_dump_prefix = os.path.join(tmpdir, "bark_dump")
+            bark_dump_prefix = (
+                os.path.join(output_root, "rank_0", "bark_dump")
+                if distributed_runtime else os.path.join(tmpdir, "bark_dump")
+            )
             if case.family == "bark":
-                cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
+                if distributed_runtime:
+                    wrapper = (
+                        'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                        'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                        'exec "$@" --output "$out/output.wav" '
+                        '--set "audio_bark.dump_path=$out/bark_dump"'
+                    )
+                    cmd = ["bash", "-lc", wrapper, "trtmc_rank_audio", output_root] + cmd
+                else:
+                    cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
+
+            cmd = _wrap_distributed_command(cmd, case)
 
             t0 = time.monotonic()
             result = subprocess.run(
@@ -279,8 +329,8 @@ class TextToAudioRunner:
                 "text_to_audio", case.name)
             data: dict = {
                 "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": stderr_truncated,
+                "stdout": _strip_mpirun_tags(result.stdout),
+                "stderr": _strip_mpirun_tags(stderr_truncated),
             }
             if case.family == "bark" and bark_seed is not None:
                 data["trt_seed"] = str(bark_seed)

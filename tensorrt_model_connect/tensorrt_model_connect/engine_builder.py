@@ -1007,6 +1007,8 @@ def build_bundle(
                 build_extra_kwargs["precision"] = precision
             if _call_supports_kwarg(build_extra, "build_timing"):
                 build_extra_kwargs["build_timing"] = build_timing
+            if _call_supports_kwarg(build_extra, "parallel_config"):
+                build_extra_kwargs["parallel_config"] = parallel
             extra_engines = build_extra(
                 config, weights, max_cache_length, **build_extra_kwargs) or {}
         finally:

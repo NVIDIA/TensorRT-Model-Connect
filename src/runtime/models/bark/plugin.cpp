@@ -5,14 +5,70 @@
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <string>
+#include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+std::string coarse_tp_engine_section_name(int32_t rank) {
+    return "coarse_engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const auto value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : fallback;
+}
+
+std::unique_ptr<KvCache> make_bark_coarse_kv_cache(const std::string& json,
+                                                   const BaseConfig& base,
+                                                   const TrtModule& module,
+                                                   cudaStream_t stream,
+                                                   DType cache_dtype) {
+    int32_t hidden = extract_json_int(json, "coarse_hidden_size", base.hidden_size);
+    int32_t layers = extract_json_int(json, "coarse_num_layers", base.num_layers);
+    int32_t heads = extract_json_int(json, "coarse_num_heads", base.num_heads);
+    int32_t hd = (heads > 0) ? hidden / heads : 128;
+    int32_t max_cache = extract_json_int(json, "coarse_max_cache_length", base.max_cache_length);
+    const int32_t row_width = decoder_cache_row_width(module, heads * hd);
+    return std::make_unique<KvCache>(layers, max_cache, row_width, stream, cache_dtype);
+}
+
+} // namespace
 
 class BarkPlugin final : public IPipelinePlugin {
   public:
@@ -24,14 +80,27 @@ class BarkPlugin final : public IPipelinePlugin {
         opts.cuda_graphs = ctx.cuda_graphs;
 
         const auto& json = ctx.config_json;
+        const auto tp_config = parse_tensor_parallel_runtime_config(json);
+        DistributedRuntimeGroup tp_group;
+        ModuleCreateOptions decoder_opts = opts;
+        if (tp_config.enabled) {
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+            decoder_opts.distributed_communicator = tp_group.communicator;
+            decoder_opts.distributed_owner = tp_group.owner;
+        }
 
-        // Load semantic engine (main plan)
+        // Load semantic engine (main plan or rank-local TP section)
+        const std::string semantic_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto sem_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "bark semantic", opts);
+            ctx.backend, find_section(ctx.bundle, semantic_section), "bark semantic", decoder_opts);
 
-        // Load coarse engine
+        // Load coarse engine (single plan or rank-local TP section)
+        const std::string coarse_section = tp_config.enabled
+                                               ? coarse_tp_engine_section_name(tp_group.rank)
+                                               : std::string("coarse_engine_plan");
         auto coarse_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "coarse_engine_plan"), "bark coarse", opts);
+            ctx.backend, find_section(ctx.bundle, coarse_section), "bark coarse", decoder_opts);
 
         cudaStream_t stream = sem_loaded.module->stream();
 
@@ -74,14 +143,14 @@ class BarkPlugin final : public IPipelinePlugin {
         }
 
         // Create KvCaches for semantic and coarse stages
-        int32_t sem_kv_dim = compute_kv_dim(ctx.config);
+        int32_t sem_kv_dim = decoder_cache_row_width(*sem_loaded.module, compute_kv_dim(ctx.config));
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> sem_state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream, cache_dtype);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
         std::unique_ptr<IInferenceState> coarse_state(
-            make_coarse_kv_cache(json, ctx.config, stream, cache_dtype));
+            make_bark_coarse_kv_cache(json, ctx.config, *coarse_loaded.module, stream, cache_dtype));
 
         // Load embeddings
         auto sem_embed = section_to_floats(find_section(ctx.bundle, "semantic_embed"));
