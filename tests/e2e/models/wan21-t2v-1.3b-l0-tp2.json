@@ -1,0 +1,48 @@
+{
+  "name": "wan21-t2v-1.3b-l0-tp2",
+  "trace_id": "IT-E2E-WAN21-L0-TP2-01",
+  "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+  "bundle": "wan21-t2v-1.3b-l0-tp2.trtfb",
+  "model_type": "wan_t2v",
+  "family": "wan_t2v",
+  "runtime_strategy": "diffusion_wan",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "ci_tier": "multi_device",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 2
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 2 }, "gating": true },
+    { "kind": "python_module_available", "args": { "module": "diffusers", "phase": "build" }, "gating": true },
+    { "kind": "python_module_available", "args": { "module": "ftfy", "phase": "build" }, "gating": true }
+  ],
+  "test_prompt": "A cat sitting on a beach watching the sunset",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 384,
+  "video_width": 672,
+  "num_inference_steps": 15,
+  "stages": [
+    { "name": "end_to_end", "required": true }
+  ],
+  "notes": "Wan2.1 T2V 1.3B TP=2 lane. Uses families/wan_t2v/standard_dit_tp_builder.py from PR #80. Sized to run on 2x 24GB GPUs (vs the upstream TP4 lane which gates on >= 4 GPUs)."
+}
