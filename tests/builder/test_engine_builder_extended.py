@@ -23,6 +23,7 @@ try:
     from tensorrt_model_connect.engine_builder import (
         _get_trt_version,
         _get_gpu_name,
+        _find_sentencepiece_model,
         _ensure_tokenizer_json,
         build_bundle,
     )
@@ -116,6 +117,30 @@ class TestGetGpuName:
 # ---------------------------------------------------------------------------
 # _ensure_tokenizer_json
 # ---------------------------------------------------------------------------
+
+
+class TestFindSentencePieceModel:
+    def test_prefers_source_spm(self, tmp_path):
+        """source.spm remains the preferred encoder-side SentencePiece file."""
+        source = tmp_path / "source.spm"
+        spiece = tmp_path / "spiece.model"
+        source.write_bytes(b"source")
+        spiece.write_bytes(b"spiece")
+
+        assert _find_sentencepiece_model(tmp_path) == source
+
+    def test_falls_back_to_spiece_model(self, tmp_path):
+        """PixArt/T5 tokenizer directories commonly ship spiece.model."""
+        spiece = tmp_path / "spiece.model"
+        spiece.write_bytes(b"spiece")
+
+        assert _find_sentencepiece_model(tmp_path) == spiece
+
+    def test_falls_back_to_any_model_extension(self, tmp_path):
+        custom = tmp_path / "custom.model"
+        custom.write_bytes(b"custom")
+
+        assert _find_sentencepiece_model(tmp_path) == custom
 
 
 class TestEnsureTokenizerJson:

@@ -520,6 +520,26 @@ def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return _detect_tokenizer_add_special_tokens(model_dir)
 
 
+def _find_sentencepiece_model(model_dir: Path) -> Path | None:
+    """Return the best SentencePiece model file for tokenizer.json conversion."""
+    preferred = (
+        model_dir / "source.spm",
+        model_dir / "spiece.model",
+        model_dir / "tokenizer.model",
+    )
+    for path in preferred:
+        if path.exists():
+            return path
+
+    candidates = sorted(
+        {
+            *model_dir.glob("*.spm"),
+            *model_dir.glob("*.model"),
+        }
+    )
+    return candidates[0] if candidates else None
+
+
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
@@ -544,15 +564,16 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
     except Exception:
         pass
 
-    # --- Attempt 2: build from SentencePiece .spm + vocab.json ---
+    # --- Attempt 2: build from SentencePiece model + optional vocab.json ---
     # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
     # vocab.json (combined source+target vocabulary with IDs).  We build a
     # Unigram tokenizer.json using the full combined vocab (so IDs match the
     # TRT engine) with scores from the SPM model for source tokens and a
     # default low score for target-only tokens.
-    spm_candidates = list(model_dir.glob("*.spm"))
-    source_spm = model_dir / "source.spm"
-    spm_path = source_spm if source_spm.exists() else (spm_candidates[0] if spm_candidates else None)
+    #
+    # Diffusers T5 tokenizers, including PixArt, commonly ship spiece.model
+    # instead of a .spm file.
+    spm_path = _find_sentencepiece_model(model_dir)
     vocab_json_path = model_dir / "vocab.json"
     if spm_path is not None:
         try:
