@@ -134,3 +134,4 @@ engines
 results.json
 !**/Recording.wav
 worktrees/
+_evidence/
