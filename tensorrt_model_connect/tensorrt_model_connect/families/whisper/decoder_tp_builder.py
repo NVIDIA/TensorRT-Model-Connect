@@ -18,7 +18,6 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
-from ... import graph_blocks
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
