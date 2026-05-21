@@ -1,0 +1,39 @@
+{
+  "name": "qwen3-moe-tiny-random-tp2",
+  "trace_id": "IT-E2E-Q3MOE-TP2-01",
+  "hf_id": "amd-quark/tiny-random-qwen3_moe",
+  "bundle": "qwen3-moe-tiny-random-tp2.trtfb",
+  "family": "qwen_moe",
+  "runtime_strategy": "decoder_moe",
+  "precision": "fp16",
+  "max_cache_length": 128,
+  "prompt": "What is the largest planet in our solar system? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.01,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "skip_comparison": "tiny random Qwen3-MoE checkpoint has untrained weights; HF text parity is not meaningful. This lane verifies the TP build + run code path only.",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": { "mode": "tensor_parallel", "tp_size": 2 }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "debug_logits": true,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 2 }, "gating": true }
+  ],
+  "metadata": {
+    "single_process_debug_generation": true
+  },
+  "notes": "TensorRT 11.0 tensor-parallel Qwen3-MoE TP=2 smoke lane. Uses families/qwen_moe/dual_profile_decoder_tp_builder.py with TP-within-experts (gate/up column-sharded along moe_intermediate, down row-sharded; ALL_REDUCE after expert and attention output). 30B-A3B variant is waived for memory on a 24 GB GPU."
+}

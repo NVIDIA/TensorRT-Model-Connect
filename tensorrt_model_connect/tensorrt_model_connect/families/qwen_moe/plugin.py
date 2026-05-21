@@ -275,9 +275,21 @@ class Qwen3MoePlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, parallel_config=None,
         debug_layer_outputs: bool = False,
     ) -> bytes:
+        from ...parallel_config import normalize_parallel_config
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            # Local import keeps the dense build path free of TP code.
+            from .dual_profile_decoder_tp_builder import (
+                build_dual_profile_tp_moe_decoder_engine,
+            )
+            return build_dual_profile_tp_moe_decoder_engine(
+                config, weights, max_cache_length, precision=precision,
+                quant_ctx=quant_ctx, verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel)
         attention_size: int = weights.get(
             "_attention_size", config.attention_size)
         num_experts: int = weights["_num_experts"]

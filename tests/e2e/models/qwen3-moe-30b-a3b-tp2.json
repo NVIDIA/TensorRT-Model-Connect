@@ -1,0 +1,40 @@
+{
+  "name": "qwen3-moe-30b-a3b-tp2",
+  "trace_id": "IT-E2E-Q3MOE-30B-TP2-01",
+  "hf_id": "Qwen/Qwen3-30B-A3B",
+  "bundle": "qwen3-moe-30b-a3b-tp2.trtfb",
+  "family": "qwen_moe",
+  "runtime_strategy": "decoder_moe",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.01,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": { "mode": "tensor_parallel", "tp_size": 2 }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "debug_logits": true,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 2 }, "gating": true }
+  ],
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 0.5,
+    "logit_cosine_p5": 0.95,
+    "logit_rel_l2_p95": 0.15
+  },
+  "notes": "TensorRT 11.0 tensor-parallel Qwen3-MoE-30B-A3B TP=2. Uses families/qwen_moe/dual_profile_decoder_tp_builder.py. NOTE: 30B fp16 ~= 60 GB total even split across 2 ranks (~30 GB per rank); requires GPUs with >= 40 GB. Currently waived for memory on 24 GB hosts via tests/e2e/waives.txt."
+}
