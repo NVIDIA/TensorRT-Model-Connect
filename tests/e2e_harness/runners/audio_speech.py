@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -65,6 +66,30 @@ def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
     if os.path.isabs(bundle_name):
         return bundle_name
     return os.path.join(ctx.engine_dir, bundle_name)
+
+
+def _distributed_runtime_config(case: E2ECase) -> dict:
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _wrap_distributed_command(cmd: list[str], case: E2ECase) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        return [launcher] + [str(arg) for arg in launcher_args] + cmd
+    return [launcher, "--tag-output", "-np", str(world_size)] + cmd
+
+
+def _strip_mpirun_tags(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        lines.append(re.sub(r"^\[[^\]]+\]<std(?:out|err)>:\s?", "", line))
+    return "\n".join(lines)
 
 
 def _read_wav_rms(path: str) -> float:
@@ -157,6 +182,7 @@ class SpeechToTextRunner:
             cmd.extend(["--hf-python", runtime_cli_python])
 
         env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
+        cmd = _wrap_distributed_command(cmd, case)
 
         t0 = time.monotonic()
         result = subprocess.run(
@@ -165,12 +191,16 @@ class SpeechToTextRunner:
 
         # Parse output: expect transcript text on stdout.
         # Strip special tokens like <|notimestamp|>, <|endoftext|>, etc.
-        import re
-        transcript = re.sub(r'<\|[^|]+\|>', '', result.stdout).strip()
+        clean_stdout = _strip_mpirun_tags(result.stdout)
+        transcript_lines = [
+            re.sub(r'<\|[^|]+\|>', '', line).strip()
+            for line in clean_stdout.splitlines()
+        ]
+        transcript = next((line for line in transcript_lines if line), "")
 
         # Try to extract token IDs if the binary outputs them
         token_ids = []
-        for line in result.stderr.splitlines():
+        for line in _strip_mpirun_tags(result.stderr).splitlines():
             if line.startswith("tokens:"):
                 try:
                     token_ids = [int(t) for t in line.split(":", 1)[1].strip().split()]
@@ -257,6 +287,7 @@ class TextToAudioRunner:
             runtime_tokens = runtime_config_set_tokens(case)
             for token in runtime_tokens:
                 cmd.extend(["--set", token])
+            cmd = _wrap_distributed_command(cmd, case)
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
             bark_seed = runtime_config_get(case, "audio_bark.seed")
             if case.family == "bark" and bark_seed is None:

@@ -33,6 +33,11 @@ from ...checkpoint_mapper import (
 )
 from ... import graph_ops
 from ... import graph_blocks
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .decoder_tp_builder import build_whisper_tp_decoder_engine
 
 
 trt = trt_compat.get_trt()
@@ -167,7 +172,36 @@ class WhisperPlugin:
             weights["w_out"] = _transpose_2d(dec_embed.copy(), "embedding_tied")
         return weights
 
-    def build_engine(self, config: ModelConfig, weights: WeightDict, max_cache_length: int, *, precision: str = "fp32", quant_ctx=None, verbose: bool = False, debug_layer_outputs: bool = False) -> bytes:
+    def build_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+        debug_layer_outputs: bool = False,
+        parallel_config=None,
+    ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Whisper tensor-parallel decoder builds")
+            if quant_ctx is not None:
+                raise ValueError("Whisper tensor-parallel builds do not support quantization")
+            if debug_layer_outputs:
+                raise ValueError(
+                    "Whisper tensor-parallel builds do not support debug_layer_outputs")
+            return build_whisper_tp_decoder_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
+
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
         dec_ffn = weights["_dec_ffn"]
