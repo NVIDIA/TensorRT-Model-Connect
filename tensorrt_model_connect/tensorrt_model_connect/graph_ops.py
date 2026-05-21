@@ -2081,7 +2081,8 @@ def add_layer_norm_native(
         eps:         Numerical stability epsilon (scalar, not a tensor).
         dtype:       Storage dtype for gamma/beta constants before TRT cast.
     """
-    rank = len(tuple(inp.shape))
+    inp_shape = getattr(inp, "shape", None)
+    rank = len(tuple(inp_shape)) if inp_shape is not None else 2
     param_shape = (
         (hidden_size,) if rank <= 1 else (1,) * (rank - 1) + (hidden_size,)
     )
