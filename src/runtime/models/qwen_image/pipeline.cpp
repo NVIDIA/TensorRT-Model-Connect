@@ -70,11 +70,115 @@ ImageSize calculate_aspect_size_from_area(int target_side, int image_height, int
     const double raw_width = std::sqrt(target_area * ratio);
     const double raw_height = raw_width / ratio;
     ImageSize out;
-    out.width = std::max(alignment,
-                         static_cast<int>(std::round(raw_width / alignment)) * alignment);
-    out.height = std::max(alignment,
-                          static_cast<int>(std::round(raw_height / alignment)) * alignment);
+    out.width =
+        std::max(alignment, static_cast<int>(std::round(raw_width / alignment)) * alignment);
+    out.height =
+        std::max(alignment, static_cast<int>(std::round(raw_height / alignment)) * alignment);
     return out;
+}
+
+int positive_or_default(int value, int fallback) {
+    if (value > 0) {
+        return value;
+    }
+    return fallback;
+}
+
+void validate_compute_edit_image_plan_inputs(int image_height, int image_width) {
+    if (image_height <= 0 || image_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: input image dimensions must be positive");
+    }
+}
+
+void validate_edit_plan_config(const QwenImageConfig& config) {
+    if (config.image_conditioning.max_input_images != 1) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: only one input image is supported");
+    }
+    if (config.image_conditioning.vae_concat_axis != "sequence") {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: only sequence-axis VAE condition "
+            "concatenation is supported");
+    }
+    if (config.vae.spatial_scale_factor <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: invalid vae_scale_factor");
+    }
+    if (config.denoiser.patch_size <= 0) {
+        throw std::runtime_error("QwenImagePipeline::compute_edit_image_plan: invalid patch_size");
+    }
+}
+
+ImageSize resolve_edit_output_size(const QwenImageConfig& config, const GenerateConfig& cfg,
+                                   int image_height, int image_width, int alignment) {
+    const auto default_output = calculate_aspect_size_from_area(
+        config.image_conditioning.vae_image_size, image_height, image_width, 32);
+    ImageSize output;
+    output.height = positive_or_default(cfg.height, default_output.height);
+    output.width = positive_or_default(cfg.width, default_output.width);
+    output.height = floor_to_multiple(output.height, alignment);
+    output.width = floor_to_multiple(output.width, alignment);
+    if (output.height <= 0 || output.width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::compute_edit_image_plan: output dimensions align to zero");
+    }
+    return output;
+}
+
+ImageSize resolve_edit_condition_size(const QwenImageConfig& config, int image_height,
+                                      int image_width) {
+    if (config.vision_encoder.image_height > 0 && config.vision_encoder.image_width > 0) {
+        return ImageSize{config.vision_encoder.image_height, config.vision_encoder.image_width};
+    }
+    const int vl_alignment = config.vision_encoder.patch_size * config.vision_encoder.merge_size;
+    return calculate_aspect_size_from_area(config.image_conditioning.vl_image_size, image_height,
+                                           image_width, vl_alignment);
+}
+
+ImageSize resolve_edit_vae_size(const QwenImageConfig& config) {
+    ImageSize vae;
+    vae.height = positive_or_default(config.image_conditioning.vae_image_height,
+                                     config.image_conditioning.vae_image_size);
+    vae.width = positive_or_default(config.image_conditioning.vae_image_width,
+                                    config.image_conditioning.vae_image_size);
+    return vae;
+}
+
+void validate_text_to_image_overload_call(const float* image_pixels, int32_t image_height,
+                                          int32_t image_width) {
+    if (image_pixels == nullptr && image_height <= 0 && image_width <= 0) {
+        return;
+    }
+    throw std::runtime_error(
+        "QwenImagePipeline::generate_image: text-to-image Qwen-Image bundles do not "
+        "accept an input image");
+}
+
+void validate_edit_generate_input_image(const float* image_pixels, int32_t image_height,
+                                        int32_t image_width) {
+    if (image_pixels == nullptr) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
+    }
+    if (image_height <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
+    }
+    if (image_width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
+    }
+}
+
+void validate_edit_runtime_complete(bool has_text, bool has_denoiser, bool has_vae_decoder,
+                                    bool has_vision, bool has_vae_encoder) {
+    if (has_text && has_denoiser && has_vae_decoder && has_vision && has_vae_encoder) {
+        return;
+    }
+    throw std::runtime_error(
+        "QwenImagePipeline::generate_image: Qwen-Image Edit runtime is not complete; "
+        "required engines are text, vision, denoiser, vae_encoder, and vae_decoder");
 }
 
 } // namespace
@@ -220,24 +324,14 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const f
                                               int32_t image_height, int32_t image_width,
                                               const GenerateConfig& cfg) {
     if (config_.task_mode != QwenImageTaskMode::Edit) {
-        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
-            throw std::runtime_error(
-                "QwenImagePipeline::generate_image: text-to-image Qwen-Image bundles do not "
-                "accept an input image");
-        }
+        validate_text_to_image_overload_call(image_pixels, image_height, image_width);
         return generate_image(prompt, cfg);
     }
 
-    if (image_pixels == nullptr || image_height <= 0 || image_width <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::generate_image: Qwen-Image Edit requires a non-empty input image");
-    }
-    if (!text_engine_ || !denoiser_engine_ || !vae_decoder_engine_ || !vision_engine_ ||
-        !vae_encoder_engine_) {
-        throw std::runtime_error(
-            "QwenImagePipeline::generate_image: Qwen-Image Edit runtime is not complete; "
-            "required engines are text, vision, denoiser, vae_encoder, and vae_decoder");
-    }
+    validate_edit_generate_input_image(image_pixels, image_height, image_width);
+    validate_edit_runtime_complete(text_engine_ != nullptr, denoiser_engine_ != nullptr,
+                                   vae_decoder_engine_ != nullptr, vision_engine_ != nullptr,
+                                   vae_encoder_engine_ != nullptr);
 
     const EditInputTensors edit_inputs =
         preprocess_edit_input_image(image_pixels, image_height, image_width, cfg);
@@ -301,57 +395,25 @@ QwenImagePipeline::LatentShape QwenImagePipeline::compute_latent_shape(int heigh
 QwenImagePipeline::EditImagePlan
 QwenImagePipeline::compute_edit_image_plan(int image_height, int image_width,
                                            const GenerateConfig& cfg) const {
-    if (image_height <= 0 || image_width <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::compute_edit_image_plan: input image dimensions must be positive");
-    }
-    if (config_.image_conditioning.max_input_images != 1) {
-        throw std::runtime_error(
-            "QwenImagePipeline::compute_edit_image_plan: only one input image is supported");
-    }
-    if (config_.image_conditioning.vae_concat_axis != "sequence") {
-        throw std::runtime_error(
-            "QwenImagePipeline::compute_edit_image_plan: only sequence-axis VAE condition "
-            "concatenation is supported");
-    }
+    validate_compute_edit_image_plan_inputs(image_height, image_width);
+    validate_edit_plan_config(config_);
 
     const int vae_scale = config_.vae.spatial_scale_factor;
     const int patch = config_.denoiser.patch_size;
-    if (vae_scale <= 0 || patch <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::compute_edit_image_plan: invalid vae_scale_factor or patch_size");
-    }
     const int output_alignment = vae_scale * patch;
 
-    const auto default_output = calculate_aspect_size_from_area(
-        config_.image_conditioning.vae_image_size, image_height, image_width, 32);
-    EditImagePlan plan;
-    plan.output_height = cfg.height > 0 ? cfg.height : default_output.height;
-    plan.output_width = cfg.width > 0 ? cfg.width : default_output.width;
-    plan.output_height = floor_to_multiple(plan.output_height, output_alignment);
-    plan.output_width = floor_to_multiple(plan.output_width, output_alignment);
-    if (plan.output_height <= 0 || plan.output_width <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::compute_edit_image_plan: output dimensions align to zero");
-    }
+    const auto output =
+        resolve_edit_output_size(config_, cfg, image_height, image_width, output_alignment);
+    const auto condition = resolve_edit_condition_size(config_, image_height, image_width);
+    const auto vae = resolve_edit_vae_size(config_);
 
-    if (config_.vision_encoder.image_height > 0 && config_.vision_encoder.image_width > 0) {
-        plan.condition_height = config_.vision_encoder.image_height;
-        plan.condition_width = config_.vision_encoder.image_width;
-    } else {
-        const int vl_alignment =
-            config_.vision_encoder.patch_size * config_.vision_encoder.merge_size;
-        const auto condition = calculate_aspect_size_from_area(
-            config_.image_conditioning.vl_image_size, image_height, image_width, vl_alignment);
-        plan.condition_height = condition.height;
-        plan.condition_width = condition.width;
-    }
-    plan.vae_height = config_.image_conditioning.vae_image_height > 0
-                          ? config_.image_conditioning.vae_image_height
-                          : config_.image_conditioning.vae_image_size;
-    plan.vae_width = config_.image_conditioning.vae_image_width > 0
-                         ? config_.image_conditioning.vae_image_width
-                         : config_.image_conditioning.vae_image_size;
+    EditImagePlan plan;
+    plan.output_height = output.height;
+    plan.output_width = output.width;
+    plan.condition_height = condition.height;
+    plan.condition_width = condition.width;
+    plan.vae_height = vae.height;
+    plan.vae_width = vae.width;
     plan.output_tokens = compute_latent_shape(plan.output_height, plan.output_width);
     plan.condition_tokens = compute_latent_shape(plan.vae_height, plan.vae_width);
     plan.scheduler_image_tokens = plan.output_tokens.n_img_tokens;
@@ -394,14 +456,12 @@ float clamp_unit_image_value(float value) {
 
 float sample_hwc_bilinear_unit(const float* pixels, int src_h, int src_w, int dst_y, int dst_x,
                                int dst_h, int dst_w, int channel) {
-    const double src_y =
-        (static_cast<double>(dst_y) + 0.5) * static_cast<double>(src_h) /
-            static_cast<double>(dst_h) -
-        0.5;
-    const double src_x =
-        (static_cast<double>(dst_x) + 0.5) * static_cast<double>(src_w) /
-            static_cast<double>(dst_w) -
-        0.5;
+    const double src_y = (static_cast<double>(dst_y) + 0.5) * static_cast<double>(src_h) /
+                             static_cast<double>(dst_h) -
+                         0.5;
+    const double src_x = (static_cast<double>(dst_x) + 0.5) * static_cast<double>(src_w) /
+                             static_cast<double>(dst_w) -
+                         0.5;
     const double y = std::max(0.0, std::min(src_y, static_cast<double>(src_h - 1)));
     const double x = std::max(0.0, std::min(src_x, static_cast<double>(src_w - 1)));
     const int y0 = static_cast<int>(std::floor(y));
@@ -424,8 +484,7 @@ float sample_hwc_bilinear_unit(const float* pixels, int src_h, int src_w, int ds
 std::vector<float> resize_hwc_unit(const float* pixels, int src_h, int src_w, int dst_h,
                                    int dst_w) {
     validate_resize_target(dst_h, dst_w);
-    std::vector<float> out(static_cast<std::size_t>(dst_h) * static_cast<std::size_t>(dst_w) *
-                           3UL);
+    std::vector<float> out(static_cast<std::size_t>(dst_h) * static_cast<std::size_t>(dst_w) * 3UL);
     for (int y = 0; y < dst_h; ++y) {
         for (int x = 0; x < dst_w; ++x) {
             for (int c = 0; c < 3; ++c) {
@@ -467,9 +526,8 @@ QwenImagePipeline::preprocess_edit_input_image(const float* image_pixels, int32_
 
     EditInputTensors out;
     out.plan = compute_edit_image_plan(image_height, image_width, cfg);
-    out.condition_pixels_hwc =
-        resize_hwc_unit(image_pixels, image_height, image_width, out.plan.condition_height,
-                        out.plan.condition_width);
+    out.condition_pixels_hwc = resize_hwc_unit(image_pixels, image_height, image_width,
+                                               out.plan.condition_height, out.plan.condition_width);
     out.vae_pixels_ncthw = resize_hwc_unit_to_ncthw_minus1_1(
         image_pixels, image_height, image_width, out.plan.vae_height, out.plan.vae_width);
     return out;
@@ -528,11 +586,9 @@ std::vector<float> make_additive_attention_mask(int max_seq_len, int valid_len) 
     return mask;
 }
 
-QwenImagePipeline::EncodedPrompt pack_prompt_hidden_after_drop(const Tensor& last_hidden,
-                                                               int valid_token_count,
-                                                               int drop_idx, int max_text_tokens,
-                                                               int text_embed_dim,
-                                                               const char* caller) {
+QwenImagePipeline::EncodedPrompt
+pack_prompt_hidden_after_drop(const Tensor& last_hidden, int valid_token_count, int drop_idx,
+                              int max_text_tokens, int text_embed_dim, const char* caller) {
     const auto raw_embed_size =
         static_cast<std::size_t>(last_hidden.shape.empty() ? 0 : last_hidden.shape[0]) *
         static_cast<std::size_t>(text_embed_dim);
@@ -627,8 +683,7 @@ int32_t resolve_required_token_id(const ITokenizer& tokenizer, std::string_view 
 }
 
 std::vector<int32_t> expand_single_image_pad_token(const std::vector<int32_t>& ids,
-                                                   int32_t image_pad_id,
-                                                   int image_feature_tokens,
+                                                   int32_t image_pad_id, int image_feature_tokens,
                                                    std::size_t& image_start) {
     const auto it = std::find(ids.begin(), ids.end(), image_pad_id);
     if (it == ids.end()) {
@@ -687,14 +742,14 @@ QwenImagePipeline::EncodedPrompt QwenImagePipeline::encode_text_with_image_condi
     if (raw_token_count <= drop_idx) {
         throw std::runtime_error(
             "QwenImagePipeline::encode_text_with_image_conditioning: tokenized prompt has " +
-            std::to_string(raw_token_count) + " tokens, but drop_idx=" +
-            std::to_string(drop_idx) + " requires more");
+            std::to_string(raw_token_count) + " tokens, but drop_idx=" + std::to_string(drop_idx) +
+            " requires more");
     }
     if (raw_token_count > max_seq_len) {
         throw std::runtime_error(
             "QwenImagePipeline::encode_text_with_image_conditioning: tokenized prompt has " +
-            std::to_string(raw_token_count) + " tokens, exceeding text max_seq_len=" +
-            std::to_string(max_seq_len));
+            std::to_string(raw_token_count) +
+            " tokens, exceeding text max_seq_len=" + std::to_string(max_seq_len));
     }
 
     std::vector<int32_t> padded_ids(static_cast<std::size_t>(max_seq_len), 0);
@@ -714,11 +769,10 @@ QwenImagePipeline::EncodedPrompt QwenImagePipeline::encode_text_with_image_condi
     for (int tok = 0; tok < image_feature_tokens; ++tok) {
         const std::size_t dst_row = image_start + static_cast<std::size_t>(tok);
         image_mask[dst_row] = 1.0F;
-        std::copy_n(
-            image_features.data() +
-                static_cast<std::size_t>(tok) * static_cast<std::size_t>(text_embed_dim),
-            static_cast<std::size_t>(text_embed_dim),
-            image_hidden.data() + dst_row * static_cast<std::size_t>(text_embed_dim));
+        std::copy_n(image_features.data() +
+                        static_cast<std::size_t>(tok) * static_cast<std::size_t>(text_embed_dim),
+                    static_cast<std::size_t>(text_embed_dim),
+                    image_hidden.data() + dst_row * static_cast<std::size_t>(text_embed_dim));
     }
 
     TensorMap inputs;
@@ -760,8 +814,8 @@ std::vector<float> resize_hwc_unit_to_qwen_vl_pixel_values(const std::vector<flo
                 static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_w) +
                 static_cast<std::size_t>(x);
             for (int c = 0; c < 3; ++c) {
-                const float unit = sample_hwc_bilinear_unit(
-                    pixels.data(), src_h, src_w, y, x, dst_h, dst_w, c);
+                const float unit =
+                    sample_hwc_bilinear_unit(pixels.data(), src_h, src_w, y, x, dst_h, dst_w, c);
                 const float normalized = (unit - kMean[c]) / kStd[c];
                 const std::size_t base = static_cast<std::size_t>(c) * 2UL * plane;
                 out[base + pixel_index] = normalized;
@@ -772,6 +826,86 @@ std::vector<float> resize_hwc_unit_to_qwen_vl_pixel_values(const std::vector<flo
     return out;
 }
 
+struct VisionEncodeDims {
+    int height{0};
+    int width{0};
+    int patch{0};
+    int merge{0};
+    int hidden{0};
+};
+
+VisionEncodeDims resolve_vision_encode_dims(const QwenImageConfig& config) {
+    VisionEncodeDims dims;
+    dims.height =
+        positive_or_default(config.vision_encoder.image_height, config.vision_encoder.image_size);
+    dims.width =
+        positive_or_default(config.vision_encoder.image_width, config.vision_encoder.image_size);
+    dims.patch = config.vision_encoder.patch_size;
+    dims.merge = config.vision_encoder.merge_size;
+    dims.hidden = config.vision_encoder.out_hidden_size;
+    return dims;
+}
+
+void validate_positive_vision_encode_dims(const VisionEncodeDims& dims) {
+    if (dims.height <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: invalid vision height");
+    }
+    if (dims.width <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: invalid vision width");
+    }
+    if (dims.patch <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: invalid vision patch_size");
+    }
+    if (dims.merge <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: invalid vision merge_size");
+    }
+    if (dims.hidden <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: invalid vision hidden size");
+    }
+}
+
+void validate_vision_encode_grid_dims(const VisionEncodeDims& dims) {
+    const int divisor = dims.patch * dims.merge;
+    if (dims.height % divisor != 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: vision image height must be "
+            "divisible by patch_size * merge_size");
+    }
+    if (dims.width % divisor != 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: vision image width must be "
+            "divisible by patch_size * merge_size");
+    }
+}
+
+void validate_vision_encode_dims(const VisionEncodeDims& dims) {
+    validate_positive_vision_encode_dims(dims);
+    validate_vision_encode_grid_dims(dims);
+}
+
+std::size_t expected_vision_feature_numel(const VisionEncodeDims& dims) {
+    const int grid_h = dims.height / dims.patch;
+    const int grid_w = dims.width / dims.patch;
+    const int merged_grid_h = grid_h / dims.merge;
+    const int merged_grid_w = grid_w / dims.merge;
+    return static_cast<std::size_t>(merged_grid_h) * static_cast<std::size_t>(merged_grid_w) *
+           static_cast<std::size_t>(dims.hidden);
+}
+
+void validate_vision_feature_numel(std::size_t actual, std::size_t expected) {
+    if (actual != expected) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vision_encode_edit_condition: vision output size " +
+            std::to_string(actual) +
+            " does not match expected merged tokens * hidden = " + std::to_string(expected));
+    }
+}
+
 } // namespace
 
 std::vector<float>
@@ -780,49 +914,22 @@ QwenImagePipeline::vision_encode_edit_condition(const EditInputTensors& edit_inp
         throw std::runtime_error(
             "QwenImagePipeline::vision_encode_edit_condition: vision_engine_ is null");
     }
-    const int height = config_.vision_encoder.image_height > 0
-                           ? config_.vision_encoder.image_height
-                           : config_.vision_encoder.image_size;
-    const int width = config_.vision_encoder.image_width > 0
-                          ? config_.vision_encoder.image_width
-                          : config_.vision_encoder.image_size;
-    const int patch = config_.vision_encoder.patch_size;
-    const int merge = config_.vision_encoder.merge_size;
-    const int hidden = config_.vision_encoder.out_hidden_size;
-    if (height <= 0 || width <= 0 || patch <= 0 || merge <= 0 || hidden <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::vision_encode_edit_condition: invalid vision config");
-    }
-    if (height % (patch * merge) != 0 || width % (patch * merge) != 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::vision_encode_edit_condition: vision image dimensions must be "
-            "divisible by patch_size * merge_size");
-    }
+    const auto dims = resolve_vision_encode_dims(config_);
+    validate_vision_encode_dims(dims);
 
     auto pixel_values = resize_hwc_unit_to_qwen_vl_pixel_values(
         edit_inputs.condition_pixels_hwc, edit_inputs.plan.condition_height,
-        edit_inputs.plan.condition_width, height, width);
+        edit_inputs.plan.condition_width, dims.height, dims.width);
 
     TensorMap inputs;
     inputs["pixel_values"] =
         Tensor{pixel_values.data(),
-               {6, static_cast<int64_t>(height), static_cast<int64_t>(width)}, DType::kFloat32};
+               {6, static_cast<int64_t>(dims.height), static_cast<int64_t>(dims.width)},
+               DType::kFloat32};
     auto outputs = vision_engine_->forward(inputs);
     const auto& features = outputs.at("image_features");
 
-    const int grid_h = height / patch;
-    const int grid_w = width / patch;
-    const int merged_grid_h = grid_h / merge;
-    const int merged_grid_w = grid_w / merge;
-    const std::size_t expected =
-        static_cast<std::size_t>(merged_grid_h) * static_cast<std::size_t>(merged_grid_w) *
-        static_cast<std::size_t>(hidden);
-    if (features.numel() != expected) {
-        throw std::runtime_error(
-            "QwenImagePipeline::vision_encode_edit_condition: vision output size " +
-            std::to_string(features.numel()) + " does not match expected merged tokens * hidden = " +
-            std::to_string(expected));
-    }
+    validate_vision_feature_numel(features.numel(), expected_vision_feature_numel(dims));
 
     std::vector<float> result(features.numel());
     std::memcpy(result.data(), features.data, result.size() * sizeof(float));
@@ -933,12 +1040,11 @@ void validate_edit_denoise_loop_inputs(std::size_t latents_size, std::size_t con
     const auto expected_condition =
         static_cast<std::size_t>(n_condition_img) * static_cast<std::size_t>(in_channels);
     if (condition_size != expected_condition) {
-        throw std::runtime_error(
-            "QwenImagePipeline::denoise_loop_with_cfg_image_conditioning: "
-            "condition_latents_packed size " +
-            std::to_string(condition_size) +
-            " does not match n_condition_img * in_channels = " +
-            std::to_string(expected_condition));
+        throw std::runtime_error("QwenImagePipeline::denoise_loop_with_cfg_image_conditioning: "
+                                 "condition_latents_packed size " +
+                                 std::to_string(condition_size) +
+                                 " does not match n_condition_img * in_channels = " +
+                                 std::to_string(expected_condition));
     }
 }
 
@@ -1003,14 +1109,13 @@ std::vector<float> concatenate_latent_sequences(const std::vector<float>& genera
     return out;
 }
 
-std::vector<float> slice_generated_noise(const std::vector<float>& noise, std::size_t generated_numel,
-                                         std::size_t total_numel) {
+std::vector<float> slice_generated_noise(const std::vector<float>& noise,
+                                         std::size_t generated_numel, std::size_t total_numel) {
     if (noise.size() != total_numel) {
         throw std::runtime_error(
             "QwenImagePipeline::denoise_loop_with_cfg_image_conditioning: denoiser output size " +
             std::to_string(noise.size()) +
-            " does not match generated + condition token size = " +
-            std::to_string(total_numel));
+            " does not match generated + condition token size = " + std::to_string(total_numel));
     }
     std::vector<float> generated(generated_numel);
     std::copy_n(noise.begin(), generated_numel, generated.begin());
@@ -1110,38 +1215,85 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg_image_conditioning(
 
 namespace {
 
-void validate_vae_encode_edit_dims(bool has_engine, int latent_channels, int patch, int vae_scale,
-                                   int image_h, int image_w, std::size_t vae_pixels_size,
-                                   std::size_t latents_mean_size,
-                                   std::size_t latents_std_size) {
+void validate_vae_encode_engine_present(bool has_engine) {
     if (!has_engine) {
         throw std::runtime_error(
             "QwenImagePipeline::vae_encode_edit_condition: vae_encoder_engine_ is null");
     }
-    if (latent_channels <= 0 || patch <= 0 || vae_scale <= 0 || image_h <= 0 || image_w <= 0) {
+}
+
+void validate_vae_encode_positive_dims(int latent_channels, int patch, int vae_scale, int image_h,
+                                       int image_w) {
+    if (latent_channels <= 0) {
         throw std::runtime_error(
-            "QwenImagePipeline::vae_encode_edit_condition: invalid dims in config or plan");
+            "QwenImagePipeline::vae_encode_edit_condition: invalid latent_channels");
     }
-    if (image_h % vae_scale != 0 || image_w % vae_scale != 0) {
+    if (patch <= 0) {
         throw std::runtime_error(
-            "QwenImagePipeline::vae_encode_edit_condition: VAE image dimensions must be "
+            "QwenImagePipeline::vae_encode_edit_condition: invalid patch_size");
+    }
+    if (vae_scale <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: invalid vae spatial scale");
+    }
+    if (image_h <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: invalid VAE image height");
+    }
+    if (image_w <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: invalid VAE image width");
+    }
+}
+
+void validate_vae_encode_alignment(int vae_scale, int image_h, int image_w) {
+    if (image_h % vae_scale != 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: VAE image height must be "
             "divisible by vae spatial scale");
     }
+    if (image_w % vae_scale != 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: VAE image width must be "
+            "divisible by vae spatial scale");
+    }
+}
+
+void validate_vae_pixels_size(int image_h, int image_w, std::size_t vae_pixels_size) {
     const std::size_t expected_pixels =
         3UL * static_cast<std::size_t>(image_h) * static_cast<std::size_t>(image_w);
     if (vae_pixels_size != expected_pixels) {
         throw std::runtime_error(
             "QwenImagePipeline::vae_encode_edit_condition: vae_pixels_ncthw size " +
-            std::to_string(vae_pixels_size) + " does not match 3 * H * W = " +
-            std::to_string(expected_pixels));
+            std::to_string(vae_pixels_size) +
+            " does not match 3 * H * W = " + std::to_string(expected_pixels));
     }
-    if (static_cast<int>(latents_mean_size) != latent_channels ||
-        static_cast<int>(latents_std_size) != latent_channels) {
+}
+
+void validate_vae_preprocessor_sizes(int latent_channels, std::size_t latents_mean_size,
+                                     std::size_t latents_std_size) {
+    if (static_cast<int>(latents_mean_size) != latent_channels) {
         throw std::runtime_error(
-            "QwenImagePipeline::vae_encode_edit_condition: preprocessor latents_mean/std missing "
+            "QwenImagePipeline::vae_encode_edit_condition: preprocessor latents_mean missing "
             "or wrong size (need " +
-            std::to_string(latent_channels) + " entries each)");
+            std::to_string(latent_channels) + " entries)");
     }
+    if (static_cast<int>(latents_std_size) != latent_channels) {
+        throw std::runtime_error(
+            "QwenImagePipeline::vae_encode_edit_condition: preprocessor latents_std missing "
+            "or wrong size (need " +
+            std::to_string(latent_channels) + " entries)");
+    }
+}
+
+void validate_vae_encode_edit_dims(bool has_engine, int latent_channels, int patch, int vae_scale,
+                                   int image_h, int image_w, std::size_t vae_pixels_size,
+                                   std::size_t latents_mean_size, std::size_t latents_std_size) {
+    validate_vae_encode_engine_present(has_engine);
+    validate_vae_encode_positive_dims(latent_channels, patch, vae_scale, image_h, image_w);
+    validate_vae_encode_alignment(vae_scale, image_h, image_w);
+    validate_vae_pixels_size(image_h, image_w, vae_pixels_size);
+    validate_vae_preprocessor_sizes(latent_channels, latents_mean_size, latents_std_size);
 }
 
 void normalize_encoded_latents_inplace(float* data, int latent_channels, std::size_t per_channel,
@@ -1170,9 +1322,8 @@ QwenImagePipeline::vae_encode_edit_condition(const EditInputTensors& edit_inputs
     const int vae_scale = config_.vae.spatial_scale_factor;
     const int image_h = edit_inputs.plan.vae_height;
     const int image_w = edit_inputs.plan.vae_width;
-    validate_vae_encode_edit_dims(vae_encoder_engine_ != nullptr, latent_channels, patch,
-                                  vae_scale, image_h, image_w,
-                                  edit_inputs.vae_pixels_ncthw.size(),
+    validate_vae_encode_edit_dims(vae_encoder_engine_ != nullptr, latent_channels, patch, vae_scale,
+                                  image_h, image_w, edit_inputs.vae_pixels_ncthw.size(),
                                   preprocessor_.latents_mean.size(),
                                   preprocessor_.latents_std.size());
 
@@ -1187,9 +1338,9 @@ QwenImagePipeline::vae_encode_edit_condition(const EditInputTensors& edit_inputs
     auto outputs = vae_encoder_engine_->forward(inputs);
     const auto& latent_tensor = outputs.at("latent");
 
-    const std::size_t expected_latent =
-        static_cast<std::size_t>(latent_channels) * static_cast<std::size_t>(h_lat) *
-        static_cast<std::size_t>(w_lat);
+    const std::size_t expected_latent = static_cast<std::size_t>(latent_channels) *
+                                        static_cast<std::size_t>(h_lat) *
+                                        static_cast<std::size_t>(w_lat);
     if (latent_tensor.numel() != expected_latent) {
         throw std::runtime_error(
             "QwenImagePipeline::vae_encode_edit_condition: VAE encoder output size " +

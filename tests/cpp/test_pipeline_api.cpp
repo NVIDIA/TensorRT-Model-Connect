@@ -74,7 +74,8 @@ static void test_has_trt_returns_bool() {
 }
 
 static void test_sizeof_ipipeline_is_vtable() {
-    check(sizeof(trtmc::IPipeline) == sizeof(void*), "sizeof(IPipeline) equals vtable pointer size");
+    check(sizeof(trtmc::IPipeline) == sizeof(void*),
+          "sizeof(IPipeline) equals vtable pointer size");
 }
 
 static void test_delete_null_safe() {

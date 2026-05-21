@@ -382,7 +382,7 @@ def _resolve_bundle(
     if edit_condition_image:
         edit_condition_path = Path(str(edit_condition_image))
         if not edit_condition_path.is_absolute():
-            edit_condition_path = PROJECT_DIR / edit_condition_path
+            edit_condition_path = Path(__file__).resolve().parents[2] / edit_condition_path
         env["TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE"] = str(edit_condition_path)
     if ctx.build_profile and ctx.build_profile != "base":
         cmd.extend(["--active-python-profile", ctx.build_profile])

@@ -197,15 +197,14 @@ class QwenImagePipeline final : public IPipeline {
     EditInputTensors preprocess_edit_input_image(const float* image_pixels, int32_t image_height,
                                                  int32_t image_width,
                                                  const GenerateConfig& cfg = {}) const;
-    EncodedPrompt encode_text_with_image_conditioning(
-        const std::string& prompt, const std::vector<float>& image_features) const;
+    EncodedPrompt
+    encode_text_with_image_conditioning(const std::string& prompt,
+                                        const std::vector<float>& image_features) const;
     std::vector<float> vision_encode_edit_condition(const EditInputTensors& edit_inputs) const;
-    std::vector<float>
-    denoise_loop_with_cfg_image_conditioning(std::vector<float> latents_packed,
-                                             const std::vector<float>& condition_latents_packed,
-                                             const EncodedPrompt& pos, const EncodedPrompt& neg,
-                                             int n_img, int n_condition_img, int num_steps,
-                                             float cfg_scale) const;
+    std::vector<float> denoise_loop_with_cfg_image_conditioning(
+        std::vector<float> latents_packed, const std::vector<float>& condition_latents_packed,
+        const EncodedPrompt& pos, const EncodedPrompt& neg, int n_img, int n_condition_img,
+        int num_steps, float cfg_scale) const;
     std::vector<float> vae_encode_edit_condition(const EditInputTensors& edit_inputs) const;
 
     // Patchify a 4D latent tensor [1, C, H, W] (row-major C, H, W) into the
