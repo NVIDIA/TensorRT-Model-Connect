@@ -1,8 +1,8 @@
 {
-  "name": "pixart-sigma-1024-l0-tp4",
-  "trace_id": "IT-E2E-PXART-L0-TP4-01",
+  "name": "pixart-sigma-1024-tp4",
+  "trace_id": "IT-E2E-PXART-TP4-01",
   "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-  "bundle": "pixart-sigma-1024-l0-tp4.trtfb",
+  "bundle": "pixart-sigma-1024-tp4.trtfb",
   "model_type": "pixart",
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
@@ -67,8 +67,8 @@
   ],
   "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
   "test_type": "diffusion",
-  "image_height": 512,
-  "image_width": 512,
+  "image_height": 1024,
+  "image_width": 1024,
   "video_num_frames": 1,
   "num_inference_steps": 20,
   "stages": [
@@ -78,7 +78,8 @@
     }
   ],
   "threshold_overrides": {
-    "psnr": 2.0,
-    "ssim": -1.0
+    "min_pixel_mean": 0.15,
+    "max_pixel_mean": 0.85,
+    "min_pixel_std": 0.05
   }
 }
