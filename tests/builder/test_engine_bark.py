@@ -34,16 +34,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-try:
-    from safetensors.numpy import save_file
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("safetensors not available", allow_module_level=True)
+pytest.importorskip("safetensors.numpy", reason="safetensors not available")
+pytest.importorskip(
+    "tensorrt_model_connect.config",
+    reason="tensorrt_model_connect requires tensorrt",
+)
 
-try:
-    from tensorrt_model_connect.config import ModelConfig
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
-
+from tensorrt_model_connect.checkpoint_mapper import WeightDict
+from tensorrt_model_connect.parallel_config import ParallelConfig
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
@@ -70,6 +68,55 @@ _FINE_MAX_POS = 32
 _FINE_N_EMBED_TABLES = 8
 _FINE_N_LM_HEADS = 7
 _FINE_CODEBOOK_SIZE = 16
+
+
+def _make_bark_tp_weights(
+    *,
+    hidden: int = _SEM_HIDDEN,
+    num_layers: int = _SEM_LAYERS,
+    mlp_size: int | None = None,
+) -> WeightDict:
+    rng = np.random.RandomState(123)
+    mlp_size = mlp_size or hidden * 4
+
+    def rand(*shape: int) -> np.ndarray:
+        return rng.randn(*shape).astype(np.float32)
+
+    weights = WeightDict({
+        "_attention_size": hidden,
+        "metadata": "kept",
+        "embedding": rand(_SEM_VOCAB, hidden),
+        "position_embedding": rand(_SEM_MAX_POS, hidden),
+        "final_norm": rand(hidden),
+        "final_norm_beta": rand(hidden),
+        "w_out": rand(hidden, _SEM_OUTPUT_VOCAB),
+        "extra_tensor": rand(3, 3),
+    })
+    for i in range(num_layers):
+        lp = f"layer.{i}"
+        for key in ("w_q", "w_k", "w_v"):
+            weights[f"{lp}.{key}"] = rand(hidden, hidden)
+        for key in ("q_bias", "k_bias", "v_bias"):
+            weights[f"{lp}.{key}"] = rand(hidden)
+        weights[f"{lp}.w_o"] = rand(hidden, hidden)
+        weights[f"{lp}.o_bias"] = rand(hidden)
+        weights[f"{lp}.w_fc1"] = rand(hidden, mlp_size)
+        weights[f"{lp}.fc1_bias"] = rand(mlp_size)
+        weights[f"{lp}.w_fc2"] = rand(mlp_size, hidden)
+        weights[f"{lp}.fc2_bias"] = rand(hidden)
+        for key in (
+            "input_norm", "input_norm_beta",
+            "post_attn_norm", "post_attn_norm_beta",
+        ):
+            weights[f"{lp}.{key}"] = rand(hidden)
+    return weights
+
+
+def _bark_tp_builder_module():
+    return pytest.importorskip(
+        "tensorrt_model_connect.families.bark.decoder_tp_builder",
+        reason="TensorRT is required for Bark TP builder tests",
+    )
 
 
 class BarkPluginTester(FamilyPluginTester):
@@ -231,7 +278,6 @@ class BarkPluginTester(FamilyPluginTester):
 
         # Semantic sub-model
         for prefix in ("semantic", "coarse"):
-            h = _SEM_HIDDEN if prefix == "semantic" else _COARSE_HIDDEN
             n_layers = _SEM_LAYERS if prefix == "semantic" else _COARSE_LAYERS
             keys.update({
                 f"{prefix}.embedding",
@@ -462,3 +508,140 @@ class TestBarkEngine(FamilyPluginTestMixin):
             f"w_q shape[0] = {w_q.shape[0]}, expected {_SEM_HIDDEN} "
             f"(projection should be transposed from HF [out, in] to [in, out])"
         )
+
+    def test_bark_tp_build_rejects_single_device_parallel_config(self):
+        decoder_tp_builder = _bark_tp_builder_module()
+
+        with pytest.raises(ValueError, match="enabled parallel config"):
+            decoder_tp_builder.build_bark_tp_decoder_engine(
+                object(),
+                _make_bark_tp_weights(),
+                max_cache_length=4,
+                sub_model="semantic",
+                sub_cfg={
+                    "hidden_size": _SEM_HIDDEN,
+                    "num_heads": _SEM_HEADS,
+                    "num_layers": _SEM_LAYERS,
+                    "vocab_size": _SEM_VOCAB,
+                    "output_vocab": _SEM_OUTPUT_VOCAB,
+                    "intermediate_size": _SEM_HIDDEN * 4,
+                },
+                parallel_config=ParallelConfig(),
+            )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"hidden": _SEM_HIDDEN + 1}, "hidden_size"),
+            ({"num_heads": _SEM_HEADS + 1}, "num_heads"),
+            ({"mlp_size": _SEM_HIDDEN * 4 + 1}, "mlp_size"),
+        ],
+    )
+    def test_bark_tp_validation_rejects_non_divisible_dimensions(
+        self,
+        kwargs,
+        message,
+    ):
+        decoder_tp_builder = _bark_tp_builder_module()
+        params = {
+            "sub_model": "semantic",
+            "hidden": _SEM_HIDDEN,
+            "num_heads": _SEM_HEADS,
+            "mlp_size": _SEM_HIDDEN * 4,
+            "parallel": ParallelConfig(
+                mode="tensor_parallel",
+                tp_size=2,
+                rank=0,
+            ),
+        }
+        params.update(kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_bark_tp(**params)
+
+    @pytest.mark.parametrize(
+        ("key", "shape", "message"),
+        [
+            ("layer.0.w_q", (_SEM_HIDDEN, _SEM_HIDDEN - 1), "last dimension"),
+            ("layer.0.w_o", (_SEM_HIDDEN - 1, _SEM_HIDDEN), "first dimension"),
+        ],
+    )
+    def test_bark_tp_sharding_rejects_unshardable_weight_shapes(
+        self,
+        key,
+        shape,
+        message,
+    ):
+        decoder_tp_builder = _bark_tp_builder_module()
+        weights = _make_bark_tp_weights()
+        weights[key] = np.zeros(shape, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder.shard_bark_decoder_weights(
+                weights,
+                sub_model="semantic",
+                sub_cfg={
+                    "hidden_size": _SEM_HIDDEN,
+                    "num_heads": _SEM_HEADS,
+                    "num_layers": _SEM_LAYERS,
+                    "intermediate_size": _SEM_HIDDEN * 4,
+                },
+                parallel_config=ParallelConfig(
+                    mode="tensor_parallel",
+                    tp_size=2,
+                    rank=0,
+                ),
+            )
+
+    def test_bark_tp_shards_rank_local_decoder_weights(self):
+        decoder_tp_builder = _bark_tp_builder_module()
+        weights = _make_bark_tp_weights()
+        shard = decoder_tp_builder.shard_bark_decoder_weights(
+            weights,
+            sub_model="semantic",
+            sub_cfg={
+                "hidden_size": _SEM_HIDDEN,
+                "num_heads": _SEM_HEADS,
+                "num_layers": _SEM_LAYERS,
+                "intermediate_size": _SEM_HIDDEN * 4,
+            },
+            parallel_config=ParallelConfig(
+                mode="tensor_parallel",
+                tp_size=2,
+                rank=1,
+            ),
+        )
+
+        assert "_attention_size" not in shard
+        assert shard["metadata"] == "kept"
+        assert shard["embedding"] is weights["embedding"]
+        assert shard["final_norm"] is weights["final_norm"]
+        np.testing.assert_array_equal(
+            shard["extra_tensor"],
+            weights["extra_tensor"],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_q"],
+            weights["layer.0.w_q"][:, _SEM_HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.q_bias"],
+            weights["layer.0.q_bias"][_SEM_HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_o"],
+            weights["layer.0.w_o"][_SEM_HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc1"],
+            weights["layer.0.w_fc1"][:, (_SEM_HIDDEN * 4) // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.fc1_bias"],
+            weights["layer.0.fc1_bias"][(_SEM_HIDDEN * 4) // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc2"],
+            weights["layer.0.w_fc2"][(_SEM_HIDDEN * 4) // 2:, :],
+        )
+        assert shard["layer.0.o_bias"] is weights["layer.0.o_bias"]
