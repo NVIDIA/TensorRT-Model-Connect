@@ -89,6 +89,25 @@ def _safe_artifact_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name or "case")
 
 
+def _read_text_generation_sample(path: Path) -> dict:
+    """Read the first JSONL text-generation sample written by the C++ CLI."""
+    if not path.is_file():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            if not isinstance(sample, dict):
+                return {}
+            token_ids = sample.get("token_ids")
+            if isinstance(token_ids, list):
+                sample["token_ids"] = [int(token) for token in token_ids]
+            return sample
+    return {}
+
+
 def _ensure_distributed_runtime_env(
     case: E2ECase,
     ctx: RunContext,
@@ -335,7 +354,7 @@ class TextGenerationCausalRunner:
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
-        has_contract = "contract_config" in case.metadata
+        has_contract = bool(case.reference_family and case.user_contract)
         is_acceptance = case.ci_lane == "acceptance"
 
         use_single_process_debug = bool(
@@ -394,6 +413,19 @@ class TextGenerationCausalRunner:
         }
         if cpp_meta.get("runtime_error_detected"):
             data["cpp_runtime_error"] = cpp_meta["runtime_error_detected"]
+        if cpp_meta.get("token_ids") is not None:
+            data["token_ids"] = cpp_meta["token_ids"]
+        if cpp_meta.get("text_output_path"):
+            data["text_output_path"] = cpp_meta["text_output_path"]
+        contract_config = case.metadata.get("contract_config", {})
+        if "token_parity_ignore_terminal_token_ids" in contract_config:
+            data["token_parity_ignore_terminal_token_ids"] = (
+                contract_config["token_parity_ignore_terminal_token_ids"]
+            )
+        if "token_parity_eos_token_ids" in contract_config:
+            data["token_parity_eos_token_ids"] = contract_config["token_parity_eos_token_ids"]
+        if "forbidden_token_ids" in contract_config:
+            data["forbidden_token_ids"] = contract_config["forbidden_token_ids"]
         if logits_path:
             data["logits_path"] = logits_path
 
@@ -486,6 +518,16 @@ class TextGenerationCausalRunner:
             "--prompt", prompt,
             "--max-new-tokens", str(max_new_tokens),
         ]
+        output_jsonl_path: Path | None = None
+        if case is not None and not _distributed_runtime_config(case):
+            output_root = (
+                Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                if ctx.artifacts_dir
+                else Path(tempfile.gettempdir())
+            )
+            output_root.mkdir(parents=True, exist_ok=True)
+            output_jsonl_path = output_root / "trt_text_generation.jsonl"
+            cmd.extend(["-o", str(output_jsonl_path)])
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", runtime_cli_python])
@@ -500,6 +542,12 @@ class TextGenerationCausalRunner:
                 cmd.extend(["--top-k", str(inputs["top_k"])])
             if inputs.get("seed", -1) >= 0:
                 cmd.extend(["--seed", str(inputs["seed"])])
+            if inputs.get("generation_mode"):
+                cmd.extend(["--generation-mode", str(inputs["generation_mode"])])
+            if inputs.get("block_length", 0):
+                cmd.extend(["--block-length", str(inputs["block_length"])])
+            if inputs.get("threshold") is not None:
+                cmd.extend(["--threshold", str(inputs["threshold"])])
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})
@@ -571,6 +619,15 @@ class TextGenerationCausalRunner:
                 meta["stderr_log"] = log_path
 
         text = _extract_rank_zero_stdout(result.stdout) if distributed_runtime else result.stdout.strip()
+        if output_jsonl_path is not None:
+            sample = _read_text_generation_sample(output_jsonl_path)
+            if sample:
+                meta["text_output_path"] = str(output_jsonl_path)
+                if isinstance(sample.get("generated"), str):
+                    text = sample["generated"]
+                    meta["generated"] = text
+                if isinstance(sample.get("token_ids"), list):
+                    meta["token_ids"] = sample["token_ids"]
         return text, elapsed, meta
 
     def _run_debug_runner_logits(

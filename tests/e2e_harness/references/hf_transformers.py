@@ -28,6 +28,20 @@ _PRECISION_TO_TORCH_DTYPE = {
     "bf16": "torch.bfloat16",
 }
 
+_NEMOTRON_LABS_DIFFUSION_MODES = {
+    "": "diffusion",
+    "auto": "diffusion",
+    "diffusion": "diffusion",
+    "dlm": "diffusion",
+    "ar": "ar",
+    "autoregressive": "ar",
+    "linear_spec": "linear_spec",
+    "linear_speculation": "linear_spec",
+    "linear_spec_lora": "linear_spec_lora",
+    "linear_spec_adapter": "linear_spec_lora",
+    "linear_speculation_lora": "linear_spec_lora",
+}
+
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
     """Return a torch dtype expression string matching the manifest precision.
@@ -133,6 +147,11 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
         return hf_id
 
 
+def _normalize_nemotron_labs_diffusion_mode(mode: object) -> str:
+    normalized = str(mode or "").strip().lower().replace("-", "_")
+    return _NEMOTRON_LABS_DIFFUSION_MODES.get(normalized, normalized)
+
+
 class HfTransformersReference:
     """Run HuggingFace Transformers inference as the reference oracle."""
 
@@ -173,6 +192,8 @@ class HfTransformersReference:
             return self._run_vl_full_generation(case, stage, ctx)
         if task == "speech_to_text":
             return self._run_speech_to_text_ref(case, stage, ctx)
+        if case.runtime_strategy == "nemotron_labs_diffusion":
+            return self._run_nemotron_labs_diffusion_generation(case, stage, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -342,6 +363,255 @@ class HfTransformersReference:
             logits=logits_path if Path(logits_path).is_file() else None,
             timing_s=elapsed,
             metadata=meta,
+        )
+
+    def _run_nemotron_labs_diffusion_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run the upstream Nemotron Labs Diffusion generation APIs.
+
+        This family registers ``AutoModel`` with custom ``ar_generate``,
+        diffusion ``generate``, and ``linear_spec_generate`` methods.  The
+        generic causal reference path uses ``AutoModelForCausalLM`` plus
+        stepwise logits, which does not represent the model-card surface.
+        """
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = (
+            _case_artifact_dir(artifacts_dir, case.name)
+            if ctx.artifacts_dir
+            else artifacts_dir
+        )
+        text_path = str(Path(model_dir) / "hf_text.txt")
+        tokens_path = str(Path(model_dir) / "hf_tokens.json")
+
+        prompt = case.inputs.get("prompt", "The capital of France is")
+        max_new_tokens = int(case.inputs.get("max_new_tokens", 30))
+        generation_mode = _normalize_nemotron_labs_diffusion_mode(
+            case.inputs.get("generation_mode", "auto")
+        )
+        block_length = int(case.inputs.get("block_length", 32))
+        threshold = float(
+            case.inputs.get("threshold", case.inputs.get("score_threshold", 0.9))
+        )
+        temperature = float(case.inputs.get("temperature", 0.0))
+        trust_remote_code = bool(case.metadata.get("trust_remote_code", True))
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        contract_config = case.metadata.get("contract_config", {})
+        use_chat_template = contract_config.get("use_chat_template", False)
+        enable_thinking = contract_config.get("enable_thinking", True)
+
+        script = textwrap.dedent(f"""\
+            import inspect, json, torch
+            from pathlib import Path
+            from transformers import AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            max_new_tokens = {max_new_tokens}
+            generation_mode = {generation_mode!r}
+            block_length = {block_length}
+            threshold = {threshold}
+            temperature = {temperature}
+            trust_remote_code = {trust_remote_code!r}
+            text_path = {text_path!r}
+            tokens_path = {tokens_path!r}
+            use_chat_template = {use_chat_template!r}
+            enable_thinking = {enable_thinking!r}
+
+            def _call_supported(fn, input_ids, **kwargs):
+                sig = inspect.signature(fn)
+                accepts_kwargs = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+                filtered_kwargs = (
+                    kwargs if accepts_kwargs
+                    else {{k: v for k, v in kwargs.items()
+                           if k in sig.parameters}}
+                )
+                if "input_ids" in sig.parameters or accepts_kwargs:
+                    try:
+                        return fn(input_ids=input_ids, **filtered_kwargs)
+                    except TypeError as exc:
+                        if "input_ids" not in str(exc):
+                            raise
+                # The model-card APIs take token IDs as the first positional
+                # argument in some upstream revisions.
+                return fn(input_ids, **filtered_kwargs)
+
+            def _as_token_list(output):
+                if hasattr(output, "sequences"):
+                    output = output.sequences
+                if isinstance(output, (tuple, list)) and output:
+                    output = output[0]
+                if isinstance(output, torch.Tensor):
+                    if output.ndim == 2:
+                        output = output[0]
+                    return [int(x) for x in output.detach().cpu().tolist()]
+                return [int(x) for x in output]
+
+            import transformers.utils.generic as _tf_generic
+            if not hasattr(_tf_generic, "check_model_inputs"):
+                _tf_generic.check_model_inputs = lambda fn: fn
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            if use_chat_template:
+                messages = [{{"role": "user", "content": prompt}}]
+                chat_kwargs = {{"add_generation_prompt": True}}
+                if not enable_thinking:
+                    chat_kwargs["enable_thinking"] = False
+                template_path = Path(model_ref) / "chat_template.jinja"
+                if getattr(tokenizer, "chat_template", None) is None and template_path.is_file():
+                    chat_kwargs["chat_template"] = template_path.read_text(encoding="utf-8")
+                text_input = tokenizer.apply_chat_template(
+                    messages, tokenize=False, **chat_kwargs)
+                input_ids = tokenizer.encode(text_input, add_special_tokens=False)
+            else:
+                input_ids = tokenizer.encode(prompt)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = AutoModel.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            generation_model = model
+            if generation_mode == "linear_spec_lora":
+                from peft import PeftModel
+                model = PeftModel.from_pretrained(
+                    model, model_ref, subfolder="linear_spec_lora",
+                    adapter_name="linear_spec_lora")
+                generation_model = model.model
+            model.to(device)
+            model.eval()
+
+            ids_tensor = torch.tensor(
+                [input_ids], dtype=torch.long, device=device)
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            common_kwargs = {{
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "eos_token_id": eos_id,
+            }}
+
+            with torch.no_grad():
+                if generation_mode == "ar":
+                    output = _call_supported(
+                        generation_model.ar_generate,
+                        ids_tensor,
+                        **common_kwargs,
+                    )
+                elif generation_mode == "diffusion":
+                    output = _call_supported(
+                        generation_model.generate,
+                        ids_tensor,
+                        **common_kwargs,
+                        block_length=block_length,
+                        threshold=threshold,
+                    )
+                elif generation_mode in {{"linear_spec", "linear_spec_lora"}}:
+                    output = _call_supported(
+                        generation_model.linear_spec_generate,
+                        ids_tensor,
+                        **common_kwargs,
+                        block_length=block_length,
+                        threshold=threshold,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported generation_mode={{generation_mode!r}}")
+
+            output_ids = _as_token_list(output)
+            if output_ids[:len(input_ids)] == input_ids:
+                generated_ids = output_ids[len(input_ids):]
+            else:
+                generated_ids = output_ids
+            text = tokenizer.decode(
+                generated_ids, skip_special_tokens=True).strip()
+            with open(text_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(tokens_path, "w", encoding="utf-8") as f:
+                json.dump({{
+                    "token_ids": generated_ids,
+                    "eos_token_id": eos_id,
+                }}, f)
+            print(f"OK mode={{generation_mode}} tokens={{len(generated_ids)}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        logger.info(
+            "HF reference: running %s with Nemotron Labs Diffusion %s mode",
+            case.name,
+            generation_mode,
+        )
+        t0 = time.monotonic()
+        try:
+            result = subprocess.run(
+                [python, "-c", script],
+                capture_output=True, text=True, timeout=1800,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - t0
+            raise RuntimeError(
+                f"HF reference timed out for {case.name} after {elapsed:.0f}s"
+            )
+        except Exception as e:
+            raise RuntimeError(f"HF reference failed for {case.name}: {e}") from e
+        elapsed = time.monotonic() - t0
+
+        if result.returncode != 0:
+            truncated, log_path = save_full_stderr(
+                result.stderr,
+                ctx.artifacts_dir or "",
+                "hf_nemotron_labs_diffusion",
+                case.name,
+            )
+            msg = (
+                f"HF reference failed for {case.name} "
+                f"(rc={result.returncode}):\n{truncated}"
+            )
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
+
+        text = ""
+        if Path(text_path).is_file():
+            text = Path(text_path).read_text(encoding="utf-8")
+        token_ids = []
+        eos_token_id = None
+        if Path(tokens_path).is_file():
+            token_payload = json.loads(Path(tokens_path).read_text(encoding="utf-8"))
+            raw_token_ids = token_payload.get("token_ids", [])
+            if isinstance(raw_token_ids, list):
+                token_ids = [int(token) for token in raw_token_ids]
+            if token_payload.get("eos_token_id") is not None:
+                eos_token_id = int(token_payload["eos_token_id"])
+
+        return StageOutput(
+            stage_name=stage.name,
+            data={
+                "generation_mode": generation_mode,
+                "text_path": text_path if Path(text_path).is_file() else "",
+                "tokens_path": tokens_path if Path(tokens_path).is_file() else "",
+                "token_ids": token_ids,
+                "eos_token_id": eos_token_id,
+            },
+            text=text,
+            timing_s=elapsed,
+            metadata={
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "trust_remote_code": trust_remote_code,
+                "generation_mode": generation_mode,
+            },
         )
 
 

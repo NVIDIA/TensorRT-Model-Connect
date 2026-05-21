@@ -33,6 +33,7 @@ Tensor contract (matches the C++ runtime KvCache naming):
     cache_v_i       fp16/f32 (max_cache, kv_size)    # static
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
+                    or (Sq, vocab) for full-logits diffusion builds
     present_k_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
     present_v_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
 """
@@ -197,6 +198,49 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
         raise NotImplementedError("missing final_norm weight")
 
 
+def _yarn_rope_kwargs(config: "ModelConfig") -> dict | None:
+    """Return YaRN RoPE parameters from HF config dicts when present."""
+    raw = getattr(config, "raw", {}) or {}
+    rope_cfg = raw.get("rope_parameters")
+    if not isinstance(rope_cfg, dict):
+        rope_cfg = raw.get("rope_scaling")
+    if not isinstance(rope_cfg, dict):
+        return None
+    rope_type = str(rope_cfg.get("rope_type", rope_cfg.get("type", ""))).lower()
+    if rope_type != "yarn":
+        return None
+    return {
+        "scaling_factor": float(rope_cfg.get("factor", 1.0)),
+        "original_max_position_embeddings": int(
+            rope_cfg.get("original_max_position_embeddings", config.max_position_embeddings)
+        ),
+        "beta_fast": float(rope_cfg.get("beta_fast", 32.0)),
+        "beta_slow": float(rope_cfg.get("beta_slow", 1.0)),
+    }
+
+
+def _llama4_attention_scale_kwargs(config: "ModelConfig") -> dict | None:
+    """Return Llama-4-style query scale parameters when present."""
+    raw = getattr(config, "raw", {}) or {}
+    rope_cfg = raw.get("rope_parameters")
+    if not isinstance(rope_cfg, dict):
+        rope_cfg = raw.get("rope_scaling")
+    if not isinstance(rope_cfg, dict):
+        return None
+    beta = rope_cfg.get("llama_4_scaling_beta")
+    if beta is None:
+        return None
+    beta = float(beta)
+    if beta == 0.0:
+        return None
+    return {
+        "beta": beta,
+        "original_max_position_embeddings": int(
+            rope_cfg.get("original_max_position_embeddings", config.max_position_embeddings)
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main builder.
 # ---------------------------------------------------------------------------
@@ -222,6 +266,7 @@ def build_dual_profile_decoder_engine(
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
+    full_logits_output: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -404,21 +449,38 @@ def build_dual_profile_decoder_engine(
     # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
+    q_position_scale_table: trt.ITensor | None = None
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+        yarn_kwargs = _yarn_rope_kwargs(config)
+        if yarn_kwargs is not None:
+            cos_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, True,
+                interleaved=interleaved_rope, **yarn_kwargs)
+            sin_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, False,
+                interleaved=interleaved_rope, **yarn_kwargs)
+        else:
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, True,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, False,
+                partial_rotary_factor, interleaved=interleaved_rope)
         cos_half_table = _const_in_work_dtype(
             network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
         sin_half_table = _const_in_work_dtype(
             network, sin_half_np.shape, sin_half_np,
             work_np_dtype, work_trt_dtype)
+        llama4_scale_kwargs = _llama4_attention_scale_kwargs(config)
+        if llama4_scale_kwargs is not None:
+            q_scale_np = graph_ops.make_llama4_attention_scale_table(
+                kmax, **llama4_scale_kwargs)
+            q_position_scale_table = _const_in_work_dtype(
+                network, q_scale_np.shape, q_scale_np,
+                work_np_dtype, work_trt_dtype)
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
@@ -559,6 +621,11 @@ def build_dual_profile_decoder_engine(
                 cos_half_table, sin_half_table, position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
+            if q_position_scale_table is not None:
+                q_scale = network.add_gather(q_position_scale_table, position_id, 0).get_output(0)
+                if q_scale.dtype != q.dtype:
+                    q_scale = network.add_cast(q_scale, q.dtype).get_output(0)
+                q = network.add_elementwise(q, q_scale, trt.ElementWiseOperation.PROD).get_output(0)
 
         # Present K / V (this step's raw K / V), shape (Sq, attn_size).
         present_k_outs.append(k)
@@ -637,28 +704,30 @@ def build_dual_profile_decoder_engine(
             weights.get("final_norm_beta"),
             eps_tensor, norm_type, work_np_dtype)
 
-    # Only the LAST prompt token's logits matter for the next-token sample,
-    # so slice hidden_state from (Sq, hidden) to (1, hidden) before the LM
-    # head. This keeps the output contract identical to the single-token
-    # engine (logits shape = (1, vocab)) under both profiles and avoids
-    # computing (Sq - 1) redundant vocab-sized matmul rows during prefill.
-    shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
-    one_hidden = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
-    start_sub = network.add_elementwise(
-        shape_t, one_hidden, trt.ElementWiseOperation.SUB)
-    start_t = start_sub.get_output(0)  # [Sq - 1, 0]
-    size_t = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
-    slicer = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
-    slicer.set_input(1, start_t)
-    slicer.set_input(2, size_t)
-    last_hidden = slicer.get_output(0)
+    lm_input = hidden_state
+    if not full_logits_output:
+        # Only the LAST prompt token's logits matter for the next-token sample,
+        # so slice hidden_state from (Sq, hidden) to (1, hidden) before the LM
+        # head. This keeps the output contract identical to the single-token
+        # engine (logits shape = (1, vocab)) under both profiles and avoids
+        # computing (Sq - 1) redundant vocab-sized matmul rows during prefill.
+        shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
+        one_hidden = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        start_sub = network.add_elementwise(
+            shape_t, one_hidden, trt.ElementWiseOperation.SUB)
+        start_t = start_sub.get_output(0)  # [Sq - 1, 0]
+        size_t = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        slicer = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+        slicer.set_input(1, start_t)
+        slicer.set_input(2, size_t)
+        lm_input = slicer.get_output(0)
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
     logits = graph_ops.add_matmul_rhs_constant(
-        network, last_hidden, hidden, out_vocab, weights["w_out"],
+        network, lm_input, hidden, out_vocab, weights["w_out"],
         dtype=work_np_dtype)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:

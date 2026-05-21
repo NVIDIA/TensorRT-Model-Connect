@@ -104,6 +104,9 @@ def mock_repo(tmp_path):
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
          "hf_id": "mist/mixtral", "core": True},
+        {"name": "nemotron-labs-diffusion-8b", "family": "nemotron_labs_diffusion",
+         "runtime_strategy": "nemotron_labs_diffusion",
+         "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B"},
         {"name": "chronos-bolt-small", "family": "chronos_bolt",
          "runtime_strategy": "chronos_bolt_torchtrt",
          "hf_id": "amazon/chronos-bolt-small", "core": True},
@@ -198,7 +201,7 @@ def mock_repo(tmp_path):
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "graph_ops.py").write_text("")
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "strategies").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "text_generation" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_kv_cache", "decoder_moe"]\n',
+        'runtime_strategies = ["decoder_kv_cache", "decoder_moe", "nemotron_labs_diffusion"]\n',
         encoding="utf-8",
     )
     (tmp_path / "src" / "runtime" / "models" / "vision_language" / "MODEL.toml").write_text(
@@ -528,6 +531,7 @@ class TestCppScope:
         # Should include qwen, llama (kv_cache) and mixtral (moe)
         assert "qwen3-0.6b" in match.models
         assert "mixtral-15m" in match.models
+        assert "nemotron-labs-diffusion-8b" in match.models
         # Should NOT include non-decoder models
         assert "bert-base" not in match.models
         assert "flux-schnell" not in match.models
@@ -576,6 +580,7 @@ class TestCppScope:
             "src/runtime/models/text_generation/pipeline.cpp", imap)
         assert match.rule == "cpp_runtime_model"
         assert "qwen3-0.6b" in match.models
+        assert "nemotron-labs-diffusion-8b" in match.models
         assert "bert-base" not in match.models
 
     def test_flux_pipeline_runtime_scope_uses_non_fp8_l0_representative(self, imap):

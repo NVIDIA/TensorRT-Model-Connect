@@ -33,6 +33,7 @@ struct CliArgs {
     float point_y{0.5F};
     bool is_foreground{true};
     int max_new_tokens{0};
+    int block_length{0};
     int num_samples{1};
     int benchmark{0}; // >0: run N timed iterations after warmup
     int warmup{1};    // number of warmup iterations before timing
@@ -46,6 +47,7 @@ struct CliArgs {
     float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
+    std::string generation_mode;
     // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
     std::string negative_prompt;
     int diffusion_height{0}; // 0 = use bundle default

@@ -3,7 +3,8 @@
 // Usage:
 //   trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]
 //   trtmc run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--benchmark N]
-//                        [--warmup N] [--num-samples N] [--num-steps N]
+//                        [--warmup N] [--generation-mode MODE] [--block-length N]
+//                        [--threshold F] [--num-samples N] [--num-steps N]
 //                        [--guidance-scale S] [--cfg-scale S] [--sde-gamma S]
 //                        [--initial-latents-raw PATH] [--condition-latents-raw PATH]
 //                        [--condition-mask-raw PATH] [--sampling-steps-raw PATH]
@@ -305,6 +306,10 @@ int cmd_run(const CliArgs& args) {
     cfg.max_new_tokens =
         args.max_new_tokens > 0 ? args.max_new_tokens : (ptype == "ElfFlowPipeline" ? 0 : 20);
     cfg.num_samples = args.num_samples;
+    cfg.block_length = args.block_length;
+    cfg.confidence_threshold = args.conf_threshold;
+    if (!args.generation_mode.empty())
+        cfg.text_generation_mode = args.generation_mode;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
     cfg.cfg_scale = args.cfg_scale;

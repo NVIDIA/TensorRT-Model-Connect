@@ -1,0 +1,37 @@
+{
+  "name": "nemotron-labs-diffusion-8b-linear-spec-lora",
+  "trace_id": "IT-E2E-NLD8-01",
+  "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B",
+  "bundle": "nemotron-labs-diffusion-8b.trtfb",
+  "family": "nemotron_labs_diffusion",
+  "runtime_strategy": "nemotron_labs_diffusion",
+  "reference_family": "nemotron_labs_diffusion_model_card",
+  "user_contract": "model_card_generation_parity",
+  "ci_tier": "nightly_only",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "precision": "bf16",
+  "max_cache_length": 640,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 32,
+  "trust_remote_code": true,
+  "inputs": {
+    "generation_mode": "linear_spec_lora",
+    "block_length": 32,
+    "threshold": 0.9,
+    "temperature": 0.0
+  },
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "token_parity_eos_token_ids": [11],
+      "token_parity_ignore_terminal_token_ids": [1010],
+      "forbidden_token_ids": [0]
+    }
+  },
+  "threshold_overrides": {
+    "canonical_token_agreement_rate": 1.0,
+    "contract_ned_threshold": 0.05
+  },
+  "notes": "Nightly coverage for the upstream LoRA-backed linear speculative model-card path."
+}

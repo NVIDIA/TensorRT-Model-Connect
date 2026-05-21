@@ -369,12 +369,25 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
         if (entry.is_external)
             continue;
 
+        std::vector<int64_t> runtime_shape = entry.shape;
+        std::size_t runtime_nbytes = entry.nbytes;
+        if (has_dynamic_shapes_ && ctx_ != nullptr) {
+            std::vector<int64_t> inferred_shape;
+            runtime_nbytes = compute_alloc_bytes(ctx_->getTensorShape(name.c_str()), entry.dtype,
+                                                 inferred_shape);
+            if (runtime_nbytes <= entry.nbytes) {
+                runtime_shape = std::move(inferred_shape);
+            } else {
+                runtime_nbytes = entry.nbytes;
+            }
+        }
+
         auto& staging = host_output_staging_[name];
-        cudaMemcpy(staging.data(), entry.d_ptr, entry.nbytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(staging.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost);
 
         Tensor t;
         t.data = staging.data();
-        t.shape = entry.shape;
+        t.shape = std::move(runtime_shape);
         t.dtype = entry.dtype;
         outputs[name] = t;
     }

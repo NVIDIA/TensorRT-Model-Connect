@@ -73,6 +73,12 @@ void test_run_parses_common_flags() {
                        "hello",
                        "--max-new-tokens",
                        "8",
+                       "--generation-mode",
+                       "diffusion",
+                       "--block-length",
+                       "32",
+                       "--threshold",
+                       "0.9",
                        "--temperature",
                        "0.5",
                        "--top-p",
@@ -95,6 +101,9 @@ void test_run_parses_common_flags() {
     check(args.bundle_path == "bundle.trtfb", "run bundle");
     check(args.prompt == "hello", "run prompt");
     check(args.max_new_tokens == 8, "run max tokens");
+    check(args.generation_mode == "diffusion", "run generation mode");
+    check(args.block_length == 32, "run block length");
+    check(args.conf_threshold > 0.89F && args.conf_threshold < 0.91F, "run threshold");
     check(args.temperature > 0.49F && args.temperature < 0.51F, "run temperature");
     check(args.top_k == 4, "run top_k");
     check(args.seed == 123, "run seed");

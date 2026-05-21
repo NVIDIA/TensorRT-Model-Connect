@@ -31,8 +31,8 @@ def _target_np_dtype(precision: str) -> np.dtype:
     return np.float32
 
 
-def _layer_key(layer_idx: int, suffix: str) -> str:
-    return f"model.layers.{layer_idx}.{suffix}"
+def _layer_key(layer_idx: int, suffix: str, model_prefix: str = "model") -> str:
+    return f"{model_prefix}.layers.{layer_idx}.{suffix}"
 
 
 def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.ndarray:
@@ -76,6 +76,10 @@ def load_standard_weights(
     config: ModelConfig,
     *,
     precision: str = "fp32",
+    model_prefix: str = "model",
+    embedding_key: str | None = None,
+    final_norm_key: str | None = None,
+    lm_head_key: str = "lm_head.weight",
 ) -> WeightDict:
     """Load HF safetensors and map to standard weight dict."""
     model_dir = Path(model_dir)
@@ -91,7 +95,9 @@ def load_standard_weights(
     weights = WeightDict()
 
     # Embedding
-    embedding = _load_tensor(readers, "model.embed_tokens.weight")
+    if embedding_key is None:
+        embedding_key = f"{model_prefix}.embed_tokens.weight"
+    embedding = _load_tensor(readers, embedding_key)
     assert embedding.shape == (vocab, hidden), (
         f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
     weights["embedding"] = embedding.astype(target_dtype)
@@ -102,25 +108,26 @@ def load_standard_weights(
 
         # Norms
         input_norm = _load_tensor(
-            readers, _layer_key(layer_idx, "input_layernorm.weight"))
+            readers, _layer_key(layer_idx, "input_layernorm.weight", model_prefix))
         post_norm = _load_tensor(
-            readers, _layer_key(layer_idx, "post_attention_layernorm.weight"))
+            readers,
+            _layer_key(layer_idx, "post_attention_layernorm.weight", model_prefix))
         layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
         q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight"))
+            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix))
         k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight"))
+            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix))
         v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight"))
+            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix))
         o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight"))
+            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix))
 
         q_hidden = q_raw.shape[0]
         gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight"))
+            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix))
         layer_mlp_size = gate_raw.shape[0]
 
         # Transpose all projections [out, in] -> [in, out]
@@ -135,9 +142,9 @@ def load_standard_weights(
         layer[f"{prefix}.w_o"] = o_t
 
         # Optional QKV biases (Qwen2 style)
-        q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias")
-        k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias")
-        v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias")
+        q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias", model_prefix)
+        k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias", model_prefix)
+        v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias", model_prefix)
         if _has_tensor(readers, q_bias_key):
             layer[f"{prefix}.q_bias"] = _load_tensor(
                 readers, q_bias_key).astype(target_dtype)
@@ -149,8 +156,8 @@ def load_standard_weights(
                 readers, v_bias_key).astype(target_dtype)
 
         # Optional per-head q/k norm (Qwen3 style)
-        q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight")
-        k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight")
+        q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight", model_prefix)
+        k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight", model_prefix)
         if _has_tensor(readers, q_norm_key):
             layer[f"{prefix}.q_norm"] = _repeat_head_norm(
                 _load_tensor(readers, q_norm_key).astype(np.float32),
@@ -162,9 +169,9 @@ def load_standard_weights(
 
         # MLP projections
         up_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.up_proj.weight"))
+            readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
         down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight"))
+            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix))
 
         layer[f"{prefix}.w_gate"] = _transpose_2d(
             gate_raw, "gate_proj", precision=precision)
@@ -199,7 +206,8 @@ def load_standard_weights(
             mlp_size = layer_mlp_size
 
     # Final norm
-    final_norm_key = "model.norm.weight"
+    if final_norm_key is None:
+        final_norm_key = f"{model_prefix}.norm.weight"
     if _has_tensor(readers, final_norm_key):
         weights["final_norm"] = _load_tensor(
             readers, final_norm_key).astype(np.float32)
@@ -207,7 +215,6 @@ def load_standard_weights(
         weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
     # LM head
-    lm_head_key = "lm_head.weight"
     if _has_tensor(readers, lm_head_key):
         weights["w_out"] = _transpose_2d(
             _load_tensor(readers, lm_head_key), "lm_head", precision=precision)

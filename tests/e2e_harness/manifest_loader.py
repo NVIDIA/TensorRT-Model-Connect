@@ -521,6 +521,7 @@ def _convert_skip_to_known_limitation(manifest: dict) -> dict | None:
 _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "decoder_kv_cache",
     "decoder_moe",
+    "nemotron_labs_diffusion",
     "ssm_recurrent",
     "rwkv_recurrent",
     "hybrid_mamba_attention",

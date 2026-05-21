@@ -398,6 +398,30 @@ def make_yarn_rope_table_half_dim(
     return table
 
 
+def make_llama4_attention_scale_table(
+    max_cache_length: int,
+    beta: float,
+    original_max_position_embeddings: int,
+) -> np.ndarray:
+    """Build the per-position query scale used by Llama-4-style RoPE.
+
+    HF Nemotron-Labs-Diffusion applies this after RoPE:
+      1 + beta * log(1 + floor(position / original_max_position_embeddings))
+
+    Returns [max_cache_length, 1] so TensorRT can gather by position_id and
+    broadcast the result across the query hidden dimension.
+    """
+    if max_cache_length <= 0:
+        return np.ones((max(max_cache_length, 0), 1), dtype=np.float32)
+    if beta == 0.0 or original_max_position_embeddings <= 0:
+        return np.ones((max_cache_length, 1), dtype=np.float32)
+    positions = np.arange(max_cache_length, dtype=np.float64)
+    scale = 1.0 + float(beta) * np.log1p(
+        np.floor(positions / float(original_max_position_embeddings))
+    )
+    return scale.reshape(max_cache_length, 1).astype(np.float32)
+
+
 def add_layer_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

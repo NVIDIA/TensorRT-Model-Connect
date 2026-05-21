@@ -17,6 +17,7 @@ from tests.e2e_harness.runners import (
     object_detection,
     omni,
     segmentation,
+    text_generation,
 )
 
 
@@ -214,6 +215,50 @@ def test_omni_runner_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, 
     assert "--stage" not in cmd
     assert out.metadata["entrypoint"] == "embed"
     assert out.data["embedding"] == [0.1, 0.2]
+
+
+def test_text_generation_runner_maps_diffusion_mode_flags(monkeypatch, tmp_path):
+    case = _make_case(
+        "text_generation_causal",
+        inputs={
+            "prompt": "hello",
+            "max_new_tokens": 32,
+            "generation_mode": "diffusion",
+            "block_length": 32,
+            "threshold": 0.9,
+        },
+        family="nemotron_labs_diffusion",
+        runtime_strategy="nemotron_labs_diffusion",
+        ci_lane="acceptance",
+        reference_family="nemotron_labs_diffusion_model_card",
+        user_contract="model_card_generation_parity",
+        metadata={"contract_config": {}},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        output_path = cmd[cmd.index("-o") + 1]
+        tmp_path.joinpath(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write('{"id":0,"generated":"ok","token_ids":[1,2,3]}\n')
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(text_generation.subprocess, "run", _fake_run)
+
+    out = text_generation.TextGenerationCausalRunner().run_stage(
+        case, StageSpec(name="full_generation"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--generation-mode" in cmd
+    assert "diffusion" in cmd
+    assert "--block-length" in cmd
+    assert "--threshold" in cmd
+    assert "-o" in cmd
+    assert out.data["token_ids"] == [1, 2, 3]
+    assert out.metadata["cpp"]["command"] == cmd
 
 
 def test_composite_runner_uses_run_without_stage_flag(monkeypatch, tmp_path):

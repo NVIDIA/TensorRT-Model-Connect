@@ -86,6 +86,75 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
     ])
 
 
+def test_same_bundle_exclusive_tests_stay_in_one_worker_queue(tmp_path: Path) -> None:
+    for mode in ("ar", "diffusion", "linear-spec", "linear-spec-lora"):
+        _write_manifest(
+            tmp_path,
+            f"nemotron-labs-diffusion-8b-{mode}",
+            runtime_strategy="nemotron_labs_diffusion",
+            e2e_parallel_resource="exclusive_gpu",
+            bundle="nemotron-labs-diffusion-8b.trtfb",
+        )
+    _write_manifest(
+        tmp_path,
+        "other-exclusive",
+        runtime_strategy="diffusion_flux",
+        e2e_parallel_resource="exclusive_gpu",
+    )
+
+    grouped_ids = [
+        _test_id("nemotron-labs-diffusion-8b-ar"),
+        _test_id("nemotron-labs-diffusion-8b-diffusion"),
+        _test_id("nemotron-labs-diffusion-8b-linear-spec"),
+        _test_id("nemotron-labs-diffusion-8b-linear-spec-lora"),
+    ]
+    assignments = schedule_e2e.schedule(
+        [*grouped_ids, _test_id("other-exclusive")],
+        tmp_path,
+        num_gpus=4,
+        workers_per_gpu=1,
+    )
+
+    queues = [worker for workers in assignments.values() for worker in workers]
+    matching_queues = [
+        worker for worker in queues
+        if any(test_id in worker for test_id in grouped_ids)
+    ]
+    assert len(matching_queues) == 1
+    assert sorted(matching_queues[0]) == sorted(grouped_ids)
+
+
+def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> None:
+    for mode in ("a", "b", "c"):
+        _write_manifest(
+            tmp_path,
+            f"shared-mode-{mode}",
+            bundle="shared-bundle.trtfb",
+        )
+    _write_manifest(tmp_path, "small-a")
+    _write_manifest(tmp_path, "small-b")
+
+    grouped_ids = [
+        _test_id("shared-mode-a"),
+        _test_id("shared-mode-b"),
+        _test_id("shared-mode-c"),
+    ]
+    assignments = schedule_e2e.schedule(
+        [*grouped_ids, _test_id("small-a"), _test_id("small-b")],
+        tmp_path,
+        num_gpus=1,
+        workers_per_gpu=3,
+    )
+
+    queues = assignments["0"]
+    matching_queues = [
+        worker for worker in queues
+        if any(test_id in worker for test_id in grouped_ids)
+    ]
+    assert len(matching_queues) == 1
+    assert sorted(matching_queues[0]) == sorted(grouped_ids)
+
+
 def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path) -> None:
     for name in ("exclusive-a", "exclusive-b", "exclusive-c"):
         _write_manifest(

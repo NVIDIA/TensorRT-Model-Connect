@@ -32,6 +32,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "ssm_recurrent": "text_generation_causal",
     "rwkv_recurrent": "text_generation_causal",
     "hybrid_mamba_attention": "text_generation_causal",
+    "nemotron_labs_diffusion": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
     "speech_to_text_rnnt": "speech_to_text",

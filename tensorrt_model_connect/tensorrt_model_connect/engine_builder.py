@@ -88,9 +88,11 @@ _HF_ALLOW_PATTERNS = [
     "elf_params.npz",
     "tokenizer.json",
     "tokenizer_config.json",
+    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",
+    "linear_spec_lora/**",
     "*.model",
     "*.spm",
     "*.py",
@@ -690,6 +692,7 @@ def build_bundle(
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
+    config.raw["_model_dir"] = str(model_dir_path)
     config.raw["_decoder_engine_layout"] = decoder_engine_layout
     config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
     print(f"[trtmc build] Model: {config.model_type} "
@@ -1005,6 +1008,8 @@ def build_bundle(
             build_extra_kwargs = {"verbose": verbose}
             if _call_supports_kwarg(build_extra, "precision"):
                 build_extra_kwargs["precision"] = precision
+            if _call_supports_kwarg(build_extra, "quant_ctx"):
+                build_extra_kwargs["quant_ctx"] = quant_ctx
             if _call_supports_kwarg(build_extra, "build_timing"):
                 build_extra_kwargs["build_timing"] = build_timing
             extra_engines = build_extra(
@@ -1160,6 +1165,12 @@ def build_bundle(
             audio_cfg = get_audio_config(config)
             if audio_cfg is not None:
                 cfg_dict.update(audio_cfg)
+        # Inject optional LoRA/adaptor config from plugin.
+        get_lora_config = getattr(plugin, 'get_lora_config', None)
+        if get_lora_config is not None:
+            lora_cfg = get_lora_config(config)
+            if lora_cfg is not None:
+                cfg_dict.update(lora_cfg)
         # Inject generic config overrides from plugin.
         # Build the final dict so overrides appear FIRST in the
         # serialized JSON.  The C++ fast_path_config parser uses
@@ -1187,8 +1198,9 @@ def build_bundle(
     # runtime from the parsed ModelConfig.
     embedded_config_json = False
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
-                     "vocab.json", "merges.txt", "special_tokens_map.json",
-                     "tokenizer.model", "preprocessor_config.json"):
+                     "chat_template.jinja", "vocab.json", "merges.txt",
+                     "special_tokens_map.json", "tokenizer.model",
+                     "preprocessor_config.json"):
         file_path = model_dir_path / filename
         if file_path.exists():
             data = file_path.read_bytes()

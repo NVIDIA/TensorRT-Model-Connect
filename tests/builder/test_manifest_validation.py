@@ -9,6 +9,7 @@ import json
 import os
 import pytest
 import warnings
+from pathlib import Path
 
 # Try to import manifest_loader
 try:
@@ -220,6 +221,33 @@ class TestManifestValidation:
         assert case.execution_profiles["build"] == "chronos"
         assert case.execution_profiles["runtime"] == "custom-runtime"
         assert case.execution_profiles["reference"] == "chronos"
+
+    def test_nemotron_labs_diffusion_manifests_cover_model_card_modes(self):
+        """The 8B model-card generation surfaces should all have nightly cases."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        manifest_paths = [
+            models_dir / "nemotron-labs-diffusion-8b-ar.json",
+            models_dir / "nemotron-labs-diffusion-8b-diffusion.json",
+            models_dir / "nemotron-labs-diffusion-8b-linear-spec.json",
+            models_dir / "nemotron-labs-diffusion-8b.json",
+        ]
+        cases = [load_manifest(path) for path in manifest_paths]
+
+        modes = {case.inputs["generation_mode"] for case in cases}
+        assert modes == {"ar", "diffusion", "linear_spec", "linear_spec_lora"}
+        assert {case.bundle for case in cases} == {"nemotron-labs-diffusion-8b.trtfb"}
+        assert all(case.runtime_strategy == "nemotron_labs_diffusion" for case in cases)
+        assert all(
+            case.reference_family == "nemotron_labs_diffusion_model_card"
+            for case in cases
+        )
+        assert all(case.user_contract == "model_card_generation_parity" for case in cases)
+        assert all(case.metadata["ci_tier"] == "nightly_only" for case in cases)
+        assert all(case.metadata["contract_config"]["enable_thinking"] is False for case in cases)
+        assert all(
+            case.threshold_overrides["canonical_token_agreement_rate"] == 1.0
+            for case in cases
+        )
 
     def test_quantization_block_propagates_to_metadata(self, tmp_path):
         """Quantization manifests should preserve the generic quant block."""

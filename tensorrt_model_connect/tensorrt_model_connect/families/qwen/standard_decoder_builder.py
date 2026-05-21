@@ -65,6 +65,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
+    full_logits_output: bool = False,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -145,7 +146,12 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            full_logits_output=full_logits_output,
         )
+
+    if full_logits_output:
+        raise NotImplementedError(
+            "full_logits_output requires the dual-profile decoder builder")
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)

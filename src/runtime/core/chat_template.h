@@ -18,6 +18,7 @@ enum class ChatTemplateFormat {
     kLlama3, ///< <|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n
     kNemotron, ///< <extra_id_0>System\n\n<extra_id_1>User\n{prompt}\n<extra_id_1>Assistant\n
     kNemotronH, ///< <SPECIAL_10>System\n\n<SPECIAL_11>User\n{prompt}\n<SPECIAL_11>Assistant\n<think>\n
+    kNemotronLabsDiffusion, ///< ChatML with empty system message and <think></think> default.
 };
 
 /// Detect chat template format from the raw chat_template Jinja2 string

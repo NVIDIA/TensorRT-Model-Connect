@@ -289,22 +289,14 @@ class DecoderPlugin final : public IPipelinePlugin {
         int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
         int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
         std::string prefill_log_label;
-        if (!tp_runtime.config.enabled &&
-            find_section(ctx.bundle, "prefill_engine_plan") != nullptr) {
-            auto split_prefill_modules =
-                load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
-            if (!split_prefill_modules.modules.empty()) {
-                const auto prefill_roles = detect_decoder_profile_roles(
-                    *split_prefill_modules.modules.front().module, io.token_id,
-                    kv_names.cache_k.front(), ctx.config.max_cache_length);
-                prefill_profile_idx = prefill_roles.prefill_profile_idx;
-                prefill_max_length = prefill_roles.prefill_max_length;
-                prefill_module = extract_prefill_module(std::move(split_prefill_modules),
-                                                        prefill_roles, "prefill_engine_plan");
-                if (prefill_module)
-                    prefill_log_label = "prefill engine";
-            }
+        if (!tp_runtime.config.enabled) {
+            prefill_module =
+                load_split_prefill_module(ctx, stream, io, kv_names, prefill_profile_idx,
+                                          prefill_max_length, prefill_log_label);
         }
+
+        auto linear_spec_lora_prefill_module =
+            load_linear_spec_lora_prefill_module(ctx, stream, io, kv_names);
 
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
@@ -323,13 +315,78 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.kv_dim = kv_dim;
         tgc.present_k_pattern = io.present_k_pattern;
         tgc.present_v_pattern = io.present_v_pattern;
+        populate_nemotron_diffusion_config(ctx, tgc);
 
         return std::make_unique<TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), tp_runtime.group.owner);
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module),
+            std::move(linear_spec_lora_prefill_module), tp_runtime.group.owner);
     }
 
   private:
+    static std::unique_ptr<TrtModule>
+    load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
+                              const KvCacheNames& kv_names, int32_t& prefill_profile_idx,
+                              int32_t& prefill_max_length, std::string& prefill_log_label) {
+        if (find_section(ctx.bundle, "prefill_engine_plan") == nullptr)
+            return nullptr;
+
+        auto split_prefill_modules =
+            load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
+        if (split_prefill_modules.modules.empty())
+            return nullptr;
+
+        const auto prefill_roles =
+            detect_decoder_profile_roles(*split_prefill_modules.modules.front().module, io.token_id,
+                                         kv_names.cache_k.front(), ctx.config.max_cache_length);
+        prefill_profile_idx = prefill_roles.prefill_profile_idx;
+        prefill_max_length = prefill_roles.prefill_max_length;
+        auto prefill_module = extract_prefill_module(std::move(split_prefill_modules),
+                                                     prefill_roles, "prefill_engine_plan");
+        if (prefill_module)
+            prefill_log_label = "prefill engine";
+        return prefill_module;
+    }
+
+    static std::unique_ptr<TrtModule>
+    load_linear_spec_lora_prefill_module(const PipelineContext& ctx, cudaStream_t stream,
+                                         const IoMap& io, const KvCacheNames& kv_names) {
+        if (ctx.config.runtime_strategy != "nemotron_labs_diffusion")
+            return nullptr;
+
+        const std::string lora_section =
+            extract_json_string(ctx.config_json, "linear_spec_lora_engine_section", "");
+        if (lora_section.empty())
+            return nullptr;
+        if (find_section(ctx.bundle, lora_section) == nullptr) {
+            throw std::runtime_error("Configured linear-spec LoRA engine section is missing: " +
+                                     lora_section);
+        }
+
+        auto lora_modules = load_decoder_profile_modules(ctx, lora_section, stream, nullptr);
+        std::unique_ptr<TrtModule> lora_prefill_module;
+        if (!lora_modules.modules.empty()) {
+            const auto lora_roles =
+                detect_decoder_profile_roles(*lora_modules.modules.front().module, io.token_id,
+                                             kv_names.cache_k.front(), ctx.config.max_cache_length);
+            lora_prefill_module =
+                extract_prefill_module(std::move(lora_modules), lora_roles, lora_section.c_str());
+        }
+        if (!lora_prefill_module) {
+            throw std::runtime_error("Configured linear-spec LoRA engine has no prefill profile: " +
+                                     lora_section);
+        }
+        return lora_prefill_module;
+    }
+
+    static void populate_nemotron_diffusion_config(const PipelineContext& ctx, TextGenConfig& tgc) {
+        if (ctx.config.runtime_strategy != "nemotron_labs_diffusion")
+            return;
+        tgc.mask_token_id = extract_json_int(ctx.config_json, "mask_token_id", 100);
+        tgc.diffusion_block_length = extract_json_int(ctx.config_json, "block_size", 32);
+        tgc.supports_text_diffusion = true;
+    }
+
     static void apply_text_trace_from_registry(const config::ConfigBundle* cfg) {
         if (cfg == nullptr)
             return;
@@ -516,16 +573,22 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 
     static void apply_chat_template_format(const BundleFile& bundle, TextGenConfig& tgc) {
+        std::string chat_tpl;
         auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
-        if (tok_cfg_sec == nullptr || tok_cfg_sec->empty())
-            return;
-        const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
-        const std::string chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+        if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {
+            const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
+            chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+        }
+        if (chat_tpl.empty()) {
+            auto* tpl_sec = find_section(bundle, "chat_template.jinja");
+            if (tpl_sec != nullptr && !tpl_sec->empty())
+                chat_tpl.assign(tpl_sec->begin(), tpl_sec->end());
+        }
         tgc.chat_template_format = detect_chat_template_format(chat_tpl);
     }
 };
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin, "decoder_kv_cache",
-                                       "decoder_moe");
+                                       "decoder_moe", "nemotron_labs_diffusion");
 
 } // namespace trtmc

@@ -65,6 +65,7 @@ void print_usage() {
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
+           "[--generation-mode MODE] [--block-length N] [--threshold F] "
            "[--num-samples N] [--num-steps N] [--guidance-scale S] [--cfg-scale S] "
            "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
            "[--condition-mask-raw PATH] [--sampling-steps-raw PATH] [--sde-noise-raw PATH] "
@@ -168,6 +169,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
             args.max_new_tokens = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--block-length" && need_value(arg)) {
+            args.block_length = std::atoi(argv[++i]);
             continue;
         }
         if (arg == "--num-samples" && need_value(arg)) {
@@ -291,6 +296,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
             args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--generation-mode" && need_value(arg)) {
+            args.generation_mode = argv[++i];
             continue;
         }
         if (arg == "--cfg-scale" && need_value(arg)) {

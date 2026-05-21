@@ -21,6 +21,8 @@
 
 namespace trtmc {
 
+class KvCache;
+
 struct TextGenConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
@@ -46,6 +48,9 @@ struct TextGenConfig {
     std::string prefill_log_label;
     int32_t num_layers{0};
     int32_t kv_dim{0};
+    int32_t mask_token_id{-1};
+    int32_t diffusion_block_length{32};
+    bool supports_text_diffusion{false};
 };
 
 // Populate the process-wide step-trace state from the resolved ConfigBundle.
@@ -74,6 +79,7 @@ class TextGenerationPipeline final : public IPipeline {
                            std::string model_id_str = "",
                            std::unique_ptr<ISampler> sampler = nullptr,
                            std::unique_ptr<TrtModule> prefill = nullptr,
+                           std::unique_ptr<TrtModule> linear_spec_lora_prefill = nullptr,
                            std::shared_ptr<void> distributed_owner = nullptr);
 
     // Public API: takes raw text, returns typed result.
@@ -96,6 +102,7 @@ class TextGenerationPipeline final : public IPipeline {
     std::shared_ptr<void> distributed_owner_;
     std::vector<DecoderContext> decoders_;
     std::unique_ptr<TrtModule> prefill_;
+    std::unique_ptr<TrtModule> linear_spec_lora_prefill_;
     std::unique_ptr<IInferenceState> state_;
     TextGenConfig config_;
     cudaStream_t stream_;
@@ -116,6 +123,41 @@ class TextGenerationPipeline final : public IPipeline {
     };
     TimedGenResult generate_from_ids(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
                                      const SamplingParams& params, const GenerateConfig& cfg);
+    TimedGenResult generate_diffusion_from_ids(const std::vector<int32_t>& input_ids,
+                                               int32_t max_new_tokens, const SamplingParams& params,
+                                               const GenerateConfig& cfg);
+    TimedGenResult generate_linear_spec_from_ids(const std::vector<int32_t>& input_ids,
+                                                 int32_t max_new_tokens,
+                                                 const SamplingParams& params,
+                                                 const GenerateConfig& cfg, bool use_lora_draft);
+    std::string resolve_generation_mode(const GenerateConfig& cfg) const;
+    void reset_generation_context();
+    TrtModule& require_block_prefill(int32_t sq, TrtModule* prefill_override);
+    KvCache& require_block_kv_cache();
+    void copy_block_logits(const TensorMap& outputs, std::vector<float>& logits) const;
+    void append_prefill_kv(KvCache& kv, TrtModule& prefill, int32_t sq);
+    int32_t resolve_text_diffusion_block_length(const GenerateConfig& cfg, int32_t max_new_tokens,
+                                                bool require_divisible) const;
+    int32_t seed_next_token_from_prefill(const std::vector<int32_t>& input_ids,
+                                         std::vector<float>& logits, int32_t vocab);
+    void fill_diffusion_block(std::vector<int32_t>& block, std::vector<float>& logits,
+                              int32_t block_len, int32_t vocab, bool use_threshold,
+                              float threshold);
+    int32_t verify_diffusion_block(const std::vector<int32_t>& block, std::vector<float>& logits,
+                                   int32_t block_len, int32_t vocab);
+    bool append_tokens_until_eos(const std::vector<int32_t>& tokens, std::vector<int32_t>& output,
+                                 const SamplingParams& params) const;
+    void fill_linear_spec_block(std::vector<int32_t>& block, std::vector<float>& logits,
+                                int32_t block_len, int32_t vocab, bool threshold_enabled,
+                                float threshold, bool use_lora_draft);
+    std::vector<int32_t> verify_linear_spec_block(const std::vector<int32_t>& block,
+                                                  std::vector<float>& logits, int32_t block_len,
+                                                  int32_t vocab);
+    static int32_t count_linear_spec_accepts(const std::vector<int32_t>& ar_tokens,
+                                             const std::vector<int32_t>& block);
+    bool append_linear_spec_tokens(const std::vector<int32_t>& ar_tokens, int32_t emit_count,
+                                   std::vector<int32_t>& output, int32_t& generated,
+                                   const SamplingParams& params) const;
 
     // Run one decoder step: token_id → logits (D2H to host). Updates cache.
     void run_step(int32_t token_id, std::vector<float>& logits);
@@ -134,6 +176,9 @@ class TextGenerationPipeline final : public IPipeline {
     std::unique_ptr<ISampler> make_step_sampler(const SamplingParams& params);
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
                      bool gpu_sampling);
+    void run_prefill_block(const std::vector<int32_t>& input_ids, bool bidirectional,
+                           bool append_kv, std::vector<float>& logits,
+                           TrtModule* prefill_override = nullptr);
     // Returns true if the batched prefill engine handled the prompt; false
     // means caller must fall back to the per-token decode loop.
     bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);

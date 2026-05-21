@@ -86,6 +86,7 @@ class ReferenceFamily(enum.Enum):
     CHAT_QWEN3_POSTTRAINED = "chat_qwen3_posttrained"
     MULTIMODAL_CHAT_QWEN35 = "multimodal_chat_qwen35"
     TRANSLATION_CHAT_TEMPLATE = "translation_chat_template"
+    NEMOTRON_LABS_DIFFUSION_MODEL_CARD = "nemotron_labs_diffusion_model_card"
 
     # --- Seq2seq ---
     SEQ2SEQ_TEXT2TEXT = "seq2seq_text2text"
@@ -216,6 +217,7 @@ class UserContract(enum.Enum):
     DIFFUSION_IMAGE = "diffusion_image"
     DIFFUSION_VIDEO = "diffusion_video"
     DIFFUSION_TEXT_GENERATION = "diffusion_text_generation"
+    MODEL_CARD_GENERATION_PARITY = "model_card_generation_parity"
 
     # --- Time series ---
     TIME_SERIES_POINT_FORECAST = "time_series_point_forecast"
@@ -844,6 +846,17 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
     # 5.30 TIME_SERIES_REGRESSION
     "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
+    # 5.31 NEMOTRON_LABS_DIFFUSION_MODEL_CARD
+    "nemotron-labs-diffusion-8b-ar": ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value,
+    "nemotron-labs-diffusion-8b-diffusion": (
+        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
+    ),
+    "nemotron-labs-diffusion-8b-linear-spec": (
+        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
+    ),
+    "nemotron-labs-diffusion-8b-linear-spec-lora": (
+        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
+    ),
 }
 
 # Reference family -> user contract mapping.
@@ -855,6 +868,9 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value: UserContract.CHAT_RESPONSE.value,
     ReferenceFamily.MULTIMODAL_CHAT_QWEN35.value: UserContract.CHAT_RESPONSE.value,
     ReferenceFamily.TRANSLATION_CHAT_TEMPLATE.value: UserContract.TRANSLATION.value,
+    ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value: (
+        UserContract.MODEL_CARD_GENERATION_PARITY.value
+    ),
     ReferenceFamily.SEQ2SEQ_TEXT2TEXT.value: UserContract.SEQ2SEQ_OUTPUT.value,
     ReferenceFamily.SEQ2SEQ_TRANSLATION.value: UserContract.TRANSLATION.value,
     ReferenceFamily.SEQ2SEQ_BASE_WEAK.value: UserContract.CONTINUATION_PARITY.value,
@@ -893,6 +909,7 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.MULTIMODAL_CHAT_QWEN35.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.TRANSLATION_CHAT_TEMPLATE.value: ComparisonMode.EXACT_TEXT.value,
+    ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value: ComparisonMode.TOKEN_EXACT.value,
     ReferenceFamily.SEQ2SEQ_TEXT2TEXT.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.SEQ2SEQ_TRANSLATION.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.SEQ2SEQ_BASE_WEAK.value: ComparisonMode.NUMERIC_TENSOR.value,
@@ -928,6 +945,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "ssm_recurrent": "text_generation_causal",
     "rwkv_recurrent": "text_generation_causal",
     "hybrid_mamba_attention": "text_generation_causal",
+    "nemotron_labs_diffusion": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
     "speech_to_text_rnnt": "speech_to_text",

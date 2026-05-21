@@ -120,11 +120,17 @@ struct GenerateConfig {
     int32_t height{0};
     int32_t width{0};
     int32_t eos_token_id{-1};
-    int32_t tail_frames{0};           // speech-to-speech: extra frames after input
-    bool use_chat_template{false};    ///< Apply chat template before tokenization
-    bool enable_thinking{true};       ///< Qwen3: if false, disable thinking mode
-    bool stop_on_boxed_answer{false}; ///< Stop once generated text contains a full \boxed{...}
-    int32_t stop_check_interval{16};  ///< Token interval for answer-stop checks
+    // Text diffusion / speculative decoding modes. Empty/"auto" lets a
+    // runtime choose its model-default mode; causal decoder runtimes ignore it.
+    std::string text_generation_mode{
+        "auto"};                       // "ar", "diffusion", "linear_spec", "linear_spec_lora"
+    int32_t block_length{0};           // <=0 uses bundle/model default
+    float confidence_threshold{-1.0f}; // <0 uses mode default
+    int32_t tail_frames{0};            // speech-to-speech: extra frames after input
+    bool use_chat_template{false};     ///< Apply chat template before tokenization
+    bool enable_thinking{true};        ///< Qwen3: if false, disable thinking mode
+    bool stop_on_boxed_answer{false};  ///< Stop once generated text contains a full \boxed{...}
+    int32_t stop_check_interval{16};   ///< Token interval for answer-stop checks
 };
 
 class ITranscriptionStream {
