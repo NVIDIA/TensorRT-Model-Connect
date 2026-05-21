@@ -25,7 +25,10 @@ _T2I_MAX_TEXT_TOKENS = 1024
 # tokens plus text/template tokens before the 64-token drop. Keep the static
 # TRT text and denoiser plans large enough for that processor output.
 _EDIT_MAX_TEXT_TOKENS = 1536
-_EDIT_IMAGE_CONDITION_SIDE = 1024
+_EDIT_IMAGE_VAE_SIDE = 1024
+# Diffusers QwenImageEditPlusPipeline uses CONDITION_IMAGE_SIZE = 384 * 384
+# for the Qwen2.5-VL vision encoder, distinct from the 1024*1024 VAE area.
+_EDIT_IMAGE_VL_SIDE = 384
 
 _T2I_PIPELINE_CLASSES = {"QwenImagePipeline"}
 _EDIT_PIPELINE_CLASSES = {"QwenImageEditPipeline", "QwenImageEditPlusPipeline"}
@@ -242,11 +245,11 @@ def build_bundle_config(
         vision_merge = int(vision_cfg.get("spatial_merge_size", 2))
         vision_window = int(vision_cfg.get("window_size", 112))
         vision_factor = math.lcm(vision_patch * vision_merge, vision_window)
-        vision_image_size = _round_to_multiple(_EDIT_IMAGE_CONDITION_SIDE, vision_factor)
+        vision_image_size = _round_to_multiple(_EDIT_IMAGE_VL_SIDE, vision_factor)
         vision_image_height = vision_image_size
         vision_image_width = vision_image_size
-        vae_condition_height = _EDIT_IMAGE_CONDITION_SIDE
-        vae_condition_width = _EDIT_IMAGE_CONDITION_SIDE
+        vae_condition_height = _EDIT_IMAGE_VAE_SIDE
+        vae_condition_width = _EDIT_IMAGE_VAE_SIDE
         if edit_condition_image_size is not None:
             processor_cfg: Mapping[str, Any] = {}
             processor_cfg_path = repo / "processor" / "preprocessor_config.json"
@@ -263,14 +266,23 @@ def build_bundle_config(
                 )
             )
             vae_condition_height, vae_condition_width = _calculate_aspect_size_from_area(
-                _EDIT_IMAGE_CONDITION_SIDE,
+                _EDIT_IMAGE_VAE_SIDE,
+                int(edit_condition_image_size[0]),
+                int(edit_condition_image_size[1]),
+                32,
+            )
+            # Mirror diffusers QwenImageEditPlusPipeline: the VL vision encoder
+            # consumes a 384*384-area aspect-resized copy of the input, then
+            # the HF processor smart-resizes to a multiple of patch * merge.
+            vl_condition_height, vl_condition_width = _calculate_aspect_size_from_area(
+                _EDIT_IMAGE_VL_SIDE,
                 int(edit_condition_image_size[0]),
                 int(edit_condition_image_size[1]),
                 32,
             )
             vision_image_height, vision_image_width = _qwen_vl_smart_resize(
-                vae_condition_height,
-                vae_condition_width,
+                vl_condition_height,
+                vl_condition_width,
                 factor=resize_factor,
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
@@ -289,8 +301,8 @@ def build_bundle_config(
             "out_hidden_size": int(text_inner["hidden_size"]),
         }
         bundle["image_conditioning"] = {
-            "vl_image_size": _EDIT_IMAGE_CONDITION_SIDE,
-            "vae_image_size": 1024,
+            "vl_image_size": _EDIT_IMAGE_VL_SIDE,
+            "vae_image_size": _EDIT_IMAGE_VAE_SIDE,
             "vae_image_height": vae_condition_height,
             "vae_image_width": vae_condition_width,
             "vae_concat_axis": "sequence",

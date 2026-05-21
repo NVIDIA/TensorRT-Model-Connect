@@ -39,7 +39,7 @@ inline const char* kEditPromptTemplatePrefix =
     "text instruction should alter or modify the image. Generate a new image "
     "that meets the user's requirements while maintaining consistency with "
     "the original input where appropriate.<|im_end|>\n<|im_start|>user\n"
-    "<|vision_start|><|image_pad|><|vision_end|>";
+    "Picture 1: <|vision_start|><|image_pad|><|vision_end|>";
 inline const char* kEditPromptTemplateSuffix = "<|im_end|>\n<|im_start|>assistant\n";
 
 struct ImageSize {

@@ -281,9 +281,9 @@ class QwenImagePlugin:
                 text_w,
                 text_plan_path,
                 enable_image_inputs=is_edit,
-                # The hardcoded edit chat template tokenizes to 65 tokens
-                # before the first <|image_pad|> for Qwen2.5-VL's tokenizer.
-                image_token_start=65,
+                # The hardcoded edit chat template matches HF EditPlus'
+                # "Picture 1: <|vision_start|>..." prefix.
+                image_token_start=70,
                 image_grid_thw=(
                     1,
                     vision_height // vision_patch,
