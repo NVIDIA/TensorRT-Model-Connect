@@ -35,6 +35,11 @@ from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict, _transpose_2d
 from ... import graph_ops
 from ... import graph_blocks
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .decoder_tp_builder import build_canary_tp_decoder_engine
 
 
 trt = trt_compat.get_trt()
@@ -655,7 +660,26 @@ class CanaryPlugin:
     def build_engine(self, config: ModelConfig, weights: WeightDict,
                      max_cache_length: int, *, precision: str = "fp32",
                      quant_ctx=None, verbose: bool = False,
-                     debug_layer_outputs: bool = False) -> bytes:
+                     debug_layer_outputs: bool = False,
+                     parallel_config=None) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Canary tensor-parallel decoder builds")
+            if quant_ctx is not None:
+                raise ValueError("Canary tensor-parallel builds do not support quantization")
+            if debug_layer_outputs:
+                raise ValueError(
+                    "Canary tensor-parallel builds do not support debug_layer_outputs")
+            return build_canary_tp_decoder_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
+
         dl = weights["_dec_layers"]
         dh = weights["_dec_heads"]
         df = weights["_dec_ffn"]
