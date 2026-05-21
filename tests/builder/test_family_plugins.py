@@ -27,6 +27,9 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
+from tensorrt_model_connect.checkpoint_mapper import WeightDict
+from tensorrt_model_connect.parallel_config import ParallelConfig
+
 # ---- helpers shared across all tests ----
 
 RNG = np.random.RandomState(42)
@@ -1918,6 +1921,62 @@ class TestCanaryPlugin:
     MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
 
     @staticmethod
+    def _make_tp_weights(
+        *,
+        hidden: int = HIDDEN,
+        dec_layers: int = DEC_LAYERS,
+        dec_heads: int = HEADS,
+        ffn: int = FFN,
+    ) -> WeightDict:
+        rng = np.random.RandomState(123)
+
+        def rand(*shape: int) -> np.ndarray:
+            return rng.randn(*shape).astype(np.float32)
+
+        weights = WeightDict({
+            "_dec_layers": dec_layers,
+            "_dec_heads": dec_heads,
+            "_dec_ffn": ffn,
+            "_enc_seq": 16,
+            "dec_emb": rand(TestCanaryPlugin.VOCAB, hidden),
+            "dec_pos": rand(128, hidden),
+            "emb_ln": rand(hidden),
+            "emb_ln_b": rand(hidden),
+            "final_norm": rand(hidden),
+            "final_norm_b": rand(hidden),
+            "w_out": rand(hidden, TestCanaryPlugin.VOCAB),
+            "out_bias": rand(TestCanaryPlugin.VOCAB),
+        })
+        for i in range(dec_layers):
+            pfx = f"layer.{i}"
+            for key in ("w_q", "w_k", "w_v", "xw_q", "xw_k", "xw_v"):
+                weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+            for key in ("q_bias", "k_bias", "v_bias", "xb_q", "xb_k", "xb_v"):
+                weights[f"{pfx}.{key}"] = rand(hidden)
+            for key in ("w_o", "xw_o"):
+                weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+            weights[f"{pfx}.o_bias"] = rand(hidden)
+            weights[f"{pfx}.xb_o"] = rand(hidden)
+            weights[f"{pfx}.w_fc1"] = rand(hidden, ffn)
+            weights[f"{pfx}.fc1_bias"] = rand(ffn)
+            weights[f"{pfx}.w_fc2"] = rand(ffn, hidden)
+            weights[f"{pfx}.fc2_bias"] = rand(hidden)
+            for key in (
+                "input_norm", "input_norm_b",
+                "xattn_norm", "xattn_norm_b",
+                "ffn_norm", "ffn_norm_b",
+            ):
+                weights[f"{pfx}.{key}"] = rand(hidden)
+        return weights
+
+    @staticmethod
+    def _tp_builder_module():
+        return pytest.importorskip(
+            "tensorrt_model_connect.families.canary.decoder_tp_builder",
+            reason="TensorRT is required for Canary TP builder tests",
+        )
+
+    @staticmethod
     def _make_nemo_state_dict(vocab, hidden, enc_layers, dec_layers,
                               heads, head_dim, ffn, mel_bins, conv_kernel,
                               sub_ch):
@@ -2105,3 +2164,165 @@ class TestCanaryPlugin:
         assert weights["_dec_layers"] == self.DEC_LAYERS
         assert weights["_hidden"] == self.HIDDEN
         assert weights["_vocab"] == self.VOCAB
+
+    def test_tp_build_rejects_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+
+        with pytest.raises(ValueError, match="requires tensor_parallel mode"):
+            decoder_tp_builder.build_canary_tp_decoder_engine(
+                object(),
+                WeightDict(),
+                max_cache_length=4,
+                parallel_config=ParallelConfig(),
+            )
+
+    def test_tp_validation_ignores_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+
+        decoder_tp_builder._validate_canary_tp(
+            WeightDict(),
+            hidden=self.HIDDEN,
+            num_heads=self.HEADS,
+            ffn_dim=self.FFN,
+            parallel=ParallelConfig(),
+        )
+
+    @pytest.mark.parametrize(
+        ("parallel", "overrides", "message"),
+        [
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=-1),
+                {},
+                "concrete rank",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"hidden": HIDDEN + 1},
+                "hidden size divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"num_heads": HEADS + 1},
+                "decoder_attention_heads divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"ffn_dim": FFN + 1},
+                "decoder_ffn_dim divisible",
+            ),
+        ],
+    )
+    def test_tp_validation_rejects_bad_config_dimensions(
+        self,
+        parallel,
+        overrides,
+        message,
+    ):
+        decoder_tp_builder = self._tp_builder_module()
+        kwargs = {
+            "hidden": self.HIDDEN,
+            "num_heads": self.HEADS,
+            "ffn_dim": self.FFN,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_canary_tp(
+                self._make_tp_weights(),
+                parallel=parallel,
+                **kwargs,
+            )
+
+    @pytest.mark.parametrize(
+        ("key", "shape", "message"),
+        [
+            ("layer.0.w_q", (HIDDEN, HIDDEN - 1), "output dim"),
+            ("layer.0.w_o", (HIDDEN - 1, HIDDEN), "input dim"),
+            ("layer.0.w_fc1", (HIDDEN, FFN - 1), "w_fc1 output dim"),
+        ],
+    )
+    def test_tp_validation_rejects_unshardable_weight_shapes(
+        self,
+        key,
+        shape,
+        message,
+    ):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        weights[key] = np.zeros(shape, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_canary_tp(
+                weights,
+                hidden=self.HIDDEN,
+                num_heads=self.HEADS,
+                ffn_dim=self.FFN,
+                parallel=ParallelConfig(
+                    mode="tensor_parallel",
+                    tp_size=2,
+                    rank=0,
+                ),
+            )
+
+    def test_tp_sharding_returns_original_for_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        assert decoder_tp_builder.shard_canary_decoder_weights(
+            weights,
+            parallel=ParallelConfig(),
+        ) is weights
+
+    def test_tp_shards_rank_local_decoder_weights(self):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        shard = decoder_tp_builder.shard_canary_decoder_weights(
+            weights,
+            parallel=ParallelConfig(
+                mode="tensor_parallel",
+                tp_size=2,
+                rank=1,
+            ),
+        )
+
+        assert isinstance(shard, WeightDict)
+        assert shard["_tensor_parallel_size"] == 2
+        assert shard["_tensor_parallel_rank"] == 1
+        assert shard["_dec_layers"] == self.DEC_LAYERS
+
+        np.testing.assert_array_equal(
+            shard["layer.0.w_q"],
+            weights["layer.0.w_q"][:, self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xw_v"],
+            weights["layer.0.xw_v"][:, self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.q_bias"],
+            weights["layer.0.q_bias"][self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xb_k"],
+            weights["layer.0.xb_k"][self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_o"],
+            weights["layer.0.w_o"][self.HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xw_o"],
+            weights["layer.0.xw_o"][self.HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc1"],
+            weights["layer.0.w_fc1"][:, self.FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.fc1_bias"],
+            weights["layer.0.fc1_bias"][self.FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc2"],
+            weights["layer.0.w_fc2"][self.FFN // 2:, :],
+        )
+        assert shard["final_norm"] is weights["final_norm"]
