@@ -50,7 +50,7 @@ def main():
 
     if args.bundle:
         # TRT comparison via bundle
-        sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
         from tensorrt_model_connect.debug_runner import load_section_from_bundle, VisionTrtRunner
 
         engine_plan = load_section_from_bundle(args.bundle, "engine_plan")

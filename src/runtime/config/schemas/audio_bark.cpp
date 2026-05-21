@@ -1,5 +1,5 @@
 // Registration for the "audio_bark" namespace schema.
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_bark.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/audio_bark.py.
 
 #include "trtmc/config/schemas/audio_bark.h"
 

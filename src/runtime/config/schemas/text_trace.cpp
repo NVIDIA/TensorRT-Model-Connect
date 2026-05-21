@@ -1,6 +1,6 @@
 // Registration for the "text_trace" namespace schema.
 //
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/text_trace.py.
 
 #include "trtmc/config/schemas/text_trace.h"
 

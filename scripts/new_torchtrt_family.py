@@ -2,7 +2,7 @@
 """Scaffold a new Torch-TRT model family plugin.
 
 Downloads the model's config.json, detects architecture features, and generates
-a plugin file in tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/<family>.py.
+a plugin file in python/tensorrt_model_connect/engine_defs/torch_trt/families/<family>.py.
 
 For most standard decoder-only models, the generated plugin will work without
 modification — it uses AutoModelForCausalLM and the generic make_export_args().
@@ -27,7 +27,7 @@ import textwrap
 from pathlib import Path
 
 FAMILIES_DIR = (Path(__file__).resolve().parent.parent
-                / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families")
+                / "python" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families")
 
 
 def fetch_config(hf_repo: str) -> dict:

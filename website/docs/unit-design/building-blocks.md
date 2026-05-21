@@ -100,21 +100,21 @@ flowchart TB
 
 | Block | Source | What it abstracts | Why it exists |
 | --- | --- | --- | --- |
-| `ModelConfig` | `tensorrt_model_connect/tensorrt_model_connect/config.py` | HuggingFace config differences. | Many model repos use different key names for the same concepts. This gives builders one typed view. |
-| `FamilyPlugin` | `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | A model-family adapter. | Matching, weight loading, graph construction, modality-specific components, and quantization hooks vary by family. |
-| `WeightDict` and checkpoint mapper | `tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py` | Normalized weight names and tensors. | Builders need stable tensor names even when checkpoint layouts differ. |
-| `graph_ops.py` | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Atomic TensorRT graph operations. | Family builders should not rewrite low-level TRT layer creation repeatedly. |
-| `graph_blocks.py` | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Reusable transformer/model blocks. | Shared blocks keep attention, MLP, normalization, and projection patterns consistent. |
+| `ModelConfig` | `python/tensorrt_model_connect/config.py` | HuggingFace config differences. | Many model repos use different key names for the same concepts. This gives builders one typed view. |
+| `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | A model-family adapter. | Matching, weight loading, graph construction, modality-specific components, and quantization hooks vary by family. |
+| `WeightDict` and checkpoint mapper | `python/tensorrt_model_connect/checkpoint_mapper.py` | Normalized weight names and tensors. | Builders need stable tensor names even when checkpoint layouts differ. |
+| `graph_ops.py` | `python/tensorrt_model_connect/graph_ops.py` | Atomic TensorRT graph operations. | Family builders should not rewrite low-level TRT layer creation repeatedly. |
+| `graph_blocks.py` | `python/tensorrt_model_connect/graph_blocks.py` | Reusable transformer/model blocks. | Shared blocks keep attention, MLP, normalization, and projection patterns consistent. |
 | Dedicated builders | `standard_decoder_builder.py`, `encoder_builder.py`, `*_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling. |
-| Quantization context | `tensorrt_model_connect/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
-| Python `ConfigBundle` mirror | `tensorrt_model_connect/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
-| `BundleInfo` / `BundleSection` | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
+| Quantization context | `python/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
+| Python `ConfigBundle` mirror | `python/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
+| `BundleInfo` / `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
 
 ## Artifact blocks
 
 | Block | Source | What it abstracts |
 | --- | --- | --- |
-| `.trtfb` magic/header/sections | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`, `src/bundle/bundle_format.cpp` | A portable container format for build output. |
+| `.trtfb` magic/header/sections | `python/tensorrt_model_connect/bundle_writer.py`, `src/bundle/bundle_format.cpp` | A portable container format for build output. |
 | `BundleInfo` | `include/trtmc/bundle.h`, internal `src/bundle/bundle_format.h` | Fast metadata inspection without constructing a pipeline. |
 | `config.json` section | Written by builder, read in `PipelineFactory` and plugins | Runtime strategy, IO map, backend name, and strategy-specific fields. |
 | Engine sections | Bundle sections such as `engine_plan`, `vision_engine_plan`, `denoiser_plan` | Serialized TensorRT or Torch-TRT execution plans. |

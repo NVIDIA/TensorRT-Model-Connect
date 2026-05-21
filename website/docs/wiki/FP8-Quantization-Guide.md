@@ -5,8 +5,8 @@ network definition API. Covers the full workflow from calibration to
 deployment, with pitfalls discovered during FLUX.2-dev optimization
 (1.58x speedup over BF16).
 
-**Reference**: `tensorrt_model_connect/tensorrt_model_connect/flux2_dit_builder.py` (FLUX.2-dev DiT builder).
-The quantization framework is in `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` (add_matmul with precision support).
+**Reference**: `python/tensorrt_model_connect/families/flux/flux2_dit_builder.py` (FLUX.2-dev DiT builder).
+The quantization framework is in `python/tensorrt_model_connect/graph_ops.py` (add_matmul with precision support).
 
 ---
 

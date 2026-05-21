@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-_TRTMC_BUILD_ROOT = Path(__file__).resolve().parents[3] / "tensorrt_model_connect"
+_TRTMC_BUILD_ROOT = Path(__file__).resolve().parents[3] / "python"
 if str(_TRTMC_BUILD_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRTMC_BUILD_ROOT))
 

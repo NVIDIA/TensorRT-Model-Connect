@@ -43,7 +43,7 @@ If `./build/trtmc --help` fails on the host with `libtorch.so: cannot open share
 Inside the container:
 
 ```bash
-pip install -e tensorrt_model_connect/
+pip install -e . -C py-only=true
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
@@ -51,7 +51,7 @@ cmake --build build -j
 If the dev image already has all Python dependencies installed and you are intentionally avoiding dependency resolution, this shorter install is acceptable:
 
 ```bash
-pip install --no-deps -e tensorrt_model_connect/
+pip install --no-deps -e . -C py-only=true
 ```
 
 Do not use `--no-deps` in a fresh Python environment. The builder depends on
@@ -99,7 +99,7 @@ For gated or private models, log in or provide the required HuggingFace token be
 | Symptom | Likely boundary | Next check |
 | --- | --- | --- |
 | Docker cannot see the GPU | Host/container setup | `nvidia-smi` on host and inside container. |
-| `ModuleNotFoundError` during build | Python builder env | Use `pip install -e tensorrt_model_connect/` without `--no-deps`, or install the missing package in the container. |
+| `ModuleNotFoundError` during build | Python builder env | Use `pip install -e . -C py-only=true` without `--no-deps`, or install the missing package in the container. |
 | HuggingFace 401/403/not found | Model resolution | Check model ID, network, auth token, and gated model access. |
 | CMake cannot find CUDA headers or `cudart` | Native build env | Confirm CUDA development files are installed in the container. |
 | `libtorch.so` missing for `./build/trtmc` | Runtime library path | Run inside container or export the container's library paths. |

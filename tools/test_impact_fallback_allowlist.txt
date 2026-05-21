@@ -11,6 +11,7 @@ catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all
 catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile.gb300 # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all _pyproject_backend.py # root PEP 517/660 backend routes wheel builds and editable installs; catch-all stays conservative
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -179,59 +180,57 @@ no_impact tools/validate_elf_replay_artifact.py # developer utility script; no C
 no_impact tools/validate_dit.py # developer utility script; no CI test impact is intentional
 no_impact tools/validate_t5.py # developer utility script; no CI test impact is intentional
 no_impact tools/validation/timm_vit/benchmark_trt_paths.py # developer validation helper; no CI test impact is intentional
-shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_cli.py # shared Python builder CLI surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/bundle_reader.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/config.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/graph_ops.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/python_profiles.toml # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/context.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/profile.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/registry.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/quantization/scales.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/cli_support.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/config_bundle.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schema_registry.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_bark.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/base.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/flow_match_euler.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/native_cli.py # removed packaged console wrapper; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/build_cli.py # shared Python builder CLI surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/checkpoint_mapper.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/diffusion_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/bundle_reader.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/graph_blocks.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/graph_ops.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/python_profiles.toml # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/adapters.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/context.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/formats.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/plan.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/profile.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/registry.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/scale_providers.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/quantization/scales.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/cli_support.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/config_bundle.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schema_registry.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/audio_bark.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/platform.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/runtime.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/text_trace.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/triattention.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/schedulers/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/schedulers/base.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/schedulers/flow_match_euler.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional

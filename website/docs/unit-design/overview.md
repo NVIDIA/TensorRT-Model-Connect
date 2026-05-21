@@ -53,11 +53,11 @@ flowchart TB
 | C ABI | `src/cabi/api/` | C entrypoints, argument validation, error mapping. |
 | Bundle reader | `src/bundle/` | `.trtfb` parsing and section lookup. |
 | Registry | `src/runtime/registry/` | Strategy dispatch and plugin lookup. |
-| Runtime plugins | `src/runtime/plugins/` | Strategy-specific construction. |
-| Pipelines | `src/runtime/pipelines/` | Task-specific inference behavior. |
+| Model runtimes | `src/runtime/models/` | Strategy-specific construction and task-specific inference behavior. |
+| Runtime plugin helpers | `src/runtime/plugins/` | Shared helpers for model runtime plugins. |
 | Runtime core | `src/runtime/core/` | Device tensors, caches, samplers, CUDA helpers, schedulers. |
 | Domains | `src/runtime/domains/` | Modality-specific plans and helpers. |
-| Python builder | `tensorrt_model_connect/tensorrt_model_connect/` | Model resolution, plugins, graph building, bundle writing. |
+| Python builder | `python/tensorrt_model_connect/` | Model resolution, plugins, graph building, bundle writing. |
 | Tests | `tests/` | Builder, C++, tools, and E2E coverage. |
 
 ## Ownership boundaries
@@ -74,10 +74,10 @@ flowchart TB
 
 | Change | Start here | Usually also update |
 | --- | --- | --- |
-| Add a model that is architecturally similar to an existing decoder | `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py` | Builder tests, E2E manifest, model support docs. |
-| Add a new request-time behavior | `src/runtime/plugins/` and `src/runtime/pipelines/` | Plugin manifest, C++ tests, CLI/API docs. |
+| Add a model that is architecturally similar to an existing decoder | `python/tensorrt_model_connect/families/<family>.py` | Builder tests, E2E manifest, model support docs. |
+| Add a new request-time behavior | `src/runtime/models/` | Plugin manifest, C++ tests, CLI/API docs. |
 | Add a new runtime knob | `src/runtime/config/`, `include/trtmc/config/`, Python mirror under `runtime_config/` | Generated schema manifest, config tests, docs. |
-| Add quantization behavior | `tensorrt_model_connect/tensorrt_model_connect/quantization/` and family hooks | Calibration tests, E2E tolerance updates. |
+| Add quantization behavior | `python/tensorrt_model_connect/quantization/` and family hooks | Calibration tests, E2E tolerance updates. |
 | Add a backend or ABI policy | `src/runtime/backend/` | Build system docs, backend tests, compatibility docs. |
 | Add a CLI command | `src/cli/` | API docs, smoke tests, E2E harness if user-contract relevant. |
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -27,7 +26,7 @@ def get_supported_model_types() -> set[str]:
     """
     # Try the import path first (works inside containers)
     project_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.insert(0, str(project_root / "tensorrt_model_connect"))
+    sys.path.insert(0, str(project_root / "python"))
     try:
         from tensorrt_model_connect.families import find_plugin
         return _probe_with_find_plugin(find_plugin)
@@ -75,7 +74,7 @@ def _scan_plugin_sources(project_root: Path) -> set[str]:
     """Extract supported model_types by scanning plugin source code."""
     import re
 
-    families_dir = project_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = project_root / "python" / "tensorrt_model_connect" / "families"
     supported = set()
 
     for py_file in families_dir.glob("*.py"):
@@ -177,7 +176,7 @@ def check_plugin_coverage(model_type: str) -> bool:
     against known supported types.
     """
     project_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.insert(0, str(project_root / "tensorrt_model_connect"))
+    sys.path.insert(0, str(project_root / "python"))
     try:
         from tensorrt_model_connect.families import find_plugin
         return find_plugin(model_type) is not None

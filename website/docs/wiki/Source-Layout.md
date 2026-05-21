@@ -11,7 +11,7 @@ path listed here exists in the source tree.
 |------|---------|
 | `include/trtmc/` | Public C/C++ API headers |
 | `src/` | C++ runtime implementation |
-| `tensorrt_model_connect/` | Python builder package |
+| `python/tensorrt_model_connect/` | Python builder package |
 | `tests/` | All test suites (C++, Python builder, tools, E2E) |
 | `tools/` | Diff test framework, perf comparison, complexity checker |
 | `scripts/` | Infrastructure and utility scripts |
@@ -286,7 +286,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 
 ---
 
-## Python Builder Package (`tensorrt_model_connect/tensorrt_model_connect/`)
+## Python Builder Package (`python/tensorrt_model_connect/`)
 
 ### Core Modules
 
@@ -299,7 +299,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `checkpoint_mapper.py` | HF safetensors -> weight dict |
 | `graph_ops.py` | Layer 1: atomic TRT graph ops |
 | `graph_blocks.py` | Layer 2: composable blocks (attention, MLP, norm) |
-| `standard_decoder_builder.py` | Layer 3: standard decoder engine builder |
+| family-local `standard_decoder_builder.py` | Layer 3: standard decoder engine builder |
 | `bundle_writer.py` | Write `.trtfb` files |
 | `engine_builder.py` | Top-level orchestrator: HF -> TRT -> bundle |
 | `debug_runner.py` | Pure-Python TRT inference (`TrtRunner`, `MambaTrtRunner`, `VLTrtRunner`) |
@@ -321,7 +321,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `clip_encoder_builder.py` | CLIP encoder builder |
 | `standard_dit_builder.py` | Standard DiT (diffusion transformer) builder |
 | `flux_dit_builder.py` | FLUX DiT builder |
-| `flux2_dit_builder.py` | FLUX2 DiT builder |
+| `families/flux/flux2_dit_builder.py` | FLUX2 DiT builder |
 | `z_image_dit_builder.py` | Z-Image DiT builder |
 | `vae_2d_builder.py` | 2D VAE builder |
 | `flux_vae_builder.py` | FLUX VAE builder |
@@ -330,7 +330,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `nanocodec_builder.py` | NanoCodec builder |
 | `diffusion_runner.py` | Python-side diffusion inference runner |
 
-### Family Plugins (`tensorrt_model_connect/tensorrt_model_connect/families/`)
+### Family Plugins (`python/tensorrt_model_connect/families/`)
 
 63 auto-discovered family plugins. Each exports a module-level `plugin` attribute
 implementing the `FamilyPlugin` protocol from `base.py`.
@@ -418,7 +418,7 @@ Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 
-91 test executables. Plain `main()` programs with `check(condition, name)`
+92 test executables. Plain `main()` programs with `check(condition, name)`
 helpers. Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
 
 Covers: bundle format, tokenizers (vocab, HF Python), text/JSON parsers,
@@ -430,7 +430,7 @@ Shared utilities in `test_helpers.h`.
 
 ### `tests/tools/` -- Tool Self-Tests
 
-51 test modules (`test_*.py`) plus 2 infrastructure files (`conftest.py`,
+62 test modules (`test_*.py`) plus 2 infrastructure files (`conftest.py`,
 `__init__.py`). Pure Python, no GPU needed. Covers diff framework, logit
 comparison, audio diff, segmentation diff, diffusion helpers, perf compare,
 parity testing, text comparator, E2E report generation, runtime strategy
@@ -445,7 +445,7 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-110 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
+122 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
 `family`, `runtime_strategy`, `prompt`, `max_new_tokens`, and optional
 fields like `logit_atol`, `trust_remote_code`, `skip`.
 

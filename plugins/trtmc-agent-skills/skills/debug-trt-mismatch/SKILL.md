@@ -16,7 +16,7 @@ Run the checks before diffing:
 ```bash
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
 python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-python3 -c "import tensorrt_model_connect; print('tensorrt_model_connect: OK')" 2>/dev/null || echo "tensorrt_model_connect: MISSING (run: pip install --no-deps -e tensorrt_model_connect/)"
+python3 -c "import tensorrt_model_connect; print('tensorrt_model_connect: OK')" 2>/dev/null || echo "tensorrt_model_connect: MISSING (run: pip install --no-deps -e . -C py-only=true)"
 python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
 ```
 

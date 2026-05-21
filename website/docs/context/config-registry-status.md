@@ -27,12 +27,11 @@ To satisfy the scalability test (one file per feature, both languages pick
 it up), schemas are declared once in Python and C++ headers are
 auto-generated at CMake configure time.
 
-- Per-feature source: `tensorrt_model_connect/tensorrt_model_connect/config/schemas/<name>.py` — a
+- Per-feature source: `python/tensorrt_model_connect/runtime_config/schemas/<name>.py` — a
   `@register_schema("<namespace>")` decorator on a dataclass-like object.
-- Codegen script: `scripts/generate_config_headers.py` — reads every
-  schema module, emits `build/generated/trtmc/config/schemas/<name>.h`
-  plus a manifest entry in `cmake/trtmc_config_schemas.cmake`.
-- CMake hook: custom command runs before C++ compilation.
+- C++ manifest: `cmake/trtmc_config_schemas.cmake` — lists schema registration
+  sources and generates `build/generated/register_schemas.cpp`.
+- CMake hook: manifest generation runs before C++ compilation.
 - Both runtimes read the same canonical Python schema; C++ gets a
   strongly-typed view via the generated header.
 
@@ -59,7 +58,7 @@ raw JSON, never know about CLI flags.
 
 Phase 4a (new, added to plan): pure rename of `override` in identifiers
 and comments. Grep scope:
-- `tensorrt_model_connect/tensorrt_model_connect/triattention_export.py`
+- `python/tensorrt_model_connect/triattention_export.py`
 - `include/trtmc/runtime/triattention_kv_cache.h`
 - `src/runtime/core/triattention_kv_cache.cpp`
 - `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
@@ -113,7 +112,7 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
-- [x] `--config` + `--set` on `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` (commit `4daa555e`)
+- [x] `--config` + `--set` on `python/tensorrt_model_connect/build_cli.py` (commit `4daa555e`)
 - [x] `--config` + `--set` on `src/cli/main.cpp` (commit `3bf3fbb8`)
 - [x] `--config` + `--set` on `examples/trtmc_dataset_benchmark.cpp` (commit TBD)
 - [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
@@ -127,8 +126,8 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     against the v1 struct layout.
 
 **D8 — Python package renamed to `runtime_config/` (deviation from prompt).**
-The prompt specified `tensorrt_model_connect/tensorrt_model_connect/config/` but Python already has
-`tensorrt_model_connect/tensorrt_model_connect/config.py` (`ModelConfig` — HF config.json parsing,
+The prompt specified a python/tensorrt_model_connect/config/ package, but Python already has
+`python/tensorrt_model_connect/config.py` (`ModelConfig` — HF config.json parsing,
 unrelated concern). The two can't coexist without `ModelConfig` moving
 into the package, which is beyond this refactor's scope. C++ side keeps
 the shorter `trtmc::config` namespace (no collision there). Test
@@ -153,7 +152,7 @@ imports, `build_cli.py`, and all internal imports updated.
     in `runtime_config/` and grep review).
 - [x] Cluster A — schemas declared (commit TBD)
   - Python schema at
-    `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py`
+    `python/tensorrt_model_connect/runtime_config/schemas/triattention.py`
     registers 24 fields spanning core runtime config
     (kv_budget, divide_length, recent_window, score_aggregation,
     per_layer_aggregation, count_prompt_tokens, protect_prefill,
@@ -171,7 +170,7 @@ imports, `build_cli.py`, and all internal imports updated.
     coupling point tolerated by the scalability test.
   - `schema_registry.cpp` now calls `force_link_all_schemas()` at
     static init so the anchor is reachable.
-  - `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/__init__.py`
+  - `python/tensorrt_model_connect/runtime_config/schemas/__init__.py`
     provides `load_all()` — imports every schema module in the
     package; uses `importlib.reload` if a module is already cached so
     tests can clear and re-register.
@@ -209,7 +208,7 @@ imports, `build_cli.py`, and all internal imports updated.
     pattern as `_dynamic_kv_opt_length`). `build_standard_decoder_engine`
     reads from there. Keeps family-plugin `build_engine` protocol
     signatures untouched, no 50-file churn.
-  - `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` resolves the registry up front when
+  - `python/tensorrt_model_connect/build_cli.py` resolves the registry up front when
     `--config`/`--set` is supplied, extracts
     `decode_policy.force_manual_attention`, passes as kwarg.
   - Cross-language schema match test auto-detects the new namespace
@@ -257,7 +256,8 @@ imports, `build_cli.py`, and all internal imports updated.
   infrastructure env vars read before pipeline construction. Can't
   route through the registry without a bootstrap-config mechanism.
   Documented as a tolerable exception for now.
-- `parse_positive_env_int` in `src/utils/json_helpers.{h,cpp}` — dead
+- `parse_positive_env_int` in `src/utils/json_helpers.h` and
+  `src/utils/json_helpers.cpp` — dead
   code (defined but unused). Candidate for deletion when the
   infrastructure env vars are swept.
 
@@ -306,7 +306,7 @@ deleted (hard removal with no shims), tests updated.
           --set triattention.profile=true
           --tri-set triattention.kv_budget=6144
           ... (see iter2 summary.json for full parameterization)
-- [x] `ctest` + `pytest tests/builder/` + `tests/config/` pass
+- [x] `ctest` + `pytest tests/builder/` pass
 - [x] CCN ≤ 10 on new files
 
 ## Last-known-good
@@ -345,7 +345,7 @@ deleted (hard removal with no shims), tests updated.
 - Commit: `77fe969e`.
 
 ### Tick 3 (2026-04-20)
-- `tensorrt_model_connect/tensorrt_model_connect/config/` package — Python mirror of the C++
+- `python/tensorrt_model_connect/runtime_config/` package — Python mirror of the C++
   foundation, semantics-identical:
   - `schema_registry.py` — `Layer` IntEnum (values match C++ 0..4),
     `ConfigField` / `Schema` dataclasses (frozen), process-wide
@@ -370,7 +370,7 @@ deleted (hard removal with no shims), tests updated.
 - Commit: `f014d1f9`.
 
 ### Tick 4 (2026-04-20)
-- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/cli_support.py` — the two-flag
+- `python/tensorrt_model_connect/runtime_config/cli_support.py` — the two-flag
   CLI surface's Python side. `load_layered_file` handles both JSON and
   YAML (YAML only if PyYAML is present; raises a clear message
   otherwise). `parse_set_token` / `parse_set_tokens` enforce the
@@ -385,7 +385,7 @@ deleted (hard removal with no shims), tests updated.
   `extra_contributions` so callers can inject a platform profile or
   bundle `defaults:` block alongside the session layer.
 - Python package renamed `config/` → `runtime_config/` (see D8).
-- `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` build subparser gains `--config FILE`
+- `python/tensorrt_model_connect/build_cli.py` build subparser gains `--config FILE`
   and `--set NS.FIELD=VALUE` (repeatable). When either flag is provided
   and at least one schema is registered, the builder writes an
   `effective_config.json` file next to the output bundle. When schemas
@@ -494,7 +494,7 @@ Over 18 ticks the `triattention` branch grew a declarative, namespaced,
 self-registering config registry. Seven namespaces are registered:
 `triattention`, `decode_policy`, `text_trace`, `runtime`, `audio_bark`,
 `audio_magpie`, `platform`. Each has:
-  - one Python schema file under `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/`,
+  - one Python schema file under `python/tensorrt_model_connect/runtime_config/schemas/`,
   - one C++ schema header under `include/trtmc/config/schemas/`,
   - one C++ registration source under `src/runtime/config/schemas/`,
   - one manifest line in `cmake/trtmc_config_schemas.cmake`.
@@ -578,8 +578,9 @@ Commit chain:
     and `configure_trt_logger`. Called from `try_resolve_runtime_config`
     after the bundle resolves, with a try/catch so schema-absent /
     type-mismatch leaves defaults intact.
-- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py` and
-  mirror `src/runtime/config/schemas/platform.{h,cpp}`:
+- `python/tensorrt_model_connect/runtime_config/schemas/platform.py` and
+  mirrors `include/trtmc/config/schemas/platform.h` plus
+  `src/runtime/config/schemas/platform.cpp`:
   * Three fields: `source_dir` (string), `trt_log_stderr` (bool),
     `trt_log_min_severity` (string with
     INTERNAL_ERROR / ERROR / WARNING / INFO / VERBOSE validator). Session /
@@ -595,7 +596,7 @@ Commit chain:
     Python debug runner doesn't go through the C++ pipeline factory,
     so the registry isn't consulted here. Noted in a comment.
 - Dead-code cleanup:
-  * `src/utils/json_helpers.{h,cpp}` — removed the unused
+  * `src/utils/json_helpers.h` and `src/utils/json_helpers.cpp` — removed the unused
     `parse_positive_env_int` helper.
   * `tests/cpp/test_json_helpers.cpp` — removed the three orphaned
     tests that exercised it.
@@ -624,7 +625,7 @@ Commit chain:
       TRTMC_MAGPIE_FINISHED_LIMIT, TRTMC_MAGPIE_SEED (runtime, in
       magpie_pipeline.cpp).
     * TRTMC_MAGPIE_MAX_SOURCE_POS (build-time, in
-      tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts/plugin.py).
+      python/tensorrt_model_connect/families/magpie_tts/plugin.py).
 - C++ side: `MagpieTTSConfig` gains `seed` (int64_t). `apply_env_overrides`
   shrinks to a single RNG-seed statement (all other fields arrive
   pre-populated from the registry via magpie_plugin). The file-scope
@@ -671,7 +672,7 @@ Commit chain:
   `disable_cuda_graph` and `prefer_gpu_greedy`. Session / platform
   layers only.
 - Python schema
-  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py`) + C++
+  (`python/tensorrt_model_connect/runtime_config/schemas/runtime.py`) + C++
   mirror (`include/trtmc/config/schemas/runtime.h`,
   `src/runtime/config/schemas/runtime.cpp`) + one manifest line in
   `cmake/trtmc_config_schemas.cmake`. Fourth schema; same pattern, no
@@ -739,7 +740,7 @@ Commit chain:
 ### Tick 12 (2026-04-20)
 - Phase 4 Cluster C (`text_trace.*`) closed.
 - Python schema
-  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py`) and
+  (`python/tensorrt_model_connect/runtime_config/schemas/text_trace.py`) and
   C++ mirror (`include/trtmc/config/schemas/text_trace.h` +
   `src/runtime/config/schemas/text_trace.cpp`). Four fields —
   step_trace_path (string), step_trace_start_pos (int32, ≥0),
@@ -783,15 +784,14 @@ Commit chain:
 ### Tick 11 (2026-04-20)
 - Phase 4 Cluster B (`decode_policy.*`) closed.
 - Python schema
-  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/decode_policy.py`)
+  (decode_policy schema file, historical branch note)
   declares one field: `force_manual_attention` (bool, default False,
   BUILD_TIME and BUNDLE_DEFAULT layer allowlist only — session /
   platform cannot retroactively toggle an already-baked engine graph).
-- C++ mirror (`include/trtmc/config/schemas/decode_policy.h` +
-  `src/runtime/config/schemas/decode_policy.cpp`) + schema manifest
+- C++ mirror (decode_policy header/source, historical branch note) + schema manifest
   entry. Second schema to land; the manifest pattern continues to be a
   one-line edit per new cluster.
-- Reader migration (`tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py`):
+- Reader migration (`python/tensorrt_model_connect/graph_blocks.py`):
   `force_manual_attention = os.getenv(...)` deleted; replaced with a
   new `force_manual_attention: bool = False` kwarg on
   `add_attention_block`. `import os` dropped (unused).
@@ -806,7 +806,7 @@ Commit chain:
   `build` gain `force_manual_attention: bool = False`.
   `build_bundle` stashes the value on `config.raw` before dispatching
   to the family plugin.
-- CLI wiring (`tensorrt_model_connect/tensorrt_model_connect/build_cli.py`): resolves the
+- CLI wiring (`python/tensorrt_model_connect/build_cli.py`): resolves the
   ConfigBundle up front (before `build()`), imports
   `runtime_config.schemas.load_all()` so schemas are registered,
   reads `decode_policy.force_manual_attention` from the bundle via
@@ -871,7 +871,7 @@ Commit chain:
   returns only comment matches (documentation of what was removed).
 - Commit: pending end-of-tick.
 - Next tick (11) — Python builder side: extend
-  `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` (or the relevant plugin)
+  `python/tensorrt_model_connect/engine_builder.py` (or the relevant plugin)
   to populate the bundle `defaults:` block for `triattention.*` when
   the user supplies `--config` / `--set` at build time. Without that,
   new bundles won't carry TriAttention config in the generic
@@ -920,7 +920,7 @@ Commit chain:
 - Next tick (10) — swap TriAttention env-var readers for
   `ctx.runtime_config->get<T>("triattention", …)` queries. Target
   `src/runtime/core/triattention_kv_cache.cpp` and
-  `src/runtime/core/triattention_kv_cache.h`. Delete the env-var
+  `include/trtmc/runtime/triattention_kv_cache.h`. Delete the env-var
   helpers (`triattention_override_*` and bare `std::getenv` reads) in
   the same commit. Scope gate: the Python builder path still provides
   a way to populate the bundle `defaults:` block for TriAttention
@@ -929,7 +929,7 @@ Commit chain:
 ### Tick 8 (2026-04-20)
 - Phase 4 Cluster A — schema declaration (no runtime wiring yet).
 - Python schema at
-  `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py` —
+  `python/tensorrt_model_connect/runtime_config/schemas/triattention.py` —
   24 fields (11 core + stats_section build-only + 12 debug/session).
   Each field declares an explicit `allowed_layers` frozenset; validators
   guard kv_budget/divide_length/offset_max_length > 0 and the
@@ -976,12 +976,12 @@ Commit chain:
 ### Tick 7 (2026-04-20)
 - Phase 3 delivered: bundles carry a `defaults:` block that feeds the
   runtime `BUNDLE_DEFAULT` layer directly.
-- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`: `BundleInfo.defaults` field
+- `python/tensorrt_model_connect/bundle_writer.py`: `BundleInfo.defaults` field
   (optional dict). When non-empty the header serializes
   `"defaults": { ns: { field: value, ... }, ... }` right before the
   `sections:` block. When empty/None, nothing is emitted so existing
   readers are unaffected.
-- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/config_bundle.py`:
+- `python/tensorrt_model_connect/runtime_config/config_bundle.py`:
   `bundle_defaults_contribution(header_json_or_mapping)` returns a
   `LayerContribution(layer=BUNDLE_DEFAULT, values=...)`. Accepts either
   raw JSON text or a pre-parsed mapping for flexibility.
@@ -1027,7 +1027,7 @@ Commit chain:
   (`triattention.*`) because it's the biggest (17 fields) and the
   acceptance gate (AIME25 iter3) depends on it. Sequence inside Cluster A:
     1. `override` rename commit first (Phase 4a — pure rename, no logic).
-    2. Declare the Python schema in `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py`.
+    2. Declare the Python schema in `python/tensorrt_model_connect/runtime_config/schemas/triattention.py`.
     3. Generate / hand-write the matching C++ schema header
        (`include/trtmc/config/schemas/triattention.h` + registration in a
        new `.cpp` file added to the force-link anchor list).

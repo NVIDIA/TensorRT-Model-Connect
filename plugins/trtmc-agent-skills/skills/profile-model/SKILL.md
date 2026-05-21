@@ -12,7 +12,7 @@ description: >-
 
 - GPU, CUDA, and TensorRT are available, usually inside a dev container.
 - `tensorrt_model_connect` is installed in editable mode:
-  `pip install --no-deps -e tensorrt_model_connect/`.
+  `pip install --no-deps -e . -C py-only=true`.
 - `./build/trtmc` is built when C++ timing or Nsight capture is needed.
 - The model is available as a HuggingFace ID or local path.
 

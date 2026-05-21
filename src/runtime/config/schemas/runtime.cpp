@@ -1,5 +1,5 @@
 // Registration for the "runtime" namespace schema.
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/runtime.py.
 
 #include "trtmc/config/schemas/runtime.h"
 

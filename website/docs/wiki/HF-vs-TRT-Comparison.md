@@ -9,9 +9,9 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 | Build engine | N/A (eager execution) | `./build/trtmc build <model-dir> -o model.trtfb` (Python) |
 | Run inference | `pipeline("Hello")` | `trtmc run model.trtfb --prompt "Hello"` (C++) |
 | Programmatic API | `pipeline("text-generation", model=...)` | `trtmc_create_pipeline("model.trtfb", flags)` (C ABI) |
-| Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `tensorrt_model_connect/` |
+| Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `python/tensorrt_model_connect/` |
 | Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `VocabTokenizer` |
-| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `tensorrt_model_connect/tensorrt_model_connect/config.py` |
+| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `python/tensorrt_model_connect/config.py` |
 
 ## Architectural Parallels
 
@@ -19,7 +19,7 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 
 **HuggingFace**: Uses `AutoModelForCausalLM` which reads `config.json`'s `architectures` field to dispatch to a specific Python model class (e.g., `Qwen2ForCausalLM`).
 
-**TensorRT-Model-Connect**: The Python `tensorrt_model_connect/` package reads `config.json`'s `model_type` to dispatch to a registered family plugin (e.g., Qwen plugin). Same metadata, different dispatch mechanism.
+**TensorRT-Model-Connect**: The Python `python/tensorrt_model_connect/` package reads `config.json`'s `model_type` to dispatch to a registered family plugin (e.g., Qwen plugin). Same metadata, different dispatch mechanism.
 
 ```python
 # HF: Dynamic class dispatch
@@ -37,7 +37,7 @@ model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
 
 **HuggingFace**: `from_pretrained()` downloads safetensors, uses `safetensors` library to load tensors directly into PyTorch `nn.Parameter` objects using the exact HF tensor key names.
 
-**TensorRT-Model-Connect**: The Python `tensorrt_model_connect/` package uses the same `safetensors` Python library, then the **checkpoint mapper** translates HF key names to canonical format with explicit transposition.
+**TensorRT-Model-Connect**: The Python `python/tensorrt_model_connect/` package uses the same `safetensors` Python library, then the **checkpoint mapper** translates HF key names to canonical format with explicit transposition.
 
 Key difference: **HF stores weights as `[out_features, in_features]`** (PyTorch convention). The checkpoint mapper transposes them to `[in_features, out_features]` during mapping for efficient right-side matmul in TRT.
 
@@ -118,7 +118,7 @@ python3 tools/perf_compare.py \
 | Quantization | GPTQ, AWQ, bitsandbytes | FP16, FP8, INT8, INT4, NVFP4, W4A8 via extensible quantization framework |
 | Attention variants | Flash Attention 2, SDPA, PagedAttention | Standard scaled dot-product in TRT |
 | Model formats | safetensors, PyTorch bin, GGUF | safetensors only |
-| Architecture breadth | 200+ model architectures | 63 family plugins: decoders, MoE, SSM, VL, diffusion, audio, encoder-only, seq2seq, segmentation |
+| Architecture breadth | 200+ model architectures | 68 family plugins: decoders, MoE, SSM, VL, diffusion, audio, encoder-only, seq2seq, segmentation |
 
 ## What We Have That HF Doesn't
 

@@ -22,7 +22,7 @@ There is no `PipelineRouter`, `PipelineServices`, `BuildContext`, or `StrategyBu
 
 ## 1. Bundle Build Flow (Python)
 
-Entry point: `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` function `build()`.
+Entry point: `python/tensorrt_model_connect/engine_builder.py` function `build()`.
 
 ```mermaid
 sequenceDiagram
@@ -72,12 +72,12 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` -- Python builder CLI dispatch
-- `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
-- `tensorrt_model_connect/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
-- `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
-- `tensorrt_model_connect/tensorrt_model_connect/families/base.py` -- `FamilyPlugin` protocol
-- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` -- `write_bundle()`
+- `python/tensorrt_model_connect/build_cli.py` -- Python builder CLI dispatch
+- `python/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
+- `python/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
+- `python/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
+- `python/tensorrt_model_connect/families/base.py` -- `FamilyPlugin` protocol
+- `python/tensorrt_model_connect/bundle_writer.py` -- `write_bundle()`
 
 ---
 

@@ -6,7 +6,7 @@ This page explains how the TensorRT engine is built (Python) and how it runs (C+
 
 The TRT pipeline has two phases:
 
-1. **Build phase (Python)**: `tensorrt_model_connect/` reads HF model weights, constructs a TRT `INetworkDefinition` via the TensorRT Python API, compiles it to an `ICudaEngine`, and serializes the engine plan into a `.trtfb` bundle.
+1. **Build phase (Python)**: `python/tensorrt_model_connect/` reads HF model weights, constructs a TRT `INetworkDefinition` via the TensorRT Python API, compiles it to an `ICudaEngine`, and serializes the engine plan into a `.trtfb` bundle.
 2. **Run phase (C++)**: The C++ runtime deserializes the engine plan from the bundle, creates an execution context, and runs the autoregressive generation loop on GPU with KV-cache management.
 
 ---
@@ -84,7 +84,7 @@ logits = hidden * W_lm_head
 
 ## Graph Building (Python)
 
-The Python `tensorrt_model_connect/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` provide reusable building blocks:
+The Python `python/tensorrt_model_connect/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `python/tensorrt_model_connect/graph_ops.py` provide reusable building blocks:
 
 | Function | Description |
 |----------|-------------|

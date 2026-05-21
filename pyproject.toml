@@ -1,6 +1,7 @@
 [build-system]
-requires = ["conan-py-build==0.4.3"]
-build-backend = "conan_py_build.build"
+requires = ["tomli>=2.0; python_version < '3.11'"]
+build-backend = "_pyproject_backend"
+backend-path = ["."]
 
 [project]
 name = "tensorrt-model-connect"
@@ -26,18 +27,18 @@ chronos = ["chronos-forecasting>=2.2.2"]
 test = ["pytest>=7.0", "torch>=2.0"]
 
 [tool.conan-py-build.wheel]
-packages = ["tensorrt_model_connect/tensorrt_model_connect"]
+packages = ["python/tensorrt_model_connect"]
 
 [tool.conan-py-build.sdist]
 include = [
-    "tensorrt_model_connect",
+    "python",
     "third_party",
 ]
 exclude = [
     "__pycache__",
     "*.pyc",
-    "tensorrt_model_connect/build",
-    "tensorrt_model_connect/*.egg-info",
+    "python/tensorrt_model_connect/build",
+    "python/tensorrt_model_connect/*.egg-info",
 ]
 
 [tool.pytest.ini_options]
@@ -55,7 +56,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["tensorrt_model_connect/tensorrt_model_connect"]
+source = ["tensorrt_model_connect"]
 omit = ["*/tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]

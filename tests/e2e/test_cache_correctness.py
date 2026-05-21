@@ -90,7 +90,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
         not _has_tensorrt_model_connect(),
-        reason="Python builder package not available (pip install -e tensorrt_model_connect/)"),
+        reason="Python builder package not available (pip install -e . -C py-only=true)"),
 ]
 
 

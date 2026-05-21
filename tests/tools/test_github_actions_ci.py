@@ -81,14 +81,6 @@ def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
     assert "tests/e2e_harness/test_*.py" in text
 
 
-def test_shared_setup_action_creates_hf_cache_dirs() -> None:
-    text = (REPO_ROOT / ".github" / "actions" / "setup-trtmc" / "action.yml").read_text()
-    assert '"${HF_HOME:-}"' in text
-    assert '"${HF_HUB_CACHE:-}"' in text
-    assert '"${HUGGINGFACE_HUB_CACHE:-}"' in text
-    assert '"${HF_MODULES_CACHE:-}"' in text
-
-
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
     premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
@@ -167,13 +159,17 @@ def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
     assert "run-gha-stage.sh wheel-qwen-smoke" in text
 
 
-def test_nightly_uses_manylinux_package_image_for_release_wheels() -> None:
-    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert "TRTMC_PACKAGE_CI_IMAGE:" in text
-    assert "trtmc-dev-gb300:manylinux_2_35" in text
-    assert 'docker build -t "$TRTMC_PACKAGE_CI_IMAGE" -f Dockerfile .' in text
-    assert "package image glibc=" in text
-    assert "TRTMC_CI_IMAGE: ${{ env.TRTMC_PACKAGE_CI_IMAGE }}" in text
+def test_github_ci_uses_manylinux_image_and_builds_wheel_first() -> None:
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "TRTMC_CI_IMAGE:" in text
+        assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in text
+        assert "vars.TRTMC_CI_IMAGE" not in text
+        assert "trtmc-dev-gb300:manylinux_2_35" in text
+        assert "TRTMC_PACKAGE_CI_IMAGE" not in text
+        assert text.index("Build trtmc pip package") < text.index(
+            "Setup TensorRT-Model-Connect"
+        )
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
@@ -215,11 +211,26 @@ def test_release_wheel_build_disables_libtorch_linkage() -> None:
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
 
 
+def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
+    assert 'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF' in script
+    assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="$enable_libtorch_multinomial"' in script
+    assert 'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
+    assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"' in coverage
+    assert "-e TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
+
+
 def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text()
-    assert 'requires = ["conan-py-build==0.4.3"]' in text
-    assert 'build-backend = "conan_py_build.build"' in text
-    assert 'packages = ["tensorrt_model_connect/tensorrt_model_connect"]' in text
+    backend_text = (REPO_ROOT / "_pyproject_backend.py").read_text()
+    assert 'build-backend = "_pyproject_backend"' in text
+    assert 'return [_CONAN_PY_BUILD_REQUIREMENT]' in backend_text
+    assert "conan_build.build_wheel" in backend_text
+    assert "conan_build.build_sdist" in backend_text
+    assert "_py_only_enabled" in backend_text
+    assert 'packages = ["python/tensorrt_model_connect"]' in text
     assert "[project.scripts]" not in text
 
 

@@ -36,7 +36,7 @@ Prints a combined console report and saves `perf_compare.json` +
 | `tools/perf_compare.py` | E2E latency: TRT vs HF eager vs torch.compile |
 | `tools/layer_profiler.py` | TRT IProfiler wrapper (library, used by trtmc_profile.py) |
 | `tools/cpu_profile.py` | CPU-phase timing breakdown for TRT decode steps |
-| `tools/nsight_collect.py` | Nsight Systems / Nsight Compute kernel data collection |
+| `tools/trtmc_profile.py --nsight` | Optional Nsight Systems collection through the unified profiler |
 | `tools/profile_report.py` | HTML report from JSON artifacts |
 
 ---

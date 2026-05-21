@@ -209,6 +209,32 @@ def test_run_returns_preflight_skip_without_resolving_bundle(
     assert data["stages"] == {}
 
 
+def test_python_module_preflight_rejects_module_that_fails_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module_name = "broken_preflight_module"
+    (tmp_path / f"{module_name}.py").write_text(
+        'raise OSError("native extension failed to load")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    case = _make_case("broken-module")
+    ctx = _make_ctx(tmp_path, case)
+
+    passed, message = orchestrator._check_python_module(
+        ctx,
+        PreflightRequirement(
+            kind="python_module_available",
+            args={"module": module_name, "phase": "build"},
+        ),
+    )
+
+    assert not passed
+    assert "not importable in build profile" in message
+    assert "native extension failed to load" in message
+
+
 def test_run_returns_build_failure_and_logs_build_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

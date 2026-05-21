@@ -410,16 +410,10 @@ def test_load_pixart_dit_weights_maps_optional_biases(
 
     import importlib
 
-    # Depending on import path, checkpoint_mapper may be loaded under either
-    # module name; patch both to keep this test layout-agnostic.
-    for mod_name in ("tensorrt_model_connect.checkpoint_mapper", "tensorrt_model_connect.tensorrt_model_connect.checkpoint_mapper"):
-        try:
-            cm = importlib.import_module(mod_name)
-        except ModuleNotFoundError:
-            continue
-        monkeypatch.setattr(cm, "_open_safetensors", lambda _p: ["reader"])
-        monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in tensors)
-        monkeypatch.setattr(cm, "_load_tensor", lambda _r, name: tensors[name])
+    cm = importlib.import_module("tensorrt_model_connect.checkpoint_mapper")
+    monkeypatch.setattr(cm, "_open_safetensors", lambda _p: ["reader"])
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in tensors)
+    monkeypatch.setattr(cm, "_load_tensor", lambda _r, name: tensors[name])
 
     out = pixart_mod._load_pixart_dit_weights(
         "/unused",

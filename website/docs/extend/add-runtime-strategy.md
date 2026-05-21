@@ -6,7 +6,7 @@ Add a runtime strategy when an existing `IPipeline` contract cannot represent th
 
 ## 1. Add or reuse a pipeline
 
-If the task contract is new, add a pipeline under `src/runtime/pipelines/`. Override only the `IPipeline` methods the pipeline supports.
+If the task contract is new, add a model runtime folder under `src/runtime/models/`. Override only the `IPipeline` methods the pipeline supports.
 
 ## 2. Add a plugin
 

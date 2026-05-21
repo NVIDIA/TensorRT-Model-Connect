@@ -262,7 +262,8 @@ class PreflightRequirement:
             - "asset_exists": args must contain "path".
             - "python_module_available": args must contain "module" and may
               optionally contain "phase" ("build", "runtime", "reference")
-              and "timeout_s".
+              and "timeout_s". The module must import successfully in that
+              profile.
         args: Parameters specific to the requirement kind.
         gating: If True (default), an unmet requirement causes PRECHECK_FAIL.
             If False, the requirement is advisory and logged but does not block.

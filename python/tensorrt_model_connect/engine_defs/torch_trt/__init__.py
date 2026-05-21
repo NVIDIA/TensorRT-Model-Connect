@@ -90,7 +90,7 @@ class TorchTrtBackend:
             import torch  # noqa: F401
             import torch_tensorrt  # noqa: F401
             return True
-        except ImportError:
+        except (ImportError, OSError):
             return False
 
     def build(

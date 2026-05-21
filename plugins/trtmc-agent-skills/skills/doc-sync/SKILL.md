@@ -114,7 +114,7 @@ Ground truth commands:
 
 ```bash
 rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
-find tensorrt_model_connect/tensorrt_model_connect/families/ -name "*.py" \
+find python/tensorrt_model_connect/families/ -name "*.py" \
   -not -name "__init__.py" -not -name "base.py" | sort
 find tests/e2e/models/ -name "*.json" | sort
 ```
@@ -130,14 +130,14 @@ Collect reusable ground truth first:
 
 ```bash
 rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
-find tensorrt_model_connect/tensorrt_model_connect/families/ -name "*.py" \
+find python/tensorrt_model_connect/families/ -name "*.py" \
   -not -name "__init__.py" -not -name "base.py" | sort
 find tests/e2e/models/ -name "*.json" | sort
 find src/runtime/pipelines/ -name "*.h" -o -name "*.cpp" | sort
 find tests/builder/ tests/tools/ -name "test_*.py" | sort
 find tests/cpp/ -name "test_*.cpp" | sort
 find src/ include/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort
-find tensorrt_model_connect/tensorrt_model_connect/ -type f -name "*.py" | sort
+find python/tensorrt_model_connect/ -type f -name "*.py" | sort
 ```
 
 Rules:
@@ -180,7 +180,7 @@ Scan E2E manifests and source files:
 ```bash
 find tests/e2e/models/ -name "*.json" | sort
 find src/ -name "*.cpp" -o -name "*.h" | sort
-find tensorrt_model_connect/tensorrt_model_connect/ -name "*.py" -not -name "__init__.py" | sort
+find python/tensorrt_model_connect/ -name "*.py" -not -name "__init__.py" | sort
 ```
 
 Fixes:

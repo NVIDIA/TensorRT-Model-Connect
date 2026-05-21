@@ -108,7 +108,7 @@ def _get_torchtrt_version() -> str:
     try:
         import torch_tensorrt
         return torch_tensorrt.__version__
-    except ImportError:
+    except (ImportError, OSError):
         return "not installed"
 
 

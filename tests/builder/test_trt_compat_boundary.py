@@ -9,7 +9,7 @@ from tensorrt_model_connect import trt_compat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRTMC_BUILD_ROOT = REPO_ROOT / "tensorrt_model_connect" / "tensorrt_model_connect"
+TRTMC_BUILD_ROOT = REPO_ROOT / "python" / "tensorrt_model_connect"
 ALLOWED_TRT_BOUNDARY_FILES = {
     TRTMC_BUILD_ROOT / "trt_compat.py",
 }

@@ -201,31 +201,22 @@ def _is_cached(hf_id: str) -> bool:
     """Return True if the model has a usable local snapshot.
 
     A snapshot directory alone is not enough: partial cache entries can contain
-    only config/tokenizer metadata. The offline build phase needs at least one
-    HF entrypoint config and at least one local weight artifact.
+    only config/tokenizer metadata, and orphan snapshots without the requested
+    revision ref cannot be resolved by the offline build phase.  Use
+    ``snapshot_download(local_files_only=True)`` here so the warm-cache skip
+    decision follows the same Hugging Face cache resolution path as the later
+    offline builder.
     """
-    cache_dir = pathlib.Path(hf_constants.HF_HUB_CACHE)
-    # HF cache layout: models--{org}--{model}/snapshots/{sha}/
-    repo_dir = cache_dir / ("models--" + hf_id.replace("/", "--"))
-    snapshots_dir = repo_dir / "snapshots"
-    if not snapshots_dir.is_dir():
+    try:
+        local_dir = snapshot_download(
+            hf_id,
+            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            local_files_only=True,
+        )
+    except Exception:
         return False
 
-    snapshot_paths = [
-        path for path in snapshots_dir.iterdir()
-        if path.is_dir()
-    ]
-    ref_main = repo_dir / "refs" / "main"
-    if ref_main.is_file():
-        commit = ref_main.read_text().strip()
-        main_snapshot = snapshots_dir / commit
-        if main_snapshot.is_dir():
-            snapshot_paths = [main_snapshot] + [
-                path for path in snapshot_paths
-                if path != main_snapshot
-            ]
-
-    return any(_snapshot_has_required_files(path, hf_id=hf_id) for path in snapshot_paths)
+    return _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id)
 
 
 def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:

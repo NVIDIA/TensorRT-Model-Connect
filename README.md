@@ -53,7 +53,7 @@ cd TensorRT-Model-Connect
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 
-pip install -e tensorrt_model_connect/
+pip install -e . -C py-only=true
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
@@ -64,15 +64,21 @@ cmake --build build -j
   --greedy
 ```
 
+The editable install is intentionally Python-only. It points imports at
+`python/tensorrt_model_connect/` for fast builder iteration; CMake still builds
+the source-tree `./build/trtmc` executable used by this workflow. Release and
+CI validation use built wheels instead.
+
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
 Nightly wheels are tagged `py310-none-manylinux_2_35_aarch64` and
 `py312-none-manylinux_2_35_aarch64`; use the tag matching your Python
 interpreter. The `manylinux_2_35_aarch64` platform tag matches the TensorRT
 CUDA 13 aarch64 wheels and requires a glibc 2.35 or newer Linux host.
-Nightly package jobs build the wheel in the repository Dockerfile image
-(`TRTMC_PACKAGE_CI_IMAGE`, default `trtmc-dev-gb300:manylinux_2_35`) so the
-compiled native executable is actually checked against that platform floor.
+CI package jobs build and test wheels in the repository Dockerfile image
+(`TRTMC_CI_IMAGE`, derived from repository variable `TRTMC_MANYLINUX_CI_IMAGE`
+or default `trtmc-dev-gb300:manylinux_2_35`) so the compiled
+native executable is actually checked against that platform floor.
 
 ## Useful Docs
 

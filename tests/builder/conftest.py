@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "python"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 

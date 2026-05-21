@@ -61,6 +61,7 @@ class CheckReport:
 # Patterns that look like repo-relative file paths.
 # Match backtick-quoted paths or bare paths in table cells.
 _PATH_PREFIXES = (
+    "python/",
     "src/",
     "include/",
     "tests/",
@@ -174,7 +175,7 @@ def _get_actual_counts(repo_root: Path) -> dict:
         counts["manifests"] = 0
 
     # Family plugins (excluding __init__.py and base.py)
-    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     if families_dir.is_dir():
         flat_plugins = [
             f for f in families_dir.iterdir()

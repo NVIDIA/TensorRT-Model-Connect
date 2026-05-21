@@ -66,7 +66,7 @@ def _get_bundle_path(request=None):
 
 def _load_trt_engine(bundle_path: str, section_name: str):
     """Load a TRT engine from a bundle section."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tensorrt_model_connect"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "python"))
     from tensorrt_model_connect.engine_defs.torch_trt.bundle_reader import read_bundle_section
     data = read_bundle_section(bundle_path, section_name)
     logger = trt.Logger(trt.Logger.WARNING)

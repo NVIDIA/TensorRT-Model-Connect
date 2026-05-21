@@ -20,7 +20,7 @@
 This test mirrors what Phase 4 clusters do in production:
 
     1. Declare a namespaced schema (here inline — in production it would
-       be a file under ``tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/``).
+       be a file under ``python/tensorrt_model_connect/runtime_config/schemas/``).
     2. Register it with the singleton SchemaRegistry.
     3. Supply values via ``--set`` tokens through
        :func:`resolve_cli_config`.
@@ -226,7 +226,7 @@ def test_scalability_claim_documented():
     list, that's a coupling point; update the design before adding.
     """
     expected_new_files_per_feature = [
-        "tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/<name>.py",
+        "python/tensorrt_model_connect/runtime_config/schemas/<name>.py",
         "include/trtmc/config/schemas/<name>.h",
         "src/runtime/config/schemas/<name>.cpp",
         "tests/builder/test_config_<name>_or_similar.py",

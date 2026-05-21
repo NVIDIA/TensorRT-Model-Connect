@@ -14,7 +14,7 @@ flowchart TB
   end
 
   subgraph Python["Python builder package"]
-    PyProj["tensorrt_model_connect/pyproject.toml"] --> BuilderModule["tensorrt_model_connect module"]
+    PyProj["pyproject.toml"] --> BuilderModule["tensorrt_model_connect module"]
     BuilderModule --> Families["family plugins"]
     BuilderModule --> Engines["engine builders"]
   end
@@ -61,15 +61,39 @@ The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
 
 ## Python package
 
-`tensorrt_model_connect/pyproject.toml` defines the editable Python builder package consumed by `trtmc build`. Use it for source development with `pip install -e tensorrt_model_connect/`.
+The repository-root `pyproject.toml` is the only Python packaging entry point.
+The source package lives under `python/tensorrt_model_connect/`.
 
-The repository-root `pyproject.toml` is the release-wheel build entry point. It uses `conan-py-build` and the root `conanfile.py` to run the native CMake build, then stages the wheel runtime artifacts under `tensorrt_model_connect/bin/`: the native `trtmc` executable and TensorRT backend DSOs. The same native `trtmc` executable is also staged into the wheel scripts directory so pip installs it directly into the target environment's `bin/` directory. The release wheel metadata declares TensorRT and the other Python builder dependencies.
+The build backend is a small repository-local wrapper:
+
+- normal wheel and source-distribution builds delegate to `conan-py-build`
+- default editable builds follow the native build backend path
+- `pip install -e . -C py-only=true` creates a lightweight developer editable install for Python files only
+
+Use the py-only editable install for source development when you are also
+building `./build/trtmc` with CMake. It intentionally does not run Conan, run
+CMake, install the native executable, or stage backend DSOs.
+
+Release wheels use `conan-py-build` and the root `conanfile.py` to run the
+native CMake build, then stage runtime artifacts under the wheel-internal
+package directory named tensorrt_model_connect/bin: the native `trtmc` executable
+and TensorRT backend DSOs. The same native `trtmc` executable is also staged into the wheel
+scripts directory so pip installs it directly into the target environment's
+`bin/` directory. The release wheel metadata declares TensorRT and the other
+Python builder dependencies.
 
 The Conan package recipe manages `nlohmann_json` for native wheel builds. TensorRT and CUDA are still supplied by the build environment and by pip/host runtime dependencies rather than by Conan recipes.
 Release wheel builds disable the optional libtorch-backed multinomial sampler so the wheel does not link against PyTorch's native DSOs or inherit their platform floor.
-Nightly release jobs build and use `TRTMC_PACKAGE_CI_IMAGE` from the repository `Dockerfile` for the package and wheel-smoke stages. That image is Ubuntu 22.04 / glibc 2.35 so `auditwheel` can verify the `manylinux_2_35_aarch64` tag instead of inheriting a newer general-purpose CI image floor.
+CI jobs build and use `TRTMC_CI_IMAGE` from the repository `Dockerfile` for
+package and test stages. The workflow derives it from repository variable
+`TRTMC_MANYLINUX_CI_IMAGE` or default `trtmc-dev-gb300:manylinux_2_35`.
+That image is Ubuntu 22.04 / glibc 2.35 so
+`auditwheel` can verify the `manylinux_2_35_aarch64` tag instead of inheriting a
+newer general-purpose CI image floor. PR and nightly workflows build the wheel
+first, install that wheel, and then run Python, C++, graph-op, and E2E stages
+against the installed artifact.
 
-To build the release wheel manually, run `python -m build --wheel .` from the repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See [Installation](../getting-started/installation.md#build-a-release-wheel) for the full command.
+To build the release wheel manually, run `python -m build --wheel .` from the repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See [Installation](../getting-started/installation.md#2-build-wheel-from-source) for the full command.
 
 ## Generated registration files
 
@@ -107,4 +131,4 @@ This is why extension work normally changes local plugin/schema files plus a man
 | `libtrtmc_backend_trt_rtx.so` | Optional TensorRT-RTX backend DSO. |
 | `libtrtmc_tvm_ffi_plugin.so` | Optional TensorRT plugin for TVM-FFI kernels. |
 | `dist/tensorrt_model_connect-*.whl` | Python wheel containing the builder package, directly installed native `trtmc` executable, packaged native executable copy, and backend DSOs. |
-| `website/build/` | Static Docusaurus docs output. |
+| website build output | Static Docusaurus docs output generated under `website/` when Docusaurus runs. |

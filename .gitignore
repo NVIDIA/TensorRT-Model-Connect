@@ -114,8 +114,8 @@ objects
 refs
 !include/trtmc/config/
 !include/trtmc/config/**
-!tensorrt_model_connect/tensorrt_model_connect/config/
-!tensorrt_model_connect/tensorrt_model_connect/config/**
+!python/tensorrt_model_connect/config/
+!python/tensorrt_model_connect/config/**
 !tests/config/
 !tests/config/**
 !src/runtime/config/

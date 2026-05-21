@@ -129,7 +129,7 @@ if [ "$DETACH" = true ]; then
     if [ "$BUILD" = true ]; then
         echo ""
         echo "Installing tensorrt_model_connect and building C++ runtime..."
-        docker exec "$CONTAINER_NAME" pip install --no-deps -e tensorrt_model_connect/
+        docker exec "$CONTAINER_NAME" pip install --no-deps -e . -C py-only=true
         docker exec "$CONTAINER_NAME" bash -c '
             cmake -S . -B build -G Ninja \
                 -DTRTMC_TRT_INCLUDE_DIR=$TRT_INC_DIR \

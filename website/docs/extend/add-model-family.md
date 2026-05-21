@@ -6,7 +6,7 @@ Add a Python family plugin when the model can reuse an existing runtime strategy
 
 ## 1. Create a plugin file
 
-Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`:
+Create `python/tensorrt_model_connect/families/<family>.py`:
 
 ```python
 from __future__ import annotations

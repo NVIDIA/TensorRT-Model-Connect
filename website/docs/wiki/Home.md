@@ -1,6 +1,6 @@
 # TensorRT-Model-Connect Wiki
 
-A split-language system for TensorRT inference: **Python builds** optimized TRT engines from HuggingFace model checkpoints, **C++ runs** them at maximum speed. The Python `tensorrt_model_connect/` package reads safetensors, constructs TRT networks via the TensorRT Python API, and produces self-contained `.trtfb` bundles. The C++ runtime loads those bundles, deserializes TRT engines, resolves the `runtime_strategy`, and runs inference through the appropriate pipeline implementation.
+A split-language system for TensorRT inference: **Python builds** optimized TRT engines from HuggingFace model checkpoints, **C++ runs** them at maximum speed. The Python `python/tensorrt_model_connect/` package reads safetensors, constructs TRT networks via the TensorRT Python API, and produces self-contained `.trtfb` bundles. The C++ runtime loads those bundles, deserializes TRT engines, resolves the `runtime_strategy`, and runs inference through the appropriate pipeline implementation.
 
 ## Quick Navigation
 
@@ -22,10 +22,10 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 
 ## Core Design Principles
 
-1. **Python builds, C++ runs.** Checkpoint loading, graph construction, and engine compilation stay in Python (`tensorrt_model_connect/`). Low-latency inference stays in C++ (`src/`).
+1. **Python builds, C++ runs.** Checkpoint loading, graph construction, and engine compilation stay in Python (`python/tensorrt_model_connect/`). Low-latency inference stays in C++ (`src/`).
 2. **The bundle is self-describing.** Each `.trtfb` bundle carries a `config.json` with `runtime_strategy`, model dimensions, tokenizer settings, and all metadata the C++ runtime needs. No external configuration files are required.
 3. **Strategy is resolved once at bundle load.** `PipelineFactory::from_bundle()` reads `runtime_strategy` from the bundle's config, looks up the matching `IPipelinePlugin` in the `PipelineRegistry` singleton, and delegates pipeline construction to the plugin. There is no per-request strategy redispatch.
-4. **Family plugins are auto-discovered.** Python family plugins in `tensorrt_model_connect/tensorrt_model_connect/families/` are found via `pkgutil.iter_modules()`. Adding a new family requires only a new `.py` file with a module-level `plugin` attribute -- no edits to shared registration code.
+4. **Family plugins are auto-discovered.** Python family plugins in `python/tensorrt_model_connect/families/` are found via `pkgutil.iter_modules()`. Adding a new family requires only a new `.py` file with a module-level `plugin` attribute -- no edits to shared registration code.
 5. **Complexity budget is enforced.** C++ cyclomatic complexity must stay at or below the repository gate (CCN at most 10), checked by `tools/check_cyclomatic_complexity.py` and CI.
 6. **Traceability is required.** Architecture decisions (ARCH-*), unit designs (UD-*), and tests (UT-*/IT-*) must stay linked per the traceability matrix.
 
@@ -89,12 +89,12 @@ docker exec trtmc-dev-gb300-<team-id> <command>
 
 ## Built-In Model Support
 
-Family plugins are auto-discovered from `tensorrt_model_connect/tensorrt_model_connect/families/`. Any HF model whose `model_type` maps to a plugin is buildable. There is no static registration list to update.
+Family plugins are auto-discovered from `python/tensorrt_model_connect/families/`. Any HF model whose `model_type` maps to a plugin is buildable. There is no static registration list to update.
 
 To enumerate all family plugins in your checkout:
 
 ```bash
-ls tensorrt_model_connect/tensorrt_model_connect/families/*.py \
+ls python/tensorrt_model_connect/families/*.py \
   | sed 's|.*/||; s|\.py$||' \
   | grep -v -E '^(__init__|base)$' \
   | sort

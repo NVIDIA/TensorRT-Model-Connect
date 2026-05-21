@@ -4,7 +4,7 @@ set -euo pipefail
 stage="${1:?usage: run-gha-stage.sh <stage>}"
 
 docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
-  echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
+  echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_MANYLINUX_CI_IMAGE if the runner uses a different local manylinux image tag."
   exit 1
 }
 
@@ -61,6 +61,7 @@ docker run --rm \
   -e TRTMC_BUILDER_OPTIMIZATION_LEVEL \
   -e TRTMC_MAX_NUM_TACTICS \
   -e TRTMC_AVG_TIMING_ITERATIONS \
+  -e TRTMC_ENABLE_LIBTORCH_MULTINOMIAL \
   -e PYTHONHASHSEED \
   -e PYTHON_COVERAGE_MIN_LINE \
   -e PYTHON_COVERAGE_MIN_BRANCH \

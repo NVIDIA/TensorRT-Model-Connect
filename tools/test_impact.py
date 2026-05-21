@@ -10,7 +10,7 @@ Usage:
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
     python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/text_generation/plugin.cpp
-    python3 tools/test_impact.py --files tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py --cap 15
+    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/qwen/plugin.py --cap 15
 """
 
 import argparse
@@ -218,7 +218,7 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
 }
 
-# Orchestrator modules in tensorrt_model_connect/ -- not treated as specialized builders
+# Orchestrator modules in python/tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
     "debug_runner", "diffusion_runner",
@@ -396,7 +396,7 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
-    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
 
@@ -597,7 +597,7 @@ def _apply_l0_replacements(
 def _infer_unit_tiers(path: str) -> List[str]:
     """Infer which unit test tiers a file change implies."""
     tiers: List[str] = []
-    if path.startswith("tensorrt_model_connect/"):
+    if path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
@@ -944,7 +944,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=20,
             name="family_package",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/([A-Za-z]\w*)/.+\.py$"
             ),
             resolver=_match_result("family_package", _family_models),
@@ -957,7 +957,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=30,
             name="family_plugin",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/(\w+)\.py$",
                 lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
             ),
@@ -968,7 +968,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=40,
             name="family_base",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/((__init__|base)\.py)$"
             ),
             resolver=_match_result("family_base", _all_models),
@@ -981,7 +981,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=50,
             name="torchtrt_family_plugin",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/families/(\w+)\.py$",
                 lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
             ),
@@ -992,7 +992,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=60,
             name="torchtrt_family_base",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/families/((__init__|base)\.py)$"
             ),
             resolver=_match_result("torchtrt_family_base", _all_models),
@@ -1002,7 +1002,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=70,
             name="torchtrt_strategy",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/strategies/(diffusion)\.py$"
             ),
             resolver=_match_result(
@@ -1015,7 +1015,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=80,
             name="torchtrt_strategy_unknown",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/strategies/(\w+)\.py$"
             ),
             resolver=_match_result("torchtrt_strategy_unknown", _all_models),
@@ -1025,7 +1025,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=90,
             name="specialized_builder",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$",
+                r"python/tensorrt_model_connect/(\w+)\.py$",
                 _is_specialized_builder,
             ),
             resolver=_match_result("specialized_builder", _specialized_builder_models),
@@ -1034,7 +1034,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=100,
             name="shared_builder_module",
-            matcher=_path_startswith("tensorrt_model_connect/"),
+            matcher=_path_startswith("python/tensorrt_model_connect/"),
             resolver=_match_result("shared_builder_module", _all_models),
             covered_by=("TestSharedModules.test_shared_module_all_models",),
         ),
@@ -1951,13 +1951,13 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "shared_builder_fp8_scales_cli",
-        "tensorrt_model_connect/tensorrt_model_connect/build_cli.py",
+        "python/tensorrt_model_connect/build_cli.py",
         ("fp8_scales", "save_fp8_scales"),
         _fp8_scale_models,
     ),
     TokenDiffRefinementRule(
         "shared_builder_fp8_scales_engine",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        "python/tensorrt_model_connect/engine_builder.py",
         (
             "fp8_scales",
             "save_fp8_scales",
@@ -1972,7 +1972,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "shared_builder_diffusion_tokenizer",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        "python/tensorrt_model_connect/engine_builder.py",
         (
             "detect_diffusion_tokenizer_add_special_tokens",
             "detect_tokenizer_add_special_tokens",
@@ -1996,7 +1996,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "torchtrt_compiler_tokenizer",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
+        "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
         (
             "detect_tokenizer_add_special_tokens",
             "detect_diffusion_tokenizer_add_special_tokens",
@@ -2221,9 +2221,14 @@ def validate_map(
     """Validate impact map consistency. Returns list of error strings."""
     errors: List[str] = []
     warnings: List[str] = []
-    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     torchtrt_families_dir = (
-        repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families"
+        repo_root
+        / "python"
+        / "tensorrt_model_connect"
+        / "engine_defs"
+        / "torch_trt"
+        / "families"
     )
 
     def _family_plugin_exists(family: str) -> bool:

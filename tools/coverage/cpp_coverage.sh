@@ -21,6 +21,8 @@ Environment:
   COVERAGE_LINK_FLAGS    Linker flags (default: "--coverage")
   BUILD_PARALLEL         Build parallelism passed to cmake --build --parallel
   CMAKE_EXTRA_ARGS       Extra CMake configure args (space-separated)
+  TRTMC_ENABLE_LIBTORCH_MULTINOMIAL
+                         Enable optional libtorch multinomial bridge (default: OFF)
   TRT_INC_DIR            TensorRT include root (optional, used for explicit cmake wiring)
   TRT_LIB_DIR            TensorRT library root (optional, used for explicit cmake wiring)
   CUDA_INC_DIR           CUDA include dir for explicit cmake wiring
@@ -70,6 +72,7 @@ CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Coverage}"
 COVERAGE_COMPILE_FLAGS="${COVERAGE_COMPILE_FLAGS:---coverage -O0 -g0}"
 COVERAGE_LINK_FLAGS="${COVERAGE_LINK_FLAGS:---coverage}"
 BUILD_PARALLEL="${BUILD_PARALLEL:-}"
+TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"
 CPP_COVERAGE_MIN_LINE="${CPP_COVERAGE_MIN_LINE:-100}"
 CPP_COVERAGE_MIN_FUNCTION="${CPP_COVERAGE_MIN_FUNCTION:-100}"
 CPP_COVERAGE_MIN_BRANCH="${CPP_COVERAGE_MIN_BRANCH:-100}"
@@ -111,6 +114,7 @@ cmake_args=(
   -DCMAKE_CXX_FLAGS="${COVERAGE_COMPILE_FLAGS}"
   -DCMAKE_EXE_LINKER_FLAGS="${COVERAGE_LINK_FLAGS}"
   -DCMAKE_SHARED_LINKER_FLAGS="${COVERAGE_LINK_FLAGS}"
+  -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"
 )
 
 if [[ -n "${CMAKE_GENERATOR}" ]]; then

@@ -20,7 +20,7 @@ import pytest
 
 
 # Ensure imports resolve to this workspace's Python package.
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "python"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
@@ -172,16 +172,10 @@ def test_package_init_exports_expected_symbols() -> None:
     Postconditions: Public symbols from `tensorrt_model_connect.__init__` exist and are usable.
     """
     import importlib
-    import tensorrt_model_connect
 
-    # Repo layout may expose an outer namespace package at `tensorrt_model_connect`.
-    # Validate exports from the concrete runtime package in either layout.
-    pkg = tensorrt_model_connect
-    if getattr(tensorrt_model_connect, "__file__", None) is None:
-        pkg = importlib.import_module("tensorrt_model_connect.tensorrt_model_connect")
+    pkg = importlib.import_module("tensorrt_model_connect")
 
-    if hasattr(pkg, "__version__"):
-        assert pkg.__version__ == "0.1.0"
+    assert pkg.__version__ == "0.1.0"
     assert callable(pkg.build)
     assert callable(pkg.build_bundle)
     assert callable(pkg.write_bundle)

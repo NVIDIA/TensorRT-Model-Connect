@@ -17,7 +17,7 @@ Schema sources live under:
 
 - `src/runtime/config/schemas/`
 - `include/trtmc/config/schemas/`
-- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/`
+- `python/tensorrt_model_connect/runtime_config/schemas/`
 - `cmake/trtmc_config_schemas.cmake`
 
 ## Backend DSOs

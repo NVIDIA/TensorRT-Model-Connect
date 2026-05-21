@@ -85,7 +85,7 @@ configure_e2e_timing_cache() {
   fi
 }
 
-setup_environment() {
+verify_environment() {
   git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
   git config --global --add safe.directory "*" || true
   echo "ENGINE_DIR=${ENGINE_DIR:-}"
@@ -93,8 +93,66 @@ setup_environment() {
   echo "HF_HUB_CACHE=${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-}}"
   echo "HF_MODULES_CACHE=${HF_MODULES_CACHE:-}"
   python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
-  python -m pip install --disable-pip-version-check --no-deps -e tensorrt_model_connect/
   chmod +x ./build/trtmc 2>/dev/null || true
+}
+
+install_built_wheel() {
+  local install_wheel
+  install_wheel="$(select_compatible_wheel dist)"
+  python -m pip install --disable-pip-version-check --force-reinstall --no-deps "$install_wheel"
+  python - "$install_wheel" <<'PY'
+from __future__ import annotations
+
+import importlib.resources as resources
+import shutil
+import sys
+from pathlib import Path
+
+import tensorrt_model_connect
+
+wheel = Path(sys.argv[1])
+repo = Path.cwd().resolve()
+package_file = Path(tensorrt_model_connect.__file__).resolve()
+try:
+    package_file.relative_to(repo)
+except ValueError:
+    pass
+else:
+    raise SystemExit(
+        f"tensorrt_model_connect imported from source tree after wheel install: {package_file}"
+    )
+
+installed_script = shutil.which("trtmc")
+if installed_script is None:
+    raise SystemExit("wheel did not install trtmc on PATH")
+installed_script_path = Path(installed_script)
+if installed_script_path.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{installed_script_path} is not the native ELF trtmc executable")
+
+native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
+native = native_dir / "trtmc"
+backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
+if not native.is_file():
+    raise SystemExit(f"packaged native trtmc executable is missing under {native_dir}")
+if not backends:
+    raise SystemExit(f"packaged TensorRT backend DSO is missing under {native_dir}")
+
+print(f"installed_wheel={wheel}")
+print(f"imported_package={package_file}")
+print(f"installed_trtmc={installed_script_path}")
+print(f"packaged_native_trtmc={native}")
+for backend in backends:
+    print(f"packaged_backend={backend}")
+PY
+}
+
+setup_environment() {
+  verify_environment
+  install_built_wheel
+}
+
+setup_package_build_environment() {
+  verify_environment
 }
 
 impact_analysis() {
@@ -143,6 +201,7 @@ build_all() {
 
   local cuda_include="${TRTMC_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
   local cudart_library="${TRTMC_CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
+  local enable_libtorch_multinomial="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"
 
   : "${trt_include:?TensorRT include directory was not found}"
   : "${trt_library:?TensorRT libnvinfer.so was not found}"
@@ -153,7 +212,8 @@ build_all() {
     -DTRTMC_TRT_INCLUDE_DIR="$trt_include" \
     -DTRTMC_TRT_LIBRARY="$trt_library" \
     -DTRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
-    -DTRTMC_CUDART_LIBRARY="$cudart_library"
+    -DTRTMC_CUDART_LIBRARY="$cudart_library" \
+    -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="$enable_libtorch_multinomial"
   run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" cmake --build build -j
 }
 
@@ -265,7 +325,7 @@ for test in tests:
 
   local cov_args=()
   if [ "$python_coverage_required" = "true" ]; then
-    cov_args=(--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml)
+    cov_args=(--cov=tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml)
   fi
   if [ -s "$selected_tests_file" ]; then
     mapfile -t selected_python_tests < "$selected_tests_file"
@@ -375,7 +435,7 @@ if len(models) > 10:
   local args=(
     --engine-dir "$ENGINE_DIR"
     --result-dir e2e_artifacts
-    --trtmc-binary ./build/trtmc
+    --trtmc-binary "$(command -v trtmc)"
     --workers-per-gpu 4
     --models-file e2e_models.txt
   )
@@ -404,7 +464,7 @@ run_full_e2e() {
   local args=(
     --engine-dir "$ENGINE_DIR"
     --result-dir e2e_artifacts
-    --trtmc-binary ./build/trtmc
+    --trtmc-binary "$(command -v trtmc)"
     --workers-per-gpu 4
     --exclude-ci-tier l0_only
     --exclude-ci-tier multi_device
@@ -543,7 +603,7 @@ validate_manylinux_build_environment() {
     if [ "$glibc_major" -gt 2 ] || \
       { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -gt "$max_glibc_minor" ]; }; then
       echo "ERROR: ${wheel_arch} requires building on glibc 2.${max_glibc_minor} or older; this image has glibc ${glibc_version}." >&2
-      echo "Use TRTMC_PACKAGE_CI_IMAGE built from the repository Dockerfile, or another Ubuntu 22.04/glibc 2.35 aarch64 image." >&2
+      echo "Use TRTMC_CI_IMAGE built from the repository Dockerfile, or another Ubuntu 22.04/glibc 2.35 aarch64 image." >&2
       exit 1
     fi
     echo "manylinux build target=${wheel_arch} build_glibc=${glibc_version}"
@@ -592,8 +652,8 @@ build_pip_package() {
 
   python -m pip install --disable-pip-version-check --quiet "auditwheel>=6.2" "build>=1.2"
   local package_build_root="${TRTMC_PACKAGE_BUILD_ROOT:-/tmp/trtmc-conan-py-wheel-${GITHUB_RUN_ID:-local}}"
-  rm -rf dist "$package_build_root" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
-  find tensorrt_model_connect/tensorrt_model_connect -type d -name __pycache__ -prune -exec rm -rf {} +
+  rm -rf dist "$package_build_root" python/tensorrt_model_connect/build python/tensorrt_model_connect/*.egg-info
+  find python/tensorrt_model_connect -type d -name __pycache__ -prune -exec rm -rf {} +
   mkdir -p dist
 
   local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
@@ -603,7 +663,7 @@ build_pip_package() {
   local tag
   for tag in $python_tags; do
     expected_wheels=$((expected_wheels + 1))
-    rm -rf "$package_build_root/$tag" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+    rm -rf "$package_build_root/$tag" python/tensorrt_model_connect/build python/tensorrt_model_connect/*.egg-info
     env \
       CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
       TRTMC_TRT_INCLUDE_DIR="$trt_include" \
@@ -846,7 +906,7 @@ run_stage() {
       run_step "Generate coverage map" generate_coverage_map
       ;;
     package)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect package build environment" setup_package_build_environment
       run_step "Build trtmc pip package" build_pip_package
       ;;
     wheel-qwen-smoke)
@@ -865,6 +925,8 @@ if [ "$#" -gt 0 ]; then
   exit 0
 fi
 
+run_step "Setup TensorRT-Model-Connect package build environment" setup_package_build_environment
+run_step "Build trtmc pip package" build_pip_package
 run_step "Setup TensorRT-Model-Connect" setup_environment
 run_step "Impact analysis" impact_analysis
 run_step "Build all" build_all
@@ -878,5 +940,4 @@ run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
 run_step "Generate coverage map" generate_coverage_map
-run_step "Build trtmc pip package" build_pip_package
 run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke

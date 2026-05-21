@@ -27,7 +27,11 @@ TRTMC_BIN = REPO_ROOT / "build" / "trtmc"
 
 
 def _has_torchtrt() -> bool:
-    return importlib.util.find_spec("torch_tensorrt") is not None
+    try:
+        import torch_tensorrt  # noqa: F401
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 requires_torchtrt = pytest.mark.skipif(

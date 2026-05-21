@@ -15,6 +15,7 @@ HELPER_FUNCTIONS = {
     "_component_has_weight",
     "_diffusers_missing_weight_components",
     "_is_diffusers_component_enabled",
+    "_is_cached",
     "_snapshot_has_required_files",
 }
 
@@ -42,6 +43,8 @@ def _load_cache_helpers() -> dict:
         },
         "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
         "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
+        "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
+        "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -140,3 +143,38 @@ def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) 
     (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
     assert helpers["_snapshot_has_required_files"](
         snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+
+def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    calls: list[dict] = []
+
+    def fake_snapshot_download(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return str(snapshot)
+
+    helpers["snapshot_download"] = fake_snapshot_download
+
+    assert helpers["_is_cached"]("org/model")
+    assert calls == [{
+        "args": ("org/model",),
+        "kwargs": {
+            "allow_patterns": ["config.json", "model.safetensors", "*.nemo"],
+            "local_files_only": True,
+        },
+    }]
+
+
+def test_cache_skip_rejects_unresolvable_local_revision() -> None:
+    helpers = _load_cache_helpers()
+
+    def fake_snapshot_download(*args, **kwargs):
+        raise RuntimeError("revision is not available offline")
+
+    helpers["snapshot_download"] = fake_snapshot_download
+
+    assert not helpers["_is_cached"]("org/model")

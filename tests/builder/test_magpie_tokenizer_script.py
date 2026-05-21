@@ -26,7 +26,7 @@ def _load_family_magpie_tokenizer():
     root = Path(__file__).resolve().parents[2]
     module_path = (
         root
-        / "tensorrt_model_connect"
+        / "python"
         / "tensorrt_model_connect"
         / "families"
         / "magpie_tts"
@@ -55,7 +55,7 @@ def test_magpie_plugin_uses_family_tokenizer_for_ipa_assets() -> None:
     root = Path(__file__).resolve().parents[2]
     plugin_path = (
         root
-        / "tensorrt_model_connect"
+        / "python"
         / "tensorrt_model_connect"
         / "families"
         / "magpie_tts"

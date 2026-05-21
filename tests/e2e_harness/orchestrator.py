@@ -187,8 +187,8 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
                 python,
                 "-c",
                 (
-                    "import importlib.util, sys; "
-                    f"sys.exit(0 if importlib.util.find_spec({module!r}) else 1)"
+                    "import importlib; "
+                    f"importlib.import_module({module!r})"
                 ),
             ],
             capture_output=True,
@@ -196,8 +196,10 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
             timeout=timeout_s,
         )
         if result.returncode == 0:
-            return True, f"Module {module} available in {phase} profile"
-        return False, f"Module {module} not available in {phase} profile"
+            return True, f"Module {module} importable in {phase} profile"
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        return False, f"Module {module} not importable in {phase} profile{suffix}"
     except Exception as exc:
         return False, f"Module check failed in {phase} profile: {exc}"
 

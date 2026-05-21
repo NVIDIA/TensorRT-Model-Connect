@@ -194,11 +194,11 @@ def build_evolve_prompt(
     ## Files You May Modify
 
     ### Python builder (engine construction):
-    - `tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py` — family plugin config
-    - `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` — builder parameters
-    - `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` — TRT graph operations (atomic ops)
-    - `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` — composable graph blocks
-    - `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` — build orchestrator
+    - `python/tensorrt_model_connect/families/{family_name}.py` — family plugin config
+    - `python/tensorrt_model_connect/standard_decoder_builder.py` — builder parameters
+    - `python/tensorrt_model_connect/graph_ops.py` — TRT graph operations (atomic ops)
+    - `python/tensorrt_model_connect/graph_blocks.py` — composable graph blocks
+    - `python/tensorrt_model_connect/engine_builder.py` — build orchestrator
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
     - `src/runtime/trt/core/device_kv_cache.h/cpp` — KV cache + decode step
@@ -210,8 +210,8 @@ def build_evolve_prompt(
     - `tools/perf_compare.py` — benchmarking tool
     - `tools/cpu_profile.py` — CPU phase profiling
     - `tools/diff_logits.py` — correctness checker
-    - `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
-    - `tensorrt_model_connect/tensorrt_model_connect/config.py` — ModelConfig dataclass
+    - `python/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
+    - `python/tensorrt_model_connect/config.py` — ModelConfig dataclass
 
     ## CRITICAL RULES
     1. **Profile FIRST** — run all 3 profiling levels before any optimization.

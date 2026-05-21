@@ -34,7 +34,7 @@ try:
 except ImportError:
     from cuda import cudart  # type: ignore[no-redef]
 
-sys.path.insert(0, "tensorrt_model_connect")
+sys.path.insert(0, "python")
 from tensorrt_model_connect import graph_ops
 
 

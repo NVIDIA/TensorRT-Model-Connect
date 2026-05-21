@@ -37,7 +37,11 @@ def _discover_plugin_names_from_filesystem() -> set[str]:
     ``plugin = ClassName()`` assignment.
     """
     names: set[str] = set()
-    repo_root = Path(__file__).resolve().parent.parent.parent / "tensorrt_model_connect" / Path("tensorrt_model_connect")
+    repo_root = (
+        Path(__file__).resolve().parent.parent.parent
+        / "python"
+        / "tensorrt_model_connect"
+    )
     plugin_dirs = [
         repo_root / "families",
         repo_root / "engine_defs" / "torch_trt" / "families",

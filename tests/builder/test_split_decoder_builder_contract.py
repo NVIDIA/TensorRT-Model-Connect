@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FAMILIES_DIR = (
-    ROOT / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    ROOT / "python" / "tensorrt_model_connect" / "families"
 )
 
 

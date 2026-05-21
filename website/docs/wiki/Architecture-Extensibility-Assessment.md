@@ -28,7 +28,7 @@ As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support a
 
 ### Adding a standard dense decoder family
 
-Create a Python plugin file in `tensorrt_model_connect/tensorrt_model_connect/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
+Create a Python plugin file in `python/tensorrt_model_connect/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
 
 **Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron (extended decoder).
 
@@ -168,7 +168,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 **Schedulers**:
 - Flow matching: `z_t = (1-t)*x + t*noise`, Euler step: `z_{t-dt} = z_t - dt*v`
 - Configurable shift parameter for timestep adjustment
-- C++ implementation in `flow_match_euler_scheduler.cpp`, Python in `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py`
+- C++ implementation in `flow_match_euler_scheduler.cpp`, Python in `python/tensorrt_model_connect/diffusion_runner.py`
 
 **Testing**: See [Testing and Validation](Testing-and-Validation.md#diffusion-domain-tests) for the 9-step component validation and frame quality checks.
 

@@ -60,7 +60,7 @@ Create an ADR when the diff introduces or substantially changes any of these:
 | Signal | Detection |
 |--------|-----------|
 | New runtime strategy | New plugin/strategy registration or runtime pipeline path |
-| New family plugin | New family module under `tensorrt_model_connect/tensorrt_model_connect/families/` |
+| New family plugin | New family module under `python/tensorrt_model_connect/families/` |
 | New pipeline class | New `.cpp` or `.h` under `src/runtime/pipelines/` or equivalent runtime path |
 | Config schema change | New persisted config field or parser behavior |
 | New E2E task strategy | New harness runner or comparator family |

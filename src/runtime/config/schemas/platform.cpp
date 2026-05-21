@@ -1,5 +1,5 @@
 // Registration for the "platform" namespace schema.
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/platform.py.
 
 #include "trtmc/config/schemas/platform.h"
 

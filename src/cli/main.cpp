@@ -121,8 +121,7 @@ std::string build_pythonpath() {
                                                !rel_exe_path.empty() &&
                                                first_component.string().rfind("build", 0) == 0;
         if (running_from_source_build) {
-            const auto source_pkg =
-                std::filesystem::path(TRTMC_SOURCE_DIR) / "tensorrt_model_connect";
+            const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "python";
             std::error_code ec;
             if (std::filesystem::is_directory(source_pkg, ec)) {
                 pythonpath = source_pkg.string();
