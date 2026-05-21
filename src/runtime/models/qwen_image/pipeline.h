@@ -79,24 +79,6 @@ class QwenImagePipeline final : public IPipeline {
     // std::runtime_error if either factor is non-positive.
     LatentShape compute_latent_shape(int height, int width) const;
 
-    struct EditImagePlan {
-        int output_height{0};
-        int output_width{0};
-        int condition_height{0}; // Qwen2.5-VL processor image height.
-        int condition_width{0};  // Qwen2.5-VL processor image width.
-        int vae_height{0};       // Input image height before VAE encode.
-        int vae_width{0};        // Input image width before VAE encode.
-        LatentShape output_tokens;
-        LatentShape condition_tokens;
-        int scheduler_image_tokens{0}; // Output-image tokens only.
-        int denoiser_image_tokens{0};  // Output + condition tokens.
-    };
-
-    // Resolve Edit output/condition image sizes and packed token counts.
-    // cfg.height/width override output size only.
-    EditImagePlan compute_edit_image_plan(int image_height, int image_width,
-                                          const GenerateConfig& cfg = {}) const;
-
     // Normalize a raw timestep value to the [0, 1] range the engine expects.
     // Qwen-Image scheduler convention: divide by num_train_timesteps (1000).
     // The engine has the full sinusoidal + 2-layer SiLU MLP baked in, so the
@@ -150,25 +132,25 @@ class QwenImagePipeline final : public IPipeline {
                                          const std::vector<float>& hidden_states,
                                          const std::vector<int32_t>& attention_mask) const;
 
-    // -------------------------------------------------------------------------
     // Denoise loop. Drives the scheduler over `num_steps`, calls
     // run_denoiser_once twice per step when cfg_scale > 1.0 (cond + uncond),
     // combines via Qwen-Image-flavored true-CFG (per-token L2 renormalization),
     // and applies the Euler step in-place. Returns the final packed latents.
     //
-    // The latents_packed buffer is consumed by value so the caller does not
-    // need its pre-loop state; n_img is passed explicitly because the scheduler
-    // needs it for dynamic-mu shifting (image_seq_len argument).
+    // When `condition_latents_packed` is non-empty, concatenates it along the
+    // sequence axis after `latents_packed` on every step (Edit mode) and only
+    // applies the scheduler update to the leading n_img tokens. The Edit
+    // engines are baked for total length n_img + n_condition_img.
     //
-    // Mirrors QwenImageDebugRunner._generate's main loop (debug_runner.py).
-    // Caveat: the Python runner ALSO performs per-token L2 renormalization
+    // Caveat: the Python runner performs per-token L2 renormalization
     //   noise = comb * (||pos|| / max(||comb||, 1e-8))
     // where the norm is taken over the channel axis of each token. We mirror
     // that behavior verbatim — it's a Qwen-Image-specific CFG variant.
-    // -------------------------------------------------------------------------
-    std::vector<float> denoise_loop_with_cfg(std::vector<float> latents_packed,
-                                             const EncodedPrompt& pos, const EncodedPrompt& neg,
-                                             int n_img, int num_steps, float cfg_scale) const;
+    std::vector<float>
+    denoise_loop_with_cfg(std::vector<float> latents_packed, const EncodedPrompt& pos,
+                          const EncodedPrompt& neg, int n_img, int num_steps, float cfg_scale,
+                          const std::vector<float>& condition_latents_packed = {},
+                          int n_condition_img = 0) const;
 
     // -------------------------------------------------------------------------
     // VAE decode. Unpatchify packed latents back to [1, C, 1, h_lat, w_lat],
@@ -188,12 +170,27 @@ class QwenImagePipeline final : public IPipeline {
                             int w_lat) const;
 
   private:
+    struct EditImagePlan {
+        int output_height{0};
+        int output_width{0};
+        int condition_height{0}; // Qwen2.5-VL processor image height.
+        int condition_width{0};  // Qwen2.5-VL processor image width.
+        int vae_height{0};       // Input image height before VAE encode.
+        int vae_width{0};        // Input image width before VAE encode.
+        LatentShape output_tokens;
+        LatentShape condition_tokens;
+        int scheduler_image_tokens{0}; // Output-image tokens only.
+        int denoiser_image_tokens{0};  // Output + condition tokens.
+    };
+
     struct EditInputTensors {
         EditImagePlan plan;
         std::vector<float> condition_pixels_hwc;
         std::vector<float> vae_pixels_ncthw;
     };
 
+    EditImagePlan compute_edit_image_plan(int image_height, int image_width,
+                                          const GenerateConfig& cfg = {}) const;
     EditInputTensors preprocess_edit_input_image(const float* image_pixels, int32_t image_height,
                                                  int32_t image_width,
                                                  const GenerateConfig& cfg = {}) const;
@@ -201,10 +198,6 @@ class QwenImagePipeline final : public IPipeline {
     encode_text_with_image_conditioning(const std::string& prompt,
                                         const std::vector<float>& image_features) const;
     std::vector<float> vision_encode_edit_condition(const EditInputTensors& edit_inputs) const;
-    std::vector<float> denoise_loop_with_cfg_image_conditioning(
-        std::vector<float> latents_packed, const std::vector<float>& condition_latents_packed,
-        const EncodedPrompt& pos, const EncodedPrompt& neg, int n_img, int n_condition_img,
-        int num_steps, float cfg_scale) const;
     std::vector<float> vae_encode_edit_condition(const EditInputTensors& edit_inputs) const;
 
     // Patchify a 4D latent tensor [1, C, H, W] (row-major C, H, W) into the
