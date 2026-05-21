@@ -389,7 +389,12 @@ def build_qwen_vl_vision_engine(
                 network, normed, **attn_kwargs)
         else:
             attn_out = graph_ops.add_windowed_self_attention_with_rope(
-                network, normed, window_patch_counts=window_patch_counts, **attn_kwargs)
+                network,
+                normed,
+                num_windows=num_windows,
+                window_patch_counts=window_patch_counts,
+                **attn_kwargs,
+            )
 
         # Residual
         res1 = network.add_elementwise(

@@ -262,18 +262,18 @@ def build_bundle_config(
                     16384 * resize_factor * resize_factor,
                 )
             )
-            vision_image_height, vision_image_width = _qwen_vl_smart_resize(
-                int(edit_condition_image_size[0]),
-                int(edit_condition_image_size[1]),
-                factor=resize_factor,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-            )
             vae_condition_height, vae_condition_width = _calculate_aspect_size_from_area(
                 _EDIT_IMAGE_CONDITION_SIDE,
                 int(edit_condition_image_size[0]),
                 int(edit_condition_image_size[1]),
                 32,
+            )
+            vision_image_height, vision_image_width = _qwen_vl_smart_resize(
+                vae_condition_height,
+                vae_condition_width,
+                factor=resize_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
             )
         bundle["vision_encoder"] = {
             "type": "qwen2_5_vl_vision",
