@@ -132,6 +132,15 @@ class QwenImagePipeline final : public IPipeline {
                                          const std::vector<float>& hidden_states,
                                          const std::vector<int32_t>& attention_mask) const;
 
+    // Hot-path variant of run_denoiser_once: writes the predicted noise into a
+    // caller-provided `out_noise` buffer (resized to the engine output size) so
+    // the denoise loop avoids re-allocating per step. Skips validation — the
+    // caller is responsible for ensuring shapes are consistent (validated once
+    // before the loop).
+    void run_denoiser_into(const std::vector<float>& latents_packed, float normalized_t,
+                           const std::vector<float>& hidden_states,
+                           std::vector<float>& out_noise) const;
+
     // Denoise loop. Drives the scheduler over `num_steps`, calls
     // run_denoiser_once twice per step when cfg_scale > 1.0 (cond + uncond),
     // combines via Qwen-Image-flavored true-CFG (per-token L2 renormalization),

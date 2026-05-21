@@ -760,14 +760,15 @@ QwenImagePipeline::EncodedPrompt QwenImagePipeline::encode_text_with_image_condi
             "QwenImagePipeline::encode_text_with_image_conditioning: image features exceed "
             "text max_seq_len");
     }
-    for (int tok = 0; tok < image_feature_tokens; ++tok) {
-        const std::size_t dst_row = image_start + static_cast<std::size_t>(tok);
-        image_mask[dst_row] = 1.0F;
-        std::copy_n(image_features.data() +
-                        static_cast<std::size_t>(tok) * static_cast<std::size_t>(text_embed_dim),
-                    static_cast<std::size_t>(text_embed_dim),
-                    image_hidden.data() + dst_row * static_cast<std::size_t>(text_embed_dim));
-    }
+    // image_features and the destination slice of image_hidden are both
+    // contiguous (image_feature_tokens consecutive rows of text_embed_dim
+    // floats), so the splice collapses to one memcpy plus a fill for the mask.
+    std::memcpy(image_hidden.data() + image_start * static_cast<std::size_t>(text_embed_dim),
+                image_features.data(),
+                static_cast<std::size_t>(image_feature_tokens) *
+                    static_cast<std::size_t>(text_embed_dim) * sizeof(float));
+    std::fill_n(image_mask.begin() + static_cast<std::ptrdiff_t>(image_start), image_feature_tokens,
+                1.0F);
 
     TensorMap inputs;
     inputs["input_ids"] =
@@ -933,6 +934,18 @@ QwenImagePipeline::run_denoiser_once(const std::vector<float>& latents_packed, f
                                  std::to_string(expected_hidden_size));
     }
 
+    std::vector<float> result;
+    run_denoiser_into(latents_packed, normalized_t, hidden_states, result);
+    return result;
+}
+
+void QwenImagePipeline::run_denoiser_into(const std::vector<float>& latents_packed,
+                                          float normalized_t,
+                                          const std::vector<float>& hidden_states,
+                                          std::vector<float>& out_noise) const {
+    const int in_channels = config_.denoiser.in_channels;
+    const int max_text_tokens = config_.denoiser.max_text_tokens;
+    const int text_embed_dim = config_.denoiser.text_embed_dim;
     const int64_t n_img =
         static_cast<int64_t>(latents_packed.size() / static_cast<std::size_t>(in_channels));
     float timestep_buf = normalized_t;
@@ -949,9 +962,10 @@ QwenImagePipeline::run_denoiser_once(const std::vector<float>& latents_packed, f
 
     auto outputs = denoiser_engine_->forward(inputs);
     const auto& noise = outputs["noise_patched"];
-    std::vector<float> result(noise.numel());
-    std::memcpy(result.data(), noise.data, result.size() * sizeof(float));
-    return result;
+    if (out_noise.size() != noise.numel()) {
+        out_noise.resize(noise.numel());
+    }
+    std::memcpy(out_noise.data(), noise.data, out_noise.size() * sizeof(float));
 }
 
 // -----------------------------------------------------------------------------
@@ -1030,39 +1044,27 @@ FlowMatchEulerScheduler build_scheduler(const QwenImageDiffusionConfig& dc, int 
 void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
                              const std::vector<float>& noise_neg, float cfg_scale, int n_img,
                              std::size_t channels, std::vector<float>& out) {
+    // Per-token L2 norms over `channels` (=64) fp32 values stay well below
+    // 1e4, so a float accumulator is numerically fine and lets the compiler
+    // SIMD-vectorize the reductions.
+    constexpr float kCfgRenormFloorF = static_cast<float>(kCfgRenormFloor);
     for (int tok = 0; tok < n_img; ++tok) {
         const std::size_t base = static_cast<std::size_t>(tok) * channels;
-        double pos_sq = 0.0;
-        double comb_sq = 0.0;
+        float pos_sq = 0.0F;
+        float comb_sq = 0.0F;
         for (std::size_t c = 0; c < channels; ++c) {
             const float p = noise_pos[base + c];
             const float ng = noise_neg[base + c];
             const float comb = ng + cfg_scale * (p - ng);
             out[base + c] = comb;
-            pos_sq += static_cast<double>(p) * static_cast<double>(p);
-            comb_sq += static_cast<double>(comb) * static_cast<double>(comb);
+            pos_sq += p * p;
+            comb_sq += comb * comb;
         }
-        const double scale = std::sqrt(pos_sq) / std::max(std::sqrt(comb_sq), kCfgRenormFloor);
-        const float scale_f = static_cast<float>(scale);
+        const float scale = std::sqrt(pos_sq) / std::max(std::sqrt(comb_sq), kCfgRenormFloorF);
         for (std::size_t c = 0; c < channels; ++c) {
-            out[base + c] *= scale_f;
+            out[base + c] *= scale;
         }
     }
-}
-
-// Crop the denoiser's noise prediction down to the output-image prefix.
-// Used in Edit mode where the model is fed [output, condition] tokens but the
-// scheduler only updates the output portion. Truncates `noise` in place to
-// the first `generated_numel` floats and validates the original total length.
-void crop_noise_to_output(std::vector<float>& noise, std::size_t generated_numel,
-                          std::size_t total_numel) {
-    if (noise.size() != total_numel) {
-        throw std::runtime_error(
-            "QwenImagePipeline::denoise_loop_with_cfg: denoiser output size " +
-            std::to_string(noise.size()) +
-            " does not match generated + condition token size = " + std::to_string(total_numel));
-    }
-    noise.resize(generated_numel);
 }
 
 } // namespace
@@ -1076,6 +1078,28 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
     validate_denoise_loop_inputs(latents_packed.size(), condition_latents_packed.size(), n_img,
                                  has_condition ? n_condition_img : 0, num_steps, in_channels);
 
+    // Per-step invariants validated once here so the hot loop can call
+    // run_denoiser_into directly without re-checking dimensions.
+    if (!denoiser_engine_) {
+        throw std::runtime_error("QwenImagePipeline::denoise_loop_with_cfg: denoiser_engine_ is "
+                                 "null");
+    }
+    const int max_text_tokens = config_.denoiser.max_text_tokens;
+    const int text_embed_dim = config_.denoiser.text_embed_dim;
+    if (max_text_tokens <= 0 || text_embed_dim <= 0) {
+        throw std::runtime_error(
+            "QwenImagePipeline::denoise_loop_with_cfg: invalid denoiser config");
+    }
+    const std::size_t expected_hidden_size =
+        static_cast<std::size_t>(max_text_tokens) * static_cast<std::size_t>(text_embed_dim);
+    if (pos.hidden_states.size() != expected_hidden_size ||
+        neg.hidden_states.size() != expected_hidden_size) {
+        throw std::runtime_error(
+            "QwenImagePipeline::denoise_loop_with_cfg: hidden_states size does not match "
+            "max_text_tokens * text_embed_dim = " +
+            std::to_string(expected_hidden_size));
+    }
+
     auto scheduler = build_scheduler(config_.diffusion, num_steps, n_img);
     const auto& timesteps = scheduler.timesteps();
 
@@ -1083,56 +1107,53 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
     const std::size_t generated_numel = latents_packed.size();
     const std::size_t total_numel = generated_numel + condition_latents_packed.size();
     const std::size_t channels = static_cast<std::size_t>(in_channels);
-    std::vector<float> noise_pred(generated_numel);
+
+    // Pre-allocate hot-loop buffers. The denoiser engine produces total_numel
+    // floats per forward (= generated_numel in T2I, = generated + condition in
+    // Edit). Reusing these across steps + CFG variants means the loop does no
+    // per-iteration allocation.
+    std::vector<float> noise_pos_buf(total_numel);
+    std::vector<float> noise_neg_buf;
+    std::vector<float> noise_pred_buf;
+    if (do_cfg) {
+        noise_neg_buf.resize(total_numel);
+        noise_pred_buf.resize(generated_numel);
+    }
 
     // Edit mode concatenates condition latents along the sequence axis on each
     // step (the engine is baked for the fixed total length, latents_packed[0]
-    // varies per step).
+    // varies per step). Copy the condition tail once; refresh the head each
+    // step from the changing latents_packed.
     std::vector<float> model_buffer;
     if (has_condition) {
         model_buffer.resize(total_numel);
         std::memcpy(model_buffer.data() + generated_numel, condition_latents_packed.data(),
                     condition_latents_packed.size() * sizeof(float));
     }
-    const auto build_model_input = [&]() -> const std::vector<float>& {
-        if (!has_condition) {
-            return latents_packed;
-        }
-        std::memcpy(model_buffer.data(), latents_packed.data(),
-                    latents_packed.size() * sizeof(float));
-        return model_buffer;
-    };
 
     for (int step = 0; step < num_steps; ++step) {
         const float t = timesteps[static_cast<std::size_t>(step)];
         const float norm_t = normalize_timestep(t);
-        const auto& model_latents = build_model_input();
-
-        auto noise_pos =
-            run_denoiser_once(model_latents, norm_t, pos.hidden_states, pos.attention_mask);
+        const std::vector<float>* model_latents = &latents_packed;
         if (has_condition) {
-            crop_noise_to_output(noise_pos, generated_numel, total_numel);
-        } else if (noise_pos.size() != generated_numel) {
-            throw std::runtime_error("QwenImagePipeline::denoise_loop_with_cfg: denoiser "
-                                     "output size mismatch");
+            std::memcpy(model_buffer.data(), latents_packed.data(),
+                        latents_packed.size() * sizeof(float));
+            model_latents = &model_buffer;
         }
 
+        run_denoiser_into(*model_latents, norm_t, pos.hidden_states, noise_pos_buf);
+        const float* noise_for_scheduler = noise_pos_buf.data();
         if (do_cfg) {
-            auto noise_neg =
-                run_denoiser_once(model_latents, norm_t, neg.hidden_states, neg.attention_mask);
-            if (has_condition) {
-                crop_noise_to_output(noise_neg, generated_numel, total_numel);
-            } else if (noise_neg.size() != generated_numel) {
-                throw std::runtime_error("QwenImagePipeline::denoise_loop_with_cfg: denoiser "
-                                         "output size mismatch");
-            }
-            combine_cfg_with_renorm(noise_pos, noise_neg, cfg_scale, n_img, channels, noise_pred);
-        } else {
-            noise_pred = std::move(noise_pos);
+            run_denoiser_into(*model_latents, norm_t, neg.hidden_states, noise_neg_buf);
+            // combine_cfg_with_renorm only touches the first n_img tokens, so
+            // the trailing condition portion of the buffers is ignored.
+            combine_cfg_with_renorm(noise_pos_buf, noise_neg_buf, cfg_scale, n_img, channels,
+                                    noise_pred_buf);
+            noise_for_scheduler = noise_pred_buf.data();
         }
 
-        // Euler step in-place: latents += (sigma_next - sigma) * noise.
-        scheduler.step(latents_packed.data(), noise_pred.data(),
+        // Euler step in-place over the output-image tokens only.
+        scheduler.step(latents_packed.data(), noise_for_scheduler,
                        static_cast<int32_t>(latents_packed.size()), step);
     }
 
