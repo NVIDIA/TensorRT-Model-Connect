@@ -290,9 +290,11 @@ class DecoderPlugin final : public IPipelinePlugin {
         int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
         std::string prefill_log_label;
         if (!tp_runtime.config.enabled) {
-            prefill_module =
+            auto split_prefill_module =
                 load_split_prefill_module(ctx, stream, io, kv_names, prefill_profile_idx,
                                           prefill_max_length, prefill_log_label);
+            if (split_prefill_module)
+                prefill_module = std::move(split_prefill_module);
         }
 
         auto linear_spec_lora_prefill_module =
@@ -385,6 +387,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.mask_token_id = extract_json_int(ctx.config_json, "mask_token_id", 100);
         tgc.diffusion_block_length = extract_json_int(ctx.config_json, "block_size", 32);
         tgc.supports_text_diffusion = true;
+        if (tgc.chat_template_format == ChatTemplateFormat::kNone)
+            tgc.chat_template_format = ChatTemplateFormat::kNemotronLabsDiffusion;
     }
 
     static void apply_text_trace_from_registry(const config::ConfigBundle* cfg) {

@@ -75,6 +75,16 @@ static void test_detect_nemotron_h() {
     check(fmt == trtmc::ChatTemplateFormat::kNemotronH, "nemotron-h detection");
 }
 
+static void test_detect_nemotron_labs_diffusion() {
+    std::string tpl = "{%- set truncate_history_thinking = truncate_history_thinking if "
+                      "truncate_history_thinking is defined else True %}"
+                      "{%- set enable_thinking = enable_thinking if enable_thinking is defined "
+                      "else False %}";
+    auto fmt = trtmc::detect_chat_template_format(tpl);
+    check(fmt == trtmc::ChatTemplateFormat::kNemotronLabsDiffusion,
+          "nemotron-labs-diffusion detection");
+}
+
 static void test_detect_unknown() {
     auto fmt = trtmc::detect_chat_template_format("some random jinja template");
     check(fmt == trtmc::ChatTemplateFormat::kNone, "unknown -> kNone");
@@ -131,6 +141,14 @@ static void test_apply_nemotron_h_no_thinking() {
           "nemotron-h no-thinking application");
 }
 
+static void test_apply_nemotron_labs_diffusion_no_thinking() {
+    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronLabsDiffusion,
+                                             "hello", false);
+    check(result == "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n"
+                    "<|im_start|>assistant\n<think></think>",
+          "nemotron-labs-diffusion no-thinking application");
+}
+
 static void test_apply_mistral_no_thinking_ignored() {
     auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kMistral, "hello", false);
     check(result == "[INST] hello [/INST]", "mistral no-thinking ignored");
@@ -145,6 +163,7 @@ int main() {
     test_detect_gemma();
     test_detect_llama3();
     test_detect_nemotron_h();
+    test_detect_nemotron_labs_diffusion();
     test_detect_unknown();
 
     // Application
@@ -156,6 +175,7 @@ int main() {
     test_apply_gemma();
     test_apply_llama3();
     test_apply_nemotron_h_no_thinking();
+    test_apply_nemotron_labs_diffusion_no_thinking();
     test_apply_mistral_no_thinking_ignored();
 
     if (failures > 0) {

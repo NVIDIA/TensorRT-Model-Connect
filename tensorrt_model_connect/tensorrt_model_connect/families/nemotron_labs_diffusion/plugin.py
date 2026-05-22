@@ -63,7 +63,7 @@ class NemotronLabsDiffusionPlugin:
         quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
-        if config.raw.get("_decoder_engine_role") == "decode":
+        if config.raw.get("_decoder_engine_role") in (None, "decode"):
             config.raw["_decoder_engine_role"] = "dual_profile"
         config.raw["_decoder_full_logits_output"] = True
         config.raw.setdefault("runtime_strategy", self.runtime_strategy)

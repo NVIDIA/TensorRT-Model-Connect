@@ -42,6 +42,27 @@ _NEMOTRON_LABS_DIFFUSION_MODES = {
     "linear_speculation_lora": "linear_spec_lora",
 }
 
+_NEMOTRON_LABS_DIFFUSION_FALLBACK_CHAT_TEMPLATE = (
+    "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False -%}"
+    "{%- if messages[0]['role'] == 'system' -%}"
+    "{{ '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+    "{%- set loop_messages = messages[1:] -%}"
+    "{%- else -%}"
+    "{{ '<|im_start|>system\\n<|im_end|>\\n' }}"
+    "{%- set loop_messages = messages -%}"
+    "{%- endif -%}"
+    "{%- for message in loop_messages -%}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}"
+    "{%- if enable_thinking -%}"
+    "{{ '<|im_start|>assistant\\n<think>\\n' }}"
+    "{%- else -%}"
+    "{{ '<|im_start|>assistant\\n<think></think>' }}"
+    "{%- endif -%}"
+    "{%- endif -%}"
+)
+
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
     """Return a torch dtype expression string matching the manifest precision.
@@ -402,6 +423,7 @@ class HfTransformersReference:
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
         enable_thinking = contract_config.get("enable_thinking", True)
+        fallback_chat_template = _NEMOTRON_LABS_DIFFUSION_FALLBACK_CHAT_TEMPLATE
 
         script = textwrap.dedent(f"""\
             import inspect, json, torch
@@ -421,6 +443,7 @@ class HfTransformersReference:
             tokens_path = {tokens_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
+            fallback_chat_template = {fallback_chat_template!r}
 
             def _call_supported(fn, input_ids, **kwargs):
                 sig = inspect.signature(fn)
@@ -468,6 +491,9 @@ class HfTransformersReference:
                 template_path = Path(model_ref) / "chat_template.jinja"
                 if getattr(tokenizer, "chat_template", None) is None and template_path.is_file():
                     chat_kwargs["chat_template"] = template_path.read_text(encoding="utf-8")
+                if (getattr(tokenizer, "chat_template", None) is None
+                        and "chat_template" not in chat_kwargs):
+                    chat_kwargs["chat_template"] = fallback_chat_template
                 text_input = tokenizer.apply_chat_template(
                     messages, tokenize=False, **chat_kwargs)
                 input_ids = tokenizer.encode(text_input, add_special_tokens=False)

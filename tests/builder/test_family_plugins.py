@@ -256,6 +256,7 @@ class TestNemotronLabsDiffusionPlugin:
         def fake_build(config, weights, max_cache_length, **kwargs):
             captured.update(kwargs)
             captured["runtime_strategy"] = config.raw.get("runtime_strategy")
+            captured["decoder_engine_role"] = config.raw.get("_decoder_engine_role")
             captured["full_logits_raw"] = config.raw.get("_decoder_full_logits_output")
             return b"plan"
 
@@ -263,6 +264,7 @@ class TestNemotronLabsDiffusionPlugin:
         assert plugin.build_engine(cfg, {}, 64, precision="bf16") == b"plan"
         assert captured["full_logits_output"] is True
         assert captured["runtime_strategy"] == "nemotron_labs_diffusion"
+        assert captured["decoder_engine_role"] == "dual_profile"
         assert captured["full_logits_raw"] is True
 
     def test_build_extra_engines_merges_linear_spec_lora(self, tmp_path, monkeypatch):
