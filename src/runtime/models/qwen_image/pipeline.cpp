@@ -1012,6 +1012,28 @@ void validate_denoise_loop_inputs(std::size_t latents_size, std::size_t conditio
     }
 }
 
+// Validate denoiser runtime invariants used by denoise_loop_with_cfg. These
+// don't change across steps, so checking once before the loop lets the hot
+// path skip per-call re-validation.
+void validate_denoise_loop_runtime(bool has_engine, int max_text_tokens, int text_embed_dim,
+                                   std::size_t pos_hidden_size, std::size_t neg_hidden_size) {
+    constexpr const char* kFn = "QwenImagePipeline::denoise_loop_with_cfg: ";
+    if (!has_engine) {
+        throw std::runtime_error(std::string(kFn) + "denoiser_engine_ is null");
+    }
+    if (max_text_tokens <= 0 || text_embed_dim <= 0) {
+        throw std::runtime_error(std::string(kFn) + "invalid denoiser config");
+    }
+    const std::size_t expected =
+        static_cast<std::size_t>(max_text_tokens) * static_cast<std::size_t>(text_embed_dim);
+    if (pos_hidden_size != expected || neg_hidden_size != expected) {
+        throw std::runtime_error(std::string(kFn) +
+                                 "hidden_states size does not match max_text_tokens * "
+                                 "text_embed_dim = " +
+                                 std::to_string(expected));
+    }
+}
+
 // Build a FlowMatchEulerScheduler from the bundle's diffusion config and
 // set up its timestep schedule for `num_steps` and `n_img` tokens.
 FlowMatchEulerScheduler build_scheduler(const QwenImageDiffusionConfig& dc, int num_steps,
@@ -1075,30 +1097,14 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
     int n_condition_img) const {
     const int in_channels = config_.denoiser.in_channels;
     const bool has_condition = !condition_latents_packed.empty();
+    const int effective_condition_img = has_condition ? n_condition_img : 0;
     validate_denoise_loop_inputs(latents_packed.size(), condition_latents_packed.size(), n_img,
-                                 has_condition ? n_condition_img : 0, num_steps, in_channels);
-
+                                 effective_condition_img, num_steps, in_channels);
     // Per-step invariants validated once here so the hot loop can call
     // run_denoiser_into directly without re-checking dimensions.
-    if (!denoiser_engine_) {
-        throw std::runtime_error("QwenImagePipeline::denoise_loop_with_cfg: denoiser_engine_ is "
-                                 "null");
-    }
-    const int max_text_tokens = config_.denoiser.max_text_tokens;
-    const int text_embed_dim = config_.denoiser.text_embed_dim;
-    if (max_text_tokens <= 0 || text_embed_dim <= 0) {
-        throw std::runtime_error(
-            "QwenImagePipeline::denoise_loop_with_cfg: invalid denoiser config");
-    }
-    const std::size_t expected_hidden_size =
-        static_cast<std::size_t>(max_text_tokens) * static_cast<std::size_t>(text_embed_dim);
-    if (pos.hidden_states.size() != expected_hidden_size ||
-        neg.hidden_states.size() != expected_hidden_size) {
-        throw std::runtime_error(
-            "QwenImagePipeline::denoise_loop_with_cfg: hidden_states size does not match "
-            "max_text_tokens * text_embed_dim = " +
-            std::to_string(expected_hidden_size));
-    }
+    validate_denoise_loop_runtime(denoiser_engine_ != nullptr, config_.denoiser.max_text_tokens,
+                                  config_.denoiser.text_embed_dim, pos.hidden_states.size(),
+                                  neg.hidden_states.size());
 
     auto scheduler = build_scheduler(config_.diffusion, num_steps, n_img);
     const auto& timesteps = scheduler.timesteps();
@@ -1162,35 +1168,48 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
 
 namespace {
 
-void validate_vae_encode_edit_dims(bool has_engine, int latent_channels, int patch, int vae_scale,
-                                   int image_h, int image_w, std::size_t vae_pixels_size,
-                                   std::size_t latents_mean_size, std::size_t latents_std_size) {
-    constexpr const char* kFn = "QwenImagePipeline::vae_encode_edit_condition: ";
-    if (!has_engine) {
-        throw std::runtime_error(std::string(kFn) + "vae_encoder_engine_ is null");
-    }
+constexpr const char* kVaeEncodeFn = "QwenImagePipeline::vae_encode_edit_condition: ";
+
+void validate_vae_encode_image_geometry(int latent_channels, int patch, int vae_scale, int image_h,
+                                        int image_w) {
     if (latent_channels <= 0 || patch <= 0 || vae_scale <= 0 || image_h <= 0 || image_w <= 0) {
-        throw std::runtime_error(std::string(kFn) +
+        throw std::runtime_error(std::string(kVaeEncodeFn) +
                                  "invalid dims (latent_channels, patch_size, vae spatial scale, "
                                  "VAE image height/width must all be > 0)");
     }
     if (image_h % vae_scale != 0 || image_w % vae_scale != 0) {
-        throw std::runtime_error(std::string(kFn) +
+        throw std::runtime_error(std::string(kVaeEncodeFn) +
                                  "VAE image dims must be divisible by vae spatial scale");
     }
+}
+
+void validate_vae_encode_buffer_sizes(int latent_channels, int image_h, int image_w,
+                                      std::size_t vae_pixels_size, std::size_t latents_mean_size,
+                                      std::size_t latents_std_size) {
     const std::size_t expected_pixels =
         3UL * static_cast<std::size_t>(image_h) * static_cast<std::size_t>(image_w);
     if (vae_pixels_size != expected_pixels) {
-        throw std::runtime_error(std::string(kFn) + "vae_pixels_ncthw size " +
+        throw std::runtime_error(std::string(kVaeEncodeFn) + "vae_pixels_ncthw size " +
                                  std::to_string(vae_pixels_size) +
                                  " does not match 3 * H * W = " + std::to_string(expected_pixels));
     }
     if (static_cast<int>(latents_mean_size) != latent_channels ||
         static_cast<int>(latents_std_size) != latent_channels) {
-        throw std::runtime_error(std::string(kFn) +
+        throw std::runtime_error(std::string(kVaeEncodeFn) +
                                  "preprocessor latents_mean/std missing or wrong size (need " +
                                  std::to_string(latent_channels) + " entries each)");
     }
+}
+
+void validate_vae_encode_edit_dims(bool has_engine, int latent_channels, int patch, int vae_scale,
+                                   int image_h, int image_w, std::size_t vae_pixels_size,
+                                   std::size_t latents_mean_size, std::size_t latents_std_size) {
+    if (!has_engine) {
+        throw std::runtime_error(std::string(kVaeEncodeFn) + "vae_encoder_engine_ is null");
+    }
+    validate_vae_encode_image_geometry(latent_channels, patch, vae_scale, image_h, image_w);
+    validate_vae_encode_buffer_sizes(latent_channels, image_h, image_w, vae_pixels_size,
+                                     latents_mean_size, latents_std_size);
 }
 
 void normalize_encoded_latents_inplace(float* data, int latent_channels, std::size_t per_channel,
