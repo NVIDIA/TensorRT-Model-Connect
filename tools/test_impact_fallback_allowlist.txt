@@ -10,7 +10,6 @@
 catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all Dockerfile.gb300 # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all _pyproject_backend.py # root PEP 517/660 backend routes wheel builds and editable installs; catch-all stays conservative
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative

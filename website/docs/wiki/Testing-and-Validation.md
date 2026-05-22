@@ -707,8 +707,8 @@ ctest --test-dir build --output-on-failure
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, under 1 min)
 
-Cyclomatic complexity is measured with `lizard`, which is baked into both
-container images (`Dockerfile`, `Dockerfile.gb300`) and verified in
+Cyclomatic complexity is measured with `lizard`, which is baked into the
+repository Docker image (`Dockerfile`) and verified in
 `scripts/bootstrap_workspace.sh`.
 
 Use the repository checker:
