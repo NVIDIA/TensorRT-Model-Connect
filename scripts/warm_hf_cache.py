@@ -59,10 +59,12 @@ _HF_ALLOW_PATTERNS = [
     "pytorch_model.bin",
     "tokenizer.json",
     "tokenizer_config.json",
+    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "normalizer.json",
     "special_tokens_map.json",
+    "linear_spec_lora/**",
     "*.model",
     "*.spm",
     "*.py",
@@ -88,6 +90,12 @@ _HF_ALLOW_PATTERNS = [
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
+_REQUIRED_FILES_BY_HF_ID = {
+    "nvidia/Nemotron-Labs-Diffusion-8B": [
+        "linear_spec_lora/adapter_config.json",
+        "linear_spec_lora/adapter_model.safetensors",
+    ],
+}
 _DIFFUSERS_WEIGHT_COMPONENTS = {
     "controlnet",
     "image_encoder",
@@ -217,10 +225,10 @@ def _is_cached(hf_id: str) -> bool:
                 if path != main_snapshot
             ]
 
-    return any(_snapshot_has_required_files(path) for path in snapshot_paths)
+    return any(_snapshot_has_required_files(path, hf_id=hf_id) for path in snapshot_paths)
 
 
-def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
+def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:
     files = [
         str(path.relative_to(snapshot_dir))
         for path in snapshot_dir.rglob("*")
@@ -238,11 +246,13 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
         for name in files
         for pattern in _WEIGHT_PATTERNS
     )
+    required_files = _REQUIRED_FILES_BY_HF_ID.get(hf_id, [])
+    has_required_files = all((snapshot_dir / name).is_file() for name in required_files)
     if (snapshot_dir / "model_index.json").is_file():
-        return has_entrypoint and has_weights and not _diffusers_missing_weight_components(
+        return has_entrypoint and has_weights and has_required_files and not _diffusers_missing_weight_components(
             snapshot_dir
         )
-    return has_entrypoint and has_weights
+    return has_entrypoint and has_weights and has_required_files
 
 
 def _diffusers_missing_weight_components(snapshot_dir: pathlib.Path) -> list[str]:
@@ -310,7 +320,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
             hf_id,
             allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
         )
-        if not _snapshot_has_required_files(pathlib.Path(local_dir)):
+        if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
             raise RuntimeError(
                 "downloaded snapshot is still missing a config/model_index "
                 "entrypoint or required local weight artifact")

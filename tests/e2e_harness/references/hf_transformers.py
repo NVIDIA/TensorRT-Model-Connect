@@ -507,9 +507,14 @@ class HfTransformersReference:
             generation_model = model
             if generation_mode == "linear_spec_lora":
                 from peft import PeftModel
-                model = PeftModel.from_pretrained(
-                    model, model_ref, subfolder="linear_spec_lora",
-                    adapter_name="linear_spec_lora")
+                adapter_path = Path(model_ref) / "linear_spec_lora"
+                if adapter_path.is_dir():
+                    model = PeftModel.from_pretrained(
+                        model, str(adapter_path), adapter_name="linear_spec_lora")
+                else:
+                    model = PeftModel.from_pretrained(
+                        model, hf_id, subfolder="linear_spec_lora",
+                        adapter_name="linear_spec_lora")
                 generation_model = model.model
             model.to(device)
             model.eval()

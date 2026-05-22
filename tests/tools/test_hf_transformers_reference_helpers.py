@@ -131,6 +131,8 @@ def test_nemotron_labs_diffusion_reference_uses_custom_auto_model_path(
     assert 'template_path = Path(model_ref) / "chat_template.jinja"' in script
     assert "fallback_chat_template" in script
     assert "<|im_start|>system\\\\n<|im_end|>" in script
+    assert 'adapter_path = Path(model_ref) / "linear_spec_lora"' in script
+    assert "str(adapter_path)" in script
     assert '_tf_generic.check_model_inputs = lambda fn: fn' in script
     assert "PeftModel.from_pretrained" in script
     assert "generation_model = model.model" in script

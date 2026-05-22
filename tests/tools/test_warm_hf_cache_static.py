@@ -34,6 +34,12 @@ def _load_cache_helpers() -> dict:
             "unet",
             "vae",
         },
+        "_REQUIRED_FILES_BY_HF_ID": {
+            "nvidia/Nemotron-Labs-Diffusion-8B": [
+                "linear_spec_lora/adapter_config.json",
+                "linear_spec_lora/adapter_model.safetensors",
+            ],
+        },
         "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
         "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
     }
@@ -50,6 +56,14 @@ def test_magpie_reference_dependencies_are_warmed() -> None:
     assert "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps" in text
     assert "google/byt5-small" in text
     assert "microsoft/wavlm-base-plus" in text
+
+
+def test_nemotron_labs_diffusion_lora_files_are_warmed() -> None:
+    text = WARM_HF_CACHE.read_text()
+    assert '"chat_template.jinja"' in text
+    assert '"linear_spec_lora/**"' in text
+    assert '"linear_spec_lora/adapter_config.json"' in text
+    assert '"linear_spec_lora/adapter_model.safetensors"' in text
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
@@ -105,3 +119,24 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
 
     assert helpers["_diffusers_missing_weight_components"](snapshot) == []
     assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+    lora_dir = snapshot / "linear_spec_lora"
+    lora_dir.mkdir()
+    (lora_dir / "adapter_config.json").write_text("{}")
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+    (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
+    assert helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
