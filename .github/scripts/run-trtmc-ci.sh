@@ -182,6 +182,7 @@ build_all() {
   if [ -z "$trt_library" ]; then
     for candidate in \
       /opt/venv/lib/python*/site-packages/tensorrt_libs/libnvinfer.so \
+      /usr/lib/aarch64-linux-gnu/libnvinfer.so \
       /usr/lib/x86_64-linux-gnu/libnvinfer.so \
       /usr/local/tensorrt/lib/libnvinfer.so; do
       if [ -f "$candidate" ]; then
@@ -191,7 +192,7 @@ build_all() {
     done
   fi
   if [ -z "$trt_include" ]; then
-    for candidate in /usr/local/tensorrt/include /usr/include/x86_64-linux-gnu /usr/include; do
+    for candidate in /usr/local/tensorrt/include /usr/include/aarch64-linux-gnu /usr/include/x86_64-linux-gnu /usr/include; do
       if [ -f "$candidate/NvInfer.h" ]; then
         trt_include="$candidate"
         break
@@ -551,10 +552,11 @@ select_compatible_wheel() {
   local wheel_dir="${1:-dist}"
   local py_tag
   py_tag="$(current_python_wheel_tag)"
+  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64}"
   mapfile -t candidates < <(
     find "$wheel_dir" -maxdepth 1 -type f \( \
-      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
-      -name "*-py3-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-${py_tag}-none-${wheel_arch}.whl" -o \
+      -name "*-py3-none-${wheel_arch}.whl" -o \
       -name "*-${py_tag}-none-linux_aarch64.whl" -o \
       -name "*-py3-none-linux_aarch64.whl" \
     \) | sort
@@ -571,9 +573,10 @@ select_compatible_wheel() {
 select_wheel_by_tag() {
   local py_tag="$1"
   local wheel_dir="${2:-dist}"
+  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64}"
   mapfile -t candidates < <(
     find "$wheel_dir" -maxdepth 1 -type f \( \
-      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-${py_tag}-none-${wheel_arch}.whl" -o \
       -name "*-${py_tag}-none-linux_aarch64.whl" \
     \) | sort
   )
@@ -603,7 +606,7 @@ validate_manylinux_build_environment() {
     if [ "$glibc_major" -gt 2 ] || \
       { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -gt "$max_glibc_minor" ]; }; then
       echo "ERROR: ${wheel_arch} requires building on glibc 2.${max_glibc_minor} or older; this image has glibc ${glibc_version}." >&2
-      echo "Use TRTMC_CI_IMAGE built from the repository Dockerfile, or another Ubuntu 22.04/glibc 2.35 aarch64 image." >&2
+      echo "Use TRTMC_CI_IMAGE built from the repository Dockerfile, or another image whose glibc is no newer than the requested wheel tag." >&2
       exit 1
     fi
     echo "manylinux build target=${wheel_arch} build_glibc=${glibc_version}"
@@ -657,7 +660,7 @@ build_pip_package() {
   mkdir -p dist
 
   local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
-  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64}"
+  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64}"
   validate_manylinux_build_environment "$wheel_arch"
   local expected_wheels=0
   local tag
@@ -692,7 +695,7 @@ import subprocess
 import sys
 import zipfile
 
-EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_35_aarch64")
+EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_39_aarch64")
 platform_match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", EXPECTED_PLATFORM)
 if not platform_match:
     raise SystemExit(f"expected a manylinux aarch64 platform tag, got {EXPECTED_PLATFORM}")
@@ -726,8 +729,12 @@ for wheel in sys.argv[1:]:
         raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
-    if "Requires-Dist: tensorrt>=10.16" not in metadata:
-        raise SystemExit(f"{wheel}: TensorRT dependency metadata is missing")
+    trt_dep_variants = (
+        "Requires-Dist: tensorrt<10.17,>=10.16.1",
+        "Requires-Dist: tensorrt>=10.16.1,<10.17",
+    )
+    if not any(dep in metadata for dep in trt_dep_variants):
+        raise SystemExit(f"{wheel}: TensorRT 10.16 dependency metadata is missing")
     if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
         raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
     audit = subprocess.run(

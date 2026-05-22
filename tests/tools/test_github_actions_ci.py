@@ -165,7 +165,9 @@ def test_github_ci_uses_manylinux_image_and_builds_wheel_first() -> None:
         assert "TRTMC_CI_IMAGE:" in text
         assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in text
         assert "vars.TRTMC_CI_IMAGE" not in text
-        assert "trtmc-dev-gb300:manylinux_2_35" in text
+        assert "trtmc-dev-gb300:manylinux_2_39" in text
+        assert "TRTMC_PACKAGE_WHEEL_ARCH:" in text
+        assert "manylinux_2_39_aarch64" in text
         assert "TRTMC_PACKAGE_CI_IMAGE" not in text
         assert text.index("Build trtmc pip package") < text.index(
             "Setup TensorRT-Model-Connect"
@@ -178,21 +180,21 @@ def test_package_stage_builds_py310_and_py312_wheels() -> None:
     assert 'WHEEL_PYVER="$tag"' in text
     assert "python -m build --wheel --outdir \"$PWD/dist\"" in text
     assert 'build-dir=$package_build_root/$tag' in text
-    assert "manylinux_2_35_aarch64" in text
+    assert "manylinux_2_39_aarch64" in text
     assert "wheel-qwen-smoke)" in text
     assert "Qwen smoke test from trtmc pip package" in text
 
 
 def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64' in text
+    assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64' in text
     assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
     assert 'native wheel must not contain .data/purelib entries' in text
     assert ".data/scripts/trtmc" in text
     assert "native trtmc must be installed directly, not via console_scripts" in text
     assert '"auditwheel>=6.2"' in text
     assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
-    assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
+    assert "*-${py_tag}-none-${wheel_arch}.whl" in text
     assert "validate_manylinux_build_environment" in text
     assert "build_glibc=" in text
 

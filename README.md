@@ -18,7 +18,7 @@ your Python version and run:
 ```bash
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
-pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
 trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
@@ -71,13 +71,13 @@ CI validation use built wheels instead.
 
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
-Nightly wheels are tagged `py310-none-manylinux_2_35_aarch64` and
-`py312-none-manylinux_2_35_aarch64`; use the tag matching your Python
-interpreter. The `manylinux_2_35_aarch64` platform tag matches the TensorRT
-CUDA 13 aarch64 wheels and requires a glibc 2.35 or newer Linux host.
+Nightly wheels are tagged `py310-none-manylinux_2_39_aarch64` and
+`py312-none-manylinux_2_39_aarch64`; use the tag matching your Python
+interpreter. The `manylinux_2_39_aarch64` platform tag matches the TensorRT
+10.16 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host.
 CI package jobs build and test wheels in the repository Dockerfile image
 (`TRTMC_CI_IMAGE`, derived from repository variable `TRTMC_MANYLINUX_CI_IMAGE`
-or default `trtmc-dev-gb300:manylinux_2_35`) so the compiled
+or default `trtmc-dev-gb300:manylinux_2_39`) so the compiled
 native executable is actually checked against that platform floor.
 
 ## Useful Docs

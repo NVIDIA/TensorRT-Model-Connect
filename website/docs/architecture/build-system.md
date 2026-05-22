@@ -86,9 +86,9 @@ The Conan package recipe manages `nlohmann_json` for native wheel builds. Tensor
 Release wheel builds disable the optional libtorch-backed multinomial sampler so the wheel does not link against PyTorch's native DSOs or inherit their platform floor.
 CI jobs build and use `TRTMC_CI_IMAGE` from the repository `Dockerfile` for
 package and test stages. The workflow derives it from repository variable
-`TRTMC_MANYLINUX_CI_IMAGE` or default `trtmc-dev-gb300:manylinux_2_35`.
-That image is Ubuntu 22.04 / glibc 2.35 so
-`auditwheel` can verify the `manylinux_2_35_aarch64` tag instead of inheriting a
+`TRTMC_MANYLINUX_CI_IMAGE` or default `trtmc-dev-gb300:manylinux_2_39`.
+That image is Ubuntu 24.04 / glibc 2.39 with the TensorRT 10.16 CUDA 13 stack so
+`auditwheel` can verify the `manylinux_2_39_aarch64` tag instead of inheriting a
 newer general-purpose CI image floor. PR and nightly workflows build the wheel
 first, install that wheel, and then run Python, C++, graph-op, and E2E stages
 against the installed artifact.

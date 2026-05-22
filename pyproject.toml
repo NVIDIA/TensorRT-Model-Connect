@@ -17,7 +17,7 @@ dependencies = [
     "onnxscript>=0.2",
     "transformers>=4.40",
     "huggingface_hub>=0.23",
-    "tensorrt>=10.16",
+    "tensorrt>=10.16.1,<10.17",
     "PyYAML>=6.0",
     "tomli>=2.0; python_version < '3.11'",
 ]

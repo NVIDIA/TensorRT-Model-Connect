@@ -23,9 +23,10 @@ env:
   HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}
-  TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_35' }}
+  TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
   TRTMC_PACKAGE_PYTHON_TAGS: ${{ vars.TRTMC_PACKAGE_PYTHON_TAGS || 'py312' }}
+  TRTMC_PACKAGE_WHEEL_ARCH: ${{ vars.TRTMC_PACKAGE_WHEEL_ARCH || 'manylinux_2_39_aarch64' }}
   PYTHONHASHSEED: "0"
   PYTHON_COVERAGE_MIN_LINE: "38"
   PYTHON_COVERAGE_MIN_BRANCH: "25"

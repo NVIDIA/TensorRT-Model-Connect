@@ -13,7 +13,7 @@ TensorRT-Model-Connect has three install paths:
 - Linux aarch64 with an NVIDIA GPU.
 - Python 3.10 or Python 3.12.
 - NVIDIA driver and CUDA runtime libraries.
-- glibc 2.35 or newer for the published `manylinux_2_35_aarch64` wheels.
+- glibc 2.39 or newer for the published `manylinux_2_39_aarch64` wheels.
 
 Building from source also needs the repository dev container or an equivalent
 CUDA/TensorRT build environment with CMake, Ninja, Conan, CUDA headers and
@@ -27,7 +27,7 @@ Install a published wheel that matches your Python version:
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
 
-pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
 trtmc build --help
@@ -39,7 +39,7 @@ The wheel installs:
 - the Python builder package,
 - the native `trtmc` executable,
 - packaged TensorRT backend DSOs,
-- declared Python dependencies, including `tensorrt>=10.16`.
+- declared Python dependencies, including `tensorrt>=10.16.1,<10.17`.
 
 Quick smoke test:
 
@@ -77,12 +77,12 @@ TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
 TRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
 WHEEL_PYVER=py312 \
 WHEEL_ABI=none \
-WHEEL_ARCH=manylinux_2_35_aarch64 \
+WHEEL_ARCH=manylinux_2_39_aarch64 \
 python -m build --wheel --outdir "$PWD/dist" \
   -C build-dir=/tmp/trtmc-conan-py-wheel-py312 \
   .
 
-python -m auditwheel show dist/tensorrt_model_connect-*-py312-none-manylinux_2_35_aarch64.whl
+python -m auditwheel show dist/tensorrt_model_connect-*-py312-none-manylinux_2_39_aarch64.whl
 ```
 
 For Python 3.10, use `WHEEL_PYVER=py310` and a matching Python 3.10 build
@@ -92,7 +92,7 @@ environment. Install the built wheel in a fresh environment:
 python3.12 -m venv /tmp/trtmc-wheel-smoke
 /tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
 /tmp/trtmc-wheel-smoke/bin/python -m pip install \
-  dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_35_aarch64.whl
+  dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 /tmp/trtmc-wheel-smoke/bin/trtmc version
 ```
 
