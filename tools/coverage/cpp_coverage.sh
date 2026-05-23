@@ -142,11 +142,15 @@ echo "[cpp-coverage] Gate thresholds: line>=${CPP_COVERAGE_MIN_LINE}% function>=
 
 cmake "${cmake_args[@]}"
 
+build_parallel_args=(--parallel)
 if [[ -n "${BUILD_PARALLEL}" ]]; then
-  cmake --build "${BUILD_DIR}" --parallel "${BUILD_PARALLEL}"
-else
-  cmake --build "${BUILD_DIR}" --parallel
+  build_parallel_args=(--parallel "${BUILD_PARALLEL}")
 fi
+
+cmake --build "${BUILD_DIR}" "${build_parallel_args[@]}"
+# C++ unit test executables are excluded from the default wheel build, so
+# coverage must request the aggregate test target explicitly before ctest.
+cmake --build "${BUILD_DIR}" --target trtmc_cpp_tests "${build_parallel_args[@]}"
 
 # Remove stale runtime coverage data from previous runs.
 find "${BUILD_DIR}" -name "*.gcda" -delete || true

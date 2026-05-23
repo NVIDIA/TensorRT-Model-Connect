@@ -59,6 +59,28 @@ prepare_shared_directories() {
 
 prepare_shared_directories
 
+ci_state_dir() {
+  printf '%s\n' "${TRTMC_CI_STATE_DIR:-.ci}"
+}
+
+ensure_ci_state_dir() {
+  mkdir -p "$(ci_state_dir)"
+}
+
+wheel_build_metadata_file() {
+  printf '%s/trtmc-wheel-build.env\n' "$(ci_state_dir)"
+}
+
+wheel_install_metadata_file() {
+  printf '%s/wheel-installed.env\n' "$(ci_state_dir)"
+}
+
+write_shell_var() {
+  local name="$1"
+  local value="$2"
+  printf '%s=%q\n' "$name" "$value"
+}
+
 configure_e2e_timing_cache() {
   local cache_root="${TRTMC_STORAGE_ROOT:-${ENGINE_DIR:-.}}"
   local opt_level="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-default}"
@@ -146,13 +168,85 @@ for backend in backends:
 PY
 }
 
-setup_environment() {
-  verify_environment
+install_built_wheel_once() {
+  ensure_ci_state_dir
+  local sentinel
+  sentinel="$(wheel_install_metadata_file)"
+  if [ -f "$sentinel" ]; then
+    echo "Built wheel already installed in this CI container:"
+    cat "$sentinel"
+    return 0
+  fi
+  local install_wheel
+  install_wheel="$(select_compatible_wheel dist)"
   install_built_wheel
+  {
+    write_shell_var TRTMC_INSTALLED_WHEEL "$install_wheel"
+    write_shell_var TRTMC_WHEEL_INSTALLED_AT "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$sentinel"
+}
+
+verify_built_wheel_installed() {
+  local sentinel
+  sentinel="$(wheel_install_metadata_file)"
+  if [ ! -f "$sentinel" ]; then
+    echo "ERROR: built wheel has not been installed in this CI container; missing $sentinel" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$sentinel"
+  python - "${TRTMC_INSTALLED_WHEEL:-}" <<'PY'
+from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+
+import tensorrt_model_connect
+
+wheel = Path(sys.argv[1])
+repo = Path.cwd().resolve()
+package_file = Path(tensorrt_model_connect.__file__).resolve()
+try:
+    package_file.relative_to(repo)
+except ValueError:
+    pass
+else:
+    raise SystemExit(
+        f"tensorrt_model_connect imported from source tree after wheel install: {package_file}"
+    )
+
+installed_script = shutil.which("trtmc")
+if installed_script is None:
+    raise SystemExit("installed trtmc was not found on PATH")
+installed_script_path = Path(installed_script)
+if installed_script_path.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{installed_script_path} is not the native ELF trtmc executable")
+
+print(f"installed_wheel={wheel}")
+print(f"imported_package={package_file}")
+print(f"installed_trtmc={installed_script_path}")
+PY
+}
+
+setup_source_check_environment() {
+  verify_environment
+}
+
+setup_wheel_runtime_environment() {
+  verify_environment
+  verify_built_wheel_installed
 }
 
 setup_package_build_environment() {
   verify_environment
+}
+
+ensure_conan_cli() {
+  if command -v conan >/dev/null 2>&1; then
+    return 0
+  fi
+  python -m pip install --disable-pip-version-check --quiet "conan-py-build==0.4.3"
 }
 
 impact_analysis() {
@@ -173,49 +267,71 @@ impact_analysis() {
   python3 tools/test_impact.py "${impact_args[@]}" --verbose
 }
 
-build_all() {
-  local trt_include="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
-  local trt_library="${TRTMC_TRT_LIBRARY:-}"
-  if [ -z "$trt_library" ] && [ -n "${TRT_LIB_DIR:-}" ]; then
-    trt_library="${TRT_LIB_DIR%/}/libnvinfer.so"
+load_wheel_build_metadata() {
+  local metadata
+  metadata="$(wheel_build_metadata_file)"
+  if [ ! -f "$metadata" ]; then
+    echo "ERROR: reusable wheel build metadata is missing: $metadata" >&2
+    exit 1
   fi
-  if [ -z "$trt_library" ]; then
-    for candidate in \
-      /opt/venv/lib/python*/site-packages/tensorrt_libs/libnvinfer.so \
-      /usr/lib/aarch64-linux-gnu/libnvinfer.so \
-      /usr/lib/x86_64-linux-gnu/libnvinfer.so \
-      /usr/local/tensorrt/lib/libnvinfer.so; do
-      if [ -f "$candidate" ]; then
-        trt_library="$candidate"
-        break
-      fi
-    done
-  fi
-  if [ -z "$trt_include" ]; then
-    for candidate in /usr/local/tensorrt/include /usr/include/aarch64-linux-gnu /usr/include/x86_64-linux-gnu /usr/include; do
-      if [ -f "$candidate/NvInfer.h" ]; then
-        trt_include="$candidate"
-        break
-      fi
-    done
+  # shellcheck disable=SC1090
+  source "$metadata"
+  : "${TRTMC_REUSE_CONAN_OUT_DIR:?TRTMC_REUSE_CONAN_OUT_DIR missing from $metadata}"
+  : "${TRTMC_REUSE_CMAKE_BUILD_DIR:?TRTMC_REUSE_CMAKE_BUILD_DIR missing from $metadata}"
+}
+
+select_cpp_build_targets() {
+  if [ "${FULL_E2E:-false}" = "true" ]; then
+    printf '%s\n' "trtmc_cpp_tests"
+    return 0
   fi
 
-  local cuda_include="${TRTMC_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
-  local cudart_library="${TRTMC_CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
-  local enable_libtorch_multinomial="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"
+  python3 - <<'PY'
+import json
+from pathlib import Path
 
-  : "${trt_include:?TensorRT include directory was not found}"
-  : "${trt_library:?TensorRT libnvinfer.so was not found}"
-  : "${cuda_include:?CUDA include directory was not found}"
-  : "${cudart_library:?CUDA runtime library was not found}"
+impact = Path("impact.json")
+if not impact.exists():
+    print("trtmc_cpp_tests")
+    raise SystemExit(0)
 
-  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" cmake -S . -B build -G Ninja \
-    -DTRTMC_TRT_INCLUDE_DIR="$trt_include" \
-    -DTRTMC_TRT_LIBRARY="$trt_library" \
-    -DTRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
-    -DTRTMC_CUDART_LIBRARY="$cudart_library" \
-    -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="$enable_libtorch_multinomial"
-  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" cmake --build build -j
+d = json.loads(impact.read_text())
+if "cpp" not in d.get("unit_tiers", []):
+    raise SystemExit(0)
+
+tests = d.get("cpp_tests", [])
+fallback = d.get("fallback_tiers", [])
+if "cpp" in fallback or not tests:
+    print("trtmc_cpp_tests")
+else:
+    print(" ".join(tests))
+PY
+}
+
+build_cpp_test_executables() {
+  local targets
+  targets="$(select_cpp_build_targets)"
+  if [ -z "$targets" ]; then
+    echo "Skipping: no C++ test targets selected"
+    return 0
+  fi
+
+  load_wheel_build_metadata
+  ensure_conan_cli
+  local conan_profile="${CONAN_PY_BUILD_PROFILE:-$PWD/conan-py-build.profile}"
+  local conan_profile_args=()
+  if [ -f "$conan_profile" ]; then
+    conan_profile_args=(-pr:h "$conan_profile" -pr:b "$conan_profile")
+  fi
+  echo "Building C++ test target(s) via Conan: $targets"
+  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" env \
+    TRTMC_CONAN_ENABLE_TEST_TARGETS=1 \
+    TRTMC_CONAN_BUILD_TARGETS="$targets" \
+    TRTMC_TRT_INCLUDE_DIR="${TRTMC_TRT_INCLUDE_DIR:-}" \
+    TRTMC_TRT_LIBRARY="${TRTMC_TRT_LIBRARY:-}" \
+    TRTMC_CUDA_INCLUDE_DIR="${TRTMC_CUDA_INCLUDE_DIR:-}" \
+    TRTMC_CUDART_LIBRARY="${TRTMC_CUDART_LIBRARY:-}" \
+    conan build . -of "$TRTMC_REUSE_CONAN_OUT_DIR" "${conan_profile_args[@]}"
 }
 
 check_family_coverage() {
@@ -275,12 +391,13 @@ print('|'.join(tests))
 " 2>/dev/null) || true
   fi
 
+  load_wheel_build_metadata
   if [ -n "$cpp_tests" ]; then
     echo "Selective C++ tests: $cpp_tests"
-    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build -R "$cpp_tests" --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR" -R "$cpp_tests" --output-on-failure
   else
     echo "Running all C++ tests"
-    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR" --output-on-failure
   fi
 }
 
@@ -536,7 +653,8 @@ generate_coverage_map() {
   fi
 
   python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10" "pytest-cov>=6.0" "gcovr==8.2"
-  run_with_timeout "${COVERAGE_MAP_TIMEOUT:-90m}" python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir build
+  local cpp_coverage_build_dir="${CPP_COVERAGE_BUILD_DIR:-$PWD/build-cov}"
+  run_with_timeout "${COVERAGE_MAP_TIMEOUT:-90m}" python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir "$cpp_coverage_build_dir"
   python -m tools.coverage_map.generate --validate coverage_map.json
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
@@ -618,6 +736,20 @@ validate_manylinux_build_environment() {
   fi
 }
 
+locate_conan_cmake_build_dir() {
+  local conan_out="$1"
+  mapfile -t cmake_caches < <(
+    find "$conan_out/build" -mindepth 2 -maxdepth 2 -name CMakeCache.txt -type f | sort
+  )
+  if [ "${#cmake_caches[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one reusable CMakeCache.txt under %s, found %d\n' \
+      "$conan_out" "${#cmake_caches[@]}" >&2
+    printf '  %s\n' "${cmake_caches[@]:-}" >&2
+    exit 1
+  fi
+  dirname "${cmake_caches[0]}"
+}
+
 build_pip_package() {
   local trt_include="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
   local trt_library="${TRTMC_TRT_LIBRARY:-}"
@@ -654,14 +786,21 @@ build_pip_package() {
   : "${cudart_library:?CUDA runtime library was not found}"
 
   python -m pip install --disable-pip-version-check --quiet "auditwheel>=6.2" "build>=1.2"
-  local package_build_root="${TRTMC_PACKAGE_BUILD_ROOT:-/tmp/trtmc-conan-py-wheel-${GITHUB_RUN_ID:-local}}"
-  rm -rf dist "$package_build_root" python/tensorrt_model_connect/build python/tensorrt_model_connect/*.egg-info
+  ensure_ci_state_dir
+  local package_build_root="${TRTMC_PACKAGE_BUILD_ROOT:-$PWD/.ci/conan-py-wheel-${GITHUB_RUN_ID:-local}}"
+  rm -rf dist "$package_build_root" "$(wheel_build_metadata_file)" "$(wheel_install_metadata_file)" \
+    python/tensorrt_model_connect/build python/tensorrt_model_connect/*.egg-info
   find python/tensorrt_model_connect -type d -name __pycache__ -prune -exec rm -rf {} +
   mkdir -p dist
 
   local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
   local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64}"
   validate_manylinux_build_environment "$wheel_arch"
+  local current_tag
+  current_tag="$(current_python_wheel_tag)"
+  local reuse_tag=""
+  local reuse_conan_out=""
+  local reuse_cmake_build_dir=""
   local expected_wheels=0
   local tag
   for tag in $python_tags; do
@@ -673,12 +812,21 @@ build_pip_package() {
       TRTMC_TRT_LIBRARY="$trt_library" \
       TRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
       TRTMC_CUDART_LIBRARY="$cudart_library" \
+      TRTMC_CONAN_ENABLE_TEST_TARGETS=1 \
       WHEEL_PYVER="$tag" \
       WHEEL_ABI=none \
       WHEEL_ARCH="$wheel_arch" \
       python -m build --wheel --outdir "$PWD/dist" \
         -C "build-dir=$package_build_root/$tag" \
         .
+    local tag_conan_out="$package_build_root/$tag/conan_out"
+    local tag_cmake_build_dir
+    tag_cmake_build_dir="$(locate_conan_cmake_build_dir "$tag_conan_out")"
+    if [ -z "$reuse_tag" ] || [ "$tag" = "$current_tag" ]; then
+      reuse_tag="$tag"
+      reuse_conan_out="$tag_conan_out"
+      reuse_cmake_build_dir="$tag_cmake_build_dir"
+    fi
   done
 
   mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
@@ -760,6 +908,18 @@ for wheel in sys.argv[1:]:
     for entry in sorted([*bin_entries, *script_entries, *backend_entries]):
         print(f"  {entry}")
 PY
+
+  {
+    write_shell_var TRTMC_REUSE_WHEEL_TAG "$reuse_tag"
+    write_shell_var TRTMC_REUSE_CONAN_OUT_DIR "$reuse_conan_out"
+    write_shell_var TRTMC_REUSE_CMAKE_BUILD_DIR "$reuse_cmake_build_dir"
+    write_shell_var TRTMC_TRT_INCLUDE_DIR "$trt_include"
+    write_shell_var TRTMC_TRT_LIBRARY "$trt_library"
+    write_shell_var TRTMC_CUDA_INCLUDE_DIR "$cuda_include"
+    write_shell_var TRTMC_CUDART_LIBRARY "$cudart_library"
+  } > "$(wheel_build_metadata_file)"
+  echo "Reusable wheel build metadata:"
+  cat "$(wheel_build_metadata_file)"
 
   local install_wheel
   install_wheel="$(select_compatible_wheel dist)"
@@ -862,62 +1022,63 @@ run_stage() {
   local stage="$1"
   case "$stage" in
     setup)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Install trtmc pip package" install_built_wheel_once
       ;;
     impact)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Impact analysis" impact_analysis
       ;;
     build)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
-      run_step "Build all" build_all
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
+      run_step "Build C++ test executables" build_cpp_test_executables
       ;;
     family-coverage)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Check family coverage" check_family_coverage
       ;;
     complexity)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Check cyclomatic complexity" check_cyclomatic_complexity
       ;;
     lint)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Lint changed files" lint_changed_files
       ;;
     cpp-unit)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "C++ unit tests" run_cpp_unit_tests
       ;;
     python-builder)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Python builder and tools tests" run_python_builder_tests
       ;;
     cpp-coverage)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "C++ coverage" run_cpp_coverage
       ;;
     graph-ops)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Graph-op GPU tests" run_graph_op_tests
       ;;
     selective-e2e)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Selective E2E tests" run_selective_e2e
       ;;
     full-e2e)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Full E2E tests" run_full_e2e
       ;;
     coverage-map)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Generate coverage map" generate_coverage_map
       ;;
     package)
       run_step "Setup TensorRT-Model-Connect package build environment" setup_package_build_environment
       run_step "Build trtmc pip package" build_pip_package
+      run_step "Install trtmc pip package" install_built_wheel_once
       ;;
     wheel-qwen-smoke)
-      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
       ;;
     *)
@@ -934,9 +1095,9 @@ fi
 
 run_step "Setup TensorRT-Model-Connect package build environment" setup_package_build_environment
 run_step "Build trtmc pip package" build_pip_package
-run_step "Setup TensorRT-Model-Connect" setup_environment
+run_step "Install trtmc pip package" install_built_wheel_once
 run_step "Impact analysis" impact_analysis
-run_step "Build all" build_all
+run_step "Build C++ test executables" build_cpp_test_executables
 run_step "Check family coverage" check_family_coverage
 run_step "Check cyclomatic complexity" check_cyclomatic_complexity
 run_step "Lint changed files" lint_changed_files

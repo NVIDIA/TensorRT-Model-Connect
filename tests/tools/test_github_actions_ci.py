@@ -20,7 +20,8 @@ def test_workflows_define_shared_hf_cache_env() -> None:
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
     for name in (
         "TRTMC_STORAGE_ROOT",
         "HF_HOME",
@@ -28,9 +29,11 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         "HUGGINGFACE_HUB_CACHE",
         "HF_MODULES_CACHE",
     ):
-        assert f'mkdir_if_set "${{{name}:-}}"' in text
-        assert f"-e {name}" in text
-    assert "/workspace/users/yifeif:/workspace/users/yifeif" in text
+        assert f'mkdir_if_set "${{{name}:-}}"' in start_text
+        assert name in start_text
+        assert f"-e {name}" in stage_text
+    assert "/workspace/users/yifeif:/workspace/users/yifeif" in start_text
+    assert "docker exec" in stage_text
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
@@ -125,7 +128,7 @@ def test_nightly_attempts_all_test_stages_after_failures() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     required_steps = (
         "Impact analysis",
-        "Build all",
+        "Build C++ test executables",
         "Check family coverage",
         "Check cyclomatic complexity",
         "Lint changed files",
@@ -169,9 +172,9 @@ def test_github_ci_uses_manylinux_image_and_builds_wheel_first() -> None:
         assert "TRTMC_PACKAGE_WHEEL_ARCH:" in text
         assert "manylinux_2_39_aarch64" in text
         assert "TRTMC_PACKAGE_CI_IMAGE" not in text
-        assert text.index("Build trtmc pip package") < text.index(
-            "Setup TensorRT-Model-Connect"
-        )
+        assert text.index("Start CI container") < text.index("Build trtmc pip package")
+        assert text.index("Build trtmc pip package") < text.index("Impact analysis")
+        assert "Setup TensorRT-Model-Connect" not in text
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
@@ -214,14 +217,27 @@ def test_release_wheel_build_disables_libtorch_linkage() -> None:
 
 
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
     wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    assert 'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF' in script
-    assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="$enable_libtorch_multinomial"' in script
+    assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in conanfile
     assert 'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
     assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"' in coverage
     assert "-e TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
+
+
+def test_ci_cpp_test_build_reuses_wheel_conan_tree() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "TRTMC_CONAN_ENABLE_TEST_TARGETS=1" in script
+    assert 'TRTMC_CONAN_BUILD_TARGETS="$targets"' in script
+    assert 'conan build . -of "$TRTMC_REUSE_CONAN_OUT_DIR"' in script
+    assert 'ctest --test-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR"' in script
+    assert "wheel_build_metadata_file" in script
+
+
+def test_cpp_coverage_builds_excluded_test_target() -> None:
+    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
+    assert "--target trtmc_cpp_tests" in coverage
 
 
 def test_root_pyproject_configures_conan_py_build_wheel() -> None:

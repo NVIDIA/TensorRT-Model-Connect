@@ -228,6 +228,22 @@ add_library(trtmc_core
   src/runtime/models/pixart_torchtrt/pipeline.cpp
 )
 
+# Keep warning policy strict for project code, but avoid CI log spam from
+# vendored STB implementation headers and known GCC 13/libstdc++ false
+# positives from inlined std::vector assignment helpers.
+set_source_files_properties(src/runtime/core/stb_impl.cpp
+  PROPERTIES
+    COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-pedantic>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-missing-field-initializers>"
+)
+set_source_files_properties(
+  src/runtime/models/magpie/pipeline.cpp
+  src/runtime/models/pixart/pipeline.cpp
+  src/runtime/models/speech/pipeline.cpp
+  src/runtime/models/wan/pipeline.cpp
+  PROPERTIES
+    COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
+)
+
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
   target_sources(trtmc_core PRIVATE
@@ -253,7 +269,9 @@ target_include_directories(trtmc_core
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/third_party/stb
+)
+target_include_directories(trtmc_core SYSTEM PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/stb
 )
 
 target_compile_definitions(trtmc_core
@@ -264,9 +282,8 @@ target_compile_definitions(trtmc_core
 
 target_compile_options(trtmc_core
   PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
+    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
 )
 
 # nlohmann/json: use include-only (header-only lib) to avoid export-set issues
@@ -529,18 +546,20 @@ add_executable(trtmc
   src/cli/main.cpp
 )
 target_link_libraries(trtmc PRIVATE trtmc_core)
-target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 
 if(TRTMC_BUILD_BENCHMARKS)
   add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
   target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
-  target_include_directories(trtmc_dataset_benchmark PRIVATE
+  target_include_directories(trtmc_dataset_benchmark SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
   )
 endif()
 
 if(TRTMC_BUILD_TESTS)
 enable_testing()
+add_custom_target(trtmc_cpp_tests)
 
 # --- Test helper function ---
 # Usage:
@@ -552,7 +571,8 @@ function(trtmc_add_test TEST_NAME)
     message(STATUS "Skipping ${TEST_NAME}: TensorRT SDK not available")
     return()
   endif()
-  add_executable(${TEST_NAME} tests/cpp/${TEST_NAME}.cpp)
+  add_executable(${TEST_NAME} EXCLUDE_FROM_ALL tests/cpp/${TEST_NAME}.cpp)
+  add_dependencies(trtmc_cpp_tests ${TEST_NAME})
   target_link_libraries(${TEST_NAME} PRIVATE trtmc_core)
   if(NOT ARG_NO_SRC_INCLUDE)
     target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)

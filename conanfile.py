@@ -10,6 +10,10 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -28,7 +32,9 @@ class TensorRTModelConnectConan(ConanFile):
         deps.generate()
 
         toolchain = CMakeToolchain(self)
-        toolchain.cache_variables["TRTMC_BUILD_TESTS"] = False
+        toolchain.cache_variables["TRTMC_BUILD_TESTS"] = _env_flag(
+            "TRTMC_CONAN_ENABLE_TEST_TARGETS"
+        )
         toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = False
         toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False
 
@@ -47,7 +53,12 @@ class TensorRTModelConnectConan(ConanFile):
     def build(self) -> None:
         cmake = CMake(self)
         cmake.configure()
-        cmake.build()
+        targets = os.environ.get("TRTMC_CONAN_BUILD_TARGETS", "").split()
+        if targets:
+            for target in targets:
+                cmake.build(target=target)
+        else:
+            cmake.build()
 
     def package(self) -> None:
         package_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"

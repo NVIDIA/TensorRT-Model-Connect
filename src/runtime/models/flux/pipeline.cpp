@@ -328,8 +328,8 @@ void unpack_flux_velocity(const std::vector<float>& denoiser_output, int32_t z_d
 // Step logging
 // ---------------------------------------------------------------------------
 
-void compute_vector_stats(const std::vector<float>& values, float& min_out, float& max_out,
-                          double& mean_out) {
+[[maybe_unused]] void compute_vector_stats(const std::vector<float>& values, float& min_out,
+                                           float& max_out, double& mean_out) {
     min_out = values[0];
     max_out = values[0];
     double sum = 0.0;
