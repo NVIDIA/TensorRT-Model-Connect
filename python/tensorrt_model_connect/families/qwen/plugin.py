@@ -116,6 +116,9 @@ class QwenPlugin:
             ])
         return patterns
 
+    def supports_parallel_quantization(self, format_name: str | None) -> bool:
+        return format_name == "fp8"
+
     def quant_adapter(self, format_name: str) -> StandardDecoderCalibrationAdapter:
         return StandardDecoderCalibrationAdapter(family=self.name)
 
