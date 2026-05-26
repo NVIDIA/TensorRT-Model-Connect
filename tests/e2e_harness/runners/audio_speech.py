@@ -293,7 +293,6 @@ class TextToAudioRunner:
             runtime_tokens = runtime_config_set_tokens(case)
             for token in runtime_tokens:
                 cmd.extend(["--set", token])
-            cmd = _wrap_distributed_command(cmd, case)
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
             bark_seed = runtime_config_get(case, "audio_bark.seed")
             if case.family == "bark" and bark_seed is None:
