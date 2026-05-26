@@ -24,6 +24,12 @@ struct TensorParallelRuntimeConfig {
     int32_t tp_size{1};
 };
 
+struct MagpieDecoderRuntime {
+    DistributedRuntimeGroup tp_group;
+    ModuleCreateOptions opts;
+    std::string section{"engine_plan"};
+};
+
 TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
     TensorParallelRuntimeConfig cfg;
     cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
@@ -56,6 +62,22 @@ int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig&
 int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
     const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
     return from_engine > 0 ? from_engine : fallback;
+}
+
+MagpieDecoderRuntime make_magpie_decoder_runtime(const PipelineContext& ctx,
+                                                 const ModuleCreateOptions& base_opts) {
+    MagpieDecoderRuntime runtime;
+    runtime.opts = base_opts;
+
+    const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+    if (!tp_config.enabled)
+        return runtime;
+
+    runtime.tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+    runtime.opts.distributed_communicator = runtime.tp_group.communicator;
+    runtime.opts.distributed_owner = runtime.tp_group.owner;
+    runtime.section = tp_engine_section_name(runtime.tp_group.rank);
+    return runtime;
 }
 
 } // namespace
@@ -94,11 +116,6 @@ class MagpiePlugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
 
-        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        DistributedRuntimeGroup tp_group;
-        if (tp_config.enabled)
-            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
-
         auto shared_stream = std::make_shared<CudaStream>();
         if (!shared_stream->ok())
             throw std::runtime_error("MagpiePlugin: failed to create CUDA stream");
@@ -107,19 +124,13 @@ class MagpiePlugin final : public IPipelinePlugin {
         opts.stream = shared_stream->get();
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
-        ModuleCreateOptions decoder_opts = opts;
-        if (tp_config.enabled) {
-            decoder_opts.distributed_communicator = tp_group.communicator;
-            decoder_opts.distributed_owner = tp_group.owner;
-        }
+        auto decoder_runtime = make_magpie_decoder_runtime(ctx, opts);
 
         auto enc_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "magpie encoder", opts);
-        const std::string decoder_section =
-            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto dec_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, decoder_section), "magpie decoder",
-            decoder_opts);
+            ctx.backend, find_section(ctx.bundle, decoder_runtime.section), "magpie decoder",
+            decoder_runtime.opts);
         enc_loaded.module->keep_alive(shared_stream);
         dec_loaded.module->keep_alive(shared_stream);
 
