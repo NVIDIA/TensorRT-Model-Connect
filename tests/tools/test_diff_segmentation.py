@@ -32,6 +32,7 @@ class TestModuleStructure:
     def test_has_main(self):
         mod = _import_diff_segmentation()
         assert callable(mod.main)
+        assert callable(mod.run_as_diff_test)
 
     def test_module_imports_cleanly(self):
         """Importing the module should not raise or run main()."""
@@ -155,3 +156,21 @@ class TestSegmentationMetrics:
         preds = np.argmax(logits, axis=0)
         expected = np.array([[0, 1], [2, 0]])
         np.testing.assert_array_equal(preds, expected)
+
+
+class TestFrameworkAdapter:
+    """Tests for diff framework adapter behavior that does not require GPU."""
+
+    def test_run_as_diff_test_skips_without_image(self):
+        from diff_framework.protocol import TestContext
+
+        mod = _import_diff_segmentation()
+        result = mod.run_as_diff_test(TestContext(
+            model="nvidia/segformer-b0-finetuned-ade-512-512",
+            runtime_strategy="segmentation",
+            bundle_path="segformer.trtfb",
+            image_path=None,
+        ))
+        assert result.status == "SKIP"
+        assert result.test_name == "segmentation_pipeline"
+        assert "image" in result.message

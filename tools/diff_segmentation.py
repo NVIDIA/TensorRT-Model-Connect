@@ -12,10 +12,81 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
+
+
+def _parse_metric(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def run_as_diff_test(ctx):
+    """Run the SegFormer diff through the unified diff framework."""
+    from diff_framework.protocol import DiffResult
+
+    test_name = "segmentation_pipeline"
+    if not ctx.image_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "Segmentation diff requires --image")
+    if not ctx.bundle_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "Segmentation diff requires --bundle")
+
+    atol = 0.5 if ctx.atol == 1e-3 else ctx.atol
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--model",
+        ctx.model,
+        "--bundle",
+        ctx.bundle_path,
+        "--image",
+        ctx.image_path,
+        "--atol",
+        str(atol),
+    ]
+    if ctx.verbose:
+        command.append("--verbose")
+
+    start = time.time()
+    completed = subprocess.run(
+        command, text=True, capture_output=True, check=False)
+    output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if part)
+
+    metrics = {}
+    max_diff = _parse_metric(r"Max logit diff:\s*([0-9.eE+-]+)", output)
+    pixel_agreement = _parse_metric(r"Pixel agreement:\s*([0-9.eE+-]+)", output)
+    if max_diff is not None:
+        metrics["max_logit_diff"] = max_diff
+    if pixel_agreement is not None:
+        metrics["pixel_agreement"] = pixel_agreement
+
+    passed = completed.returncode == 0
+    return DiffResult(
+        test_name=test_name,
+        model=ctx.model,
+        runtime_strategy=ctx.runtime_strategy,
+        passed=passed,
+        status="PASS" if passed else "FAIL",
+        message=(
+            "Segmentation logits and predictions match"
+            if passed else f"Segmentation diff failed with rc={completed.returncode}"
+        ),
+        metrics=metrics,
+        duration_s=time.time() - start,
+        details=output[-4000:],
+    )
 
 
 def main():

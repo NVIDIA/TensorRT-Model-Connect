@@ -208,6 +208,7 @@ class TestArgParsing:
         assert callable(mod.stage2_token_comparison)
         assert callable(mod.stage3_codec_comparison)
         assert callable(mod.stage4_greedy_parity)
+        assert callable(mod.run_as_diff_test)
 
     def test_module_has_helper_functions(self):
         mod = _import_diff_audio()
@@ -252,3 +253,21 @@ class TestReadTokenFile:
 
         tokens = mod.read_token_file(path)
         np.testing.assert_array_equal(tokens, [5, 10, 15])
+
+
+class TestFrameworkAdapter:
+    """Tests for diff framework adapter behavior that does not require GPU."""
+
+    def test_run_as_diff_test_skips_without_bundle(self):
+        from diff_framework.protocol import TestContext
+
+        mod = _import_diff_audio()
+        result = mod.run_as_diff_test(TestContext(
+            model="suno/bark-small",
+            runtime_strategy="text_to_audio_bark",
+            bundle_path=None,
+            binary_path="./build/trtmc",
+        ))
+        assert result.status == "SKIP"
+        assert result.test_name == "bark_audio_pipeline"
+        assert "bundle" in result.message

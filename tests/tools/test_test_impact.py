@@ -313,8 +313,15 @@ class TestDeclarativeClassificationRules:
                 "harness_threshold_unknown",
             ),
             ("tests/e2e_harness/test_orchestrator_phases.py", "harness_unit_test"),
-            ("scripts/_gen_fp8_bf16.py", "fp8_gen_script"),
+            ("scripts/generate_e2e_report.py", "e2e_report_tool"),
+            (
+                "scripts/generate_e2e_report_assets/e2e_report.css",
+                "e2e_report_asset",
+            ),
             ("tools/make_elf_replay_artifact.py", "elf_replay_tool"),
+            ("tools/diff.py", "diff_tool"),
+            ("tools/diff_framework/protocol.py", "diff_tool"),
+            ("tools/diff_logits.py", "diff_tool"),
         ],
     )
     def test_representative_rule_paths(self, imap, path, rule_name):
@@ -686,8 +693,8 @@ class TestNoImpact:
         assert match.models == []
 
     def test_tools_no_impact(self, imap):
-        """tools/diff_logits.py -> no E2E tests."""
-        match = test_impact.classify_file("tools/diff_logits.py", imap)
+        """Unowned developer tools still have no E2E impact."""
+        match = test_impact.classify_file("tools/auto_perf_tune.py", imap)
         assert match.rule == "no_impact"
         assert match.models == []
 
@@ -696,6 +703,14 @@ class TestNoImpact:
         match = test_impact.classify_file("scripts/run_e2e_parallel.sh", imap)
         assert match.rule == "e2e_runner_script"
         assert match.models == imap.all_model_names
+        assert match.unit_tiers == ["tools"]
+
+    def test_warm_hf_cache_script_triggers_static_tool_tests(self, imap):
+        """HF cache warmup changes keep static dry-run coverage selected."""
+        match = test_impact.classify_file("scripts/warm_hf_cache.py", imap)
+        assert match.rule == "e2e_runner_script"
+        assert match.models == imap.all_model_names
+        assert match.unit_tiers == ["tools"]
 
     def test_scripts_no_impact(self, imap):
         """scripts/ -> no E2E tests."""
@@ -817,6 +832,39 @@ class TestUnitTiers:
             assert match.rule == "elf_replay_tool"
             assert match.models == []
             assert match.unit_tiers == ["tools"]
+
+    def test_diff_tools_trigger_tools_tier(self, imap):
+        """Differential tool edits run tools-tier tests without E2E."""
+        for path in (
+            "tools/diff.py",
+            "tools/diff_framework/protocol.py",
+            "tools/diff_framework/checks/logit_diff.py",
+            "tools/diff_framework/checks/personaplex_pipeline.py",
+            "tools/diff_logits.py",
+            "tools/diff_audio.py",
+            "tools/diff_personaplex.py",
+            "tools/test_runner_parity.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "diff_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+
+    def test_e2e_report_tools_trigger_tools_tier(self, imap):
+        """Report generator edits run report/tool tests without E2E."""
+        for path in ("scripts/generate_e2e_report.py", "scripts/generate_ci_summary.py"):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "e2e_report_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+
+    def test_e2e_report_assets_trigger_tools_tier(self, imap):
+        """Report asset edits run report/tool tests without E2E."""
+        match = test_impact.classify_file(
+            "scripts/generate_e2e_report_assets/e2e_report.css", imap)
+        assert match.rule == "e2e_report_asset"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
 
     def test_unit_tier_torchtrt_engine_defs(self, imap):
         """Torch-TRT engine-def tests run as builder tests without E2E."""
@@ -1228,6 +1276,8 @@ class TestAggregation:
             ["python/tensorrt_model_connect/checkpoint_mapper.py"], imap, cap=5)
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
+        assert result.fallback_reason == "cap_applied"
+        assert result.safety_degraded is True
 
     def test_no_changed_files(self, imap):
         """No files -> no impact."""
@@ -1235,6 +1285,8 @@ class TestAggregation:
         assert result.e2e_models == []
         assert result.unit_tiers == []
         assert not result.rebuild_cpp
+        assert result.fallback_reason == ""
+        assert result.safety_degraded is False
 
     def test_mixed_impact(self, imap):
         """Family plugin + unit test -> models + unit tier."""
@@ -1360,7 +1412,7 @@ class TestValidation:
             "pyproject.toml",
             "python/tensorrt_model_connect/checkpoint_mapper.py",
             "tests/e2e_harness/contracts.py",
-            "tools/diff_logits.py",
+            "tools/auto_perf_tune.py",
         ]
         allowlist.write_text(
             "\n".join([
@@ -1369,7 +1421,7 @@ class TestValidation:
                 "python/tensorrt_model_connect/checkpoint_mapper.py "
                 "# shared builder surface",
                 "harness_shared tests/e2e_harness/contracts.py # shared harness surface",
-                "no_impact tools/diff_logits.py # developer utility script",
+                "no_impact tools/auto_perf_tune.py # developer utility script",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -1390,7 +1442,7 @@ class TestValidation:
                 "python/tensorrt_model_connect/checkpoint_mapper.py",
             ),
             ("harness_shared", "tests/e2e_harness/contracts.py"),
-            ("no_impact", "tools/diff_logits.py"),
+            ("no_impact", "tools/auto_perf_tune.py"),
         }
 
     def test_validate_rejects_unreviewed_fallback_path(self, imap, mock_repo, tmp_path):
@@ -1469,8 +1521,12 @@ class TestOutput:
         )
         output = test_impact.format_json(result)
         data = json.loads(output)
+        assert data["selected_e2e"] == ["qwen3-0.6b", "qwen3-4b"]
+        assert data["selected_unit_tiers"] == ["builder"]
         assert data["e2e_models"] == ["qwen3-0.6b", "qwen3-4b"]
         assert data["rebuild_cpp"] is False
+        assert data["fallback_reason"] == ""
+        assert data["safety_degraded"] is False
 
     def test_json_cap_applied(self, imap):
         result = test_impact.ImpactResult(
@@ -1513,6 +1569,8 @@ class TestCoverageMapIntegration:
             coverage_map=coverage_map,
         )
         assert "builder" in result.fallback_tiers
+        assert result.fallback_reason == "coverage_map_fallback_tiers:builder"
+        assert result.safety_degraded is False
 
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
@@ -1582,6 +1640,40 @@ class TestCoverageMapIntegration:
             fallback_tiers=[],
         )
         output = json.loads(test_impact.format_json(result))
+        assert output["selected_unit_tests"] == {
+            "builder": ["tests/builder/test_config.py::test_a"],
+            "cpp": [],
+            "tools": [],
+        }
         assert output["builder_tests"] == ["tests/builder/test_config.py::test_a"]
         assert output["cpp_tests"] == []
         assert output["fallback_tiers"] == []
+
+    def test_explain_file_impact_for_tool_path(self, imap):
+        """Single-file explanation includes rule and final selected coverage."""
+        payload = test_impact.explain_file_impact("tools/diff.py", imap)
+
+        assert payload["file"] == "tools/diff.py"
+        assert payload["rule"] == "diff_tool"
+        assert payload["rule_models"] == []
+        assert payload["selected_e2e"] == []
+        assert payload["selected_unit_tiers"] == ["tools"]
+        assert payload["selected_unit_tests"] == {
+            "builder": [],
+            "cpp": [],
+            "tools": [],
+        }
+        assert payload["fallback_reason"] == ""
+        assert payload["safety_degraded"] is False
+
+    def test_format_explanation_includes_rule_and_selected_models(self, imap):
+        """Human explanation mirrors the machine-readable selection."""
+        payload = test_impact.explain_file_impact(
+            "python/tensorrt_model_connect/families/qwen/plugin.py",
+            imap,
+        )
+        output = test_impact.format_explanation(payload)
+
+        assert "# Rule: family_package" in output
+        assert "tests/test_e2e.py::test_e2e[qwen3-0.6b]" in output
+        assert "# Selected unit tiers: builder" in output

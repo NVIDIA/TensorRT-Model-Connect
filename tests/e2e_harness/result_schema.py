@@ -111,6 +111,8 @@ def serialize_result(result: E2EResult) -> Dict[str, Any]:
         "oracle_level": result.oracle_level,
         "timestamp": result.timestamp,
     }
+    if result.weak_validation_reason:
+        d["weak_validation_reason"] = result.weak_validation_reason
 
     if result.case_config:
         d["case_config"] = result.case_config
@@ -166,6 +168,7 @@ def deserialize_result(data: Dict[str, Any]) -> E2EResult:
         status=data.get("status", "error"),
         failure_type=data.get("failure_type"),
         oracle_level=data.get("oracle_level", ""),
+        weak_validation_reason=data.get("weak_validation_reason", ""),
         stages=stages,
         determinism=data.get("determinism", {}),
         timing=data.get("timing", {}),

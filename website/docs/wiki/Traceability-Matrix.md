@@ -81,7 +81,7 @@ linking to entries in the matrix below.
 
 | ARCH ID | Architecture Contract | UD ID + Real Files | UT Evidence (Real Test Files) | IT Evidence (Real E2E Paths) | Status |
 |---------|----------------------|-------------------|-------------------------------|------------------------------|--------|
-| `ARCH-BDL-001` | Bundle format read/write roundtrip: `.trtfb` bundles must survive write-then-read without data loss; section headers, magic bytes, and payload integrity are preserved. | `UD-BDL-01`: `src/bundle/bundle_format.h`, `src/bundle/bundle_format.cpp`; `UD-BDL-02`: `python/tensorrt_model_connect/bundle_writer.py` | `UT-BDL-CPP-01`: `tests/cpp/test_bundle_format.cpp` (magic, section parsing, round-trip); `UT-BDL-PY-01`: `tests/builder/test_bundle_writer.py` (bundle format round-trip, section integrity) | `IT-E2E-*`: Every E2E test in `tests/test_e2e.py` exercises bundle read/write (all 122 manifests in `tests/e2e/models/`) | verified |
+| `ARCH-BDL-001` | Bundle format read/write roundtrip: `.trtfb` bundles must survive write-then-read without data loss; section headers, magic bytes, and payload integrity are preserved. | `UD-BDL-01`: `src/bundle/bundle_format.h`, `src/bundle/bundle_format.cpp`; `UD-BDL-02`: `python/tensorrt_model_connect/bundle_writer.py` | `UT-BDL-CPP-01`: `tests/cpp/test_bundle_format.cpp` (magic, section parsing, round-trip); `UT-BDL-PY-01`: `tests/builder/test_bundle_writer.py` (bundle format round-trip, section integrity) | `IT-E2E-*`: Every E2E test in `tests/test_e2e.py` exercises bundle read/write (all 131 manifests in `tests/e2e/models/`) | verified |
 
 ### 4.2 Configuration
 

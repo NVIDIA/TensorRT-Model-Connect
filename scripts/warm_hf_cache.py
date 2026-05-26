@@ -41,9 +41,13 @@ try:
     from huggingface_hub import constants as hf_constants
     from huggingface_hub import snapshot_download
     from huggingface_hub.utils import HfHubHTTPError
-except ImportError:
-    print("ERROR: huggingface_hub not available", file=sys.stderr)
-    sys.exit(1)
+except ImportError as import_error:
+    hf_constants = None
+    snapshot_download = None
+    HfHubHTTPError = RuntimeError
+    _HF_IMPORT_ERROR = import_error
+else:
+    _HF_IMPORT_ERROR = None
 
 # Keep this intentionally aligned with tensorrt_model_connect.engine_builder._HF_ALLOW_PATTERNS
 # without importing engine_builder here; that import pulls in the whole builder
@@ -124,9 +128,16 @@ _MAGPIE_REFERENCE_DEPENDENCIES = [
     ),
 ]
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
 parser = argparse.ArgumentParser(
     description=__doc__,
     formatter_class=argparse.RawDescriptionHelpFormatter,
+)
+parser.add_argument(
+    "--manifest-dir",
+    default="tests/e2e/models",
+    help="Directory containing E2E manifest JSON files.",
 )
 parser.add_argument(
     "--models-file",
@@ -143,10 +154,18 @@ parser.add_argument(
     help="Exclude manifests with this ci_tier value. Intended for nightly mode "
          "to skip PR-only representative manifests.",
 )
+parser.add_argument(
+    "--dry-run",
+    action="store_true",
+    help="Print the cache plan and validate manifest-declared local assets "
+         "without touching the network or local HF cache.",
+)
 args = parser.parse_args()
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-manifests = sorted((ROOT / "tests" / "e2e" / "models").glob("*.json"))
+manifest_dir = pathlib.Path(args.manifest_dir)
+if not manifest_dir.is_absolute():
+    manifest_dir = ROOT / manifest_dir
+manifests = sorted(manifest_dir.glob("*.json"))
 
 # Optional filter: only consider models listed in --models-file
 filter_names: set[str] | None = None
@@ -160,6 +179,68 @@ excluded_ci_tiers = set(args.exclude_ci_tier or [])
 
 entries: list[tuple[str, str, bool]] = []
 needs_tts_asr_verifier = False
+static_errors: list[str] = []
+
+
+def _resolve_manifest_asset(path_value: str, *, data_dir: bool = False) -> pathlib.Path:
+    path = pathlib.Path(path_value)
+    if path.is_absolute():
+        return path
+    if path_value.startswith("tests/e2e/data/"):
+        return ROOT / path_value
+    if path_value.startswith("data/"):
+        return ROOT / "tests" / "e2e" / path_value
+    if data_dir:
+        return ROOT / "tests" / "e2e" / "data" / path.name
+    project_path = ROOT / path_value
+    if project_path.is_file():
+        return project_path
+    return ROOT / "tests" / "e2e" / "data" / path.name
+
+
+def _validate_manifest_assets(manifest_path: pathlib.Path, manifest: dict) -> list[str]:
+    errors: list[str] = []
+    asset_fields = (
+        "test_image",
+        "test_input_audio",
+        "speech_reference_tokens",
+    )
+    for field in asset_fields:
+        value = manifest.get(field)
+        if isinstance(value, str) and value.strip():
+            resolved = _resolve_manifest_asset(value)
+            if not resolved.is_file():
+                errors.append(
+                    f"{manifest_path.name}: {field}={value!r} is missing "
+                    f"(resolved to {resolved})"
+                )
+
+    fp8_scales = manifest.get("fp8_scales")
+    if isinstance(fp8_scales, str) and fp8_scales.strip() and fp8_scales != "auto":
+        resolved = _resolve_manifest_asset(fp8_scales, data_dir=True)
+        if not resolved.is_file():
+            errors.append(
+                f"{manifest_path.name}: fp8_scales={fp8_scales!r} is missing "
+                f"(resolved to {resolved})"
+            )
+
+    for req in manifest.get("preflight_requirements", []):
+        if not isinstance(req, dict) or req.get("kind") != "asset_exists":
+            continue
+        args_dict = req.get("args", {})
+        if not isinstance(args_dict, dict):
+            continue
+        value = args_dict.get("path")
+        if isinstance(value, str) and value.strip():
+            resolved = _resolve_manifest_asset(value)
+            if not resolved.is_file():
+                errors.append(
+                    f"{manifest_path.name}: preflight asset {value!r} is missing "
+                    f"(resolved to {resolved})"
+                )
+    return errors
+
+
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
@@ -172,6 +253,7 @@ for m in manifests:
     if filter_names is not None and name not in filter_names:
         continue
     entries.append((name, d["hf_id"], bool(d.get("gated"))))
+    static_errors.extend(_validate_manifest_assets(m, d))
     if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
         needs_tts_asr_verifier = True
         if str(d.get("family", "")) == "magpie_tts":
@@ -288,7 +370,39 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
 selective = filter_names is not None
 scope = f"selective ({len(entries)} models)" if selective else f"all {len(entries)} models"
 print(f"Warming HF cache — {scope}...")
-print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
+if hf_constants is not None:
+    print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
+elif args.dry_run:
+    print("HF Hub cache: unavailable (dry-run, huggingface_hub not installed)")
+else:
+    print("ERROR: huggingface_hub not available", file=sys.stderr)
+    if _HF_IMPORT_ERROR is not None:
+        print(f"Import error: {_HF_IMPORT_ERROR}", file=sys.stderr)
+    sys.exit(1)
+
+if args.dry_run:
+    for i, (name, hf_id, gated) in enumerate(entries, 1):
+        suffix = " gated" if gated else ""
+        print(f"  [{i:3d}/{len(entries)}] {name} -> {hf_id}{suffix}")
+    if static_errors:
+        print(
+            f"ERROR: {len(static_errors)} manifest-declared asset(s) are missing:",
+            file=sys.stderr,
+        )
+        for error in static_errors:
+            print(f"  - {error}", file=sys.stderr)
+        sys.exit(1)
+    print("Dry-run validation passed: manifest-declared local assets exist.")
+    sys.exit(0)
+
+if static_errors:
+    print(
+        f"ERROR: {len(static_errors)} manifest-declared asset(s) are missing:",
+        file=sys.stderr,
+    )
+    for error in static_errors:
+        print(f"  - {error}", file=sys.stderr)
+    sys.exit(1)
 
 warned: list[str] = []
 skipped: list[str] = []

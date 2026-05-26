@@ -281,6 +281,7 @@ def _mime_for_ext(ext: str) -> str:
 
 _STATUS_COLORS = {
     "pass": "#22c55e",
+    "weak_pass": "#a16207",
     "fail": "#ef4444",
     "skip": "#eab308",
     "error": "#f97316",
@@ -300,6 +301,35 @@ def _badge(status: str) -> str:
 
 def _esc(text: Any) -> str:
     return html.escape(str(text)) if text is not None else ""
+
+
+def _is_pass_status(status: Any) -> bool:
+    return str(status or "").lower() in {"pass", "passed", "success", "succeeded"}
+
+
+def _weak_validation_reason(result: Dict[str, Any]) -> str:
+    raw_status = result.get("status", "")
+    if not _is_pass_status(raw_status):
+        return ""
+    explicit = result.get("weak_validation_reason")
+    if explicit:
+        return str(explicit)
+    oracle_level = str(result.get("oracle_level") or "")
+    if not oracle_level:
+        return "missing oracle_level in result.json"
+    if oracle_level == "L4_invariants":
+        return "oracle_level is L4_invariants"
+    case_config = result.get("case_config") or {}
+    reference_backend = str(case_config.get("reference_backend") or "")
+    if reference_backend == "invariant_only":
+        return "reference_backend is invariant_only"
+    return ""
+
+
+def _display_status(result: Dict[str, Any]) -> str:
+    if _weak_validation_reason(result):
+        return "weak_pass"
+    return str(result.get("status", "error")).lower()
 
 
 def _code_block(text: str, block_id: str) -> str:
@@ -1435,7 +1465,7 @@ def render_model_section(
 ) -> str:
     """Render a single collapsible ``<details>`` for one model."""
     name = result.get("case_name", "unknown")
-    status = result.get("status", "error")
+    status = _display_status(result)
     cc = result.get("case_config", {})
     family = cc.get("family", "")
     task_strategy = cc.get("task_strategy", "")
@@ -1470,6 +1500,12 @@ def render_model_section(
         body_parts.append(
             f'<p class="failure-info">Failure type: '
             f"<strong>{_esc(failure_type)}</strong></p>"
+        )
+    weak_reason = _weak_validation_reason(result)
+    if weak_reason and pytest_status != "XFAIL":
+        body_parts.append(
+            '<p class="weak-info">Weak validation: '
+            f"<strong>{_esc(weak_reason)}</strong></p>"
         )
 
     # Dispatch to modality renderer
@@ -1557,14 +1593,21 @@ def _total_time_sort_key(result: Dict[str, Any]) -> float:
 
 def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     """Render the top-of-page summary table with counters and filters."""
-    counts: Dict[str, int] = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
+    counts: Dict[str, int] = {
+        "pass": 0,
+        "weak_pass": 0,
+        "fail": 0,
+        "skip": 0,
+        "error": 0,
+    }
     for r in results:
-        s = r.get("status", "error")
+        s = _display_status(r)
         counts[s] = counts.get(s, 0) + 1
 
     counters = (
         f'<div class="counters">'
         f'<span class="counter pass-counter">{counts["pass"]} Passed</span>'
+        f'<span class="counter weak-counter">{counts["weak_pass"]} Weak Pass</span>'
         f'<span class="counter fail-counter">{counts["fail"]} Failed</span>'
         f'<span class="counter skip-counter">{counts["skip"]} Skipped</span>'
         f'<span class="counter error-counter">{counts["error"]} Error</span>'
@@ -1579,6 +1622,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
         '<select id="status-filter" onchange="filterModels()">'
         '<option value="">All</option>'
         '<option value="pass">Pass</option>'
+        '<option value="weak_pass">Weak Pass</option>'
         '<option value="fail">Fail</option>'
         '<option value="skip">Skip</option>'
         '<option value="error">Error</option>'
@@ -1590,7 +1634,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     sorted_results = sorted(results, key=_total_time_sort_key, reverse=True)
     for r in sorted_results:
         name = r.get("case_name", "unknown")
-        status = r.get("status", "error")
+        status = _display_status(r)
         cc = r.get("case_config", {})
         family = cc.get("family", "")
         task_strategy = cc.get("task_strategy", "")

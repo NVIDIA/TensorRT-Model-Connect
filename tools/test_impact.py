@@ -292,6 +292,8 @@ class ImpactResult:
     tools_tests: List[str] = field(default_factory=list)
     fallback_tiers: List[str] = field(default_factory=list)
     l0_replacements: List[Dict[str, str]] = field(default_factory=list)
+    fallback_reason: str = ""
+    safety_degraded: bool = False
 
 # ---------------------------------------------------------------------------
 # Impact map construction
@@ -706,6 +708,17 @@ def _path_in_impact_map(
     return _matcher
 
 
+def _diff_tool_matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
+    del imap
+    if path == "tools/diff.py" or path.startswith("tools/diff_framework/"):
+        return RuleContext(path=path)
+    if re.match(r"^tools/diff_[A-Za-z0-9_]+\.py$", path):
+        return RuleContext(path=path)
+    if path == "tools/test_runner_parity.py":
+        return RuleContext(path=path)
+    return None
+
+
 def _no_impact_matcher(path: str, imap: ImpactMap) -> Optional[RuleContext]:
     del imap
     if path.startswith("tools/") or path.startswith("scripts/"):
@@ -826,11 +839,6 @@ def _scoped_cpp_helper_models(context: RuleContext, imap: ImpactMap) -> List[str
 
 def _e2e_data_file_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return imap.e2e_data_file_to_models[context.path]
-
-
-def _fp8_scale_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del context
-    return sorted(imap.manifest_field_to_models.get("fp8_scales", []))
 
 
 def _known_cpp_runtime_model(
@@ -1354,7 +1362,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "scripts/schedule_e2e.py",
                 "scripts/warm_hf_cache.py",
             }),
-            resolver=_match_result("e2e_runner_script", _all_models),
+            resolver=_match_result("e2e_runner_script", _all_models, ["tools"]),
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
         ),
         ClassificationRule(
@@ -1363,6 +1371,23 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_equals("tests/e2e/waives.txt"),
             resolver=_match_result("e2e_waives", _all_models),
             covered_by=("TestHarness.test_waives_diff_can_be_refined",),
+        ),
+        ClassificationRule(
+            priority=415,
+            name="e2e_report_tool",
+            matcher=_path_in({
+                "scripts/generate_ci_summary.py",
+                "scripts/generate_e2e_report.py",
+            }),
+            resolver=_match_result("e2e_report_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_e2e_report_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=416,
+            name="e2e_report_asset",
+            matcher=_path_startswith("scripts/generate_e2e_report_assets/"),
+            resolver=_match_result("e2e_report_asset", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_e2e_report_assets_trigger_tools_tier",),
         ),
         ClassificationRule(
             priority=420,
@@ -1414,15 +1439,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
-            priority=480,
-            name="fp8_gen_script",
-            matcher=_path_equals("scripts/_gen_fp8_bf16.py"),
-            resolver=_match_result(
-                "fp8_gen_script", _fp8_scale_models, [], False,
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
             priority=485,
             name="elf_replay_tool",
             matcher=_path_in({
@@ -1434,7 +1450,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
         ),
         ClassificationRule(
-            priority=490,
+            priority=489,
+            name="diff_tool",
+            matcher=_diff_tool_matcher,
+            resolver=_match_result("diff_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_diff_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=492,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,
@@ -1504,6 +1527,14 @@ def _filter_models_by_ci_tier(
         if str(imap.model_metadata.get(model, {}).get("ci_tier", "") or "")
         not in exclude_ci_tiers
     )
+
+
+def _impact_fallback_reason(cap_applied: bool, fallback_tiers: List[str]) -> str:
+    if cap_applied:
+        return "cap_applied"
+    if fallback_tiers:
+        return "coverage_map_fallback_tiers:" + ",".join(sorted(fallback_tiers))
+    return ""
 
 
 def analyze_impact(
@@ -1577,6 +1608,7 @@ def analyze_impact(
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
     if direct_tools_tests:
         tools_tests = sorted(set(tools_tests).union(direct_tools_tests))
+    fallback_reason = _impact_fallback_reason(cap_applied, fallback_tiers)
 
     return ImpactResult(
         e2e_models=e2e_models,
@@ -1589,7 +1621,53 @@ def analyze_impact(
         tools_tests=tools_tests,
         fallback_tiers=fallback_tiers,
         l0_replacements=l0_replacements,
+        fallback_reason=fallback_reason,
+        safety_degraded=cap_applied,
     )
+
+
+def explain_file_impact(
+    path: str,
+    imap: ImpactMap,
+    cap: Optional[int] = None,
+    coverage_map: Optional[Dict[str, List[str]]] = None,
+    base: Optional[str] = None,
+    head: Optional[str] = None,
+    repo_root: Optional[Path] = None,
+    e2e_suite: str = "l0",
+    exclude_ci_tiers: Optional[Set[str]] = None,
+) -> Dict[str, object]:
+    """Explain final impact selection for one changed file."""
+    result = analyze_impact(
+        [path],
+        imap,
+        cap=cap,
+        coverage_map=coverage_map,
+        base=base,
+        head=head,
+        repo_root=repo_root,
+        e2e_suite=e2e_suite,
+        exclude_ci_tiers=exclude_ci_tiers,
+    )
+    matched_rule = result.matched_rules[0] if result.matched_rules else {}
+    return {
+        "file": path,
+        "rule": matched_rule.get("rule", ""),
+        "rule_models": matched_rule.get("models", []),
+        "selected_e2e": result.e2e_models,
+        "selected_unit_tiers": result.unit_tiers,
+        "selected_unit_tests": {
+            "builder": result.builder_tests,
+            "cpp": result.cpp_tests,
+            "tools": result.tools_tests,
+        },
+        "rebuild_cpp": result.rebuild_cpp,
+        "cap_applied": result.cap_applied,
+        "l0_replacements": result.l0_replacements,
+        "fallback_tiers": result.fallback_tiers,
+        "fallback_reason": result.fallback_reason,
+        "safety_degraded": result.safety_degraded,
+    }
 
 # ---------------------------------------------------------------------------
 # Git diff
@@ -2355,11 +2433,24 @@ def format_human(result: ImpactResult) -> str:
         lines.append(f"# L0 replacements applied ({len(result.l0_replacements)} models):")
         for repl in result.l0_replacements:
             lines.append(f"#   {repl['model']} -> {repl['replacement']}")
+    if result.fallback_reason:
+        lines.append(f"# Fallback reason: {result.fallback_reason}")
+    if result.safety_degraded:
+        lines.append("# WARNING: Safety degraded; inspect selected coverage before relying on it.")
     return "\n".join(lines)
 
 
 def format_json(result: ImpactResult) -> str:
     return json.dumps({
+        "selected_e2e": result.e2e_models,
+        "selected_unit_tiers": result.unit_tiers,
+        "selected_unit_tests": {
+            "builder": result.builder_tests,
+            "cpp": result.cpp_tests,
+            "tools": result.tools_tests,
+        },
+        "fallback_reason": result.fallback_reason,
+        "safety_degraded": result.safety_degraded,
         "e2e_models": result.e2e_models,
         "unit_tiers": result.unit_tiers,
         "rebuild_cpp": result.rebuild_cpp,
@@ -2371,6 +2462,30 @@ def format_json(result: ImpactResult) -> str:
         "fallback_tiers": result.fallback_tiers,
         "l0_replacements": result.l0_replacements,
     }, indent=2)
+
+
+def format_explanation(payload: Dict[str, object]) -> str:
+    lines = [
+        f"# File: {payload['file']}",
+        f"# Rule: {payload['rule']}",
+    ]
+    selected_e2e = list(payload.get("selected_e2e", []))
+    selected_unit_tiers = list(payload.get("selected_unit_tiers", []))
+    if selected_e2e:
+        lines.append(f"# Selected E2E models ({len(selected_e2e)}):")
+        for model in selected_e2e:
+            lines.append(f"tests/test_e2e.py::test_e2e[{model}]")
+    else:
+        lines.append("# Selected E2E models: none")
+    if selected_unit_tiers:
+        lines.append("# Selected unit tiers: " + ", ".join(selected_unit_tiers))
+    else:
+        lines.append("# Selected unit tiers: none")
+    if payload.get("fallback_reason"):
+        lines.append(f"# Fallback reason: {payload['fallback_reason']}")
+    if payload.get("safety_degraded"):
+        lines.append("# WARNING: Safety degraded; inspect selected coverage before relying on it.")
+    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -2387,6 +2502,8 @@ def main() -> int:
                         help="Git ref for diff head (default: HEAD)")
     parser.add_argument("--files",
                         help="Explicit comma-separated file list (overrides git diff)")
+    parser.add_argument("--explain-file",
+                        help="Explain why one changed file selects E2E models or unit tiers")
     parser.add_argument("--cap", type=int, default=None,
                         help="If affected models > N, limit to core set + warn")
     parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
@@ -2437,11 +2554,13 @@ def main() -> int:
 
     # Load coverage map if provided
     coverage_map_data = None
+    coverage_map_missing = False
     if args.coverage_map:
         sys.path.insert(0, str(repo_root / "tools"))
         from coverage_map.generate import load_coverage_map
         coverage_map_data = load_coverage_map(Path(args.coverage_map))
         if coverage_map_data is None:
+            coverage_map_missing = True
             print(f"WARNING: Coverage map not found at {args.coverage_map}. "
                   "Falling back to tier-level selection.", file=sys.stderr)
 
@@ -2449,6 +2568,26 @@ def main() -> int:
         set(_DEFAULT_EXCLUDED_CI_TIERS)
         .difference(set(args.include_ci_tier or []))
     )
+
+    if args.explain_file:
+        payload = explain_file_impact(
+            args.explain_file,
+            imap,
+            cap=args.cap,
+            coverage_map=coverage_map_data,
+            base=args.base,
+            head=args.head,
+            repo_root=repo_root,
+            e2e_suite=args.e2e_suite,
+            exclude_ci_tiers=exclude_ci_tiers,
+        )
+        if coverage_map_missing and not payload["fallback_reason"]:
+            payload["fallback_reason"] = "coverage_map_unavailable_tier_level_selection"
+        if args.json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(format_explanation(payload))
+        return 0
 
     # Get changed files
     if args.files:
@@ -2473,6 +2612,7 @@ def main() -> int:
                 "file": "<all>", "rule": "git_diff_failed",
                 "models": e2e_models,
             }],
+            fallback_reason="git_diff_failed_safety_net",
         )
     elif not changed:
         print("No changed files detected.", file=sys.stderr)
@@ -2492,6 +2632,9 @@ def main() -> int:
             e2e_suite=args.e2e_suite,
             exclude_ci_tiers=exclude_ci_tiers,
         )
+
+    if coverage_map_missing and not result_obj.fallback_reason:
+        result_obj.fallback_reason = "coverage_map_unavailable_tier_level_selection"
 
     if args.verbose:
         for rule in result_obj.matched_rules:

@@ -20,9 +20,11 @@ def _result(name: str, status: str = "pass") -> dict:
         "case_name": name,
         "status": status,
         "failure_type": "compare_fail" if status == "fail" else None,
+        "oracle_level": "L1_external_reference",
         "case_config": {
             "family": "qwen",
             "task_strategy": "text_generation_causal",
+            "reference_backend": "hf_transformers",
         },
         "stages": {
             "generate": {
@@ -200,3 +202,51 @@ def test_summary_treats_xfail_result_as_waived_not_active_failure(
     assert "| skip | 1 |" in summary
     assert "### Failures" not in summary
     assert "| fnet-base | XFAIL | skip | known representation parity gap |" in summary
+
+
+def test_summary_treats_invariant_only_pass_as_weak_pass(tmp_path: Path) -> None:
+    mod = _import_summary()
+    artifacts_dir = tmp_path / "artifacts"
+    weak = _result("elf-b-owt-l0", "pass")
+    weak["oracle_level"] = "L4_invariants"
+    weak["case_config"]["reference_backend"] = "invariant_only"
+    case_dir = artifacts_dir / "elf-b-owt-l0"
+    case_dir.mkdir(parents=True)
+    (case_dir / "result.json").write_text(json.dumps(weak), encoding="utf-8")
+
+    summary = mod.render_summary(
+        results=mod._load_results(artifacts_dir),
+        mode="nightly",
+        report_path=tmp_path / "missing.html",
+        html_artifact_name="html",
+        full_artifact_name="full",
+        run_url="",
+        max_rows=40,
+    )
+
+    assert "| weak_pass | 1 |" in summary
+    assert "### Failures" in summary
+    assert "| elf-b-owt-l0 | qwen | text_generation_causal | weak_pass | oracle_level is L4_invariants |" in summary
+
+
+def test_summary_uses_explicit_weak_validation_reason(tmp_path: Path) -> None:
+    mod = _import_summary()
+    artifacts_dir = tmp_path / "artifacts"
+    weak = _result("weak-text", "pass")
+    weak["weak_validation_reason"] = "semantic verifier unavailable"
+    case_dir = artifacts_dir / "weak-text"
+    case_dir.mkdir(parents=True)
+    (case_dir / "result.json").write_text(json.dumps(weak), encoding="utf-8")
+
+    summary = mod.render_summary(
+        results=mod._load_results(artifacts_dir),
+        mode="premerge",
+        report_path=tmp_path / "missing.html",
+        html_artifact_name="html",
+        full_artifact_name="full",
+        run_url="",
+        max_rows=40,
+    )
+
+    assert "| weak_pass | 1 |" in summary
+    assert "semantic verifier unavailable" in summary

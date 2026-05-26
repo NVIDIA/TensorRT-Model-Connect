@@ -1,4 +1,4 @@
-"""Static contract checks for scripts/warm_hf_cache.py."""
+"""Static dry-run tests for scripts/warm_hf_cache.py."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import ast
 import fnmatch
 import json
 import pathlib
+import subprocess
+import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "warm_hf_cache.py"
+WARM_HF_CACHE = SCRIPT
 HELPER_FUNCTIONS = {
     "_component_has_weight",
     "_diffusers_missing_weight_components",
@@ -52,6 +55,108 @@ def _load_cache_helpers() -> dict:
             ast.fix_missing_locations(module)
             exec(compile(module, str(WARM_HF_CACHE), "exec"), namespace)
     return namespace
+
+
+def _write_manifest(directory: Path, name: str, payload: dict) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    data = {
+        "name": name,
+        "hf_id": f"org/{name}",
+        "bundle": f"{name}.trtfb",
+        "family": "unit",
+        "runtime_strategy": "decoder_kv_cache",
+    }
+    data.update(payload)
+    (directory / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def _run_dry_run(
+    manifest_dir: Path,
+    models_file: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--dry-run",
+            "--manifest-dir",
+            str(manifest_dir),
+            "--models-file",
+            str(models_file),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_dry_run_validates_manifest_declared_local_assets(tmp_path: Path) -> None:
+    manifests = tmp_path / "models"
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("speech\n", encoding="utf-8")
+    _write_manifest(
+        manifests,
+        "speech",
+        {
+            "runtime_strategy": "speech_to_speech",
+            "test_input_audio": "data/Recording.wav",
+            "speech_reference_tokens": (
+                "data/personaplex_recording_official_tokens_greedy.npy"
+            ),
+        },
+    )
+
+    result = _run_dry_run(manifests, models_file)
+
+    assert result.returncode == 0, result.stderr
+    assert "Dry-run validation passed" in result.stdout
+    assert "personaplex-mimi-codec -> kyutai/mimi" in result.stdout
+
+
+def test_dry_run_fails_on_missing_manifest_asset(tmp_path: Path) -> None:
+    manifests = tmp_path / "models"
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("speech\n", encoding="utf-8")
+    _write_manifest(
+        manifests,
+        "speech",
+        {
+            "runtime_strategy": "speech_to_speech",
+            "test_input_audio": "data/does-not-exist.wav",
+        },
+    )
+
+    result = _run_dry_run(manifests, models_file)
+
+    assert result.returncode == 1
+    assert (
+        "test_input_audio='data/does-not-exist.wav' is missing"
+        in result.stderr
+    )
+
+
+def test_dry_run_includes_text_to_audio_verifier_dependencies(tmp_path: Path) -> None:
+    manifests = tmp_path / "models"
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("magpie\n", encoding="utf-8")
+    _write_manifest(
+        manifests,
+        "magpie",
+        {
+            "family": "magpie_tts",
+            "runtime_strategy": "text_to_audio_magpie",
+        },
+    )
+
+    result = _run_dry_run(manifests, models_file)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "magpie-nanocodec -> nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps"
+        in result.stdout
+    )
+    assert "tts-asr-verifier -> openai/whisper-large-v3-turbo" in result.stdout
 
 
 def test_magpie_reference_dependencies_are_warmed() -> None:

@@ -11,6 +11,14 @@ class DiffusionComponentsTest:
     runtime_strategies = ["diffusion"]
     requires_bundle = True
     requires_gpu = True
+    required_inputs = ["bundle", "prompt"]
+    oracle_level = "hf_diffusers"
+    deterministic_seed = True
+    output_metrics = ["psnr", "ssim", "pixel_mean", "pixel_std"]
+    failure_examples = [
+        "blank image has low pixel variance",
+        "component output diverges from HF Diffusers reference",
+    ]
 
     def run(self, ctx: TestContext) -> DiffResult:
         from debug_diffusion_pipeline import run_as_diff_test

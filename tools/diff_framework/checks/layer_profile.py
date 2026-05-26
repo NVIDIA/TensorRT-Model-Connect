@@ -11,6 +11,19 @@ class LayerProfileTest:
     runtime_strategies = ["decoder_kv_cache", "decoder_moe"]
     requires_bundle = False
     requires_gpu = True
+    required_inputs = ["model"]
+    oracle_level = "performance_only"
+    deterministic_seed = False
+    output_metrics = [
+        "total_layer_ms",
+        "num_layers_profiled",
+        "bottleneck_pct",
+        "bottleneck_mean_ms",
+    ]
+    failure_examples = [
+        "no TRT layers are profiled",
+        "single layer dominates runtime unexpectedly",
+    ]
 
     def run(self, ctx: TestContext) -> DiffResult:
         import sys

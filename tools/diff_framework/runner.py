@@ -198,9 +198,24 @@ def list_tests(runtime_strategy: str | None = None) -> list[dict]:
             "runtime_strategies": cls.runtime_strategies,
             "requires_bundle": cls.requires_bundle,
             "requires_gpu": cls.requires_gpu,
+            "required_inputs": list(getattr(cls, "required_inputs", [])),
+            "oracle_level": getattr(cls, "oracle_level", ""),
+            "deterministic_seed": bool(getattr(cls, "deterministic_seed", False)),
+            "output_metrics": list(getattr(cls, "output_metrics", [])),
+            "failure_examples": list(getattr(cls, "failure_examples", [])),
         }
         for cls in classes
     ]
+
+
+def _populate_result_metadata(result: DiffResult, cls: type, ctx: TestContext) -> DiffResult:
+    if not result.oracle_level:
+        result.oracle_level = getattr(cls, "oracle_level", "")
+    if not result.command_repro and ctx.command_repro:
+        result.command_repro = list(ctx.command_repro)
+    if not result.environment and ctx.environment:
+        result.environment = dict(ctx.environment)
+    return result
 
 
 def run_tests(
@@ -222,13 +237,29 @@ def run_tests(
     else:
         classes = get_tests_for_strategy(ctx.runtime_strategy)
 
+    if not classes:
+        result = DiffResult.error(
+            "strategy_discovery",
+            ctx.model,
+            ctx.runtime_strategy,
+            (
+                "No diff tests registered for runtime_strategy "
+                f"{ctx.runtime_strategy!r}"
+            ),
+        )
+        if ctx.command_repro:
+            result.command_repro = list(ctx.command_repro)
+        if ctx.environment:
+            result.environment = dict(ctx.environment)
+        return [result]
+
     results = []
     for cls in classes:
         # Skip tests that require a bundle if none provided
         if cls.requires_bundle and not ctx.bundle_path:
-            results.append(DiffResult.skip(
+            results.append(_populate_result_metadata(DiffResult.skip(
                 cls.name, ctx.model, ctx.runtime_strategy,
-                "No bundle provided (--bundle required)"))
+                "No bundle provided (--bundle required)"), cls, ctx))
             continue
 
         instance = cls()
@@ -240,6 +271,6 @@ def run_tests(
                 cls.name, ctx.model, ctx.runtime_strategy,
                 str(e), details=f"{type(e).__name__}: {e}")
         result.duration_s = time.monotonic() - t0
-        results.append(result)
+        results.append(_populate_result_metadata(result, cls, ctx))
 
     return results

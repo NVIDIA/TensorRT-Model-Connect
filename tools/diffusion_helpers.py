@@ -1,6 +1,6 @@
 """Shared utilities for diffusion pipeline tools.
 
-Used by: debug_diffusion_pipeline.py, validate_dit.py, validate_t5.py
+Used by: debug_diffusion_pipeline.py
 """
 from __future__ import annotations
 

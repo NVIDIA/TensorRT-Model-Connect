@@ -402,18 +402,39 @@ def _parse_mimi_tokens_from_stderr(stderr: str) -> np.ndarray:
 # Comparison
 # ---------------------------------------------------------------------------
 
+def _default_tolerances() -> dict[str, float]:
+    return {
+        "mimi_token_match": 0.9,   # 90% token match
+        "depth_token_match": 0.5,   # 50% token match (generous for now)
+        "audio_rms_ratio": 0.1,     # TRT audio RMS should be at least 10% of ref
+        "audio_cosine_sim": 0.1,    # Loose cosine similarity
+    }
+
+
+def _metrics_pass(metrics: dict, tolerances: dict[str, float] | None = None) -> bool:
+    if not metrics:
+        return False
+    thresholds = tolerances or _default_tolerances()
+    return all(value >= thresholds.get(key, 0) for key, value in metrics.items())
+
+
+def _load_saved_reference(reference_dir: str) -> dict:
+    ref_data = {}
+    for name in ["mimi_tokens", "temporal_hidden", "depth_tokens", "audio_out", "text_tokens"]:
+        path = os.path.join(reference_dir, f"{name}.npy")
+        if os.path.exists(path):
+            ref_data[name] = np.load(path)
+            print(f"  Loaded {name}: {ref_data[name].shape}")
+    return ref_data
+
+
 def compare_results(ref: dict, trt: dict, tolerances: dict = None) -> dict:
     """Compare reference and TRT results, printing a detailed report.
 
     Returns dict with pass/fail status for each stage.
     """
     if tolerances is None:
-        tolerances = {
-            "mimi_token_match": 0.9,   # 90% token match
-            "depth_token_match": 0.5,   # 50% token match (generous for now)
-            "audio_rms_ratio": 0.1,     # TRT audio RMS should be at least 10% of ref
-            "audio_cosine_sim": 0.1,    # Loose cosine similarity
-        }
+        tolerances = _default_tolerances()
 
     results = {}
     print("\n" + "=" * 70)
@@ -537,6 +558,80 @@ def compare_results(ref: dict, trt: dict, tolerances: dict = None) -> dict:
     return results
 
 
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    test_name = "personaplex_pipeline"
+    if not ctx.audio_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "PersonaPlex diff requires --audio")
+    if not ctx.bundle_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "PersonaPlex diff requires --bundle")
+    if not (ctx.reference_dir or ctx.official_repo_path):
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "PersonaPlex diff requires --reference-dir or --official-repo")
+
+    output_dir = ctx.output_dir or tempfile.mkdtemp(prefix="personaplex_diff_")
+    ref_dir = os.path.join(output_dir, "reference")
+    trt_dir = os.path.join(output_dir, "trt")
+    binary = ctx.binary_path or "./build/trtmc"
+    start = _time.monotonic()
+
+    try:
+        if ctx.reference_dir:
+            ref_data = _load_saved_reference(ctx.reference_dir)
+            oracle_level = "golden_snapshot"
+        else:
+            ref_data = run_official_reference(
+                input_wav=ctx.audio_path,
+                official_repo=ctx.official_repo_path,
+                output_dir=ref_dir,
+                device=ctx.device,
+                hf_repo=ctx.hf_repo,
+                greedy=True,
+                num_frames=ctx.max_new_tokens,
+            )
+            oracle_level = "official_runtime"
+
+        trt_data = run_trt_pipeline(
+            input_wav=ctx.audio_path,
+            bundle=ctx.bundle_path,
+            trtmc_binary=binary,
+            hf_python=ctx.hf_python or "",
+            output_dir=trt_dir,
+        )
+        metrics = compare_results(ref_data, trt_data)
+        passed = _metrics_pass(metrics)
+        return DiffResult(
+            test_name=test_name,
+            model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=passed,
+            status="PASS" if passed else "FAIL",
+            message=(
+                "PersonaPlex TRT output matches reference thresholds"
+                if passed else "PersonaPlex comparison failed or produced no metrics"
+            ),
+            metrics=metrics,
+            artifacts={"output_dir": output_dir, "reference_dir": ref_dir, "trt_dir": trt_dir},
+            oracle_level=oracle_level,
+            duration_s=_time.monotonic() - start,
+        )
+    except Exception as exc:
+        return DiffResult.error(
+            test_name,
+            ctx.model,
+            ctx.runtime_strategy,
+            f"PersonaPlex diff crashed: {type(exc).__name__}: {exc}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -591,7 +686,7 @@ def main():
 
     if args.reference_only:
         print(f"\n[main] Reference-only mode. Data saved to: {ref_dir}")
-        return
+        return 0
 
     # --- Run TRT pipeline ---
     trt_data = {}
@@ -608,12 +703,15 @@ def main():
 
     # --- Compare ---
     if ref_data or trt_data:
-        compare_results(ref_data, trt_data)
+        results = compare_results(ref_data, trt_data)
+        rc = 0 if _metrics_pass(results) else 1
     else:
         print("[main] Nothing to compare (no reference or TRT data)")
+        rc = 1
 
     print(f"\n[main] Output saved to: {args.output_dir}")
+    return rc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

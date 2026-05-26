@@ -1286,3 +1286,28 @@ class TestSummaryDashboard:
         assert html.index('href="#model-slow"') < html.index('href="#model-medium"')
         assert html.index('href="#model-medium"') < html.index('href="#model-fast"')
         assert html.index('href="#model-fast"') < html.index('href="#model-missing"')
+
+    def test_invariant_only_pass_is_rendered_as_weak_pass(self):
+        mod = _import_report()
+        result = _make_result(name="elf-b-owt-l0", status="pass")
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "invariant_only"
+
+        html = mod.render_report([result])
+
+        assert "0 Passed" in html
+        assert "1 Weak Pass" in html
+        assert "WEAK_PASS" in html
+        assert 'data-status="weak_pass"' in html
+        assert '<option value="weak_pass">Weak Pass</option>' in html
+        assert "Weak validation: <strong>oracle_level is L4_invariants</strong>" in html
+
+    def test_explicit_weak_validation_reason_is_rendered(self):
+        mod = _import_report()
+        result = _make_result(name="weak-text", status="pass")
+        result["weak_validation_reason"] = "semantic verifier unavailable"
+
+        html = mod.render_report([result])
+
+        assert "WEAK_PASS" in html
+        assert "semantic verifier unavailable" in html

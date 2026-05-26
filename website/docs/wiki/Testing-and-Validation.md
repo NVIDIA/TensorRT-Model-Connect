@@ -13,9 +13,9 @@ purpose, dependency profile, and speed:
 |-------|-----------|:--:|:--:|:--:|------|---------|
 | 1. Builder unit | `tests/builder/` | 98 | ~940 | No | ~10 min | Python build logic in isolation |
 | 2. C++ runtime unit | `tests/cpp/` | 92 | 70+ | Mix | ~8 s | C++ runtime correctness |
-| 3. Tools self-tests | `tests/tools/` | 62 | ~160 | No | ~35 s | Diff framework + comparison utilities |
+| 3. Tools self-tests | `tests/tools/` | 67 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 122 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 131 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -494,7 +494,7 @@ gold-standard correctness gate. All modalities use the same harness.
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines
 
-# All 122 models with artifact output
+# All 131 models with artifact output
 .venv/bin/python -m pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
@@ -528,7 +528,7 @@ gold-standard correctness gate. All modalities use the same harness.
 
 ```
 tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 122 per-model JSON manifests
+tests/e2e/models/*.json              # 131 per-model JSON manifests
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -618,7 +618,7 @@ Every `CompareResult` returned by any comparator includes:
 - **Full tracebacks**: Exception blocks in the orchestrator capture
   `traceback.format_exc()` and include it in the `CompareResult.message`.
 
-### 122 model manifests by category
+### 131 model manifests by category
 
 | Category | Count | Models |
 |----------|:--:|---------|
@@ -702,7 +702,7 @@ ctest --test-dir build --output-on-failure
 
 **What's covered**:
 - Python: 98 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
-- Tools: 62 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
+- Tools: 67 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
 - C++: 92 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, under 1 min)
@@ -748,7 +748,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 122 models, force-rebuild every bundle. Gold-standard regression gate.
+All 131 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \

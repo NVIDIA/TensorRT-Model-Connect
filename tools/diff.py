@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
+import shlex
 import sys
 
 import diff_framework
@@ -45,44 +47,82 @@ def cmd_list(args):
         return
 
     print(f"{'Name':<25s} {'Bundle?':<9s} {'GPU?':<6s} "
-          f"{'Strategies':<40s} Description")
-    print("-" * 120)
+          f"{'Oracle':<18s} {'Strategies':<32s} Description")
+    print("-" * 132)
     for t in tests:
         strategies = ", ".join(t["runtime_strategies"])
+        oracle = t.get("oracle_level", "")
         print(f"{t['name']:<25s} "
               f"{'Yes' if t['requires_bundle'] else 'No':<9s} "
               f"{'Yes' if t['requires_gpu'] else 'No':<6s} "
-              f"{strategies:<40s} {t['description']}")
+              f"{oracle:<18s} "
+              f"{strategies:<32s} {t['description']}")
+        inputs = ", ".join(t.get("required_inputs", []))
+        metrics = ", ".join(t.get("output_metrics", []))
+        if inputs or metrics:
+            print(f"{'':<42s} inputs: {inputs or '-'}; metrics: {metrics or '-'}")
 
 
 def cmd_run(args):
     """Run tests."""
     # Detect strategy
     if args.bundle:
-        strategy = diff_framework.detect_runtime_strategy_from_bundle(
-            args.bundle)
+        detection = diff_framework.detect_runtime_strategy_from_bundle(
+            args.bundle, with_status=True)
     else:
-        strategy = diff_framework.detect_runtime_strategy(args.model)
+        detection = diff_framework.detect_runtime_strategy(
+            args.model, with_status=True)
+    strategy = detection.runtime_strategy or ""
 
     print(f"Model: {args.model}", file=sys.stderr)
     print(f"Runtime strategy: {strategy}", file=sys.stderr)
+    if detection.message:
+        print(f"Strategy detection {detection.status}: {detection.message}",
+              file=sys.stderr)
 
-    ctx = diff_framework.TestContext(
-        model=args.model,
-        runtime_strategy=strategy,
-        bundle_path=args.bundle,
-        binary_path=args.binary,
-        hf_python=args.hf_python,
-        image_path=args.image,
-        max_cache_length=args.max_cache_length,
-        max_new_tokens=args.max_new_tokens,
-        atol=args.atol,
-        trust_remote_code=args.trust_remote_code,
-        verbose=args.verbose,
-    )
+    command_repro = [shlex.join([sys.executable, "tools/diff.py", *sys.argv[1:]])]
+    environment = {
+        "python": sys.executable,
+        "platform": platform.platform(),
+    }
 
-    test_names = args.test if args.test else None
-    results = diff_framework.run_tests(ctx, test_names)
+    if detection.status == "error":
+        results = [
+            diff_framework.DiffResult.error(
+                "strategy_discovery",
+                args.model,
+                strategy,
+                detection.message,
+            )
+        ]
+        for result in results:
+            result.command_repro = command_repro
+            result.environment = environment
+    else:
+        ctx = diff_framework.TestContext(
+            model=args.model,
+            runtime_strategy=strategy,
+            bundle_path=args.bundle,
+            binary_path=args.binary,
+            hf_python=args.hf_python,
+            image_path=args.image,
+            audio_path=args.audio,
+            official_repo_path=args.official_repo,
+            reference_dir=args.reference_dir,
+            output_dir=args.output_dir,
+            hf_repo=args.hf_repo,
+            device=args.device,
+            command_repro=command_repro,
+            environment=environment,
+            max_cache_length=args.max_cache_length,
+            max_new_tokens=args.max_new_tokens,
+            atol=args.atol,
+            trust_remote_code=args.trust_remote_code,
+            verbose=args.verbose,
+        )
+
+        test_names = args.test if args.test else None
+        results = diff_framework.run_tests(ctx, test_names)
 
     # Print summary
     print()
@@ -90,19 +130,37 @@ def cmd_run(args):
         print(f"  {r.status:5s}  {r.test_name:<25s}  "
               f"{r.duration_s:6.1f}s  {r.message}")
 
-    all_passed = all(r.passed for r in results)
+    executed_results = [r for r in results if r.status != "SKIP"]
+    all_passed = bool(executed_results) and all(r.passed for r in results)
+    if all_passed:
+        aggregate_status = "PASS"
+    elif results and not executed_results:
+        aggregate_status = "SKIP"
+    else:
+        aggregate_status = "FAIL"
+
     print()
-    print(f"{'PASS' if all_passed else 'FAIL'}: "
-          f"{sum(r.passed for r in results)}/{len(results)} tests passed")
+    print(f"{aggregate_status}: {sum(r.passed for r in results)}/{len(results)} "
+          f"tests passed, {len(executed_results)}/{len(results)} executed")
 
     # JSON output
     if args.json_path:
         output = {
             "model": args.model,
             "runtime_strategy": strategy,
+            "status": aggregate_status,
+            "passed": all_passed,
+            "executed_count": len(executed_results),
+            "skipped_count": len(results) - len(executed_results),
+            "strategy_detection": {
+                "status": detection.status,
+                "message": detection.message,
+            },
+            "command_repro": command_repro,
+            "environment": environment,
             "results": [r.to_dict() for r in results],
         }
-        with open(args.json_path, "w") as f:
+        with open(args.json_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2)
         print(f"\nResults saved to {args.json_path}", file=sys.stderr)
 
@@ -129,6 +187,17 @@ def main():
                        help="C++ trtmc binary path")
     p_run.add_argument("--hf-python", help="Python for HF tokenizer bridge")
     p_run.add_argument("--image", help="Test image (VL models)")
+    p_run.add_argument("--audio", help="Test audio file (speech/audio models)")
+    p_run.add_argument("--official-repo",
+                       help="Official implementation checkout for model-specific oracles")
+    p_run.add_argument("--reference-dir",
+                       help="Directory containing saved golden reference arrays")
+    p_run.add_argument("--output-dir",
+                       help="Directory for diff artifacts and intermediate arrays")
+    p_run.add_argument("--hf-repo", default="nvidia/personaplex-7b-v1",
+                       help="HF repo used by official-runtime audio oracles")
+    p_run.add_argument("--device", default="cuda",
+                       help="Device for official-runtime reference oracles")
     p_run.add_argument("--max-cache-length", type=int, default=256)
     p_run.add_argument("--max-new-tokens", type=int, default=20)
     p_run.add_argument("--atol", type=float, default=1e-3)

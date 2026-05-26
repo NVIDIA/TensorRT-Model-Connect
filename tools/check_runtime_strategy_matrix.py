@@ -15,7 +15,11 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
 DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
-DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
+DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "models"
+DEFAULT_REGISTRY_DIR = PROJECT_ROOT / "src" / "runtime" / "registry"
+DEFAULT_ENGINE_DEFS_DIR = (
+    PROJECT_ROOT / "python" / "tensorrt_model_connect" / "engine_defs"
+)
 DEFAULT_CONTRACTS_PATH = PROJECT_ROOT / "tests" / "e2e_harness" / "contracts.py"
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
 DEFAULT_RUNNERS_DIR = PROJECT_ROOT / "tests" / "e2e_harness" / "runners"
@@ -78,7 +82,9 @@ def load_runtime_strategy_matrix(path: Path) -> dict[str, dict[str, Any]]:
 def _extract_string_literals(text: str) -> set[str]:
     values: set[str] = set()
     for raw in _STRING_LITERAL_RE.findall(text):
-        values.add(bytes(raw, "utf-8").decode("unicode_escape"))
+        # Runtime strategy keys are plain ASCII identifiers. Keeping the raw
+        # literal avoids unicode_escape warnings on unrelated regex strings.
+        values.add(raw)
     return values
 
 
@@ -117,13 +123,32 @@ def extract_runtime_strategies_from_cpp_files(
     return strategies
 
 
-def discover_runtime_cpp_files(*, cpp_path: Path, builders_dir: Path) -> list[Path]:
-    """Discover runtime sources that define strategy coverage in the new runtime."""
+def _discover_source_files(directory: Path, suffixes: set[str]) -> list[Path]:
+    if not directory.exists():
+        return []
+    return [
+        path.resolve()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file() and path.suffix in suffixes
+    ]
+
+
+def discover_runtime_cpp_files(
+    *,
+    cpp_path: Path,
+    builders_dir: Path,
+    registry_dir: Path = DEFAULT_REGISTRY_DIR,
+    engine_defs_dir: Path = DEFAULT_ENGINE_DEFS_DIR,
+) -> list[Path]:
+    """Discover runtime sources that define runtime_strategy coverage."""
     discovered: list[Path] = []
     if cpp_path.exists():
         discovered.append(cpp_path.resolve())
-    if builders_dir.exists():
-        discovered.extend(path.resolve() for path in sorted(builders_dir.rglob("*.cpp")))
+    discovered.extend(
+        _discover_source_files(builders_dir, {".cpp", ".h", ".toml"})
+    )
+    discovered.extend(_discover_source_files(registry_dir, {".cpp", ".h"}))
+    discovered.extend(_discover_source_files(engine_defs_dir, {".py"}))
     return discovered
 
 
@@ -400,6 +425,8 @@ def validate_matrix_paths(
     matrix_path: Path = DEFAULT_MATRIX_PATH,
     cpp_path: Path = DEFAULT_CPP_PATH,
     builders_dir: Path = DEFAULT_BUILDERS_DIR,
+    registry_dir: Path = DEFAULT_REGISTRY_DIR,
+    engine_defs_dir: Path = DEFAULT_ENGINE_DEFS_DIR,
     contracts_path: Path = DEFAULT_CONTRACTS_PATH,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
     runners_dir: Path = DEFAULT_RUNNERS_DIR,
@@ -413,6 +440,8 @@ def validate_matrix_paths(
     runtime_cpp_files = discover_runtime_cpp_files(
         cpp_path=cpp_path.resolve(),
         builders_dir=builders_dir.resolve(),
+        registry_dir=registry_dir.resolve(),
+        engine_defs_dir=engine_defs_dir.resolve(),
     )
     cpp_runtime_strategies = extract_runtime_strategies_from_cpp_files(
         runtime_cpp_files,
@@ -453,7 +482,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--builders-dir",
         type=Path,
         default=DEFAULT_BUILDERS_DIR,
-        help="Path to src/runtime/builders directory.",
+        help="Path to runtime model source directory.",
+    )
+    parser.add_argument(
+        "--registry-dir",
+        type=Path,
+        default=DEFAULT_REGISTRY_DIR,
+        help="Path to runtime registry source directory.",
+    )
+    parser.add_argument(
+        "--engine-defs-dir",
+        type=Path,
+        default=DEFAULT_ENGINE_DEFS_DIR,
+        help="Path to Python engine definition source directory.",
     )
     parser.add_argument(
         "--contracts",
@@ -490,6 +531,8 @@ def main(argv: list[str] | None = None) -> int:
             matrix_path=args.matrix,
             cpp_path=args.cpp,
             builders_dir=args.builders_dir,
+            registry_dir=args.registry_dir,
+            engine_defs_dir=args.engine_defs_dir,
             contracts_path=args.contracts,
             diff_checks_dir=args.diff_checks_dir,
             runners_dir=args.runners_dir,

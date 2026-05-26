@@ -98,7 +98,7 @@ class FamilyPlugin(Protocol):
 
 ### 3.4 Plugin Auto-Discovery
 
-`python/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan family modules and packages. Any module exposing a `plugin` attribute is registered automatically. The current checkout has 68 family plugins. Batch onboarding can use the autopilot system (`scripts/autopilot/autorun.py`), which launches configurable agent CLI sessions that follow `AGENTS.md` and the repo-local skills.
+`python/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan family modules and packages. Any module exposing a `plugin` attribute is registered automatically. There are currently 68 family plugins, excluding `base.py` and the `__init__.py` auto-discovery module. Batch onboarding can use the autopilot system (`scripts/autopilot/autorun.py`), which launches configurable agent CLI sessions that follow `AGENTS.md` and the repo-local skills.
 
 Key discovery functions:
 - `find_plugin(model_type)` -- matches standard models by HF `model_type`.

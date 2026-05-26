@@ -64,6 +64,7 @@ class E2EStatus(enum.Enum):
     """Terminal status of an E2E run."""
 
     PASS = "pass"
+    WEAK_PASS = "weak_pass"
     FAIL = "fail"
     SKIP = "skip"
     ERROR = "error"
@@ -481,6 +482,8 @@ class E2EResult:
         status: Terminal status (pass/fail/skip/error).
         failure_type: If status is fail/error, which phase failed.
         oracle_level: Oracle strength for this run (from the case).
+        weak_validation_reason: Explains why a passing run is only a weak
+            validation signal, such as invariant-only comparison.
         stages: Per-stage comparison results.
         determinism: Results of determinism reruns (if any).
         timing: Phase-level timing (bundle_build_s, trt_run_s, ref_run_s, etc.).
@@ -500,6 +503,7 @@ class E2EResult:
     status: str = E2EStatus.PASS.value
     failure_type: Optional[str] = None
     oracle_level: str = OracleLevel.L1_EXTERNAL_REFERENCE.value
+    weak_validation_reason: str = ""
     stages: Dict[str, CompareResult] = field(default_factory=dict)
     determinism: Dict[str, Any] = field(default_factory=dict)
     timing: Dict[str, float] = field(default_factory=dict)
@@ -974,7 +978,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
-    "torchtrt_diffusion": "torchtrt_diffusion",
+    "torchtrt_diffusion": "diffusion_media_generation",
     "diffusion_pixart_torchtrt": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",

@@ -16,6 +16,7 @@ from tests.e2e_harness.contracts import (
     E2EStatus,
     FailureType,
     MetricResult,
+    OracleLevel,
     PreflightRequirement,
     RunContext,
     StageOutput,
@@ -123,6 +124,8 @@ def _make_case(
     *,
     preflight: list[PreflightRequirement] | None = None,
     determinism: dict[str, Any] | None = None,
+    oracle_level: str = OracleLevel.L1_EXTERNAL_REFERENCE.value,
+    metadata: dict[str, Any] | None = None,
 ) -> E2ECase:
     return E2ECase(
         name=name,
@@ -131,10 +134,12 @@ def _make_case(
         runtime_strategy="unit_runtime",
         task_strategy="unit_task",
         reference_backend="unit_ref",
+        oracle_level=oracle_level,
         bundle=f"{name}.trtfb",
         preflight=preflight or [],
         stages=[StageSpec(name="generate")],
         determinism=determinism or {},
+        metadata=metadata or {},
     )
 
 
@@ -372,3 +377,29 @@ def test_run_classifies_determinism_failure(
     data = _read_result_json(ctx, case)
     assert data["failure_type"] == FailureType.DETERMINISM_FAIL.value
     assert data["determinism"]["status"] == "non_deterministic"
+
+
+def test_pass_records_weak_validation_reason_for_invariant_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case(
+        "invariant-pass",
+        oracle_level=OracleLevel.L4_INVARIANTS.value,
+    )
+    ctx = _make_ctx(tmp_path, case)
+    _patch_bundle_success(monkeypatch, tmp_path)
+    _patch_plugins(
+        monkeypatch,
+        runner=_FakeRunner(),
+        reference=_FakeReference(),
+        comparator=_FakeComparator(),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.PASS.value
+    assert result.weak_validation_reason == "oracle_level is L4_invariants"
+    data = _read_result_json(ctx, case)
+    assert data["status"] == E2EStatus.PASS.value
+    assert data["weak_validation_reason"] == "oracle_level is L4_invariants"

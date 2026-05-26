@@ -1112,6 +1112,75 @@ def stage4_greedy_parity(args) -> bool:
     return all_pass
 
 
+def run_as_diff_test(ctx):
+    """Run the staged Bark audio diff through the unified diff framework."""
+    from diff_framework.protocol import DiffResult
+    import time
+    import traceback
+
+    test_name = "bark_audio_pipeline"
+    if not ctx.bundle_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "Bark audio diff requires --bundle")
+    if not ctx.binary_path:
+        return DiffResult.skip(
+            test_name, ctx.model, ctx.runtime_strategy,
+            "Bark audio diff requires --binary")
+
+    args = argparse.Namespace(
+        model=ctx.model,
+        bundle=ctx.bundle_path,
+        binary=ctx.binary_path,
+        prompt="Hello, my dog is cute.",
+        hf_python=ctx.hf_python or "",
+        min_energy=0.005,
+        codec_atol=0.15,
+        stage=0,
+        max_semantic_tokens=ctx.max_new_tokens,
+        json=None,
+        verbose=ctx.verbose,
+    )
+
+    start = time.time()
+    stage_results = {}
+    all_pass = True
+    try:
+        for stage, func in (
+            (1, stage1_cpp_smoke_test),
+            (2, stage2_token_comparison),
+            (3, stage3_codec_comparison),
+        ):
+            ok = bool(func(args))
+            stage_results[f"stage_{stage}_passed"] = ok
+            if not ok:
+                all_pass = False
+    except Exception as exc:
+        result = DiffResult.error(
+            test_name,
+            ctx.model,
+            ctx.runtime_strategy,
+            f"Bark audio diff crashed: {type(exc).__name__}: {exc}",
+            details=traceback.format_exc(),
+        )
+        result.duration_s = time.time() - start
+        return result
+
+    return DiffResult(
+        test_name=test_name,
+        model=ctx.model,
+        runtime_strategy=ctx.runtime_strategy,
+        passed=all_pass,
+        status="PASS" if all_pass else "FAIL",
+        message=(
+            "Bark audio stages passed"
+            if all_pass else "One or more Bark audio stages failed"
+        ),
+        metrics=stage_results,
+        duration_s=time.time() - start,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

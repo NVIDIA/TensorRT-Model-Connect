@@ -1276,6 +1276,22 @@ def _build_detailed_timing(
     return details
 
 
+def _weak_validation_reason(case: E2ECase, status: str) -> str:
+    """Return why a successful run is only a weak validation signal."""
+    if status != E2EStatus.PASS.value:
+        return ""
+
+    explicit = case.metadata.get("weak_validation_reason")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    if case.oracle_level == "L4_invariants":
+        return "oracle_level is L4_invariants"
+    if case.reference_backend == "invariant_only":
+        return "reference_backend is invariant_only"
+    return ""
+
+
 @dataclass
 class _RunState:
     case: E2ECase
@@ -1803,6 +1819,7 @@ class E2EOrchestrator:
             status=status,
             failure_type=failure_type,
             oracle_level=state.case.oracle_level,
+            weak_validation_reason=_weak_validation_reason(state.case, status),
             stages=state.stage_results,
             determinism=state.determinism_results,
             timing=state.timing,

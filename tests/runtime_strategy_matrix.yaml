@@ -5,14 +5,14 @@
       "cli_commands": ["run"],
       "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
       "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
-      "diff_framework_check_classes": ["LayerDiffTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
+      "diff_framework_check_classes": ["LayerDiffTest", "LayerProfileTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
     },
     "decoder_moe": {
       "task_strategy": "text_generation_causal",
       "cli_commands": ["run"],
       "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
       "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
-      "diff_framework_check_classes": ["LayerDiffTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
+      "diff_framework_check_classes": ["LayerDiffTest", "LayerProfileTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
     },
     "nemotron_labs_diffusion": {
       "task_strategy": "text_generation_causal",
@@ -29,6 +29,14 @@
       "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
       "diff_framework_check_classes": ["DiffusionComponentsTest"]
     },
+    "diffusion_flux": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_flux']."
+    },
     "diffusion_ltx": {
       "task_strategy": "diffusion_media_generation",
       "cli_commands": ["generate-video"],
@@ -36,6 +44,46 @@
       "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_ltx']."
+    },
+    "diffusion_pixart": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart']."
+    },
+    "diffusion_pixart_torchtrt": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart_torchtrt']."
+    },
+    "diffusion_qwen_image": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_qwen_image']."
+    },
+    "diffusion_wan": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_wan']."
+    },
+    "diffusion_zimage": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_zimage']."
     },
     "embedding": {
       "task_strategy": "embedding",
@@ -141,6 +189,14 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['image_classification']."
     },
+    "marian_translation": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": ["run"],
+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['marian_translation']."
+    },
     "reranking": {
       "task_strategy": "reranking",
       "cli_commands": ["rerank"],
@@ -162,16 +218,22 @@
       "cli_commands": ["segment"],
       "runner_class": "tests.e2e_harness.runners.segmentation.SegmentationRunner",
       "comparator_class": "tests.e2e_harness.comparators.segmentation.SegmentationComparator",
+      "diff_framework_check_classes": ["SegmentationPipelineTest"]
+    },
+    "seq2seq_encoder_decoder": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": ["run"],
+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['segmentation']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['seq2seq_encoder_decoder']."
     },
     "speech_to_speech": {
       "task_strategy": "speech_to_speech",
       "cli_commands": ["speak"],
       "runner_class": "tests.e2e_harness.runners.audio_speech.SpeechToSpeechRunner",
       "comparator_class": "tests.e2e_harness.comparators.speech_to_speech.SpeechToSpeechComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_speech']."
+      "diff_framework_check_classes": ["PersonaPlexPipelineTest"]
     },
     "speech_to_text": {
       "task_strategy": "speech_to_text",
@@ -203,6 +265,43 @@
       "comparator_class": "tests.e2e_harness.comparators.text_to_audio.TextToAudioComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio']."
+    },
+    "text_to_audio_bark": {
+      "task_strategy": "text_to_audio",
+      "cli_commands": ["generate-audio"],
+      "runner_class": "tests.e2e_harness.runners.audio_speech.TextToAudioRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text_to_audio.TextToAudioComparator",
+      "diff_framework_check_classes": ["BarkAudioPipelineTest"]
+    },
+    "text_to_audio_magpie": {
+      "task_strategy": "text_to_audio",
+      "cli_commands": ["generate-audio"],
+      "runner_class": "tests.e2e_harness.runners.audio_speech.TextToAudioRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text_to_audio.TextToAudioComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_magpie']."
+    },
+    "text_to_text": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": ["run"],
+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
+      "diff_framework_check_classes": ["T5EncoderDiffTest"]
+    },
+    "torchtrt_decoder": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": ["run"],
+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
+      "diff_framework_check_classes": ["TorchTrtLogitDiffTest"]
+    },
+    "torchtrt_diffusion": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_diffusion']."
     },
     "vision_language": {
       "task_strategy": "vision_language_generation",

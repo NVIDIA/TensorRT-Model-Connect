@@ -25,7 +25,11 @@ Options:
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,6 +43,81 @@ BATTERY_PROMPTS = [
 ]
 
 SINGLE_PROMPT = "The capital of France is"
+
+
+def _parse_percent(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return float(match.group(1)) / 100.0
+
+
+def _parse_metric(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def run_as_diff_test(ctx):
+    """Run the Torch-TRT logit diff through the unified diff framework."""
+    from diff_framework.protocol import DiffResult
+
+    test_name = "torchtrt_logit_diff"
+    atol = 1e-2 if ctx.atol == 1e-3 else ctx.atol
+    max_new_tokens = 10 if ctx.max_new_tokens == 20 else ctx.max_new_tokens
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--model",
+        ctx.model,
+        "--atol",
+        str(atol),
+        "--max-cache-length",
+        str(ctx.max_cache_length),
+        "--max-new-tokens",
+        str(max_new_tokens),
+    ]
+    if ctx.trust_remote_code:
+        command.append("--trust-remote-code")
+    if ctx.verbose:
+        command.append("--verbose")
+
+    start = time.time()
+    completed = subprocess.run(
+        command, text=True, capture_output=True, check=False)
+    output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if part)
+
+    metrics = {}
+    top1 = _parse_percent(r"top1_match=([0-9.]+)%", output)
+    top5 = _parse_percent(r"top5_overlap=([0-9.]+)%", output)
+    cosine = _parse_metric(r"cos_sim=([0-9.eE+-]+)", output)
+    max_diff = _parse_metric(r"max_diff=([0-9.eE+-]+)", output)
+    if top1 is not None:
+        metrics["top1_match_rate"] = top1
+    if top5 is not None:
+        metrics["mean_top5_overlap"] = top5
+    if cosine is not None:
+        metrics["mean_cosine_sim"] = cosine
+    if max_diff is not None:
+        metrics["max_abs_diff"] = max_diff
+
+    passed = completed.returncode == 0
+    return DiffResult(
+        test_name=test_name,
+        model=ctx.model,
+        runtime_strategy=ctx.runtime_strategy,
+        passed=passed,
+        status="PASS" if passed else "FAIL",
+        message=(
+            "Torch-TRT logits match HF reference"
+            if passed else f"Torch-TRT logit diff failed with rc={completed.returncode}"
+        ),
+        metrics=metrics,
+        duration_s=time.time() - start,
+        details=output[-4000:],
+    )
 
 
 def _load_model_and_tokenizer(model_id: str, trust_remote_code: bool = False):

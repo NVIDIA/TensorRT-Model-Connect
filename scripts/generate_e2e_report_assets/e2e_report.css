@@ -12,6 +12,7 @@ h4 { margin: 12px 0 6px; }
 .counter { padding: 6px 16px; border-radius: 8px; font-weight: 600;
   font-size: 0.95em; }
 .pass-counter { background: #dcfce7; color: #166534; }
+.weak-counter { background: #fef3c7; color: #78350f; }
 .fail-counter { background: #fee2e2; color: #991b1b; }
 .skip-counter { background: #fef9c3; color: #854d0e; }
 .error-counter { background: #ffedd5; color: #9a3412; }
@@ -51,6 +52,7 @@ summary:hover { background: #f8fafc; }
   font-variant-numeric: tabular-nums; }
 .model-body { padding: 12px 16px; }
 .failure-info { color: #dc2626; margin-bottom: 8px; }
+.weak-info { color: #92400e; margin-bottom: 8px; }
 .waive-info { color: #92400e; margin-bottom: 8px; }
 .text-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
   margin: 8px 0; }

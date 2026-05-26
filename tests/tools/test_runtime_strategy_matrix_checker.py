@@ -87,6 +87,43 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
     }
 
 
+def test_discover_runtime_cpp_files_includes_current_strategy_sources(tmp_path: Path):
+    mod = _import_checker()
+
+    cpp_path = tmp_path / "src" / "cabi" / "api" / "trtmc_c.cpp"
+    cpp_path.parent.mkdir(parents=True)
+    cpp_path.write_text('"decoder_kv_cache"', encoding="utf-8")
+
+    models_dir = tmp_path / "src" / "runtime" / "models"
+    model_toml = models_dir / "flux" / "MODEL.toml"
+    model_toml.parent.mkdir(parents=True)
+    model_toml.write_text('runtime_strategies = ["diffusion_flux"]', encoding="utf-8")
+
+    registry_dir = tmp_path / "src" / "runtime" / "registry"
+    registry_cpp = registry_dir / "pipeline_factory.cpp"
+    registry_dir.mkdir(parents=True)
+    registry_cpp.write_text('"text_to_audio_magpie"', encoding="utf-8")
+
+    engine_defs_dir = tmp_path / "engine_defs"
+    engine_def = engine_defs_dir / "strategies" / "decoder.py"
+    engine_def.parent.mkdir(parents=True)
+    engine_def.write_text('runtime_strategy = "torchtrt_decoder"', encoding="utf-8")
+
+    discovered = mod.discover_runtime_cpp_files(
+        cpp_path=cpp_path,
+        builders_dir=models_dir,
+        registry_dir=registry_dir,
+        engine_defs_dir=engine_defs_dir,
+    )
+
+    assert discovered == [
+        cpp_path.resolve(),
+        model_toml.resolve(),
+        registry_cpp.resolve(),
+        engine_def.resolve(),
+    ]
+
+
 def test_validate_matrix_data_requires_exemption_when_no_diff_check():
     mod = _import_checker()
     errors = mod.validate_matrix_data(

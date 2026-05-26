@@ -13,10 +13,70 @@ Requires: torch, transformers, tensorrt, cuda-python
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
+
+
+def _parse_metric(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def run_as_diff_test(ctx):
+    """Run the T5 encoder comparison through the unified diff framework."""
+    from diff_framework.protocol import DiffResult
+
+    test_name = "t5_encoder_diff"
+    max_seq_len = 64 if ctx.max_cache_length == 256 else ctx.max_cache_length
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--model",
+        ctx.model,
+        "--atol",
+        str(ctx.atol),
+        "--max-seq-len",
+        str(max_seq_len),
+    ]
+    if ctx.verbose:
+        command.append("--verbose")
+
+    start = time.time()
+    completed = subprocess.run(
+        command, text=True, capture_output=True, check=False)
+    output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if part)
+
+    metrics = {}
+    max_diff = _parse_metric(r"Max abs diff:\s*([0-9.eE+-]+)", output)
+    mean_diff = _parse_metric(r"Mean abs diff:\s*([0-9.eE+-]+)", output)
+    if max_diff is not None:
+        metrics["max_abs_diff"] = max_diff
+    if mean_diff is not None:
+        metrics["mean_abs_diff"] = mean_diff
+
+    passed = completed.returncode == 0
+    return DiffResult(
+        test_name=test_name,
+        model=ctx.model,
+        runtime_strategy=ctx.runtime_strategy,
+        passed=passed,
+        status="PASS" if passed else "FAIL",
+        message=(
+            "T5 encoder embeddings match"
+            if passed else f"T5 encoder diff failed with rc={completed.returncode}"
+        ),
+        metrics=metrics,
+        duration_s=time.time() - start,
+        details=output[-4000:],
+    )
 
 
 def main():
@@ -25,6 +85,7 @@ def main():
     parser.add_argument("--atol", type=float, default=1e-3, help="Absolute tolerance")
     parser.add_argument("--max-seq-len", type=int, default=64, help="Max sequence length for test")
     parser.add_argument("--prompt", default="A cat on a beach", help="Test prompt")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     print(f"[diff-t5] Model: {args.model}", file=sys.stderr)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -19,6 +19,11 @@ class DiffResult:
     status: str  # "PASS", "FAIL", "SKIP", "ERROR"
     message: str
     metrics: dict = field(default_factory=dict)
+    artifacts: dict = field(default_factory=dict)
+    oracle_level: str = ""
+    weak_validation_reason: str = ""
+    command_repro: list[str] = field(default_factory=list)
+    environment: dict[str, Any] = field(default_factory=dict)
     duration_s: float = 0.0
     details: str = ""
 
@@ -30,7 +35,12 @@ class DiffResult:
             "passed": self.passed,
             "status": self.status,
             "message": self.message,
+            "oracle_level": self.oracle_level,
+            "weak_validation_reason": self.weak_validation_reason,
             "metrics": self.metrics,
+            "artifacts": self.artifacts,
+            "command_repro": self.command_repro,
+            "environment": self.environment,
             "duration_s": round(self.duration_s, 2),
             "details": self.details,
         }
@@ -65,6 +75,14 @@ class TestContext:
     binary_path: str | None = None
     hf_python: str | None = None
     image_path: str | None = None
+    audio_path: str | None = None
+    official_repo_path: str | None = None
+    reference_dir: str | None = None
+    output_dir: str | None = None
+    hf_repo: str = "nvidia/personaplex-7b-v1"
+    device: str = "cuda"
+    command_repro: list[str] = field(default_factory=list)
+    environment: dict[str, Any] = field(default_factory=dict)
     max_cache_length: int = 256
     max_new_tokens: int = 20
     atol: float = 1e-3
@@ -83,5 +101,10 @@ class DiffTest(Protocol):
     runtime_strategies: list[str]
     requires_bundle: bool
     requires_gpu: bool
+    required_inputs: list[str]
+    oracle_level: str
+    deterministic_seed: bool
+    output_metrics: list[str]
+    failure_examples: list[str]
 
     def run(self, ctx: TestContext) -> DiffResult: ...

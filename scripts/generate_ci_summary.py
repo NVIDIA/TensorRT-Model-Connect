@@ -12,7 +12,7 @@ from typing import Any
 import xml.etree.ElementTree as ET
 
 
-_STATUS_ORDER = ("fail", "error", "skip", "pass")
+_STATUS_ORDER = ("fail", "error", "weak_pass", "skip", "pass")
 _PASS_STATUSES = {"pass", "passed", "success", "succeeded"}
 _PYTEST_TO_RESULT_STATUS = {
     "PASSED": "pass",
@@ -195,9 +195,37 @@ def _status(result: dict[str, Any]) -> str:
     outcome = result.get("_pytest_outcome")
     if isinstance(outcome, dict):
         pytest_status = str(outcome.get("pytest_status") or "")
-        if pytest_status in {"XFAIL", "XPASS"}:
+        if pytest_status == "XFAIL":
+            return _PYTEST_TO_RESULT_STATUS[pytest_status]
+    weak_reason = _weak_validation_reason(result)
+    if weak_reason:
+        return "weak_pass"
+    if isinstance(outcome, dict):
+        pytest_status = str(outcome.get("pytest_status") or "")
+        if pytest_status == "XPASS":
             return _PYTEST_TO_RESULT_STATUS[pytest_status]
     return str(result.get("status") or "error").lower()
+
+
+def _is_pass_status(status: Any) -> bool:
+    return str(status or "").lower() in _PASS_STATUSES
+
+
+def _weak_validation_reason(result: dict[str, Any]) -> str:
+    if not _is_pass_status(result.get("status", "")):
+        return ""
+    explicit = result.get("weak_validation_reason")
+    if explicit:
+        return str(explicit)
+    oracle_level = str(result.get("oracle_level") or "")
+    if not oracle_level:
+        return "missing oracle_level in result.json"
+    if oracle_level == "L4_invariants":
+        return "oracle_level is L4_invariants"
+    config = result.get("case_config", {}) or {}
+    if str(config.get("reference_backend") or "") == "invariant_only":
+        return "reference_backend is invariant_only"
+    return ""
 
 
 def _key_metric(result: dict[str, Any]) -> str:
@@ -241,6 +269,9 @@ def _failure_note(result: dict[str, Any]) -> str:
     failure_type = result.get("failure_type")
     if failure_type:
         return str(failure_type)
+    weak_reason = _weak_validation_reason(result)
+    if weak_reason:
+        return weak_reason
     for stage_name, stage_data in (result.get("stages", {}) or {}).items():
         if not isinstance(stage_data, dict):
             continue
