@@ -293,7 +293,6 @@ class TextToAudioRunner:
             runtime_tokens = runtime_config_set_tokens(case)
             for token in runtime_tokens:
                 cmd.extend(["--set", token])
-            cmd = _wrap_distributed_command(cmd, case)
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
             bark_seed = runtime_config_get(case, "audio_bark.seed")
             if case.family == "bark" and bark_seed is None:
@@ -306,17 +305,17 @@ class TextToAudioRunner:
                 os.path.join(output_root, "rank_0", "bark_dump")
                 if distributed_runtime else os.path.join(tmpdir, "bark_dump")
             )
-            if case.family == "bark":
-                if distributed_runtime:
-                    wrapper = (
-                        'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
-                        'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
-                        'exec "$@" --output "$out/output.wav" '
-                        '--set "audio_bark.dump_path=$out/bark_dump"'
-                    )
-                    cmd = ["bash", "-lc", wrapper, "trtmc_rank_audio", output_root] + cmd
-                else:
-                    cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
+            if distributed_runtime:
+                wrapper = (
+                    'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                    'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                    'exec "$@" --output "$out/output.wav"'
+                )
+                if case.family == "bark":
+                    wrapper += ' --set "audio_bark.dump_path=$out/bark_dump"'
+                cmd = ["bash", "-lc", wrapper, "trtmc_rank_audio", output_root] + cmd
+            elif case.family == "bark":
+                cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
 
             cmd = _wrap_distributed_command(cmd, case)
 

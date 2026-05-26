@@ -5,14 +5,45 @@
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
+#include "utils/json_helpers.h"
 
 #include <cstdint>
 #include <exception>
+#include <limits>
+#include <string>
+#include <vector>
 
 namespace trtmc {
 
 namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const auto value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
 
 int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig& magpie_cfg) {
     if (base_cfg.num_kv_heads > 0 && base_cfg.head_dim > 0)
@@ -20,6 +51,11 @@ int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig&
     if (base_cfg.attention_size > 0)
         return base_cfg.attention_size;
     return magpie_cfg.hidden_size;
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : fallback;
 }
 
 } // namespace
@@ -57,6 +93,12 @@ class MagpiePlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        DistributedRuntimeGroup tp_group;
+        if (tp_config.enabled)
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+
         auto shared_stream = std::make_shared<CudaStream>();
         if (!shared_stream->ok())
             throw std::runtime_error("MagpiePlugin: failed to create CUDA stream");
@@ -65,11 +107,19 @@ class MagpiePlugin final : public IPipelinePlugin {
         opts.stream = shared_stream->get();
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
+        ModuleCreateOptions decoder_opts = opts;
+        if (tp_config.enabled) {
+            decoder_opts.distributed_communicator = tp_group.communicator;
+            decoder_opts.distributed_owner = tp_group.owner;
+        }
 
         auto enc_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "magpie encoder", opts);
+        const std::string decoder_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto dec_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "magpie decoder", opts);
+            ctx.backend, find_section(ctx.bundle, decoder_section), "magpie decoder",
+            decoder_opts);
         enc_loaded.module->keep_alive(shared_stream);
         dec_loaded.module->keep_alive(shared_stream);
 
@@ -77,7 +127,8 @@ class MagpiePlugin final : public IPipelinePlugin {
 
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
         apply_magpie_registry_overlay(magpie_cfg, ctx.runtime_config);
-        int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
+        const int32_t fallback_kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
+        int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, fallback_kv_dim);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(
