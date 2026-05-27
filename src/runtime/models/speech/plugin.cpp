@@ -74,9 +74,9 @@ class SpeechPlugin final : public IPipelinePlugin {
 
         const std::string temporal_section =
             tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
-        auto temporal_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, temporal_section), "speech temporal",
-            temporal_opts);
+        auto temporal_loaded =
+            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, temporal_section),
+                                      "speech temporal", temporal_opts);
 
         cudaStream_t stream = temporal_loaded.module->stream();
 
