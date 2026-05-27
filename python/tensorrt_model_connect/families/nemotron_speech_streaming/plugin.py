@@ -23,6 +23,10 @@ from tensorrt_model_connect import trt_compat
 from ... import graph_ops
 from ...checkpoint_mapper import WeightDict, _transpose_2d
 from ...config import ModelConfig
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from ..canary import (
     _add_conv_norm,
     _add_half_ffn,
@@ -35,6 +39,7 @@ from ..canary import (
     _relative_pe,
     _to_np,
 )
+from .predictor_tp_builder import build_nemotron_streaming_tp_predictor
 
 
 trt = trt_compat.get_trt()
@@ -683,8 +688,21 @@ class NemotronSpeechStreamingPlugin:
 
     def build_engine(self, config: ModelConfig, weights: WeightDict, max_cache_length: int,
                      *, precision: str = "fp32", quant_ctx=None, verbose: bool = False,
-                     debug_layer_outputs: bool = False) -> bytes:
-        del config, max_cache_length, precision, quant_ctx, debug_layer_outputs
+                     debug_layer_outputs: bool = False, parallel_config=None) -> bytes:
+        del config, max_cache_length, precision
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Nemotron Speech Streaming TP predictor builds")
+            if quant_ctx is not None:
+                raise ValueError(
+                    "Nemotron Speech Streaming tensor-parallel builds do not support quantization")
+            if debug_layer_outputs:
+                raise ValueError(
+                    "Nemotron Speech Streaming tensor-parallel builds do not support "
+                    "debug_layer_outputs")
+            return build_nemotron_streaming_tp_predictor(
+                weights, verbose=verbose, parallel_config=parallel)
         return _build_predictor(weights, verbose=verbose)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig, weights: WeightDict,
