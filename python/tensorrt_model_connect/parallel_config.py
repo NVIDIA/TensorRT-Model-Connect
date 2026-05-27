@@ -200,7 +200,7 @@ def shard_standard_decoder_weights(
             out[key] = _slice_last_dim(value, rank, tp)
         elif key.endswith((".w_o", ".w_down")):
             out[key] = _slice_first_dim(value, rank, tp)
-        elif key.endswith((".w_gate", ".w_up", ".w_fc1")):
+        elif key.endswith((".w_gate", ".w_up", ".w_fc1", ".fc1_bias")):
             out[key] = _slice_last_dim(value, rank, tp)
         elif key.endswith(".w_fc2"):
             out[key] = _slice_first_dim(value, rank, tp)

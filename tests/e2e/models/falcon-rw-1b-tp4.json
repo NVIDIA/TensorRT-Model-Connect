@@ -1,0 +1,20 @@
+{
+  "name": "falcon-rw-1b-tp4",
+  "trace_id": "IT-E2E-FALRW-TP4-01",
+  "hf_id": "tiiuae/falcon-rw-1b",
+  "bundle": "falcon-rw-1b-tp4.trtfb",
+  "family": "falcon",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+  "max_new_tokens": 20,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "ci_tier": "multi_device",
+  "exclusive_gpu": true,
+  "gpu_count": 4,
+  "world_size": 4,
+  "tp_size": 4,
+  "notes": "Tensor-parallel TP=4 Falcon decoder coverage on four GPUs."
+}
