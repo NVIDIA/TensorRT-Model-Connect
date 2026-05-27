@@ -4,9 +4,51 @@
 #include "runtime/models/speech/pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
+#include "utils/json_helpers.h"
+
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const auto value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : fallback;
+}
+
+} // namespace
 
 class SpeechPlugin final : public IPipelinePlugin {
   public:
@@ -21,12 +63,27 @@ class SpeechPlugin final : public IPipelinePlugin {
             build_speech_config_from_bundle(ctx.bundle, ctx.config_json, ctx.config, ctx.hf_python);
         infer_speech_vocab_sizes(speech_cfg, ctx.config_json, ctx.config);
 
+        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        DistributedRuntimeGroup tp_group;
+        ModuleCreateOptions temporal_opts = opts;
+        if (tp_config.enabled) {
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+            temporal_opts.distributed_communicator = tp_group.communicator;
+            temporal_opts.distributed_owner = tp_group.owner;
+        }
+
+        const std::string temporal_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto temporal_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "speech temporal", opts);
+            ctx.backend, find_section(ctx.bundle, temporal_section), "speech temporal",
+            temporal_opts);
 
         cudaStream_t stream = temporal_loaded.module->stream();
 
-        int32_t temporal_kv_dim = compute_kv_dim_kv_heads(ctx.config, ctx.config.hidden_size);
+        const int32_t temporal_kv_fallback =
+            compute_kv_dim_kv_heads(ctx.config, ctx.config.hidden_size);
+        int32_t temporal_kv_dim =
+            decoder_cache_row_width(*temporal_loaded.module, temporal_kv_fallback);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> temporal_state =

@@ -92,6 +92,17 @@ def _strip_mpirun_tags(text: str) -> str:
     return "\n".join(lines)
 
 
+def _untag_ranked_mpirun_line(line: str) -> tuple[int | None, str]:
+    match = re.match(r"^\[([^\]]+)\]<std(?:out|err)>:\s?(.*)$", line)
+    if not match:
+        return None, line
+    rank_text = match.group(1).split(",")[-1]
+    try:
+        return int(rank_text), match.group(2)
+    except ValueError:
+        return None, match.group(2)
+
+
 def _read_wav_rms(path: str) -> float:
     """Read a WAV file and return its RMS energy."""
     import numpy as np
@@ -466,15 +477,32 @@ class SpeechToSpeechRunner:
         )
 
         with tempfile.TemporaryDirectory(prefix="trtmc_s2s_") as tmpdir:
-            wav_path = os.path.join(tmpdir, "output.wav")
-            tokens_path = os.path.join(tmpdir, "output_tokens.npy")
+            distributed_runtime = _distributed_runtime_config(case)
+            output_root = os.path.join(tmpdir, "rank_outputs")
+            wav_path = (
+                os.path.join(output_root, "rank_0", "output.wav")
+                if distributed_runtime else os.path.join(tmpdir, "output.wav")
+            )
+            tokens_path = (
+                os.path.join(output_root, "rank_0", "output_tokens.npy")
+                if distributed_runtime else os.path.join(tmpdir, "output_tokens.npy")
+            )
 
             cmd = [
                 binary, "speak", bundle_path,
                 "--audio-in", audio_input,
-                "--audio-out", wav_path,
                 "--tail-frames", str(max_frames),
             ]
+            if distributed_runtime:
+                wrapper = (
+                    'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                    'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                    'exec "$@" --audio-out "$out/output.wav"'
+                )
+                cmd = ["bash", "-lc", wrapper, "trtmc_rank_speech", output_root] + cmd
+            else:
+                cmd.extend(["--audio-out", wav_path])
+            cmd = _wrap_distributed_command(cmd, case)
 
             env = {
                 **os.environ,
@@ -491,8 +519,8 @@ class SpeechToSpeechRunner:
                 "speech_to_speech", case.name)
             data: dict = {
                 "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": stderr_truncated,
+                "stdout": _strip_mpirun_tags(result.stdout),
+                "stderr": _strip_mpirun_tags(stderr_truncated),
             }
             if stderr_log:
                 data["stderr_log"] = stderr_log
@@ -544,7 +572,10 @@ class SpeechToSpeechRunner:
         """Try to parse frame tokens from C++ stderr output."""
         import numpy as np
         frames = []
-        for line in (stderr or "").splitlines():
+        for raw_line in (stderr or "").splitlines():
+            rank, line = _untag_ranked_mpirun_line(raw_line)
+            if rank not in (None, 0):
+                continue
             if line.startswith("frame["):
                 try:
                     # format: frame[N]: depth=X audio=Y,Z,...
@@ -558,6 +589,16 @@ class SpeechToSpeechRunner:
                     if token_strs:
                         frames.append(token_strs)
                 except (ValueError, IndexError):
+                    pass
+                continue
+
+            match = re.search(r"\[speech\]\s+Output frame\s+\d+:\s*(.*)$", line)
+            if match:
+                try:
+                    token_strs = [int(t) for t in match.group(1).split()]
+                    if token_strs:
+                        frames.append(token_strs)
+                except ValueError:
                     pass
         if frames:
             data["output_tokens"] = np.array(frames, dtype=np.int32)
