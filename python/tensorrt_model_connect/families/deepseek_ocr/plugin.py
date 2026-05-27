@@ -48,6 +48,10 @@ from ...checkpoint_mapper import (
 )
 from ... import graph_ops
 from ... import graph_blocks
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from .standard_decoder_builder import _apply_norm, _mark_debug_output
 
 
@@ -94,6 +98,7 @@ class DeepSeekOCRPlugin:
         weights["embedding"] = embedding.astype(np.float32)
 
         attention_size = 0
+        kv_attention_size = 0
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
@@ -120,6 +125,8 @@ class DeepSeekOCRPlugin:
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
+            if kv_attention_size == 0:
+                kv_attention_size = k_raw.shape[0]
 
             q_t = _transpose_2d(q_raw, "q_proj")
             k_t = _transpose_2d(k_raw, "k_proj")
@@ -213,6 +220,7 @@ class DeepSeekOCRPlugin:
 
         # Store metadata
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
         weights["_n_routed_experts"] = n_routed_experts  # type: ignore[assignment]
         weights["_n_shared_experts"] = n_shared_experts  # type: ignore[assignment]
         weights["_num_experts_per_tok"] = num_experts_per_tok  # type: ignore[assignment]
@@ -229,7 +237,24 @@ class DeepSeekOCRPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="DeepSeek-OCR tensor-parallel builds")
+            if debug_layer_outputs:
+                raise ValueError(
+                    "DeepSeek-OCR tensor-parallel builds do not support "
+                    "debug layer outputs")
+            from .tp_builder import build_deepseek_ocr_tp_engine
+            return build_deepseek_ocr_tp_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                parallel_config=parallel)
+
         image_prefill_tokens = 257
         if max_cache_length <= image_prefill_tokens:
             print(
