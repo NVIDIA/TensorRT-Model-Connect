@@ -73,6 +73,8 @@ class VLPipeline final : public IPipeline {
     // VL generation with vision features injected at image token positions.
     std::vector<int32_t> generate_vl_from_ids(const std::vector<int32_t>& input_ids,
                                               const std::vector<float>& image_features,
+                                              const std::vector<std::vector<float>>&
+                                                  deepstack_features,
                                               int32_t num_features, int32_t feature_dim,
                                               int32_t max_new_tokens, const SamplingParams& params);
 
@@ -82,11 +84,14 @@ class VLPipeline final : public IPipeline {
 
     // Run a text step with optional vision embedding override.
     void run_text_step_with_embed(int32_t token_id, const float* input_embed, float use_input_embed,
+                                  const std::vector<const float*>& deepstack_embeds,
+                                  float deepstack_active,
                                   std::vector<float>& logits);
 
     // Run vision encoder on preprocessed pixel values.
     bool run_vision_encoder(const float* pixel_values, std::size_t pixel_count,
-                            std::vector<float>& image_features);
+                            std::vector<float>& image_features,
+                            std::vector<std::vector<float>>* deepstack_features = nullptr);
 };
 
 } // namespace trtmc

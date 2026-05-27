@@ -99,8 +99,9 @@ TextResult VLPipeline::generate(const std::string& prompt, const float* image_pi
         throw std::runtime_error("VLPipeline: image preprocessing failed");
 
     std::vector<float> features;
+    std::vector<std::vector<float>> deepstack_features;
     if (!run_vision_encoder(preprocessed.pixel_values.data(), preprocessed.pixel_values.size(),
-                            features))
+                            features, &deepstack_features))
         throw std::runtime_error("VLPipeline: vision encoder failed");
 
     int32_t dim = infer_feature_dim(*vision_encoder_, config_.vision_output_dim);
@@ -112,7 +113,8 @@ TextResult VLPipeline::generate(const std::string& prompt, const float* image_pi
     auto input_ids = tokenizer_->encode(format_vl_prompt(prompt, vl_preprocess_));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = sampling_params_from_config(cfg, eos);
-    auto out = generate_vl_from_ids(input_ids, features, nf, dim, max_new, sp_vl);
+    auto out = generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim, max_new,
+                                    sp_vl);
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
@@ -168,6 +170,8 @@ std::vector<int32_t> VLPipeline::generate_from_ids(const std::vector<int32_t>& i
 
 std::vector<int32_t> VLPipeline::generate_vl_from_ids(const std::vector<int32_t>& input_ids,
                                                       const std::vector<float>& image_features,
+                                                      const std::vector<std::vector<float>>&
+                                                          deepstack_features,
                                                       int32_t num_features, int32_t feature_dim,
                                                       int32_t max_new_tokens,
                                                       const SamplingParams& params) {
@@ -193,12 +197,25 @@ std::vector<int32_t> VLPipeline::generate_vl_from_ids(const std::vector<int32_t>
     // Prefill: run each token with vision embedding injection at image tokens.
     auto prefill_one = [&](int32_t tid) {
         if (tid == image_token && feature_index < num_features) {
+            const int32_t used_feature_index = feature_index;
             const float* embed =
                 image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
-            run_text_step_with_embed(tid, embed, 1.0F, logits);
+            std::vector<const float*> deepstack_embeds;
+            deepstack_embeds.reserve(deepstack_features.size());
+            for (const auto& deepstack : deepstack_features) {
+                const int32_t deepstack_count =
+                    static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
+                deepstack_embeds.push_back(
+                    used_feature_index < deepstack_count
+                        ? deepstack.data() +
+                              static_cast<std::size_t>(used_feature_index) * feature_dim
+                        : nullptr);
+            }
+            run_text_step_with_embed(tid, embed, 1.0F, deepstack_embeds,
+                                     deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
             ++feature_index;
         } else {
-            run_text_step_with_embed(tid, nullptr, 0.0F, logits);
+            run_text_step_with_embed(tid, nullptr, 0.0F, {}, 0.0F, logits);
         }
     };
 
@@ -244,7 +261,10 @@ void VLPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
 }
 
 void VLPipeline::run_text_step_with_embed(int32_t token_id, const float* input_embed,
-                                          float use_input_embed, std::vector<float>& logits) {
+                                          float use_input_embed,
+                                          const std::vector<const float*>& deepstack_embeds,
+                                          float deepstack_active,
+                                          std::vector<float>& logits) {
     if (!text_decoder_->has_input("input_embed")) {
         run_text_step(token_id, logits);
         return;
@@ -283,12 +303,32 @@ void VLPipeline::run_text_step_with_embed(int32_t token_id, const float* input_e
 
     // DeepStack: if the engine has deepstack inputs, provide inactive zeros.
     if (text_decoder_->has_input("deepstack_active")) {
-        float ds_active = 0.0F;
         Tensor ds_active_t;
-        ds_active_t.data = &ds_active;
+        ds_active_t.data = &deepstack_active;
         ds_active_t.shape = {1};
         ds_active_t.dtype = DType::kFloat32;
         inputs["deepstack_active"] = ds_active_t;
+
+        std::vector<float> zero_deepstack;
+        for (std::size_t i = 0;; ++i) {
+            const std::string name = "deepstack_embed_" + std::to_string(i);
+            if (!text_decoder_->has_input(name))
+                break;
+
+            const float* deepstack_embed =
+                i < deepstack_embeds.size() ? deepstack_embeds[i] : nullptr;
+            if (deepstack_embed == nullptr) {
+                if (zero_deepstack.empty())
+                    zero_deepstack.resize(static_cast<std::size_t>(embed_dim), 0.0F);
+                deepstack_embed = zero_deepstack.data();
+            }
+
+            Tensor ds_embed_t;
+            ds_embed_t.data = const_cast<float*>(deepstack_embed);
+            ds_embed_t.shape = {1, static_cast<int64_t>(embed_dim)};
+            ds_embed_t.dtype = DType::kFloat32;
+            inputs[name] = ds_embed_t;
+        }
     }
 
     auto outputs = text_decoder_->forward(inputs);
@@ -305,7 +345,8 @@ void VLPipeline::run_text_step_with_embed(int32_t token_id, const float* input_e
 }
 
 bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel_count,
-                                    std::vector<float>& image_features) {
+                                    std::vector<float>& image_features,
+                                    std::vector<std::vector<float>>* deepstack_features) {
     if (!vision_encoder_ || !vision_encoder_->ok())
         return false;
 
@@ -341,6 +382,20 @@ bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel
     auto n = it->second.numel();
     image_features.resize(static_cast<std::size_t>(n));
     std::memcpy(image_features.data(), it->second.data, n * sizeof(float));
+
+    if (deepstack_features != nullptr) {
+        deepstack_features->clear();
+        for (std::size_t i = 0;; ++i) {
+            const std::string name = "deepstack_features_" + std::to_string(i);
+            auto ds_it = outputs.find(name);
+            if (ds_it == outputs.end())
+                break;
+            auto ds_n = ds_it->second.numel();
+            deepstack_features->emplace_back(static_cast<std::size_t>(ds_n));
+            std::memcpy(deepstack_features->back().data(), ds_it->second.data,
+                        ds_n * sizeof(float));
+        }
+    }
 
     return true;
 }

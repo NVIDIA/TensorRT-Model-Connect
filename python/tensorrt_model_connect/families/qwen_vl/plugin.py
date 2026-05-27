@@ -29,6 +29,8 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import normalize_parallel_config
+from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
 from ... import graph_ops
 from ... import graph_blocks
@@ -69,15 +71,37 @@ class QwenVLPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
         if _is_qwen3_vl(config):
             vc = config.raw.get("vision_config", {})
             deepstack_indexes = vc.get("deepstack_visual_indexes", [])
+            if parallel.enabled:
+                return build_qwen_vl_tp_decoder_engine(
+                    config, weights, max_cache_length,
+                    precision=precision,
+                    quant_ctx=quant_ctx,
+                    embed_input=True,
+                    deepstack_num_levels=len(deepstack_indexes),
+                    verbose=verbose,
+                    debug_layer_outputs=debug_layer_outputs,
+                    parallel_config=parallel)
             return _build_qwen3_vl_decoder(
                 config, weights, max_cache_length,
                 deepstack_num_levels=len(deepstack_indexes),
                 quant_ctx=quant_ctx, verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs)
+        if parallel.enabled:
+            return build_qwen_vl_tp_decoder_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                embed_input=True,
+                deepstack_num_levels=0,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel)
         return build_standard_decoder_engine(
             config, weights, max_cache_length, verbose=verbose,
             quant_ctx=quant_ctx, embed_input=True,
@@ -203,6 +227,7 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 
     attention_size = 0
     mlp_size = 0
+    kv_attention_size = 0
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
@@ -238,6 +263,8 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.w_k"] = k_t
         weights[f"{prefix}.w_v"] = v_t
         weights[f"{prefix}.w_o"] = o_t
+        if kv_attention_size == 0:
+            kv_attention_size = k_t.shape[1]
 
         # Optional per-head q/k norms (Qwen3)
         q_norm_key = f"{hf_prefix}.self_attn.q_norm.weight"
@@ -278,6 +305,7 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
     weights["_attention_size"] = attention_size
+    weights["_kv_attention_size"] = kv_attention_size
     weights["_mlp_size"] = mlp_size
 
     return weights

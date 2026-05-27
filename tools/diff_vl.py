@@ -400,7 +400,19 @@ def test_vision_features(
 
 def test_embed_input(bundle_path: str) -> bool:
     """Verify the text decoder accepts embed_input mode."""
-    from tensorrt_model_connect.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.debug_runner import (
+        load_section_from_bundle,
+        runner_from_bundle,
+    )
+
+    if (
+        load_section_from_bundle(bundle_path, "engine_plan") is None
+        and load_section_from_bundle(bundle_path, "engine_plan_tp_rank0") is not None
+    ):
+        print("[diff_vl] Text decoder embed_input: SKIP "
+              "(tensor-parallel decoder requires distributed runtime)",
+              file=sys.stderr)
+        return True
 
     runner = runner_from_bundle(bundle_path)
     if not runner.has_embed_input:

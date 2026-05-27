@@ -5,17 +5,56 @@
 #include "runtime/domains/multimodal/image_preprocessor.h"
 #include "runtime/models/vision_language/pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <cstddef>
 #include <iostream>
+#include <string>
+#include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, std::size_t idx) {
+    return shape.size() > idx ? static_cast<int32_t>(shape[idx]) : 0;
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+} // namespace
 
 class VLPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        DistributedRuntimeGroup tp_group;
+        if (tp_config.enabled)
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
 
         auto shared_stream = std::make_shared<CudaStream>();
         if (!shared_stream->ok())
@@ -25,6 +64,12 @@ class VLPlugin final : public IPipelinePlugin {
         opts.stream = shared_stream->get();
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
+
+        auto decoder_opts = opts;
+        if (tp_config.enabled) {
+            decoder_opts.distributed_communicator = tp_group.communicator;
+            decoder_opts.distributed_owner = tp_group.owner;
+        }
 
         // Build KvCacheNames from IoMap patterns.
         const auto& io = ctx.config.io_map;
@@ -36,12 +81,15 @@ class VLPlugin final : public IPipelinePlugin {
             kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
         }
 
+        const std::string engine_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan", opts);
+            ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(),
+            decoder_opts);
         loaded.module->keep_alive(shared_stream);
 
         cudaStream_t stream = loaded.module->stream();
-        int32_t kv_dim = compute_kv_dim(ctx.config);
+        int32_t kv_dim = decoder_cache_row_width(*loaded.module, ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> state =
             std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
