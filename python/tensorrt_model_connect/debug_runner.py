@@ -1027,9 +1027,15 @@ class RwkvTrtRunner:
     Only transfers token_id (H2D) and logits (D2H) per step.
     """
 
-    def __init__(self, engine_plan: bytes, num_layers: int):
+    def __init__(
+        self,
+        engine_plan: bytes,
+        num_layers: int,
+        distributed_communicator: object | None = None,
+    ):
         _require_trt_runtime()
         self.num_layers = num_layers
+        self._distributed_communicator = distributed_communicator
 
         logger = trt.Logger(trt.Logger.WARNING)
         runtime = trt.Runtime(logger)
@@ -1037,6 +1043,15 @@ class RwkvTrtRunner:
         if self.engine is None:
             raise RuntimeError("Failed to deserialize TRT engine")
         self.context = self.engine.create_execution_context()
+        if distributed_communicator is not None:
+            set_communicator = getattr(self.context, "set_communicator", None)
+            if set_communicator is None:
+                raise RuntimeError(
+                    "TensorRT distributed execution requires TRT 11.0+ "
+                    "IExecutionContext.set_communicator"
+                )
+            if not set_communicator(distributed_communicator):
+                raise RuntimeError("Failed to set TRT distributed communicator")
 
         # Auto-detect hidden_size from attn_state_0 shape [1, hidden]
         state_shape = tuple(self.engine.get_tensor_shape("attn_state_0"))
@@ -2281,14 +2296,10 @@ def runner_from_bundle(
             num_layers=num_layers,
         )
     if runtime_strategy == "rwkv_recurrent":
-        if distributed_communicator is not None or engine_section != "engine_plan":
-            raise ValueError(
-                "Distributed engine section selection is only supported for "
-                "standard decoder runners"
-            )
         return RwkvTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
+            distributed_communicator=distributed_communicator,
         )
     if tri_cfg.get("enabled") and runtime_strategy in ("decoder_kv_cache", "decoder_moe"):
         tri_stats = load_triattention_stats_from_bundle(
