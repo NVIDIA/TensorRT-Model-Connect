@@ -39,6 +39,7 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ... import graph_ops
+from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 
 trt = trt_compat.get_trt()
@@ -131,7 +132,20 @@ class MarianPlugin:
 
     def build_engine(self, config: ModelConfig, weights: WeightDict,
                      max_cache_length: int, *, verbose: bool = False,
-                     debug_layer_outputs: bool = False) -> bytes:
+                     debug_layer_outputs: bool = False,
+                     parallel_config=None) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Marian tensor-parallel decoder builds")
+            from .decoder_tp_builder import build_marian_tp_decoder_engine
+            return build_marian_tp_decoder_engine(
+                config, weights, max_cache_length,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
         dec_ffn = weights["_dec_ffn"]
