@@ -1,0 +1,27 @@
+{
+  "name": "qwen3-moe-30b-a3b-instruct-2507-tp2",
+  "trace_id": "IT-E2E-QWN3MOE-2507-TP2-01",
+  "hf_id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+  "bundle": "qwen3-moe-30b-a3b-instruct-2507-tp2.trtfb",
+  "family": "qwen_moe",
+  "runtime_strategy": "decoder_moe",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of Andorra? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": { "parallel": { "mode": "tensor_parallel", "tp_size": 2 } },
+  "distributed_runtime": {
+    "enabled": true, "launcher": "mpirun", "world_size": 2,
+    "debug_logits": true, "capture_gpu_memory": true, "gpu_memory_sample_interval_ms": 200,
+    "export_env": ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 2 }, "gating": true }
+  ],
+  "threshold_overrides": { "logit_cosine_p5": 0.95, "logit_rel_l2_p95": 0.15 }
+}
