@@ -64,6 +64,10 @@ from tensorrt_model_connect import trt_compat
 from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict
 from ...build_timing import timed_trt_compile
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from ... import graph_ops
 from . import magpie_tokenizer
 
@@ -714,6 +718,7 @@ class MagpieTTSPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build MagpieTTS decoder TRT engine with dynamic seq_len.
 
@@ -722,6 +727,24 @@ class MagpieTTSPlugin:
           - Batched prefill: seq_len=ctx_len (profile 1)
         No separate prefill engine needed — saves ~400MB bundle space.
         """
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="MagpieTTS tensor-parallel decoder builds")
+            if quant_ctx is not None:
+                raise ValueError("MagpieTTS tensor-parallel builds do not support quantization")
+            from .decoder_tp_builder import build_magpie_tp_decoder_engine
+            return build_magpie_tp_decoder_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
         dec_ffn = weights["_dec_ffn"]

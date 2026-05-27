@@ -252,7 +252,7 @@ class TestRunnerFromBundle:
         from tensorrt_model_connect.debug_runner import runner_from_bundle
 
         config_data = json.dumps({
-            "runtime_strategy": "seq2seq_encoder_decoder",
+            "runtime_strategy": "text_to_text",
             "decoder_layers": 2,
             "decoder_start_token_id": 0,
         }).encode("utf-8")
@@ -267,6 +267,42 @@ class TestRunnerFromBundle:
         )
 
         path = tmp_path / "seq2seq_tp_dispatch.trtfb"
+        path.write_bytes(bundle)
+
+        communicator = object()
+        with patch("tensorrt_model_connect.debug_runner.Seq2SeqTrtRunner",
+                   return_value="seq2seq-tp-runner") as mock_runner:
+            runner = runner_from_bundle(
+                str(path),
+                engine_section="engine_plan_tp_rank1",
+                distributed_communicator=communicator,
+            )
+
+        assert runner == "seq2seq-tp-runner"
+        kwargs = mock_runner.call_args.kwargs
+        assert kwargs["decoder_plan"] == b"RANK1_DECODER"
+        assert kwargs["encoder_plan"] == b"ENCODER_PLAN"
+        assert kwargs["distributed_communicator"] is communicator
+
+    def test_bart_seq2seq_engine_section_and_communicator_forwarded(self, tmp_path):
+        from tensorrt_model_connect.debug_runner import runner_from_bundle
+
+        config_data = json.dumps({
+            "runtime_strategy": "seq2seq_encoder_decoder",
+            "decoder_layers": 2,
+            "decoder_start_token_id": 0,
+        }).encode("utf-8")
+        bundle = _make_bundle_bytes(
+            {"num_layers": 2, "max_cache_length": 128},
+            engine_plan=b"SINGLE_DECODER",
+            vision_plan=b"ENCODER_PLAN",
+            extra_sections={
+                "config.json": config_data,
+                "engine_plan_tp_rank1": b"RANK1_DECODER",
+            },
+        )
+
+        path = tmp_path / "bart_seq2seq_tp_dispatch.trtfb"
         path.write_bytes(bundle)
 
         communicator = object()

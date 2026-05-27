@@ -68,6 +68,10 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ...build_timing import timed_trt_compile
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
@@ -243,6 +247,7 @@ class PersonaPlexPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine for the Temporal Transformer.
 
@@ -280,6 +285,31 @@ class PersonaPlexPlugin:
         for key, val in weights.items():
             if key.startswith("temporal."):
                 decoder_weights[key[len("temporal."):]] = val
+        decoder_weights["_kv_attention_size"] = hidden
+
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="PersonaPlex temporal tensor-parallel builds")
+            if quant_ctx is not None:
+                raise ValueError("PersonaPlex tensor-parallel builds do not support quantization")
+            from .decoder_tp_builder import build_personaplex_tp_decoder_engine
+            return build_personaplex_tp_decoder_engine(
+                temporal_config,
+                decoder_weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                norm_type="rmsnorm",
+                mlp_type="swiglu",
+                position_type="rope",
+                interleaved_rope=True,
+                embed_input=True,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                hidden_state_output=True,
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
             temporal_config, decoder_weights, max_cache_length,

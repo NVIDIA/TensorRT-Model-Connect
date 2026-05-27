@@ -230,6 +230,18 @@ def _call_supports_kwarg(func, name: str) -> bool:
     )
 
 
+def _quant_format_name(quant_ctx) -> str | None:
+    quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    return getattr(quant_format, "name", None)
+
+
+def _plugin_supports_parallel_quantization(plugin, quant_ctx) -> bool:
+    supports = getattr(plugin, "supports_parallel_quantization", None)
+    if not callable(supports):
+        return False
+    return bool(supports(_quant_format_name(quant_ctx)))
+
+
 def _plugin_uses_standard_decoder_builder(plugin) -> bool:
     """Best-effort check for family plugins routed through the standard decoder."""
     try:
@@ -861,7 +873,9 @@ def build_bundle(
 
     if parallel.enabled:
         require_tensorrt_11_for_tensor_parallel(parallel)
-        if quant_ctx is not None:
+        if quant_ctx is not None and not _plugin_supports_parallel_quantization(
+            plugin, quant_ctx
+        ):
             raise ValueError("Tensor-parallel decoder builds do not support quantization yet")
         if enable_dynamic_kv_cache:
             raise NotImplementedError(
