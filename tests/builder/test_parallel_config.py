@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import numpy as np
 
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.parallel_config import (
@@ -35,6 +36,31 @@ def test_standard_decoder_weight_sharding_preserves_single_device() -> None:
     out = shard_standard_decoder_weights(cfg, weights, ParallelConfig())
 
     assert out is weights
+
+
+def test_standard_decoder_weight_sharding_slices_gelu_fc_bias() -> None:
+    cfg = ModelConfig.create_tiny("opt")
+    cfg.num_attention_heads = 4
+    cfg.num_key_value_heads = 4
+    cfg.intermediate_size = 32
+    weights = {
+        "_attention_size": 16,
+        "_kv_attention_size": 16,
+        "_mlp_size": 32,
+        "layer.0.w_fc1": np.zeros((16, 32)),
+        "layer.0.fc1_bias": np.arange(32),
+        "layer.0.w_fc2": np.zeros((32, 16)),
+        "layer.0.fc2_bias": np.arange(16),
+    }
+
+    out = shard_standard_decoder_weights(
+        cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2))
+
+    np.testing.assert_array_equal(
+        out["layer.0.fc1_bias"], weights["layer.0.fc1_bias"][16:24])
+    np.testing.assert_array_equal(
+        out["layer.0.fc2_bias"], weights["layer.0.fc2_bias"])
+    assert out["_mlp_size"] == 8
 
 
 def test_tensor_parallel_requires_trt11(monkeypatch) -> None:
