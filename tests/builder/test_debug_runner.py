@@ -248,6 +248,40 @@ class TestRunnerFromBundle:
         assert kwargs["engine_plan"] == b"RANK1_ENGINE"
         assert kwargs["distributed_communicator"] is communicator
 
+    def test_hybrid_engine_section_and_communicator_forwarded(self, tmp_path):
+        from tensorrt_model_connect.debug_runner import runner_from_bundle
+
+        config_data = json.dumps({
+            "runtime_strategy": "hybrid_mamba_attention",
+            "num_mamba_layers": 1,
+            "num_attention_layers": 1,
+        }).encode("utf-8")
+        bundle = _make_bundle_bytes(
+            {"num_layers": 2, "max_cache_length": 128},
+            engine_plan=b"SINGLE_ENGINE",
+            extra_sections={
+                "config.json": config_data,
+                "engine_plan_tp_rank1": b"HYBRID_RANK1_ENGINE",
+            },
+        )
+
+        path = tmp_path / "hybrid_tp_dispatch.trtfb"
+        path.write_bytes(bundle)
+
+        communicator = object()
+        with patch("tensorrt_model_connect.debug_runner.HybridTrtRunner",
+                   return_value="hybrid-tp-runner") as mock_runner:
+            runner = runner_from_bundle(
+                str(path),
+                engine_section="engine_plan_tp_rank1",
+                distributed_communicator=communicator,
+            )
+
+        assert runner == "hybrid-tp-runner"
+        kwargs = mock_runner.call_args.kwargs
+        assert kwargs["engine_plan"] == b"HYBRID_RANK1_ENGINE"
+        assert kwargs["distributed_communicator"] is communicator
+
     def test_mpi_rank_info_uses_single_node_rank(self, monkeypatch):
         from tensorrt_model_connect.debug_runner import _mpi_rank_info_from_env
 

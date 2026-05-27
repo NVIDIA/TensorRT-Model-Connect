@@ -1441,11 +1441,13 @@ class HybridTrtRunner:
         max_cache_length: int,
         num_mamba_layers: int,
         num_attention_layers: int,
+        distributed_communicator: object | None = None,
     ):
         _require_trt_runtime()
         self.max_cache_length = max_cache_length
         self.num_mamba_layers = num_mamba_layers
         self.num_attention_layers = num_attention_layers
+        self._distributed_communicator = distributed_communicator
 
         # Deserialize engine
         logger = trt.Logger(trt.Logger.WARNING)
@@ -1454,6 +1456,15 @@ class HybridTrtRunner:
         if self.engine is None:
             raise RuntimeError("Failed to deserialize TRT engine")
         self.context = self.engine.create_execution_context()
+        if distributed_communicator is not None:
+            set_communicator = getattr(self.context, "set_communicator", None)
+            if set_communicator is None:
+                raise RuntimeError(
+                    "TensorRT distributed execution requires TRT 11.0+ "
+                    "IExecutionContext.set_communicator"
+                )
+            if not set_communicator(distributed_communicator):
+                raise RuntimeError("Failed to set TRT distributed communicator")
 
         # Auto-detect state dimensions from engine tensor shapes
         if num_mamba_layers > 0:
@@ -2257,11 +2268,6 @@ def runner_from_bundle(
             )
 
     if runtime_strategy == "hybrid_mamba_attention":
-        if distributed_communicator is not None or engine_section != "engine_plan":
-            raise ValueError(
-                "Distributed engine section selection is only supported for "
-                "standard decoder runners"
-            )
         num_mamba = config.get("num_mamba_layers", 0)
         num_attn = config.get("num_attention_layers", 0)
         return HybridTrtRunner(
@@ -2269,6 +2275,7 @@ def runner_from_bundle(
             max_cache_length=header["max_cache_length"],
             num_mamba_layers=num_mamba,
             num_attention_layers=num_attn,
+            distributed_communicator=distributed_communicator,
         )
     if runtime_strategy == "ssm_recurrent":
         if distributed_communicator is not None or engine_section != "engine_plan":
