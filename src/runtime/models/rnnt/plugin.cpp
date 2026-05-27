@@ -3,15 +3,38 @@
 #include "runtime/models/rnnt/pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+} // namespace
 
 class RnntPlugin final : public IPipelinePlugin {
   public:
@@ -22,10 +45,21 @@ class RnntPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
+        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        DistributedRuntimeGroup tp_group;
+        ModuleCreateOptions pred_opts = opts;
+        std::string pred_section = "engine_plan";
+        if (tp_config.enabled) {
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+            pred_opts.distributed_communicator = tp_group.communicator;
+            pred_opts.distributed_owner = tp_group.owner;
+            pred_section = tp_engine_section_name(tp_group.rank);
+        }
+
         auto enc_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "rnnt encoder", opts);
         auto pred_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "rnnt predictor", opts);
+            ctx.backend, find_section(ctx.bundle, pred_section), "rnnt predictor", pred_opts);
         auto joint_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "joint_engine_plan"), "rnnt joint", opts);
         std::map<int32_t, std::string> streaming_encoder_sections;
