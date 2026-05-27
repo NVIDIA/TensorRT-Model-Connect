@@ -1,0 +1,58 @@
+{
+  "name": "segformer-b0-ade-tp4",
+  "trace_id": "IT-E2E-SEGF-TP4-01",
+  "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
+  "bundle": "segformer-b0-ade-tp4.trtfb",
+  "family": "segformer",
+  "runtime_strategy": "segmentation",
+  "test_type": "segmentation",
+  "max_cache_length": 1,
+  "prompt": "",
+  "max_new_tokens": 0,
+  "logit_atol": 0.5,
+  "trust_remote_code": false,
+  "test_image": "data/test_img.jpeg",
+  "min_pixel_agreement": 0.85,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "notes": "SegFormer-B0 TP4 repro. Uses the same checkpoint, image, runner, comparator, logit tolerance, and pixel-agreement threshold as segformer-b0-ade."
+}

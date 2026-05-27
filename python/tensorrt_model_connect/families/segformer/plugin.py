@@ -50,6 +50,11 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ... import graph_ops
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .segformer_tp_builder import build_segformer_tp_engine
 
 
 trt = trt_compat.get_trt()
@@ -212,12 +217,28 @@ class SegformerPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build single TRT engine for SegFormer segmentation.
 
         Input:  pixel_values [1, 3, H, W]
         Output: logits [1, num_classes, H/4, W/4]
         """
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="SegFormer tensor-parallel Mix-FFN builds")
+            if quant_ctx is not None:
+                raise ValueError("SegFormer tensor-parallel builds do not support quantization")
+            return build_segformer_tp_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         raw = config.raw
         num_encoder_blocks = raw.get("depths", [2, 2, 2, 2])
         sr_ratios = raw.get("sr_ratios", [8, 4, 2, 1])

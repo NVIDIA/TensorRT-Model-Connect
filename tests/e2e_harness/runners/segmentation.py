@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -26,6 +27,30 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parents[3]
+
+
+def _distributed_runtime_config(case: E2ECase) -> dict:
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _wrap_distributed_command(cmd: list[str], case: E2ECase) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        return [launcher] + [str(arg) for arg in launcher_args] + cmd
+    return [launcher, "--tag-output", "-np", str(world_size)] + cmd
+
+
+def _strip_mpirun_tags(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        lines.append(re.sub(r"^\[[^\]]+\]<std(?:out|err)>:\s?", "", line))
+    return "\n".join(lines)
 
 
 class SegmentationRunner:
@@ -88,16 +113,30 @@ class SegmentationRunner:
             )
 
         _model_dir = _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name)
-        output_path = os.path.join(_model_dir, "seg_output.png")
+        distributed_runtime = _distributed_runtime_config(case)
+        output_root = os.path.join(_model_dir, "rank_outputs")
+        output_path = (
+            os.path.join(output_root, "rank_0", "seg_output.png")
+            if distributed_runtime else os.path.join(_model_dir, "seg_output.png")
+        )
 
         cmd = [
             str(ctx.binary_path), "segment", str(bundle_path),
             "--image", str(image_path),
-            "--output", str(output_path),
         ]
+        if distributed_runtime:
+            wrapper = (
+                'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                'exec "$@" --output "$out/seg_output.png"'
+            )
+            cmd = ["bash", "-lc", wrapper, "trtmc_rank_segment", output_root] + cmd
+        else:
+            cmd.extend(["--output", str(output_path)])
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", str(runtime_cli_python)])
+        cmd = _wrap_distributed_command(cmd, case)
 
         env = dict(os.environ)
         if ctx.ld_library_path:
@@ -133,7 +172,8 @@ class SegmentationRunner:
         seg_meta: dict = {
             "command": cmd,
             "returncode": result.returncode,
-            "stderr": stderr_truncated,
+            "stdout": _strip_mpirun_tags(result.stdout),
+            "stderr": _strip_mpirun_tags(stderr_truncated),
         }
         if stderr_log:
             seg_meta["stderr_log"] = stderr_log
