@@ -417,8 +417,10 @@ def build_dual_profile_tp_decoder_engine(
     alibi_slopes_tensor: trt.ITensor | None = None
     alibi_cache_positions_fp32: trt.ITensor | None = None
     if position_type == "alibi":
+        global_alibi_slopes = graph_ops.compute_alibi_slopes(config.num_attention_heads)
         alibi_slopes_np = (
-            graph_ops.compute_alibi_slopes(num_heads) * float(alibi_bias_scale))
+            np.array_split(global_alibi_slopes, parallel.tp_size)[parallel.rank]
+            * float(alibi_bias_scale))
         # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
         # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
         # to the additive mask.
