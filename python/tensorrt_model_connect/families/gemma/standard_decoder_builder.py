@@ -323,6 +323,7 @@ def build_standard_decoder_engine(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    final_logit_softcap = config.raw.get("final_logit_softcapping")
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
     # ---------------------------------------------------------------
@@ -480,6 +481,10 @@ def build_standard_decoder_engine(
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
                                         dtype=work_np_dtype)
 
+    if final_logit_softcap is not None and float(final_logit_softcap) > 0.0:
+        logits = graph_ops.add_tanh_softcap(
+            network, logits, float(final_logit_softcap), scalar_shape=(1, 1))
+
     # Logits output: always FP32 for accurate argmax/sampling
     if work_trt_dtype != trt.float32:
         logits_cast = network.add_cast(logits, trt.float32)
@@ -599,7 +604,25 @@ def _add_decoder_layer(
     present_v = attn["present_v"]
 
     # --- Parallel vs sequential residual ---
-    if parallel_residual:
+    gemma2_norms = (
+        weights.get(f"{prefix}.pre_ffn_norm") is not None
+        and weights.get(f"{prefix}.post_ffn_norm") is not None
+    )
+
+    if gemma2_norms:
+        attn_out = _apply_norm(
+            network, attn_out, hidden_size,
+            weights[f"{prefix}.post_attn_norm"],
+            weights.get(f"{prefix}.post_attn_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+        residual1 = network.add_elementwise(
+            hidden, attn_out, trt.ElementWiseOperation.SUM)
+        norm2 = _apply_norm(
+            network, residual1.get_output(0), hidden_size,
+            weights[f"{prefix}.pre_ffn_norm"],
+            weights.get(f"{prefix}.pre_ffn_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+    elif parallel_residual:
         post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
         if post_attn_norm_w is not None:
             norm2 = _apply_norm(
@@ -632,7 +655,16 @@ def _add_decoder_layer(
             quant_ctx=quant_ctx, layer_prefix=prefix)
 
     # Final residual connection
-    if parallel_residual:
+    if gemma2_norms:
+        mlp_out = _apply_norm(
+            network, mlp_out, hidden_size,
+            weights[f"{prefix}.post_ffn_norm"],
+            weights.get(f"{prefix}.post_ffn_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+        residual2 = network.add_elementwise(
+            residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+        post_attn_tensor = residual1.get_output(0)
+    elif parallel_residual:
         sum_attn = network.add_elementwise(
             hidden, attn_out, trt.ElementWiseOperation.SUM)
         residual2 = network.add_elementwise(

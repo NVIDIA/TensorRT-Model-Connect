@@ -2602,6 +2602,139 @@ def add_attention_core(
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
 
 
+def _scalar_constant_for_trt_dtype(
+    network: trt.INetworkDefinition,
+    shape: tuple[int, ...],
+    value: float,
+    dtype: trt.DataType,
+) -> trt.ITensor:
+    np_dtype = np.float16 if dtype == trt.float16 else np.float32
+    const = add_constant(
+        network, shape, np.full(shape, value, dtype=np_dtype),
+        dtype=np_dtype)
+    if dtype == trt.bfloat16:
+        const = network.add_cast(const, trt.bfloat16).get_output(0)
+    return const
+
+
+def add_tanh_softcap(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    cap: float,
+    *,
+    scalar_shape: tuple[int, ...],
+) -> trt.ITensor:
+    """Apply ``tanh(tensor / cap) * cap`` using scalar broadcasting."""
+    cap_t = _scalar_constant_for_trt_dtype(
+        network, scalar_shape, float(cap), tensor.dtype)
+    scaled = network.add_elementwise(
+        tensor, cap_t, trt.ElementWiseOperation.DIV).get_output(0)
+    capped = network.add_activation(
+        scaled, trt.ActivationType.TANH).get_output(0)
+    return network.add_elementwise(
+        capped, cap_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+
+def _repeat_kv_heads_4d(
+    network: trt.INetworkDefinition,
+    x_4d: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> trt.ITensor:
+    if num_kv_heads == num_heads:
+        return x_4d
+    if num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"num_heads={num_heads} must be divisible by "
+            f"num_kv_heads={num_kv_heads}")
+
+    repeat = num_heads // num_kv_heads
+    if num_kv_heads == 1:
+        concat = network.add_concatenation([x_4d] * repeat)
+        concat.axis = 1
+        return concat.get_output(0)
+
+    x_shape = network.add_shape(x_4d).get_output(0)
+    one = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    seq = network.add_slice(x_shape, start=(2,), shape=(1,), stride=(1,))
+    dim = add_constant(
+        network, (1,), np.array([head_dim], dtype=np.int64), dtype=np.int64)
+    slice_shape = network.add_concatenation([one, one, seq.get_output(0), dim])
+    slice_shape.axis = 0
+
+    repeated = []
+    for head_idx in range(num_kv_heads):
+        head_slice = network.add_slice(
+            x_4d, start=(0, head_idx, 0, 0),
+            shape=(1, 1, 1, head_dim), stride=(1, 1, 1, 1))
+        head_slice.set_input(2, slice_shape.get_output(0))
+        repeated.extend([head_slice.get_output(0)] * repeat)
+
+    concat = network.add_concatenation(repeated)
+    concat.axis = 1
+    return concat.get_output(0)
+
+
+def _add_attention_core_with_logit_softcap(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    mask: trt.ITensor | None,
+    scale: float,
+    logit_softcap: float,
+) -> trt.ITensor:
+    output_dtype = q_4d.dtype
+    k_4d = _repeat_kv_heads_4d(
+        network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+    v_4d = _repeat_kv_heads_4d(
+        network, v_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+
+    score_q = q_4d
+    score_k = k_4d
+    score_mask = mask
+    if output_dtype != trt.float32:
+        score_q = network.add_cast(score_q, trt.float32).get_output(0)
+        score_k = network.add_cast(score_k, trt.float32).get_output(0)
+        if score_mask is not None and score_mask.dtype != trt.float32:
+            score_mask = network.add_cast(score_mask, trt.float32).get_output(0)
+
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, score_q.dtype)
+    scores = network.add_matrix_multiply(
+        score_q, trt.MatrixOperation.NONE,
+        score_k, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    scores = network.add_elementwise(
+        scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+    scores = add_tanh_softcap(
+        network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+
+    if score_mask is not None:
+        scores = network.add_elementwise(
+            scores, score_mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    probs_t = probs.get_output(0)
+    if probs_t.dtype != output_dtype:
+        probs_t = network.add_cast(probs_t, output_dtype).get_output(0)
+
+    context = network.add_matrix_multiply(
+        probs_t, trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -2616,6 +2749,7 @@ def add_attention_from_rows(
     causal: bool = False,
     mask: trt.ITensor | None = None,
     scale: float | None = None,
+    logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
@@ -2638,9 +2772,18 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    ctx_4d = add_attention_core(
-        network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
-        fp32_accumulation=fp32_accumulation)
+    if logit_softcap is not None and float(logit_softcap) > 0.0:
+        if causal:
+            raise NotImplementedError(
+                "logit_softcap attention requires an explicit additive mask")
+        ctx_4d = _add_attention_core_with_logit_softcap(
+            network, q_4d, k_4d, v_4d,
+            num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
+            mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    else:
+        ctx_4d = add_attention_core(
+            network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
+            fp32_accumulation=fp32_accumulation)
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")

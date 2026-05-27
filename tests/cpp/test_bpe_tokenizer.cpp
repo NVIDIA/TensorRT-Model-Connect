@@ -1648,6 +1648,88 @@ int main() {
         }
     }
 
+    // === 37. Gemma Split pre-tokenizer with SentencePiece-BPE normalizer ===
+    {
+        std::cerr << "\n=== Gemma Split SentencePiece-BPE ===\n";
+
+        std::string gemma_json = R"({
+          "model": {
+            "type": "BPE",
+            "vocab": {
+              "<bos>": 0,
+              "\u2581": 1,
+              "i": 2,
+              "s": 3,
+              "is": 4,
+              "\u2581is": 5,
+              "2": 6,
+              "+": 7,
+              "\u2581+": 8,
+              "?": 9,
+              "W": 10,
+              "h": 11,
+              "a": 12,
+              "t": 13,
+              "Wh": 14,
+              "Wha": 15,
+              "What": 16
+            },
+            "merges": [
+              "W h",
+              "Wh a",
+              "Wha t",
+              "i s",
+              "\u2581 is",
+              "\u2581 +"
+            ]
+          },
+          "added_tokens": [
+            {"id": 0, "content": "<bos>", "special": true}
+          ],
+          "normalizer": {
+            "type": "Replace",
+            "pattern": {"String": " "},
+            "content": "\u2581"
+          },
+          "pre_tokenizer": {
+            "type": "Split",
+            "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious",
+            "invert": false
+          },
+          "decoder": {
+            "type": "Sequence",
+            "decoders": [
+              {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+              {"type": "ByteFallback"},
+              {"type": "Fuse"}
+            ]
+          },
+          "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [
+              {"SpecialToken": {"id": "<bos>", "type_id": 0}},
+              {"Sequence": {"id": "A", "type_id": 0}}
+            ],
+            "special_tokens": {
+              "<bos>": {"id": "<bos>", "ids": [0], "tokens": ["<bos>"]}
+            }
+          }
+        })";
+
+        auto tok = trtmc::CreateBpeTokenizer(gemma_json.data(), gemma_json.size(), true);
+        check(tok != nullptr, "gemma_split_create");
+        {
+            auto ids = tok->encode("What is 2 + 2?");
+            std::vector<int32_t> expected = {0, 16, 5, 1, 6, 8, 1, 6, 9};
+            check(ids == expected, "gemma_split_encode_no_leading_space");
+        }
+        {
+            auto text = tok->decode({0, 16, 5, 1, 6, 8, 1, 6, 9});
+            check(text == "What is 2 + 2?", "gemma_split_decode");
+        }
+    }
+
     if (failures > 0) {
         std::cerr << "\n" << failures << " test(s) failed\n";
         return 1;

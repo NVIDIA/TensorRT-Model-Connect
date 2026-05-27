@@ -754,7 +754,8 @@ class BpeTokenizer final : public ITokenizer {
             out += (c == ' ') ? sp : std::string(1, c);
         }
         // Metaspace prepend_scheme=first: prepend if not already starting with ▁
-        if (!mSentencePiecePrependAlways && (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
+        if (!mSentencePiecePrependAlways && mSentencePiecePrependIfMissing &&
+            (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
             out = sp + out;
         }
         return out;
@@ -1186,6 +1187,12 @@ class BpeTokenizer final : public ITokenizer {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
+        } else if (pt_type == "Split" && pt.contains("pattern") &&
+                   pt["pattern"].contains("String") &&
+                   pt["pattern"]["String"].get<std::string>() == " ") {
+            // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
+            // pre-tokenizer with spaces already normalized to U+2581.
+            mUsePreTokenizer = false;
         } else if (pt_type == "Metaspace") {
             mIsMetaspace = true;
             mUsePreTokenizer = false;
@@ -1296,6 +1303,14 @@ class BpeTokenizer final : public ITokenizer {
                     mSentencePiecePrependAlways = true;
                 }
             }
+        } else if (norm_type == "Replace" && norm.contains("pattern") &&
+                   norm["pattern"].contains("String") &&
+                   norm["pattern"]["String"].get<std::string>() == " " &&
+                   norm.value("content", "") == "\xe2\x96\x81") {
+            // Gemma replaces spaces with ▁ but does not prepend ▁ to the
+            // first token. Preserve the old prepend-if-missing behavior for
+            // Metaspace-style SentencePiece models.
+            mSentencePiecePrependIfMissing = false;
         }
     }
 
@@ -1398,6 +1413,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
         false; // true for Normalizer Prepend, false for Metaspace first
+    bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true
