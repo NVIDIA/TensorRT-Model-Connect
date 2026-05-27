@@ -916,13 +916,18 @@ class HfTransformersReference:
                 resized_w = resize_short
                 resized_h = max(1, int(height * resize_short / width + 0.5))
 
-            image = image.resize((resized_w, resized_h), Image.Resampling.NEAREST)
-            left = max(0, (resized_w - target) // 2)
-            top = max(0, (resized_h - target) // 2)
-            image = image.crop((left, top, left + target, top + target))
-            arr = np.asarray(image, dtype=np.float32) / 255.0
-            arr = (arr - 0.5) / 0.5
-            chw = np.transpose(arr, (2, 0, 1))[None, ...].copy()
+            source = np.asarray(image, dtype=np.float32) / 255.0
+            crop_x = max(0, (resized_w - target) // 2)
+            crop_y = max(0, (resized_h - target) // 2)
+            chw = np.empty((3, target, target), dtype=np.float32)
+            for y in range(target):
+                ry = crop_y + y
+                src_y = min(height - 1, int(float(ry) * height / resized_h))
+                for x in range(target):
+                    rx = crop_x + x
+                    src_x = min(width - 1, int(float(rx) * width / resized_w))
+                    chw[:, y, x] = (source[src_y, src_x, :] - 0.5) / 0.5
+            chw = chw[None, ...].copy()
 
             model_ref = f"hf-hub:{{hf_id}}"
             try:

@@ -25,6 +25,10 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ...config import ModelConfig
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 trt = trt_compat.get_trt()
@@ -144,7 +148,23 @@ class TimmVitPlugin:
         precision: str = "fp32",
         quant_ctx=None,
         verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="timm_vit tensor-parallel MLP builds")
+            if quant_ctx is not None:
+                raise ValueError("timm_vit tensor-parallel builds do not support quantization")
+            from .timm_vit_tp_builder import build_timm_vit_tp_engine
+            return build_timm_vit_tp_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
+
         del max_cache_length, quant_ctx
         if precision not in ("fp32",):
             raise ValueError("timm_vit raw TRT path currently supports precision='fp32'")

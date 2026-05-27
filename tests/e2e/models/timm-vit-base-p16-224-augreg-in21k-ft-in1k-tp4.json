@@ -1,0 +1,60 @@
+{
+  "name": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4",
+  "trace_id": "IT-E2E-TIMM-VIT-TP4-01",
+  "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
+  "bundle": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.trtfb",
+  "family": "timm_vit",
+  "runtime_strategy": "image_classification",
+  "task_strategy": "image_classification",
+  "reference_family": "image_classification",
+  "user_contract": "image_classification",
+  "test_type": "image_classification",
+  "max_cache_length": 1,
+  "prompt": "",
+  "max_new_tokens": 0,
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "test_image": "data/test_img.jpeg",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "notes": "timm ViT-base TP4 repro. Uses the same checkpoint, image, image-classification comparator, and thresholds as timm-vit-base-p16-224-augreg-in21k-ft-in1k."
+}

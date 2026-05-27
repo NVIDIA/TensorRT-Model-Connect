@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +13,13 @@ try:
     from safetensors.numpy import save_file
     from tensorrt_model_connect.config import ModelConfig
     from tensorrt_model_connect.families.timm_vit import plugin
+    from tensorrt_model_connect.families.timm_vit import timm_vit_tp_builder as tp_builder
+    from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires TensorRT", allow_module_level=True)
+
+timm_vit_plugin_module = importlib.import_module(
+    "tensorrt_model_connect.families.timm_vit.plugin")
 
 
 def _rand(*shape: int) -> np.ndarray:
@@ -87,3 +93,70 @@ def test_load_weights_maps_timm_vit_shapes(tmp_path: Path):
         weights["blocks.0.attn.qkv.weight"],
         raw["blocks.0.attn.qkv.weight"].T,
     )
+
+
+def test_timm_vit_tp_slices_mlp_weights_by_rank(tmp_path: Path):
+    raw = _write_tiny_vit(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
+
+    fc1 = tp_builder._slice_mlp_columns(
+        weights["blocks.0.mlp.fc1.weight"], 16, parallel)
+    fc1_bias = tp_builder._slice_mlp_columns(
+        weights["blocks.0.mlp.fc1.bias"], 16, parallel)
+    fc2 = tp_builder._slice_mlp_rows(
+        weights["blocks.0.mlp.fc2.weight"], 16, parallel)
+
+    assert fc1.shape == (8, 4)
+    assert fc1_bias.shape == (4,)
+    assert fc2.shape == (4, 8)
+    np.testing.assert_allclose(fc1, raw["blocks.0.mlp.fc1.weight"].T[:, 8:12])
+    np.testing.assert_allclose(fc1_bias, raw["blocks.0.mlp.fc1.bias"][8:12])
+    np.testing.assert_allclose(fc2, raw["blocks.0.mlp.fc2.weight"].T[8:12, :])
+
+
+def test_timm_vit_tp_validation_requires_concrete_rank(tmp_path: Path):
+    _write_tiny_vit(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    with pytest.raises(ValueError, match="concrete rank"):
+        tp_builder._validate_timm_vit_tp(
+            cfg,
+            ParallelConfig(mode="tensor_parallel", tp_size=4, rank=-1),
+        )
+
+
+def test_timm_vit_plugin_routes_parallel_builds(monkeypatch, tmp_path: Path):
+    _write_tiny_vit(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    calls: dict[str, object] = {}
+
+    def fake_require(parallel, *, feature):
+        calls["require"] = (parallel, feature)
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"timm-vit-tp-plan"
+
+    monkeypatch.setattr(
+        timm_vit_plugin_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
+    monkeypatch.setattr(tp_builder, "build_timm_vit_tp_engine", fake_build)
+
+    parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
+    result = timm_vit_plugin_module.TimmVitPlugin().build_engine(
+        cfg,
+        weights,
+        1,
+        verbose=True,
+        parallel_config=parallel,
+    )
+
+    assert result == b"timm-vit-tp-plan"
+    assert calls["require"][0] == parallel
+    assert "timm_vit tensor-parallel" in calls["require"][1]
+    _, _, max_cache_length, kwargs = calls["build"]
+    assert max_cache_length == 1
+    assert kwargs["parallel_config"] == parallel
+    assert kwargs["verbose"] is True
