@@ -7,6 +7,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
 from ... import graph_ops
+from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 trt = trt_compat.get_trt()
 
@@ -95,7 +96,22 @@ class T5Plugin:
             weights["w_out"] = _transpose_2d(shared_embed.copy(), "embedding_tied")
         return weights
 
-    def build_engine(self, config, weights, max_cache_length, *, verbose=False, debug_layer_outputs=False):
+    def build_engine(
+        self, config, weights, max_cache_length, *, verbose=False,
+        debug_layer_outputs=False, parallel_config=None,
+    ):
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="T5 tensor-parallel decoder builds")
+            from .decoder_tp_builder import build_t5_tp_decoder_engine
+            return build_t5_tp_decoder_engine(
+                config, weights, max_cache_length,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         weights['_max_cache_length'] = max_cache_length
         dl = weights["_dec_layers"]
         nh = weights["_num_heads"]
