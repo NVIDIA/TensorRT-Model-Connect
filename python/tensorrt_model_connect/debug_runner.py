@@ -781,9 +781,11 @@ class MambaTrtRunner:
         d_inner: int | None = None,
         state_size: int | None = None,
         conv_kernel: int | None = None,
+        distributed_communicator: object | None = None,
     ):
         _require_trt_runtime()
         self.num_layers = num_layers
+        self._distributed_communicator = distributed_communicator
 
         # Deserialize engine
         logger = trt.Logger(trt.Logger.WARNING)
@@ -792,6 +794,15 @@ class MambaTrtRunner:
         if self.engine is None:
             raise RuntimeError("Failed to deserialize TRT engine")
         self.context = self.engine.create_execution_context()
+        if distributed_communicator is not None:
+            set_communicator = getattr(self.context, "set_communicator", None)
+            if set_communicator is None:
+                raise RuntimeError(
+                    "TensorRT distributed Mamba debug execution requires "
+                    "IExecutionContext.set_communicator"
+                )
+            if not set_communicator(distributed_communicator):
+                raise RuntimeError("Failed to set TensorRT distributed communicator")
 
         # Auto-detect state dimensions
         if d_inner is None or conv_kernel is None:
@@ -2299,14 +2310,10 @@ def runner_from_bundle(
             num_attention_layers=num_attn,
         )
     if runtime_strategy == "ssm_recurrent":
-        if distributed_communicator is not None or engine_section != "engine_plan":
-            raise ValueError(
-                "Distributed engine section selection is only supported for "
-                "standard decoder runners"
-            )
         return MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
+            distributed_communicator=distributed_communicator,
         )
     if runtime_strategy == "rwkv_recurrent":
         return RwkvTrtRunner(
