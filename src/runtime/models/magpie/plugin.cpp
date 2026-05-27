@@ -26,7 +26,6 @@ struct TensorParallelRuntimeConfig {
 
 struct MagpieDecoderRuntime {
     DistributedRuntimeGroup tp_group;
-    ModuleCreateOptions opts;
     std::string section{"engine_plan"};
 };
 
@@ -64,18 +63,14 @@ int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
     return from_engine > 0 ? from_engine : fallback;
 }
 
-MagpieDecoderRuntime make_magpie_decoder_runtime(const PipelineContext& ctx,
-                                                 const ModuleCreateOptions& base_opts) {
+MagpieDecoderRuntime make_magpie_decoder_runtime(const PipelineContext& ctx) {
     MagpieDecoderRuntime runtime;
-    runtime.opts = base_opts;
 
     const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
     if (!tp_config.enabled)
         return runtime;
 
     runtime.tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
-    runtime.opts.distributed_communicator = runtime.tp_group.communicator;
-    runtime.opts.distributed_owner = runtime.tp_group.owner;
     runtime.section = tp_engine_section_name(runtime.tp_group.rank);
     return runtime;
 }
@@ -116,6 +111,7 @@ class MagpiePlugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
 
+        auto decoder_runtime = make_magpie_decoder_runtime(ctx);
         auto shared_stream = std::make_shared<CudaStream>();
         if (!shared_stream->ok())
             throw std::runtime_error("MagpiePlugin: failed to create CUDA stream");
@@ -124,13 +120,17 @@ class MagpiePlugin final : public IPipelinePlugin {
         opts.stream = shared_stream->get();
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
-        auto decoder_runtime = make_magpie_decoder_runtime(ctx, opts);
+        ModuleCreateOptions decoder_opts = opts;
+        if (decoder_runtime.tp_group.communicator != nullptr) {
+            decoder_opts.distributed_communicator = decoder_runtime.tp_group.communicator;
+            decoder_opts.distributed_owner = decoder_runtime.tp_group.owner;
+        }
 
         auto enc_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "magpie encoder", opts);
         auto dec_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, decoder_runtime.section), "magpie decoder",
-            decoder_runtime.opts);
+            decoder_opts);
         enc_loaded.module->keep_alive(shared_stream);
         dec_loaded.module->keep_alive(shared_stream);
 
