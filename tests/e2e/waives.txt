@@ -8,3 +8,4 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+phi-3-mini-128k-instruct-tp2    XFAIL  (longrope rope_scaling not modeled in the dense Phi-3 standard_decoder_builder; cosine_p5 collapses to ~0 vs the HF longrope reference. Phi-3-mini-4k + Phi-3.5-mini cover the family with milder short_factor scaling.)
