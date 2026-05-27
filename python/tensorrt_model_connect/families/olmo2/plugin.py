@@ -32,6 +32,10 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 class Olmo2Plugin:
@@ -61,6 +65,7 @@ class Olmo2Plugin:
 
         mlp_size = 0
         attention_size = 0
+        kv_attention_size = 0
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
@@ -96,6 +101,8 @@ class Olmo2Plugin:
             weights[f"{prefix}.w_k"] = k_t
             weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
+            if kv_attention_size == 0:
+                kv_attention_size = k_t.shape[1]
 
             # QK normalization -- OLMo-2 q_norm/k_norm are already
             # full-size (num_heads * head_dim), NOT per-head like Qwen3.
@@ -129,6 +136,7 @@ class Olmo2Plugin:
             _load_tensor(readers, "lm_head.weight"), "lm_head")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -137,8 +145,19 @@ class Olmo2Plugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine with OLMo-2 post-norm residual layout."""
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="OLMo2 tensor-parallel builds")
+            from .tp_builder import build_olmo2_tp_engine
+            return build_olmo2_tp_engine(
+                config, weights, max_cache_length,
+                verbose=verbose,
+                parallel_config=parallel)
+
         import sys
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
