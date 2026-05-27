@@ -30,6 +30,10 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 if TYPE_CHECKING:
     pass
@@ -69,11 +73,21 @@ class EagleVLMPlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, parallel_config=None,
     ) -> bytes:
         is_rerank = _is_reranker(config)
         # Store for runtime_strategy property
         self._runtime_strategy = "reranking" if is_rerank else "embedding"
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Eagle VLM tensor-parallel builds")
+            from .tp_builder import build_eagle_vlm_tp_engine
+            return build_eagle_vlm_tp_engine(
+                config, weights, max_cache_length,
+                is_reranker=is_rerank,
+                verbose=verbose,
+                parallel_config=parallel)
         return _build_eagle_engine(
             config, weights, max_cache_length,
             is_reranker=is_rerank, verbose=verbose)

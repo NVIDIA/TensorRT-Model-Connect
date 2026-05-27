@@ -13,6 +13,7 @@ import subprocess
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.runners import (
     audio_speech,
+    embedding,
     neural_operator,
     object_detection,
     omni,
@@ -251,6 +252,12 @@ def test_omni_runner_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, 
     assert "--stage" not in cmd
     assert out.metadata["entrypoint"] == "embed"
     assert out.data["embedding"] == [0.1, 0.2]
+
+
+def test_embedding_parser_accepts_fragmented_json_from_mpirun() -> None:
+    stdout = '{"embedding": [0.1, 0.2,\n 0.3], "dim": 3}\n'
+
+    assert embedding._parse_embedding(stdout) == [0.1, 0.2, 0.3]
 
 
 def test_text_generation_runner_maps_diffusion_mode_flags(monkeypatch, tmp_path):
