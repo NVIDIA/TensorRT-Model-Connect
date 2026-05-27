@@ -49,6 +49,10 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ... import graph_ops
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 trt = trt_compat.get_trt()
@@ -399,12 +403,28 @@ class SamPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine for SAM image encoder.
 
         Input:  pixel_values [1, 3, 1024, 1024]
         Output: image_embeddings [1, 256, 64, 64]
         """
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="SAM encoder tensor-parallel MLP builds")
+            if quant_ctx is not None:
+                raise ValueError("SAM tensor-parallel builds do not support quantization")
+            from .sam_tp_builder import build_sam_tp_encoder_engine
+            return build_sam_tp_encoder_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
+
         sam_cfg = config.raw.get("_sam_config", _resolve_sam_config(config.raw))
         hidden = sam_cfg["hidden_size"]
         num_layers = sam_cfg["num_hidden_layers"]
