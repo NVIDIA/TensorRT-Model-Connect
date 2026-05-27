@@ -1,0 +1,20 @@
+{
+  "name": "olmo-1b-tp4",
+  "trace_id": "IT-E2E-OLMO-TP4-01",
+  "hf_id": "allenai/OLMo-1B-hf",
+  "bundle": "olmo-1b-tp4.trtfb",
+  "family": "olmo",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "ci_tier": "multi_device",
+  "exclusive_gpu": true,
+  "gpu_count": 4,
+  "world_size": 4,
+  "tp_size": 4,
+  "notes": "Tensor-parallel TP=4 OLMo decoder coverage on four GPUs."
+}

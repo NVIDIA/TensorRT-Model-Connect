@@ -22,6 +22,8 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import normalize_parallel_config
+from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
 
 
@@ -51,6 +53,7 @@ class OlmoPlugin:
 
         mlp_size = 0
         attention_size = 0
+        kv_attention_size = 0
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
@@ -104,6 +107,8 @@ class OlmoPlugin:
             weights[f"{prefix}.w_k"] = k_t
             weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
+            if kv_attention_size == 0:
+                kv_attention_size = k_t.shape[1]
 
             # MLP
             gate_raw = _load_tensor(
@@ -138,6 +143,7 @@ class OlmoPlugin:
                 embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -147,7 +153,18 @@ class OlmoPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            return build_dual_profile_tp_decoder_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                verbose=verbose,
+                parallel_config=parallel)
+
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
             precision=precision, quant_ctx=quant_ctx,
