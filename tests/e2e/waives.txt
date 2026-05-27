@@ -8,6 +8,5 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
-meta-llama-3-8b-instruct        SKIP  (gated model, license not yet accepted on test account)
-meta-llama-3-8b-instruct-tp2    SKIP  (gated model, license not yet accepted on test account)
+meta-llama-3-8b-instruct        SKIP  (8B fp16 split prefill+decode engines = ~30 GB total, exceeds 24 GB A30; passes on >=32 GB GPUs; TP2 lane covers Llama 3 family validation)
 llama-3.1-8b-instruct           SKIP  (8B fp16 split prefill+decode engines = ~30 GB total, exceeds 24 GB A30; passes on >=32 GB GPUs; TP2 lane covers Llama 3.1 family validation)
