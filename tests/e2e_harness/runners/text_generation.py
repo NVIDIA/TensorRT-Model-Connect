@@ -696,9 +696,10 @@ class TextGenerationCausalRunner:
 
                 # Run full generate (we always need prefill internally)
                 results = runner.generate(input_ids, max_new_tokens)
+                is_seq2seq = runner.__class__.__name__ == "Seq2SeqTrtRunner"
                 generated_tokens = []
                 if len(results) > 0 and max_new_tokens > 0:
-                    start = max(len(input_ids) - 1, 0)
+                    start = 0 if is_seq2seq else max(len(input_ids) - 1, 0)
                     for i in range(max_new_tokens):
                         idx = start + i
                         if idx >= len(results):
