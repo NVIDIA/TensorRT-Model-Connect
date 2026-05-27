@@ -164,6 +164,42 @@ def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     assert out.metadata["command"] == cmd
 
 
+def test_bark_distributed_audio_runner_wraps_mpirun_once(monkeypatch, tmp_path):
+    case = _make_case(
+        "text_to_audio",
+        inputs={"prompt": "hello"},
+        family="bark",
+        runtime_strategy="text_to_audio_bark",
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+            },
+        },
+        determinism={"seed": 42},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(audio_speech.subprocess, "run", _fake_run)
+
+    out = audio_speech.TextToAudioRunner().run_stage(
+        case, StageSpec(name="generate"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["mpirun", "--tag-output", "-np", "4"]
+    assert cmd.count("mpirun") == 1
+    assert "trtmc_rank_audio" in cmd
+    assert "audio_bark.seed=42" in cmd
+    assert out.metadata["command"] == cmd
+
+
 def test_omni_runner_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path):
     case = _make_case(
         "omni_multimodal",

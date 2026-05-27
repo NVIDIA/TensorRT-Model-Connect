@@ -1771,12 +1771,14 @@ class Seq2SeqTrtRunner:
         max_source_positions: int,
         hidden_size: int | None = None,
         decoder_start_token_id: int = 2,
+        distributed_communicator: object | None = None,
     ):
         _require_trt_runtime()
         self.num_layers = num_layers
         self.max_cache_length = max_cache_length
         self.max_source_positions = max_source_positions
         self.decoder_start_token_id = decoder_start_token_id
+        self._distributed_communicator = distributed_communicator
 
         logger = trt.Logger(trt.Logger.WARNING)
         runtime = trt.Runtime(logger)
@@ -1786,6 +1788,15 @@ class Seq2SeqTrtRunner:
         if self.dec_engine is None:
             raise RuntimeError("Failed to deserialize seq2seq decoder TRT engine")
         self.dec_context = self.dec_engine.create_execution_context()
+        if distributed_communicator is not None:
+            set_communicator = getattr(self.dec_context, "set_communicator", None)
+            if set_communicator is None:
+                raise RuntimeError(
+                    "TensorRT distributed seq2seq debug execution requires "
+                    "IExecutionContext.set_communicator"
+                )
+            if not set_communicator(distributed_communicator):
+                raise RuntimeError("Failed to set TensorRT distributed communicator")
 
         # Encoder engine
         self.enc_engine = runtime.deserialize_cuda_engine(encoder_plan)
@@ -1796,6 +1807,10 @@ class Seq2SeqTrtRunner:
         # Auto-detect dimensions from decoder engine
         cache_shape = tuple(self.dec_engine.get_tensor_shape("cache_k_0"))
         self.attention_size = cache_shape[1]
+        self._decoder_has_encoder_mask = any(
+            self.dec_engine.get_tensor_name(i) == "encoder_mask"
+            for i in range(self.dec_engine.num_io_tensors)
+        )
         if hidden_size is None:
             cross_shape = tuple(self.dec_engine.get_tensor_shape("cross_k_0"))
             hidden_size = cross_shape[1]
@@ -1945,6 +1960,8 @@ class Seq2SeqTrtRunner:
             self.dec_context.set_tensor_address(f"present_v_{i}", self._d_present_v[i])
             self.dec_context.set_tensor_address(f"cross_k_{i}", self._d_cross_k[i])
             self.dec_context.set_tensor_address(f"cross_v_{i}", self._d_cross_v[i])
+        if self._decoder_has_encoder_mask:
+            self.dec_context.set_tensor_address("encoder_mask", self._d_enc_mask)
 
         self.dec_context.execute_async_v3(stream)
 
@@ -2253,11 +2270,6 @@ def runner_from_bundle(
     tri_cfg = config.get("triattention", {}) or {}
 
     if runtime_strategy in ("seq2seq_encoder_decoder", "text_to_text", "marian_translation"):
-        if distributed_communicator is not None or engine_section != "engine_plan":
-            raise ValueError(
-                "Distributed engine section selection is only supported for "
-                "single-engine decoder runners"
-            )
         encoder_plan, _ = load_vision_engine_from_bundle(bundle_path)
         if encoder_plan is not None:
             dec_layers = config.get("decoder_layers", num_layers)
@@ -2269,6 +2281,7 @@ def runner_from_bundle(
                 max_cache_length=header["max_cache_length"],
                 max_source_positions=header["max_cache_length"],
                 decoder_start_token_id=decoder_start,
+                distributed_communicator=distributed_communicator,
             )
 
     if runtime_strategy == "hybrid_mamba_attention":

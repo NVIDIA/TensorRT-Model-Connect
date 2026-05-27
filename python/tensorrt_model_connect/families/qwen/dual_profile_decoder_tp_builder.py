@@ -112,6 +112,14 @@ def _make_matmul_fn(
     return matmul
 
 
+def _validate_tp_quantization(quant_ctx: "QuantContext | None") -> None:
+    if quant_ctx is None:
+        return
+    format_name = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    if getattr(format_name, "name", None) != "fp8":
+        raise ValueError("Tensor-parallel decoder quantization currently supports fp8 only")
+
+
 def _norm_multi(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -253,8 +261,7 @@ def build_dual_profile_tp_decoder_engine(
         raise ValueError(
             "dual_profile_decoder_tp_builder requires "
             "parallel.mode=tensor_parallel and tp_size > 1")
-    if quant_ctx is not None:
-        raise ValueError("Tensor-parallel decoder builds do not support quantization yet")
+    _validate_tp_quantization(quant_ctx)
     if mlp_type != "swiglu":
         raise NotImplementedError(
             "Tensor-parallel decoder builds currently support SwiGLU MLPs only")
