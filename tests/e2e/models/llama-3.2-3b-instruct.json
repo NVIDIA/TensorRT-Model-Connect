@@ -1,0 +1,13 @@
+{
+  "name": "llama-3.2-3b-instruct",
+  "trace_id": "IT-E2E-LLAMA32-3B-DENSE-01",
+  "hf_id": "meta-llama/Llama-3.2-3B-Instruct",
+  "bundle": "llama-3.2-3b-instruct.trtfb",
+  "family": "llama",
+  "runtime_strategy": "decoder_kv_cache",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of Cyprus? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false
+}

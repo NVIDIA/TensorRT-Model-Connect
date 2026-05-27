@@ -1,0 +1,13 @@
+{
+  "name": "llama-3.2-1b-instruct",
+  "trace_id": "IT-E2E-LLAMA32-1B-DENSE-01",
+  "hf_id": "meta-llama/Llama-3.2-1B-Instruct",
+  "bundle": "llama-3.2-1b-instruct.trtfb",
+  "family": "llama",
+  "runtime_strategy": "decoder_kv_cache",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of Iceland? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false
+}
