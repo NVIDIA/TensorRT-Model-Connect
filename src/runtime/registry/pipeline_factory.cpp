@@ -84,7 +84,11 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy) {
 }
 
 bool strategy_uses_no_backend(const std::string& strategy) {
-    return strategy == "diffusion_sana_wm";
+    // Backendless bundles opt out explicitly with engine_backend="none".
+    // SANA-WM now has native TRT component plans, so the strategy name alone
+    // is no longer enough to decide whether a backend is needed.
+    (void)strategy;
+    return false;
 }
 
 bool backend_is_disabled(const std::string& backend_name) {

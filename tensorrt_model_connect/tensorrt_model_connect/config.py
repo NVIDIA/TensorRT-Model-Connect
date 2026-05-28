@@ -13,6 +13,21 @@ _ELF_VARIANTS: dict[str, tuple[int, int, int]] = {
     "ELF-L": (32, 1280, 16),
 }
 
+_SANA_WM_VARIANTS: dict[str, tuple[int, int, int, tuple[int, int, int]]] = {
+    # name suffix -> (depth, hidden_size, num_heads, patch_size)
+    # Mirrors upstream SanaMSVideoCamCtrl constructors in NVlabs/Sana.
+    "600M_P1_D28": (28, 1152, 16, (1, 1, 1)),
+    "600M_P2_D28": (28, 1152, 16, (1, 2, 2)),
+    "1600M_P1_D20": (20, 2240, 20, (1, 1, 1)),
+    "1600M_P2_D20": (20, 2240, 20, (1, 2, 2)),
+    "1600M_P2S1_D20": (20, 2240, 20, (1, 1, 1)),
+    "2000M_P2_D20": (20, 2304, 18, (1, 2, 2)),
+    "2800M_P2_D28": (28, 2240, 20, (1, 2, 2)),
+    "4000M_P2_D28": (28, 2560, 20, (1, 2, 2)),
+    "4800M_P1_D60": (60, 2240, 20, (1, 1, 1)),
+    "4800M_P2_D60": (60, 2240, 20, (1, 2, 2)),
+}
+
 
 def _normalize_elf_variant(value: object) -> str:
     variant = str(value or "ELF-B").upper().replace("_", "-")
@@ -57,6 +72,28 @@ def _is_sana_wm_yaml(raw: dict) -> bool:
     )
 
 
+def _sana_wm_arch_defaults(
+    model_name: str,
+    model: dict,
+) -> tuple[int, int, int, tuple[int, int, int]]:
+    suffix = model_name
+    if model_name.startswith("SanaMSVideoCamCtrl_"):
+        suffix = model_name.removeprefix("SanaMSVideoCamCtrl_")
+    if suffix in _SANA_WM_VARIANTS:
+        return _SANA_WM_VARIANTS[suffix]
+
+    depth = 20
+    if "_D" in model_name:
+        try:
+            depth = int(model_name.rsplit("_D", 1)[1].split("_", 1)[0])
+        except (ValueError, IndexError):
+            depth = 20
+    num_heads = int(model.get("num_heads") or model.get("num_attention_heads") or 20)
+    linear_head_dim = int(model.get("linear_head_dim", 112))
+    hidden_size = int(model.get("hidden_size") or linear_head_dim * num_heads)
+    return depth, hidden_size, num_heads, (1, 1, 1)
+
+
 def _sana_wm_yaml_to_config(raw: dict) -> dict:
     model = raw.get("model", {}) if isinstance(raw.get("model"), dict) else {}
     text_encoder = (
@@ -65,14 +102,7 @@ def _sana_wm_yaml_to_config(raw: dict) -> dict:
     vae = raw.get("vae", {}) if isinstance(raw.get("vae"), dict) else {}
 
     model_name = str(model.get("model", "SanaMSVideoCamCtrl_1600M_P1_D20"))
-    # The public config names the 20-block DiT as "..._D20". Keep a safe
-    # fallback for future variants where the suffix changes.
-    depth = 20
-    if "_D" in model_name:
-        try:
-            depth = int(model_name.rsplit("_D", 1)[1].split("_", 1)[0])
-        except (ValueError, IndexError):
-            depth = 20
+    depth, hidden_size, num_heads, patch_size = _sana_wm_arch_defaults(model_name, model)
 
     converted = dict(raw)
     converted.update(
@@ -80,9 +110,9 @@ def _sana_wm_yaml_to_config(raw: dict) -> dict:
             "model_type": "sana_wm",
             "architectures": ["SanaWmWorldModel"],
             "runtime_strategy": "diffusion_sana_wm",
-            "hidden_size": int(model.get("linear_head_dim", 112)) * 16,
+            "hidden_size": hidden_size,
             "num_hidden_layers": depth,
-            "num_attention_heads": 16,
+            "num_attention_heads": num_heads,
             "vocab_size": 0,
             "max_position_embeddings": int(text_encoder.get("model_max_length", 300)),
             "video_height": 704,
@@ -90,6 +120,10 @@ def _sana_wm_yaml_to_config(raw: dict) -> dict:
             "video_num_frames": 321,
             "vae_latent_dim": int(vae.get("vae_latent_dim", 128)),
             "vae_downsample_rate": int(vae.get("vae_downsample_rate", 32)),
+            "patch_size": list(patch_size),
+            "linear_head_dim": int(
+                model.get("linear_head_dim", hidden_size // max(num_heads, 1))
+            ),
             "sana_wm_config": raw,
         }
     )
@@ -276,7 +310,11 @@ class ModelConfig:
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
                                           d.get("n_positions", 8192)),
-            hidden_act=d.get("hidden_act", "") or d.get("activation_function", ""),
+            hidden_act=(
+                d.get("hidden_act", "")
+                or d.get("hidden_activation", "")
+                or d.get("activation_function", "")
+            ),
             _head_dim=d.get("head_dim", 0),
             raw=original_raw,
         )

@@ -318,9 +318,14 @@ class TestManifestValidation:
         assert case.reference_backend == "hf_diffusers"
         assert case.inputs["image"] == "asset/sana_wm/demo_0.png"
         assert case.inputs["prompt_file"] == "asset/sana_wm/demo_0.txt"
+        assert case.inputs["camera_intrinsics"] == "asset/sana_wm/demo_0_intrinsics.npy"
         assert case.inputs["action"] == "w-80,jw-40,w-40,lw-60,w-100"
         assert case.inputs["translation_speed"] == 0.055
         assert case.inputs["rotation_speed_deg"] == 1.2
+        assert case.inputs["num_inference_steps"] == 60
+        assert case.inputs["cfg_scale"] == 5.0
+        assert case.inputs["fps"] == 16
+        assert case.inputs["flow_shift"] == 9.8
         assert case.inputs["sana_wm_require_official_script"] is True
         assert case.inputs["video_num_frames"] == 321
         asset_paths = {
@@ -331,6 +336,7 @@ class TestManifestValidation:
         assert asset_paths == {
             "asset/sana_wm/demo_0.png",
             "asset/sana_wm/demo_0.txt",
+            "asset/sana_wm/demo_0_intrinsics.npy",
         }
         script_reqs = [
             req for req in case.preflight if req.kind == "sana_wm_script_available"

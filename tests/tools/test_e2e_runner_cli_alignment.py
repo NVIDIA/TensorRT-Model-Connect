@@ -178,6 +178,10 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
+            "num_inference_steps": 60,
+            "cfg_scale": 5.0,
+            "fps": 16,
+            "flow_shift": 9.8,
         },
     )
     ctx = _make_ctx(case, tmp_path)
@@ -196,9 +200,9 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
 
     cmd = captured["cmd"]
     assert cmd[1] == "generate-video"
-    assert "--prompt-file" in cmd
+    assert "--prompt-file" not in cmd
+    assert "--prompt" in cmd
     assert any(str(arg).endswith("asset/sana_wm/demo_0.txt") for arg in cmd)
-    assert "--prompt" not in cmd
     assert "--num-steps" not in cmd
     assert "--image" in cmd
     assert any(str(arg).endswith("asset/sana_wm/demo_0.png") for arg in cmd)
@@ -213,6 +217,14 @@ def test_diffusion_runner_maps_sana_wm_official_demo_flags(monkeypatch, tmp_path
     assert "797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num_frames" in cmd
     assert "321" in cmd
+    assert "--step" in cmd
+    assert "60" in cmd
+    assert "--cfg_scale" in cmd
+    assert "5.0" in cmd
+    assert "--fps" in cmd
+    assert "16" in cmd
+    assert "--flow_shift" in cmd
+    assert "9.8" in cmd
     assert "--no_refiner" not in cmd
     assert "--hf-python" not in cmd
     assert "/opt/trtmc-python/bin/python" not in cmd
@@ -241,6 +253,43 @@ def test_diffusion_runner_maps_sana_wm_optional_no_refiner(monkeypatch, tmp_path
     assert "--no_refiner" in captured["cmd"]
 
 
+def test_diffusion_runner_prefers_sana_wm_camera_npy_over_action(monkeypatch, tmp_path):
+    camera = tmp_path / "asset" / "sana_wm" / "camera.npy"
+    intrinsics = tmp_path / "asset" / "sana_wm" / "intrinsics.npy"
+    camera.parent.mkdir(parents=True)
+    camera.write_bytes(b"camera")
+    intrinsics.write_bytes(b"intrinsics")
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        inputs={
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "camera": "asset/sana_wm/camera.npy",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "intrinsics": "asset/sana_wm/intrinsics.npy",
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(diffusion.subprocess, "run", _fake_run)
+
+    diffusion.DiffusionMediaRunner().run_stage(case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--camera" in cmd
+    assert str(camera) in cmd
+    assert "--action" not in cmd
+    assert "--intrinsics" in cmd
+    assert str(intrinsics) in cmd
+
+
 def test_sana_wm_reference_uses_model_card_script_contract(
     monkeypatch, tmp_path
 ):
@@ -256,6 +305,10 @@ def test_sana_wm_reference_uses_model_card_script_contract(
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
             "video_num_frames": 321,
+            "num_inference_steps": 60,
+            "cfg_scale": 5.0,
+            "fps": 16,
+            "flow_shift": 9.8,
             "sana_wm_require_official_script": True,
         },
     )
@@ -279,8 +332,51 @@ def test_sana_wm_reference_uses_model_card_script_contract(
     assert "--translation_speed" in cmd
     assert "--rotation_speed_deg" in cmd
     assert "--num_frames" in cmd
+    assert "--step" in cmd
+    assert "--cfg_scale" in cmd
+    assert "--fps" in cmd
+    assert "--flow_shift" in cmd
     assert "--no_refiner" not in cmd
     assert out.metadata["command"] == cmd
+
+
+def test_sana_wm_reference_prefers_camera_npy_over_action(monkeypatch, tmp_path):
+    camera = tmp_path / "asset" / "sana_wm" / "camera.npy"
+    intrinsics = tmp_path / "asset" / "sana_wm" / "intrinsics.npy"
+    camera.parent.mkdir(parents=True)
+    camera.write_bytes(b"camera")
+    intrinsics.write_bytes(b"intrinsics")
+    case = _make_case(
+        "diffusion_media_generation",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        inputs={
+            "prompt": "drive forward",
+            "camera": "asset/sana_wm/camera.npy",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "intrinsics": "asset/sana_wm/intrinsics.npy",
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", _fake_run)
+
+    hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--camera" in cmd
+    assert str(camera) in cmd
+    assert "--action" not in cmd
+    assert "--intrinsics" in cmd
+    assert str(intrinsics) in cmd
 
 
 def test_sana_wm_reference_passes_optional_no_refiner(monkeypatch, tmp_path):

@@ -14,7 +14,10 @@
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> (--prompt "text" | --prompt-file PATH)
 //                        --output DIR [--num-steps N] [--image PATH]
-//                        [--action DSL] [--camera-intrinsics CSV|--intrinsics CSV] [--num-frames N]
+//                        [--action DSL | --camera PATH.npy]
+//                        [--camera-intrinsics CSV|PATH.npy|--intrinsics CSV|PATH.npy]
+//                        [--num-frames N] [--fps N] [--step N] [--cfg_scale S]
+//                        [--flow-shift F] [--name NAME]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc inspect         <bundle.trtfb>
 //   trtmc version
@@ -29,6 +32,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +60,7 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_dir;
+    std::string output_name;
     std::string initial_latents_raw;
     std::string condition_latents_raw;
     std::string condition_mask_raw;
@@ -65,6 +70,7 @@ struct CliArgs {
     std::string audio_in;
     std::string audio_out;
     std::string action;
+    std::string camera_path;
     std::string camera_intrinsics;
     std::string field_input;
     std::string branch_input;
@@ -84,7 +90,9 @@ struct CliArgs {
     int seed{-1};
     int num_steps{-1};
     int num_frames{-1};
+    int fps{-1};
     float guidance_scale{-1.0F};
+    float flow_shift{-1.0F};
     float sde_gamma{-1.0F};
     float translation_speed{-1.0F};
     float rotation_speed_deg{-1.0F};
@@ -207,8 +215,10 @@ void print_usage() {
            "stdout.\n"
            "  trtmc generate-video  <bundle.trtfb> (--prompt \"text\" | --prompt-file PATH) "
            "--output DIR [--num-steps N] [--guidance-scale S] [--initial-latents-raw PATH] "
-           "[--image PATH] [--action DSL] [--translation-speed F] "
-           "[--rotation-speed-deg F] [--camera-intrinsics CSV|--intrinsics CSV] [--num-frames N] "
+           "[--image PATH] [--action DSL | --camera PATH.npy] [--translation-speed F] "
+           "[--rotation-speed-deg F] [--camera-intrinsics CSV|PATH.npy|--intrinsics CSV|PATH.npy] "
+           "[--num-frames N] [--fps N] [--step N] [--cfg-scale S|--cfg_scale S] "
+           "[--flow-shift F] [--name NAME] "
            "[--no-refiner]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
@@ -360,6 +370,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.output_dir = argv[++i];
             continue;
         }
+        if (arg == "--name" && need_value(arg)) {
+            args.output_name = argv[++i];
+            continue;
+        }
         if (arg == "--initial-latents-raw" && need_value(arg)) {
             args.initial_latents_raw = argv[++i];
             continue;
@@ -380,7 +394,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.sde_noise_raw = argv[++i];
             continue;
         }
-        if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
+        if ((arg == "--num-steps" || arg == "--num-inference-steps" || arg == "--step") &&
+            need_value(arg)) {
             args.num_steps = std::atoi(argv[++i]);
             continue;
         }
@@ -388,12 +403,24 @@ CliArgs parse_args(int argc, char** argv) {
             args.num_frames = std::atoi(argv[++i]);
             continue;
         }
+        if (arg == "--fps" && need_value(arg)) {
+            args.fps = std::atoi(argv[++i]);
+            continue;
+        }
         if (arg == "--guidance-scale" && need_value(arg)) {
             args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
+        if ((arg == "--flow-shift" || arg == "--flow_shift") && need_value(arg)) {
+            args.flow_shift = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
         if (arg == "--action" && need_value(arg)) {
             args.action = argv[++i];
+            continue;
+        }
+        if (arg == "--camera" && need_value(arg)) {
+            args.camera_path = argv[++i];
             continue;
         }
         if ((arg == "--camera-intrinsics" || arg == "--intrinsics") && need_value(arg)) {
@@ -432,7 +459,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
-        if (arg == "--cfg-scale" && need_value(arg)) {
+        if ((arg == "--cfg-scale" || arg == "--cfg_scale") && need_value(arg)) {
             args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
@@ -600,6 +627,145 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
     return values;
 }
 
+std::optional<std::string> read_numpy_header(std::ifstream& in, const std::string& path,
+                                             std::string& error) {
+    char magic[6]{};
+    if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, "\x93NUMPY", sizeof(magic)) != 0) {
+        error = path + " is not a NumPy .npy file";
+        return std::nullopt;
+    }
+
+    unsigned char version[2]{};
+    if (!in.read(reinterpret_cast<char*>(version), sizeof(version))) {
+        error = "failed to read NumPy version from " + path;
+        return std::nullopt;
+    }
+
+    std::uint32_t header_len = 0;
+    if (version[0] == 1U) {
+        unsigned char bytes[2]{};
+        if (!in.read(reinterpret_cast<char*>(bytes), sizeof(bytes))) {
+            error = "failed to read NumPy header length from " + path;
+            return std::nullopt;
+        }
+        header_len = static_cast<std::uint32_t>(bytes[0]) |
+                     (static_cast<std::uint32_t>(bytes[1]) << 8U);
+    } else if (version[0] == 2U || version[0] == 3U) {
+        unsigned char bytes[4]{};
+        if (!in.read(reinterpret_cast<char*>(bytes), sizeof(bytes))) {
+            error = "failed to read NumPy header length from " + path;
+            return std::nullopt;
+        }
+        header_len = static_cast<std::uint32_t>(bytes[0]) |
+                     (static_cast<std::uint32_t>(bytes[1]) << 8U) |
+                     (static_cast<std::uint32_t>(bytes[2]) << 16U) |
+                     (static_cast<std::uint32_t>(bytes[3]) << 24U);
+    } else {
+        error = path + " uses unsupported NumPy .npy version " + std::to_string(version[0]) + "." +
+                std::to_string(version[1]);
+        return std::nullopt;
+    }
+
+    std::string header(header_len, '\0');
+    if (!in.read(header.data(), static_cast<std::streamsize>(header.size()))) {
+        error = "failed to read NumPy header from " + path;
+        return std::nullopt;
+    }
+    return header;
+}
+
+std::optional<std::string> numpy_header_value(const std::string& header, const std::string& key) {
+    const auto key_pos = header.find("'" + key + "'");
+    const auto alt_key_pos = header.find("\"" + key + "\"");
+    const auto pos = key_pos == std::string::npos ? alt_key_pos : key_pos;
+    if (pos == std::string::npos)
+        return std::nullopt;
+    const auto colon = header.find(':', pos);
+    if (colon == std::string::npos)
+        return std::nullopt;
+    const auto first_quote = header.find_first_of("'\"", colon + 1);
+    if (first_quote == std::string::npos)
+        return std::nullopt;
+    const auto quote = header[first_quote];
+    const auto second_quote = header.find(quote, first_quote + 1);
+    if (second_quote == std::string::npos)
+        return std::nullopt;
+    return header.substr(first_quote + 1, second_quote - first_quote - 1);
+}
+
+bool numpy_header_fortran_order(const std::string& header) {
+    const auto pos = header.find("fortran_order");
+    if (pos == std::string::npos)
+        return false;
+    const auto colon = header.find(':', pos);
+    if (colon == std::string::npos)
+        return false;
+    const auto value_start = header.find_first_not_of(" \t", colon + 1);
+    return value_start != std::string::npos && header.compare(value_start, 4, "True") == 0;
+}
+
+std::optional<std::vector<float>> read_numpy_float_array(const std::string& path,
+                                                         std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "failed to open " + path;
+        return std::nullopt;
+    }
+    auto header = read_numpy_header(in, path, error);
+    if (!header)
+        return std::nullopt;
+    if (numpy_header_fortran_order(*header)) {
+        error = path + " uses Fortran-order storage, which is not supported";
+        return std::nullopt;
+    }
+
+    auto descr = numpy_header_value(*header, "descr");
+    if (!descr) {
+        error = "NumPy header in " + path + " is missing dtype descr";
+        return std::nullopt;
+    }
+    const bool is_f32 = *descr == "<f4" || *descr == "|f4" || *descr == "f4";
+    const bool is_f64 = *descr == "<f8" || *descr == "|f8" || *descr == "f8";
+    if (!is_f32 && !is_f64) {
+        error = path + " has unsupported dtype " + *descr + "; expected float32 or float64";
+        return std::nullopt;
+    }
+
+    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::size_t elem_size = is_f32 ? sizeof(float) : sizeof(double);
+    if (bytes.size() % elem_size != 0U) {
+        error = path + " data size is not a multiple of the NumPy dtype size";
+        return std::nullopt;
+    }
+
+    std::vector<float> values(bytes.size() / elem_size);
+    if (is_f32) {
+        if (!values.empty())
+            std::memcpy(values.data(), bytes.data(), bytes.size());
+        return values;
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        double value = 0.0;
+        std::memcpy(&value, bytes.data() + i * sizeof(double), sizeof(double));
+        values[i] = static_cast<float>(value);
+    }
+    return values;
+}
+
+bool looks_like_numpy_path(const std::string& value) {
+    return value.size() >= 4U && value.substr(value.size() - 4U) == ".npy";
+}
+
+bool looks_like_sana_wm_video_request(const CliArgs& args) {
+    return !args.action.empty() || !args.camera_path.empty() || !args.camera_intrinsics.empty() ||
+           args.translation_speed >= 0.0F || args.rotation_speed_deg >= 0.0F ||
+           args.no_refiner;
+}
+
+std::optional<std::vector<float>>
+parse_float_values_or_numpy(const std::string& value, const std::string& flag_name,
+                            std::string& error);
+
 std::optional<std::vector<float>>
 parse_float_values(const std::string& csv, const std::string& flag_name, std::string& error) {
     std::vector<float> values;
@@ -639,6 +805,14 @@ parse_float_values(const std::string& csv, const std::string& flag_name, std::st
         return std::nullopt;
     }
     return values;
+}
+
+std::optional<std::vector<float>>
+parse_float_values_or_numpy(const std::string& value, const std::string& flag_name,
+                            std::string& error) {
+    if (looks_like_numpy_path(value) || std::filesystem::exists(value))
+        return read_numpy_float_array(value, error);
+    return parse_float_values(value, flag_name, error);
 }
 
 std::optional<std::string> read_text_file(const std::string& path, std::string& error) {
@@ -727,6 +901,7 @@ int cmd_run(const CliArgs& args) {
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
     cfg.cfg_scale = args.cfg_scale;
+    cfg.flow_shift = args.flow_shift;
     cfg.sde_gamma = args.sde_gamma;
     cfg.use_chat_template = args.chat_template;
     cfg.enable_thinking = !args.no_thinking;
@@ -941,16 +1116,33 @@ int cmd_generate_video(const CliArgs& args) {
     trtmc::GenerateConfig cfg;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
+    cfg.cfg_scale = args.cfg_scale;
+    cfg.flow_shift = args.flow_shift;
     cfg.seed = args.seed;
     cfg.image_path = args.image_path;
     cfg.camera_action = args.action;
     cfg.translation_speed = args.translation_speed;
     cfg.rotation_speed_deg = args.rotation_speed_deg;
     cfg.num_frames = args.num_frames;
+    cfg.fps = args.fps;
     cfg.no_refiner = args.no_refiner;
+    if (!args.camera_path.empty()) {
+        if (!args.action.empty()) {
+            std::cerr << "Error: --camera and --action are mutually exclusive for SANA-WM\n";
+            return EXIT_FAILURE;
+        }
+        std::string error;
+        auto poses = read_numpy_float_array(args.camera_path, error);
+        if (!poses) {
+            std::cerr << "Error: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.camera_poses = std::move(*poses);
+    }
     if (!args.camera_intrinsics.empty()) {
         std::string error;
-        auto intrinsics = parse_float_values(args.camera_intrinsics, "--camera-intrinsics", error);
+        auto intrinsics =
+            parse_float_values_or_numpy(args.camera_intrinsics, "--camera-intrinsics", error);
         if (!intrinsics) {
             std::cerr << "Error: " << error << '\n';
             return EXIT_FAILURE;
@@ -968,9 +1160,12 @@ int cmd_generate_video(const CliArgs& args) {
     }
 
     std::string prompt = args.prompt;
-    if (prompt.empty()) {
+    const bool model_card_prompt_file =
+        args.prompt_file.empty() && !prompt.empty() && looks_like_sana_wm_video_request(args) &&
+        std::filesystem::is_regular_file(prompt);
+    if (prompt.empty() || model_card_prompt_file) {
         std::string error;
-        auto loaded = read_text_file(args.prompt_file, error);
+        auto loaded = read_text_file(prompt.empty() ? args.prompt_file : prompt, error);
         if (!loaded) {
             std::cerr << "Error: " << error << '\n';
             return EXIT_FAILURE;

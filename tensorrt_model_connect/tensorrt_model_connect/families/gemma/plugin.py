@@ -26,6 +26,14 @@ class GemmaPlugin:
             prefix = f"layer.{layer_idx}"
             weights[f"{prefix}.input_norm"] = weights[f"{prefix}.input_norm"] + 1.0
             weights[f"{prefix}.post_attn_norm"] = weights[f"{prefix}.post_attn_norm"] + 1.0
+            if f"{prefix}.q_norm" in weights:
+                weights[f"{prefix}.q_norm"] = weights[f"{prefix}.q_norm"] + 1.0
+            if f"{prefix}.k_norm" in weights:
+                weights[f"{prefix}.k_norm"] = weights[f"{prefix}.k_norm"] + 1.0
+            if f"{prefix}.pre_ff_norm" in weights:
+                weights[f"{prefix}.pre_ff_norm"] = weights[f"{prefix}.pre_ff_norm"] + 1.0
+            if f"{prefix}.post_ff_norm" in weights:
+                weights[f"{prefix}.post_ff_norm"] = weights[f"{prefix}.post_ff_norm"] + 1.0
         weights["final_norm"] = weights["final_norm"] + 1.0
 
         # Fix 2: Gemma scales embedding by sqrt(hidden_size).

@@ -70,7 +70,9 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_path;
+    std::string output_name;
     std::string action;
+    std::string camera_path;
     std::string camera_intrinsics;
     std::string initial_latents_raw;
     std::string condition_latents_raw;
@@ -81,8 +83,10 @@ struct CliArgs {
     int num_samples{1};
     int num_steps{-1};
     int num_frames{-1};
+    int fps{-1};
     float guidance_scale{-1.0F};
     float cfg_scale{-1.0F};
+    float flow_shift{-1.0F};
     float sde_gamma{-1.0F};
     float translation_speed{-1.0F};
     float rotation_speed_deg{-1.0F};
@@ -198,7 +202,7 @@ CliArgs parse_args(int argc, const char** argv) {
             args.num_samples = std::max(1, std::atoi(argv[++i]));
             continue;
         }
-        if (arg == "--num-steps") {
+        if (arg == "--num-steps" || arg == "--step") {
             if (i + 1 >= argc) {
                 args.parse_error = true;
                 args.error_message = arg + " requires a value";
@@ -216,7 +220,16 @@ CliArgs parse_args(int argc, const char** argv) {
             args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
-        if (arg == "--cfg-scale") {
+        if (arg == "--flow-shift" || arg == "--flow_shift") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.flow_shift = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--cfg-scale" || arg == "--cfg_scale") {
             if (i + 1 >= argc) {
                 args.parse_error = true;
                 args.error_message = arg + " requires a value";
@@ -287,6 +300,15 @@ CliArgs parse_args(int argc, const char** argv) {
             args.output_path = argv[++i];
             continue;
         }
+        if (arg == "--name") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.output_name = argv[++i];
+            continue;
+        }
         if (arg == "--condition-latents-raw") {
             if (i + 1 >= argc) {
                 args.parse_error = true;
@@ -341,6 +363,15 @@ CliArgs parse_args(int argc, const char** argv) {
             args.action = argv[++i];
             continue;
         }
+        if (arg == "--camera") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.camera_path = argv[++i];
+            continue;
+        }
         if (arg == "--camera-intrinsics" || arg == "--intrinsics") {
             if (i + 1 >= argc) {
                 args.parse_error = true;
@@ -375,6 +406,15 @@ CliArgs parse_args(int argc, const char** argv) {
                 return args;
             }
             args.num_frames = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--fps") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.fps = std::atoi(argv[++i]);
             continue;
         }
         if (arg == "--no-refiner" || arg == "--no_refiner") {
@@ -631,7 +671,9 @@ static void test_sana_wm_model_card_alias_flags() {
     auto args = parse({"trtmc", "generate-video", "sana.trtfb", "--output_dir", "results/demo",
                        "--action", "w-80,jw-40,w-40,lw-60,w-100", "--intrinsics",
                        "797.87866,830.0503,844.2675,463.7225", "--translation_speed", "0.055",
-                       "--rotation_speed_deg", "1.2", "--num_frames", "321", "--no_refiner"});
+                       "--rotation_speed_deg", "1.2", "--num_frames", "321", "--fps", "16",
+                       "--step", "60", "--cfg_scale", "5.0", "--flow_shift", "9.8", "--name",
+                       "demo_0", "--no_refiner"});
     check(!args.parse_error, "sana wm model-card aliases no parse error");
     check(args.output_path == "results/demo", "sana wm model-card output_dir alias");
     check(args.action == "w-80,jw-40,w-40,lw-60,w-100", "sana wm model-card action");
@@ -640,7 +682,20 @@ static void test_sana_wm_model_card_alias_flags() {
     check(args.translation_speed == 0.055F, "sana wm model-card translation_speed alias");
     check(args.rotation_speed_deg == 1.2F, "sana wm model-card rotation_speed_deg alias");
     check(args.num_frames == 321, "sana wm model-card num_frames alias");
+    check(args.fps == 16, "sana wm model-card fps");
+    check(args.num_steps == 60, "sana wm model-card step alias");
+    check(args.cfg_scale == 5.0F, "sana wm model-card cfg_scale alias");
+    check(args.flow_shift == 9.8F, "sana wm model-card flow_shift alias");
+    check(args.output_name == "demo_0", "sana wm model-card name alias");
     check(args.no_refiner, "sana wm model-card no_refiner alias");
+}
+
+static void test_sana_wm_camera_npy_flag() {
+    auto args = parse({"trtmc", "generate-video", "sana.trtfb", "--camera", "camera.npy",
+                       "--intrinsics", "intrinsics.npy"});
+    check(!args.parse_error, "sana wm camera npy no parse error");
+    check(args.camera_path == "camera.npy", "sana wm camera npy path");
+    check(args.camera_intrinsics == "intrinsics.npy", "sana wm intrinsics npy path");
 }
 
 int main() {
@@ -660,6 +715,7 @@ int main() {
     test_detect_alias_flags();
     test_detect_unknown_flag_still_errors();
     test_sana_wm_model_card_alias_flags();
+    test_sana_wm_camera_npy_flag();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

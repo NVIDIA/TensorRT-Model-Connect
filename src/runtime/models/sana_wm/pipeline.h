@@ -29,8 +29,17 @@ struct SanaWmRuntimeConfig {
     int32_t vae_latent_dim{128};
     int32_t vae_time_stride{8};
     int32_t vae_spatial_stride{32};
+    bool vae_use_framewise_decoding{true};
+    bool vae_use_spatial_tiling{true};
+    int32_t vae_tile_sample_min_height{512};
+    int32_t vae_tile_sample_min_width{512};
+    int32_t vae_tile_sample_stride_height{448};
+    int32_t vae_tile_sample_stride_width{448};
+    int32_t vae_tile_sample_min_num_frames{96};
+    int32_t vae_tile_sample_stride_num_frames{64};
     int32_t text_encoder_max_length{300};
     int32_t text_encoder_dim{2304};
+    int32_t refiner_text_encoder_max_length{1024};
     std::string chi_prompt;
     std::vector<float> default_intrinsics;
 };
@@ -79,6 +88,10 @@ struct SanaWmVaeInputImage {
 
 struct SanaWmCameraConditions {
     std::vector<float> raymap;
+    // Flat [T, H, W, 4, 4] row-major ray<-world matrices for UCPE.
+    std::vector<float> raymats;
+    // Flat [T, H, W, 4, 4] row-major world<-ray inverse matrices for UCPE K/V.
+    std::vector<float> raymats_inv;
     std::vector<float> chunk_plucker;
     std::vector<int32_t> time_indices;
     int32_t num_frames{0};
@@ -101,14 +114,24 @@ struct SanaWmStage1Latents {
     int32_t width{0};
 };
 
+struct SanaWmVaeDecoderTile {
+    int32_t latent_frames{0};
+    int32_t latent_height{0};
+    int32_t latent_width{0};
+    std::unique_ptr<ITrtModule> module;
+};
+
 struct SanaWmNativeModules {
     std::unique_ptr<ITrtModule> text_encoder;
     std::unique_ptr<ITrtModule> stage1_denoiser;
     std::unique_ptr<ITrtModule> vae_encoder;
     std::unique_ptr<ITrtModule> vae_decoder;
+    std::vector<SanaWmVaeDecoderTile> vae_decoder_tiles;
     std::unique_ptr<ITrtModule> refiner_text_encoder;
+    std::unique_ptr<ITrtModule> refiner_text_connector;
     std::unique_ptr<ITrtModule> refiner_denoiser;
     std::unique_ptr<ITrtModule> refiner_vae_decoder;
+    std::vector<SanaWmVaeDecoderTile> refiner_vae_decoder_tiles;
 
     bool has_any() const;
     bool has_stage1() const;
@@ -147,7 +170,8 @@ SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& fir
 class SanaWmPipeline final : public IPipeline {
   public:
     SanaWmPipeline(SanaWmRuntimeConfig config, SanaWmNativeModules native_modules = {},
-                   std::shared_ptr<ITokenizer> tokenizer = nullptr);
+                   std::shared_ptr<ITokenizer> stage1_tokenizer = nullptr,
+                   std::shared_ptr<ITokenizer> refiner_tokenizer = nullptr);
 
     const char* model_id() const override { return config_.hf_id.c_str(); }
     const char* pipeline_type() const override { return "SanaWmPipeline"; }
@@ -161,7 +185,8 @@ class SanaWmPipeline final : public IPipeline {
   private:
     SanaWmRuntimeConfig config_;
     SanaWmNativeModules native_modules_;
-    std::shared_ptr<ITokenizer> tokenizer_;
+    std::shared_ptr<ITokenizer> stage1_tokenizer_;
+    std::shared_ptr<ITokenizer> refiner_tokenizer_;
 };
 
 } // namespace trtmc

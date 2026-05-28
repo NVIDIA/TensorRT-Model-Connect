@@ -1374,6 +1374,83 @@ int main() {
         }
     }
 
+    // === Gemma3 SentencePiece BPE: Replace normalizer + top-level Split ===
+    {
+        std::cerr << "\n=== Gemma3 SentencePiece BPE ===\n";
+
+        static const char* kGemma3BpeJson = R"({
+          "model": {
+            "type": "BPE",
+            "byte_fallback": true,
+            "vocab": {
+              "h": 0, "e": 1, "l": 2, "o": 3, "w": 4, "r": 5, "d": 6,
+              "\u2581": 7, "he": 8, "ll": 9, "hel": 10, "lo": 11, "hello": 12,
+              "wo": 13, "wor": 14, "worl": 15, "world": 16,
+              "\u2581w": 17, "\u2581wo": 18, "\u2581wor": 19,
+              "\u2581worl": 20, "\u2581world": 21,
+              "\u2581h": 22, "\u2581he": 23, "\u2581hel": 24,
+              "\u2581hello": 25,
+              "<bos>": 26
+            },
+            "merges": [
+              ["\u2581", "w"], ["\u2581w", "o"], ["\u2581wo", "r"],
+              ["\u2581wor", "l"], ["\u2581worl", "d"],
+              ["\u2581", "h"], ["\u2581h", "e"], ["\u2581he", "l"],
+              ["\u2581hel", "lo"],
+              ["h", "e"], ["he", "l"], ["l", "o"], ["hel", "lo"],
+              ["w", "o"], ["wo", "r"], ["wor", "l"], ["worl", "d"]
+            ]
+          },
+          "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "\u2581"},
+          "pre_tokenizer": {
+            "type": "Split",
+            "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious",
+            "invert": false
+          },
+          "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [
+              {"SpecialToken": {"id": "<bos>", "type_id": 0}},
+              {"Sequence": {"id": "A", "type_id": 0}}
+            ],
+            "special_tokens": {"<bos>": {"id": "<bos>", "ids": [26], "tokens": ["<bos>"]}}
+          },
+          "added_tokens": [
+            {"id": 26, "content": "<bos>", "special": true}
+          ],
+          "decoder": {
+            "type": "Sequence",
+            "decoders": [
+              {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+              {"type": "ByteFallback"},
+              {"type": "Fuse"}
+            ]
+          }
+        })";
+
+        std::string gj(kGemma3BpeJson);
+        auto tok = trtmc::CreateBpeTokenizer(gj.data(), gj.size(), false);
+        check(tok != nullptr, "gemma3_bpe_create");
+
+        auto ids = tok->encode("hello world");
+        check(ids.size() == 2 && ids[0] == 12 && ids[1] == 21,
+              "gemma3_bpe_no_implicit_prefix");
+
+        auto leading = tok->encode(" hello world");
+        check(leading.size() == 2 && leading[0] == 25 && leading[1] == 21,
+              "gemma3_bpe_preserve_explicit_leading_space");
+
+        auto tok_special = trtmc::CreateBpeTokenizer(gj.data(), gj.size(), true);
+        auto with_bos = tok_special->encode("hello world");
+        check(with_bos.size() == 3 && with_bos[0] == 26 && with_bos[1] == 12 &&
+                  with_bos[2] == 21,
+              "gemma3_bpe_template_bos");
+        auto empty_with_bos = tok_special->encode("");
+        check(empty_with_bos.size() == 1 && empty_with_bos[0] == 26,
+              "gemma3_bpe_template_bos_empty");
+    }
+
     // === ByteLevel decoder (explicit decoder field) ===
     {
         std::cerr << "\n=== Explicit ByteLevel Decoder ===\n";

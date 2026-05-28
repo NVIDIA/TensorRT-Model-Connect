@@ -33,6 +33,22 @@ if TYPE_CHECKING:
     from ...quantization.context import QuantContext
 
 
+def _uses_gemma_post_norm_residual(config: ModelConfig) -> bool:
+    model_type = str(config.model_type).lower()
+    architectures = [str(arch).lower() for arch in config.architectures]
+    return model_type.startswith(("gemma2", "gemma3")) or any(
+        "gemma2" in arch or "gemma3" in arch for arch in architectures
+    )
+
+
+def _attention_logit_softcap(config: ModelConfig) -> float | None:
+    value = config.raw.get("attn_logit_softcapping")
+    if value is None:
+        return None
+    value = float(value)
+    return value if value > 0.0 else None
+
+
 def _mark_debug_output(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -97,6 +113,11 @@ def build_standard_decoder_engine(
         Serialized engine plan bytes.
     """
     import os as _os
+    gemma_post_norm_residual = _uses_gemma_post_norm_residual(config)
+    attention_softcap = _attention_logit_softcap(config)
+    if gemma_post_norm_residual and activation == "silu":
+        activation = config.hidden_act or "gelu_pytorch_tanh"
+
     # Dispatch to the dual-profile builder by default (one engine, two
     # optimization profiles — Profile 0 = batched prefill, Profile 1 =
     # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
@@ -119,6 +140,7 @@ def build_standard_decoder_engine(
         or debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
+        or attention_softcap is not None
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
     if not _dual_profile_disabled_for:
@@ -425,6 +447,8 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
+            gemma_post_norm_residual=gemma_post_norm_residual,
+            attention_softcap=attention_softcap,
         )
 
         hidden_state = result["hidden"]
@@ -558,6 +582,8 @@ def _add_decoder_layer(
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     eps: float | None = None,
+    gemma_post_norm_residual: bool = False,
+    attention_softcap: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -583,13 +609,27 @@ def _add_decoder_layer(
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
+        attention_softcap=attention_softcap,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
     present_v = attn["present_v"]
 
-    # --- Parallel vs sequential residual ---
-    if parallel_residual:
+    # --- Parallel vs sequential/Gemma post-norm residual ---
+    if gemma_post_norm_residual:
+        attn_normed = _apply_norm(
+            network, attn_out, hidden_size,
+            weights[f"{prefix}.post_attn_norm"],
+            weights.get(f"{prefix}.post_attn_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+        residual1 = network.add_elementwise(
+            hidden, attn_normed, trt.ElementWiseOperation.SUM)
+        norm2 = _apply_norm(
+            network, residual1.get_output(0), hidden_size,
+            weights[f"{prefix}.pre_ff_norm"],
+            weights.get(f"{prefix}.pre_ff_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+    elif parallel_residual:
         post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
         if post_attn_norm_w is not None:
             norm2 = _apply_norm(
@@ -618,11 +658,21 @@ def _add_decoder_layer(
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
-            hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
-            quant_ctx=quant_ctx, layer_prefix=prefix)
+            hidden_size=hidden_size, mlp_size=mlp_size,
+            activation=activation, dtype=dtype, quant_ctx=quant_ctx,
+            layer_prefix=prefix)
 
     # Final residual connection
-    if parallel_residual:
+    if gemma_post_norm_residual:
+        mlp_normed = _apply_norm(
+            network, mlp_out, hidden_size,
+            weights[f"{prefix}.post_ff_norm"],
+            weights.get(f"{prefix}.post_ff_norm_beta"),
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
+        residual2 = network.add_elementwise(
+            residual1.get_output(0), mlp_normed, trt.ElementWiseOperation.SUM)
+        post_attn_tensor = residual1.get_output(0)
+    elif parallel_residual:
         sum_attn = network.add_elementwise(
             hidden, attn_out, trt.ElementWiseOperation.SUM)
         residual2 = network.add_elementwise(

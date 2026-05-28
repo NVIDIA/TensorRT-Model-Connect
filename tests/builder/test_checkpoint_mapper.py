@@ -198,6 +198,57 @@ class TestLoadStandardWeights:
         assert fp16_weights["layer.0.w_q"].dtype == np.float16
         assert fp16_weights["layer.0.input_norm"].dtype == np.float32
 
+    def test_language_model_model_prefix_loading(self, tmp_path):
+        """Load Gemma3 conditional text weights under language_model.model.*."""
+        from safetensors.numpy import save_file
+
+        config = {
+            "model_type": "gemma3",
+            "text_config": {
+                "vocab_size": 16,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+            },
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        prefix = "language_model.model.layers.0"
+        embedding = np.random.randn(16, 8).astype(np.float32)
+        tensors = {
+            "language_model.model.embed_tokens.weight": embedding,
+            f"{prefix}.input_layernorm.weight": np.random.randn(8).astype(np.float32),
+            f"{prefix}.post_attention_layernorm.weight": np.random.randn(8).astype(np.float32),
+            f"{prefix}.pre_feedforward_layernorm.weight": np.random.randn(8).astype(np.float32),
+            f"{prefix}.post_feedforward_layernorm.weight": np.random.randn(8).astype(np.float32),
+            f"{prefix}.self_attn.q_proj.weight": np.random.randn(8, 8).astype(np.float32),
+            f"{prefix}.self_attn.k_proj.weight": np.random.randn(4, 8).astype(np.float32),
+            f"{prefix}.self_attn.v_proj.weight": np.random.randn(4, 8).astype(np.float32),
+            f"{prefix}.self_attn.o_proj.weight": np.random.randn(8, 8).astype(np.float32),
+            f"{prefix}.mlp.gate_proj.weight": np.random.randn(16, 8).astype(np.float32),
+            f"{prefix}.mlp.up_proj.weight": np.random.randn(16, 8).astype(np.float32),
+            f"{prefix}.mlp.down_proj.weight": np.random.randn(8, 16).astype(np.float32),
+            "language_model.model.norm.weight": np.random.randn(8).astype(np.float32),
+        }
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = load_standard_weights(tmp_path, cfg)
+
+        assert weights["embedding"].shape == (16, 8)
+        assert weights["layer.0.w_k"].shape == (8, 4)
+        np.testing.assert_allclose(
+            weights["layer.0.pre_ff_norm"],
+            tensors[f"{prefix}.pre_feedforward_layernorm.weight"],
+        )
+        np.testing.assert_allclose(
+            weights["layer.0.post_ff_norm"],
+            tensors[f"{prefix}.post_feedforward_layernorm.weight"],
+        )
+        np.testing.assert_allclose(weights["w_out"], embedding.T.astype(np.float32))
+
     def test_transpose_applied(self, tmp_path):
         """Verify projections are transposed from [out, in] to [in, out]."""
         config = {

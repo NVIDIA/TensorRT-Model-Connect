@@ -1024,9 +1024,18 @@ def _build_repro_commands(
                 ]
                 if case.family != "sana_wm":
                     infer_parts.extend(["--num-steps", str(case.inputs.get("num_inference_steps", 30))])
+                else:
+                    sana_steps = (
+                        case.inputs.get("num_inference_steps")
+                        or case.inputs.get("num_steps")
+                        or case.inputs.get("step")
+                    )
+                    if sana_steps is not None:
+                        infer_parts.extend(["--step", str(sana_steps)])
                 prompt_file = case.inputs.get("prompt_file")
                 if prompt_file:
-                    infer_parts.extend(["--prompt-file", str(prompt_file)])
+                    prompt_flag = "--prompt" if case.family == "sana_wm" else "--prompt-file"
+                    infer_parts.extend([prompt_flag, str(prompt_file)])
                 else:
                     infer_parts.extend([
                         "--prompt",
@@ -1034,29 +1043,49 @@ def _build_repro_commands(
                     ])
                 if image:
                     infer_parts.extend(["--image", str(image)])
-                action = case.inputs.get("action")
-                if action:
-                    infer_parts.extend(["--action", _shell_quote(str(action))])
+                camera = case.inputs.get("camera") or case.inputs.get("camera_path")
+                if camera:
+                    infer_parts.extend(["--camera", str(camera)])
+                else:
+                    action = case.inputs.get("action")
+                    if action:
+                        infer_parts.extend(["--action", _shell_quote(str(action))])
                 if "translation_speed" in case.inputs:
                     flag = "--translation_speed" if case.family == "sana_wm" else "--translation-speed"
                     infer_parts.extend([flag, str(case.inputs["translation_speed"])])
                 if "rotation_speed_deg" in case.inputs:
                     flag = "--rotation_speed_deg" if case.family == "sana_wm" else "--rotation-speed-deg"
                     infer_parts.extend([flag, str(case.inputs["rotation_speed_deg"])])
-                if "camera_intrinsics" in case.inputs:
+                intrinsics = case.inputs.get("camera_intrinsics")
+                if intrinsics is None:
+                    intrinsics = case.inputs.get("intrinsics")
+                if intrinsics is not None:
                     flag = "--intrinsics" if case.family == "sana_wm" else "--camera-intrinsics"
                     infer_parts.extend([
                         flag,
-                        _shell_quote(_csv_arg(case.inputs["camera_intrinsics"])),
+                        _shell_quote(_csv_arg(intrinsics)),
                     ])
                 num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames"))
                 if num_frames is not None:
                     flag = "--num_frames" if case.family == "sana_wm" else "--num-frames"
                     infer_parts.extend([flag, str(num_frames)])
+                if case.family == "sana_wm":
+                    fps = case.inputs.get("fps")
+                    if fps is not None:
+                        infer_parts.extend(["--fps", str(fps)])
+                    flow_shift = case.inputs.get("flow_shift")
+                    if flow_shift is not None:
+                        infer_parts.extend(["--flow_shift", str(flow_shift)])
                 if case.family == "sana_wm" and case.inputs.get("no_refiner"):
                     infer_parts.append("--no_refiner")
                 guidance_scale = case.inputs.get("guidance_scale")
-                if guidance_scale is not None:
+                if case.family == "sana_wm":
+                    cfg_scale = case.inputs.get("cfg_scale")
+                    if cfg_scale is None:
+                        cfg_scale = guidance_scale
+                    if cfg_scale is not None:
+                        infer_parts.extend(["--cfg_scale", str(cfg_scale)])
+                elif guidance_scale is not None:
                     infer_parts.extend(["--guidance-scale", str(guidance_scale)])
                 if "seed" in case.inputs:
                     infer_parts.extend(["--seed", str(case.inputs["seed"])])
@@ -1136,10 +1165,19 @@ def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> s
         or "asset/sana_wm/demo_0.png"
     )
     prompt_file = case.inputs.get("prompt_file") or "asset/sana_wm/demo_0.txt"
-    action = case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")
     translation_speed = case.inputs.get("translation_speed", 0.055)
     rotation_speed_deg = case.inputs.get("rotation_speed_deg", 1.2)
     num_frames = case.inputs.get("video_num_frames", case.inputs.get("num_frames", 321))
+    num_steps = (
+        case.inputs.get("num_inference_steps")
+        or case.inputs.get("num_steps")
+        or case.inputs.get("step")
+    )
+    cfg_scale = case.inputs.get("cfg_scale")
+    if cfg_scale is None:
+        cfg_scale = case.inputs.get("guidance_scale")
+    fps = case.inputs.get("fps")
+    flow_shift = case.inputs.get("flow_shift")
     parts = [
         ctx.reference_python_path() or "python",
         "inference_video_scripts/inference_sana_wm.py",
@@ -1147,17 +1185,35 @@ def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> s
         str(image),
         "--prompt",
         str(prompt_file),
-        "--action",
-        f'"{action}"',
+    ]
+    camera = case.inputs.get("camera") or case.inputs.get("camera_path")
+    if camera:
+        parts.extend(["--camera", str(camera)])
+    else:
+        action = case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")
+        parts.extend(["--action", f'"{action}"'])
+    intrinsics = case.inputs.get("camera_intrinsics")
+    if intrinsics is None:
+        intrinsics = case.inputs.get("intrinsics")
+    if intrinsics is not None:
+        parts.extend(["--intrinsics", _shell_quote(_csv_arg(intrinsics))])
+    parts.extend([
         "--translation_speed",
         str(translation_speed),
         "--rotation_speed_deg",
         str(rotation_speed_deg),
         "--num_frames",
         str(num_frames),
-        "--output_dir",
-        "results/demo",
-    ]
+    ])
+    if num_steps is not None:
+        parts.extend(["--step", str(num_steps)])
+    if cfg_scale is not None:
+        parts.extend(["--cfg_scale", str(cfg_scale)])
+    if fps is not None:
+        parts.extend(["--fps", str(fps)])
+    if flow_shift is not None:
+        parts.extend(["--flow_shift", str(flow_shift)])
+    parts.extend(["--output_dir", "results/demo"])
     if case.inputs.get("no_refiner"):
         parts.append("--no_refiner")
     return " ".join(parts)

@@ -6,6 +6,8 @@ shapes must be identical so the C++ runtime can consume the built engine.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
@@ -545,7 +547,7 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type in ("gelu_new", "gelu", "gelu_pytorch_tanh"):
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)
@@ -2540,6 +2542,117 @@ def add_attention_core(
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
 
 
+def _repeat_kv_heads_4d(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    *,
+    num_kv_heads: int,
+    num_heads: int,
+    kv_seq: int,
+    head_dim: int,
+) -> trt.ITensor:
+    if num_kv_heads == num_heads:
+        return tensor
+    if num_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"Cannot repeat {num_kv_heads} KV heads to {num_heads} query heads"
+        )
+    repeat = num_heads // num_kv_heads
+    heads = []
+    for head_idx in range(num_kv_heads):
+        sliced = network.add_slice(
+            tensor,
+            start=(0, head_idx, 0, 0),
+            shape=(1, 1, kv_seq, head_dim),
+            stride=(1, 1, 1, 1),
+        ).get_output(0)
+        heads.extend([sliced] * repeat)
+    concat = network.add_concatenation(heads)
+    concat.axis = 1
+    return concat.get_output(0)
+
+
+def _add_manual_attention_core(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    mask: trt.ITensor | None,
+    scale: float,
+    softcap: float | None = None,
+) -> trt.ITensor:
+    output_dtype = q_4d.dtype
+    if q_4d.dtype != trt.float32:
+        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
+    if k_4d.dtype != trt.float32:
+        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
+    if v_4d.dtype != trt.float32:
+        v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
+    if mask is not None and mask.dtype != trt.float32:
+        mask = network.add_cast(mask, trt.float32).get_output(0)
+
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]], dtype=np.float32),
+        dtype=np.float32,
+    )
+    q_scaled = network.add_elementwise(
+        q_4d,
+        scale_t,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    scores = network.add_matrix_multiply(
+        q_scaled,
+        trt.MatrixOperation.NONE,
+        k_4d,
+        trt.MatrixOperation.TRANSPOSE,
+    ).get_output(0)
+    if softcap is not None and softcap > 0.0:
+        inv_softcap = add_constant(
+            network,
+            (1, 1, 1, 1),
+            np.array([[[[1.0 / softcap]]]], dtype=np.float32),
+            dtype=np.float32,
+        )
+        scores_scaled = network.add_elementwise(
+            scores,
+            inv_softcap,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0)
+        scores_tanh = network.add_activation(
+            scores_scaled,
+            trt.ActivationType.TANH,
+        ).get_output(0)
+        softcap_const = add_constant(
+            network,
+            (1, 1, 1, 1),
+            np.array([[[[softcap]]]], dtype=np.float32),
+            dtype=np.float32,
+        )
+        scores = network.add_elementwise(
+            scores_tanh,
+            softcap_const,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0)
+    if mask is not None:
+        scores = network.add_elementwise(
+            scores,
+            mask,
+            trt.ElementWiseOperation.SUM,
+        ).get_output(0)
+    probs_layer = network.add_softmax(scores)
+    probs_layer.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        probs_layer.get_output(0),
+        trt.MatrixOperation.NONE,
+        v_4d,
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -2555,6 +2668,7 @@ def add_attention_from_rows(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     fp32_accumulation: bool = False,
+    attention_softcap: float | None = None,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2576,9 +2690,46 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    ctx_4d = add_attention_core(
-        network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
-        fp32_accumulation=fp32_accumulation)
+    use_manual_attention = (
+        os.environ.get("TRTMC_MANUAL_DECODE_ATTENTION") == "1"
+        or attention_softcap is not None
+    )
+    if use_manual_attention:
+        if causal:
+            raise ValueError("manual decode attention fallback does not support causal=True")
+        if kv_seq is None:
+            raise ValueError(
+                "manual decode attention fallback requires static kv_seq"
+            )
+        k_4d = _repeat_kv_heads_4d(
+            network,
+            k_4d,
+            num_kv_heads=kv_heads,
+            num_heads=num_heads,
+            kv_seq=kv_seq,
+            head_dim=head_dim,
+        )
+        v_4d = _repeat_kv_heads_4d(
+            network,
+            v_4d,
+            num_kv_heads=kv_heads,
+            num_heads=num_heads,
+            kv_seq=kv_seq,
+            head_dim=head_dim,
+        )
+        ctx_4d = _add_manual_attention_core(
+            network,
+            q_4d,
+            k_4d,
+            v_4d,
+            mask=mask,
+            scale=scale,
+            softcap=attention_softcap,
+        )
+    else:
+        ctx_4d = add_attention_core(
+            network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
+            fp32_accumulation=fp32_accumulation)
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")

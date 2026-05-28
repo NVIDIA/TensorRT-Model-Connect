@@ -510,6 +510,42 @@ def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return _detect_tokenizer_add_special_tokens(model_dir)
 
 
+def _detect_sana_wm_tokenizer_add_special_tokens(
+    model_dir: Path, raw_config: dict, weights: dict | None = None
+) -> bool:
+    """Detect SANA-WM's Gemma tokenizer behavior from the embedded tokenizer dir."""
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+    candidates: list[Path] = []
+    for configured in (
+        raw_config.get("sana_wm_stage1_tokenizer_dir"),
+        raw_config.get("sana_wm_tokenizer_dir"),
+        os.environ.get("SANA_WM_STAGE1_TOKENIZER_DIR"),
+        os.environ.get("SANA_WM_TOKENIZER_DIR"),
+        (weights or {}).get("_stage1_text_encoder_dir"),
+        raw_config.get("sana_wm_text_encoder_dir"),
+        text_encoder.get("text_encoder_dir"),
+        os.environ.get("SANA_WM_TEXT_ENCODER_DIR"),
+    ):
+        if configured:
+            configured_path = Path(str(configured))
+            candidate = (
+                configured_path if configured_path.is_absolute() else model_dir / configured_path
+            )
+            if candidate not in candidates:
+                candidates.append(candidate)
+    candidates.extend(
+        [
+            model_dir / "text_encoder",
+        ]
+    )
+    for tok_dir in candidates:
+        if tok_dir.is_dir():
+            return _detect_tokenizer_add_special_tokens(tok_dir)
+    return _detect_tokenizer_add_special_tokens(model_dir)
+
+
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
@@ -886,8 +922,12 @@ def build_bundle(
 
     # 5. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
-    tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
-        model_dir_path)
+    if runtime_strategy == "diffusion_sana_wm":
+        tokenizer_add_special_tokens = _detect_sana_wm_tokenizer_add_special_tokens(
+            model_dir_path, config.raw, weights)
+    else:
+        tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
+            model_dir_path)
     _add_build_timing(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)

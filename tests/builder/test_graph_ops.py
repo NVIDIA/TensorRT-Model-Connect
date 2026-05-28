@@ -346,7 +346,8 @@ class TestAddGeluNew:
 @requires_trt
 class TestAddActivation:
     @pytest.mark.parametrize("act_name", [
-        "silu", "relu", "gelu_new", "gelu", "relu2", "squared_relu"])
+        "silu", "relu", "gelu_new", "gelu", "gelu_pytorch_tanh",
+        "relu2", "squared_relu"])
     def test_vs_torch(self, trt_runner, act_name):
         import torch
         import torch.nn as nn

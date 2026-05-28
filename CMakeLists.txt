@@ -70,6 +70,30 @@ find_library(TRTMC_CUDART_LIBRARY
   PATH_SUFFIXES "" lib lib64
 )
 
+set(_trtmc_cudnn_search_paths
+  ${_trtmc_default_search_paths}
+  /opt/venv/lib/python3.12/site-packages/nvidia/cudnn
+)
+if(DEFINED ENV{CUDNN_ROOT})
+  list(APPEND _trtmc_cudnn_search_paths "$ENV{CUDNN_ROOT}")
+endif()
+
+find_path(TRTMC_CUDNN_INCLUDE_DIR cudnn.h
+  PATHS ${_trtmc_cudnn_search_paths}
+  PATH_SUFFIXES "" include
+)
+
+find_library(TRTMC_CUDNN_LIBRARY
+  NAMES cudnn libcudnn.so.9 libcudnn.so
+  PATHS ${_trtmc_cudnn_search_paths}
+  PATH_SUFFIXES "" lib lib64
+)
+
+set(_trtmc_has_cudnn FALSE)
+if(TRTMC_CUDNN_INCLUDE_DIR AND TRTMC_CUDNN_LIBRARY)
+  set(_trtmc_has_cudnn TRUE)
+endif()
+
 function(_trtmc_header_define_value OUT_VAR DEFINE_NAME)
   set(${OUT_VAR} "" PARENT_SCOPE)
   if(NOT TRTMC_TRT_INCLUDE_DIR OR NOT EXISTS "${TRTMC_TRT_INCLUDE_DIR}/NvInferVersion.h")
@@ -269,6 +293,8 @@ target_compile_definitions(trtmc_core PRIVATE TRTMC_HAS_TRT=0)
 target_include_directories(trtmc_core SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
 find_library(TRTMC_CUBLAS_LIBRARY NAMES cublas libcublas.so
   PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64)
+find_library(TRTMC_CUBLASLT_LIBRARY NAMES cublasLt libcublasLt.so
+  PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64)
 target_link_libraries(trtmc_core PRIVATE ${TRTMC_CUDART_LIBRARY}
   $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>)
 message(STATUS "Core runtime: TensorRT-free (backend DSOs are dlopen-loaded)")
@@ -402,6 +428,66 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
+if(_trtmc_can_build_trt_backend AND CMAKE_CUDA_COMPILER)
+  add_library(trtmc_sana_wm_gdn_plugin SHARED
+    src/plugins/sana_wm_gdn_plugin.cu
+    src/plugins/sana_wm_gdn_creator.cpp
+    src/plugins/sana_wm_timestep_plugin.cu
+    src/plugins/sana_wm_timestep_creator.cpp
+    src/plugins/sana_wm_gate_proj_plugin.cu
+    src/plugins/sana_wm_gate_proj_creator.cpp
+    src/plugins/sana_wm_decay_plugin.cu
+    src/plugins/sana_wm_decay_creator.cpp
+    src/plugins/sana_wm_layer_norm_plugin.cu
+    src/plugins/sana_wm_layer_norm_creator.cpp
+    src/plugins/sana_wm_t2i_modulate_plugin.cu
+    src/plugins/sana_wm_t2i_modulate_creator.cpp
+    src/plugins/sana_wm_short_conv_plugin.cu
+    src/plugins/sana_wm_short_conv_creator.cpp
+    src/plugins/sana_wm_rope_plugin.cu
+    src/plugins/sana_wm_rope_creator.cpp
+    src/plugins/sana_wm_ucpe_plugin.cu
+    src/plugins/sana_wm_ucpe_creator.cpp
+    src/plugins/sana_wm_qk_rope_plugin.cu
+    src/plugins/sana_wm_qk_rope_creator.cpp
+    src/plugins/sana_wm_cam_prep_plugin.cu
+    src/plugins/sana_wm_cam_prep_creator.cpp
+  )
+  if(_trtmc_has_cudnn)
+    target_sources(trtmc_sana_wm_gdn_plugin PRIVATE
+      src/plugins/sana_wm_patch_embed_plugin.cpp
+      src/plugins/sana_wm_patch_embed_creator.cpp
+    )
+  endif()
+  target_include_directories(trtmc_sana_wm_gdn_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(trtmc_sana_wm_gdn_plugin SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR})
+  if(_trtmc_has_cudnn)
+    target_include_directories(trtmc_sana_wm_gdn_plugin SYSTEM PRIVATE ${TRTMC_CUDNN_INCLUDE_DIR})
+  endif()
+  target_link_libraries(trtmc_sana_wm_gdn_plugin PRIVATE
+    ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>
+    $<$<BOOL:${TRTMC_CUBLASLT_LIBRARY}>:${TRTMC_CUBLASLT_LIBRARY}>)
+  if(_trtmc_has_cudnn)
+    target_link_libraries(trtmc_sana_wm_gdn_plugin PRIVATE ${TRTMC_CUDNN_LIBRARY})
+  endif()
+  target_compile_definitions(trtmc_sana_wm_gdn_plugin PRIVATE
+    TRTMC_HAS_TRT=1
+    TRTMC_HAS_CUDNN=$<BOOL:${_trtmc_has_cudnn}>)
+  target_compile_options(trtmc_sana_wm_gdn_plugin PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>)
+  set_target_properties(trtmc_sana_wm_gdn_plugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  if(_trtmc_has_cudnn)
+    get_filename_component(_trtmc_cudnn_library_dir "${TRTMC_CUDNN_LIBRARY}" DIRECTORY)
+    set_property(TARGET trtmc_sana_wm_gdn_plugin APPEND PROPERTY
+      BUILD_RPATH "${_trtmc_cudnn_library_dir}")
+  endif()
+  message(STATUS "SANA-WM GDN TensorRT plugin shared library: trtmc_sana_wm_gdn_plugin.so")
+endif()
+
 # --- Backend DSO: standard TRT ---
 if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   add_library(trtmc_backend_trt SHARED
@@ -420,6 +506,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   target_link_libraries(trtmc_backend_trt PRIVATE
     trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    $<$<BOOL:${TRTMC_CUBLASLT_LIBRARY}>:${TRTMC_CUBLASLT_LIBRARY}>
   )
   if(_trtmc_has_tvm_ffi)
     target_sources(trtmc_backend_trt PRIVATE
@@ -429,10 +516,44 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     target_include_directories(trtmc_backend_trt SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtmc_backend_trt PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
   endif()
+  if(CMAKE_CUDA_COMPILER)
+    target_sources(trtmc_backend_trt PRIVATE
+      src/plugins/sana_wm_gdn_plugin.cu
+      src/plugins/sana_wm_gdn_creator.cpp
+      src/plugins/sana_wm_timestep_plugin.cu
+      src/plugins/sana_wm_timestep_creator.cpp
+      src/plugins/sana_wm_layer_norm_plugin.cu
+      src/plugins/sana_wm_layer_norm_creator.cpp
+      src/plugins/sana_wm_t2i_modulate_plugin.cu
+      src/plugins/sana_wm_t2i_modulate_creator.cpp
+      src/plugins/sana_wm_short_conv_plugin.cu
+      src/plugins/sana_wm_short_conv_creator.cpp
+      src/plugins/sana_wm_rope_plugin.cu
+      src/plugins/sana_wm_rope_creator.cpp
+      src/plugins/sana_wm_ucpe_plugin.cu
+      src/plugins/sana_wm_ucpe_creator.cpp
+      src/plugins/sana_wm_qk_rope_plugin.cu
+      src/plugins/sana_wm_qk_rope_creator.cpp
+      src/plugins/sana_wm_cam_prep_plugin.cu
+      src/plugins/sana_wm_cam_prep_creator.cpp
+    )
+    if(_trtmc_has_cudnn)
+      target_sources(trtmc_backend_trt PRIVATE
+        src/plugins/sana_wm_patch_embed_plugin.cpp
+        src/plugins/sana_wm_patch_embed_creator.cpp
+      )
+      target_include_directories(trtmc_backend_trt SYSTEM PRIVATE ${TRTMC_CUDNN_INCLUDE_DIR})
+      target_link_libraries(trtmc_backend_trt PRIVATE ${TRTMC_CUDNN_LIBRARY})
+      get_filename_component(_trtmc_cudnn_library_dir "${TRTMC_CUDNN_LIBRARY}" DIRECTORY)
+      set_property(TARGET trtmc_backend_trt APPEND PROPERTY
+        BUILD_RPATH "${_trtmc_cudnn_library_dir}")
+    endif()
+  endif()
   target_compile_options(trtmc_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_definitions(trtmc_backend_trt PRIVATE
     TRTMC_HAS_TRT=1
     TRTMC_HAS_TVM_FFI=$<BOOL:${_trtmc_has_tvm_ffi}>
+    TRTMC_HAS_CUDNN=$<BOOL:${_trtmc_has_cudnn}>
     TRTMC_TRT_BACKEND_ABI_STRING=\"${TRTMC_TRT_BACKEND_ABI}\"
   )
   set_target_properties(trtmc_backend_trt PROPERTIES

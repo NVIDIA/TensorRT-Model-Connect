@@ -619,20 +619,20 @@ class BpeTokenizer final : public ITokenizer {
 
     std::vector<int32_t> encode(const std::string& text) const override {
         std::vector<int32_t> result;
-        if (text.empty())
-            return result;
 
         if (mAddSpecialTokens) {
             for (int32_t bos_id : mPostBosIds)
                 result.push_back(bos_id);
         }
 
-        auto segments = split_added_tokens(text);
-        for (const auto& seg : segments) {
-            if (seg.added_id >= 0)
-                result.push_back(seg.added_id);
-            else
-                encode_segment(seg.text, result);
+        if (!text.empty()) {
+            auto segments = split_added_tokens(text);
+            for (const auto& seg : segments) {
+                if (seg.added_id >= 0)
+                    result.push_back(seg.added_id);
+                else
+                    encode_segment(seg.text, result);
+            }
         }
 
         if (mAddSpecialTokens) {
@@ -754,7 +754,8 @@ class BpeTokenizer final : public ITokenizer {
             out += (c == ' ') ? sp : std::string(1, c);
         }
         // Metaspace prepend_scheme=first: prepend if not already starting with ▁
-        if (!mSentencePiecePrependAlways && (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
+        if (mSentencePiecePrefixIfMissing && !mSentencePiecePrependAlways &&
+            (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
             out = sp + out;
         }
         return out;
@@ -1189,6 +1190,16 @@ class BpeTokenizer final : public ITokenizer {
         } else if (pt_type == "Metaspace") {
             mIsMetaspace = true;
             mUsePreTokenizer = false;
+        } else if (pt_type == "Split") {
+            if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
+                int digit_group = 0;
+                mPreTokenizerVariant =
+                    classify_split_regex(pt["pattern"]["Regex"].get<std::string>(), digit_group);
+                mPreTokenizerDigitGroup = digit_group;
+            } else if (pt.contains("pattern") && pt["pattern"].contains("String") &&
+                       pt["pattern"]["String"] == " ") {
+                mUsePreTokenizer = false;
+            }
         } else if (pt_type.empty()) {
             mUsePreTokenizer = false;
         } else {
@@ -1290,10 +1301,21 @@ class BpeTokenizer final : public ITokenizer {
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
+        if (norm_type == "Replace" && norm.contains("pattern") &&
+            norm["pattern"].contains("String") && norm["pattern"]["String"] == " " &&
+            norm.value("content", "") == "\xe2\x96\x81") {
+            mSentencePiecePrefixIfMissing = false;
+            return;
+        }
         if (norm_type == "Sequence" && norm.contains("normalizers")) {
             for (auto& sub : norm["normalizers"]) {
                 if (sub.value("type", "") == "Prepend") {
                     mSentencePiecePrependAlways = true;
+                } else if (sub.value("type", "") == "Replace" && sub.contains("pattern") &&
+                           sub["pattern"].contains("String") &&
+                           sub["pattern"]["String"] == " " &&
+                           sub.value("content", "") == "\xe2\x96\x81") {
+                    mSentencePiecePrefixIfMissing = false;
                 }
             }
         }
@@ -1398,6 +1420,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
         false; // true for Normalizer Prepend, false for Metaspace first
+    bool mSentencePiecePrefixIfMissing = true;
     bool mByteFallback = false;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true

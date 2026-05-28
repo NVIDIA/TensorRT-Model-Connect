@@ -230,6 +230,14 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             args={"path": manifest["prompt_file"]},
             gating=True,
         ))
+    for key in ("camera_intrinsics", "intrinsics"):
+        value = manifest.get(key)
+        if isinstance(value, str) and value.endswith(".npy"):
+            reqs.append(PreflightRequirement(
+                kind="asset_exists",
+                args={"path": value},
+                gating=True,
+            ))
 
     runtime_strategy = str(manifest.get("runtime_strategy", "") or "")
     if (
@@ -415,9 +423,14 @@ def _build_inputs(manifest: dict) -> dict:
         "seed",
         "guidance_scale",
         "action",
+        "camera",
+        "camera_path",
         "translation_speed",
         "rotation_speed_deg",
         "camera_intrinsics",
+        "intrinsics",
+        "fps",
+        "flow_shift",
         "no_refiner",
         "sana_wm_script",
         "sana_wm_native_plan_dir",
@@ -537,7 +550,9 @@ def _build_metadata(manifest: dict) -> dict:
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
         "negative_prompt", "cfg_scale", "height", "width",
         "image_height", "image_width",
-        "action", "translation_speed", "rotation_speed_deg", "camera_intrinsics", "no_refiner", "sana_wm_script",
+        "action", "camera", "camera_path", "translation_speed", "rotation_speed_deg",
+        "camera_intrinsics", "intrinsics", "fps", "flow_shift", "no_refiner",
+        "sana_wm_script",
         "sana_wm_native_plan_dir", "sana_wm_model_dir", "sana_wm_tokenizer_dir",
         "sana_wm_require_official_script",
     }

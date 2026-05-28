@@ -683,11 +683,49 @@ print(f"Generated {{len(frames)}} frames")
             python, str(script),
             "--prompt", str(prompt_path),
             "--output_dir", frames_dir,
-            "--action", str(case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")),
             "--translation_speed", str(case.inputs.get("translation_speed", 0.055)),
             "--rotation_speed_deg", str(case.inputs.get("rotation_speed_deg", 1.2)),
             "--num_frames", str(case.inputs.get("video_num_frames", 321)),
         ]
+        num_steps = (
+            case.inputs.get("num_inference_steps")
+            or case.inputs.get("num_steps")
+            or case.inputs.get("step")
+        )
+        if num_steps is not None:
+            cmd.extend(["--step", str(num_steps)])
+        cfg_scale = case.inputs.get("cfg_scale")
+        if cfg_scale is None:
+            cfg_scale = case.inputs.get("guidance_scale")
+        if cfg_scale is not None:
+            cmd.extend(["--cfg_scale", str(cfg_scale)])
+        camera_path = _resolve_input_path(
+            case.inputs.get("camera") or case.inputs.get("camera_path"), ctx
+        )
+        if camera_path:
+            cmd.extend(["--camera", camera_path])
+        else:
+            cmd.extend([
+                "--action",
+                str(case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")),
+            ])
+        intrinsics = case.inputs.get("camera_intrinsics")
+        if intrinsics is None:
+            intrinsics = case.inputs.get("intrinsics")
+        if intrinsics is not None:
+            if isinstance(intrinsics, str):
+                value = _resolve_input_path(intrinsics, ctx) or intrinsics
+            elif isinstance(intrinsics, (list, tuple)):
+                value = ",".join(str(v) for v in intrinsics)
+            else:
+                value = str(intrinsics)
+            cmd.extend(["--intrinsics", value])
+        fps = case.inputs.get("fps")
+        if fps is not None:
+            cmd.extend(["--fps", str(fps)])
+        flow_shift = case.inputs.get("flow_shift")
+        if flow_shift is not None:
+            cmd.extend(["--flow_shift", str(flow_shift)])
         if image_path:
             cmd.extend(["--image", image_path])
         else:

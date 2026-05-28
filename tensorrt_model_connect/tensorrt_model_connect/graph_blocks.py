@@ -148,6 +148,7 @@ def add_attention_block(
     kv_attention_size: int | None = None,
     num_kv_heads: int | None = None,
     attention_scale: float | None = None,
+    attention_softcap: float | None = None,
     eps: float | None = None,
     norm_type: str = "rmsnorm",
     position_type: str = "rope",
@@ -295,6 +296,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            attention_softcap=attention_softcap,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:
@@ -334,6 +336,7 @@ def add_swiglu_mlp(
     prefix: str,
     hidden_size: int,
     mlp_size: int,
+    activation: str = "silu",
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
@@ -347,11 +350,9 @@ def add_swiglu_mlp(
     up = matmul(inp, hidden_size, mlp_size,
                 weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gate_act = graph_ops.add_activation(network, gate, activation, dtype=dtype)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        gate_act, up, trt.ElementWiseOperation.PROD)
 
     mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
                      weights[f"{prefix}.w_down"], f"{_lp}.w_down")

@@ -1,7 +1,6 @@
 #include "runtime/models/sana_wm/pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "stb_image_resize2.h"
 #include "trtmc/trtmc_io.hpp"
 #include "utils/json_helpers.h"
 
@@ -9,9 +8,12 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iostream>
 #include <limits>
-#include <random>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -29,6 +31,19 @@ std::string first_nonempty(std::string a, const std::string& b) {
     if (!a.empty())
         return a;
     return b;
+}
+
+std::string trim_ascii_whitespace(std::string value) {
+    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    auto begin = std::find_if_not(value.begin(), value.end(), [&](char ch) {
+        return is_space(static_cast<unsigned char>(ch));
+    });
+    auto end = std::find_if_not(value.rbegin(), value.rend(), [&](char ch) {
+                   return is_space(static_cast<unsigned char>(ch));
+               }).base();
+    if (begin >= end)
+        return {};
+    return std::string(begin, end);
 }
 
 using Mat3 = std::array<std::array<float, 3>, 3>;
@@ -424,6 +439,58 @@ void pack_chunk_plucker(std::vector<float>& chunk_plucker, const std::vector<Mat
     }
 }
 
+std::size_t raymat_index(int32_t frame, int32_t y, int32_t x, int32_t row, int32_t col,
+                         int32_t latent_h, int32_t latent_w) {
+    return (((((static_cast<std::size_t>(frame) * static_cast<std::size_t>(latent_h) +
+                static_cast<std::size_t>(y)) *
+                   static_cast<std::size_t>(latent_w) +
+               static_cast<std::size_t>(x)) *
+                  4U +
+              static_cast<std::size_t>(row)) *
+                 4U) +
+            static_cast<std::size_t>(col));
+}
+
+void pack_ucpe_raymat(std::vector<float>& raymats, std::vector<float>& raymats_inv,
+                      int32_t frame, int32_t y, int32_t x, const Mat4& pose,
+                      const SanaWmIntrinsics& intrinsics, int32_t latent_h,
+                      int32_t latent_w) {
+    const Vec3 z_ray = camera_ray_direction(pose, intrinsics, y, x);
+    const Vec3 cam_y = {m4_at(pose, 0, 1), m4_at(pose, 1, 1), m4_at(pose, 2, 1)};
+    const Vec3 x_ray = normalized(cross3(cam_y, z_ray));
+    const Vec3 y_ray = normalized(cross3(z_ray, x_ray));
+    const Vec3 origin = pose_origin(pose);
+    const std::array<Vec3, 3> rows{x_ray, y_ray, z_ray};
+    for (int32_t row = 0; row < 3; ++row) {
+        for (int32_t col = 0; col < 3; ++col) {
+            raymats[raymat_index(frame, y, x, row, col, latent_h, latent_w)] =
+                rows[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
+        }
+        const float translated =
+            -(rows[static_cast<std::size_t>(row)][0] * origin[0] +
+              rows[static_cast<std::size_t>(row)][1] * origin[1] +
+              rows[static_cast<std::size_t>(row)][2] * origin[2]);
+        raymats[raymat_index(frame, y, x, row, 3, latent_h, latent_w)] = translated;
+    }
+    raymats[raymat_index(frame, y, x, 3, 0, latent_h, latent_w)] = 0.0F;
+    raymats[raymat_index(frame, y, x, 3, 1, latent_h, latent_w)] = 0.0F;
+    raymats[raymat_index(frame, y, x, 3, 2, latent_h, latent_w)] = 0.0F;
+    raymats[raymat_index(frame, y, x, 3, 3, latent_h, latent_w)] = 1.0F;
+
+    for (int32_t row = 0; row < 3; ++row) {
+        for (int32_t col = 0; col < 3; ++col) {
+            raymats_inv[raymat_index(frame, y, x, row, col, latent_h, latent_w)] =
+                rows[static_cast<std::size_t>(col)][static_cast<std::size_t>(row)];
+        }
+        raymats_inv[raymat_index(frame, y, x, row, 3, latent_h, latent_w)] =
+            origin[static_cast<std::size_t>(row)];
+    }
+    raymats_inv[raymat_index(frame, y, x, 3, 0, latent_h, latent_w)] = 0.0F;
+    raymats_inv[raymat_index(frame, y, x, 3, 1, latent_h, latent_w)] = 0.0F;
+    raymats_inv[raymat_index(frame, y, x, 3, 2, latent_h, latent_w)] = 0.0F;
+    raymats_inv[raymat_index(frame, y, x, 3, 3, latent_h, latent_w)] = 1.0F;
+}
+
 std::size_t stage1_latent_index(int32_t channel, int32_t frame, int32_t y, int32_t x,
                                 int32_t frames, int32_t height, int32_t width) {
     return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(frames) +
@@ -445,12 +512,115 @@ std::size_t stage1_latent_count(int32_t channels, int32_t frames, int32_t height
            static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
 }
 
+uint32_t mulhilo32(uint32_t a, uint32_t b, uint32_t& high) {
+    const uint64_t product = static_cast<uint64_t>(a) * static_cast<uint64_t>(b);
+    high = static_cast<uint32_t>(product >> 32U);
+    return static_cast<uint32_t>(product);
+}
+
+std::array<uint32_t, 4> philox_single_round(std::array<uint32_t, 4> counter,
+                                            std::array<uint32_t, 2> key) {
+    constexpr uint32_t kPhiloxSA = 0xD2511F53U;
+    constexpr uint32_t kPhiloxSB = 0xCD9E8D57U;
+    uint32_t high0 = 0U;
+    uint32_t high1 = 0U;
+    const uint32_t low0 = mulhilo32(kPhiloxSA, counter[0], high0);
+    const uint32_t low1 = mulhilo32(kPhiloxSB, counter[2], high1);
+    return {high1 ^ counter[1] ^ key[0], low1, high0 ^ counter[3] ^ key[1], low0};
+}
+
+std::array<uint32_t, 4> philox4x32_10(uint64_t seed, uint64_t subsequence, uint64_t offset) {
+    constexpr uint32_t kPhilox10A = 0x9E3779B9U;
+    constexpr uint32_t kPhilox10B = 0xBB67AE85U;
+    std::array<uint32_t, 4> counter{
+        static_cast<uint32_t>(offset),
+        static_cast<uint32_t>(offset >> 32U),
+        static_cast<uint32_t>(subsequence),
+        static_cast<uint32_t>(subsequence >> 32U),
+    };
+    std::array<uint32_t, 2> key{
+        static_cast<uint32_t>(seed),
+        static_cast<uint32_t>(seed >> 32U),
+    };
+    for (int round = 0; round < 9; ++round) {
+        counter = philox_single_round(counter, key);
+        key[0] += kPhilox10A;
+        key[1] += kPhilox10B;
+    }
+    return philox_single_round(counter, key);
+}
+
+float round_stage1_noise_to_bfloat16(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7FFFU + ((bits >> 16U) & 1U);
+    bits &= 0xFFFF0000U;
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+std::array<float, 4> torch_cuda_bfloat16_normal4(uint64_t seed, uint64_t subsequence,
+                                                 uint64_t offset) {
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    constexpr double kUint32ToUnit = 2.3283064365386962890625e-10;
+    const auto random = philox4x32_10(seed, subsequence, offset);
+    const double u0 = (static_cast<double>(random[0]) + 1.0) * kUint32ToUnit;
+    const double u1 = (static_cast<double>(random[1]) + 1.0) * kUint32ToUnit;
+    const double u2 = (static_cast<double>(random[2]) + 1.0) * kUint32ToUnit;
+    const double u3 = (static_cast<double>(random[3]) + 1.0) * kUint32ToUnit;
+    const double radius0 = std::sqrt(-2.0 * std::log(u0));
+    const double theta0 = kTwoPi * u1;
+    const double radius1 = std::sqrt(-2.0 * std::log(u2));
+    const double theta1 = kTwoPi * u3;
+    return {
+        round_stage1_noise_to_bfloat16(static_cast<float>(radius0 * std::sin(theta0))),
+        round_stage1_noise_to_bfloat16(static_cast<float>(radius0 * std::cos(theta0))),
+        round_stage1_noise_to_bfloat16(static_cast<float>(radius1 * std::sin(theta1))),
+        round_stage1_noise_to_bfloat16(static_cast<float>(radius1 * std::cos(theta1))),
+    };
+}
+
+uint64_t torch_cuda_distribution_thread_count(std::size_t count) {
+    constexpr uint32_t kBlockSize = 256U;
+    constexpr uint32_t kFallbackGridBlocks = 1216U;
+    if (count == 0)
+        return 0;
+
+    const auto grid_for_count =
+        static_cast<uint32_t>((count + static_cast<std::size_t>(kBlockSize) - 1U) /
+                              static_cast<std::size_t>(kBlockSize));
+    uint32_t grid_limit = kFallbackGridBlocks;
+    int device = 0;
+    cudaDeviceProp props{};
+    if (cudaGetDevice(&device) == cudaSuccess &&
+        cudaGetDeviceProperties(&props, device) == cudaSuccess &&
+        props.maxThreadsPerMultiProcessor >= static_cast<int>(kBlockSize) &&
+        props.multiProcessorCount > 0) {
+        const auto blocks_per_sm =
+            static_cast<uint32_t>(props.maxThreadsPerMultiProcessor) / kBlockSize;
+        grid_limit = static_cast<uint32_t>(props.multiProcessorCount) * blocks_per_sm;
+    }
+    const uint32_t grid = std::max(1U, std::min(grid_limit, grid_for_count));
+    return static_cast<uint64_t>(kBlockSize) * static_cast<uint64_t>(grid);
+}
+
+float torch_cuda_bfloat16_normal(uint64_t seed, uint64_t element_index, uint64_t thread_count) {
+    constexpr uint64_t kUnrollFactor = 4U;
+    const uint64_t values_per_grid_stride = thread_count * kUnrollFactor;
+    const uint64_t offset = element_index / values_per_grid_stride;
+    const uint64_t within = element_index % values_per_grid_stride;
+    const auto lane = static_cast<std::size_t>(within / thread_count);
+    const uint64_t subsequence = within % thread_count;
+    const auto normal4 = torch_cuda_bfloat16_normal4(seed, subsequence, offset);
+    return normal4[lane];
+}
+
 std::vector<float> sample_stage1_noise(std::size_t count, uint64_t seed) {
     std::vector<float> values(count);
-    std::mt19937 gen(static_cast<std::mt19937::result_type>(seed));
-    std::normal_distribution<float> dist(0.0F, 1.0F);
-    for (float& value : values)
-        value = dist(gen);
+    const uint64_t thread_count = torch_cuda_distribution_thread_count(count);
+    for (std::size_t i = 0; i < count; ++i)
+        values[i] = torch_cuda_bfloat16_normal(seed, static_cast<uint64_t>(i), thread_count);
     return values;
 }
 
@@ -481,6 +651,140 @@ std::size_t chw_index(int32_t channel, int32_t y, int32_t x, int32_t height, int
             static_cast<std::size_t>(y)) *
                static_cast<std::size_t>(width) +
            static_cast<std::size_t>(x);
+}
+
+float lanczos3(float x) {
+    const float ax = std::fabs(x);
+    if (ax < 1.0e-7F)
+        return 1.0F;
+    if (ax >= 3.0F)
+        return 0.0F;
+    const float pix = kPi * ax;
+    return (std::sin(pix) / pix) * (std::sin(pix / 3.0F) / (pix / 3.0F));
+}
+
+struct ResizeContribution {
+    std::vector<std::pair<int32_t, float>> weights;
+};
+
+std::vector<ResizeContribution> make_pillow_lanczos_contributions(int32_t src_size,
+                                                                  int32_t dst_size) {
+    if (src_size <= 0 || dst_size <= 0)
+        throw std::invalid_argument("SANA-WM resize contribution dimensions must be positive");
+
+    const double scale = static_cast<double>(src_size) / static_cast<double>(dst_size);
+    const double filter_scale = std::max(scale, 1.0);
+    const double support = 3.0 * filter_scale;
+    const double inv_filter_scale = 1.0 / filter_scale;
+    std::vector<ResizeContribution> out(static_cast<std::size_t>(dst_size));
+    for (int32_t dst = 0; dst < dst_size; ++dst) {
+        const double center = (static_cast<double>(dst) + 0.5) * scale;
+        int32_t xmin = static_cast<int32_t>(center - support + 0.5);
+        xmin = std::max(xmin, 0);
+        int32_t xmax = static_cast<int32_t>(center + support + 0.5);
+        xmax = std::min(xmax, src_size);
+        const int32_t count = std::max(0, xmax - xmin);
+        double sum = 0.0;
+        auto& weights = out[static_cast<std::size_t>(dst)].weights;
+        weights.reserve(static_cast<std::size_t>(count));
+        for (int32_t x = 0; x < count; ++x) {
+            const float weight = lanczos3(
+                static_cast<float>((static_cast<double>(x + xmin) - center + 0.5) *
+                                   inv_filter_scale));
+            weights.emplace_back(xmin + x, weight);
+            sum += static_cast<double>(weight);
+        }
+        if (std::fabs(sum) <= 1.0e-12) {
+            const int32_t nearest =
+                std::max(0, std::min(src_size - 1, static_cast<int32_t>(std::round(center - 0.5))));
+            weights = {{nearest, 1.0F}};
+            continue;
+        }
+        for (auto& [_, weight] : weights)
+            weight = static_cast<float>(static_cast<double>(weight) / sum);
+    }
+    return out;
+}
+
+uint8_t float_to_uint8_pixel(float value) {
+    const float clamped = std::max(0.0F, std::min(1.0F, value));
+    const long rounded = std::lround(static_cast<double>(clamped) * 255.0);
+    return static_cast<uint8_t>(std::max<long>(0, std::min<long>(255, rounded)));
+}
+
+uint8_t round_to_uint8_pixel(double value) {
+    const long rounded = std::lround(value);
+    return static_cast<uint8_t>(std::max<long>(0, std::min<long>(255, rounded)));
+}
+
+bool resize_lanczos3_hwc(const std::vector<float>& src_hwc, int32_t src_width,
+                         int32_t src_height, int32_t dst_width, int32_t dst_height,
+                         std::vector<float>& dst_hwc) {
+    const auto expected =
+        static_cast<std::size_t>(src_width) * static_cast<std::size_t>(src_height) * 3U;
+    if (src_hwc.size() != expected)
+        return false;
+    if (src_width == dst_width && src_height == dst_height) {
+        dst_hwc = src_hwc;
+        return true;
+    }
+
+    const auto x_weights = make_pillow_lanczos_contributions(src_width, dst_width);
+    const auto y_weights = make_pillow_lanczos_contributions(src_height, dst_height);
+    std::vector<uint8_t> src_u8(src_hwc.size());
+    for (std::size_t i = 0; i < src_hwc.size(); ++i)
+        src_u8[i] = float_to_uint8_pixel(src_hwc[i]);
+
+    std::vector<uint8_t> horizontal(static_cast<std::size_t>(src_height) *
+                                    static_cast<std::size_t>(dst_width) * 3U);
+    for (int32_t y = 0; y < src_height; ++y) {
+        for (int32_t x = 0; x < dst_width; ++x) {
+            const auto& contrib = x_weights[static_cast<std::size_t>(x)].weights;
+            for (int32_t c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (const auto& [src_x, weight] : contrib) {
+                    const auto src_idx =
+                        (static_cast<std::size_t>(y) * static_cast<std::size_t>(src_width) +
+                         static_cast<std::size_t>(src_x)) *
+                            3U +
+                        static_cast<std::size_t>(c);
+                    acc += static_cast<double>(src_u8[src_idx]) * static_cast<double>(weight);
+                }
+                const auto dst_idx =
+                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_width) +
+                     static_cast<std::size_t>(x)) *
+                        3U +
+                    static_cast<std::size_t>(c);
+                horizontal[dst_idx] = round_to_uint8_pixel(acc);
+            }
+        }
+    }
+
+    dst_hwc.assign(static_cast<std::size_t>(dst_width) * static_cast<std::size_t>(dst_height) * 3U,
+                   0.0F);
+    for (int32_t y = 0; y < dst_height; ++y) {
+        const auto& contrib = y_weights[static_cast<std::size_t>(y)].weights;
+        for (int32_t x = 0; x < dst_width; ++x) {
+            for (int32_t c = 0; c < 3; ++c) {
+                double acc = 0.0;
+                for (const auto& [src_y, weight] : contrib) {
+                    const auto src_idx =
+                        (static_cast<std::size_t>(src_y) * static_cast<std::size_t>(dst_width) +
+                         static_cast<std::size_t>(x)) *
+                            3U +
+                        static_cast<std::size_t>(c);
+                    acc += static_cast<double>(horizontal[src_idx]) * static_cast<double>(weight);
+                }
+                const auto dst_idx =
+                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_width) +
+                     static_cast<std::size_t>(x)) *
+                        3U +
+                    static_cast<std::size_t>(c);
+                dst_hwc[dst_idx] = static_cast<float>(round_to_uint8_pixel(acc)) / 255.0F;
+            }
+        }
+    }
+    return true;
 }
 
 half_bits_t fp32_to_fp16(float v) {
@@ -516,6 +820,7 @@ float fp16_to_fp32(half_bits_t h) {
 half_bits_t fp32_to_bf16(float v) {
     uint32_t bits;
     std::memcpy(&bits, &v, sizeof(bits));
+    bits += 0x7FFFU + ((bits >> 16U) & 1U);
     return static_cast<half_bits_t>(bits >> 16U);
 }
 
@@ -544,6 +849,8 @@ Tensor make_model_tensor(const std::vector<float>& values, std::vector<half_bits
     return Tensor{scratch16.data(), std::move(shape), dtype};
 }
 
+void log_float_stats(const char* label, const std::vector<float>& values);
+
 std::vector<float> tensor_to_float_vector(const Tensor& tensor, std::size_t count,
                                           const std::string& label) {
     if (tensor.data == nullptr)
@@ -558,21 +865,191 @@ std::vector<float> tensor_to_float_vector(const Tensor& tensor, std::size_t coun
     if (tensor.dtype == DType::kFloat32) {
         const auto* src = static_cast<const float*>(tensor.data);
         std::copy_n(src, count, out.data());
+        log_float_stats(label.c_str(), out);
         return out;
     }
     if (tensor.dtype == DType::kFloat16) {
         const auto* src = static_cast<const half_bits_t*>(tensor.data);
         for (std::size_t i = 0; i < count; ++i)
             out[i] = fp16_to_fp32(src[i]);
+        log_float_stats(label.c_str(), out);
         return out;
     }
     if (tensor.dtype == DType::kBFloat16) {
         const auto* src = static_cast<const half_bits_t*>(tensor.data);
         for (std::size_t i = 0; i < count; ++i)
             out[i] = bf16_to_fp32(src[i]);
+        log_float_stats(label.c_str(), out);
+        return out;
+    }
+    if (tensor.dtype == DType::kInt32) {
+        const auto* src = static_cast<const int32_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = static_cast<float>(src[i]);
+        log_float_stats(label.c_str(), out);
+        return out;
+    }
+    if (tensor.dtype == DType::kInt8) {
+        const auto* src = static_cast<const int8_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = static_cast<float>(src[i]);
+        log_float_stats(label.c_str(), out);
         return out;
     }
     throw std::runtime_error("SANA-WM " + label + " output tensor has unsupported dtype");
+}
+
+bool debug_stats_enabled() {
+    const char* value = std::getenv("TRTMC_SANA_WM_DEBUG_STATS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+std::string debug_dump_dir() {
+    const char* value = std::getenv("TRTMC_SANA_WM_DEBUG_DUMP_DIR");
+    if (value == nullptr || value[0] == '\0' || std::string(value) == "0")
+        return {};
+    return value;
+}
+
+bool debug_step_dumps_enabled() {
+    const char* value = std::getenv("TRTMC_SANA_WM_DEBUG_STEP_DUMPS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+bool debug_vae_tensor_dumps_disabled() {
+    const char* value = std::getenv("TRTMC_SANA_WM_DEBUG_NO_VAE_DUMPS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+std::string stage1_step_debug_label(const char* base, int32_t step_index) {
+    if (step_index < 0 || !debug_step_dumps_enabled())
+        return std::string(base);
+    return std::string(base) + " step" + std::to_string(step_index);
+}
+
+std::string debug_dump_filename(const char* label) {
+    std::string name(label == nullptr ? "tensor" : label);
+    for (char& ch : name) {
+        const bool keep = std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-';
+        if (!keep)
+            ch = '_';
+    }
+    return name + ".f32";
+}
+
+void maybe_dump_float_tensor(const char* label, const std::vector<float>& values) {
+    const std::string dir = debug_dump_dir();
+    if (dir.empty() || values.empty())
+        return;
+    std::ofstream out(dir + "/" + debug_dump_filename(label), std::ios::binary);
+    if (!out)
+        return;
+    out.write(reinterpret_cast<const char*>(values.data()),
+              static_cast<std::streamsize>(values.size() * sizeof(float)));
+}
+
+std::string debug_input_dir() {
+    const char* value = std::getenv("TRTMC_SANA_WM_DEBUG_INPUT_DIR");
+    if (value == nullptr || value[0] == '\0' || std::string(value) == "0")
+        return {};
+    return value;
+}
+
+void maybe_load_float_tensor_override(const char* label, std::vector<float>& values) {
+    const std::string dir = debug_input_dir();
+    if (dir.empty() || values.empty())
+        return;
+    std::ifstream in(dir + "/" + debug_dump_filename(label), std::ios::binary);
+    if (!in)
+        return;
+    std::vector<float> loaded(values.size());
+    in.read(reinterpret_cast<char*>(loaded.data()),
+            static_cast<std::streamsize>(loaded.size() * sizeof(float)));
+    if (in.gcount() != static_cast<std::streamsize>(loaded.size() * sizeof(float))) {
+        std::cerr << "[sana_wm.debug] Ignoring tensor override with wrong size for " << label
+                  << std::endl;
+        return;
+    }
+    values = std::move(loaded);
+    std::cerr << "[sana_wm.debug] Loaded tensor override for " << label << std::endl;
+}
+
+void log_float_stats(const char* label, const std::vector<float>& values) {
+    if (!debug_stats_enabled() || values.empty())
+        return;
+    float min_value = values.front();
+    float max_value = values.front();
+    long double sum = 0.0L;
+    std::size_t finite_count = 0;
+    std::size_t negative_count = 0;
+    std::size_t above_one_count = 0;
+    std::size_t nonfinite_count = 0;
+    for (float value : values) {
+        if (!std::isfinite(value)) {
+            ++nonfinite_count;
+            continue;
+        }
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+        sum += static_cast<long double>(value);
+        ++finite_count;
+        if (value < 0.0F)
+            ++negative_count;
+        if (value > 1.0F)
+            ++above_one_count;
+    }
+    const long double mean = finite_count ? sum / static_cast<long double>(finite_count) : 0.0L;
+    std::cerr << "[sana_wm.stats] " << label << " count=" << values.size() << " finite="
+              << finite_count << " nonfinite=" << nonfinite_count << " min=" << min_value
+              << " max=" << max_value << " mean=" << static_cast<double>(mean)
+              << " lt0=" << negative_count << " gt1=" << above_one_count << std::endl;
+    const std::string label_string(label);
+    const bool is_vae_tensor = label_string.rfind("VAE encoder", 0) == 0 ||
+                               label_string.rfind("VAE decoder", 0) == 0 ||
+                               label_string.rfind("refiner VAE decoder", 0) == 0;
+    if (label_string.rfind("Stage-1 denoiser", 0) == 0 ||
+        label_string.rfind("Stage-1 final latent", 0) == 0 ||
+        (is_vae_tensor && !debug_vae_tensor_dumps_disabled())) {
+        maybe_dump_float_tensor(label, values);
+    }
+}
+
+void log_float_stats_slice(const char* label, const std::vector<float>& values,
+                           std::size_t offset, std::size_t count) {
+    if (!debug_stats_enabled())
+        return;
+    if (offset > values.size() || count > values.size() - offset)
+        throw std::runtime_error("SANA-WM debug stats slice is out of bounds");
+    std::vector<float> slice(values.begin() + static_cast<std::ptrdiff_t>(offset),
+                             values.begin() + static_cast<std::ptrdiff_t>(offset + count));
+    log_float_stats(label, slice);
+}
+
+void log_int_token_summary(const char* label, const std::vector<int32_t>& values) {
+    if (!debug_stats_enabled())
+        return;
+    std::size_t nonzero = 0;
+    for (int32_t value : values) {
+        if (value != 0)
+            ++nonzero;
+    }
+    std::cerr << "[sana_wm.tokens] " << label << " count=" << values.size()
+              << " nonzero=" << nonzero << " head=[";
+    const std::size_t head_count = std::min<std::size_t>(values.size(), 20);
+    for (std::size_t i = 0; i < head_count; ++i) {
+        if (i != 0)
+            std::cerr << ',';
+        std::cerr << values[i];
+    }
+    std::cerr << "] tail=[";
+    const std::size_t tail_count = std::min<std::size_t>(values.size(), 20);
+    const std::size_t tail_start = values.size() - tail_count;
+    for (std::size_t i = tail_start; i < values.size(); ++i) {
+        if (i != tail_start)
+            std::cerr << ',';
+        std::cerr << values[i];
+    }
+    std::cerr << "]" << std::endl;
 }
 
 DType input_dtype_or(const ITrtModule& module, const std::string& name, DType fallback) {
@@ -593,6 +1070,15 @@ std::string pick_input_name(const ITrtModule& module, std::initializer_list<cons
     if (inputs.size() == 1U)
         return inputs.front().name;
     throw std::runtime_error("SANA-WM " + label + " input tensor not found");
+}
+
+std::string pick_optional_input_name(const ITrtModule& module,
+                                     std::initializer_list<const char*> names) {
+    for (const char* name : names) {
+        if (module.has_input(name))
+            return name;
+    }
+    return {};
 }
 
 TensorMap::const_iterator find_output_tensor(const TensorMap& outputs,
@@ -781,6 +1267,26 @@ std::vector<float> decoder_attention_mask(int32_t token_index, std::size_t width
     return mask;
 }
 
+std::vector<float> decoder_attention_mask(int32_t token_index, std::size_t width,
+                                          const std::vector<int32_t>& key_mask) {
+    std::vector<float> mask(width, -10000.0F);
+    if (mask.empty())
+        return mask;
+    if (key_mask.empty())
+        return decoder_attention_mask(token_index, width);
+
+    const std::size_t current_index = static_cast<std::size_t>(std::max(token_index, 0));
+    const std::size_t cache_width = width - 1U;
+    const std::size_t visible_cache = std::min<std::size_t>(current_index, cache_width);
+    for (std::size_t i = 0; i < visible_cache; ++i) {
+        if (i < key_mask.size() && key_mask[i] != 0)
+            mask[i] = 0.0F;
+    }
+    if (current_index < key_mask.size() && key_mask[current_index] != 0)
+        mask.back() = 0.0F;
+    return mask;
+}
+
 void write_cache_values(DecoderCacheTensor& cache, const std::vector<float>& values,
                         std::size_t offset) {
     if (offset + values.size() > cache.numel()) {
@@ -871,6 +1377,8 @@ struct SanaWmTextEncoding {
 struct SanaWmRefinerText {
     std::vector<float> values;
     std::vector<int64_t> shape;
+    std::vector<float> attention_mask;
+    std::vector<int64_t> attention_mask_shape;
 };
 
 std::vector<float> repeat_batch(const std::vector<float>& values, int32_t batch) {
@@ -925,6 +1433,18 @@ void keep_stage1_anchor_frame(std::vector<float>& next, const std::vector<float>
     }
 }
 
+bool stage1_ltx_updates_non_anchor_tokens(float timestep) {
+    // PR379 compares this scalar against a BF16 condition mask. Values close enough to 1.0
+    // round back to 1.0 and do not denoise non-anchor tokens for that step.
+    const float mask_lhs = round_stage1_noise_to_bfloat16(timestep / 1000.0F - 1.0e-6F);
+    return mask_lhs < 1.0F;
+}
+
+void round_stage1_latents_to_bfloat16(std::vector<float>& values) {
+    for (float& value : values)
+        value = round_stage1_noise_to_bfloat16(value);
+}
+
 std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& model_output,
                                                      std::size_t latent_count, float cfg_scale) {
     std::vector<float> velocity(latent_count, 0.0F);
@@ -932,7 +1452,7 @@ std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& m
         if (model_output.size() != latent_count)
             throw std::runtime_error("SANA-WM Stage-1 denoiser output size mismatch");
         for (std::size_t i = 0; i < latent_count; ++i)
-            velocity[i] = -model_output[i];
+            velocity[i] = model_output[i];
         return velocity;
     }
     if (model_output.size() != latent_count * 2U)
@@ -940,7 +1460,7 @@ std::vector<float> stage1_velocity_from_model_output(const std::vector<float>& m
     for (std::size_t i = 0; i < latent_count; ++i) {
         const float uncond = model_output[i];
         const float cond = model_output[latent_count + i];
-        velocity[i] = -(uncond + cfg_scale * (cond - uncond));
+        velocity[i] = uncond + cfg_scale * (cond - uncond);
     }
     return velocity;
 }
@@ -1091,9 +1611,13 @@ std::vector<float> run_native_vae_encoder(ITrtModule& vae_encoder,
     const auto input_name =
         pick_input_name(vae_encoder, {"sample", "pixel_values", "images", "x"}, "VAE encoder");
     const DType input_dtype = input_dtype_or(vae_encoder, input_name, DType::kBFloat16);
+    std::vector<float> vae_input = first_frame.pixels_chw;
+    maybe_load_float_tensor_override("VAE encoder input", vae_input);
+    log_float_stats("VAE encoder input", vae_input);
+
     std::vector<half_bits_t> input16;
     TensorMap inputs;
-    inputs[input_name] = make_model_tensor(first_frame.pixels_chw, input16, input_dtype,
+    inputs[input_name] = make_model_tensor(vae_input, input16, input_dtype,
                                            {1, 3, 1, static_cast<int64_t>(first_frame.height),
                                             static_cast<int64_t>(first_frame.width)});
 
@@ -1116,6 +1640,17 @@ std::vector<int32_t> tokenize_fixed(const ITokenizer& tokenizer, const std::stri
         ids.resize(static_cast<std::size_t>(length));
     ids.resize(static_cast<std::size_t>(length), 0);
     return ids;
+}
+
+std::vector<int32_t> tokenize_fixed_left_padded(const ITokenizer& tokenizer,
+                                                const std::string& text, int32_t length) {
+    auto ids = tokenizer.encode(text);
+    if (static_cast<int32_t>(ids.size()) > length)
+        ids.resize(static_cast<std::size_t>(length));
+    std::vector<int32_t> out(static_cast<std::size_t>(length), 0);
+    const auto offset = out.size() - ids.size();
+    std::copy(ids.begin(), ids.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
+    return out;
 }
 
 std::vector<int32_t> attention_mask_from_tokens(const std::vector<int32_t>& ids) {
@@ -1156,6 +1691,7 @@ SanaWmTextEncoding run_native_full_sequence_text_encoder(ITrtModule& text_encode
 
 SanaWmTextEncoding run_native_decoder_text_encoder(ITrtModule& text_encoder,
                                                    const std::vector<int32_t>& input_ids,
+                                                   const std::vector<int32_t>& attention_mask,
                                                    int32_t text_dim, const char* label) {
     const auto attention_shape =
         input_shape_or_profile_max(text_encoder, "attention_mask", "text attention mask");
@@ -1170,7 +1706,7 @@ SanaWmTextEncoding run_native_decoder_text_encoder(ITrtModule& text_encoder,
     for (std::size_t pos = 0; pos < input_ids.size(); ++pos) {
         int32_t token_id = input_ids[pos];
         int32_t position_id = static_cast<int32_t>(pos);
-        auto attention = decoder_attention_mask(position_id, attention_count);
+        auto attention = decoder_attention_mask(position_id, attention_count, attention_mask);
         std::vector<half_bits_t> attention16;
 
         TensorMap inputs;
@@ -1211,6 +1747,143 @@ SanaWmTextEncoding run_native_decoder_text_encoder(ITrtModule& text_encoder,
     return {std::move(encoded), {1, static_cast<int64_t>(input_ids.size()), output_dim}};
 }
 
+std::vector<std::string> sorted_refiner_debug_output_names(const TensorMap& outputs) {
+    std::vector<std::string> names;
+    if (outputs.find("debug_embed") != outputs.end())
+        names.push_back("debug_embed");
+
+    std::vector<std::pair<int32_t, std::string>> indexed;
+    for (const auto& [name, _] : outputs) {
+        const int32_t idx = trailing_nonnegative_suffix(name, "debug_hidden_");
+        if (idx >= 0)
+            indexed.emplace_back(idx, name);
+    }
+    std::sort(indexed.begin(), indexed.end());
+    for (const auto& [_, name] : indexed)
+        names.push_back(name);
+    return names;
+}
+
+SanaWmTextEncoding
+run_native_refiner_decoder_hidden_stack(ITrtModule& text_encoder,
+                                        const std::vector<int32_t>& input_ids,
+                                        const std::vector<int32_t>& attention_mask) {
+    const auto attention_shape =
+        input_shape_or_profile_max(text_encoder, "attention_mask", "refiner text attention mask");
+    const auto attention_count =
+        checked_shape_numel(attention_shape, "refiner text attention mask");
+    auto caches = collect_decoder_cache_layers(text_encoder);
+
+    std::vector<std::vector<float>> encoded_rows(input_ids.size());
+    std::vector<std::string> hidden_output_names;
+    int32_t hidden_dim = 0;
+    int32_t packed_dim = 0;
+
+    for (std::size_t pos = 0; pos < input_ids.size(); ++pos) {
+        if (pos >= attention_mask.size() || attention_mask[pos] == 0)
+            continue;
+        int32_t token_id = input_ids[pos];
+        int32_t position_id = static_cast<int32_t>(pos);
+        auto attention = decoder_attention_mask(position_id, attention_count, attention_mask);
+        std::vector<half_bits_t> attention16;
+
+        TensorMap inputs;
+        inputs["token_id"] = Tensor{const_cast<int32_t*>(&token_id), {1}, DType::kInt32};
+        inputs["position_id"] = Tensor{const_cast<int32_t*>(&position_id), {1}, DType::kInt32};
+        inputs["attention_mask"] = make_model_tensor(
+            attention, attention16, input_dtype_or(text_encoder, "attention_mask", DType::kFloat32),
+            attention_shape);
+
+        for (auto& layer : caches) {
+            inputs[layer.k.input_name] = make_cache_tensor(layer.k);
+            inputs[layer.v.input_name] = make_cache_tensor(layer.v);
+        }
+
+        auto outputs = text_encoder.forward(inputs);
+        if (hidden_output_names.empty()) {
+            hidden_output_names = sorted_refiner_debug_output_names(outputs);
+            if (hidden_output_names.empty()) {
+                throw std::runtime_error("SANA-WM native refiner text connector requires "
+                                         "debug_embed/debug_hidden_* outputs from the Gemma "
+                                         "text encoder plan");
+            }
+        }
+
+        std::vector<std::vector<float>> per_layer;
+        per_layer.reserve(hidden_output_names.size());
+        for (const auto& name : hidden_output_names) {
+            const auto it = outputs.find(name);
+            if (it == outputs.end()) {
+                throw std::runtime_error("SANA-WM native refiner text encoder missing output " +
+                                         name);
+            }
+            auto values = tensor_to_float_vector(it->second, it->second.numel(),
+                                                 "refiner text hidden " + name);
+            if (values.empty() ||
+                values.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+                throw std::runtime_error(
+                    "SANA-WM native refiner text hidden-state output size is invalid");
+            }
+            if (hidden_dim == 0) {
+                hidden_dim = static_cast<int32_t>(values.size());
+                packed_dim = hidden_dim * static_cast<int32_t>(hidden_output_names.size());
+            } else if (values.size() != static_cast<std::size_t>(hidden_dim)) {
+                throw std::runtime_error("SANA-WM native refiner text hidden-state outputs have "
+                                         "mismatched hidden dimensions");
+            }
+            per_layer.push_back(std::move(values));
+        }
+
+        auto& row = encoded_rows[pos];
+        row.reserve(static_cast<std::size_t>(packed_dim));
+        for (int32_t h = 0; h < hidden_dim; ++h) {
+            for (const auto& values : per_layer)
+                row.push_back(values[static_cast<std::size_t>(h)]);
+        }
+        update_decoder_caches(caches, outputs, position_id);
+    }
+
+    if (packed_dim <= 0)
+        throw std::runtime_error("SANA-WM native refiner text prompt contains no valid tokens");
+
+    std::vector<float> encoded;
+    encoded.reserve(input_ids.size() * static_cast<std::size_t>(packed_dim));
+    const std::vector<float> pad_row(static_cast<std::size_t>(packed_dim), 0.0F);
+    for (const auto& row : encoded_rows) {
+        const auto& values = row.empty() ? pad_row : row;
+        encoded.insert(encoded.end(), values.begin(), values.end());
+    }
+
+    return {std::move(encoded), {1, static_cast<int64_t>(input_ids.size()), packed_dim}};
+}
+
+SanaWmTextEncoding
+run_native_refiner_full_sequence_hidden_stack(ITrtModule& text_encoder,
+                                              const std::vector<int32_t>& input_ids,
+                                              const std::vector<int32_t>& attention_mask) {
+    const int64_t seq_len = static_cast<int64_t>(input_ids.size());
+    TensorMap inputs;
+    inputs["input_ids"] = Tensor{const_cast<int32_t*>(input_ids.data()), {1, seq_len},
+                                 DType::kInt32};
+    inputs["attention_mask"] =
+        Tensor{const_cast<int32_t*>(attention_mask.data()), {1, seq_len}, DType::kInt32};
+
+    auto outputs = text_encoder.forward(inputs);
+    const auto it =
+        find_output_tensor(outputs, {"text_hidden_states", "all_hidden_states",
+                                     "stacked_hidden_states", "packed_hidden_states",
+                                     "hidden_states", "output0"});
+    if (it == outputs.end()) {
+        throw std::runtime_error("SANA-WM native refiner text connector requires a packed "
+                                 "all-hidden-state output from the text encoder plan");
+    }
+    auto shape = it->second.shape;
+    auto values = tensor_to_float_vector(it->second, it->second.numel(), "refiner text hidden");
+    if (shape.empty())
+        shape = {1, seq_len, static_cast<int64_t>(values.size()) / std::max<int64_t>(seq_len, 1)};
+    return {std::move(values), std::move(shape)};
+}
+
 SanaWmTextEncoding run_native_text_encoder(ITrtModule& text_encoder,
                                            const std::vector<int32_t>& input_ids,
                                            const std::vector<int32_t>& attention_mask,
@@ -1224,7 +1897,8 @@ SanaWmTextEncoding run_native_text_encoder(ITrtModule& text_encoder,
     }
     if (text_encoder.has_input("token_id") && text_encoder.has_input("position_id") &&
         text_encoder.has_input("attention_mask")) {
-        return run_native_decoder_text_encoder(text_encoder, input_ids, text_dim, label);
+        return run_native_decoder_text_encoder(text_encoder, input_ids, attention_mask, text_dim,
+                                               label);
     }
     throw std::runtime_error(std::string("SANA-WM native ") + label +
                              " text encoder input tensors not found");
@@ -1273,21 +1947,26 @@ SanaWmTextConditioning run_native_text_conditioning(ITrtModule& text_encoder,
 
     auto cond_ids = tokenize_fixed(tokenizer, conditioning_prompt, cond_len);
     auto cond_mask_full = attention_mask_from_tokens(cond_ids);
+    log_int_token_summary("stage1 cond ids", cond_ids);
+    log_int_token_summary("stage1 cond mask full", cond_mask_full);
     auto cond_full = run_native_text_encoder(text_encoder, cond_ids, cond_mask_full,
                                              config.text_encoder_dim, "cond")
                          .values;
 
     auto neg_ids = tokenize_fixed(tokenizer, negative_prompt, config.text_encoder_max_length);
     auto neg_mask = attention_mask_from_tokens(neg_ids);
+    log_int_token_summary("stage1 negative ids", neg_ids);
+    log_int_token_summary("stage1 negative mask", neg_mask);
     auto neg = run_native_text_encoder(text_encoder, neg_ids, neg_mask, config.text_encoder_dim,
                                        "negative")
                    .values;
 
-    return {select_stage1_text_window(cond_full, cond_len, config.text_encoder_max_length,
-                                      config.text_encoder_dim),
-            std::move(neg),
-            select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length),
-            std::move(neg_mask)};
+    auto cond = select_stage1_text_window(cond_full, cond_len, config.text_encoder_max_length,
+                                          config.text_encoder_dim);
+    auto cond_mask = select_stage1_mask_window(cond_mask_full, config.text_encoder_max_length);
+    log_int_token_summary("stage1 cond mask selected", cond_mask);
+
+    return {std::move(cond), std::move(neg), std::move(cond_mask), std::move(neg_mask)};
 }
 
 Tensor make_mask_tensor(const std::vector<int32_t>& values, std::vector<float>& scratch,
@@ -1304,7 +1983,8 @@ Tensor make_mask_tensor(const std::vector<int32_t>& values, std::vector<float>& 
 std::vector<float>
 run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& latents,
                            const SanaWmTextConditioning& text, const SanaWmCameraConditions& camera,
-                           const SanaWmRuntimeConfig& config, float timestep, float cfg_scale) {
+                           const SanaWmRuntimeConfig& config, float timestep, float cfg_scale,
+                           int32_t step_index) {
     if (!denoiser.ok())
         throw std::runtime_error("SANA-WM native Stage-1 denoiser is not ready");
 
@@ -1314,8 +1994,36 @@ run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& late
     auto text_input = stage1_text_input(text, do_cfg);
     auto mask_input = stage1_mask_input(text, do_cfg);
     auto raymap_input = repeat_batch(camera.raymap, batch);
+    auto raymats_input = repeat_batch(camera.raymats, batch);
+    auto raymats_inv_input = repeat_batch(camera.raymats_inv, batch);
     auto plucker_input = repeat_batch(camera.chunk_plucker, batch);
     auto timestep_input = stage1_frame_timestep(batch, latents.frames, timestep);
+    maybe_load_float_tensor_override("Stage-1 denoiser input x", latent_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input timestep", timestep_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input y", text_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input camera_conditions", raymap_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input raymats", raymats_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input raymats_inv", raymats_inv_input);
+    maybe_load_float_tensor_override("Stage-1 denoiser input chunk_plucker", plucker_input);
+    const auto x_label = stage1_step_debug_label("Stage-1 denoiser input x", step_index);
+    const auto timestep_label =
+        stage1_step_debug_label("Stage-1 denoiser input timestep", step_index);
+    const auto y_label = stage1_step_debug_label("Stage-1 denoiser input y", step_index);
+    const auto camera_label =
+        stage1_step_debug_label("Stage-1 denoiser input camera_conditions", step_index);
+    const auto raymats_label =
+        stage1_step_debug_label("Stage-1 denoiser input raymats", step_index);
+    const auto raymats_inv_label =
+        stage1_step_debug_label("Stage-1 denoiser input raymats_inv", step_index);
+    const auto plucker_label =
+        stage1_step_debug_label("Stage-1 denoiser input chunk_plucker", step_index);
+    log_float_stats(x_label.c_str(), latent_input);
+    log_float_stats(timestep_label.c_str(), timestep_input);
+    log_float_stats(y_label.c_str(), text_input);
+    log_float_stats(camera_label.c_str(), raymap_input);
+    log_float_stats(raymats_label.c_str(), raymats_input);
+    log_float_stats(raymats_inv_label.c_str(), raymats_inv_input);
+    log_float_stats(plucker_label.c_str(), plucker_input);
 
     const auto latent_name = pick_input_name(
         denoiser, {"x", "sample", "latents", "hidden_states", "noisy_image_or_video"},
@@ -1337,6 +2045,8 @@ run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& late
     std::vector<half_bits_t> timestep16;
     std::vector<half_bits_t> mask16;
     std::vector<half_bits_t> raymap16;
+    std::vector<half_bits_t> raymats16;
+    std::vector<half_bits_t> raymats_inv16;
     std::vector<half_bits_t> plucker16;
     std::vector<float> mask_float;
     TensorMap inputs;
@@ -1355,6 +2065,26 @@ run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& late
     inputs[camera_name] = make_model_tensor(raymap_input, raymap16,
                                             input_dtype_or(denoiser, camera_name, DType::kBFloat16),
                                             {batch, camera.latent_frames, camera.raymap_width});
+    if (denoiser.has_input("raymats") || denoiser.has_input("ucpe_raymats")) {
+        const auto raymats_name = denoiser.has_input("raymats") ? "raymats" : "ucpe_raymats";
+        const auto token_count = static_cast<int64_t>(camera.latent_frames) *
+                                 static_cast<int64_t>(camera.latent_height) *
+                                 static_cast<int64_t>(camera.latent_width);
+        inputs[raymats_name] = make_model_tensor(
+            raymats_input, raymats16, input_dtype_or(denoiser, raymats_name, DType::kBFloat16),
+            {batch, token_count, 4, 4});
+    }
+    if (denoiser.has_input("raymats_inv") || denoiser.has_input("ucpe_raymats_inv")) {
+        const auto raymats_inv_name =
+            denoiser.has_input("raymats_inv") ? "raymats_inv" : "ucpe_raymats_inv";
+        const auto token_count = static_cast<int64_t>(camera.latent_frames) *
+                                 static_cast<int64_t>(camera.latent_height) *
+                                 static_cast<int64_t>(camera.latent_width);
+        inputs[raymats_inv_name] =
+            make_model_tensor(raymats_inv_input, raymats_inv16,
+                              input_dtype_or(denoiser, raymats_inv_name, DType::kBFloat16),
+                              {batch, token_count, 4, 4});
+    }
     inputs[plucker_name] = make_model_tensor(
         plucker_input, plucker16, input_dtype_or(denoiser, plucker_name, DType::kBFloat16),
         {batch, camera.chunk_plucker_channels, camera.latent_frames, camera.latent_height,
@@ -1366,7 +2096,14 @@ run_native_stage1_denoiser(ITrtModule& denoiser, const SanaWmStage1Latents& late
     if (it == outputs.end())
         throw std::runtime_error("SANA-WM native Stage-1 denoiser output tensor not found");
     const auto count = static_cast<std::size_t>(batch) * latents.values.size();
-    return tensor_to_float_vector(it->second, count, "Stage-1 denoiser");
+    const auto denoiser_label = stage1_step_debug_label("Stage-1 denoiser", step_index);
+    auto values = tensor_to_float_vector(it->second, count, denoiser_label);
+    if (do_cfg) {
+        log_float_stats_slice("Stage-1 denoiser uncond half", values, 0, latents.values.size());
+        log_float_stats_slice("Stage-1 denoiser cond half", values, latents.values.size(),
+                              latents.values.size());
+    }
+    return values;
 }
 
 SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser, SanaWmStage1Latents latents,
@@ -1385,15 +2122,19 @@ SanaWmStage1Latents run_native_stage1_solver(ITrtModule& denoiser, SanaWmStage1L
     for (int32_t step = 0; step < num_steps; ++step) {
         const float timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
         auto model_output = run_native_stage1_denoiser(denoiser, latents, text, camera, config,
-                                                       timestep, cfg_scale);
+                                                       timestep, cfg_scale, step);
+        if (!stage1_ltx_updates_non_anchor_tokens(timestep))
+            continue;
         auto velocity =
             stage1_velocity_from_model_output(model_output, latents.values.size(), cfg_scale);
         scheduler.step(velocity.data(), latents.values.data(), next.data(), latents.values.size(),
                        step);
         keep_stage1_anchor_frame(next, latents.values, latents.channels, latents.frames,
                                  latents.height, latents.width);
+        round_stage1_latents_to_bfloat16(next);
         latents.values.swap(next);
     }
+    log_float_stats("Stage-1 final latent", latents.values);
     return latents;
 }
 
@@ -1432,18 +2173,139 @@ SanaWmStage1Latents run_native_stage1_path(SanaWmNativeModules& modules,
                                     native_inputs.camera, config, num_steps, cfg_scale);
 }
 
+SanaWmRefinerText run_native_refiner_text_connector(ITrtModule& connector,
+                                                    const SanaWmTextEncoding& hidden_states,
+                                                    const std::vector<int32_t>& attention_mask) {
+    if (!connector.ok())
+        throw std::runtime_error("SANA-WM native refiner text connector is not ready");
+
+    const auto hidden_name = pick_input_name(connector,
+                                            {"text_hidden_states", "hidden_states",
+                                             "prompt_embeds", "input_hidden_states", "input0"},
+                                            "refiner text connector hidden states");
+    const auto mask_name =
+        pick_input_name(connector, {"attention_mask", "text_attention_mask",
+                                    "prompt_attention_mask", "input_attention_mask"},
+                        "refiner text connector attention mask");
+
+    std::vector<half_bits_t> hidden16;
+    std::vector<float> mask_float;
+    std::vector<half_bits_t> mask16;
+    TensorMap inputs;
+    inputs[hidden_name] =
+        make_model_tensor(hidden_states.values, hidden16,
+                          input_dtype_or(connector, hidden_name, DType::kBFloat16),
+                          hidden_states.shape);
+    inputs[mask_name] = make_mask_tensor(
+        attention_mask, mask_float, mask16, input_dtype_or(connector, mask_name, DType::kInt32),
+        {1, static_cast<int64_t>(attention_mask.size())});
+
+    auto outputs = connector.forward(inputs);
+    const auto context_it =
+        find_output_tensor(outputs, {"v_context", "video_text_embedding",
+                                     "video_text_embeddings", "connector_prompt_embeds",
+                                     "prompt_embeds", "encoder_hidden_states", "output0"});
+    if (context_it == outputs.end())
+        throw std::runtime_error("SANA-WM native refiner text connector output tensor not found");
+
+    auto values = tensor_to_float_vector(context_it->second, context_it->second.numel(),
+                                         "refiner text connector");
+    auto shape = context_it->second.shape;
+    if (shape.empty())
+        shape = {1, static_cast<int64_t>(values.size())};
+
+    std::vector<float> fallback_mask(attention_mask.begin(), attention_mask.end());
+    auto mask_values = std::move(fallback_mask);
+    std::vector<int64_t> mask_shape{1, static_cast<int64_t>(attention_mask.size())};
+    const auto mask_it =
+        find_output_tensor(outputs, {"v_attention_mask", "video_attention_mask",
+                                     "connector_attention_mask", "encoder_attention_mask",
+                                     "text_attention_mask", "prompt_attention_mask"});
+    if (mask_it != outputs.end() && mask_it != context_it) {
+        mask_values = tensor_to_float_vector(mask_it->second, mask_it->second.numel(),
+                                             "refiner connector attention mask");
+        mask_shape = mask_it->second.shape;
+        if (mask_shape.empty())
+            mask_shape = {1, static_cast<int64_t>(mask_values.size())};
+    }
+
+    return {std::move(values), std::move(shape), std::move(mask_values), std::move(mask_shape)};
+}
+
 SanaWmRefinerText run_native_refiner_text_encoder(ITrtModule& text_encoder,
-                                                  const ITokenizer& tokenizer,
+                                                  ITrtModule* text_connector,
+                                                  const ITokenizer& tokenizer, int32_t max_length,
                                                   const std::string& prompt) {
     if (!text_encoder.ok())
         throw std::runtime_error("SANA-WM native refiner text encoder is not ready");
-    constexpr int32_t kRefinerTextLength = 256;
-    auto input_ids = tokenize_fixed(tokenizer, prompt, kRefinerTextLength);
+    auto input_ids = tokenize_fixed_left_padded(tokenizer, prompt, max_length);
     auto attention_mask = attention_mask_from_tokens(input_ids);
+    std::vector<float> fallback_mask(attention_mask.begin(), attention_mask.end());
+
+    if (text_connector != nullptr) {
+        SanaWmTextEncoding hidden_states;
+        if (text_encoder.has_input("input_ids")) {
+            hidden_states = run_native_refiner_full_sequence_hidden_stack(text_encoder, input_ids,
+                                                                          attention_mask);
+        } else if (text_encoder.has_input("token_id") && text_encoder.has_input("position_id") &&
+                   text_encoder.has_input("attention_mask")) {
+            hidden_states =
+                run_native_refiner_decoder_hidden_stack(text_encoder, input_ids, attention_mask);
+        } else {
+            throw std::runtime_error("SANA-WM native refiner text encoder input tensors not found");
+        }
+        if (hidden_states.shape.empty())
+            hidden_states.shape = {1, static_cast<int64_t>(hidden_states.values.size())};
+        return run_native_refiner_text_connector(*text_connector, hidden_states, attention_mask);
+    }
+
+    if (text_encoder.has_input("input_ids")) {
+        const int64_t seq_len = static_cast<int64_t>(input_ids.size());
+        TensorMap inputs;
+        inputs["input_ids"] =
+            Tensor{const_cast<int32_t*>(input_ids.data()), {1, seq_len}, DType::kInt32};
+        inputs["attention_mask"] =
+            Tensor{const_cast<int32_t*>(attention_mask.data()), {1, seq_len}, DType::kInt32};
+
+        auto outputs = text_encoder.forward(inputs);
+        const auto context_it = find_output_tensor(
+            outputs, {"v_context", "video_text_embedding", "video_text_embeddings",
+                      "connector_prompt_embeds", "prompt_embeds", "last_hidden_state",
+                      "hidden_states", "text_embeddings", "encoder_hidden_states", "output0"});
+        if (context_it == outputs.end()) {
+            throw std::runtime_error(
+                "SANA-WM native refiner text encoder output tensor not found");
+        }
+
+        auto shape = context_it->second.shape;
+        auto values = tensor_to_float_vector(context_it->second, context_it->second.numel(),
+                                             "refiner");
+        if (shape.empty())
+            shape = {1, static_cast<int64_t>(values.size())};
+
+        auto mask_values = std::move(fallback_mask);
+        std::vector<int64_t> mask_shape{1, seq_len};
+        const auto mask_it =
+            find_output_tensor(outputs, {"v_attention_mask", "video_attention_mask",
+                                         "connector_attention_mask", "encoder_attention_mask",
+                                         "text_attention_mask", "prompt_attention_mask"});
+        if (mask_it != outputs.end() && mask_it != context_it) {
+            mask_values = tensor_to_float_vector(mask_it->second, mask_it->second.numel(),
+                                                 "refiner attention mask");
+            mask_shape = mask_it->second.shape;
+            if (mask_shape.empty())
+                mask_shape = {1, static_cast<int64_t>(mask_values.size())};
+        }
+
+        return {std::move(values), std::move(shape), std::move(mask_values),
+                std::move(mask_shape)};
+    }
+
     auto encoded = run_native_text_encoder(text_encoder, input_ids, attention_mask, 0, "refiner");
     if (encoded.shape.empty())
         encoded.shape = {1, static_cast<int64_t>(encoded.values.size())};
-    return {std::move(encoded.values), std::move(encoded.shape)};
+    return {std::move(encoded.values), std::move(encoded.shape), std::move(fallback_mask),
+            {1, static_cast<int64_t>(input_ids.size())}};
 }
 
 std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
@@ -1467,6 +2329,9 @@ std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
     const auto text_name =
         pick_input_name(denoiser, {"v_context", "encoder_hidden_states", "text_embeddings"},
                         "refiner denoiser text");
+    const auto text_mask_name = pick_optional_input_name(
+        denoiser, {"v_attention_mask", "encoder_attention_mask", "attention_mask",
+                   "text_attention_mask", "prompt_attention_mask"});
     const auto sigma_name =
         pick_input_name(denoiser, {"sigma", "timestep"}, "refiner denoiser sigma");
 
@@ -1474,6 +2339,7 @@ std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
     std::vector<half_bits_t> clean16;
     std::vector<half_bits_t> positions16;
     std::vector<half_bits_t> text16;
+    std::vector<half_bits_t> text_mask16;
     std::vector<half_bits_t> sigma16;
     std::vector<float> sigma_vec{sigma};
     TensorMap inputs;
@@ -1490,6 +2356,12 @@ std::vector<float> run_native_refiner_denoiser(ITrtModule& denoiser,
         {1, 3, total_tokens, 2});
     inputs[text_name] = make_model_tensor(
         text.values, text16, input_dtype_or(denoiser, text_name, DType::kBFloat16), text.shape);
+    if (!text_mask_name.empty()) {
+        inputs[text_mask_name] =
+            make_model_tensor(text.attention_mask, text_mask16,
+                              input_dtype_or(denoiser, text_mask_name, DType::kFloat32),
+                              text.attention_mask_shape);
+    }
     inputs[sigma_name] = make_model_tensor(
         sigma_vec, sigma16, input_dtype_or(denoiser, sigma_name, DType::kFloat32), {1});
 
@@ -1525,13 +2397,13 @@ std::vector<float> refiner_euler_step(const std::vector<float>& sample,
     const float dt = sigma_next - sigma;
     for (std::size_t i = 0; i < sample.size(); ++i) {
         const float velocity = (sample[i] - denoised[i]) / std::max(sigma, 1.0e-6F);
-        out[i] = sample[i] + velocity * dt;
+        out[i] = round_stage1_noise_to_bfloat16(sample[i] + velocity * dt);
     }
     return out;
 }
 
-SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& denoiser,
-                                       const ITokenizer& tokenizer,
+SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule* text_connector,
+                                       ITrtModule& denoiser, const ITokenizer& tokenizer,
                                        const SanaWmStage1Latents& stage1,
                                        const SanaWmRuntimeConfig& config, const GenerateConfig& cfg,
                                        const std::string& prompt) {
@@ -1539,18 +2411,27 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
     if (stage1.frames <= kSinkFrames)
         throw std::runtime_error("SANA-WM native refiner requires more than one latent frame");
     const int32_t current_frames = stage1.frames - kSinkFrames;
-    const auto text = run_native_refiner_text_encoder(text_encoder, tokenizer, prompt);
+    const auto text = run_native_refiner_text_encoder(
+        text_encoder, text_connector, tokenizer, config.refiner_text_encoder_max_length, prompt);
     auto sink = patchify_refiner_latents(stage1.values, stage1.channels, 0, kSinkFrames,
                                          stage1.frames, stage1.height, stage1.width);
     auto current_clean =
         patchify_refiner_latents(stage1.values, stage1.channels, kSinkFrames, current_frames,
                                  stage1.frames, stage1.height, stage1.width);
-    auto noise = sample_stage1_noise(current_clean.size(),
-                                     cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
-                                                   : static_cast<uint64_t>(config.seed));
+    auto noise_cthw = sample_stage1_noise(stage1_latent_count(stage1.channels, current_frames,
+                                                              stage1.height, stage1.width),
+                                          cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed)
+                                                        : static_cast<uint64_t>(config.seed));
+    auto noise = patchify_refiner_latents(noise_cthw, stage1.channels, 0, current_frames,
+                                          current_frames, stage1.height, stage1.width);
     std::vector<float> current(current_clean.size(), 0.0F);
     for (std::size_t i = 0; i < current.size(); ++i)
-        current[i] = (1.0F - kRefinerSigmas[0]) * current_clean[i] + kRefinerSigmas[0] * noise[i];
+        current[i] = round_stage1_noise_to_bfloat16(
+            (1.0F - kRefinerSigmas[0]) * current_clean[i] + kRefinerSigmas[0] * noise[i]);
+    log_float_stats("refiner input stage1 latent", stage1.values);
+    log_float_stats("refiner current clean", current_clean);
+    log_float_stats("refiner initial noise", noise);
+    log_float_stats("refiner noisy current step0", current);
 
     const auto positions =
         refiner_positions(kSinkFrames, current_frames, stage1.height, stage1.width, config.fps);
@@ -1569,7 +2450,10 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
         auto output = run_native_refiner_denoiser(denoiser, combined, clean, mask, positions, text,
                                                   kRefinerSigmas[i], total_tokens, stage1.channels);
         auto pred = refiner_current_prediction(output, context_values, current_values);
+        log_float_stats((std::string("refiner denoised step") + std::to_string(i)).c_str(), pred);
         current = refiner_euler_step(current, pred, kRefinerSigmas[i], kRefinerSigmas[i + 1U]);
+        log_float_stats((std::string("refiner noisy current step") + std::to_string(i + 1U)).c_str(),
+                        current);
     }
 
     auto current_cthw = unpatchify_refiner_current(current, stage1.channels, current_frames,
@@ -1592,7 +2476,9 @@ SanaWmStage1Latents run_native_refiner(ITrtModule& text_encoder, ITrtModule& den
 }
 
 bool has_any_refiner_module(const SanaWmNativeModules& modules) {
-    return modules.refiner_text_encoder || modules.refiner_denoiser || modules.refiner_vae_decoder;
+    return modules.refiner_text_encoder || modules.refiner_text_connector ||
+           modules.refiner_denoiser || modules.refiner_vae_decoder ||
+           !modules.refiner_vae_decoder_tiles.empty();
 }
 
 bool has_stage1_core_modules(const SanaWmNativeModules& modules) {
@@ -1609,56 +2495,355 @@ void validate_native_module_set(const SanaWmNativeModules& modules) {
     if (has_any_refiner_module(modules)) {
         if (!modules.has_refiner()) {
             throw std::runtime_error("SANA-WM native TensorRT execution requires a complete "
-                                     "refiner module set: refiner text encoder, refiner denoiser, "
-                                     "and refiner VAE decoder");
+                                     "refiner module set: refiner text encoder, optional refiner "
+                                     "text connector, refiner denoiser, and refiner VAE decoder");
         }
         return;
     }
-    if (!modules.vae_decoder) {
+    if (!modules.vae_decoder && modules.vae_decoder_tiles.empty()) {
         throw std::runtime_error("SANA-WM native TensorRT execution requires a VAE decoder module "
                                  "when no native refiner is bundled");
     }
 }
 
-ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
-                                   const SanaWmRuntimeConfig& config) {
-    if (!vae_decoder.ok())
-        throw std::runtime_error("SANA-WM native VAE decoder is not ready");
+struct SanaWmDecodedCthw {
+    std::vector<float> values;
+    int32_t frames{0};
+    int32_t height{0};
+    int32_t width{0};
+};
 
-    const auto input_name = pick_input_name(vae_decoder, {"latents", "sample", "z"}, "VAE decoder");
+std::size_t vae_video_index(int32_t channel, int32_t frame, int32_t y, int32_t x,
+                            int32_t frames, int32_t height, int32_t width) {
+    return (((static_cast<std::size_t>(channel) * static_cast<std::size_t>(frames) +
+              static_cast<std::size_t>(frame)) *
+                 static_cast<std::size_t>(height) +
+             static_cast<std::size_t>(y)) *
+                static_cast<std::size_t>(width) +
+            static_cast<std::size_t>(x));
+}
+
+int32_t decoded_frames_for_latent_frames(int32_t latent_frames, int32_t stride) {
+    if (latent_frames <= 0)
+        return 0;
+    return (latent_frames - 1) * stride + 1;
+}
+
+std::vector<float> extract_latent_tile(const SanaWmStage1Latents& latents, int32_t frame_start,
+                                       int32_t tile_frames, int32_t y_start,
+                                       int32_t tile_height, int32_t x_start,
+                                       int32_t tile_width) {
+    std::vector<float> out(static_cast<std::size_t>(latents.channels) *
+                               static_cast<std::size_t>(tile_frames) *
+                               static_cast<std::size_t>(tile_height) *
+                               static_cast<std::size_t>(tile_width),
+                           0.0F);
+    for (int32_t c = 0; c < latents.channels; ++c)
+        for (int32_t t = 0; t < tile_frames; ++t)
+            for (int32_t y = 0; y < tile_height; ++y)
+                for (int32_t x = 0; x < tile_width; ++x) {
+                    out[stage1_latent_index(c, t, y, x, tile_frames, tile_height, tile_width)] =
+                        latents.values[stage1_latent_index(
+                            c, frame_start + t, y_start + y, x_start + x, latents.frames,
+                            latents.height, latents.width)];
+                }
+    return out;
+}
+
+const SanaWmVaeDecoderTile* find_vae_decoder_tile(const std::vector<SanaWmVaeDecoderTile>& tiles,
+                                                  int32_t frames, int32_t height,
+                                                  int32_t width) {
+    for (const auto& tile : tiles) {
+        if (tile.latent_frames == frames && tile.latent_height == height &&
+            tile.latent_width == width && tile.module) {
+            return &tile;
+        }
+    }
+    return nullptr;
+}
+
+SanaWmDecodedCthw run_native_vae_decoder_cthw(ITrtModule& vae_decoder,
+                                              const std::vector<float>& latent_values,
+                                              int32_t channels, int32_t latent_frames,
+                                              int32_t latent_height, int32_t latent_width,
+                                              int32_t vae_time_stride,
+                                              int32_t vae_spatial_stride,
+                                              const char* label) {
+    if (!vae_decoder.ok())
+        throw std::runtime_error(std::string("SANA-WM native ") + label + " is not ready");
+
+    const auto input_name = pick_input_name(vae_decoder, {"latents", "sample", "z"}, label);
     std::vector<half_bits_t> latent16;
     TensorMap inputs;
     inputs[input_name] = make_model_tensor(
-        latents.values, latent16, input_dtype_or(vae_decoder, input_name, DType::kBFloat16),
-        {1, latents.channels, latents.frames, latents.height, latents.width});
+        latent_values, latent16, input_dtype_or(vae_decoder, input_name, DType::kBFloat16),
+        {1, channels, latent_frames, latent_height, latent_width});
 
     auto outputs = vae_decoder.forward(inputs);
     const auto it = find_output_tensor(outputs, {"output0", "sample", "decoder_output", "video"});
     if (it == outputs.end())
-        throw std::runtime_error("SANA-WM native VAE decoder output tensor not found");
+        throw std::runtime_error(std::string("SANA-WM native ") + label +
+                                 " output tensor not found");
 
-    const auto raw_count =
-        static_cast<std::size_t>(3) * static_cast<std::size_t>(config.num_frames) *
-        static_cast<std::size_t>(config.height) * static_cast<std::size_t>(config.width);
-    auto raw = tensor_to_float_vector(it->second, raw_count, "VAE decoder");
+    const int32_t out_frames = decoded_frames_for_latent_frames(latent_frames, vae_time_stride);
+    const int32_t out_height = latent_height * vae_spatial_stride;
+    const int32_t out_width = latent_width * vae_spatial_stride;
+    const auto raw_count = static_cast<std::size_t>(3) * static_cast<std::size_t>(out_frames) *
+                           static_cast<std::size_t>(out_height) *
+                           static_cast<std::size_t>(out_width);
+    return {tensor_to_float_vector(it->second, raw_count, label), out_frames, out_height,
+            out_width};
+}
+
+void blend_vertical(SanaWmDecodedCthw& above, SanaWmDecodedCthw& current, int32_t blend_extent) {
+    blend_extent = std::min({above.height, current.height, blend_extent});
+    for (int32_t y = 0; y < blend_extent; ++y) {
+        const float alpha = static_cast<float>(y) / static_cast<float>(blend_extent);
+        for (int32_t c = 0; c < 3; ++c)
+            for (int32_t t = 0; t < current.frames; ++t)
+                for (int32_t x = 0; x < current.width; ++x) {
+                    const auto src = vae_video_index(c, t, above.height - blend_extent + y, x,
+                                                     above.frames, above.height, above.width);
+                    const auto dst =
+                        vae_video_index(c, t, y, x, current.frames, current.height, current.width);
+                    current.values[dst] = above.values[src] * (1.0F - alpha) +
+                                          current.values[dst] * alpha;
+                }
+    }
+}
+
+void blend_horizontal(SanaWmDecodedCthw& left, SanaWmDecodedCthw& current,
+                      int32_t blend_extent) {
+    blend_extent = std::min({left.width, current.width, blend_extent});
+    for (int32_t x = 0; x < blend_extent; ++x) {
+        const float alpha = static_cast<float>(x) / static_cast<float>(blend_extent);
+        for (int32_t c = 0; c < 3; ++c)
+            for (int32_t t = 0; t < current.frames; ++t)
+                for (int32_t y = 0; y < current.height; ++y) {
+                    const auto src = vae_video_index(c, t, y, left.width - blend_extent + x,
+                                                     left.frames, left.height, left.width);
+                    const auto dst =
+                        vae_video_index(c, t, y, x, current.frames, current.height, current.width);
+                    current.values[dst] = left.values[src] * (1.0F - alpha) +
+                                          current.values[dst] * alpha;
+                }
+    }
+}
+
+void blend_temporal(SanaWmDecodedCthw& previous, SanaWmDecodedCthw& current,
+                    int32_t blend_extent) {
+    blend_extent = std::min({previous.frames, current.frames, blend_extent});
+    for (int32_t t = 0; t < blend_extent; ++t) {
+        const float alpha = static_cast<float>(t) / static_cast<float>(blend_extent);
+        for (int32_t c = 0; c < 3; ++c)
+            for (int32_t y = 0; y < current.height; ++y)
+                for (int32_t x = 0; x < current.width; ++x) {
+                    const auto src =
+                        vae_video_index(c, previous.frames - blend_extent + t, y, x,
+                                        previous.frames, previous.height, previous.width);
+                    const auto dst =
+                        vae_video_index(c, t, y, x, current.frames, current.height, current.width);
+                    current.values[dst] = previous.values[src] * (1.0F - alpha) +
+                                          current.values[dst] * alpha;
+                }
+    }
+}
+
+SanaWmDecodedCthw drop_last_frame(SanaWmDecodedCthw input) {
+    if (input.frames <= 0)
+        return input;
+    const int32_t out_frames = input.frames - 1;
+    std::vector<float> out(static_cast<std::size_t>(3) * static_cast<std::size_t>(out_frames) *
+                               static_cast<std::size_t>(input.height) *
+                               static_cast<std::size_t>(input.width),
+                           0.0F);
+    for (int32_t c = 0; c < 3; ++c)
+        for (int32_t t = 0; t < out_frames; ++t)
+            for (int32_t y = 0; y < input.height; ++y)
+                for (int32_t x = 0; x < input.width; ++x)
+                    out[vae_video_index(c, t, y, x, out_frames, input.height, input.width)] =
+                        input.values[vae_video_index(c, t, y, x, input.frames, input.height,
+                                                     input.width)];
+    input.values = std::move(out);
+    input.frames = out_frames;
+    return input;
+}
+
+SanaWmDecodedCthw decode_native_vae_spatial_tiled(
+    const std::vector<SanaWmVaeDecoderTile>& tiles, const SanaWmStage1Latents& latents,
+    const SanaWmRuntimeConfig& config, int32_t frame_start, int32_t tile_frames,
+    const char* label) {
+    const int32_t tile_latent_min_height =
+        std::max(1, config.vae_tile_sample_min_height / config.vae_spatial_stride);
+    const int32_t tile_latent_min_width =
+        std::max(1, config.vae_tile_sample_min_width / config.vae_spatial_stride);
+    const int32_t tile_latent_stride_height =
+        std::max(1, config.vae_tile_sample_stride_height / config.vae_spatial_stride);
+    const int32_t tile_latent_stride_width =
+        std::max(1, config.vae_tile_sample_stride_width / config.vae_spatial_stride);
+    const int32_t blend_height =
+        std::max(0, config.vae_tile_sample_min_height - config.vae_tile_sample_stride_height);
+    const int32_t blend_width =
+        std::max(0, config.vae_tile_sample_min_width - config.vae_tile_sample_stride_width);
+    if (!config.vae_use_spatial_tiling ||
+        (latents.height <= tile_latent_min_height && latents.width <= tile_latent_min_width)) {
+        const auto* tile_module =
+            find_vae_decoder_tile(tiles, tile_frames, latents.height, latents.width);
+        if (!tile_module) {
+            throw std::runtime_error("SANA-WM native tiled VAE missing tile decoder for [" +
+                                     std::to_string(tile_frames) + "," +
+                                     std::to_string(latents.height) + "," +
+                                     std::to_string(latents.width) + "]");
+        }
+        auto latent_tile = extract_latent_tile(latents, frame_start, tile_frames, 0,
+                                               latents.height, 0, latents.width);
+        return run_native_vae_decoder_cthw(
+            *tile_module->module, latent_tile, latents.channels, tile_frames, latents.height,
+            latents.width, config.vae_time_stride, config.vae_spatial_stride, label);
+    }
+    const int32_t output_frames = decoded_frames_for_latent_frames(tile_frames, config.vae_time_stride);
+    SanaWmDecodedCthw out;
+    out.frames = output_frames;
+    out.height = latents.height * config.vae_spatial_stride;
+    out.width = latents.width * config.vae_spatial_stride;
+    out.values.resize(static_cast<std::size_t>(3) * static_cast<std::size_t>(out.frames) *
+                          static_cast<std::size_t>(out.height) *
+                          static_cast<std::size_t>(out.width),
+                      0.0F);
+
+    std::vector<std::vector<SanaWmDecodedCthw>> rows;
+    int32_t dst_y = 0;
+    for (int32_t y0 = 0; y0 < latents.height; y0 += tile_latent_stride_height) {
+        std::vector<SanaWmDecodedCthw> row;
+        for (int32_t x0 = 0; x0 < latents.width; x0 += tile_latent_stride_width) {
+            const int32_t tile_height = std::min(tile_latent_min_height, latents.height - y0);
+            const int32_t tile_width = std::min(tile_latent_min_width, latents.width - x0);
+            const auto* tile_module =
+                find_vae_decoder_tile(tiles, tile_frames, tile_height, tile_width);
+            if (!tile_module) {
+                throw std::runtime_error("SANA-WM native tiled VAE missing tile decoder for [" +
+                                         std::to_string(tile_frames) + "," +
+                                         std::to_string(tile_height) + "," +
+                                         std::to_string(tile_width) + "]");
+            }
+            auto latent_tile = extract_latent_tile(latents, frame_start, tile_frames, y0,
+                                                   tile_height, x0, tile_width);
+            row.push_back(run_native_vae_decoder_cthw(
+                *tile_module->module, latent_tile, latents.channels, tile_frames, tile_height,
+                tile_width, config.vae_time_stride, config.vae_spatial_stride, label));
+        }
+
+        int32_t dst_x = 0;
+        int32_t row_crop_height = 0;
+        const auto row_index = rows.size();
+        for (std::size_t j = 0; j < row.size(); ++j) {
+            auto& tile = row[j];
+            if (row_index > 0)
+                blend_vertical(rows[row_index - 1U][j], tile, blend_height);
+            if (j > 0)
+                blend_horizontal(row[j - 1U], tile, blend_width);
+            const int32_t crop_height =
+                std::min(config.vae_tile_sample_stride_height, tile.height);
+            const int32_t crop_width = std::min(config.vae_tile_sample_stride_width, tile.width);
+            row_crop_height = std::max(row_crop_height, crop_height);
+            for (int32_t c = 0; c < 3; ++c)
+                for (int32_t t = 0; t < tile.frames; ++t)
+                    for (int32_t y = 0; y < crop_height && dst_y + y < out.height; ++y)
+                        for (int32_t x = 0; x < crop_width && dst_x + x < out.width; ++x)
+                            out.values[vae_video_index(c, t, dst_y + y, dst_x + x, out.frames,
+                                                       out.height, out.width)] =
+                                tile.values[vae_video_index(c, t, y, x, tile.frames, tile.height,
+                                                            tile.width)];
+            dst_x += crop_width;
+        }
+        dst_y += row_crop_height;
+        rows.push_back(std::move(row));
+    }
+    return out;
+}
+
+SanaWmDecodedCthw decode_native_vae_tiled(const std::vector<SanaWmVaeDecoderTile>& tiles,
+                                          const SanaWmStage1Latents& latents,
+                                          const SanaWmRuntimeConfig& config,
+                                          const char* label) {
+    const int32_t tile_latent_min_frames =
+        std::max(1, config.vae_tile_sample_min_num_frames / config.vae_time_stride);
+    const int32_t tile_latent_stride_frames =
+        std::max(1, config.vae_tile_sample_stride_num_frames / config.vae_time_stride);
+    const int32_t blend_frames = std::max(
+        0, config.vae_tile_sample_min_num_frames - config.vae_tile_sample_stride_num_frames);
+    const int32_t output_frames = decoded_frames_for_latent_frames(latents.frames, config.vae_time_stride);
+
+    SanaWmDecodedCthw out;
+    out.frames = output_frames;
+    out.height = latents.height * config.vae_spatial_stride;
+    out.width = latents.width * config.vae_spatial_stride;
+    out.values.resize(static_cast<std::size_t>(3) * static_cast<std::size_t>(out.frames) *
+                          static_cast<std::size_t>(out.height) *
+                          static_cast<std::size_t>(out.width),
+                      0.0F);
+
+    std::vector<SanaWmDecodedCthw> temporal_tiles;
+    if (config.vae_use_framewise_decoding && latents.frames > tile_latent_min_frames) {
+        for (int32_t t0 = 0; t0 < latents.frames; t0 += tile_latent_stride_frames) {
+            const int32_t tile_frames =
+                std::min(tile_latent_min_frames + 1, latents.frames - t0);
+            if (t0 > 0 && tile_frames <= 1)
+                continue;
+            auto decoded =
+                decode_native_vae_spatial_tiled(tiles, latents, config, t0, tile_frames, label);
+            if (t0 > 0)
+                decoded = drop_last_frame(std::move(decoded));
+            temporal_tiles.push_back(std::move(decoded));
+        }
+    } else {
+        temporal_tiles.push_back(
+            decode_native_vae_spatial_tiled(tiles, latents, config, 0, latents.frames, label));
+    }
+
+    int32_t dst_t = 0;
+    for (std::size_t i = 0; i < temporal_tiles.size(); ++i) {
+        auto& tile = temporal_tiles[i];
+        int32_t crop_frames = 0;
+        if (i == 0) {
+            crop_frames = std::min(config.vae_tile_sample_stride_num_frames + 1, tile.frames);
+        } else {
+            blend_temporal(temporal_tiles[i - 1U], tile, blend_frames);
+            crop_frames = std::min(config.vae_tile_sample_stride_num_frames, tile.frames);
+        }
+        for (int32_t c = 0; c < 3; ++c)
+            for (int32_t t = 0; t < crop_frames && dst_t + t < out.frames; ++t)
+                for (int32_t y = 0; y < out.height; ++y)
+                    for (int32_t x = 0; x < out.width; ++x)
+                        out.values[vae_video_index(c, dst_t + t, y, x, out.frames, out.height,
+                                                   out.width)] =
+                            tile.values[vae_video_index(c, t, y, x, tile.frames, tile.height,
+                                                        tile.width)];
+        dst_t += crop_frames;
+    }
+    return out;
+}
+
+ImageResult image_result_from_stage1_cthw(const SanaWmDecodedCthw& raw,
+                                          const SanaWmRuntimeConfig& config) {
+    if (raw.frames < config.num_frames || raw.height < config.height || raw.width < config.width)
+        throw std::runtime_error("SANA-WM native tiled VAE output is smaller than requested video");
 
     ImageResult result;
     result.channels = 3;
     result.height = config.height;
     result.width = config.width;
     result.num_frames = config.num_frames;
+    const auto raw_count =
+        static_cast<std::size_t>(3) * static_cast<std::size_t>(config.num_frames) *
+        static_cast<std::size_t>(config.height) * static_cast<std::size_t>(config.width);
     result.pixels.resize(raw_count, 0.0F);
     for (int32_t t = 0; t < config.num_frames; ++t) {
         for (int32_t y = 0; y < config.height; ++y) {
             for (int32_t x = 0; x < config.width; ++x) {
                 for (int32_t c = 0; c < 3; ++c) {
-                    const auto src = (((static_cast<std::size_t>(c) *
-                                            static_cast<std::size_t>(config.num_frames) +
-                                        static_cast<std::size_t>(t)) *
-                                           static_cast<std::size_t>(config.height) +
-                                       static_cast<std::size_t>(y)) *
-                                          static_cast<std::size_t>(config.width) +
-                                      static_cast<std::size_t>(x));
+                    const auto src =
+                        vae_video_index(c, t, y, x, raw.frames, raw.height, raw.width);
                     const auto dst =
                         (((static_cast<std::size_t>(t) * static_cast<std::size_t>(config.height) +
                            static_cast<std::size_t>(y)) *
@@ -1666,12 +2851,29 @@ ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1La
                           static_cast<std::size_t>(x)) *
                              3U +
                          static_cast<std::size_t>(c));
-                    result.pixels[dst] = std::max(0.0F, std::min(1.0F, raw[src] * 0.5F + 0.5F));
+                    result.pixels[dst] =
+                        std::max(0.0F, std::min(1.0F, raw.values[src] * 0.5F + 0.5F));
                 }
             }
         }
     }
     return result;
+}
+
+ImageResult decode_native_sana_vae(ITrtModule& vae_decoder, const SanaWmStage1Latents& latents,
+                                   const SanaWmRuntimeConfig& config) {
+    auto raw = run_native_vae_decoder_cthw(
+        vae_decoder, latents.values, latents.channels, latents.frames, latents.height,
+        latents.width, config.vae_time_stride, config.vae_spatial_stride, "VAE decoder");
+    return image_result_from_stage1_cthw(raw, config);
+}
+
+ImageResult decode_native_sana_vae_tiled(const std::vector<SanaWmVaeDecoderTile>& tiles,
+                                         const SanaWmStage1Latents& latents,
+                                         const SanaWmRuntimeConfig& config) {
+    auto raw = decode_native_vae_tiled(tiles, latents, config, "VAE decoder");
+    log_float_stats("VAE decoder tiled", raw.values);
+    return image_result_from_stage1_cthw(raw, config);
 }
 
 float normalize_refiner_pixel(float value) {
@@ -1682,6 +2884,44 @@ float normalize_refiner_pixel(float value) {
 
 float normalize_refiner_cthw_pixel(float value) {
     return std::max(0.0F, std::min(1.0F, value * 0.5F + 0.5F));
+}
+
+ImageResult image_result_from_refiner_cthw(const SanaWmDecodedCthw& raw,
+                                           const SanaWmRuntimeConfig& config) {
+    const int32_t output_frames = std::max(config.num_frames - 1, 1);
+    if (raw.frames < output_frames || raw.height < config.height || raw.width < config.width)
+        throw std::runtime_error("SANA-WM native tiled refiner VAE output is smaller than "
+                                 "requested video");
+    const bool drop_sink = raw.frames >= output_frames + 1;
+    const int32_t src_frame_offset = drop_sink ? 1 : 0;
+    const auto direct_count = static_cast<std::size_t>(output_frames) *
+                              static_cast<std::size_t>(config.height) *
+                              static_cast<std::size_t>(config.width) * 3U;
+
+    ImageResult result;
+    result.channels = 3;
+    result.height = config.height;
+    result.width = config.width;
+    result.num_frames = output_frames;
+    result.pixels.resize(direct_count, 0.0F);
+    for (int32_t t = 0; t < output_frames; ++t)
+        for (int32_t y = 0; y < config.height; ++y)
+            for (int32_t x = 0; x < config.width; ++x)
+                for (int32_t c = 0; c < 3; ++c) {
+                    const auto src =
+                        vae_video_index(c, src_frame_offset + t, y, x, raw.frames, raw.height,
+                                        raw.width);
+                    const auto dst =
+                        (((static_cast<std::size_t>(t) *
+                               static_cast<std::size_t>(config.height) +
+                           static_cast<std::size_t>(y)) *
+                              static_cast<std::size_t>(config.width) +
+                          static_cast<std::size_t>(x)) *
+                             3U +
+                         static_cast<std::size_t>(c));
+                    result.pixels[dst] = normalize_refiner_cthw_pixel(raw.values[src]);
+                }
+    return result;
 }
 
 std::size_t cthw_video_index(int32_t channel, int32_t frame, int32_t y, int32_t x, int32_t frames,
@@ -1849,23 +3089,45 @@ ImageResult decode_native_refiner_vae(ITrtModule& vae_decoder, const SanaWmStage
     return result;
 }
 
+ImageResult decode_native_refiner_vae_tiled(const std::vector<SanaWmVaeDecoderTile>& tiles,
+                                            const SanaWmStage1Latents& latents,
+                                            const SanaWmRuntimeConfig& config) {
+    auto raw = decode_native_vae_tiled(tiles, latents, config, "refiner VAE decoder");
+    log_float_stats("refiner VAE decoder tiled", raw.values);
+    return image_result_from_refiner_cthw(raw, config);
+}
+
 ImageResult run_native_image_path(SanaWmNativeModules& modules,
-                                  const std::shared_ptr<ITokenizer>& tokenizer,
+                                  const std::shared_ptr<ITokenizer>& stage1_tokenizer,
+                                  const std::shared_ptr<ITokenizer>& refiner_tokenizer,
                                   const SanaWmRuntimeConfig& config, const SanaWmRequest& request,
                                   const GenerateConfig& cfg, const std::string& prompt) {
+    const std::string prompt_text = trim_ascii_whitespace(prompt);
     if (!cfg.no_refiner) {
-        if (!modules.has_refiner() || !tokenizer) {
+        if (!modules.has_refiner() || !refiner_tokenizer) {
             throw std::runtime_error("SANA-WM native refiner execution requires refiner text, "
                                      "denoiser, VAE, and tokenizer. Pass --no_refiner only when "
                                      "intentionally running a stage1-only bundle.");
         }
     }
-    auto latents = run_native_stage1_path(modules, tokenizer, config, request, cfg, prompt);
+    auto latents =
+        run_native_stage1_path(modules, stage1_tokenizer, config, request, cfg, prompt_text);
     if (!cfg.no_refiner) {
-        auto refined = run_native_refiner(*modules.refiner_text_encoder, *modules.refiner_denoiser,
-                                          *tokenizer, latents, config, cfg, prompt);
+        auto refined = run_native_refiner(*modules.refiner_text_encoder,
+                                          modules.refiner_text_connector.get(),
+                                          *modules.refiner_denoiser, *refiner_tokenizer, latents,
+                                          config, cfg, prompt_text);
+        if (!modules.refiner_vae_decoder_tiles.empty())
+            return decode_native_refiner_vae_tiled(modules.refiner_vae_decoder_tiles, refined,
+                                                   config);
+        if (!modules.refiner_vae_decoder) {
+            throw std::runtime_error("SANA-WM native refiner execution requires a refiner VAE "
+                                     "decoder module");
+        }
         return decode_native_refiner_vae(*modules.refiner_vae_decoder, refined, config);
     }
+    if (!modules.vae_decoder_tiles.empty())
+        return decode_native_sana_vae_tiled(modules.vae_decoder_tiles, latents, config);
     if (!modules.vae_decoder) {
         throw std::runtime_error("SANA-WM native TensorRT execution requires a VAE decoder module");
     }
@@ -1896,8 +3158,27 @@ SanaWmRuntimeConfig parse_sana_wm_config(const std::string& config_json) {
     cfg.vae_spatial_stride = extract_json_int(
         config_json, "vae_spatial_stride",
         extract_json_int(config_json, "vae_downsample_rate", cfg.vae_spatial_stride));
+    cfg.vae_use_framewise_decoding =
+        extract_json_bool(config_json, "vae_use_framewise_decoding", cfg.vae_use_framewise_decoding);
+    cfg.vae_use_spatial_tiling =
+        extract_json_bool(config_json, "vae_use_spatial_tiling", cfg.vae_use_spatial_tiling);
+    cfg.vae_tile_sample_min_height = extract_json_int(
+        config_json, "vae_tile_sample_min_height", cfg.vae_tile_sample_min_height);
+    cfg.vae_tile_sample_min_width = extract_json_int(
+        config_json, "vae_tile_sample_min_width", cfg.vae_tile_sample_min_width);
+    cfg.vae_tile_sample_stride_height = extract_json_int(
+        config_json, "vae_tile_sample_stride_height", cfg.vae_tile_sample_stride_height);
+    cfg.vae_tile_sample_stride_width = extract_json_int(
+        config_json, "vae_tile_sample_stride_width", cfg.vae_tile_sample_stride_width);
+    cfg.vae_tile_sample_min_num_frames = extract_json_int(
+        config_json, "vae_tile_sample_min_num_frames", cfg.vae_tile_sample_min_num_frames);
+    cfg.vae_tile_sample_stride_num_frames = extract_json_int(
+        config_json, "vae_tile_sample_stride_num_frames", cfg.vae_tile_sample_stride_num_frames);
     cfg.text_encoder_max_length =
         extract_json_int(config_json, "text_encoder_max_length", cfg.text_encoder_max_length);
+    cfg.refiner_text_encoder_max_length =
+        extract_json_int(config_json, "sana_wm_refiner_text_max_length",
+                         cfg.refiner_text_encoder_max_length);
     cfg.text_encoder_dim =
         extract_json_int(config_json, "sana_wm_dit_text_embed_dim",
                          extract_json_int(config_json, "text_encoder_dim", cfg.text_encoder_dim));
@@ -2042,15 +3323,11 @@ SanaWmPreprocessedImage sana_wm_resize_and_center_crop(const std::vector<float>&
     if (src_hwc.size() != expected_src)
         throw std::invalid_argument("SANA-WM source image buffer size does not match dimensions");
 
-    std::vector<float> resized(static_cast<std::size_t>(out.plan.resized_width) *
-                               static_cast<std::size_t>(out.plan.resized_height) * 3U);
-    void* resize_result = stbir_resize(
-        src_hwc.data(), src_width, src_height, static_cast<int>(src_width * 3 * sizeof(float)),
-        resized.data(), out.plan.resized_width, out.plan.resized_height,
-        static_cast<int>(out.plan.resized_width * 3 * sizeof(float)), STBIR_RGB, STBIR_TYPE_FLOAT,
-        STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT);
-    if (resize_result == nullptr)
+    std::vector<float> resized;
+    if (!resize_lanczos3_hwc(src_hwc, src_width, src_height, out.plan.resized_width,
+                             out.plan.resized_height, resized)) {
         return out;
+    }
 
     out.pixels_hwc.assign(static_cast<std::size_t>(target_width) *
                               static_cast<std::size_t>(target_height) * 3U,
@@ -2091,8 +3368,10 @@ SanaWmVaeInputImage sana_wm_prepare_vae_input_image(const std::vector<float>& sr
                               static_cast<std::size_t>(x)) *
                              3U;
             for (int32_t c = 0; c < 3; ++c) {
+                const float pixel =
+                    std::max(0.0F, std::min(1.0F, cropped.pixels_hwc[src + static_cast<std::size_t>(c)]));
                 out.pixels_chw[chw_index(c, y, x, target_height, target_width)] =
-                    cropped.pixels_hwc[src + static_cast<std::size_t>(c)] * 2.0F - 1.0F;
+                    pixel * 2.0F - 1.0F;
             }
         }
     }
@@ -2142,6 +3421,24 @@ sana_wm_prepare_camera_conditions(const std::vector<SanaWmPose>& c2w,
     }
 
     const int32_t chunk_count = static_cast<int32_t>(out.time_indices.size());
+    out.raymats.assign(static_cast<std::size_t>(chunk_count) *
+                           static_cast<std::size_t>(latent_h) *
+                           static_cast<std::size_t>(latent_w) * 16U,
+                       0.0F);
+    out.raymats_inv.assign(static_cast<std::size_t>(chunk_count) *
+                               static_cast<std::size_t>(latent_h) *
+                               static_cast<std::size_t>(latent_w) * 16U,
+                           0.0F);
+    for (int32_t chunk = 0; chunk < chunk_count; ++chunk) {
+        const auto pose_idx = static_cast<std::size_t>(out.time_indices[chunk]);
+        for (int32_t y = 0; y < latent_h; ++y) {
+            for (int32_t x = 0; x < latent_w; ++x) {
+                pack_ucpe_raymat(out.raymats, out.raymats_inv, chunk, y, x, poses[pose_idx],
+                                 latent_intrinsics[pose_idx], latent_h, latent_w);
+            }
+        }
+    }
+
     out.chunk_plucker.assign(static_cast<std::size_t>(out.chunk_plucker_channels) *
                                  static_cast<std::size_t>(chunk_count) *
                                  static_cast<std::size_t>(latent_h) *
@@ -2179,8 +3476,9 @@ SanaWmStage1Latents sana_wm_prepare_stage1_latents(const std::vector<float>& fir
 }
 
 bool SanaWmNativeModules::has_any() const {
-    return text_encoder || stage1_denoiser || vae_encoder || vae_decoder || refiner_text_encoder ||
-           refiner_denoiser || refiner_vae_decoder;
+    return text_encoder || stage1_denoiser || vae_encoder || vae_decoder ||
+           !vae_decoder_tiles.empty() || refiner_text_encoder || refiner_text_connector ||
+           refiner_denoiser || refiner_vae_decoder || !refiner_vae_decoder_tiles.empty();
 }
 
 bool SanaWmNativeModules::has_stage1() const {
@@ -2188,23 +3486,33 @@ bool SanaWmNativeModules::has_stage1() const {
 }
 
 bool SanaWmNativeModules::has_refiner() const {
-    return refiner_text_encoder && refiner_denoiser && refiner_vae_decoder;
+    return refiner_text_encoder && refiner_denoiser &&
+           (refiner_vae_decoder || !refiner_vae_decoder_tiles.empty());
 }
 
 SanaWmPipeline::SanaWmPipeline(SanaWmRuntimeConfig config, SanaWmNativeModules native_modules,
-                               std::shared_ptr<ITokenizer> tokenizer)
+                               std::shared_ptr<ITokenizer> stage1_tokenizer,
+                               std::shared_ptr<ITokenizer> refiner_tokenizer)
     : config_(std::move(config)), native_modules_(std::move(native_modules)),
-      tokenizer_(std::move(tokenizer)) {}
+      stage1_tokenizer_(std::move(stage1_tokenizer)),
+      refiner_tokenizer_(refiner_tokenizer ? std::move(refiner_tokenizer) : stage1_tokenizer_) {}
 
 ImageResult SanaWmPipeline::generate_image(const std::string& prompt, const GenerateConfig& cfg) {
-    const auto request = resolve_request(config_, cfg);
+    SanaWmRuntimeConfig runtime_config = config_;
+    if (cfg.fps > 0)
+        runtime_config.fps = cfg.fps;
+    if (cfg.flow_shift >= 0.0F)
+        runtime_config.flow_shift = cfg.flow_shift;
+
+    const auto request = resolve_request(runtime_config, cfg);
     if (request.image_path.empty())
         throw std::runtime_error("SANA-WM generation requires --image");
     if (prompt.empty())
         throw std::runtime_error("SANA-WM generation requires a non-empty prompt");
     if (native_modules_.has_any()) {
         validate_native_module_set(native_modules_);
-        return run_native_image_path(native_modules_, tokenizer_, config_, request, cfg, prompt);
+        return run_native_image_path(native_modules_, stage1_tokenizer_, refiner_tokenizer_,
+                                     runtime_config, request, cfg, prompt);
     }
     throw std::runtime_error("SANA-WM pure C++ execution requires native TensorRT plan sections");
 }

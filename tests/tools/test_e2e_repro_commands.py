@@ -106,6 +106,10 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
             "video_num_frames": 321,
+            "num_inference_steps": 60,
+            "cfg_scale": 5.0,
+            "fps": 16,
+            "flow_shift": 9.8,
         },
         stages=[],
     )
@@ -120,8 +124,8 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
 
     cmd = repro["trt_inference"]
     assert " generate-video " in f" {cmd} "
-    assert "--prompt-file asset/sana_wm/demo_0.txt" in cmd
-    assert "--prompt " not in cmd
+    assert "--prompt asset/sana_wm/demo_0.txt" in cmd
+    assert "--prompt-file" not in cmd
     assert "--num-steps" not in cmd
     assert "--image asset/sana_wm/demo_0.png" in cmd
     assert "--action w-80,jw-40,w-40,lw-60,w-100" in cmd
@@ -130,6 +134,10 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
     assert "--rotation_speed_deg 1.2" in cmd
     assert "--intrinsics 797.87866,830.0503,844.2675,463.7225" in cmd
     assert "--num_frames 321" in cmd
+    assert "--step 60" in cmd
+    assert "--cfg_scale 5.0" in cmd
+    assert "--fps 16" in cmd
+    assert "--flow_shift 9.8" in cmd
     assert "--no_refiner" not in cmd
     assert "--hf-python" not in cmd
 
@@ -139,11 +147,53 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
         "--image asset/sana_wm/demo_0.png "
         "--prompt asset/sana_wm/demo_0.txt "
         '--action "w-80,jw-40,w-40,lw-60,w-100" '
+        "--intrinsics 797.87866,830.0503,844.2675,463.7225 "
         "--translation_speed 0.055 "
         "--rotation_speed_deg 1.2 "
         "--num_frames 321 "
+        "--step 60 "
+        "--cfg_scale 5.0 "
+        "--fps 16 "
+        "--flow_shift 9.8 "
         "--output_dir results/demo"
     )
+
+
+def test_repro_commands_prefer_sana_wm_camera_npy_over_action(tmp_path) -> None:
+    case = E2ECase(
+        name="sana-wm-bidirectional",
+        hf_id="Efficient-Large-Model/SANA-WM_bidirectional",
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        task_strategy="diffusion_media_generation",
+        bundle="sana-wm-bidirectional.trtfb",
+        inputs={
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "image": "asset/sana_wm/demo_0.png",
+            "camera": "asset/sana_wm/camera.npy",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "intrinsics": "asset/sana_wm/intrinsics.npy",
+        },
+        stages=[],
+    )
+    ctx = _make_ctx(tmp_path)
+    ctx.case = case
+    repro = _build_repro_commands(
+        case,
+        ctx,
+        "/tmp/engines/sana-wm-bidirectional.trtfb",
+        {},
+    )
+
+    cmd = repro["trt_inference"]
+    assert "--camera asset/sana_wm/camera.npy" in cmd
+    assert "--action" not in cmd
+    assert "--intrinsics asset/sana_wm/intrinsics.npy" in cmd
+
+    reference_cmd = repro["sana_wm_python_reference"]
+    assert "--camera asset/sana_wm/camera.npy" in reference_cmd
+    assert "--action" not in reference_cmd
+    assert "--intrinsics asset/sana_wm/intrinsics.npy" in reference_cmd
 
 
 def test_repro_commands_include_optional_sana_wm_no_refiner(tmp_path) -> None:

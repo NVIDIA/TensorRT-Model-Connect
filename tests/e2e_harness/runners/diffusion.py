@@ -513,17 +513,32 @@ class DiffusionMediaRunner:
                 ]
                 if case.family != "sana_wm":
                     cmd.extend(["--num-steps", str(num_steps)])
+                else:
+                    sana_steps = (
+                        case.inputs.get("num_inference_steps")
+                        or case.inputs.get("num_steps")
+                        or case.inputs.get("step")
+                    )
+                    if sana_steps is not None:
+                        cmd.extend(["--step", str(sana_steps)])
                 if prompt_file:
-                    cmd.extend(["--prompt-file", prompt_file])
+                    prompt_flag = "--prompt" if case.family == "sana_wm" else "--prompt-file"
+                    cmd.extend([prompt_flag, prompt_file])
                 else:
                     cmd.extend(["--prompt", prompt])
                 if initial_latents_raw:
                     cmd.extend(["--initial-latents-raw", initial_latents_raw])
                 if image_path:
                     cmd.extend(["--image", image_path])
-                action = case.inputs.get("action")
-                if action:
-                    cmd.extend(["--action", str(action)])
+                camera_path = _resolve_input_path(
+                    case.inputs.get("camera") or case.inputs.get("camera_path"), ctx
+                )
+                if camera_path:
+                    cmd.extend(["--camera", camera_path])
+                else:
+                    action = case.inputs.get("action")
+                    if action:
+                        cmd.extend(["--action", str(action)])
                 translation_speed = case.inputs.get("translation_speed")
                 if translation_speed is not None:
                     flag = "--translation_speed" if case.family == "sana_wm" else "--translation-speed"
@@ -533,17 +548,36 @@ class DiffusionMediaRunner:
                     flag = "--rotation_speed_deg" if case.family == "sana_wm" else "--rotation-speed-deg"
                     cmd.extend([flag, str(rotation_speed_deg)])
                 camera_intrinsics = case.inputs.get("camera_intrinsics")
+                if camera_intrinsics is None:
+                    camera_intrinsics = case.inputs.get("intrinsics")
                 if camera_intrinsics is not None:
                     flag = "--intrinsics" if case.family == "sana_wm" else "--camera-intrinsics"
-                    cmd.extend([flag, _format_float_csv(camera_intrinsics)])
+                    if isinstance(camera_intrinsics, str):
+                        value = _resolve_input_path(camera_intrinsics, ctx) or camera_intrinsics
+                    else:
+                        value = _format_float_csv(camera_intrinsics)
+                    cmd.extend([flag, value])
                 num_frames = case.inputs.get("video_num_frames") or case.inputs.get("num_frames")
                 if num_frames is not None:
                     flag = "--num_frames" if case.family == "sana_wm" else "--num-frames"
                     cmd.extend([flag, str(num_frames)])
+                if case.family == "sana_wm":
+                    fps = case.inputs.get("fps")
+                    if fps is not None:
+                        cmd.extend(["--fps", str(fps)])
+                    flow_shift = case.inputs.get("flow_shift")
+                    if flow_shift is not None:
+                        cmd.extend(["--flow_shift", str(flow_shift)])
                 if case.family == "sana_wm" and case.inputs.get("no_refiner"):
                     cmd.append("--no_refiner")
                 guidance_scale = case.inputs.get("guidance_scale")
-                if guidance_scale is not None:
+                if case.family == "sana_wm":
+                    cfg_scale = case.inputs.get("cfg_scale")
+                    if cfg_scale is None:
+                        cfg_scale = guidance_scale
+                    if cfg_scale is not None:
+                        cmd.extend(["--cfg_scale", str(cfg_scale)])
+                elif guidance_scale is not None:
                     cmd.extend(["--guidance-scale", str(guidance_scale)])
                 if "seed" in case.inputs:
                     cmd.extend(["--seed", str(case.inputs["seed"])])

@@ -783,6 +783,7 @@ class TestSanaWmImpactRules:
                 "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
                 "test_image": "asset/sana_wm/demo_0.png",
                 "prompt_file": "asset/sana_wm/demo_0.txt",
+                "camera_intrinsics": "asset/sana_wm/demo_0_intrinsics.npy",
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
@@ -795,6 +796,7 @@ class TestSanaWmImpactRules:
             ),
             ("asset/sana_wm/demo_0.png", "e2e_data_file", []),
             ("asset/sana_wm/demo_0.txt", "e2e_data_file", []),
+            ("asset/sana_wm/demo_0_intrinsics.npy", "e2e_data_file", []),
         ]
         for path, rule, unit_tiers in scoped:
             match = test_impact.classify_file(path, imap)

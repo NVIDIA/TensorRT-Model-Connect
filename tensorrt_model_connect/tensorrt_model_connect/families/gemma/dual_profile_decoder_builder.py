@@ -56,6 +56,14 @@ if TYPE_CHECKING:
     from ...quantization.context import QuantContext
 
 
+def _uses_gemma_post_norm_residual(config: "ModelConfig") -> bool:
+    model_type = str(config.model_type).lower()
+    architectures = [str(arch).lower() for arch in config.architectures]
+    return model_type.startswith(("gemma2", "gemma3")) or any(
+        "gemma2" in arch or "gemma3" in arch for arch in architectures
+    )
+
+
 def _const_in_work_dtype(
     network: trt.INetworkDefinition,
     shape: tuple,
@@ -139,16 +147,16 @@ def _swiglu_mlp(
     prefix: str,
     hidden: int,
     mlp_size: int,
+    activation: str,
+    work_np_dtype: np.dtype,
 ) -> trt.ITensor:
     gate = matmul(inp, hidden, mlp_size,
                   weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
     up = matmul(inp, hidden, mlp_size,
                 weights[f"{prefix}.w_up"], f"{prefix}.w_up")
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gate_act = graph_ops.add_activation(network, gate, activation, dtype=work_np_dtype)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        gate_act, up, trt.ElementWiseOperation.PROD)
     mlp_out = matmul(gated.get_output(0), mlp_size, hidden,
                      weights[f"{prefix}.w_down"], f"{prefix}.w_down")
     return mlp_out
@@ -241,6 +249,10 @@ def build_dual_profile_decoder_engine(
     can constrain their row count independently.
     """
     _supports_config(config, weights)
+
+    gemma_post_norm_residual = _uses_gemma_post_norm_residual(config)
+    if gemma_post_norm_residual and activation == "silu":
+        activation = config.hidden_act or "gelu_pytorch_tanh"
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -546,9 +558,21 @@ def build_dual_profile_decoder_engine(
             attn_out = graph_ops.add_bias_sum(
                 network, attn_out, hidden, o_bias, dtype=work_np_dtype)
 
-        # Residual structure: parallel (GPT-NeoX / CodeGen / Falcon-3) vs
-        # sequential (everything else).
-        if parallel_residual:
+        # Residual structure: Gemma post-norm, parallel, or default sequential.
+        if gemma_post_norm_residual:
+            attn_normed = _norm_multi(
+                network, attn_out, hidden,
+                weights[f"{prefix}.post_attn_norm"],
+                weights.get(f"{prefix}.post_attn_norm_beta"),
+                eps_tensor, norm_type, work_np_dtype)
+            residual1 = network.add_elementwise(
+                hidden_state, attn_normed, trt.ElementWiseOperation.SUM)
+            norm2 = _norm_multi(
+                network, residual1.get_output(0), hidden,
+                weights[f"{prefix}.pre_ff_norm"],
+                weights.get(f"{prefix}.pre_ff_norm_beta"),
+                eps_tensor, norm_type, work_np_dtype)
+        elif parallel_residual:
             post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
             if post_attn_norm_w is not None:
                 norm2 = _norm_multi(
@@ -578,10 +602,19 @@ def build_dual_profile_decoder_engine(
             mlp_out = _swiglu_mlp(
                 network, norm2,
                 matmul=matmul, weights=weights, prefix=prefix,
-                hidden=hidden, mlp_size=mlp_size)
+                hidden=hidden, mlp_size=mlp_size,
+                activation=activation, work_np_dtype=work_np_dtype)
 
         # Final residual.
-        if parallel_residual:
+        if gemma_post_norm_residual:
+            mlp_normed = _norm_multi(
+                network, mlp_out, hidden,
+                weights[f"{prefix}.post_ff_norm"],
+                weights.get(f"{prefix}.post_ff_norm_beta"),
+                eps_tensor, norm_type, work_np_dtype)
+            residual2 = network.add_elementwise(
+                residual1.get_output(0), mlp_normed, trt.ElementWiseOperation.SUM)
+        elif parallel_residual:
             sum_attn = network.add_elementwise(
                 hidden_state, attn_out, trt.ElementWiseOperation.SUM)
             residual2 = network.add_elementwise(

@@ -190,6 +190,72 @@ class TestGemmaPlugin:
         np.testing.assert_allclose(
             weights["embedding"], expected_embed, atol=1e-5)
 
+    def test_gemma3_extra_norm_gamma_plus_one(self, tmp_path):
+        """Gemma3's extra attention/feed-forward norms should get the Gemma +1 offset."""
+        from tensorrt_model_connect.families.gemma import plugin
+
+        tensors = self._setup(tmp_path, num_layers=1)
+        head_dim = self.HIDDEN // self.HEADS
+        config = {
+            "model_type": "gemma3",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "intermediate_size": self.MLP,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+            "hidden_activation": "gelu_pytorch_tanh",
+        }
+        prefix = "model.layers.0"
+        tensors[f"{prefix}.self_attn.q_norm.weight"] = _rand(head_dim)
+        tensors[f"{prefix}.self_attn.k_norm.weight"] = _rand(head_dim)
+        tensors[f"{prefix}.pre_feedforward_layernorm.weight"] = _rand(self.HIDDEN)
+        tensors[f"{prefix}.post_feedforward_layernorm.weight"] = _rand(self.HIDDEN)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        np.testing.assert_allclose(
+            weights["layer.0.q_norm"],
+            np.tile(tensors[f"{prefix}.self_attn.q_norm.weight"], self.HEADS) + 1.0,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            weights["layer.0.k_norm"],
+            np.tile(tensors[f"{prefix}.self_attn.k_norm.weight"], self.KV_HEADS) + 1.0,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            weights["layer.0.pre_ff_norm"],
+            tensors[f"{prefix}.pre_feedforward_layernorm.weight"] + 1.0,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            weights["layer.0.post_ff_norm"],
+            tensors[f"{prefix}.post_feedforward_layernorm.weight"] + 1.0,
+            atol=1e-6,
+        )
+        assert cfg.hidden_act == "gelu_pytorch_tanh"
+
+    def test_gemma2_uses_post_norm_residual_and_attention_softcap(self):
+        """Gemma2 should follow HF's post-norm residual block and softcapped attention."""
+        from tensorrt_model_connect.families.gemma.standard_decoder_builder import (
+            _attention_logit_softcap,
+            _uses_gemma_post_norm_residual,
+        )
+
+        cfg = ModelConfig.create_tiny(
+            "gemma2",
+            architectures=["Gemma2ForCausalLM"],
+            hidden_activation="gelu_pytorch_tanh",
+            attn_logit_softcapping=50.0,
+        )
+
+        assert _uses_gemma_post_norm_residual(cfg)
+        assert _attention_logit_softcap(cfg) == 50.0
+
 
 # =========================================================================
 # 3. Phi — fused QKV split, fused gate_up split

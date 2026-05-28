@@ -480,13 +480,15 @@ def _linear(
     weights: "Mapping[str, np.ndarray]",
     prefix: str,
     dtype: np.dtype,
+    constant_dtype: np.dtype | None = None,
 ) -> trt.ITensor:
+    constant_dtype = dtype if constant_dtype is None else constant_dtype
     out = graph_ops.add_matmul_rhs_constant(
-        network, inp, in_dim, out_dim, weights[f"{prefix}.weight"], dtype=dtype
+        network, inp, in_dim, out_dim, weights[f"{prefix}.weight"], dtype=constant_dtype
     )
     bias = weights.get(f"{prefix}.bias")
     if bias is not None:
-        out = graph_ops.add_bias_sum(network, out, out_dim, bias, dtype=dtype)
+        out = graph_ops.add_bias_sum(network, out, out_dim, bias, dtype=constant_dtype)
     return out
 
 
@@ -639,11 +641,16 @@ def _ltx_attention(
     rotary_cos: trt.ITensor | None = None,
     rotary_sin: trt.ITensor | None = None,
     rot_half: trt.ITensor | None = None,
+    constant_dtype: np.dtype | None = None,
 ) -> trt.ITensor:
+    constant_dtype = dtype if constant_dtype is None else constant_dtype
     kv_source = hidden if context is None else context
-    q = _linear(network, hidden, dim, dim, weights, f"{prefix}.to_q", dtype)
-    k = _linear(network, kv_source, dim, dim, weights, f"{prefix}.to_k", dtype)
-    v = _linear(network, kv_source, dim, dim, weights, f"{prefix}.to_v", dtype)
+    q = _linear(network, hidden, dim, dim, weights, f"{prefix}.to_q", dtype,
+                constant_dtype=constant_dtype)
+    k = _linear(network, kv_source, dim, dim, weights, f"{prefix}.to_k", dtype,
+                constant_dtype=constant_dtype)
+    v = _linear(network, kv_source, dim, dim, weights, f"{prefix}.to_v", dtype,
+                constant_dtype=constant_dtype)
 
     q = graph_ops.add_rms_norm(
         network, q, dim, weights[f"{prefix}.norm_q.weight"], eps_t, dtype=dtype
@@ -673,7 +680,8 @@ def _ltx_attention(
     ctx = _from_attention_4d(
         network, ctx4, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim
     )
-    return _linear(network, ctx, dim, dim, weights, f"{prefix}.to_out.0", dtype)
+    return _linear(network, ctx, dim, dim, weights, f"{prefix}.to_out.0", dtype,
+                   constant_dtype=constant_dtype)
 
 
 def _residual_gated(
@@ -696,19 +704,22 @@ def _ffn(
     prefix: str,
     dim: int,
     dtype: np.dtype,
+    constant_dtype: np.dtype | None = None,
 ) -> trt.ITensor:
+    constant_dtype = dtype if constant_dtype is None else constant_dtype
     fc1_w = weights[f"{prefix}.ff.net.0.proj.weight"]
     ffn_dim = fc1_w.shape[1]
     x = graph_ops.add_matmul_rhs_constant(
-        network, hidden, dim, ffn_dim, fc1_w, dtype=dtype
+        network, hidden, dim, ffn_dim, fc1_w, dtype=constant_dtype
     )
     x = graph_ops.add_bias_sum(
-        network, x, ffn_dim, weights[f"{prefix}.ff.net.0.proj.bias"], dtype=dtype
+        network, x, ffn_dim, weights[f"{prefix}.ff.net.0.proj.bias"], dtype=constant_dtype
     )
-    x = graph_ops.add_gelu_new(network, x, dtype=dtype)
+    x = graph_ops.add_gelu_new(network, x, dtype=constant_dtype)
     x = graph_ops.add_matmul_rhs_constant(
-        network, x, ffn_dim, dim, weights[f"{prefix}.ff.net.2.weight"], dtype=dtype
+        network, x, ffn_dim, dim, weights[f"{prefix}.ff.net.2.weight"],
+        dtype=constant_dtype
     )
     return graph_ops.add_bias_sum(
-        network, x, dim, weights[f"{prefix}.ff.net.2.bias"], dtype=dtype
+        network, x, dim, weights[f"{prefix}.ff.net.2.bias"], dtype=constant_dtype
     )
