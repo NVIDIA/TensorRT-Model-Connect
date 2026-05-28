@@ -59,6 +59,10 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ... import graph_ops
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 trt = trt_compat.get_trt()
@@ -212,6 +216,7 @@ class RwkvPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine for RWKV linear attention.
 
@@ -234,6 +239,21 @@ class RwkvPlugin:
           present_den_0..N: float32 [1, hidden_size]
           present_max_0..N: float32 [1, hidden_size]
         """
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="RWKV tensor-parallel builds")
+            from .tp_builder import build_rwkv_tp_engine
+
+            return build_rwkv_tp_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers

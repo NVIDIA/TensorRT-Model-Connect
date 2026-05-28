@@ -25,6 +25,10 @@ from ...checkpoint_mapper import (
     _has_tensor,
 )
 from ... import graph_ops
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 from tensorrt_model_connect import trt_compat
 
@@ -127,8 +131,23 @@ class ModernbertPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="ModernBERT tensor-parallel builds")
+            if quant_ctx is not None:
+                raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
+            from .tp_builder import build_tp_modernbert_engine
+            return build_tp_modernbert_engine(
+                config, weights,
+                max_seq_length=max_cache_length,
+                verbose=verbose,
+                parallel_config=parallel)
+
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers

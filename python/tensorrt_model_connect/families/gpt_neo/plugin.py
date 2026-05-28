@@ -24,7 +24,9 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import normalize_parallel_config
 from .standard_decoder_builder import build_standard_decoder_engine
+from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 
 
 class GPTNeoPlugin:
@@ -134,6 +136,7 @@ class GPTNeoPlugin:
                 embedding.T.astype(np.float32))
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -143,7 +146,20 @@ class GPTNeoPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            return build_dual_profile_tp_decoder_engine(
+                config, weights, max_cache_length,
+                precision=precision, quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                mlp_type="gelu_fc",
+                position_type="learned",
+                activation="gelu_new",
+                scale_attn_weights=False,
+                verbose=verbose,
+                parallel_config=parallel)
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
             precision=precision, quant_ctx=quant_ctx,

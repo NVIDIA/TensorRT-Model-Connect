@@ -21,7 +21,9 @@ from ...checkpoint_mapper import (
     _load_tensor,
     _transpose_2d,
 )
+from ...parallel_config import normalize_parallel_config
 from .standard_decoder_builder import build_standard_decoder_engine
+from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 
 
 class GPTNeoXPlugin:
@@ -144,6 +146,7 @@ class GPTNeoXPlugin:
         weights["w_out"] = _transpose_2d(lm_head, "lm_head")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -153,11 +156,25 @@ class GPTNeoXPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         # GPT-NeoX uses partial rotary: rotary_pct (default 0.25)
         rotary_pct = config.raw.get("rotary_pct", 0.25)
         use_parallel = config.raw.get("use_parallel_residual", True)
 
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            return build_dual_profile_tp_decoder_engine(
+                config, weights, max_cache_length,
+                precision=precision, quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                mlp_type="gelu_fc",
+                position_type="rope",
+                activation="gelu",
+                partial_rotary_factor=rotary_pct,
+                parallel_residual=use_parallel,
+                verbose=verbose,
+                parallel_config=parallel)
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
             precision=precision, quant_ctx=quant_ctx,

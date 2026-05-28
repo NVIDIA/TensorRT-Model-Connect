@@ -39,7 +39,7 @@ def test_standard_decoder_weight_sharding_preserves_single_device() -> None:
 
 
 def test_standard_decoder_weight_sharding_slices_gelu_fc_bias() -> None:
-    cfg = ModelConfig.create_tiny("opt")
+    cfg = ModelConfig.create_tiny("gpt2")
     cfg.num_attention_heads = 4
     cfg.num_key_value_heads = 4
     cfg.intermediate_size = 32
