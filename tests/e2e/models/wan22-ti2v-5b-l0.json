@@ -1,0 +1,26 @@
+{
+  "name": "wan22-ti2v-5b-l0",
+  "trace_id": "IT-E2E-WAN22-L0-01",
+  "hf_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+  "bundle": "wan22-ti2v-5b-l0.trtfb",
+  "model_type": "wan_t2v",
+  "family": "wan_t2v",
+  "runtime_strategy": "diffusion_wan",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "python_module_available", "args": { "module": "diffusers", "phase": "build" }, "gating": true },
+    { "kind": "python_module_available", "args": { "module": "ftfy", "phase": "build" }, "gating": true }
+  ],
+  "test_prompt": "A cat sitting on a beach watching the sunset",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 384,
+  "video_width": 672,
+  "num_inference_steps": 15,
+  "stages": [
+    { "name": "end_to_end", "required": true }
+  ],
+  "notes": "Wan 2.2 TI2V-5B foundation lane. Wan 2.2 differs from 2.1 in: 48-channel latent (vs 16), new VAE arch (asymmetric encoder/decoder dims base=160/decoder=256, patch_size=2, is_residual=True, scale_factor_spatial=16). The config-driven plugin handles DiT differences automatically; the VAE differences are NOT modeled by the v1 causal_vae_3d builder, so this lane raises NotImplementedError at build time with a clear message. Unwaive after Wan 2.2 VAE builder lands."
+}
