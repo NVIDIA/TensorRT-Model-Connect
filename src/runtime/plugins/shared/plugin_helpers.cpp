@@ -65,6 +65,8 @@ struct TokenizerSpecialFrame {
     std::vector<int32_t> suffix;
 };
 
+using TokenizerFactory = std::unique_ptr<ITokenizer> (*)(const char*, std::size_t, bool);
+
 } // namespace
 
 void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes) {
@@ -130,6 +132,29 @@ std::shared_ptr<ITokenizer> apply_tokenizer_special_frame(std::unique_ptr<IToken
     return std::make_shared<SpecialFrameTokenizer>(std::move(shared), frame.prefix, frame.suffix);
 }
 
+TokenizerSpecialFrame detect_requested_tokenizer_special_frame(const BundleFile& bundle,
+                                                               bool add_special_tokens) {
+    if (!add_special_tokens)
+        return TokenizerSpecialFrame{};
+    return detect_tokenizer_special_frame(bundle);
+}
+
+std::shared_ptr<ITokenizer> try_create_native_tokenizer_kind(TokenizerFactory factory,
+                                                             const char* data, std::size_t size,
+                                                             bool add_special_tokens,
+                                                             const TokenizerSpecialFrame& frame,
+                                                             const char* label) {
+    try {
+        auto tok = factory(data, size, add_special_tokens);
+        if (!tok)
+            return nullptr;
+        std::cerr << "[trtmc] Using native " << label << " tokenizer" << std::endl;
+        return apply_tokenizer_special_frame(std::move(tok), frame);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 } // namespace
 
 bool is_bpe_tokenizer_json(const BundleFile& bundle) {
@@ -177,41 +202,19 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
 
     const char* data = tok_data->data();
     std::size_t size = tok_data->size();
-    const auto special_frame =
-        add_special_tokens ? detect_tokenizer_special_frame(bundle) : TokenizerSpecialFrame{};
-    const bool native_add_special = special_frame.present ? false : add_special_tokens;
+    const auto special_frame = detect_requested_tokenizer_special_frame(bundle, add_special_tokens);
+    const bool native_add_special = !special_frame.present && add_special_tokens;
 
-    // Try BPE
-    try {
-        auto tok = CreateBpeTokenizer(data, size, native_add_special);
-        if (tok) {
-            std::cerr << "[trtmc] Using native BPE tokenizer" << std::endl;
-            return apply_tokenizer_special_frame(std::move(tok), special_frame);
-        }
-    } catch (...) {
-    }
+    if (auto tokenizer = try_create_native_tokenizer_kind(CreateBpeTokenizer, data, size,
+                                                          native_add_special, special_frame, "BPE"))
+        return tokenizer;
 
-    // Try WordPiece
-    try {
-        auto tok = CreateWordPieceTokenizer(data, size, native_add_special);
-        if (tok) {
-            std::cerr << "[trtmc] Using native WordPiece tokenizer" << std::endl;
-            return apply_tokenizer_special_frame(std::move(tok), special_frame);
-        }
-    } catch (...) {
-    }
+    if (auto tokenizer = try_create_native_tokenizer_kind(
+            CreateWordPieceTokenizer, data, size, native_add_special, special_frame, "WordPiece"))
+        return tokenizer;
 
-    // Try Unigram (SentencePiece)
-    try {
-        auto tok = CreateUnigramTokenizer(data, size, native_add_special);
-        if (tok) {
-            std::cerr << "[trtmc] Using native Unigram tokenizer" << std::endl;
-            return apply_tokenizer_special_frame(std::move(tok), special_frame);
-        }
-    } catch (...) {
-    }
-
-    return nullptr;
+    return try_create_native_tokenizer_kind(CreateUnigramTokenizer, data, size, native_add_special,
+                                            special_frame, "Unigram");
 }
 
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundle) {
