@@ -43,7 +43,9 @@ class SpecialFrameTokenizer final : public ITokenizer {
         return framed;
     }
 
-    std::string decode(const std::vector<int32_t>& ids) const override { return mInner->decode(ids); }
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        return mInner->decode(ids);
+    }
 
     int32_t id_for_token(std::string_view token) const override {
         return mInner->id_for_token(token);
@@ -118,15 +120,14 @@ TokenizerSpecialFrame detect_tokenizer_special_frame(const BundleFile& bundle) {
     return frame;
 }
 
-std::shared_ptr<ITokenizer> apply_tokenizer_special_frame(
-    std::unique_ptr<ITokenizer> tokenizer, const TokenizerSpecialFrame& frame) {
+std::shared_ptr<ITokenizer> apply_tokenizer_special_frame(std::unique_ptr<ITokenizer> tokenizer,
+                                                          const TokenizerSpecialFrame& frame) {
     if (!tokenizer)
         return nullptr;
     std::shared_ptr<ITokenizer> shared(std::move(tokenizer));
     if (!frame.present || (frame.prefix.empty() && frame.suffix.empty()))
         return shared;
-    return std::make_shared<SpecialFrameTokenizer>(
-        std::move(shared), frame.prefix, frame.suffix);
+    return std::make_shared<SpecialFrameTokenizer>(std::move(shared), frame.prefix, frame.suffix);
 }
 
 } // namespace

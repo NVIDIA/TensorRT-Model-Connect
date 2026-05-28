@@ -25,8 +25,8 @@ static trtmc::BundleFile make_bundle_with_config(const std::string& config) {
     return bundle;
 }
 
-static trtmc::BundleFile make_bundle_with_config_and_tokenizer(
-    const std::string& config, const std::string& tokenizer_json) {
+static trtmc::BundleFile make_bundle_with_config_and_tokenizer(const std::string& config,
+                                                               const std::string& tokenizer_json) {
     auto bundle = make_bundle_with_config(config);
     trtmc::BundleSection tok;
     tok.name = "tokenizer.json";
@@ -35,8 +35,7 @@ static trtmc::BundleFile make_bundle_with_config_and_tokenizer(
     return bundle;
 }
 
-static void check_ids(const std::vector<int32_t>& actual,
-                      const std::vector<int32_t>& expected,
+static void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
                       const char* name) {
     if (actual != expected) {
         std::cerr << "FAIL: " << name << '\n';
