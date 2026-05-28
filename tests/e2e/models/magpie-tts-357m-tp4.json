@@ -1,0 +1,71 @@
+{
+  "name": "magpie-tts-357m-tp4",
+  "trace_id": "IT-E2E-MGPTTS-TP4-01",
+  "hf_id": "nvidia/magpie_tts_multilingual_357m",
+  "bundle": "magpie-tts-357m-tp4.trtfb",
+  "family": "magpie_tts",
+  "runtime_strategy": "text_to_audio_magpie",
+  "reference_backend": "nemo",
+  "test_type": "audio",
+  "max_cache_length": 512,
+  "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
+  "max_new_tokens": 750,
+  "logit_atol": 1e-2,
+  "trust_remote_code": false,
+  "runtime_config": {
+    "audio_magpie": {
+      "cfg_scale": 2.5,
+      "temperature": 0.6,
+      "seed": 42
+    }
+  },
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+        "timeout_s": 180
+      },
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ]
+}

@@ -52,16 +52,16 @@ Do not skip inspection after building a bundle. Record the four answers above be
 A bundle can exist on disk and still be unusable for the runtime you are testing. The strategy key, engine sections, tokenizer assets, and TensorRT ABI metadata are part of the contract.
 :::
 
-## Use the Python inspector
+## Use the inspector
 
 ```bash
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb --list-engines
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb --list-engines
 ```
 
 Use this for build-time metadata and engine section checks.
 
-The Python inspector is usually closest to the builder's view of the artifact. It is useful immediately after a build, before involving the C++ runtime.
+The inspector reads the bundle header through the same unified `trtmc` binary that runs the artifact. It is useful immediately after a build, before loading engines for inference.
 
 Example shape:
 
@@ -82,21 +82,11 @@ Sections:
 The exact sizes and TensorRT metadata depend on your build environment. The important point is that the family, runtime strategy, precision, and required sections are visible before you run inference.
 
 :::tip Progress check
-You are ready for C++ inspection when the Python inspector confirms the expected `family`, `runtime_strategy`, precision, and engine sections.
+You are ready for inference when inspection confirms the expected `family`, `runtime_strategy`, precision, and engine sections.
 :::
 
-## Use the C++ inspector
-
-```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
-```
-
-Use this to confirm the runtime can parse bundle metadata without loading engines.
-
-If Python inspection works but C++ inspection fails, the issue is likely in bundle parsing compatibility or the local runtime build.
-
 :::danger Required task
-Run both inspectors for the same bundle and record whether they agree on the strategy and section names.
+Run inspection for the bundle and record the strategy and section names before starting runtime debugging.
 :::
 
 ## Fields to check
@@ -151,11 +141,10 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 
 | Check | Command or source |
 | --- | --- |
-| Bundle header parses | `trtmc-build inspect model.trtfb` |
-| C++ header parse works | `./build/trtmc inspect model.trtfb` |
+| Bundle header parses | `./build/trtmc inspect model.trtfb` |
 | Runtime strategy exists | `rg "REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST" src/runtime/plugins` |
 | Plugin is in manifest | `rg "<plugin file>" cmake/trtmc_pipeline_plugins.cmake` |
-| Engine sections exist | `trtmc-build inspect model.trtfb --list-engines` |
+| Engine sections exist | `./build/trtmc inspect model.trtfb --list-engines` |
 | E2E manifest matches expected contract | `tests/e2e/models/<model>.json` |
 
 Inspecting the bundle should become muscle memory. It tells you whether you are debugging the builder, the artifact, the runtime loader, or request execution.
@@ -167,4 +156,4 @@ Before leaving the tutorial, write short answers to these prompts:
 1. Which field tells the runtime what plugin to load?
 2. Which fields or sections prove the tokenizer is packaged?
 3. Which metadata would you inspect for TensorRT compatibility?
-4. If Python inspection works but C++ inspection fails, where is the likely boundary?
+4. If inspection passes but runtime loading fails, where is the likely boundary?

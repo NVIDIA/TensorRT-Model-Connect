@@ -1,7 +1,7 @@
 #pragma once
 
 // Schema for the "triattention" namespace. Mirrors
-// tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py one-for-one.
+// python/tensorrt_model_connect/runtime_config/schemas/triattention.py one-for-one.
 //
 // The cross-language field-set match test (tests/builder/test_config_schemas_crosslang.py)
 // will fail fast if the two sides drift. Until the codegen pipeline lands,

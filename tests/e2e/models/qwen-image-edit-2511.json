@@ -1,0 +1,40 @@
+{
+  "name": "qwen-image-edit-2511",
+  "trace_id": "IT-E2E-QIMG-EDIT-01",
+  "hf_id": "Qwen/Qwen-Image-Edit-2511",
+  "bundle": "qwen-image-edit-2511.trtfb",
+  "model_type": "qwen_image_edit",
+  "family": "qwen_image",
+  "runtime_strategy": "diffusion_qwen_image",
+  "task_strategy": "diffusion_media_generation",
+  "ci_tier": "nightly_only",
+  "task_mode": "edit",
+  "description": "Qwen-Image-Edit-2511 image edit (Qwen2.5-VL text+vision conditioning + Qwen-Image DiT + VAE encode/decode)",
+  "build_args": {
+    "max_cache_length": 256,
+    "edit_condition_image": "tests/e2e/data/test_img.jpeg"
+  },
+  "prompt": "Turn the image into a watercolor illustration while preserving the main subject.",
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "negative_prompt": " ",
+  "test_type": "diffusion",
+  "image_height": 1024,
+  "image_width": 1024,
+  "height": 1024,
+  "width": 1024,
+  "video_num_frames": 1,
+  "num_inference_steps": 20,
+  "cfg_scale": 4.0,
+  "seed": 42,
+  "min_pixel_mean": 0.15,
+  "max_pixel_mean": 0.85,
+  "min_pixel_std": 0.05,
+  "skip_text_comparison": true,
+  "threshold_overrides": {
+    "psnr": 12.0,
+    "min_pixel_mean": 0.15,
+    "max_pixel_mean": 0.85,
+    "min_pixel_std": 0.05
+  },
+  "notes": "Qwen-Image Edit 2511 coverage. The build uses the manifest image to compile the static VAE condition grid for the current e2e edit case."
+}

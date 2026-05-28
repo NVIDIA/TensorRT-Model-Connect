@@ -126,7 +126,7 @@ def run_cmd(cmd: str, timeout: int = 600, dry_run: bool = False) -> tuple[int, s
 def step_build(model: str, output: str, precision: str = "fp32",
                max_cache: int = 256, dry_run: bool = False) -> bool:
     """Build a .trtfb bundle."""
-    cmd = (f"trtmc-build build {model} -o {output} "
+    cmd = (f"./build/trtmc build {model} -o {output} "
            f"--max-cache-length {max_cache} --precision {precision}")
     print(f"\n[build] {precision.upper()} bundle: {model}")
     rc, out = run_cmd(cmd, timeout=600, dry_run=dry_run)
@@ -202,6 +202,7 @@ def _build_bench_cmd(
         config_flags += " --set runtime.prefer_gpu_greedy=true"
     binary = "/tmp/build/trtmc"
     hf = "--hf-python /opt/venv/bin/python"
+    env = ""
 
     if mode == "decode" or pipeline_type in (
         "text_to_text", "vision_language", "seq2seq_encoder_decoder", "marian_translation"):

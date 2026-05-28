@@ -7,14 +7,9 @@
 
 #include <cmath>
 #include <iostream>
-#include <memory>
 #include <set>
 #include <string>
 #include <vector>
-
-#if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
-#include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -23,12 +18,6 @@ static void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
-}
-
-static std::unique_ptr<trtmc::ISampler> create_host_sampler(const trtmc::SamplingParams& params) {
-    trtmc::SamplerFactoryOptions options;
-    options.prefer_torch_cuda_multinomial = false;
-    return trtmc::create_sampler(params, options);
 }
 
 static void test_sampling_params_from_config() {
@@ -54,7 +43,7 @@ static void test_create_sampler_greedy_only_when_sampling_disabled() {
     params.top_p = 1.0F;
     params.min_p = 0.0F;
     params.seed = -1;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "greedy", "greedy factory path");
 
     params.top_p = 0.95F;
@@ -71,7 +60,7 @@ static void test_top_p_alone_uses_full_vocab() {
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 99;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
     std::set<int32_t> seen;
@@ -89,7 +78,7 @@ static void test_top_k_zero_means_no_topk_limit() {
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 17;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
     std::set<int32_t> seen;
@@ -107,7 +96,7 @@ static void test_min_p_without_top_p_keeps_default_top_k() {
     params.top_p = 1.0F;
     params.min_p = 0.5F;
     params.seed = 33;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const float logits[] = {5.0F, 4.0F, 4.0F, 4.0F};
     for (int i = 0; i < 64; ++i) {
@@ -124,7 +113,7 @@ static void test_top_p_zero_is_greedy() {
     params.top_p = 0.0F;
     params.min_p = 0.0F;
     params.seed = 7;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 4, params);
     check(result.token_id == 1, "top_p zero is greedy");
 }
@@ -137,7 +126,7 @@ static void test_invalid_sampling_values_are_sanitized() {
     params.top_p = 1.5F;
     params.min_p = -0.2F;
     params.seed = 7;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 4, params);
     check(result.token_id == 1, "invalid sampling values are sanitized");
 }
@@ -149,7 +138,7 @@ static void test_sampler_reset_replays_seeded_sequence() {
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 123;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 0.9F, 0.8F, 0.7F, 0.6F};
     std::vector<int32_t> first;
@@ -183,7 +172,7 @@ static void test_top_p_truncates_tail_tokens() {
     params.top_p = 0.55F;
     params.min_p = 0.0F;
     params.seed = 17;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 3, params);
     check(result.token_id == 0, "top_p keeps only the highest-prob token");
 }
@@ -196,7 +185,7 @@ static void test_min_p_drops_low_probability_tail() {
     params.top_p = 1.0F;
     params.min_p = 0.75F;
     params.seed = 9;
-    auto sampler = create_host_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     for (int i = 0; i < 32; ++i) {
         auto result = sampler->sample(logits, 3, params);
         check(result.token_id != 2, "min_p excludes low-probability token");
@@ -204,16 +193,6 @@ static void test_min_p_drops_low_probability_tail() {
 }
 
 #if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
-static bool cuda_device_available() {
-    int count = 0;
-    const cudaError_t status = cudaGetDeviceCount(&count);
-    if (status != cudaSuccess) {
-        cudaGetLastError();
-        return false;
-    }
-    return count > 0;
-}
-
 static void test_torch_multinomial_matches_known_hf_sequence() {
     trtmc::SamplingParams params;
     params.temperature = 1.0F;
@@ -316,14 +295,10 @@ int main() {
     test_top_p_truncates_tail_tokens();
     test_min_p_drops_low_probability_tail();
 #if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
-    if (cuda_device_available()) {
-        test_torch_multinomial_matches_known_hf_sequence();
-        test_torch_multinomial_uses_full_vocab_semantics();
-        test_torch_multinomial_advances_offset_like_full_vocab_cuda();
-        test_torch_multinomial_matches_live_step_three_way_case();
-    } else {
-        std::cerr << "Skipping CUDA multinomial sampler tests: no CUDA device available.\n";
-    }
+    test_torch_multinomial_matches_known_hf_sequence();
+    test_torch_multinomial_uses_full_vocab_semantics();
+    test_torch_multinomial_advances_offset_like_full_vocab_cuda();
+    test_torch_multinomial_matches_live_step_three_way_case();
 #endif
 
     if (failures > 0) {

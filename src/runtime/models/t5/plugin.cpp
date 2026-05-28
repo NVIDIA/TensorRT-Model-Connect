@@ -9,6 +9,7 @@
 
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_module.h"
@@ -18,12 +19,48 @@
 #include <algorithm>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const auto value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // T5Pipeline: encoder-decoder text generation
@@ -280,6 +317,10 @@ class T5Plugin final : public IPipelinePlugin {
         opts.cuda_graphs = ctx.cuda_graphs;
 
         const auto& json = ctx.config_json;
+        const auto tp_config = parse_tensor_parallel_runtime_config(json);
+        DistributedRuntimeGroup tp_group;
+        if (tp_config.enabled)
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
 
         // Load encoder (stored as vision_engine_plan in T5 bundles)
         const auto* enc_plan = find_section(ctx.bundle, "vision_engine_plan");
@@ -287,9 +328,17 @@ class T5Plugin final : public IPipelinePlugin {
             throw std::runtime_error("T5Plugin: no encoder engine in bundle");
         auto enc_loaded = load_trt_module_from_plan(ctx.backend, enc_plan, "t5 encoder", opts);
 
-        // Load decoder (main engine_plan)
+        ModuleCreateOptions decoder_opts = opts;
+        if (tp_config.enabled) {
+            decoder_opts.distributed_communicator = tp_group.communicator;
+            decoder_opts.distributed_owner = tp_group.owner;
+        }
+
+        // Load decoder (main engine_plan or rank-local TP section)
+        const std::string decoder_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
         auto dec_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "t5 decoder", opts);
+            ctx.backend, find_section(ctx.bundle, decoder_section), "t5 decoder", decoder_opts);
 
         // Config
         int32_t decoder_layers =
@@ -301,7 +350,7 @@ class T5Plugin final : public IPipelinePlugin {
 
         // Create KvCache for decoder self-attention
         cudaStream_t stream = dec_loaded.module->stream();
-        int32_t kv_dim = compute_kv_dim(ctx.config);
+        int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())
             throw std::runtime_error("T5Plugin: failed to create KvCache");

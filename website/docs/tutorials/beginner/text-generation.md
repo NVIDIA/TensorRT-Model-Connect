@@ -79,7 +79,7 @@ Do not use "Qwen support" and "text generation support" as if they mean the same
 Run this inside the dev container:
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+./build/trtmc build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-0.6b.trtfb \
   --precision fp16 \
   --max-cache-length 256
@@ -89,7 +89,7 @@ What happens:
 
 ```mermaid
 sequenceDiagram
-  participant CLI as trtmc-build
+  participant CLI as trtmc build
   participant Config as ModelConfig
   participant Family as qwen FamilyPlugin
   participant Builder as decoder builder
@@ -130,10 +130,10 @@ The first run may download model files from HuggingFace and compile TensorRT eng
 
 ## Stage 3: Inspect the Bundle
 
-Run the Python inspector first:
+Inspect the bundle metadata:
 
 ```bash
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
 ```
 
 Confirm that the output reports:
@@ -145,13 +145,7 @@ Confirm that the output reports:
 Then list engine sections:
 
 ```bash
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb --list-engines
-```
-
-Finally run the C++ inspector to prove the native runtime can parse the same bundle metadata:
-
-```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
+./build/trtmc inspect /tmp/qwen3-0.6b.trtfb --list-engines
 ```
 
 You are looking for the pieces that the C++ runtime will later consume:

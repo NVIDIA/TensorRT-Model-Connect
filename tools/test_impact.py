@@ -10,7 +10,7 @@ Usage:
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
     python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/text_generation/plugin.cpp
-    python3 tools/test_impact.py --files tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py --cap 15
+    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/qwen/plugin.py --cap 15
 """
 
 import argparse
@@ -32,6 +32,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "ssm_recurrent": "text_generation_causal",
     "rwkv_recurrent": "text_generation_causal",
     "hybrid_mamba_attention": "text_generation_causal",
+    "nemotron_labs_diffusion": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
     "speech_to_text_rnnt": "speech_to_text",
@@ -59,7 +60,6 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
-    "diffusion_sana_wm": "diffusion_media_generation",
     "torchtrt_decoder": "text_generation_causal",
     "torchtrt_diffusion": "diffusion_media_generation",
     "diffusion_pixart_torchtrt": "diffusion_media_generation",
@@ -97,7 +97,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
     "zimage_plugin": ["diffusion_zimage"],
     "qwen_image_plugin": ["diffusion_qwen_image"],
-    "sana_wm_plugin": ["diffusion_sana_wm"],
     "t5_plugin": ["text_to_text"],
     "marian_plugin": ["marian_translation"],
     "seq2seq_plugin": ["seq2seq_encoder_decoder"],
@@ -135,11 +134,9 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
     "qwen_image_pipeline": ["diffusion_qwen_image"],
-    "sana_wm_pipeline": ["diffusion_sana_wm"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
         "diffusion_zimage", "diffusion_qwen_image", "diffusion_pixart_torchtrt",
-        "diffusion_sana_wm",
     ],
 }
 
@@ -213,7 +210,7 @@ THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
 SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_helpers": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage", "diffusion_sana_wm",
+        "diffusion_zimage",
     ],
     "audio_helpers": [
         "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
@@ -221,7 +218,7 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
 }
 
-# Orchestrator modules in tensorrt_model_connect/ -- not treated as specialized builders
+# Orchestrator modules in python/tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
     "debug_runner", "diffusion_runner",
@@ -248,6 +245,9 @@ _BROAD_FALLBACK_RULES = {
     "harness_shared",
     "shared_builder_module",
 }
+# TODO: Remove multi_device from the default exclusion once CI has a runner pool
+# that can reserve all GPUs for tensor-parallel E2E cases.
+_DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
 _FALLBACK_ALLOWLIST = Path("tools/test_impact_fallback_allowlist.txt")
 
 # ---------------------------------------------------------------------------
@@ -390,15 +390,13 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
             paths.add(normalized)
         elif normalized.startswith("data/"):
             paths.add(f"tests/e2e/{normalized}")
-        elif normalized.startswith("asset/"):
-            paths.add(normalized)
     return sorted(paths)
 
 
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
-    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
 
@@ -599,7 +597,7 @@ def _apply_l0_replacements(
 def _infer_unit_tiers(path: str) -> List[str]:
     """Infer which unit test tiers a file change implies."""
     tiers: List[str] = []
-    if path.startswith("tensorrt_model_connect/"):
+    if path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
@@ -791,17 +789,6 @@ def _runtime_strategy_models(
     return _resolver
 
 
-def _fixed_runtime_strategy_models(strategies: List[str]) -> ModelsResolver:
-    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
-        del context
-        return _drop_fp8_scale_models(
-            _models_for_runtime_strategies(strategies, imap),
-            imap,
-        )
-
-    return _resolver
-
-
 def _cpp_runtime_model_strategies(
     context: RuleContext, imap: ImpactMap,
 ) -> List[str]:
@@ -957,7 +944,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=20,
             name="family_package",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/([A-Za-z]\w*)/.+\.py$"
             ),
             resolver=_match_result("family_package", _family_models),
@@ -970,7 +957,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=30,
             name="family_plugin",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/(\w+)\.py$",
                 lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
             ),
@@ -981,7 +968,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=40,
             name="family_base",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"families/((__init__|base)\.py)$"
             ),
             resolver=_match_result("family_base", _all_models),
@@ -994,7 +981,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=50,
             name="torchtrt_family_plugin",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/families/(\w+)\.py$",
                 lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
             ),
@@ -1005,7 +992,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=60,
             name="torchtrt_family_base",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/families/((__init__|base)\.py)$"
             ),
             resolver=_match_result("torchtrt_family_base", _all_models),
@@ -1015,7 +1002,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=70,
             name="torchtrt_strategy",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/strategies/(diffusion)\.py$"
             ),
             resolver=_match_result(
@@ -1028,7 +1015,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=80,
             name="torchtrt_strategy_unknown",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/"
+                r"python/tensorrt_model_connect/"
                 r"engine_defs/torch_trt/strategies/(\w+)\.py$"
             ),
             resolver=_match_result("torchtrt_strategy_unknown", _all_models),
@@ -1038,7 +1025,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=90,
             name="specialized_builder",
             matcher=_regex_rule(
-                r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$",
+                r"python/tensorrt_model_connect/(\w+)\.py$",
                 _is_specialized_builder,
             ),
             resolver=_match_result("specialized_builder", _specialized_builder_models),
@@ -1047,7 +1034,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=100,
             name="shared_builder_module",
-            matcher=_path_startswith("tensorrt_model_connect/"),
+            matcher=_path_startswith("python/tensorrt_model_connect/"),
             resolver=_match_result("shared_builder_module", _all_models),
             covered_by=("TestSharedModules.test_shared_module_all_models",),
         ),
@@ -1447,18 +1434,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
         ),
         ClassificationRule(
-            priority=488,
-            name="sana_wm_inference_script",
-            matcher=_path_equals("inference_video_scripts/inference_sana_wm.py"),
-            resolver=_match_result(
-                "sana_wm_inference_script",
-                _fixed_runtime_strategy_models(["diffusion_sana_wm"]),
-                ["tools"],
-                False,
-            ),
-            covered_by=("TestSanaWmImpactRules.test_sana_wm_scoped_paths",),
-        ),
-        ClassificationRule(
             priority=490,
             name="no_impact",
             matcher=_no_impact_matcher,
@@ -1515,6 +1490,22 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     return sorted(builder_tests), sorted(tools_tests)
 
 
+def _filter_models_by_ci_tier(
+    models: List[str],
+    imap: ImpactMap,
+    exclude_ci_tiers: Set[str],
+) -> List[str]:
+    """Drop models whose manifest ci_tier is excluded by this selection."""
+    if not exclude_ci_tiers:
+        return sorted(models)
+    return sorted(
+        model
+        for model in models
+        if str(imap.model_metadata.get(model, {}).get("ci_tier", "") or "")
+        not in exclude_ci_tiers
+    )
+
+
 def analyze_impact(
     changed_files: List[str],
     imap: ImpactMap,
@@ -1524,8 +1515,12 @@ def analyze_impact(
     head: Optional[str] = None,
     repo_root: Optional[Path] = None,
     e2e_suite: str = "l0",
+    exclude_ci_tiers: Optional[Set[str]] = None,
 ) -> ImpactResult:
     """Analyze impact of all changed files and return aggregated result."""
+    if exclude_ci_tiers is None:
+        exclude_ci_tiers = set(_DEFAULT_EXCLUDED_CI_TIERS)
+
     all_models: Set[str] = set()
     exact_models: Set[str] = set()
     all_tiers: Set[str] = set()
@@ -1561,6 +1556,7 @@ def analyze_impact(
         e2e_models = sorted(imap.core_models)
         cap_applied = True
         l0_replacements = []
+    e2e_models = _filter_models_by_ci_tier(e2e_models, imap, exclude_ci_tiers)
 
     # Coverage-map-based unit test selection
     builder_tests: List[str] = []
@@ -1579,10 +1575,8 @@ def analyze_impact(
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
     if direct_builder_tests:
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
-        fallback_tiers = [tier for tier in fallback_tiers if tier != "builder"]
     if direct_tools_tests:
         tools_tests = sorted(set(tools_tests).union(direct_tools_tests))
-        fallback_tiers = [tier for tier in fallback_tiers if tier != "tools"]
 
     return ImpactResult(
         e2e_models=e2e_models,
@@ -1957,13 +1951,13 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "shared_builder_fp8_scales_cli",
-        "tensorrt_model_connect/tensorrt_model_connect/cli.py",
+        "python/tensorrt_model_connect/build_cli.py",
         ("fp8_scales", "save_fp8_scales"),
         _fp8_scale_models,
     ),
     TokenDiffRefinementRule(
         "shared_builder_fp8_scales_engine",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        "python/tensorrt_model_connect/engine_builder.py",
         (
             "fp8_scales",
             "save_fp8_scales",
@@ -1978,7 +1972,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "shared_builder_diffusion_tokenizer",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+        "python/tensorrt_model_connect/engine_builder.py",
         (
             "detect_diffusion_tokenizer_add_special_tokens",
             "detect_tokenizer_add_special_tokens",
@@ -2002,7 +1996,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     TokenDiffRefinementRule(
         "torchtrt_compiler_tokenizer",
-        "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
+        "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
         (
             "detect_tokenizer_add_special_tokens",
             "detect_diffusion_tokenizer_add_special_tokens",
@@ -2227,9 +2221,14 @@ def validate_map(
     """Validate impact map consistency. Returns list of error strings."""
     errors: List[str] = []
     warnings: List[str] = []
-    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     torchtrt_families_dir = (
-        repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families"
+        repo_root
+        / "python"
+        / "tensorrt_model_connect"
+        / "engine_defs"
+        / "torch_trt"
+        / "families"
     )
 
     def _family_plugin_exists(family: str) -> bool:
@@ -2393,6 +2392,9 @@ def main() -> int:
     parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
                         help="E2E selection policy: l0 applies configured "
                              "large-model replacements; nightly keeps exact models")
+    parser.add_argument("--include-ci-tier", action="append", default=[],
+                        help="Include a ci_tier that is excluded by default, "
+                             "for example multi_device for manual local runs")
     parser.add_argument("--json", action="store_true", dest="json_output",
                         help="Output structured JSON for CI consumption")
     parser.add_argument("--validate", action="store_true",
@@ -2443,6 +2445,11 @@ def main() -> int:
             print(f"WARNING: Coverage map not found at {args.coverage_map}. "
                   "Falling back to tier-level selection.", file=sys.stderr)
 
+    exclude_ci_tiers = (
+        set(_DEFAULT_EXCLUDED_CI_TIERS)
+        .difference(set(args.include_ci_tier or []))
+    )
+
     # Get changed files
     if args.files:
         changed: Optional[List[str]] = [f.strip() for f in args.files.split(",") if f.strip()]
@@ -2452,14 +2459,19 @@ def main() -> int:
     if changed is None:
         # Git diff failed -- safety net: run everything
         print("Running all tests (git diff unavailable).", file=sys.stderr)
+        e2e_models = _filter_models_by_ci_tier(
+            list(imap.all_model_names),
+            imap,
+            exclude_ci_tiers,
+        )
         result_obj = ImpactResult(
-            e2e_models=list(imap.all_model_names),
+            e2e_models=e2e_models,
             unit_tiers=["builder", "cpp", "tools"],
             rebuild_cpp=True,
             cap_applied=False,
             matched_rules=[{
                 "file": "<all>", "rule": "git_diff_failed",
-                "models": list(imap.all_model_names),
+                "models": e2e_models,
             }],
         )
     elif not changed:
@@ -2478,6 +2490,7 @@ def main() -> int:
             head=args.head,
             repo_root=repo_root,
             e2e_suite=args.e2e_suite,
+            exclude_ci_tiers=exclude_ci_tiers,
         )
 
     if args.verbose:

@@ -87,7 +87,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     If validation fails:
     1. Read the error output carefully.
     2. Read the generated plugin at:
-       tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
+       python/tensorrt_model_connect/families/{family_name}.py
     3. Read the HF model's source code to understand the architecture:
        - Look at the model's config.json for architecture details
        - If available, examine the HF modeling code to understand weight naming
@@ -135,7 +135,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
     git fetch github main
     git switch -C autopilot/{family_name} github/main
-    git add tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
+    git add python/tensorrt_model_connect/families/{family_name}.py
     git add tests/e2e/models/{family_name}.json
     ```
 

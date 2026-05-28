@@ -89,7 +89,7 @@ The result is a two-phase deployment model:
 ```mermaid
 sequenceDiagram
   participant User
-  participant Build as trtmc-build
+  participant Build as trtmc build
   participant Bundle as .trtfb bundle
   participant App as C++ application
   participant Runtime as TensorRT-Model-Connect runtime
@@ -114,7 +114,7 @@ The same model has three identities as it moves through the stack:
 | Identity | Example | Source of truth | Used by |
 | --- | --- | --- | --- |
 | HuggingFace model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
-| Builder family | `qwen`, `whisper`, `flux`, `timesfm` | `tensorrt_model_connect/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
+| Builder family | `qwen`, `whisper`, `flux`, `timesfm` | `python/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
 | Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux` | Bundle metadata and C++ plugin manifest | C++ dispatch and pipeline construction. |
 
 This matters because adding a new model does not always mean adding a new runtime. A new decoder-only family can often reuse `decoder_kv_cache`; a new task shape may need a new runtime strategy.
@@ -141,11 +141,11 @@ flowchart TB
 
 The Python builder is responsible for the messy part of model diversity.
 
-It starts in `tensorrt_model_connect/tensorrt_model_connect/cli.py`, then calls into `engine_builder.py`. The builder resolves a model directory, parses `ModelConfig`, selects a `FamilyPlugin`, asks that plugin to load weights and build engines, then writes a bundle through `bundle_writer.py`.
+It starts in `python/tensorrt_model_connect/build_cli.py`, then calls into `engine_builder.py`. The builder resolves a model directory, parses `ModelConfig`, selects a `FamilyPlugin`, asks that plugin to load weights and build engines, then writes a bundle through `bundle_writer.py`.
 
 ```mermaid
 flowchart TD
-  CLI["cli.py<br/>parse trtmc-build args"] --> Resolve["resolve model path and config"]
+  CLI["build_cli.py<br/>parse trtmc build args"] --> Resolve["resolve model path and config"]
   Resolve --> ModelConfig["ModelConfig.from_dir"]
   ModelConfig --> Match["families/__init__.py<br/>select FamilyPlugin"]
   Match --> LoadWeights["FamilyPlugin.load_weights"]
@@ -161,18 +161,18 @@ The important builder abstractions are:
 
 | Abstraction | Source | Responsibility |
 | --- | --- | --- |
-| `ModelConfig` | `tensorrt_model_connect/tensorrt_model_connect/config.py` | Normalizes HuggingFace config fields into one typed view. |
-| `FamilyPlugin` | `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | Per-family matching, weight loading, engine building, optional quantization hooks, and optional modality-specific build methods. |
+| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes HuggingFace config fields into one typed view. |
+| `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | Per-family matching, weight loading, engine building, optional quantization hooks, and optional modality-specific build methods. |
 | Graph builders | `graph_ops.py`, `graph_blocks.py`, `standard_decoder_builder.py`, dedicated builder files | Convert model structure and weights into TensorRT networks or compiled components. |
-| Quantization units | `tensorrt_model_connect/tensorrt_model_connect/quantization/` | Plan quantization, calibration, scale loading, and family-specific exclusions. |
-| `BundleInfo` and `BundleSection` | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | Serialize build metadata and binary sections into `.trtfb`. |
+| Quantization units | `python/tensorrt_model_connect/quantization/` | Plan quantization, calibration, scale loading, and family-specific exclusions. |
+| `BundleInfo` and `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Serialize build metadata and binary sections into `.trtfb`. |
 
 Primary source locations:
 
-- `tensorrt_model_connect/tensorrt_model_connect/cli.py`
-- `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py`
-- `tensorrt_model_connect/tensorrt_model_connect/families/`
-- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`
+- `python/tensorrt_model_connect/build_cli.py`
+- `python/tensorrt_model_connect/engine_builder.py`
+- `python/tensorrt_model_connect/families/`
+- `python/tensorrt_model_connect/bundle_writer.py`
 
 ## Runtime phase
 
@@ -215,8 +215,8 @@ Primary source locations:
 - `src/runtime/registry/pipeline_factory.cpp`
 - `src/runtime/registry/pipeline_registry.cpp`
 - `include/trtmc/runtime/pipeline_plugin.h`
+- `src/runtime/models/`
 - `src/runtime/plugins/`
-- `src/runtime/pipelines/`
 
 ## Request-time flow
 

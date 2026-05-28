@@ -179,7 +179,7 @@ def load_model_arch_from_hf(model_id: str) -> ModelArch:
 def load_model_arch_from_bundle(bundle_path: str) -> ModelArch:
     """Load model architecture from a .trtfb bundle."""
     try:
-        sys.path.insert(0, "tensorrt_model_connect")
+        sys.path.insert(0, "python")
         from tensorrt_model_connect.bundle_writer import BundleReader
         reader = BundleReader(bundle_path)
         config = json.loads(reader.read_section("config"))

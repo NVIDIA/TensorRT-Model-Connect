@@ -88,7 +88,8 @@ run_step() {
 
 # Step 1: Build bundle
 run_step "Build bundle" \
-    trtmc-build build "$MODEL" -o "$BUNDLE_PATH" --max-cache-length "$MAX_CACHE_LENGTH"
+    "$BINARY" build "$MODEL" -o "$BUNDLE_PATH" \
+        --max-cache-length "$MAX_CACHE_LENGTH"
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools
 # for encoder-only / seq2seq models (diff_logits, diff_layers, parity only

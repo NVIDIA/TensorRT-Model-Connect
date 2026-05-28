@@ -84,7 +84,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} python3 scripts/new_family.py \\
         --model-type {model_type} --hf-repo {hf_id} --family-name {family_name}
     docker exec trtmc-dev-gb300-{agent_id} bash -c \\
-        'trtmc-build build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
+        './build/trtmc build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
     ```
 
     ### Validate (3 mandatory gates — ALL must pass)
@@ -144,14 +144,14 @@ WORKER_PROMPT = textwrap.dedent("""\
       "
       ```
     - Read existing plugins for reference (BERT, Qwen, Phi, Mamba, etc.) at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/
+      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
     - Read graph_ops.py and graph_blocks.py for available TRT operations.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
     - Edit the plugin on the HOST at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
+      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}.py
 
     ### C++ runtime plugin (if needed for full E2E)
     The goal is FULL onboarding: a user must be able to run the model via

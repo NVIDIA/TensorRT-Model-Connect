@@ -1,8 +1,8 @@
 """E2E tests for KV cache correctness -- overflow and consistency.
 
 These tests verify that the KV cache behaves correctly when prompts approach
-or exceed the configured max_cache_length.  They require GPU + the trtmc-build
-CLI + the C++ binary.
+or exceed the configured max_cache_length. They require GPU + the unified
+trtmc binary.
 
 Usage:
     pytest tests/e2e/test_cache_correctness.py -v \
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -44,10 +43,10 @@ LONG_PROMPT = (
 SHORT_PROMPT = "The capital of France is"
 
 
-def _build_bundle(hf_id, output_path, max_cache_length, timeout=600):
+def _build_bundle(trtmc_binary, hf_id, output_path, max_cache_length, timeout=600):
     """Build a .trtfb bundle with a specific cache size."""
     cmd = [
-        "trtmc-build", "build",
+        str(trtmc_binary), "build",
         hf_id, "-o", str(output_path),
         "--max-cache-length", str(max_cache_length),
     ]
@@ -76,22 +75,22 @@ def _run_inference(trtmc_binary, bundle_path, prompt, max_new_tokens,
 
 
 def _has_tensorrt_model_connect():
-    """Check if trtmc-build CLI is available."""
+    """Check if the Python builder package is available."""
     try:
         result = subprocess.run(
-            ["trtmc-build", "version"],
+            [sys.executable, "-m", "tensorrt_model_connect", "version"],
             capture_output=True, text=True, timeout=10)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-# Skip the entire module if trtmc-build is not installed
+# Skip the entire module if the Python builder package is not installed.
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
         not _has_tensorrt_model_connect(),
-        reason="trtmc-build CLI not available (pip install -e tensorrt_model_connect/)"),
+        reason="Python builder package not available (pip install -e . -C py-only=true)"),
 ]
 
 
@@ -104,7 +103,7 @@ class TestCacheOverflow:
         bundle_path = engine_dir / "cache_test_32.trtfb"
 
         # Build with tiny cache (32 tokens, LONG_PROMPT is ~80 tokens)
-        _build_bundle(CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
+        _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
 
         rc, stdout, stderr = _run_inference(
             trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
@@ -122,7 +121,7 @@ class TestCacheOverflow:
 
         # Reuse if already built by previous test, otherwise build fresh
         if not bundle_path.is_file():
-            _build_bundle(CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
+            _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
 
         rc, stdout, stderr = _run_inference(
             trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
@@ -146,8 +145,8 @@ class TestCacheConsistency:
         bundle_256 = engine_dir / "cache_test_256.trtfb"
 
         # Build both bundles (skip if build fails -- probably no GPU)
-        _build_bundle(CACHE_TEST_MODEL, bundle_64, max_cache_length=64)
-        _build_bundle(CACHE_TEST_MODEL, bundle_256, max_cache_length=256)
+        _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_64, max_cache_length=64)
+        _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_256, max_cache_length=256)
 
         max_new = 10
 
@@ -169,7 +168,7 @@ class TestCacheConsistency:
             f"  cache=64:  {out_64!r}\n"
             f"  cache=256: {out_256!r}")
 
-        print(f"\n[cache_consistency] Outputs match (cache=64 vs cache=256):")
+        print("\n[cache_consistency] Outputs match (cache=64 vs cache=256):")
         print(f"  {out_64!r}")
 
 
@@ -187,7 +186,7 @@ class TestCacheBoundary:
         """
         bundle_path = engine_dir / "cache_test_64.trtfb"
         if not bundle_path.is_file():
-            _build_bundle(CACHE_TEST_MODEL, bundle_path, max_cache_length=64)
+            _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_path, max_cache_length=64)
 
         # Use a moderate-length prompt that's around 60-70 tokens
         boundary_prompt = (
@@ -215,4 +214,4 @@ class TestCacheBoundary:
                     or "exceed" in combined
                     or "failed" in combined), (
                 f"Non-zero exit without clear error: {stderr}")
-            print(f"\n[cache_boundary] Clean failure at boundary (expected)")
+            print("\n[cache_boundary] Clean failure at boundary (expected)")

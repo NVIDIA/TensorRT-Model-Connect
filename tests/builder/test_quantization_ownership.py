@@ -14,16 +14,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICY_DOC = REPO_ROOT / "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md"
 
 SHARED_CORE_FILES = [
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/context.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/profile.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/scales.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py",
-    "tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py",
-    "tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py",
-    "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py",
+    "python/tensorrt_model_connect/quantization/plan.py",
+    "python/tensorrt_model_connect/quantization/context.py",
+    "python/tensorrt_model_connect/quantization/formats.py",
+    "python/tensorrt_model_connect/quantization/profile.py",
+    "python/tensorrt_model_connect/quantization/scales.py",
+    "python/tensorrt_model_connect/quantization/scale_providers.py",
+    "python/tensorrt_model_connect/quantization/adapters.py",
+    "python/tensorrt_model_connect/quantization/__init__.py",
+    "python/tensorrt_model_connect/graph_blocks.py",
+    "python/tensorrt_model_connect/graph_ops.py",
 ]
 
 # Keep this list to unambiguous, multi-character family names so the regex
@@ -106,7 +106,7 @@ class TestQuantizationSharedCoreBoundary:
 
 class TestFamilyLocalQuantHooks:
     def test_qwen_quant_policy_lives_in_family_plugin(self):
-        text = _read("tensorrt_model_connect/tensorrt_model_connect/families/qwen/plugin.py")
+        text = _read("python/tensorrt_model_connect/families/qwen/plugin.py")
         assert "def quant_exclude_patterns" in text
         assert "def quant_adapter" in text
 

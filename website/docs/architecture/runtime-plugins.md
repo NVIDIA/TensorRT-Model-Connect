@@ -100,10 +100,10 @@ flowchart TD
   Registry --> Lookup["lookup(runtime_strategy)"]
 ```
 
-This design keeps ownership local. Adding a plugin should usually touch:
+This design keeps ownership local. Adding a model runtime should usually touch:
 
-1. One plugin source file under `src/runtime/plugins/`.
-2. One pipeline file under `src/runtime/pipelines/` if a new task state machine is needed.
+1. One model runtime folder under `src/runtime/models/`.
+2. One pipeline file in that model folder if a new task state machine is needed.
 3. The CMake plugin manifest.
 4. Focused unit tests and an E2E manifest.
 

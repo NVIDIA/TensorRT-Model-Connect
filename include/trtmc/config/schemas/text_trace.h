@@ -1,7 +1,7 @@
 #pragma once
 
 // Schema for the "text_trace" namespace. Mirrors
-// tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py one-for-one.
+// python/tensorrt_model_connect/runtime_config/schemas/text_trace.py one-for-one.
 
 #include "trtmc/config/schema_registry.h"
 

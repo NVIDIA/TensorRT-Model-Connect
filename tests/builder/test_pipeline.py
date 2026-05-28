@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
+    import tensorrt_model_connect.pipeline as pipeline_module
     from tensorrt_model_connect.pipeline import Pipeline
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
@@ -285,33 +286,24 @@ class TestPipelineInspect:
 class TestFindBinary:
     def test_build_trtmc_exists(self, tmp_path):
         """Finds ./build/trtmc when it exists."""
-        build_dir = tmp_path / "build"
-        build_dir.mkdir()
-        trtmc = build_dir / "trtmc"
-        trtmc.touch()
+        trtmc = tmp_path / "build" / "trtmc"
+        trtmc.parent.mkdir()
+        trtmc.write_text("#!/bin/sh\n", encoding="utf-8")
+        trtmc.chmod(0o755)
 
-        # Patch Path to make ./build/trtmc resolve to our temp file
-        with patch("tensorrt_model_connect.pipeline.Path") as MockPath:
-            def path_side_effect(p):
-                if p == "./build/trtmc":
-                    return trtmc
-                mock_p = MagicMock()
-                mock_p.exists.return_value = False
-                mock_p.is_file.return_value = False
-                return mock_p
-
-            MockPath.side_effect = path_side_effect
+        with patch(
+            "tensorrt_model_connect.pipeline._native_binary_candidates",
+            return_value=[trtmc],
+        ):
             result = Pipeline._find_binary()
             assert result == str(trtmc)
 
     def test_found_on_path(self):
         """Falls back to shutil.which when local candidates missing."""
-        with patch("tensorrt_model_connect.pipeline.Path") as MockPath:
-            mock_p = MagicMock()
-            mock_p.exists.return_value = False
-            mock_p.is_file.return_value = False
-            MockPath.return_value = mock_p
-
+        with patch(
+            "tensorrt_model_connect.pipeline._native_binary_candidates",
+            return_value=[],
+        ):
             with patch("tensorrt_model_connect.pipeline.shutil.which",
                         return_value="/usr/local/bin/trtmc"):
                 result = Pipeline._find_binary()
@@ -319,13 +311,29 @@ class TestFindBinary:
 
     def test_not_found_anywhere(self):
         """Raises FileNotFoundError when trtmc is not found anywhere."""
-        with patch("tensorrt_model_connect.pipeline.Path") as MockPath:
-            mock_p = MagicMock()
-            mock_p.exists.return_value = False
-            mock_p.is_file.return_value = False
-            MockPath.return_value = mock_p
-
+        with patch(
+            "tensorrt_model_connect.pipeline._native_binary_candidates",
+            return_value=[],
+        ):
             with patch("tensorrt_model_connect.pipeline.shutil.which",
                         return_value=None):
                 with pytest.raises(FileNotFoundError, match="trtmc binary not found"):
                     Pipeline._find_binary()
+
+    def test_existing_executable_returns_first_executable(self, tmp_path):
+        missing = tmp_path / "missing"
+        non_executable = tmp_path / "non_executable"
+        executable = tmp_path / "trtmc"
+        non_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+        assert pipeline_module._existing_executable(
+            [missing, non_executable, executable]
+        ) == executable
+
+    def test_native_binary_candidates_include_package_and_source_paths(self):
+        candidates = pipeline_module._native_binary_candidates()
+
+        assert any(candidate.name == "trtmc" for candidate in candidates)
+        assert any(candidate.parent.name == "build" for candidate in candidates)

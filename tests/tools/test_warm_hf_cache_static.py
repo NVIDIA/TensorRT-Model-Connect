@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
-import os
 import pathlib
 from pathlib import Path
 
@@ -13,22 +12,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 HELPER_FUNCTIONS = {
-    "_allow_patterns_for_hf_id",
     "_component_has_weight",
     "_diffusers_missing_weight_components",
     "_is_diffusers_component_enabled",
+    "_is_cached",
     "_snapshot_has_required_files",
-    "_truthy_env",
-}
-HELPER_CONSTANTS = {
-    "_DIFFUSERS_WEIGHT_COMPONENTS",
-    "_ENTRYPOINT_PATTERNS",
-    "_HF_ALLOW_PATTERNS",
-    "_HF_EXTRA_ALLOW_PATTERNS",
-    "_SANA_WM_FULL_ALLOW_PATTERNS",
-    "_SANA_WM_HF_ID",
-    "_SANA_WM_METADATA_ALLOW_PATTERNS",
-    "_WEIGHT_PATTERNS",
 }
 
 
@@ -37,17 +25,28 @@ def _load_cache_helpers() -> dict:
     namespace = {
         "fnmatch": fnmatch,
         "json": json,
-        "os": os,
         "pathlib": pathlib,
+        "_DIFFUSERS_WEIGHT_COMPONENTS": {
+            "controlnet",
+            "image_encoder",
+            "text_encoder",
+            "text_encoder_2",
+            "transformer",
+            "unet",
+            "vae",
+        },
+        "_REQUIRED_FILES_BY_HF_ID": {
+            "nvidia/Nemotron-Labs-Diffusion-8B": [
+                "linear_spec_lora/adapter_config.json",
+                "linear_spec_lora/adapter_model.safetensors",
+            ],
+        },
+        "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
+        "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
+        "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
+        "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
     }
     for node in tree.body:
-        if isinstance(node, ast.Assign) and all(
-            isinstance(target, ast.Name) and target.id in HELPER_CONSTANTS
-            for target in node.targets
-        ):
-            module = ast.Module(body=[node], type_ignores=[])
-            ast.fix_missing_locations(module)
-            exec(compile(module, str(WARM_HF_CACHE), "exec"), namespace)
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
             module = ast.Module(body=[node], type_ignores=[])
             ast.fix_missing_locations(module)
@@ -60,6 +59,14 @@ def test_magpie_reference_dependencies_are_warmed() -> None:
     assert "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps" in text
     assert "google/byt5-small" in text
     assert "microsoft/wavlm-base-plus" in text
+
+
+def test_nemotron_labs_diffusion_lora_files_are_warmed() -> None:
+    text = WARM_HF_CACHE.read_text()
+    assert '"chat_template.jinja"' in text
+    assert '"linear_spec_lora/**"' in text
+    assert '"linear_spec_lora/adapter_config.json"' in text
+    assert '"linear_spec_lora/adapter_model.safetensors"' in text
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
@@ -117,32 +124,57 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
     assert helpers["_snapshot_has_required_files"](snapshot)
 
 
-def test_sana_wm_cache_warm_uses_metadata_only_by_default(monkeypatch) -> None:
+def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) -> None:
     helpers = _load_cache_helpers()
-    monkeypatch.delenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", raising=False)
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
 
-    assert helpers["_allow_patterns_for_hf_id"](
-        "Efficient-Large-Model/SANA-WM_bidirectional"
-    ) == ["README.md", "config.yaml"]
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+    lora_dir = snapshot / "linear_spec_lora"
+    lora_dir.mkdir()
+    (lora_dir / "adapter_config.json").write_text("{}")
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+    (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
+    assert helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
 
 
-def test_sana_wm_cache_warm_can_opt_into_full_weights(monkeypatch) -> None:
+def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
     helpers = _load_cache_helpers()
-    monkeypatch.setenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", "1")
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    calls: list[dict] = []
 
-    allow_patterns = helpers["_allow_patterns_for_hf_id"](
-        "Efficient-Large-Model/SANA-WM_bidirectional"
-    )
+    def fake_snapshot_download(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return str(snapshot)
 
-    assert allow_patterns != ["README.md", "config.yaml"]
-    assert "asset/sana_wm/**" in allow_patterns
-    assert "dit/**" in allow_patterns
-    assert "refiner/**" in allow_patterns
+    helpers["snapshot_download"] = fake_snapshot_download
+
+    assert helpers["_is_cached"]("org/model")
+    assert calls == [{
+        "args": ("org/model",),
+        "kwargs": {
+            "allow_patterns": ["config.json", "model.safetensors", "*.nemo"],
+            "local_files_only": True,
+        },
+    }]
 
 
-def test_non_sana_wm_cache_warm_uses_standard_allow_patterns() -> None:
+def test_cache_skip_rejects_unresolvable_local_revision() -> None:
     helpers = _load_cache_helpers()
 
-    assert helpers["_allow_patterns_for_hf_id"]("nvidia/test-model") == (
-        helpers["_HF_ALLOW_PATTERNS"] + helpers["_HF_EXTRA_ALLOW_PATTERNS"]
-    )
+    def fake_snapshot_download(*args, **kwargs):
+        raise RuntimeError("revision is not available offline")
+
+    helpers["snapshot_download"] = fake_snapshot_download
+
+    assert not helpers["_is_cached"]("org/model")

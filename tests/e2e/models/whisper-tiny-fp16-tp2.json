@@ -1,0 +1,64 @@
+{
+  "name": "whisper-tiny-fp16-tp2",
+  "trace_id": "IT-E2E-WHSPT-FP16-TP2-01",
+  "hf_id": "openai/whisper-tiny",
+  "bundle": "whisper-tiny-fp16-tp2.trtfb",
+  "family": "whisper",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "precision": "fp16",
+  "max_cache_length": 64,
+  "prompt": "test",
+  "max_new_tokens": 10,
+  "logit_atol": 1.0,
+  "layer_atol": 0.5,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 2
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 2
+      },
+      "gating": true
+    }
+  ],
+  "threshold_overrides": {
+    "logit_cosine_p5": 0.0,
+    "stable_top1_match_rate": 0.0,
+    "token_agreement_rate": 0.0,
+    "normalized_text_edit_distance": 1.0
+  }
+}

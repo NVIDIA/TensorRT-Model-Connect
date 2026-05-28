@@ -4,46 +4,55 @@ title: Quick Start
 
 This quick start builds one text-generation bundle, inspects it, and runs it through the C++ runtime.
 
-Complete [Environment and First Repro](environment-and-repro.md) first. The commands below assume you are inside the dev container with the Python builder installed and `build/trtmc` compiled.
+Complete [Installation](installation.md) first. If you installed a release
+wheel, the command is `trtmc`. If you built from source in the dev container,
+the command is `./build/trtmc`.
+
+```bash
+TRTMC=trtmc
+# Source build alternative:
+# TRTMC=./build/trtmc
+```
 
 ## 1. Prove The Tools Are Available
 
 ```bash
-trtmc-build version
-./build/trtmc version
+$TRTMC version
 ```
 
 Expected signals:
 
 ```text
-trtmc-build 0.1.0
-TensorRT: <installed version>
 trtmc 0.1.0
 TRT support: yes
 ```
 
-If `./build/trtmc` fails with a missing shared library, you are probably outside the dev container or missing its runtime library paths.
+If source-built `./build/trtmc` fails with a missing shared library, you are
+probably outside the dev container or missing its runtime library paths.
+If `trtmc` from a wheel fails, check that you installed the
+`manylinux_2_39_aarch64` wheel for your Python version and that the host has
+compatible NVIDIA driver/CUDA runtime libraries.
 
 ## 2. Build A Bundle
 
 ```bash
-trtmc-build build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-0.6b.trtfb \
   --precision fp16 \
   --max-cache-length 256
 ```
 
-`trtmc-build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
+`trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
 
 First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
 
 ## 3. Inspect The Bundle
 
-Run the Python inspector:
+Inspect the bundle:
 
 ```bash
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb
-trtmc-build inspect /tmp/qwen3-0.6b.trtfb --list-engines
+$TRTMC inspect /tmp/qwen3-0.6b.trtfb
+$TRTMC inspect /tmp/qwen3-0.6b.trtfb --list-engines
 ```
 
 Expected fields include:
@@ -55,18 +64,12 @@ Runtime strategy:   decoder_kv_cache
 Precision:          fp16
 ```
 
-Then prove the C++ runtime can parse the same artifact:
-
-```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
-```
-
 Inspection should become the first debugging habit. The important fields are `family`, `precision`, `runtime_strategy`, engine sections, tokenizer assets, and TensorRT compatibility metadata.
 
 ## 4. Run Deterministic Inference
 
 ```bash
-./build/trtmc run /tmp/qwen3-0.6b.trtfb \
+$TRTMC run /tmp/qwen3-0.6b.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -82,7 +85,7 @@ If generation succeeds, you have proven this path:
 
 ```mermaid
 flowchart LR
-  Build["trtmc-build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
+  Build["trtmc build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
   Bundle --> Inspect["inspect metadata"]
   Bundle --> Load["trtmc::load"]
   Load --> Strategy["decoder_kv_cache"]
@@ -96,8 +99,7 @@ If generation fails, classify the failure before changing code:
 | --- | --- |
 | Build cannot download model | HuggingFace model ID, auth, network, or cache problem. |
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
-| Python inspection fails | Bundle was not written correctly or path is wrong. |
-| C++ inspection fails | Runtime cannot parse the bundle or runtime library environment is wrong. |
+| Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
 | Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 

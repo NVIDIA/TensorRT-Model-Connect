@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,9 @@ try:
     from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
+
+from tensorrt_model_connect.checkpoint_mapper import WeightDict
+from tensorrt_model_connect.parallel_config import ParallelConfig
 
 # ---- helpers shared across all tests ----
 
@@ -132,6 +136,207 @@ class TestQwenPlugin:
         # w_out original [vocab, hidden] transposed to [hidden, vocab]
         assert weights["w_out"].shape == (self.HIDDEN, self.VOCAB)
 
+    def test_tensor_parallel_shards_qwen_projection_weights(self, tmp_path):
+        """TP shards attention/MLP inner dims and leaves replicated weights intact."""
+        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.parallel_config import (
+            ParallelConfig,
+            shard_standard_decoder_weights,
+        )
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors(
+            self.VOCAB, self.HIDDEN, 1, self.HEADS, self.KV_HEADS, self.MLP)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+        tp_size = 4
+        rank = 3
+        hidden_start = rank * self.HIDDEN // tp_size
+        hidden_end = (rank + 1) * self.HIDDEN // tp_size
+        mlp_start = rank * self.MLP // tp_size
+        mlp_end = (rank + 1) * self.MLP // tp_size
+        shard = shard_standard_decoder_weights(
+            cfg, weights,
+            ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=rank))
+
+        np.testing.assert_allclose(
+            shard["layer.0.w_q"], weights["layer.0.w_q"][:, hidden_start:hidden_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_k"], weights["layer.0.w_k"][:, hidden_start:hidden_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_o"], weights["layer.0.w_o"][hidden_start:hidden_end, :])
+        np.testing.assert_allclose(
+            shard["layer.0.w_gate"], weights["layer.0.w_gate"][:, mlp_start:mlp_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_down"], weights["layer.0.w_down"][mlp_start:mlp_end, :])
+        np.testing.assert_allclose(shard["w_out"], weights["w_out"])
+        assert shard["_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_kv_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_mlp_size"] == self.MLP // tp_size
+
+
+# =========================================================================
+# 1b. Nemotron Labs Diffusion — encoder.* checkpoint aliases
+# =========================================================================
+
+class TestNemotronLabsDiffusionPlugin:
+    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
+
+    @staticmethod
+    def _make_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
+        head_dim = hidden // heads
+        kv_hidden = kv_heads * head_dim
+        t = {}
+        t["encoder.embed_tokens.weight"] = _rand(vocab, hidden)
+        for i in range(layers):
+            p = f"encoder.layers.{i}"
+            t[f"{p}.input_layernorm.weight"] = _rand(hidden)
+            t[f"{p}.post_attention_layernorm.weight"] = _rand(hidden)
+            t[f"{p}.self_attn.q_proj.weight"] = _rand(hidden, hidden)
+            t[f"{p}.self_attn.k_proj.weight"] = _rand(kv_hidden, hidden)
+            t[f"{p}.self_attn.v_proj.weight"] = _rand(kv_hidden, hidden)
+            t[f"{p}.self_attn.o_proj.weight"] = _rand(hidden, hidden)
+            t[f"{p}.mlp.gate_proj.weight"] = _rand(mlp, hidden)
+            t[f"{p}.mlp.up_proj.weight"] = _rand(mlp, hidden)
+            t[f"{p}.mlp.down_proj.weight"] = _rand(hidden, mlp)
+        t["encoder.norm.weight"] = _rand(hidden)
+        t["diffusion_head.weight"] = _rand(vocab, hidden)
+        return t
+
+    def _setup(self, tmp_path):
+        config = {
+            "model_type": "nemotron_labs_diffusion",
+            "architectures": ["NemotronLabsDiffusionModel"],
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "intermediate_size": self.MLP,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+            "head_dim": self.HIDDEN // self.HEADS,
+            "mask_token_id": 100,
+            "block_size": 32,
+        }
+        tensors = self._make_tensors(
+            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.KV_HEADS, self.MLP)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+        return tensors
+
+    def test_load_weights_uses_encoder_prefix_and_diffusion_head(self, tmp_path):
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+
+        tensors = self._setup(tmp_path)
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        np.testing.assert_allclose(weights["embedding"], tensors["encoder.embed_tokens.weight"])
+        np.testing.assert_allclose(weights["final_norm"], tensors["encoder.norm.weight"])
+        np.testing.assert_allclose(weights["w_out"], tensors["diffusion_head.weight"].T)
+        assert weights["_attention_size"] == self.HIDDEN
+        assert weights["_kv_attention_size"] == self.KV_HEADS * (self.HIDDEN // self.HEADS)
+        assert weights["_mlp_size"] == self.MLP
+
+    def test_build_engine_requests_full_logits_runtime(self, tmp_path, monkeypatch):
+        plugin_mod = importlib.import_module(
+            "tensorrt_model_connect.families.nemotron_labs_diffusion.plugin")
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+
+        self._setup(tmp_path)
+        cfg = ModelConfig.from_dir(tmp_path)
+        captured = {}
+
+        def fake_build(config, weights, max_cache_length, **kwargs):
+            captured.update(kwargs)
+            captured["runtime_strategy"] = config.raw.get("runtime_strategy")
+            captured["decoder_engine_role"] = config.raw.get("_decoder_engine_role")
+            captured["full_logits_raw"] = config.raw.get("_decoder_full_logits_output")
+            return b"plan"
+
+        monkeypatch.setattr(plugin_mod, "build_standard_decoder_engine", fake_build)
+        assert plugin.build_engine(cfg, {}, 64, precision="bf16") == b"plan"
+        assert captured["full_logits_output"] is True
+        assert captured["runtime_strategy"] == "nemotron_labs_diffusion"
+        assert captured["decoder_engine_role"] == "dual_profile"
+        assert captured["full_logits_raw"] is True
+
+    def test_build_extra_engines_merges_linear_spec_lora(self, tmp_path, monkeypatch):
+        plugin_mod = importlib.import_module(
+            "tensorrt_model_connect.families.nemotron_labs_diffusion.plugin")
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+
+        self._setup(tmp_path)
+        lora_dir = tmp_path / "linear_spec_lora"
+        lora_dir.mkdir()
+        (lora_dir / "adapter_config.json").write_text(json.dumps({
+            "peft_type": "LORA",
+            "target_modules": ["o_proj"],
+            "r": 2,
+            "lora_alpha": 4,
+            "bias": "none",
+            "fan_in_fan_out": False,
+            "inference_mode": True,
+        }))
+
+        adapters = {}
+        expected_deltas = {}
+        for layer_idx in range(self.LAYERS):
+            prefix = f"base_model.model.encoder.layers.{layer_idx}.self_attn.o_proj"
+            lora_a = (
+                np.arange(2 * self.HIDDEN, dtype=np.float32).reshape(2, self.HIDDEN)
+                + layer_idx
+            )
+            lora_b = (
+                np.arange(self.HIDDEN * 2, dtype=np.float32).reshape(self.HIDDEN, 2)
+                + 0.25 + layer_idx
+            )
+            adapters[f"{prefix}.lora_A.weight"] = lora_a
+            adapters[f"{prefix}.lora_B.weight"] = lora_b
+            expected_deltas[layer_idx] = ((lora_b @ lora_a) * 2.0).T
+        save_file(adapters, str(lora_dir / "adapter_model.safetensors"))
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        cfg.raw["_model_dir"] = str(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+        assert plugin.get_lora_config(cfg) == {
+            "linear_spec_lora_engine_section": plugin.lora_engine_section
+        }
+        base_w_o = {i: weights[f"layer.{i}.w_o"].copy() for i in range(self.LAYERS)}
+        captured = {}
+
+        def fake_build(config, merged_weights, max_cache_length, **kwargs):
+            captured["weights"] = merged_weights
+            captured["kwargs"] = kwargs
+            captured["runtime_strategy"] = config.raw.get("runtime_strategy")
+            captured["full_logits_raw"] = config.raw.get("_decoder_full_logits_output")
+            return b"lora-plan"
+
+        monkeypatch.setattr(plugin_mod, "build_standard_decoder_engine", fake_build)
+        extra = plugin.build_extra_engines(cfg, weights, 64, precision="fp32")
+
+        assert extra == {plugin.lora_engine_section: b"lora-plan"}
+        assert captured["kwargs"]["full_logits_output"] is True
+        assert captured["runtime_strategy"] == "nemotron_labs_diffusion"
+        assert captured["full_logits_raw"] is True
+        for layer_idx in range(self.LAYERS):
+            np.testing.assert_allclose(
+                captured["weights"][f"layer.{layer_idx}.w_o"],
+                base_w_o[layer_idx] + expected_deltas[layer_idx],
+                rtol=1e-5,
+                atol=1e-5,
+            )
+            np.testing.assert_allclose(weights[f"layer.{layer_idx}.w_o"], base_w_o[layer_idx])
+
 
 # =========================================================================
 # 2. Gemma — gamma +1.0 offset, embedding scaling
@@ -189,72 +394,6 @@ class TestGemmaPlugin:
         expected_embed = tensors["model.embed_tokens.weight"] * scale
         np.testing.assert_allclose(
             weights["embedding"], expected_embed, atol=1e-5)
-
-    def test_gemma3_extra_norm_gamma_plus_one(self, tmp_path):
-        """Gemma3's extra attention/feed-forward norms should get the Gemma +1 offset."""
-        from tensorrt_model_connect.families.gemma import plugin
-
-        tensors = self._setup(tmp_path, num_layers=1)
-        head_dim = self.HIDDEN // self.HEADS
-        config = {
-            "model_type": "gemma3",
-            "vocab_size": self.VOCAB,
-            "hidden_size": self.HIDDEN,
-            "intermediate_size": self.MLP,
-            "num_hidden_layers": 1,
-            "num_attention_heads": self.HEADS,
-            "num_key_value_heads": self.KV_HEADS,
-            "hidden_activation": "gelu_pytorch_tanh",
-        }
-        prefix = "model.layers.0"
-        tensors[f"{prefix}.self_attn.q_norm.weight"] = _rand(head_dim)
-        tensors[f"{prefix}.self_attn.k_norm.weight"] = _rand(head_dim)
-        tensors[f"{prefix}.pre_feedforward_layernorm.weight"] = _rand(self.HIDDEN)
-        tensors[f"{prefix}.post_feedforward_layernorm.weight"] = _rand(self.HIDDEN)
-        _write_config(tmp_path, config)
-        _write_safetensors(tmp_path, tensors)
-
-        cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
-
-        np.testing.assert_allclose(
-            weights["layer.0.q_norm"],
-            np.tile(tensors[f"{prefix}.self_attn.q_norm.weight"], self.HEADS) + 1.0,
-            atol=1e-6,
-        )
-        np.testing.assert_allclose(
-            weights["layer.0.k_norm"],
-            np.tile(tensors[f"{prefix}.self_attn.k_norm.weight"], self.KV_HEADS) + 1.0,
-            atol=1e-6,
-        )
-        np.testing.assert_allclose(
-            weights["layer.0.pre_ff_norm"],
-            tensors[f"{prefix}.pre_feedforward_layernorm.weight"] + 1.0,
-            atol=1e-6,
-        )
-        np.testing.assert_allclose(
-            weights["layer.0.post_ff_norm"],
-            tensors[f"{prefix}.post_feedforward_layernorm.weight"] + 1.0,
-            atol=1e-6,
-        )
-        assert cfg.hidden_act == "gelu_pytorch_tanh"
-
-    def test_gemma2_uses_post_norm_residual_and_attention_softcap(self):
-        """Gemma2 should follow HF's post-norm residual block and softcapped attention."""
-        from tensorrt_model_connect.families.gemma.standard_decoder_builder import (
-            _attention_logit_softcap,
-            _uses_gemma_post_norm_residual,
-        )
-
-        cfg = ModelConfig.create_tiny(
-            "gemma2",
-            architectures=["Gemma2ForCausalLM"],
-            hidden_activation="gelu_pytorch_tanh",
-            attn_logit_softcapping=50.0,
-        )
-
-        assert _uses_gemma_post_norm_residual(cfg)
-        assert _attention_logit_softcap(cfg) == 50.0
 
 
 # =========================================================================
@@ -1936,6 +2075,62 @@ class TestCanaryPlugin:
     MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
 
     @staticmethod
+    def _make_tp_weights(
+        *,
+        hidden: int = HIDDEN,
+        dec_layers: int = DEC_LAYERS,
+        dec_heads: int = HEADS,
+        ffn: int = FFN,
+    ) -> WeightDict:
+        rng = np.random.RandomState(123)
+
+        def rand(*shape: int) -> np.ndarray:
+            return rng.randn(*shape).astype(np.float32)
+
+        weights = WeightDict({
+            "_dec_layers": dec_layers,
+            "_dec_heads": dec_heads,
+            "_dec_ffn": ffn,
+            "_enc_seq": 16,
+            "dec_emb": rand(TestCanaryPlugin.VOCAB, hidden),
+            "dec_pos": rand(128, hidden),
+            "emb_ln": rand(hidden),
+            "emb_ln_b": rand(hidden),
+            "final_norm": rand(hidden),
+            "final_norm_b": rand(hidden),
+            "w_out": rand(hidden, TestCanaryPlugin.VOCAB),
+            "out_bias": rand(TestCanaryPlugin.VOCAB),
+        })
+        for i in range(dec_layers):
+            pfx = f"layer.{i}"
+            for key in ("w_q", "w_k", "w_v", "xw_q", "xw_k", "xw_v"):
+                weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+            for key in ("q_bias", "k_bias", "v_bias", "xb_q", "xb_k", "xb_v"):
+                weights[f"{pfx}.{key}"] = rand(hidden)
+            for key in ("w_o", "xw_o"):
+                weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+            weights[f"{pfx}.o_bias"] = rand(hidden)
+            weights[f"{pfx}.xb_o"] = rand(hidden)
+            weights[f"{pfx}.w_fc1"] = rand(hidden, ffn)
+            weights[f"{pfx}.fc1_bias"] = rand(ffn)
+            weights[f"{pfx}.w_fc2"] = rand(ffn, hidden)
+            weights[f"{pfx}.fc2_bias"] = rand(hidden)
+            for key in (
+                "input_norm", "input_norm_b",
+                "xattn_norm", "xattn_norm_b",
+                "ffn_norm", "ffn_norm_b",
+            ):
+                weights[f"{pfx}.{key}"] = rand(hidden)
+        return weights
+
+    @staticmethod
+    def _tp_builder_module():
+        return pytest.importorskip(
+            "tensorrt_model_connect.families.canary.decoder_tp_builder",
+            reason="TensorRT is required for Canary TP builder tests",
+        )
+
+    @staticmethod
     def _make_nemo_state_dict(vocab, hidden, enc_layers, dec_layers,
                               heads, head_dim, ffn, mel_bins, conv_kernel,
                               sub_ch):
@@ -2123,3 +2318,165 @@ class TestCanaryPlugin:
         assert weights["_dec_layers"] == self.DEC_LAYERS
         assert weights["_hidden"] == self.HIDDEN
         assert weights["_vocab"] == self.VOCAB
+
+    def test_tp_build_rejects_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+
+        with pytest.raises(ValueError, match="requires tensor_parallel mode"):
+            decoder_tp_builder.build_canary_tp_decoder_engine(
+                object(),
+                WeightDict(),
+                max_cache_length=4,
+                parallel_config=ParallelConfig(),
+            )
+
+    def test_tp_validation_ignores_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+
+        decoder_tp_builder._validate_canary_tp(
+            WeightDict(),
+            hidden=self.HIDDEN,
+            num_heads=self.HEADS,
+            ffn_dim=self.FFN,
+            parallel=ParallelConfig(),
+        )
+
+    @pytest.mark.parametrize(
+        ("parallel", "overrides", "message"),
+        [
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=-1),
+                {},
+                "concrete rank",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"hidden": HIDDEN + 1},
+                "hidden size divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"num_heads": HEADS + 1},
+                "decoder_attention_heads divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"ffn_dim": FFN + 1},
+                "decoder_ffn_dim divisible",
+            ),
+        ],
+    )
+    def test_tp_validation_rejects_bad_config_dimensions(
+        self,
+        parallel,
+        overrides,
+        message,
+    ):
+        decoder_tp_builder = self._tp_builder_module()
+        kwargs = {
+            "hidden": self.HIDDEN,
+            "num_heads": self.HEADS,
+            "ffn_dim": self.FFN,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_canary_tp(
+                self._make_tp_weights(),
+                parallel=parallel,
+                **kwargs,
+            )
+
+    @pytest.mark.parametrize(
+        ("key", "shape", "message"),
+        [
+            ("layer.0.w_q", (HIDDEN, HIDDEN - 1), "output dim"),
+            ("layer.0.w_o", (HIDDEN - 1, HIDDEN), "input dim"),
+            ("layer.0.w_fc1", (HIDDEN, FFN - 1), "w_fc1 output dim"),
+        ],
+    )
+    def test_tp_validation_rejects_unshardable_weight_shapes(
+        self,
+        key,
+        shape,
+        message,
+    ):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        weights[key] = np.zeros(shape, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_canary_tp(
+                weights,
+                hidden=self.HIDDEN,
+                num_heads=self.HEADS,
+                ffn_dim=self.FFN,
+                parallel=ParallelConfig(
+                    mode="tensor_parallel",
+                    tp_size=2,
+                    rank=0,
+                ),
+            )
+
+    def test_tp_sharding_returns_original_for_single_device_mode(self):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        assert decoder_tp_builder.shard_canary_decoder_weights(
+            weights,
+            parallel=ParallelConfig(),
+        ) is weights
+
+    def test_tp_shards_rank_local_decoder_weights(self):
+        decoder_tp_builder = self._tp_builder_module()
+        weights = self._make_tp_weights()
+        shard = decoder_tp_builder.shard_canary_decoder_weights(
+            weights,
+            parallel=ParallelConfig(
+                mode="tensor_parallel",
+                tp_size=2,
+                rank=1,
+            ),
+        )
+
+        assert isinstance(shard, WeightDict)
+        assert shard["_tensor_parallel_size"] == 2
+        assert shard["_tensor_parallel_rank"] == 1
+        assert shard["_dec_layers"] == self.DEC_LAYERS
+
+        np.testing.assert_array_equal(
+            shard["layer.0.w_q"],
+            weights["layer.0.w_q"][:, self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xw_v"],
+            weights["layer.0.xw_v"][:, self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.q_bias"],
+            weights["layer.0.q_bias"][self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xb_k"],
+            weights["layer.0.xb_k"][self.HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_o"],
+            weights["layer.0.w_o"][self.HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.xw_o"],
+            weights["layer.0.xw_o"][self.HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc1"],
+            weights["layer.0.w_fc1"][:, self.FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.fc1_bias"],
+            weights["layer.0.fc1_bias"][self.FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc2"],
+            weights["layer.0.w_fc2"][self.FFN // 2:, :],
+        )
+        assert shard["final_norm"] is weights["final_norm"]

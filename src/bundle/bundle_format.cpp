@@ -149,6 +149,13 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
 
     sections_out.clear();
     parse_sections_table(json, sections_out);
+    info.sections.clear();
+    info.sections.reserve(sections_out.size());
+    for (const auto& [name, offset_size] : sections_out) {
+        const auto& [offset, size] = offset_size;
+        info.sections.push_back(BundleSectionInfo{name, static_cast<std::uint64_t>(offset),
+                                                  static_cast<std::uint64_t>(size)});
+    }
 
     return info;
 }

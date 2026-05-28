@@ -116,7 +116,7 @@ Bundles are deployable artifacts, but they are not universally portable binaries
 
 Use this checklist when debugging:
 
-1. Does `trtmc-build inspect` report the expected model, family, precision, and runtime strategy?
+1. Does `./build/trtmc inspect` report the expected model, family, precision, and runtime strategy?
 2. Does `./build/trtmc inspect` parse the same bundle from the C++ side?
 3. Are the expected engine sections present for the strategy?
 4. Does the runtime binary register the strategy?

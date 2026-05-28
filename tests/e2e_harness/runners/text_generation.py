@@ -18,6 +18,7 @@ import logging
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,219 @@ _TRT_RUNTIME_ERROR_RE = re.compile(
     r"|illegal memory access"
     r").*$"
 )
+_MPI_TAGGED_STDOUT_RE = re.compile(
+    r"^\[[^\]]+,(?P<rank>\d+)\]<stdout>:(?P<text>.*)$")
+_MPI_STREAM_TAG_RE = re.compile(r"\[[^\]]+,\d+\]<(?:stdout|stderr)>:")
+
+
+def _distributed_runtime_config(case: E2ECase | None) -> dict:
+    if case is None:
+        return {}
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _extract_rank_zero_stdout(stdout: str) -> str:
+    """Return rank-0 stdout from OpenMPI --tag-output, falling back to raw text."""
+    rank0_lines: list[str] = []
+    saw_tagged = False
+    for line in (stdout or "").splitlines():
+        match = _MPI_TAGGED_STDOUT_RE.match(line)
+        if match is None:
+            continue
+        saw_tagged = True
+        if int(match.group("rank")) == 0:
+            rank0_lines.append(match.group("text"))
+    if saw_tagged:
+        return "\n".join(rank0_lines).strip()
+    return (stdout or "").strip()
+
+
+def _strip_mpi_stream_tags(text: str) -> str:
+    return _MPI_STREAM_TAG_RE.sub("", text or "")
+
+
+def _safe_artifact_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name or "case")
+
+
+def _read_text_generation_sample(path: Path) -> dict:
+    """Read the first JSONL text-generation sample written by the C++ CLI."""
+    if not path.is_file():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            if not isinstance(sample, dict):
+                return {}
+            token_ids = sample.get("token_ids")
+            if isinstance(token_ids, list):
+                sample["token_ids"] = [int(token) for token in token_ids]
+            return sample
+    return {}
+
+
+def _ensure_distributed_runtime_env(
+    case: E2ECase,
+    ctx: RunContext,
+    env: dict[str, str],
+    rendezvous_suffix: str = "",
+) -> None:
+    """Populate shared env values needed by all distributed ranks."""
+    if not _distributed_runtime_config(case):
+        return
+    if env.get("TRTMC_NCCL_RENDEZVOUS"):
+        return
+
+    safe_name = _safe_artifact_name(case.name)
+    root = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) if ctx.artifacts_dir else \
+        Path(tempfile.gettempdir())
+    path = root / f"{safe_name}{rendezvous_suffix}.nccl_rendezvous.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(path)
+
+
+def _wrap_distributed_command(
+    cmd: list[str], case: E2ECase | None, env: dict[str, str]
+) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        prefix = [launcher] + [str(arg) for arg in launcher_args]
+    else:
+        prefix = [launcher, "--tag-output", "-np", str(world_size)]
+
+    export_env = config.get("export_env", ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"])
+    if isinstance(export_env, list) and Path(launcher).name == "mpirun":
+        export_names = [str(name) for name in export_env]
+        if "TRTMC_NCCL_RENDEZVOUS" in env and "TRTMC_NCCL_RENDEZVOUS" not in export_names:
+            export_names.append("TRTMC_NCCL_RENDEZVOUS")
+        for name in export_names:
+            if name in env:
+                prefix.extend(["-x", name])
+
+    return prefix + cmd
+
+
+def _visible_gpu_indices(env: dict[str, str]) -> list[str]:
+    raw = env.get("CUDA_VISIBLE_DEVICES", "")
+    if not raw or raw.lower() in {"all", "none", "void"}:
+        return []
+    indices: list[str] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if token.isdigit():
+            indices.append(token)
+    return indices
+
+
+class _GpuMemorySampler:
+    def __init__(self, artifacts_dir: str | None, case_name: str, env: dict[str, str],
+                 interval_ms: int) -> None:
+        root = Path(_case_artifact_dir(artifacts_dir, case_name)) if artifacts_dir else \
+            Path(tempfile.gettempdir())
+        root.mkdir(parents=True, exist_ok=True)
+        self.path = root / "gpu_memory_samples.csv"
+        self.env = env
+        self.interval_ms = max(50, interval_ms)
+        self.visible_indices = _visible_gpu_indices(env)
+        self.proc: subprocess.Popen | None = None
+        self.handle = None
+        self.error = ""
+
+    def start(self) -> None:
+        if shutil.which("nvidia-smi") is None:
+            self.error = "nvidia-smi not found"
+            return
+        self.handle = self.path.open("w", encoding="utf-8")
+        cmd = [
+            "nvidia-smi",
+            "--query-gpu=index,memory.used",
+            "--format=csv,noheader,nounits",
+            f"--loop-ms={self.interval_ms}",
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=self.handle,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=self.env,
+            )
+        except Exception as exc:
+            self.error = str(exc)
+            self.handle.close()
+            self.handle = None
+
+    def stop(self) -> dict:
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=2)
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
+        return self._summary()
+
+    def _summary(self) -> dict:
+        meta = {
+            "sample_file": str(self.path),
+            "sample_interval_ms": self.interval_ms,
+            "visible_device_indices": self.visible_indices,
+        }
+        if self.error:
+            meta["error"] = self.error
+            return meta
+        peaks: dict[str, int] = {}
+        sample_count = 0
+        if not self.path.is_file():
+            meta["error"] = "sample file was not created"
+            return meta
+        with self.path.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 2 or not parts[0].isdigit():
+                    continue
+                if self.visible_indices and parts[0] not in self.visible_indices:
+                    continue
+                try:
+                    used_mb = int(float(parts[1]))
+                except ValueError:
+                    continue
+                peaks[parts[0]] = max(peaks.get(parts[0], 0), used_mb)
+                sample_count += 1
+        meta["sample_count"] = sample_count
+        meta["peak_memory_mb_by_gpu"] = peaks
+        if peaks:
+            meta["peak_memory_mb"] = max(peaks.values())
+            meta["peak_memory_mb_visible_sum"] = sum(peaks.values())
+        return meta
+
+
+def _maybe_start_gpu_memory_sampler(
+    distributed_runtime: dict, ctx: RunContext, case: E2ECase | None, env: dict[str, str]
+) -> _GpuMemorySampler | None:
+    if case is None or not distributed_runtime.get("capture_gpu_memory"):
+        return None
+    interval_ms = int(distributed_runtime.get("gpu_memory_sample_interval_ms", 200) or 200)
+    sampler = _GpuMemorySampler(ctx.artifacts_dir, case.name, env, interval_ms)
+    sampler.start()
+    return sampler
 
 
 def _extract_trtmc_timing(stderr: str) -> dict[str, float]:
@@ -88,6 +302,26 @@ def _detect_trt_runtime_error(stderr: str) -> str:
     return match.group(0).strip() if match else ""
 
 
+def _distributed_debug_logits_required(case: E2ECase) -> bool:
+    distributed_runtime = _distributed_runtime_config(case)
+    return bool(distributed_runtime and distributed_runtime.get("debug_logits", True))
+
+
+def _format_debug_runner_error(case: E2ECase, phase: str, meta: dict) -> str:
+    detail = meta.get("error")
+    if not detail and meta.get("returncode") not in (None, 0):
+        detail = f"returncode={meta['returncode']}"
+    if not detail:
+        detail = "logits were not produced"
+    log_path = meta.get("stderr_log")
+    if log_path:
+        detail = f"{detail}; stderr_log={log_path}"
+    return (
+        f"Distributed debug logits requested for {case.name} phase={phase}, "
+        f"but {detail}"
+    )
+
+
 class TextGenerationCausalRunner:
     """Execute TRT text generation inference via C++ binary + Python debug runner."""
 
@@ -120,7 +354,7 @@ class TextGenerationCausalRunner:
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
-        has_contract = "contract_config" in case.metadata
+        has_contract = bool(case.reference_family and case.user_contract)
         is_acceptance = case.ci_lane == "acceptance"
 
         use_single_process_debug = bool(
@@ -169,6 +403,8 @@ class TextGenerationCausalRunner:
             logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
                 ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
             )
+            if logits_path is None and _distributed_debug_logits_required(case):
+                raise RuntimeError(_format_debug_runner_error(case, "full", debug_meta))
 
         data = {
             "cpp_text": cpp_text,
@@ -177,6 +413,19 @@ class TextGenerationCausalRunner:
         }
         if cpp_meta.get("runtime_error_detected"):
             data["cpp_runtime_error"] = cpp_meta["runtime_error_detected"]
+        if cpp_meta.get("token_ids") is not None:
+            data["token_ids"] = cpp_meta["token_ids"]
+        if cpp_meta.get("text_output_path"):
+            data["text_output_path"] = cpp_meta["text_output_path"]
+        contract_config = case.metadata.get("contract_config", {})
+        if "token_parity_ignore_terminal_token_ids" in contract_config:
+            data["token_parity_ignore_terminal_token_ids"] = (
+                contract_config["token_parity_ignore_terminal_token_ids"]
+            )
+        if "token_parity_eos_token_ids" in contract_config:
+            data["token_parity_eos_token_ids"] = contract_config["token_parity_eos_token_ids"]
+        if "forbidden_token_ids" in contract_config:
+            data["forbidden_token_ids"] = contract_config["forbidden_token_ids"]
         if logits_path:
             data["logits_path"] = logits_path
 
@@ -203,6 +452,8 @@ class TextGenerationCausalRunner:
         logits_path, elapsed, meta = self._run_debug_runner_logits(
             ctx, bundle_path, prompt, max_new_tokens=0, case=case, phase="prefill"
         )
+        if logits_path is None and _distributed_debug_logits_required(case):
+            raise RuntimeError(_format_debug_runner_error(case, "prefill", meta))
 
         data = {}
         if logits_path:
@@ -232,6 +483,8 @@ class TextGenerationCausalRunner:
         logits_path, elapsed, meta = self._run_debug_runner_logits(
             ctx, bundle_path, prompt, max_new_tokens, case=case, phase="decode"
         )
+        if logits_path is None and _distributed_debug_logits_required(case):
+            raise RuntimeError(_format_debug_runner_error(case, "decode", meta))
 
         data = {}
         if logits_path:
@@ -265,6 +518,16 @@ class TextGenerationCausalRunner:
             "--prompt", prompt,
             "--max-new-tokens", str(max_new_tokens),
         ]
+        output_jsonl_path: Path | None = None
+        if case is not None and not _distributed_runtime_config(case):
+            output_root = (
+                Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                if ctx.artifacts_dir
+                else Path(tempfile.gettempdir())
+            )
+            output_root.mkdir(parents=True, exist_ok=True)
+            output_jsonl_path = output_root / "trt_text_generation.jsonl"
+            cmd.extend(["-o", str(output_jsonl_path)])
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", runtime_cli_python])
@@ -279,6 +542,12 @@ class TextGenerationCausalRunner:
                 cmd.extend(["--top-k", str(inputs["top_k"])])
             if inputs.get("seed", -1) >= 0:
                 cmd.extend(["--seed", str(inputs["seed"])])
+            if inputs.get("generation_mode"):
+                cmd.extend(["--generation-mode", str(inputs["generation_mode"])])
+            if inputs.get("block_length", 0):
+                cmd.extend(["--block-length", str(inputs["block_length"])])
+            if inputs.get("threshold") is not None:
+                cmd.extend(["--threshold", str(inputs["threshold"])])
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})
@@ -290,30 +559,52 @@ class TextGenerationCausalRunner:
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        distributed_runtime = _distributed_runtime_config(case)
+        if distributed_runtime and case is not None:
+            _ensure_distributed_runtime_env(case, ctx, env)
+            extra_env = distributed_runtime.get("env", {})
+            if isinstance(extra_env, dict):
+                env.update({str(k): str(v) for k, v in extra_env.items()})
+            cmd = _wrap_distributed_command(cmd, case, env)
 
         logger.info("C++ inference: %s", " ".join(cmd))
         t0 = time.monotonic()
+        memory_sampler = _maybe_start_gpu_memory_sampler(distributed_runtime, ctx, case, env)
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=600, env=env
             )
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - t0
-            return "", elapsed, {"returncode": -1, "error": "timeout"}
+            meta = {"returncode": -1, "error": "timeout"}
+            if memory_sampler is not None:
+                meta["gpu_memory"] = memory_sampler.stop()
+            return "", elapsed, meta
         except Exception as e:
             elapsed = time.monotonic() - t0
-            return "", elapsed, {"returncode": -1, "error": str(e)}
+            meta = {"returncode": -1, "error": str(e)}
+            if memory_sampler is not None:
+                meta["gpu_memory"] = memory_sampler.stop()
+            return "", elapsed, meta
         elapsed = time.monotonic() - t0
+        memory_meta = memory_sampler.stop() if memory_sampler is not None else None
 
+        parse_stderr = _strip_mpi_stream_tags(result.stderr) if distributed_runtime else result.stderr
         meta: dict = {
             "returncode": result.returncode,
             "command": cmd,
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
-        meta.update(_extract_trtmc_timing(result.stderr))
-        meta.update(_extract_trtmc_load_timing(result.stderr))
-        runtime_error = _detect_trt_runtime_error(result.stderr)
+        if distributed_runtime:
+            meta["distributed_runtime"] = distributed_runtime
+            meta["rank_zero_stdout"] = _extract_rank_zero_stdout(result.stdout)
+            meta["stderr_without_mpi_tags"] = parse_stderr
+        if memory_meta is not None:
+            meta["gpu_memory"] = memory_meta
+        meta.update(_extract_trtmc_timing(parse_stderr))
+        meta.update(_extract_trtmc_load_timing(parse_stderr))
+        runtime_error = _detect_trt_runtime_error(parse_stderr)
         if runtime_error:
             meta["runtime_error_detected"] = runtime_error
             if result.returncode == 0:
@@ -327,7 +618,16 @@ class TextGenerationCausalRunner:
             if log_path:
                 meta["stderr_log"] = log_path
 
-        text = result.stdout.strip()
+        text = _extract_rank_zero_stdout(result.stdout) if distributed_runtime else result.stdout.strip()
+        if output_jsonl_path is not None:
+            sample = _read_text_generation_sample(output_jsonl_path)
+            if sample:
+                meta["text_output_path"] = str(output_jsonl_path)
+                if isinstance(sample.get("generated"), str):
+                    text = sample["generated"]
+                    meta["generated"] = text
+                if isinstance(sample.get("token_ids"), list):
+                    meta["token_ids"] = sample["token_ids"]
         return text, elapsed, meta
 
     def _run_debug_runner_logits(
@@ -362,73 +662,114 @@ class TextGenerationCausalRunner:
             max_new_tokens = {max_new_tokens}
             logits_path = {logits_path!r}
             phase = {phase!r}
+            distributed = {bool(_distributed_runtime_config(case))!r}
+            tp_size = {int(_distributed_runtime_config(case).get("world_size", _distributed_runtime_config(case).get("tp_size", 1)) or 1)}
 
             # Create runner from bundle (auto-detects strategy, loads engine)
             from tensorrt_model_connect.debug_runner import (
-                runner_from_bundle, load_config_from_bundle)
-            runner = runner_from_bundle(bundle_path)
-            config_json = load_config_from_bundle(bundle_path)
-
-            # Tokenize
-            from transformers import AutoTokenizer
-            hf_id = config_json.get("_hf_id", {case.hf_id!r})
-            trust_remote_code = {case.metadata.get("trust_remote_code", False)!r}
-            tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
-            input_ids = tokenizer.encode(prompt)
-
-            # Run full generate (we always need prefill internally)
-            results = runner.generate(input_ids, max_new_tokens)
-            generated_tokens = []
-            if len(results) > 0 and max_new_tokens > 0:
-                start = max(len(input_ids) - 1, 0)
-                for i in range(max_new_tokens):
-                    idx = start + i
-                    if idx >= len(results):
-                        break
-                    generated_tokens.append(
-                        int(np.argmax(results[idx]["logits"].flatten()))
+                TensorParallelNcclGroup,
+                runner_from_bundle,
+                load_config_from_bundle,
+            )
+            from tensorrt_model_connect.parallel_config import rank_engine_section
+            group = None
+            runner = None
+            try:
+                if distributed:
+                    group = TensorParallelNcclGroup(world_size=tp_size)
+                    runner = runner_from_bundle(
+                        bundle_path,
+                        engine_section=rank_engine_section(group.rank),
+                        distributed_communicator=group.communicator,
                     )
-            full_ids = input_ids + generated_tokens
-            generated_text = tokenizer.decode(
-                generated_tokens, skip_special_tokens=True)
-            full_text = tokenizer.decode(full_ids, skip_special_tokens=True)
+                else:
+                    runner = runner_from_bundle(bundle_path)
+                config_json = load_config_from_bundle(bundle_path)
 
-            # Select phase slice
-            n_input = len(input_ids)
-            if phase == "prefill":
-                results = results[:n_input]
-            elif phase == "decode":
-                results = results[n_input:]
-            # else "full": keep all
+                # Tokenize
+                from transformers import AutoTokenizer
+                hf_id = config_json.get("_hf_id", {case.hf_id!r})
+                trust_remote_code = {case.metadata.get("trust_remote_code", False)!r}
+                tokenizer = AutoTokenizer.from_pretrained(
+                    hf_id, trust_remote_code=trust_remote_code)
+                input_ids = tokenizer.encode(prompt)
 
-            logits_list = [r["logits"].flatten() for r in results]
+                # Run full generate (we always need prefill internally)
+                results = runner.generate(input_ids, max_new_tokens)
+                is_seq2seq = runner.__class__.__name__ == "Seq2SeqTrtRunner"
+                generated_tokens = []
+                if len(results) > 0 and max_new_tokens > 0:
+                    start = 0 if is_seq2seq else max(len(input_ids) - 1, 0)
+                    for i in range(max_new_tokens):
+                        idx = start + i
+                        if idx >= len(results):
+                            break
+                        generated_tokens.append(
+                            int(np.argmax(results[idx]["logits"].flatten()))
+                        )
+                full_ids = input_ids + generated_tokens
+                generated_text = tokenizer.decode(
+                    generated_tokens, skip_special_tokens=True)
+                full_text = tokenizer.decode(full_ids, skip_special_tokens=True)
 
-            if len(logits_list) == 0:
-                # Edge case: no steps in this phase
-                np.save(logits_path, np.zeros((0, 0), dtype=np.float32))
-                print(f"OK steps=0 vocab=0")
-            else:
-                max_len = max(l.shape[0] for l in logits_list)
-                padded = np.zeros((len(logits_list), max_len), dtype=np.float32)
-                for i, l in enumerate(logits_list):
-                    padded[i, :l.shape[0]] = l
-                np.save(logits_path, padded)
-                print(f"OK steps={{len(logits_list)}} vocab={{max_len}}")
-            print("TRTMC_DEBUG_META " + json.dumps({{
-                "generated_text": generated_text,
-                "full_text": full_text,
-                "generated_token_count": len(generated_tokens),
-            }}))
+                # Select phase slice
+                n_input = len(input_ids)
+                if phase == "prefill":
+                    results = results[:n_input]
+                elif phase == "decode":
+                    results = results[n_input:]
+                # else "full": keep all
+
+                logits_list = [r["logits"].flatten() for r in results]
+
+                should_write = group is None or group.rank == 0
+                rank = 0 if group is None else group.rank
+                if len(logits_list) == 0:
+                    if should_write:
+                        np.save(logits_path, np.zeros((0, 0), dtype=np.float32))
+                    print(f"OK rank={{rank}} steps=0 vocab=0")
+                else:
+                    max_len = max(l.shape[0] for l in logits_list)
+                    padded = np.zeros((len(logits_list), max_len), dtype=np.float32)
+                    for i, l in enumerate(logits_list):
+                        padded[i, :l.shape[0]] = l
+                    if should_write:
+                        np.save(logits_path, padded)
+                    print(f"OK rank={{rank}} steps={{len(logits_list)}} vocab={{max_len}}")
+                if should_write:
+                    print("TRTMC_DEBUG_META " + json.dumps({{
+                        "generated_text": generated_text,
+                        "full_text": full_text,
+                        "generated_token_count": len(generated_tokens),
+                        "distributed_rank": rank,
+                    }}))
+            finally:
+                if runner is not None:
+                    del runner
+                    runner = None
+                if group is not None:
+                    group.close()
         """)
 
         python = ctx.runtime_python_path() or sys.executable
         logger.info("Debug runner (%s): collecting logits for %s", phase, case.name)
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        distributed_runtime = _distributed_runtime_config(case)
+        cmd = [python, "-c", script]
+        if distributed_runtime:
+            _ensure_distributed_runtime_env(
+                case, ctx, env, rendezvous_suffix=f".debug_{phase}")
+            extra_env = distributed_runtime.get("env", {})
+            if isinstance(extra_env, dict):
+                env.update({str(k): str(v) for k, v in extra_env.items()})
+            cmd = _wrap_distributed_command(cmd, case, env)
         t0 = time.monotonic()
         try:
             result = subprocess.run(
-                [python, "-c", script],
-                capture_output=True, text=True, timeout=600,
+                cmd,
+                capture_output=True, text=True, timeout=600, env=env,
             )
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - t0
@@ -440,11 +781,21 @@ class TextGenerationCausalRunner:
 
         meta: dict = {
             "returncode": result.returncode,
+            "command": cmd,
             "stdout": result.stdout,
             "stderr": result.stderr,
             "phase": phase,
         }
-        for line in result.stdout.splitlines():
+        parse_stdout = (
+            _extract_rank_zero_stdout(result.stdout)
+            if distributed_runtime
+            else result.stdout
+        )
+        if distributed_runtime:
+            meta["distributed_runtime"] = distributed_runtime
+            meta["rank_zero_stdout"] = parse_stdout
+            meta["stderr_without_mpi_tags"] = _strip_mpi_stream_tags(result.stderr)
+        for line in parse_stdout.splitlines():
             if line.startswith("TRTMC_DEBUG_META "):
                 try:
                     parsed = json.loads(line[len("TRTMC_DEBUG_META "):])

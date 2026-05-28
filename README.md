@@ -11,7 +11,28 @@ TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trt
 
 ## Start Here
 
-For the fastest setup, open Claude Code, Codex, or another repo-aware coding agent and ask:
+Nightly GitHub Releases publish Linux aarch64 wheels for Python 3.10 and
+Python 3.12. On a compatible NVIDIA GPU host, download the wheel that matches
+your Python version and run:
+
+```bash
+python3.12 -m venv .venv-trtmc
+. .venv-trtmc/bin/activate
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
+
+trtmc version
+trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc run /tmp/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --greedy
+```
+
+The wheel installs the native `trtmc` executable into the environment, the
+Python builder dependencies including TensorRT, and the TensorRT backend DSO.
+CUDA driver/runtime libraries still come from the host system.
+
+For source development, open Codex or another repo-aware coding agent and ask:
 
 ```text
 Clone https://github.com/NVIDIA/TensorRT-Model-Connect, set up the dev
@@ -27,23 +48,37 @@ Use the [Environment and First Repro](website/docs/getting-started/environment-a
 
 ```bash
 git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
-cd TensorRT-Model-Connct
+cd TensorRT-Model-Connect
 
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 
-pip install -e tensorrt_model_connect/
+pip install -e . -C py-only=true
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 ./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy
 ```
 
+The editable install is intentionally Python-only. It points imports at
+`python/tensorrt_model_connect/` for fast builder iteration; CMake still builds
+the source-tree `./build/trtmc` executable used by this workflow. Release and
+CI validation use built wheels instead.
+
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
+
+Nightly wheels are tagged `py310-none-manylinux_2_39_aarch64` and
+`py312-none-manylinux_2_39_aarch64`; use the tag matching your Python
+interpreter. The `manylinux_2_39_aarch64` platform tag matches the TensorRT
+10.16 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host.
+CI package jobs build and test wheels in the repository Dockerfile image
+(`TRTMC_CI_IMAGE`, derived from repository variable `TRTMC_MANYLINUX_CI_IMAGE`
+or default `trtmc-dev-gb300:manylinux_2_39`) so the compiled
+native executable is actually checked against that platform floor.
 
 ## Useful Docs
 

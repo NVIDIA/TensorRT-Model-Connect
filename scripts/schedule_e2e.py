@@ -141,6 +141,31 @@ def _model_name_from_test_id(test_id: str) -> str:
     return match.group(1) if match else ""
 
 
+def _bundle_group_key(test_id: str, manifests: dict[str, dict]) -> str:
+    """Return a stable scheduling key for tests that build the same bundle."""
+    manifest = manifests.get(_model_name_from_test_id(test_id), {})
+    bundle = str(manifest.get("bundle", "") or "").strip()
+    if bundle:
+        return f"bundle:{bundle}"
+    return f"single:{test_id}"
+
+
+def _group_by_bundle(
+    test_ids: list[str],
+    manifests: dict[str, dict],
+) -> list[tuple[int, list[str]]]:
+    """Group tests that share a bundle so they stay in one worker queue."""
+    groups: list[tuple[int, list[str]]] = []
+    key_to_group: dict[str, int] = {}
+    for idx, test_id in enumerate(test_ids):
+        key = _bundle_group_key(test_id, manifests)
+        if key not in key_to_group:
+            key_to_group[key] = len(groups)
+            groups.append((idx, []))
+        groups[key_to_group[key]][1].append(test_id)
+    return groups
+
+
 def split_by_parallel_resource(
     test_ids: list[str],
     manifest_dir: Path,
@@ -238,6 +263,9 @@ def schedule(
     def weight(tid: str) -> float:
         return _test_weight(tid, manifests, timing_estimates)
 
+    def group_weight(group: tuple[int, list[str]]) -> float:
+        return sum(weight(tid) for tid in group[1])
+
     # Reserve whole GPUs for exclusive tests. This keeps high-memory build
     # cases from colliding with unrelated workers while preserving parallelism
     # on the remaining GPUs.
@@ -248,11 +276,11 @@ def schedule(
             [0.0, gpu_id, 0, []]
             for gpu_id in range(max(reserved_gpu_count, 1))
         ]
-        indexed_exclusive = list(enumerate(exclusive_tests))
-        for _, tid in sorted(indexed_exclusive, key=lambda item: (-weight(item[1]), item[0])):
+        grouped_exclusive = _group_by_bundle(exclusive_tests, manifests)
+        for group in sorted(grouped_exclusive, key=lambda item: (-group_weight(item), item[0])):
             slot = min(exclusive_slots, key=lambda item: (item[0], item[1]))
-            slot[0] += weight(tid)
-            slot[3].append(tid)
+            slot[0] += group_weight(group)
+            slot[3].extend(group[1])
         for _, gpu_id, _, tests_for_gpu in exclusive_slots:
             if tests_for_gpu:
                 result[str(gpu_id)] = [tests_for_gpu]
@@ -277,11 +305,11 @@ def schedule(
                 [],
             ])
 
-    indexed_shared = list(enumerate([*large_tests, *small_tests]))
-    for _, tid in sorted(indexed_shared, key=lambda item: (-weight(item[1]), item[0])):
+    grouped_shared = _group_by_bundle([*large_tests, *small_tests], manifests)
+    for group in sorted(grouped_shared, key=lambda item: (-group_weight(item), item[0])):
         slot = min(slots, key=lambda item: (item[0], item[1], item[2]))
-        slot[0] = float(slot[0]) + weight(tid)
-        slot[3].append(tid)
+        slot[0] = float(slot[0]) + group_weight(group)
+        slot[3].extend(group[1])
 
     for gpu_id in shared_gpu_ids:
         workers: list[list[str]] = [[] for _ in range(workers_per_gpu)]

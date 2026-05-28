@@ -18,6 +18,9 @@ include(GNUInstallDirs)
 
 option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
+option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
+option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
+option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
 
@@ -140,15 +143,23 @@ if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
-include(FetchContent)
-set(JSON_Install OFF CACHE INTERNAL "")
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
+find_package(nlohmann_json CONFIG QUIET)
+if(TARGET nlohmann_json::nlohmann_json)
+  get_target_property(_trtmc_nlohmann_json_include
+    nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "nlohmann/json: using package config")
+else()
+  include(FetchContent)
+  set(JSON_Install OFF CACHE INTERNAL "")
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+  set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
+endif()
 
 # --- Bundle-only runtime library ---
 # PIC needed because trtmc_core is linked into backend DSOs (shared libs).
@@ -166,6 +177,7 @@ add_library(trtmc_core
   src/runtime/backend/backend_loader.cpp
   src/runtime/backend/trt_version.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
+  src/runtime/core/distributed_runtime.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
   src/runtime/core/device_kv_cache.cpp
@@ -241,6 +253,22 @@ add_library(trtmc_core
   src/runtime/models/pixart_torchtrt/pipeline.cpp
 )
 
+# Keep warning policy strict for project code, but avoid CI log spam from
+# vendored STB implementation headers and known GCC 13/libstdc++ false
+# positives from inlined std::vector assignment helpers.
+set_source_files_properties(src/runtime/core/stb_impl.cpp
+  PROPERTIES
+    COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-pedantic>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-missing-field-initializers>"
+)
+set_source_files_properties(
+  src/runtime/models/magpie/pipeline.cpp
+  src/runtime/models/pixart/pipeline.cpp
+  src/runtime/models/speech/pipeline.cpp
+  src/runtime/models/wan/pipeline.cpp
+  PROPERTIES
+    COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
+)
+
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
   target_sources(trtmc_core PRIVATE
@@ -266,7 +294,9 @@ target_include_directories(trtmc_core
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/third_party/stb
+)
+target_include_directories(trtmc_core SYSTEM PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/stb
 )
 
 target_compile_definitions(trtmc_core
@@ -277,14 +307,13 @@ target_compile_definitions(trtmc_core
 
 target_compile_options(trtmc_core
   PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
+    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
 )
 
 # nlohmann/json: use include-only (header-only lib) to avoid export-set issues
 target_include_directories(trtmc_core SYSTEM PRIVATE
-  ${nlohmann_json_SOURCE_DIR}/include
+  ${_trtmc_nlohmann_json_include}
 )
 
 target_link_libraries(trtmc_core PRIVATE ${CMAKE_DL_LIBS})
@@ -307,49 +336,52 @@ else()
 endif()
 
 # --- libtorch multinomial bridge (optional) ---
-set(_trtmc_torch_roots
-  /opt/venv/lib/python3.12/site-packages/torch
-  ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
-)
-if(DEFINED ENV{TRTMC_TORCH_ROOT})
-  list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL)
+  set(_trtmc_torch_roots
+    /opt/venv/lib/python3.12/site-packages/torch
+    ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
+  )
+  if(DEFINED ENV{TRTMC_TORCH_ROOT})
+    list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+  endif()
+
+  find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include
+  )
+  find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include/torch/csrc/api/include
+  )
+  find_library(TRTMC_TORCH_LIBRARY
+    NAMES torch libtorch.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CPU_LIBRARY
+    NAMES torch_cpu libtorch_cpu.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CUDA_LIBRARY
+    NAMES torch_cuda libtorch_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_LIBRARY
+    NAMES c10 libc10.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_CUDA_LIBRARY
+    NAMES c10_cuda libc10_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
 endif()
 
-find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include
-)
-find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include/torch/csrc/api/include
-)
-find_library(TRTMC_TORCH_LIBRARY
-  NAMES torch libtorch.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CPU_LIBRARY
-  NAMES torch_cpu libtorch_cpu.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CUDA_LIBRARY
-  NAMES torch_cuda libtorch_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_LIBRARY
-  NAMES c10 libc10.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_CUDA_LIBRARY
-  NAMES c10_cuda libc10_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-
-if(TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL
+   AND TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
    AND TRTMC_TORCH_LIBRARY AND TRTMC_TORCH_CPU_LIBRARY
    AND TRTMC_TORCH_CUDA_LIBRARY AND TRTMC_C10_LIBRARY AND TRTMC_C10_CUDA_LIBRARY)
   get_filename_component(TRTMC_TORCH_LIBRARY_DIR ${TRTMC_TORCH_LIBRARY} DIRECTORY)
@@ -408,24 +440,6 @@ endif()
 if(NOT _trtmc_has_tvm_ffi)
   target_compile_definitions(trtmc_core PUBLIC TRTMC_HAS_TVM_FFI=0)
   message(STATUS "TVM-FFI kernel bridge disabled")
-endif()
-
-# Build the TVM-FFI TensorRT plugin as a standalone shared library.
-if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
-  add_library(trtmc_tvm_ffi_plugin SHARED
-    src/plugins/tvm_ffi_kernel_plugin.cpp
-    src/plugins/tvm_ffi_kernel_creator.cpp
-    src/plugins/tvm_ffi_module_loader.cpp
-    src/utils/json_helpers.cpp
-  )
-  target_include_directories(trtmc_tvm_ffi_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
-  target_include_directories(trtmc_tvm_ffi_plugin SYSTEM PRIVATE
-    ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR} ${TRTMC_TVM_FFI_INCLUDE_DIR})
-  target_link_libraries(trtmc_tvm_ffi_plugin PRIVATE
-    ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
-  target_compile_definitions(trtmc_tvm_ffi_plugin PRIVATE TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
-  target_compile_options(trtmc_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
-  message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
 if(_trtmc_can_build_trt_backend AND CMAKE_CUDA_COMPILER)
@@ -488,6 +502,24 @@ if(_trtmc_can_build_trt_backend AND CMAKE_CUDA_COMPILER)
   message(STATUS "SANA-WM GDN TensorRT plugin shared library: trtmc_sana_wm_gdn_plugin.so")
 endif()
 
+# Build the TVM-FFI TensorRT plugin as a standalone shared library.
+if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
+  add_library(trtmc_tvm_ffi_plugin SHARED
+    src/plugins/tvm_ffi_kernel_plugin.cpp
+    src/plugins/tvm_ffi_kernel_creator.cpp
+    src/plugins/tvm_ffi_module_loader.cpp
+    src/utils/json_helpers.cpp
+  )
+  target_include_directories(trtmc_tvm_ffi_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(trtmc_tvm_ffi_plugin SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_tvm_ffi_plugin PRIVATE
+    ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
+  target_compile_definitions(trtmc_tvm_ffi_plugin PRIVATE TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
+  target_compile_options(trtmc_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
+  message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
+endif()
+
 # --- Backend DSO: standard TRT ---
 if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   add_library(trtmc_backend_trt SHARED
@@ -505,7 +537,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(trtmc_backend_trt PRIVATE
-    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS}
     $<$<BOOL:${TRTMC_CUBLASLT_LIBRARY}>:${TRTMC_CUBLASLT_LIBRARY}>
   )
   if(_trtmc_has_tvm_ffi)
@@ -558,6 +590,8 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   set_target_properties(trtmc_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    SKIP_BUILD_RPATH TRUE
+    INSTALL_RPATH ""
   )
   if(TRTMC_TRT_BACKEND_ABI)
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD
@@ -569,7 +603,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   endif()
   # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
   target_include_directories(trtmc_backend_trt SYSTEM PRIVATE
-    ${nlohmann_json_SOURCE_DIR}/include
+    ${_trtmc_nlohmann_json_include}
   )
   message(STATUS "TRT backend DSO: enabled (libtrtmc_backend_trt.so)")
   if(TRTMC_TRT_BACKEND_ABI)
@@ -621,7 +655,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE
-      ${nlohmann_json_SOURCE_DIR}/include
+      ${_trtmc_nlohmann_json_include}
     )
     message(STATUS "TRT-RTX backend DSO: enabled (libtrtmc_backend_trt_rtx.so)")
   else()
@@ -629,30 +663,38 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
-add_executable(trtmc examples/trtmc_cli.cpp)
-target_link_libraries(trtmc PRIVATE trtmc_core)
-target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
-
-add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
-target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
-target_include_directories(trtmc_dataset_benchmark PRIVATE
-  ${PROJECT_SOURCE_DIR}/third_party/stb
+add_executable(trtmc
+  src/cli/args.cpp
+  src/cli/main.cpp
 )
+target_link_libraries(trtmc PRIVATE trtmc_core)
+target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 
+if(TRTMC_BUILD_BENCHMARKS)
+  add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
+  target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
+  target_include_directories(trtmc_dataset_benchmark SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+endif()
+
+if(TRTMC_BUILD_TESTS)
 enable_testing()
+add_custom_target(trtmc_cpp_tests)
 
 # --- Test helper function ---
 # Usage:
-#   trtmc_add_test(test_name)                -- links trtmc_core, adds src/ include
-#   trtmc_add_test(test_name REQUIRES_TRT)   -- also links TensorRT test deps
-#   trtmc_add_test(test_name REQUIRES_GPU)   -- labels test as requiring a live CUDA device
+#   trtmc_add_test(test_name)               -- links trtmc_core, adds src/ include
+#   trtmc_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
 function(trtmc_add_test TEST_NAME)
-  cmake_parse_arguments(ARG "NO_SRC_INCLUDE;REQUIRES_TRT;REQUIRES_GPU" "" "EXTRA_INCLUDES" ${ARGN})
+  cmake_parse_arguments(ARG "NO_SRC_INCLUDE;REQUIRES_TRT" "" "EXTRA_INCLUDES" ${ARGN})
   if(ARG_REQUIRES_TRT AND NOT _trtmc_can_build_trt_backend)
     message(STATUS "Skipping ${TEST_NAME}: TensorRT SDK not available")
     return()
   endif()
-  add_executable(${TEST_NAME} tests/cpp/${TEST_NAME}.cpp)
+  add_executable(${TEST_NAME} EXCLUDE_FROM_ALL tests/cpp/${TEST_NAME}.cpp)
+  add_dependencies(trtmc_cpp_tests ${TEST_NAME})
   target_link_libraries(${TEST_NAME} PRIVATE trtmc_core)
   if(NOT ARG_NO_SRC_INCLUDE)
     target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -670,9 +712,6 @@ function(trtmc_add_test TEST_NAME)
     target_compile_definitions(${TEST_NAME} PRIVATE TRTMC_HAS_TRT=0)
   endif()
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-  if(ARG_REQUIRES_GPU)
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS requires_gpu)
-  endif()
 endfunction()
 
 # --- Tests ---
@@ -687,13 +726,14 @@ trtmc_add_test(test_trt_version)
 
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
-trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE REQUIRES_GPU)
+trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
-trtmc_add_test(test_cli_args            NO_SRC_INCLUDE)
+trtmc_add_test(test_cli_args)
+target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_chat_template)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
@@ -707,33 +747,33 @@ trtmc_add_test(test_trt_logger REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_trt_runtime_lifetime REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_runtime_lifetime PRIVATE trtmc_backend_trt)
 endif()
 trtmc_add_test(test_trt_engine_lifecycle)
 trtmc_add_test(test_trt_engine_lifecycle_fake_engine)
-trtmc_add_test(test_trt_module REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_trt_module REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_module PRIVATE trtmc_backend_trt)
 endif()
 
 # CUDA / device
-trtmc_add_test(test_cuda_buffer REQUIRES_TRT REQUIRES_GPU)
-trtmc_add_test(test_cuda_stream REQUIRES_TRT REQUIRES_GPU)
-trtmc_add_test(test_cuda_graph REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_cuda_buffer REQUIRES_TRT)
+trtmc_add_test(test_cuda_stream REQUIRES_TRT)
+trtmc_add_test(test_cuda_graph REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_cuda_graph PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_device_kv_cache REQUIRES_GPU)
-trtmc_add_test(test_device_resources REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_device_kv_cache)
+trtmc_add_test(test_device_resources REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_device_resources PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_device_tensor REQUIRES_GPU)
-trtmc_add_test(test_kv_cache_new REQUIRES_GPU)
-trtmc_add_test(test_triattention_kv_cache REQUIRES_GPU)
-trtmc_add_test(test_recurrent_state REQUIRES_GPU)
+trtmc_add_test(test_device_tensor)
+trtmc_add_test(test_kv_cache_new)
+trtmc_add_test(test_triattention_kv_cache)
+trtmc_add_test(test_recurrent_state)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
@@ -746,15 +786,14 @@ trtmc_add_test(test_recurrent_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_encoder_pipeline REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_encoder_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_encoder_pipeline PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_vl_pipeline REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_vl_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_vl_pipeline PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_sana_wm_pipeline)
 trtmc_add_test(test_diffusion_pipeline_new)
 trtmc_add_test(test_audio_pipeline_new REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
@@ -788,6 +827,7 @@ trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
 trtmc_add_test(test_ltx_video_pipeline)
+trtmc_add_test(test_sana_wm_pipeline)
 
 # Recurrent (Mamba / RWKV)
 trtmc_add_test(test_recurrent_step_contracts)
@@ -854,6 +894,7 @@ endif()
 if(TARGET test_tvm_ffi_plugin_v2 AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin_v2 SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+endif()
 endif()
 
 # --- Install ---

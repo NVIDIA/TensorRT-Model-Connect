@@ -180,6 +180,116 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
     assert calls["build_standard_dit_engine"]["context_dim"] == wan_mod.plugin._DIT_DIM
 
 
+def test_build_components_tensor_parallel_builds_rank_denoisers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intent: verify Wan TP packaging keeps T5/VAE single-copy and builds rank DiTs.
+
+    Preconditions: builder modules are monkeypatched and TensorRT version is 11.0.
+    Postconditions: denoiser_ranks contains one rank-local plan per requested TP rank.
+    """
+    from tensorrt_model_connect import trt_compat
+    from tensorrt_model_connect.parallel_config import ParallelConfig
+
+    calls: dict[str, object] = {"dit_ranks": []}
+
+    monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
+
+    def load_t5_weights(path, **kwargs):
+        calls["load_t5_weights"] = {"path": path, **kwargs}
+        return {"t5.weight": np.array([1], dtype=np.float32)}
+
+    def build_t5_encoder_engine(weights, **kwargs):
+        calls["build_t5_encoder_engine"] = {"weights": weights, **kwargs}
+        return b"t5-plan"
+
+    def load_dit_weights(path, **kwargs):
+        calls["load_dit_weights"] = {"path": path, **kwargs}
+        return {"dit.weight": np.array([2], dtype=np.float32)}
+
+    def build_standard_dit_engine(_weights, **_kwargs):
+        raise AssertionError("single-device Wan DiT builder used for TP build")
+
+    def build_standard_dit_tp_engine(weights, **kwargs):
+        parallel = kwargs["parallel_config"]
+        calls["dit_ranks"].append(parallel.rank)
+        return f"dit-rank-{parallel.rank}".encode()
+
+    def load_vae_weights(path, **kwargs):
+        calls["load_vae_weights"] = {"path": path, **kwargs}
+        return {"vae.weight": np.array([3], dtype=np.float32)}
+
+    def build_causal_vae_3d_engine(weights, **kwargs):
+        calls["build_causal_vae_3d_engine"] = {"weights": weights, **kwargs}
+        return b"vae-plan"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+        _module(
+            "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+            load_t5_weights=load_t5_weights,
+            build_t5_encoder_engine=build_t5_encoder_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+        _module(
+            "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+            load_dit_weights=load_dit_weights,
+            build_standard_dit_engine=build_standard_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.wan_t2v.standard_dit_tp_builder",
+        _module(
+            "tensorrt_model_connect.families.wan_t2v.standard_dit_tp_builder",
+            build_standard_dit_engine=build_standard_dit_tp_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+        _module(
+            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+            load_vae_weights=load_vae_weights,
+            build_causal_vae_3d_engine=build_causal_vae_3d_engine,
+            count_vae_caches=lambda **_kwargs: 0,
+        ),
+    )
+    monkeypatch.setattr(
+        wan_mod,
+        "_serialize_preprocessor_weights",
+        lambda dit_weights: b"wan-preproc",
+    )
+
+    weights = {
+        "_text_encoder_dir": "/model/text_encoder",
+        "_transformer_dir": "/model/transformer",
+        "_vae_dir": "/model/vae",
+    }
+
+    out = wan_mod.plugin.build_components(
+        "/model",
+        _cfg(video_height=64, video_width=80, video_num_frames=9),
+        weights,
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4),
+    )
+
+    assert out["text_encoders"] == [("t5", b"t5-plan")]
+    assert out["denoiser_ranks"] == {
+        0: b"dit-rank-0",
+        1: b"dit-rank-1",
+        2: b"dit-rank-2",
+        3: b"dit-rank-3",
+    }
+    assert "denoiser" not in out
+    assert out["vae_decoder"] == b"vae-plan"
+    assert calls["dit_ranks"] == [0, 1, 2, 3]
+
+
 def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Intent: verify diffusion config wiring and imported cache-count helper call.
 

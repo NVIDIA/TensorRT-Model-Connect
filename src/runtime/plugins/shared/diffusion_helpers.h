@@ -12,6 +12,8 @@ DiffusionConfig make_diffusion_config(const std::string& json);
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
+    LoadedModule vision;
+    LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;
     DiffusionConfig config;
     PreprocessorWeights weights;
@@ -20,6 +22,8 @@ struct DiffusionParts {
 
 DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
                                     const std::string& json,
-                                    const ModuleCreateOptions& options = {});
+                                    const ModuleCreateOptions& options = {},
+                                    const std::string& denoiser_section_name = "denoiser_plan",
+                                    const ModuleCreateOptions* denoiser_options = nullptr);
 
 } // namespace trtmc

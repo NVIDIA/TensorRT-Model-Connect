@@ -1,0 +1,68 @@
+{
+  "name": "bark-small-tp4",
+  "trace_id": "IT-E2E-BARKS-TP4-01",
+  "hf_id": "suno/bark-small",
+  "bundle": "bark-small-tp4.trtfb",
+  "family": "bark",
+  "runtime_strategy": "text_to_audio_bark",
+  "test_type": "audio",
+  "max_cache_length": 1024,
+  "prompt": "Hello, this is a test of the audio generation system.",
+  "max_new_tokens": 0,
+  "logit_atol": 0.01,
+  "trust_remote_code": false,
+  "core": true,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "determinism": {
+    "seed": 0
+  },
+  "threshold_overrides": {
+    "duration_ratio_min": 0.3,
+    "log_spectral_distance": 10.0,
+    "mel_spectrogram_distance": 8.0,
+    "min_semantic_tokens": 50,
+    "rms_min": 0.01,
+    "golden_semantic_tokens": [41, 215, 548, 6961, 602, 602, 2586, 8385, 1311, 602, 5109, 3051, 1136, 8343, 8909, 292, 3318, 6362, 6362, 4401],
+    "golden_coarse_tokens": [10062, 11937, 10062, 11448, 10408, 11568, 10062, 11448, 10062, 11448, 10408, 11568, 10408, 11542, 10408, 11937, 10408, 11568, 10062, 11448]
+  }
+}

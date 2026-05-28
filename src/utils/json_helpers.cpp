@@ -89,56 +89,57 @@ ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
     return ArrayParseState::kReady;
 }
 
-bool append_json_escape(char escaped, std::string& out) {
-    switch (escaped) {
-    case '"':
-        out.push_back('"');
-        return true;
-    case '\\':
-        out.push_back('\\');
-        return true;
-    case '/':
-        out.push_back('/');
-        return true;
-    case 'b':
-        out.push_back('\b');
-        return true;
-    case 'f':
-        out.push_back('\f');
-        return true;
-    case 'n':
-        out.push_back('\n');
-        return true;
-    case 'r':
-        out.push_back('\r');
-        return true;
-    case 't':
-        out.push_back('\t');
-        return true;
-    default:
-        return false;
-    }
-}
-
 bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
     if (pos >= text.size() || text[pos] != '"') {
         return false;
     }
 
     out.clear();
-    ++pos;
-    while (pos < text.size()) {
-        const char c = text[pos++];
-        if (c == '"') {
-            return !out.empty();
-        }
-        if (c != '\\') {
-            out.push_back(c);
+    bool escape = false;
+    for (++pos; pos < text.size(); ++pos) {
+        const char c = text[pos];
+        if (escape) {
+            switch (c) {
+            case '"':
+                out.push_back('"');
+                break;
+            case '\\':
+                out.push_back('\\');
+                break;
+            case '/':
+                out.push_back('/');
+                break;
+            case 'b':
+                out.push_back('\b');
+                break;
+            case 'f':
+                out.push_back('\f');
+                break;
+            case 'n':
+                out.push_back('\n');
+                break;
+            case 'r':
+                out.push_back('\r');
+                break;
+            case 't':
+                out.push_back('\t');
+                break;
+            default:
+                out.push_back(c);
+                break;
+            }
+            escape = false;
             continue;
         }
-        if (pos >= text.size() || !append_json_escape(text[pos++], out)) {
-            return false;
+        if (c == '\\') {
+            escape = true;
+            continue;
         }
+        if (c == '"') {
+            ++pos;
+            return true;
+        }
+        out.push_back(c);
     }
     return false;
 }

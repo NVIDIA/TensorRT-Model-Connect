@@ -9,7 +9,7 @@ from tensorrt_model_connect import trt_compat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRTMC_BUILD_ROOT = REPO_ROOT / "tensorrt_model_connect" / "tensorrt_model_connect"
+TRTMC_BUILD_ROOT = REPO_ROOT / "python" / "tensorrt_model_connect"
 ALLOWED_TRT_BOUNDARY_FILES = {
     TRTMC_BUILD_ROOT / "trt_compat.py",
 }
@@ -253,3 +253,16 @@ def test_trt_compat_applies_builder_env_and_persists_timing_cache(monkeypatch, t
     assert ("create_timing_cache", b"") in calls
     assert ("set_timing_cache", True) in calls
     assert ("get_timing_cache",) in calls
+
+
+def test_trt_compat_scoped_timing_cache_uses_separate_path(monkeypatch, tmp_path):
+    cache_path = tmp_path / "tensorrt-opt1.cache"
+    monkeypatch.setenv("TRTMC_TRT_TIMING_CACHE_PATH", str(cache_path))
+
+    with trt_compat.scoped_timing_cache("split qwen/decode"):
+        assert (
+            trt_compat._timing_cache_path()
+            == tmp_path / "tensorrt-opt1.split_qwen_decode.cache"
+        )
+
+    assert trt_compat._timing_cache_path() == cache_path

@@ -68,6 +68,19 @@ class KvCache : public IInferenceState {
     void write_prefill_kv(const std::vector<const void*>& prefill_k,
                           const std::vector<const void*>& prefill_v, int32_t seq_len);
 
+    // Prepare a multi-token block whose new tokens may attend bidirectionally
+    // to one another while still seeing the valid prefix cache.
+    void prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len);
+
+    // Append batched present K/V at the current position. Used after causal
+    // block verification in diffusion-style text decoders.
+    void append_prefill_kv(const std::vector<const void*>& prefill_k,
+                           const std::vector<const void*>& prefill_v, int32_t seq_len);
+
+    // Move the logical cache length without touching device memory. Stale rows
+    // remain masked out by subsequent prepare_step calls.
+    void set_position(int32_t position);
+
     // Bind only the cache_k/v INPUT pointers to `module`. Used for the
     // prefill TrtModule whose present_k/v outputs have shape (Sq, kv_dim)
     // — too big for KvCache's single-row present buffer. The caller reads
@@ -80,6 +93,7 @@ class KvCache : public IInferenceState {
     std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
+    void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
 
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]

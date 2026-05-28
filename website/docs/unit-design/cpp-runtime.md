@@ -76,7 +76,7 @@ sequenceDiagram
 
 ## Pipelines
 
-`src/runtime/pipelines/` files own task execution. Pipeline classes override only the `IPipeline` methods they support.
+`src/runtime/models/` files own task execution. Pipeline classes override only the `IPipeline` methods they support.
 
 Examples:
 

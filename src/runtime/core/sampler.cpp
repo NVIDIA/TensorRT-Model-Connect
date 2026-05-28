@@ -423,7 +423,7 @@ SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t de
 }
 
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params,
-                                         const SamplerFactoryOptions& options) {
+                                         [[maybe_unused]] const SamplerFactoryOptions& options) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);

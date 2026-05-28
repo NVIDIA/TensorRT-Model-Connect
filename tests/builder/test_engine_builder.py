@@ -10,9 +10,11 @@ Postconditions: Local directories with config.json resolve correctly, HF repo ID
 
 from __future__ import annotations
 
+import json
 import importlib
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -92,71 +94,6 @@ class TestResolveModel:
         result = _resolve_model("nvidia/Magpie-TTS")
         assert result == f"resolved:{nemo_path}"
 
-    def test_sana_wm_downloads_only_metadata_files(self, tmp_path, monkeypatch):
-        """SANA-WM resolution must not pull the 100GB weight payload during build."""
-        dl_dir = tmp_path / "sana-wm"
-        dl_dir.mkdir()
-        (dl_dir / "config.yaml").write_text(
-            "model:\n"
-            "  model: SanaMSVideoCamCtrl_1600M_P1_D20\n"
-            "vae:\n"
-            "  vae_type: LTX2VAE_diffusers\n",
-            encoding="utf-8",
-        )
-        calls: list[dict] = []
-
-        def fake_snapshot_download(**kwargs):
-            calls.append(kwargs)
-            return str(dl_dir)
-
-        fake_hf = types.ModuleType("huggingface_hub")
-        fake_hf.snapshot_download = fake_snapshot_download
-        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
-
-        result = _resolve_model("Efficient-Large-Model/SANA-WM_bidirectional")
-
-        assert result == str(dl_dir)
-        assert calls
-        assert calls[0]["allow_patterns"] == ["README.md", "config.yaml"]
-
-    def test_sana_wm_can_opt_into_full_snapshot_download(self, tmp_path, monkeypatch):
-        """SANA-WM full snapshot download is explicit because the model is large."""
-        dl_dir = tmp_path / "sana-wm"
-        dl_dir.mkdir()
-        (dl_dir / "config.yaml").write_text(
-            "model:\n"
-            "  model: SanaMSVideoCamCtrl_1600M_P1_D20\n"
-            "vae:\n"
-            "  vae_type: LTX2VAE_diffusers\n",
-            encoding="utf-8",
-        )
-        calls: list[dict] = []
-
-        def fake_snapshot_download(**kwargs):
-            calls.append(kwargs)
-            return str(dl_dir)
-
-        fake_hf = types.ModuleType("huggingface_hub")
-        fake_hf.snapshot_download = fake_snapshot_download
-        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
-        monkeypatch.setenv("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS", "1")
-
-        result = _resolve_model("Efficient-Large-Model/SANA-WM_bidirectional")
-
-        assert result == str(dl_dir)
-        assert calls
-        allow_patterns = calls[0]["allow_patterns"]
-        assert "model_index.json" in allow_patterns
-        assert "config.yaml" in allow_patterns
-        assert "pipeline*.py" in allow_patterns
-        assert "asset/sana_wm/**" in allow_patterns
-        assert "inference_video_scripts/**" in allow_patterns
-        assert "scheduler/**" in allow_patterns
-        assert "dit/**" in allow_patterns
-        assert "vae/**" in allow_patterns
-        assert "text_encoder/**" in allow_patterns
-        assert "refiner/**" in allow_patterns
-
 
 class TestFindPlugin:
     def test_supported_model_types(self):
@@ -170,7 +107,6 @@ class TestFindPlugin:
             "olmo", "xglm", "gpt_neox", "gpt_neo", "codegen",
             "bloom", "mamba", "mixtral",
             "qwen2_vl", "qwen2_5_vl",
-            "sana_wm",
         ]
         for model_type in known_types:
             plugin = find_plugin(model_type)

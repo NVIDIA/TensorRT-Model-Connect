@@ -165,7 +165,8 @@ std::vector<std::string> whitespace_split(const std::string& text) {
     return words;
 }
 
-std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_space) {
+[[maybe_unused]] std::string metaspace_pre_tokenize(const std::string& text,
+                                                    bool add_prefix_space) {
     std::string result;
     result.reserve(text.size() + 8);
     if (add_prefix_space && !text.empty() && text[0] != ' ') {

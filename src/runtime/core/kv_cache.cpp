@@ -147,6 +147,29 @@ void KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
     inputs[names_.attention_mask] = mask_t;
 }
 
+void KvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) {
+    // Diffusion block mask: all valid prefix cache rows are visible, stale cache
+    // rows are hidden, and every token in the current block can see every other
+    // token in the current block.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
+        for (int32_t j = 0; j < seq_len; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+                0.0f;
+    }
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
 void KvCache::write_decode_mask(TensorMap& inputs) {
     const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
@@ -175,6 +198,13 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
         write_batched_mask(inputs, seq_len);
     else
         write_decode_mask(inputs);
+}
+
+void KvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len <= 0)
+        seq_len = 1;
+    write_position_input(inputs, seq_len);
+    write_bidirectional_mask(inputs, seq_len);
 }
 
 void KvCache::bind_to(TrtModule& module) {
@@ -235,6 +265,33 @@ void KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
                         stream_);
     }
     position_ = seq_len;
+}
+
+void KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
+                                const std::vector<const void*>& prefill_v, int32_t seq_len) {
+    if (seq_len <= 0)
+        return;
+    if (position_ + seq_len > max_length_)
+        throw std::runtime_error("KvCache::append_prefill_kv: append exceeds max_length");
+    if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
+        static_cast<int32_t>(prefill_v.size()) != num_layers_) {
+        throw std::runtime_error("KvCache::append_prefill_kv: per-layer pointer count mismatch");
+    }
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, prefill_k[li],
+                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, prefill_v[li],
+                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
+    }
+    position_ += seq_len;
+}
+
+void KvCache::set_position(int32_t position) {
+    position_ = std::max(0, std::min(position, max_length_));
 }
 
 void KvCache::advance(int32_t n_tokens) {

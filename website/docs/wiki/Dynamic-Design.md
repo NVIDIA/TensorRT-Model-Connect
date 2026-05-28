@@ -22,12 +22,12 @@ There is no `PipelineRouter`, `PipelineServices`, `BuildContext`, or `StrategyBu
 
 ## 1. Bundle Build Flow (Python)
 
-Entry point: `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` function `build()`.
+Entry point: `python/tensorrt_model_connect/engine_builder.py` function `build()`.
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant CLI as cli.py _cmd_build()
+    participant CLI as build_cli.py _cmd_build()
     participant EB as engine_builder.py build()
     participant Resolve as _resolve_model()
     participant Config as ModelConfig.from_dir()
@@ -35,7 +35,7 @@ sequenceDiagram
     participant Plugin as FamilyPlugin
     participant Writer as bundle_writer.py write_bundle()
 
-    User->>CLI: trtmc-build build <model> -o model.trtfb
+    User->>CLI: ./build/trtmc build <model> -o model.trtfb
     CLI->>EB: build(model_id_or_path, output_path, max_cache_length)
     EB->>Resolve: _resolve_model(model_id_or_path)
     Note over Resolve: Local dir with config.json? Return directly.<br/>HF repo ID? snapshot_download().<br/>.nemo archive? Extract to synthetic HF dir.
@@ -72,12 +72,12 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `tensorrt_model_connect/tensorrt_model_connect/cli.py` -- CLI dispatch
-- `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
-- `tensorrt_model_connect/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
-- `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
-- `tensorrt_model_connect/tensorrt_model_connect/families/base.py` -- `FamilyPlugin` protocol
-- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` -- `write_bundle()`
+- `python/tensorrt_model_connect/build_cli.py` -- Python builder CLI dispatch
+- `python/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
+- `python/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
+- `python/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
+- `python/tensorrt_model_connect/families/base.py` -- `FamilyPlugin` protocol
+- `python/tensorrt_model_connect/bundle_writer.py` -- `write_bundle()`
 
 ---
 

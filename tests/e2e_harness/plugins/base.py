@@ -6,7 +6,7 @@ Each contract test plugin handles one or more reference families and defines:
 3. How to verify the user-facing contract (exact text, ranking, mask overlap, etc.).
 
 Plugins are auto-discovered from this directory by __init__.py, following the
-same pattern as builder family plugins in tensorrt_model_connect/tensorrt_model_connect/families/.
+same pattern as builder family plugins in python/tensorrt_model_connect/families/.
 
 Adding a new contract = adding one .py file with a module-level ``plugin``
 attribute.  Zero edits to the orchestrator or registry.

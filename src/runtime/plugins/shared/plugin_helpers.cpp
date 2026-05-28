@@ -242,11 +242,17 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
 }
 
 void apply_recurrent_chat_template_format(const BundleFile& bundle, RecurrentGenConfig& rgc) {
+    std::string chat_tpl;
     auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
-    if (tok_cfg_sec == nullptr || tok_cfg_sec->empty())
-        return;
-    const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
-    const std::string chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+    if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {
+        const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
+        chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+    }
+    if (chat_tpl.empty()) {
+        auto* tpl_sec = find_section(bundle, "chat_template.jinja");
+        if (tpl_sec != nullptr && !tpl_sec->empty())
+            chat_tpl.assign(tpl_sec->begin(), tpl_sec->end());
+    }
     rgc.chat_template_format = detect_chat_template_format(chat_tpl);
 }
 

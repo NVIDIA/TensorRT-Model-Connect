@@ -2,15 +2,23 @@
 title: Python Builder API
 ---
 
-The Python package lives under `tensorrt_model_connect/tensorrt_model_connect/`.
+The Python package lives under `python/tensorrt_model_connect/`.
 
 ## Install
 
 ```bash
-pip install -e tensorrt_model_connect/
+pip install -e . -C py-only=true
 ```
 
-Use `pip install --no-deps -e tensorrt_model_connect/` only in a dev container that already has the declared dependencies installed. In a fresh Python environment, skipping dependencies will hide required packages such as `transformers`, `safetensors`, `onnx`, and `onnxscript`.
+This is a developer-only editable install. It points imports at
+`python/tensorrt_model_connect/` and skips the native wheel build. It does not
+install the native `trtmc` executable or backend DSOs; pair it with a CMake
+source build when using `./build/trtmc`.
+
+Use `pip install --no-deps -e . -C py-only=true` only in a dev container that already has the declared dependencies installed. In a fresh Python environment, skipping dependencies will hide required packages such as `transformers`, `safetensors`, `onnx`, `onnxscript`, and `tensorrt`.
+The release wheel installs the same builder package plus the native `trtmc`
+executable and declares TensorRT as a dependency; use the wheel when you want
+`trtmc build` and `trtmc run` available from one pip install.
 
 ## Python usage
 
@@ -49,7 +57,7 @@ tensorrt_model_connect.build(
 
 ## Family plugin protocol
 
-Family plugins implement `tensorrt_model_connect/tensorrt_model_connect/families/base.py`. Required pieces are:
+Family plugins implement `python/tensorrt_model_connect/families/base.py`. Required pieces are:
 
 ```python
 class FamilyPlugin(Protocol):

@@ -3,7 +3,7 @@
 
 Downloads the model's config.json, detects architecture features, and generates
 a flat family package in
-tensorrt_model_connect/tensorrt_model_connect/families/<family>/.
+python/tensorrt_model_connect/families/<family>/.
 
 Usage:
     python3 scripts/new_family.py \
@@ -23,7 +23,7 @@ import json
 import sys
 from pathlib import Path
 
-FAMILIES_DIR = Path(__file__).resolve().parent.parent / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+FAMILIES_DIR = Path(__file__).resolve().parent.parent / "python" / "tensorrt_model_connect" / "families"
 
 
 def fetch_config(hf_repo: str) -> dict:

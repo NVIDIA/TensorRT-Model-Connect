@@ -68,7 +68,7 @@ before launching agents.
 
 ## Manual Path
 
-Adding support for a new HuggingFace model family manually is a Python task in `tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ model runtime folder in `src/runtime/models/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing model folder handles.
+Adding support for a new HuggingFace model family manually is a Python task in `python/tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ model runtime folder in `src/runtime/models/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing model folder handles.
 
 ## Prerequisites
 
@@ -102,7 +102,7 @@ python3 scripts/new_family.py \
   --family-name phi
 
 # 2. Review the generated plugin (customize if needed)
-$EDITOR tensorrt_model_connect/tensorrt_model_connect/families/phi/plugin.py
+$EDITOR python/tensorrt_model_connect/families/phi/plugin.py
 
 # 3. Validate end-to-end (build + diff_logits + diff_layers + runner parity)
 ./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
@@ -118,7 +118,7 @@ The scaffolding script:
 
 ### Step 1: Create the plugin file
 
-Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`. The file must:
+Create `python/tensorrt_model_connect/families/<family>.py`. The file must:
 - Define a class implementing the `FamilyPlugin` protocol (see `base.py`)
 - Expose a module-level `plugin` attribute (instance of the class)
 
@@ -127,9 +127,9 @@ Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`. The
 
 from __future__ import annotations
 
-from ..config import ModelConfig
-from ..checkpoint_mapper import WeightDict, load_standard_weights
-from ..standard_decoder_builder import build_standard_decoder_engine
+from ...config import ModelConfig
+from ...checkpoint_mapper import WeightDict, load_standard_weights
+from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class YiPlugin:
@@ -188,7 +188,7 @@ def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
     return weights
 ```
 
-Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `tensorrt_model_connect/tensorrt_model_connect/families/phi/plugin.py` for an example.
+Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `python/tensorrt_model_connect/families/phi/plugin.py` for an example.
 
 ### Step 3: Validate
 
@@ -199,7 +199,7 @@ Run the one-command validation gate:
 ```
 
 This runs:
-1. `trtmc-build build` — builds a `.trtfb` bundle
+1. `./build/trtmc build` — builds a `.trtfb` bundle
 2. `diff_logits.py --battery` — E2E logit comparison (4 prompts)
 3. `diff_layers.py` — per-layer hidden state comparison
 4. `test_runner_parity.py` — Python-vs-C++ cross-validation
@@ -208,7 +208,7 @@ Or run each step individually:
 
 ```bash
 # Build bundle
-trtmc-build build <model> -o /tmp/test.trtfb --max-cache-length 256
+./build/trtmc build <model> -o /tmp/test.trtfb --max-cache-length 256
 
 # E2E logit comparison (per-step, all tokens)
 python3 tools/diff_logits.py --model <model> --atol 1e-3 --battery
@@ -235,7 +235,7 @@ For models that require custom tokenizer code (e.g., Phi-3), add `--trust-remote
 
 ## FamilyPlugin Protocol
 
-From `tensorrt_model_connect/tensorrt_model_connect/families/base.py`:
+From `python/tensorrt_model_connect/families/base.py`:
 
 ```python
 class FamilyPlugin(Protocol):
@@ -249,12 +249,12 @@ class FamilyPlugin(Protocol):
 
 ## Advanced: Custom Build Engine
 
-If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
+If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `python/tensorrt_model_connect/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
 
 ### Already implemented custom architectures
 
 - **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
-- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and reuses the existing C++ `MambaBackend` (`src/runtime/pipelines/recurrent_pipeline.cpp`).
+- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and reuses the existing recurrent runtime model (`src/runtime/models/recurrent/pipeline.cpp`).
 - **Vision-Language (Qwen-VL)**: Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input. See `families/qwen_vl.py`. Uses `runtime_strategy="vision_language"`. Requires `build_vision_engine()` and `get_vl_config()` methods.
 
 ### Adding a Vision-Language Family

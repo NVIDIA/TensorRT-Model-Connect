@@ -1756,9 +1756,8 @@ This makes sense after reading the native runtime code:
 - `cache_length_` only grows in `append_present_to_cache()`
 - prefill tokens do not contribute to `cache_length_`
 - compaction triggering uses `cache_length_ >= compaction_trigger_length()`
-- relevant code:
-  `src/runtime/core/triattention_kv_cache.cpp:1950`
-  `src/runtime/core/triattention_kv_cache.cpp:1043`
+- relevant code: `src/runtime/core/triattention_kv_cache.cpp` around the
+  append/cache-length and compaction-trigger paths
 
 So the earlier Python replay with `count_prompt_tokens=True` was not an
 apples-to-apples comparison against the native runtime behavior.

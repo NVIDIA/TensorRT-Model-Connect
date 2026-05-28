@@ -58,21 +58,21 @@ class TestPythonCollector:
         """Parses a fake .coverage DB and returns source -> test mapping."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
+            "python/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::TestModelConfig::test_parse|run": [1, 2, 3],
                 "tests/builder/test_config.py::TestModelConfig::test_vl|run": [1, 5],
             },
-            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": {
+            "python/tensorrt_model_connect/graph_ops.py": {
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic|run": [10, 20],
             },
         })
         result = parse_coverage_db(db_path)
-        assert "tensorrt_model_connect/tensorrt_model_connect/config.py" in result
-        assert sorted(result["tensorrt_model_connect/tensorrt_model_connect/config.py"]) == [
+        assert "python/tensorrt_model_connect/config.py" in result
+        assert sorted(result["python/tensorrt_model_connect/config.py"]) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
         ]
-        assert result["tensorrt_model_connect/tensorrt_model_connect/graph_ops.py"] == [
+        assert result["python/tensorrt_model_connect/graph_ops.py"] == [
             "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
         ]
 
@@ -80,15 +80,39 @@ class TestPythonCollector:
         """Strips |run, |setup, |teardown from context names."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
+            "python/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::test_a|setup": [1],
                 "tests/builder/test_config.py::test_a|run": [2],
                 "tests/builder/test_config.py::test_a|teardown": [3],
             },
         })
         result = parse_coverage_db(db_path)
-        assert result["tensorrt_model_connect/tensorrt_model_connect/config.py"] == [
+        assert result["python/tensorrt_model_connect/config.py"] == [
             "tests/builder/test_config.py::test_a",
+        ]
+
+    def test_parse_coverage_db_normalizes_installed_wheel_paths(self, tmp_path):
+        """Installed-wheel coverage still maps back to the repo source tree."""
+        db_path = tmp_path / ".coverage"
+        installed_path = (
+            tmp_path
+            / "venv"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "tensorrt_model_connect"
+            / "config.py"
+        )
+        _create_fake_coverage_db(db_path, {
+            str(installed_path): {
+                "tests/builder/test_config.py::test_from_wheel|run": [1],
+            },
+        })
+
+        result = parse_coverage_db(db_path, repo_root=tmp_path / "repo")
+
+        assert result["python/tensorrt_model_connect/config.py"] == [
+            "tests/builder/test_config.py::test_from_wheel",
         ]
 
     def test_parse_coverage_db_empty(self, tmp_path):
@@ -243,11 +267,11 @@ class TestSelectTests:
             "src/tokenizer/vocab_tokenizer.cpp": ["test_vocab_tokenizer"],
             "src/bundle/bundle_format.cpp": ["test_bundle_format", "test_bundle_e2e"],
             "src/utils/text_parsers.cpp": ["test_text_parsers", "test_vocab_tokenizer"],
-            "tensorrt_model_connect/tensorrt_model_connect/config.py": [
+            "python/tensorrt_model_connect/config.py": [
                 "tests/builder/test_config.py::TestModelConfig::test_parse",
                 "tests/builder/test_config.py::TestModelConfig::test_vl",
             ],
-            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": [
+            "python/tensorrt_model_connect/graph_ops.py": [
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
             ],
         }
@@ -261,7 +285,7 @@ class TestSelectTests:
 
     def test_known_python_file(self, sample_map):
         """Known Python source file returns its mapped tests."""
-        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/config.py"], sample_map)
+        result = select_tests(["python/tensorrt_model_connect/config.py"], sample_map)
         assert sorted(result.builder_tests) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
@@ -276,9 +300,24 @@ class TestSelectTests:
 
     def test_unknown_python_file_fallback(self, sample_map):
         """Unknown tensorrt_model_connect/ file triggers builder tier fallback."""
-        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/new_module.py"], sample_map)
+        result = select_tests(["python/tensorrt_model_connect/new_module.py"], sample_map)
         assert "builder" in result.fallback_tiers
         assert result.builder_tests == []
+
+    def test_direct_python_test_file_runs_directly_without_fallback(self, sample_map):
+        """Changed Python tests should run directly without forcing full-tier fallback."""
+        result = select_tests([
+            "tests/builder/test_family_timm_vit.py",
+            "tests/tools/test_test_impact.py",
+            "tests/e2e_harness/test_orchestrator_phases.py",
+        ], sample_map)
+
+        assert result.builder_tests == ["tests/builder/test_family_timm_vit.py"]
+        assert result.tools_tests == [
+            "tests/e2e_harness/test_orchestrator_phases.py",
+            "tests/tools/test_test_impact.py",
+        ]
+        assert result.fallback_tiers == []
 
     def test_multiple_files_union(self, sample_map):
         """Multiple changed files produce union of tests."""
@@ -306,7 +345,7 @@ class TestSelectTests:
         """Changes in both languages select tests from both."""
         result = select_tests([
             "src/tokenizer/vocab_tokenizer.cpp",
-            "tensorrt_model_connect/tensorrt_model_connect/config.py",
+            "python/tensorrt_model_connect/config.py",
         ], sample_map)
         assert "test_vocab_tokenizer" in result.cpp_tests
         assert "tests/builder/test_config.py::TestModelConfig::test_parse" in result.builder_tests

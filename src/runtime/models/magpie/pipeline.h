@@ -42,6 +42,7 @@ class MagpiePipeline final : public IPipeline {
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "MagpiePipeline"; }
+    using IPipeline::generate_audio_streaming;
 
   private:
     struct DecoderLoopState {

@@ -1,6 +1,6 @@
 // Registration for the "triattention" namespace schema.
 //
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/triattention.py.
 // Only edit both sides together; the cross-language match test gates on it.
 
 #include "trtmc/config/schemas/triattention.h"

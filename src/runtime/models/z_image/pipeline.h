@@ -39,7 +39,8 @@ class ZImagePipeline final : public IPipeline {
                    std::unique_ptr<TrtModule> vae, DiffusionConfig config,
                    PreprocessorWeights weights, ZImagePreprocessorWeights z_weights,
                    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                   std::string bundle_path);
+                   std::string bundle_path, std::shared_ptr<void> distributed_owner = {},
+                   int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
 
     ~ZImagePipeline() override;
 
@@ -63,7 +64,13 @@ class ZImagePipeline final : public IPipeline {
                      std::vector<float>& patches) const;
     void unpatchify_2d(const std::vector<float>& patches, int32_t c, int32_t h, int32_t w,
                        std::vector<float>& output) const;
+    ImageResult decode_z_image_result(int32_t z_dim, int32_t h_lat, int32_t w_lat,
+                                      std::vector<float>& latents, ImageResult result);
 
+    // Keep TP communicator ownership until after TRT modules are destroyed.
+    std::shared_ptr<void> distributed_owner_;
+    int32_t tensor_parallel_rank_{0};
+    int32_t tensor_parallel_size_{1};
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;

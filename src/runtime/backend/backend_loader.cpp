@@ -2,10 +2,12 @@
 
 #include <cstdlib>
 #include <dlfcn.h>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
@@ -14,6 +16,8 @@
 namespace trtmc {
 
 namespace {
+
+namespace fs = std::filesystem;
 
 std::string exe_dir() {
     char buf[4096];
@@ -90,12 +94,57 @@ std::string join_path(const std::string& dir, const std::string& dso_name) {
     return dir + "/" + dso_name;
 }
 
+void append_python_package_backend_dirs(const fs::path& root, std::vector<std::string>& dirs) {
+    std::error_code ec;
+    for (const auto& lib_dir : {root / "lib", root / "lib64"}) {
+        if (!fs::is_directory(lib_dir, ec)) {
+            ec.clear();
+            continue;
+        }
+        for (fs::directory_iterator it(lib_dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_directory(ec)) {
+                ec.clear();
+                continue;
+            }
+            const std::string name = it->path().filename().string();
+            if (name.rfind("python", 0) != 0)
+                continue;
+            const fs::path candidate =
+                it->path() / "site-packages" / "tensorrt_model_connect" / "bin";
+            if (fs::is_directory(candidate, ec))
+                dirs.push_back(candidate.string());
+            ec.clear();
+        }
+        ec.clear();
+    }
+}
+
+std::vector<std::string> installed_package_backend_dirs() {
+    std::vector<std::string> dirs;
+    const std::string bin_dir = exe_dir();
+    if (bin_dir.empty())
+        return dirs;
+
+    const fs::path exe_bin_dir(bin_dir);
+    if (exe_bin_dir.filename() == "bin")
+        append_python_package_backend_dirs(exe_bin_dir.parent_path(), dirs);
+    return dirs;
+}
+
 void* open_backend_dso(const std::string& dso_name, const std::vector<std::string>& search_dirs,
                        std::string& tried) {
     const std::string exe_path = exe_dir();
     if (!exe_path.empty()) {
         void* handle =
             try_open_backend_dso(exe_path + "/" + dso_name, exe_path + "/" + dso_name, tried);
+        if (handle) {
+            return handle;
+        }
+    }
+
+    for (const std::string& dir : installed_package_backend_dirs()) {
+        const std::string path = join_path(dir, dso_name);
+        void* handle = try_open_backend_dso(path, path, tried);
         if (handle) {
             return handle;
         }
@@ -217,6 +266,8 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
                                  "To use " +
                                  backend_name + " bundles, ensure " + dso_name +
                                  " is next to the trtmc binary,\n"
+                                 "inside the installed tensorrt_model_connect/bin package "
+                                 "directory,\n"
                                  "in a LoadOptions::backend_search_paths / --backend-dir "
                                  "directory, or in LD_LIBRARY_PATH.");
     }
@@ -224,8 +275,9 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
     throw std::runtime_error("No compatible backend DSO available for candidates: " +
                              join_backend_names(backend_names) + ".\n" + all_tried +
                              "\nEnsure the matching libtrtmc_backend_<backend>.so is next to the "
-                             "trtmc binary, in a LoadOptions::backend_search_paths / --backend-dir "
-                             "directory, or in LD_LIBRARY_PATH.");
+                             "trtmc binary, inside the installed tensorrt_model_connect/bin "
+                             "package directory, in a LoadOptions::backend_search_paths / "
+                             "--backend-dir directory, or in LD_LIBRARY_PATH.");
 }
 
 } // namespace

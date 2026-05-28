@@ -126,7 +126,7 @@ def build_evolve_prompt(
     ### Step 1: Build
     ```bash
     docker exec {container} bash -c \\
-        'trtmc-build build {model} -o /tmp/evolve_test.trtfb \\
+        './build/trtmc build {model} -o /tmp/evolve_test.trtfb \\
          --max-cache-length {max_cache_length} --verbose 2>&1; echo EXIT=$?'
     ```
     If the build fails, read the error, fix the code, and retry the build.
@@ -194,11 +194,11 @@ def build_evolve_prompt(
     ## Files You May Modify
 
     ### Python builder (engine construction):
-    - `tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py` — family plugin config
-    - `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` — builder parameters
-    - `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` — TRT graph operations (atomic ops)
-    - `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` — composable graph blocks
-    - `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` — build orchestrator
+    - `python/tensorrt_model_connect/families/{family_name}.py` — family plugin config
+    - `python/tensorrt_model_connect/standard_decoder_builder.py` — builder parameters
+    - `python/tensorrt_model_connect/graph_ops.py` — TRT graph operations (atomic ops)
+    - `python/tensorrt_model_connect/graph_blocks.py` — composable graph blocks
+    - `python/tensorrt_model_connect/engine_builder.py` — build orchestrator
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
     - `src/runtime/trt/core/device_kv_cache.h/cpp` — KV cache + decode step
@@ -210,8 +210,8 @@ def build_evolve_prompt(
     - `tools/perf_compare.py` — benchmarking tool
     - `tools/cpu_profile.py` — CPU phase profiling
     - `tools/diff_logits.py` — correctness checker
-    - `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
-    - `tensorrt_model_connect/tensorrt_model_connect/config.py` — ModelConfig dataclass
+    - `python/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
+    - `python/tensorrt_model_connect/config.py` — ModelConfig dataclass
 
     ## CRITICAL RULES
     1. **Profile FIRST** — run all 3 profiling levels before any optimization.
@@ -402,14 +402,14 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         Already implemented in the quantization framework. Just pass `--precision fp16`:
         ```bash
-        trtmc-build build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
+        ./build/trtmc build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
         ```
         Correctness: use `--atol 0.1` (relaxed for FP16).
         Bundle size halves (~2.5GB → ~1.3GB for 0.6B model).
 
         **BF16 — similar to FP16, better numerical stability**
         ```bash
-        trtmc-build build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
+        ./build/trtmc build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
         ```
         Only on B100/B200/H100 (native BF16 support).
 

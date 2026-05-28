@@ -13,6 +13,9 @@ Usage:
     # Core models only:
     pytest tests/test_e2e.py --e2e-core-only
 
+    # Multi-device models only:
+    pytest tests/test_e2e.py --multi-device-only
+
     # Partitioned execution (agent 0 of 4):
     pytest tests/test_e2e.py --e2e-partition-id 0 --e2e-partition-size 4
 
@@ -97,7 +100,8 @@ def _resolve_ld_library_path() -> str:
     except Exception:
         trt_lib_dir = ""
     base = os.environ.get("LD_LIBRARY_PATH", "")
-    parts = [p for p in [trt_lib_dir, "/usr/local/cuda/lib64", base] if p]
+    nccl_lib_dir = os.environ.get("TRTMC_NCCL_LIB_DIR", "")
+    parts = [p for p in [nccl_lib_dir, trt_lib_dir, "/usr/local/cuda/lib64", base] if p]
     return ":".join(parts)
 
 
@@ -167,6 +171,7 @@ def _get_case_names(config=None) -> list[str]:
     core_only = False
     partition_id = None
     partition_size = None
+    multi_device_only = False
     excluded_ci_tiers = set()
 
     if config is not None:
@@ -174,6 +179,7 @@ def _get_case_names(config=None) -> list[str]:
         core_only = config.getoption("--e2e-core-only", default=False)
         partition_id = config.getoption("--e2e-partition-id", default=None)
         partition_size = config.getoption("--e2e-partition-size", default=None)
+        multi_device_only = config.getoption("--multi-device-only", default=False)
         excluded_ci_tiers = set(
             config.getoption("--e2e-exclude-ci-tier", default=[]) or [])
 
@@ -184,6 +190,11 @@ def _get_case_names(config=None) -> list[str]:
             c for c in cases
             if str(c.metadata.get("ci_tier", "")) not in excluded_ci_tiers
         ]
+
+    if multi_device_only:
+        cases = [c for c in cases if _is_multi_device_case(c)]
+    else:
+        cases = [c for c in cases if not _is_multi_device_case(c)]
 
     # Filter to core models only
     if core_only:
@@ -198,6 +209,11 @@ def _get_case_names(config=None) -> list[str]:
     if not cases:
         return ["__no_models__"]
     return [c.name for c in cases]
+
+
+def _is_multi_device_case(case) -> bool:
+    metadata = case.metadata or {}
+    return str(metadata.get("ci_tier", "") or "") == "multi_device"
 
 
 # ---------------------------------------------------------------------------

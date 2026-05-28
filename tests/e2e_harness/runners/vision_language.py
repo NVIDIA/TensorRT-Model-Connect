@@ -23,6 +23,17 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from .text_generation import (
+    _detect_trt_runtime_error,
+    _distributed_runtime_config,
+    _ensure_distributed_runtime_env,
+    _extract_rank_zero_stdout,
+    _extract_trtmc_load_timing,
+    _extract_trtmc_timing,
+    _maybe_start_gpu_memory_sampler,
+    _strip_mpi_stream_tags,
+    _wrap_distributed_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,21 +298,43 @@ class VisionLanguageRunner:
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        distributed_runtime = _distributed_runtime_config(case)
+        if distributed_runtime:
+            _ensure_distributed_runtime_env(case, ctx, env)
+            extra_env = distributed_runtime.get("env", {})
+            if isinstance(extra_env, dict):
+                env.update({str(k): str(v) for k, v in extra_env.items()})
+            cmd = _wrap_distributed_command(cmd, case, env)
 
         t0 = time.monotonic()
+        memory_sampler = _maybe_start_gpu_memory_sampler(
+            distributed_runtime, ctx, case, env)
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=600, env=env)
         except subprocess.TimeoutExpired:
+            meta: dict = {
+                "error": "C++ VL generation timed out",
+                "command": cmd,
+            }
+            if memory_sampler is not None:
+                meta["gpu_memory"] = memory_sampler.stop()
             return StageOutput(
                 stage_name="full_generation",
                 timing_s=time.monotonic() - t0,
-                metadata={"error": "C++ VL generation timed out",
-                          "command": cmd},
+                metadata=meta,
             )
         elapsed = time.monotonic() - t0
+        memory_meta = memory_sampler.stop() if memory_sampler is not None else None
 
-        raw_text = result.stdout.strip()
+        parse_stderr = (
+            _strip_mpi_stream_tags(result.stderr)
+            if distributed_runtime else result.stderr
+        )
+        raw_text = (
+            _extract_rank_zero_stdout(result.stdout)
+            if distributed_runtime else result.stdout.strip()
+        )
 
         # Strip chat template / prompt prefix from C++ binary output.
         # The C++ binary may output the full conversation including the
@@ -332,6 +365,20 @@ class VisionLanguageRunner:
             "stdout": result.stdout or "",
             "stderr": result.stderr or "",
         }
+        if distributed_runtime:
+            meta_fg["distributed_runtime"] = distributed_runtime
+            meta_fg["rank_zero_stdout"] = raw_text
+            meta_fg["stderr_without_mpi_tags"] = parse_stderr
+        if memory_meta is not None:
+            meta_fg["gpu_memory"] = memory_meta
+        meta_fg.update(_extract_trtmc_timing(parse_stderr))
+        meta_fg.update(_extract_trtmc_load_timing(parse_stderr))
+        runtime_error = _detect_trt_runtime_error(parse_stderr)
+        if runtime_error:
+            meta_fg["runtime_error_detected"] = runtime_error
+            if result.returncode == 0:
+                meta_fg["effective_returncode"] = -1
+                meta_fg["error"] = "TensorRT runtime error detected in stderr"
         if stderr_log:
             meta_fg["stderr_log"] = stderr_log
 

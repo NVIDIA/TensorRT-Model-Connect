@@ -29,7 +29,7 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
 
   A) Environment precheck/build
   - python3 -c "import tensorrt, torch, transformers; print('ok')"
-  - pip install --no-deps -e tensorrt_model_connect/
+  - pip install --no-deps -e . -C py-only=true
   - cmake -S . -B build -G Ninja \
     -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
     -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
@@ -43,7 +43,7 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
     - Add/update manifest in tests/e2e/models/<MODEL_NAME>.json
   - If new family required:
     - Scaffold with scripts/new_family.py
-    - Implement plugin in tensorrt_model_connect/tensorrt_model_connect/families/<family>.py
+    - Implement plugin in python/tensorrt_model_connect/families/<family>.py
     - Ensure family coverage check passes.
 
   C) Harness compatibility check

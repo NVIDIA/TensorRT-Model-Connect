@@ -1,0 +1,56 @@
+{
+  "name": "olmo2-1b-tp4",
+  "hf_id": "allenai/OLMo-2-0425-1B",
+  "bundle": "olmo2-1b-tp4.trtfb",
+  "family": "olmo2",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "debug_logits": true,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "notes": "Tensor-parallel TP=4 OLMo2 decoder coverage on four GPUs using the same prompt, cache length, and thresholds as olmo2-1b."
+}

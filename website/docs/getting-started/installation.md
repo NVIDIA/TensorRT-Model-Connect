@@ -2,80 +2,143 @@
 title: Installation
 ---
 
-TensorRT-Model-Connect has two install surfaces:
+TensorRT-Model-Connect has three install paths:
 
-- The Python builder package, `trtmc-build`, installed from `tensorrt_model_connect/`.
-- The C++ runtime executable and library, built with CMake from the repository root.
+1. Simple pip install from a published wheel.
+2. Build the wheel from source, then install it.
+3. Advanced Python-only editable install for developers.
 
-## Host requirements
+## Requirements
 
-- Linux with an NVIDIA GPU.
-- Docker and NVIDIA Container Toolkit for the standard project workflow.
-- CUDA development files. The C++ core requires CUDA headers and `cudart`.
-- TensorRT SDK when building the standard TensorRT backend DSO.
-- Optional TensorRT-RTX SDK when building the RTX backend DSO.
+- Linux aarch64 with an NVIDIA GPU.
+- Python 3.10 or Python 3.12.
+- NVIDIA driver and CUDA runtime libraries.
+- glibc 2.39 or newer for the published `manylinux_2_39_aarch64` wheels.
 
-Use [Environment and First Repro](environment-and-repro.md) for the full setup check before building a model.
+Building from source also needs the repository dev container or an equivalent
+CUDA/TensorRT build environment with CMake, Ninja, Conan, CUDA headers and
+libraries, TensorRT headers and libraries, `patchelf`, and `auditwheel`.
 
-## Container workflow
+## 1. Simple pip install
+
+Install a published wheel that matches your Python version:
 
 ```bash
+python3.12 -m venv .venv-trtmc
+. .venv-trtmc/bin/activate
+
+pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
+
+trtmc version
+trtmc build --help
+```
+
+Use the `py310` wheel with Python 3.10 and the `py312` wheel with Python 3.12.
+The wheel installs:
+
+- the Python builder package,
+- the native `trtmc` executable,
+- packaged TensorRT backend DSOs,
+- declared Python dependencies, including `tensorrt>=10.16.1,<10.17`.
+
+Quick smoke test:
+
+```bash
+trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc run /tmp/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --greedy
+```
+
+## 2. Build wheel from source
+
+Use this path when you need the same pip-installable artifact that CI and
+nightly releases produce.
+
+```bash
+git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
+cd TensorRT-Model-Connect
+
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 ```
 
-Then, inside the container:
+Inside the dev container, build one Python 3.12 wheel:
 
 ```bash
-pip install -e tensorrt_model_connect/
+python -m pip install --upgrade build auditwheel
+rm -rf dist /tmp/trtmc-conan-py-wheel-py312
+
+CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+TRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+TRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+TRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+WHEEL_PYVER=py312 \
+WHEEL_ABI=none \
+WHEEL_ARCH=manylinux_2_39_aarch64 \
+python -m build --wheel --outdir "$PWD/dist" \
+  -C build-dir=/tmp/trtmc-conan-py-wheel-py312 \
+  .
+
+python -m auditwheel show dist/tensorrt_model_connect-*-py312-none-manylinux_2_39_aarch64.whl
+```
+
+For Python 3.10, use `WHEEL_PYVER=py310` and a matching Python 3.10 build
+environment. Install the built wheel in a fresh environment:
+
+```bash
+python3.12 -m venv /tmp/trtmc-wheel-smoke
+/tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
+/tmp/trtmc-wheel-smoke/bin/python -m pip install \
+  dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
+/tmp/trtmc-wheel-smoke/bin/trtmc version
+```
+
+Run wheel builds from the repository root. Do not point `python -m build` at a
+package subdirectory.
+
+## 3. Advanced editable Python-only install
+
+Use this only for local development of the Python builder. It does not run
+Conan, does not run CMake, and does not install the native `trtmc` executable or
+backend DSOs.
+
+```bash
+git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
+cd TensorRT-Model-Connect
+
+./scripts/docker_build_gb300.sh
+./scripts/docker_run_gb300.sh
+```
+
+Inside the dev container:
+
+```bash
+pip install -e . -C py-only=true
+```
+
+If the container already has the declared dependencies installed and you want
+to avoid dependency resolution:
+
+```bash
+pip install --no-deps -e . -C py-only=true
+```
+
+This editable install points Python at `python/tensorrt_model_connect/`. Use it
+with a separate source build when you need the native CLI:
+
+```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
   -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
   -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
   -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
-```
 
-The configure step should print `TRT backend DSO: enabled`. If it says the TensorRT backend is skipped, fix the `TRTMC_TRT_INCLUDE_DIR` and `TRTMC_TRT_LIBRARY` paths before building bundles.
-
-Use `pip install --no-deps -e tensorrt_model_connect/` only when the container already has the builder dependencies installed and you intentionally want to avoid dependency resolution.
-
-## Python package
-
-The package metadata is in `tensorrt_model_connect/pyproject.toml`. The installed console script is:
-
-```bash
-trtmc-build
-```
-
-The builder dependencies include `safetensors`, `numpy`, `ml_dtypes`, `onnx`, `onnxscript`, and `transformers`. TensorRT is intentionally not pinned in the package because it depends on the CUDA and TensorRT distribution installed in the target environment.
-
-## C++ runtime build
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
-  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-cmake --build build -j
-```
-
-The main executable is:
-
-```bash
 ./build/trtmc version
 ```
 
-Run it inside the dev container unless you have exported equivalent runtime library paths. A host-side failure such as `libtorch.so: cannot open shared object file` usually means the executable was built against libraries available in the container environment but not on the host loader path.
-
-The core runtime does not directly link `libnvinfer`. TensorRT execution lives behind backend DSOs loaded at runtime. The standard DSO is `libtrtmc_backend_trt.so`, with an ABI-suffixed alias when TensorRT headers expose a major/minor version.
-
-## Optional build switches
-
-| Switch | Default | Purpose |
-| --- | --- | --- |
-| `TRTMC_ENABLE_TRT` | `ON` | Enable TensorRT backend DSO integration. |
-| `TRTMC_BUILD_BACKEND_TRT` | `ON` | Build the standard TensorRT backend DSO when headers and libraries exist. |
-| `TRTMC_BUILD_BACKEND_RTX` | `OFF` | Build the TensorRT-RTX backend DSO. |
-| `TRTMC_ENABLE_TVM_FFI` | `ON` | Enable the optional TVM-FFI module loader and plugin when available. |
+CI and release validation use the wheel path, not the Python-only editable
+install.

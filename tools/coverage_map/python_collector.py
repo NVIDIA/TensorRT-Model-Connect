@@ -7,12 +7,35 @@ SQLite database to build a {source_file: [test_node_ids]} mapping.
 import os
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+_PYTHON_PACKAGE = "tensorrt_model_connect"
+_PYTHON_SOURCE_PREFIX = f"python/{_PYTHON_PACKAGE}"
 
-def parse_coverage_db(db_path: Path) -> Dict[str, List[str]]:
+
+def _normalize_source_path(src_path: str, repo_root: Optional[Path] = None) -> str:
+    path_text = str(src_path).replace("\\", "/")
+    if repo_root is not None:
+        try:
+            source_path = Path(src_path)
+            if source_path.is_absolute():
+                return source_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        except (OSError, ValueError):
+            pass
+
+    parts = [part for part in path_text.strip("/").split("/") if part]
+    if _PYTHON_PACKAGE in parts:
+        package_index = parts.index(_PYTHON_PACKAGE)
+        if package_index > 0 and parts[package_index - 1] == "python":
+            return "/".join(parts[package_index - 1:])
+        package_tail = "/".join(parts[package_index + 1:])
+        return f"{_PYTHON_SOURCE_PREFIX}/{package_tail}" if package_tail else _PYTHON_SOURCE_PREFIX
+
+    return path_text.strip("/")
+
+
+def parse_coverage_db(db_path: Path, repo_root: Optional[Path] = None) -> Dict[str, List[str]]:
     """Parse a coverage.py SQLite database with per-test contexts.
 
     Returns:
@@ -39,7 +62,8 @@ def parse_coverage_db(db_path: Path) -> Dict[str, List[str]]:
         test_id = context.split("|")[0] if "|" in context else context
         if not test_id:
             continue
-        source_to_tests.setdefault(src_path, set()).add(test_id)
+        normalized_src_path = _normalize_source_path(src_path, repo_root)
+        source_to_tests.setdefault(normalized_src_path, set()).add(test_id)
 
     return {src: sorted(tests) for src, tests in source_to_tests.items()}
 
@@ -93,7 +117,7 @@ def collect_python_coverage(
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
 
-    result = parse_coverage_db(coverage_file)
+    result = parse_coverage_db(coverage_file, repo_root=repo_root)
 
     coverage_file.unlink(missing_ok=True)
 

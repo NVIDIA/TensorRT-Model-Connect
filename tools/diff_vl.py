@@ -73,7 +73,7 @@ def _get_hf_vision_features_qwen(
 
     if is_qwen3:
         print(f"[diff_vl] Loading HF Qwen3 VL model {model_id} ...", file=sys.stderr)
-        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+        from transformers import Qwen3VLForConditionalGeneration
         model_cls = Qwen3VLForConditionalGeneration
     else:
         print(f"[diff_vl] Loading HF Qwen2.5 VL model {model_id} ...", file=sys.stderr)
@@ -135,9 +135,7 @@ def _get_hf_vision_features_qwen(
     trt_pixel_values = np.tile(img_chw, (temporal, 1, 1)).astype(np.float32)
 
     del model
-    import gc; gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _free_gpu()
     return hf_features_np, trt_pixel_values
 
 
@@ -210,9 +208,7 @@ def _get_hf_vision_features_generic(
     trt_pixel_values = img_np.transpose(2, 0, 1).astype(np.float32)
 
     del model
-    import gc; gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _free_gpu()
     return hf_features_np, trt_pixel_values
 
 
@@ -306,22 +302,25 @@ def test_vision_features(
     # Basic sanity checks
     if np.all(trt_features == 0):
         print("[diff_vl] FAIL: TRT vision output is all zeros", file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return False
 
     if np.any(np.isnan(trt_features)):
         print("[diff_vl] FAIL: TRT vision output contains NaN", file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return False
 
     if np.any(np.isinf(trt_features)):
         print("[diff_vl] FAIL: TRT vision output contains Inf", file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return False
 
     # Numerical comparison against HF reference
     if model_id is not None:
-        print(f"[diff_vl] Comparing against HF reference ...", file=sys.stderr)
+        print("[diff_vl] Comparing against HF reference ...", file=sys.stderr)
 
         # Warn if HF processor's image_mean/std differ from bundle values
         try:
@@ -373,7 +372,7 @@ def test_vision_features(
             print(f"[diff_vl] WARN: Max diff {max_diff:.6f} > atol {atol}",
                   file=sys.stderr)
             # Not a hard failure — print diagnostics
-            print(f"[diff_vl] Per-row max diff (first 10 features):",
+            print("[diff_vl] Per-row max diff (first 10 features):",
                   file=sys.stderr)
             for i in range(min(10, trt_sub.shape[0])):
                 row_diff = np.abs(trt_sub[i] - hf_sub[i]).max()
@@ -388,7 +387,7 @@ def test_vision_features(
             _free_gpu()
             return False
 
-    print(f"[diff_vl] Vision encoder: PASS", file=sys.stderr)
+    print("[diff_vl] Vision encoder: PASS", file=sys.stderr)
     # Ensure GPU is free for next test (runner may already be deleted by HF path)
     try:
         del runner
@@ -400,19 +399,33 @@ def test_vision_features(
 
 def test_embed_input(bundle_path: str) -> bool:
     """Verify the text decoder accepts embed_input mode."""
-    from tensorrt_model_connect.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.debug_runner import (
+        load_section_from_bundle,
+        runner_from_bundle,
+    )
+
+    if (
+        load_section_from_bundle(bundle_path, "engine_plan") is None
+        and load_section_from_bundle(bundle_path, "engine_plan_tp_rank0") is not None
+    ):
+        print("[diff_vl] Text decoder embed_input: SKIP "
+              "(tensor-parallel decoder requires distributed runtime)",
+              file=sys.stderr)
+        return True
 
     runner = runner_from_bundle(bundle_path)
     if not runner.has_embed_input:
         print("[diff_vl] Text decoder has no embed_input — skipping",
               file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return True
 
     result1 = runner.step(1, use_input_embed=0.0)
     if "logits" not in result1:
         print("[diff_vl] FAIL: no logits from text decoder", file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return False
 
     embed_shape = tuple(runner.engine.get_tensor_shape("input_embed"))
@@ -421,12 +434,14 @@ def test_embed_input(bundle_path: str) -> bool:
     result2 = runner.step(0, input_embed=dummy_embed, use_input_embed=1.0)
     if "logits" not in result2:
         print("[diff_vl] FAIL: no logits from embed_input step", file=sys.stderr)
-        del runner; _free_gpu()
+        del runner
+        _free_gpu()
         return False
 
     print(f"[diff_vl] Text decoder embed_input: PASS "
           f"(hidden={embed_hidden})", file=sys.stderr)
-    del runner; _free_gpu()
+    del runner
+    _free_gpu()
     return True
 
 
@@ -436,7 +451,10 @@ def test_vl_generation(
     max_new_tokens: int = 20,
 ) -> bool:
     """Run full VL generation in Python using VLTrtRunner."""
-    from tensorrt_model_connect.debug_runner import VLTrtRunner
+    from tensorrt_model_connect.debug_runner import (
+        load_section_from_bundle,
+        VLTrtRunner,
+    )
 
     print("[diff_vl] Loading VL runner from bundle ...", file=sys.stderr)
     runner = VLTrtRunner(bundle_path)
@@ -464,7 +482,7 @@ def test_vl_generation(
         tok_data = load_section_from_bundle(bundle_path, "tokenizer.json")
         if tok_data:
             # Write tokenizer to temp dir and load
-            import tempfile, json
+            import tempfile
             with tempfile.TemporaryDirectory() as tmpdir:
                 for name in ["tokenizer.json", "tokenizer_config.json",
                              "special_tokens_map.json"]:
@@ -496,7 +514,8 @@ def test_vl_generation(
         print("[diff_vl] WARN: Empty generation output", file=sys.stderr)
 
     print("[diff_vl] VL generation: PASS", file=sys.stderr)
-    del runner; _free_gpu()
+    del runner
+    _free_gpu()
     return True
 
 
@@ -535,10 +554,6 @@ def test_cpp_binary(
     print(f"[diff_vl] C++ output: {output[:200]!r}", file=sys.stderr)
     print("[diff_vl] C++ binary: PASS", file=sys.stderr)
     return True
-
-
-# Need this import at module level for test_vl_generation
-from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
 
 def test_debug_layers(
@@ -667,9 +682,7 @@ def test_debug_layers(
                   file=sys.stderr)
 
     del model
-    import gc; gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _free_gpu()
 
     print("[diff_vl] Debug layers: DONE", file=sys.stderr)
     return True

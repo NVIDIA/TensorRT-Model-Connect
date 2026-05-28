@@ -12,7 +12,7 @@ description: >-
 
 - GPU, CUDA, and TensorRT are available, usually inside a dev container.
 - `tensorrt_model_connect` is installed in editable mode:
-  `pip install --no-deps -e tensorrt_model_connect/`.
+  `pip install --no-deps -e . -C py-only=true`.
 - `./build/trtmc` is built when C++ timing or Nsight capture is needed.
 - The model is available as a HuggingFace ID or local path.
 
@@ -21,8 +21,7 @@ description: >-
 ```bash
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
 python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-which trtmc-build 2>/dev/null && echo "trtmc-build: OK" || echo "trtmc-build: MISSING"
-test -x ./build/trtmc && echo "C++ binary: OK" || echo "C++ binary: MISSING"
+test -x ./build/trtmc && echo "trtmc: OK" || echo "trtmc: MISSING"
 python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
 ```
 
@@ -57,8 +56,8 @@ harness artifacts until dedicated profiler support is available.
 ## Build Or Inspect Bundle
 
 ```bash
-trtmc-build build <model> -o /tmp/<model-name>.trtfb --max-cache-length 256 --verbose
-trtmc-build inspect /tmp/<model-name>.trtfb
+./build/trtmc build <model> -o /tmp/<model-name>.trtfb --max-cache-length 256 --verbose
+./build/trtmc inspect /tmp/<model-name>.trtfb
 ```
 
 Skip the build when the user provides a bundle.

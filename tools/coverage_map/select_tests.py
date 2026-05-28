@@ -60,13 +60,22 @@ def _classify_tier(path: str) -> Optional[str]:
         return "cpp"
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
         return "cpp"
-    if path.startswith("tensorrt_model_connect/"):
+    if path.startswith("python/tensorrt_model_connect/"):
         return "builder"
     if path.startswith("tests/builder/"):
         return "builder"
     if path.startswith("tests/cpp/"):
         return "cpp"
     if path.startswith("tests/tools/"):
+        return "tools"
+    return None
+
+
+def _direct_python_test_tier(path: str) -> Optional[str]:
+    """Return the tier for Python test files that pytest can run directly."""
+    if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
+        return "builder"
+    if path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
         return "tools"
     return None
 
@@ -90,6 +99,14 @@ def select_tests(
 
     for path in changed_files:
         path = path.replace("\\", "/").strip("/")
+
+        direct_tier = _direct_python_test_tier(path)
+        if direct_tier == "builder":
+            builder_tests.add(path)
+            continue
+        if direct_tier == "tools":
+            tools_tests.add(path)
+            continue
 
         if _is_no_impact(path):
             continue

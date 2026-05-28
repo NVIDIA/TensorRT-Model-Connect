@@ -4,10 +4,10 @@ title: Model Support
 
 Model support is defined by two source-of-truth surfaces:
 
-- Python family plugins under `tensorrt_model_connect/tensorrt_model_connect/families/`.
+- Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
 
-The current checkout contains 64 Python family plugins and 107 E2E model manifests.
+The current checkout contains 68 Python family plugins and 122 E2E model manifests.
 
 ## Support Levels
 
@@ -55,12 +55,12 @@ z_image
 
 ## How support is resolved
 
-For raw TRT builds, `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` scans every non-private family module and registers its module-level `plugin` object. Standard models use `find_plugin(model_type)`. Diffusion models use `find_diffusion_plugin(pipeline_class)`.
+For raw TRT builds, `python/tensorrt_model_connect/families/__init__.py` scans every non-private family module and registers its module-level `plugin` object. Standard models use `find_plugin(model_type)`. Diffusion models use `find_diffusion_plugin(pipeline_class)`.
 
-For Torch-TRT engine definitions, `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/` provides a smaller plugin set for families such as Qwen, BERT, PixArt, TimesFM, PatchTST, PatchTSMixer, and Chronos-Bolt.
+For Torch-TRT engine definitions, `python/tensorrt_model_connect/engine_defs/torch_trt/families/` provides a smaller plugin set for families such as Qwen, BERT, PixArt, TimesFM, PatchTST, PatchTSMixer, and Chronos-Bolt.
 
 For runtime, the bundle's `runtime_strategy` selects a C++ `IPipelinePlugin` registered through `cmake/trtmc_pipeline_plugins.cmake`.
 
 :::note CLI coverage is smaller than runtime coverage
-Some runtime strategies have C++ API and test coverage before they have a polished CLI wrapper. For example, `object_detection` maps to `IPipeline::detect`, but the current `./build/trtmc` CLI does not expose a `detect` subcommand.
+Some runtime strategies have C++ API and test coverage before they have a polished CLI wrapper. Object detection is available through `trtmc detect`; less common strategies may still require the C++ API or dedicated tests until their CLI path is polished.
 :::

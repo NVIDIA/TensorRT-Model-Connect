@@ -23,7 +23,7 @@ _EXEMPT_PLUGINS = {
 }
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FAMILIES_DIR = REPO_ROOT / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
+FAMILIES_DIR = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 
 

@@ -1,5 +1,0 @@
-chronos-forecasting==2.2.2
-transformers==4.57.6
-tokenizers==0.22.2
-huggingface_hub==0.36.2
-accelerate==1.13.0

@@ -2,20 +2,26 @@
 title: CLI Reference
 ---
 
-## `trtmc-build`
+## `trtmc build`
 
-`trtmc-build` builds and inspects `.trtfb` bundles.
+`trtmc build` builds `.trtfb` bundles through the Python builder package.
 
 ```bash
-trtmc-build build <hf-repo-or-local-dir> -o <output.trtfb> [options]
-trtmc-build inspect <bundle.trtfb> [--list-engines]
-trtmc-build version
+trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
 ```
 
-The bare form is accepted as build sugar:
+The C++ bridge runs `python -m tensorrt_model_connect build ...`. When
+installed from the release wheel, `trtmc` is the native executable installed in
+the environment's `bin/` directory and it uses the sibling `python3` or
+`python` from that same environment. A source-built `./build/trtmc` falls back
+to `python3` from the user's shell.
+
+Source builds use the same subcommands through `./build/trtmc`.
+
+Direct module execution is still available for debugging:
 
 ```bash
-trtmc-build <hf-repo-or-local-dir> -o <output.trtfb>
+python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 ```
 
 ### Build options
@@ -43,29 +49,31 @@ trtmc-build <hf-repo-or-local-dir> -o <output.trtfb>
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 
-## `trtmc`
+## Runtime commands
 
-`trtmc` runs bundles from C++.
+`trtmc` also inspects and runs bundles from C++.
 
 ```bash
-./build/trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
-./build/trtmc encode <bundle.trtfb> --prompt "text"
-./build/trtmc segment <bundle.trtfb> --image PATH --output PATH
-./build/trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
-./build/trtmc serve-audio <bundle.trtfb>
-./build/trtmc generate-video <bundle.trtfb> (--prompt "text" | --prompt-file PATH) --output DIR [--action DSL | --camera PATH.npy] [--camera-intrinsics CSV|PATH.npy] [--step N] [--cfg-scale S|--cfg_scale S] [--fps N] [--flow-shift F|--flow_shift F]
-./build/trtmc embed <bundle.trtfb> --prompt "text"
-./build/trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
-./build/trtmc solve <bundle.trtfb> --field-input CSV
-./build/trtmc solve <bundle.trtfb> --branch-input CSV [--trunk-input CSV]
-./build/trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
-./build/trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
-./build/trtmc inspect <bundle.trtfb>
-./build/trtmc version
+trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
+trtmc encode <bundle.trtfb> --prompt "text"
+trtmc segment <bundle.trtfb> --image PATH --output PATH
+trtmc detect <bundle.trtfb> --image PATH [--output-json PATH]
+trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
+trtmc serve-audio <bundle.trtfb>
+trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
+trtmc embed <bundle.trtfb> --prompt "text"
+trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
+trtmc solve <bundle.trtfb> --field-input CSV
+trtmc solve <bundle.trtfb> --branch-input CSV [--trunk-input CSV]
+trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
+trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
+trtmc inspect <bundle.trtfb>
+trtmc inspect <bundle.trtfb> --list-engines
+trtmc version
 ```
 
 Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable `--set`.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
-Object detection is available through the runtime API for pipelines that implement `IPipeline::detect`, but the current CLI command list does not include `detect`.
+Object detection is available through `trtmc detect` for pipelines that implement `IPipeline::detect`.

@@ -62,10 +62,10 @@ Common reference paths:
 
 | Path | Purpose |
 |------|---------|
-| `tensorrt_model_connect/tensorrt_model_connect/families/` | Family plugins |
-| `tensorrt_model_connect/tensorrt_model_connect/strategies/` | Build strategies |
-| `tensorrt_model_connect/tensorrt_model_connect/compiler.py` | Build orchestration |
-| `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | Family plugin protocol |
+| `python/tensorrt_model_connect/families/` | Family plugins |
+| `python/tensorrt_model_connect/strategies/` | Build strategies |
+| `python/tensorrt_model_connect/compiler.py` | Build orchestration |
+| `python/tensorrt_model_connect/families/base.py` | Family plugin protocol |
 | `scripts/new_family.py` | Family scaffold helper |
 | `tests/e2e/models/` | E2E manifests |
 

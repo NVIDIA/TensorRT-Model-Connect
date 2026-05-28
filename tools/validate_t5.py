@@ -63,7 +63,7 @@ def main():
 
     # --- TRT ---
     print("[validate] Loading T5 weights ...", file=sys.stderr)
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
     from tensorrt_model_connect.families.flux.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
     cfg = hf_model.config

@@ -6,7 +6,7 @@ Add a Python family plugin when the model can reuse an existing runtime strategy
 
 ## 1. Create a plugin file
 
-Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`:
+Create `python/tensorrt_model_connect/families/<family>.py`:
 
 ```python
 from __future__ import annotations
@@ -60,7 +60,7 @@ Auto-discovery registers modules with a module-level `plugin` attribute. No cent
 ## 2. Build a smoke bundle
 
 ```bash
-trtmc-build build <hf-repo-or-local-dir> -o /tmp/family-smoke.trtfb --max-cache-length 256
+./build/trtmc build <hf-repo-or-local-dir> -o /tmp/family-smoke.trtfb --max-cache-length 256
 ```
 
 ## 3. Validate

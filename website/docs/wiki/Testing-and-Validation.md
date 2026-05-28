@@ -11,11 +11,11 @@ purpose, dependency profile, and speed:
 
 | Layer | Directory | Files | Tests | GPU? | Time | Purpose |
 |-------|-----------|:--:|:--:|:--:|------|---------|
-| 1. Builder unit | `tests/builder/` | 94 | ~940 | No | ~10 min | Python build logic in isolation |
-| 2. C++ runtime unit | `tests/cpp/` | 91 | 70+ | Mix | ~8 s | C++ runtime correctness |
-| 3. Tools self-tests | `tests/tools/` | 51 | ~160 | No | ~35 s | Diff framework + comparison utilities |
+| 1. Builder unit | `tests/builder/` | 98 | ~940 | No | ~10 min | Python build logic in isolation |
+| 2. C++ runtime unit | `tests/cpp/` | 92 | 70+ | Mix | ~8 s | C++ runtime correctness |
+| 3. Tools self-tests | `tests/tools/` | 62 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 110 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 122 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -494,7 +494,7 @@ gold-standard correctness gate. All modalities use the same harness.
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines
 
-# All 84 models with artifact output
+# All 122 models with artifact output
 .venv/bin/python -m pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
@@ -528,7 +528,7 @@ gold-standard correctness gate. All modalities use the same harness.
 
 ```
 tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 110 per-model JSON manifests
+tests/e2e/models/*.json              # 122 per-model JSON manifests
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -618,7 +618,7 @@ Every `CompareResult` returned by any comparator includes:
 - **Full tracebacks**: Exception blocks in the orchestrator capture
   `traceback.format_exc()` and include it in the `CompareResult.message`.
 
-### 84 model manifests by category
+### 122 model manifests by category
 
 | Category | Count | Models |
 |----------|:--:|---------|
@@ -701,14 +701,14 @@ ctest --test-dir build --output-on-failure
 ```
 
 **What's covered**:
-- Python: 94 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
-- Tools: 51 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
-- C++: 91 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
+- Python: 98 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
+- Tools: 62 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
+- C++: 92 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, under 1 min)
 
-Cyclomatic complexity is measured with `lizard`, which is baked into both
-container images (`Dockerfile`, `Dockerfile.gb300`) and verified in
+Cyclomatic complexity is measured with `lizard`, which is baked into the
+repository Docker image (`Dockerfile`) and verified in
 `scripts/bootstrap_workspace.sh`.
 
 Use the repository checker:
@@ -748,7 +748,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 110 models, force-rebuild every bundle. Gold-standard regression gate.
+All 122 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \
@@ -835,7 +835,7 @@ tools/coverage/run_coverage_all.sh
 ```
 
 Configuration:
-- **Source**: `tensorrt_model_connect/tensorrt_model_connect` (the build package)
+- **Source**: `python/tensorrt_model_connect` (the build package)
 - **Omit**: `*/tests/*`, `*/__pycache__/*`
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
@@ -864,7 +864,7 @@ The primary validation gate for new model families:
 validate_family.sh <hf-repo-or-path> [options]
   |
   +-- Step 1: Build bundle
-  |     trtmc-build build <model> -o /tmp/<name>.trtfb --max-cache-length 256
+  |     ./build/trtmc build <model> -o /tmp/<name>.trtfb --max-cache-length 256
   |
   +-- Step 2: diff_logits battery
   |     python tools/diff_logits.py --model <model> --atol 1e-3 --battery

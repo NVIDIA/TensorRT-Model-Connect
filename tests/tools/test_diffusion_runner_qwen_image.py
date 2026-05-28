@@ -183,6 +183,23 @@ def test_qwen_image_guidance_scale_falls_back_to_cfg_scale(monkeypatch, tmp_path
     assert cmd[cmd.index("--cfg-scale") + 1] == "3.5"
 
 
+def test_qwen_image_threads_image_input_for_edit(monkeypatch, tmp_path):
+    """Qwen-Image Edit manifests should pass the input image to ``trtmc run``."""
+    image_path = tmp_path / "input.jpg"
+    image_path.write_text("stub", encoding="utf-8")
+    case = _make_qwen_image_case(
+        inputs={"prompt": "turn it into watercolor", "image": str(image_path)},
+    )
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    diffusion.DiffusionMediaRunner().run_stage(case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--image" in cmd
+    assert cmd[cmd.index("--image") + 1] == str(image_path)
+
+
 def test_wan_case_still_uses_generate_video(monkeypatch, tmp_path):
     """Non-Qwen-Image diffusion families must keep the generate-video flow."""
     case = _make_wan_case(

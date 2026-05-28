@@ -17,7 +17,7 @@ Family plugins can:
 
 ## Raw TRT families
 
-Raw TRT family plugins live in `tensorrt_model_connect/tensorrt_model_connect/families/`. The current checkout has 64 plugins.
+Raw TRT family plugins live in `python/tensorrt_model_connect/families/`. The current checkout has 68 plugins.
 
 Common raw TRT groups:
 
@@ -33,4 +33,4 @@ Common raw TRT groups:
 
 ## Torch-TRT families
 
-Torch-TRT engine definition families live in `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/`. They are useful when a model can be captured through `torch.export` and compiled without hand-written graph construction.
+Torch-TRT engine definition families live in `python/tensorrt_model_connect/engine_defs/torch_trt/families/`. They are useful when a model can be captured through `torch.export` and compiled without hand-written graph construction.

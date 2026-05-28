@@ -1,4 +1,4 @@
-"""Thin wrapper over the shared trtmc-build Python profile registry."""
+"""Thin wrapper over the shared Python builder profile registry."""
 
 from tensorrt_model_connect.python_profiles import (
     DEFAULT_PROFILE,

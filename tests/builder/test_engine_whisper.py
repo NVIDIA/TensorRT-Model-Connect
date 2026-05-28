@@ -34,16 +34,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-try:
-    from safetensors.numpy import save_file
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("safetensors not available", allow_module_level=True)
+pytest.importorskip("safetensors.numpy", reason="safetensors not available")
+pytest.importorskip(
+    "tensorrt_model_connect.config",
+    reason="tensorrt_model_connect requires tensorrt",
+)
 
-try:
-    from tensorrt_model_connect.config import ModelConfig
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
-
+from tensorrt_model_connect.checkpoint_mapper import WeightDict
+from tensorrt_model_connect.parallel_config import ParallelConfig
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
@@ -60,6 +58,64 @@ _VOCAB = 32
 _NUM_MEL_BINS = 8
 _MAX_SOURCE_POSITIONS = 16
 _MAX_TARGET_POSITIONS = 16
+
+
+def _make_whisper_tp_weights(
+    *,
+    hidden: int = _HIDDEN,
+    dec_layers: int = _DEC_LAYERS,
+    dec_heads: int = _DEC_HEADS,
+    dec_ffn: int = _DEC_FFN,
+) -> WeightDict:
+    rng = np.random.RandomState(123)
+
+    def rand(*shape: int) -> np.ndarray:
+        return rng.randn(*shape).astype(np.float32)
+
+    weights = WeightDict({
+        "_dec_layers": dec_layers,
+        "_dec_heads": dec_heads,
+        "_dec_ffn": dec_ffn,
+        "_max_source_positions": _MAX_SOURCE_POSITIONS,
+        "dec_embedding": rand(_VOCAB, hidden),
+        "dec_pos_embedding": rand(_MAX_TARGET_POSITIONS, hidden),
+        "final_norm": rand(hidden),
+        "final_norm_beta": rand(hidden),
+        "w_out": rand(hidden, _VOCAB),
+    })
+    for i in range(dec_layers):
+        pfx = f"layer.{i}"
+        for key in (
+            "w_q", "w_k", "w_v",
+            "cross_w_q", "cross_w_k", "cross_w_v",
+        ):
+            weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+        for key in ("q_bias", "k_bias", "v_bias"):
+            weights[f"{pfx}.{key}"] = rand(hidden)
+        for key in ("cross_b_q", "cross_b_k", "cross_b_v"):
+            weights[f"{pfx}.{key}"] = rand(hidden)
+        for key in ("w_o", "cross_w_o"):
+            weights[f"{pfx}.{key}"] = rand(hidden, hidden)
+        weights[f"{pfx}.w_fc1"] = rand(hidden, dec_ffn)
+        weights[f"{pfx}.fc1_bias"] = rand(dec_ffn)
+        weights[f"{pfx}.w_fc2"] = rand(dec_ffn, hidden)
+        weights[f"{pfx}.o_bias"] = rand(hidden)
+        weights[f"{pfx}.cross_b_o"] = rand(hidden)
+        weights[f"{pfx}.fc2_bias"] = rand(hidden)
+        for key in (
+            "input_norm", "input_norm_beta",
+            "cross_attn_norm", "cross_attn_norm_beta",
+            "post_attn_norm", "post_attn_norm_beta",
+        ):
+            weights[f"{pfx}.{key}"] = rand(hidden)
+    return weights
+
+
+def _whisper_tp_builder_module():
+    return pytest.importorskip(
+        "tensorrt_model_connect.families.whisper.decoder_tp_builder",
+        reason="TensorRT is required for Whisper TP builder tests",
+    )
 
 
 class WhisperPluginTester(FamilyPluginTester):
@@ -444,3 +500,165 @@ class TestWhisperEngine(FamilyPluginTestMixin):
             f"w_q shape[0] = {w_q.shape[0]}, expected {_HIDDEN} "
             f"(projection should be transposed from HF [out, in] to [in, out])"
         )
+
+    def test_whisper_tp_build_rejects_single_device_mode(self):
+        decoder_tp_builder = _whisper_tp_builder_module()
+
+        with pytest.raises(ValueError, match="requires tensor_parallel mode"):
+            decoder_tp_builder.build_whisper_tp_decoder_engine(
+                object(),
+                WeightDict(),
+                max_cache_length=4,
+                parallel_config=ParallelConfig(),
+            )
+
+    def test_whisper_tp_validation_ignores_single_device_mode(self):
+        decoder_tp_builder = _whisper_tp_builder_module()
+
+        decoder_tp_builder._validate_whisper_tp(
+            WeightDict(),
+            hidden=_HIDDEN,
+            num_heads=_DEC_HEADS,
+            ffn_dim=_DEC_FFN,
+            parallel=ParallelConfig(),
+        )
+
+    @pytest.mark.parametrize(
+        ("parallel", "overrides", "message"),
+        [
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=-1),
+                {},
+                "concrete rank",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"hidden": _HIDDEN + 1},
+                "hidden size divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"num_heads": _DEC_HEADS + 1},
+                "decoder_attention_heads divisible",
+            ),
+            (
+                ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
+                {"ffn_dim": _DEC_FFN + 1},
+                "decoder_ffn_dim divisible",
+            ),
+        ],
+    )
+    def test_whisper_tp_validation_rejects_bad_config_dimensions(
+        self,
+        parallel,
+        overrides,
+        message,
+    ):
+        decoder_tp_builder = _whisper_tp_builder_module()
+        kwargs = {
+            "hidden": _HIDDEN,
+            "num_heads": _DEC_HEADS,
+            "ffn_dim": _DEC_FFN,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_whisper_tp(
+                _make_whisper_tp_weights(),
+                parallel=parallel,
+                **kwargs,
+            )
+
+    @pytest.mark.parametrize(
+        ("key", "shape", "message"),
+        [
+            ("layer.0.w_q", (_HIDDEN, _HIDDEN - 1), "output dim"),
+            ("layer.0.w_o", (_HIDDEN - 1, _HIDDEN), "input dim"),
+            ("layer.0.w_fc1", (_HIDDEN, _DEC_FFN - 1), "w_fc1 output dim"),
+        ],
+    )
+    def test_whisper_tp_validation_rejects_unshardable_weight_shapes(
+        self,
+        key,
+        shape,
+        message,
+    ):
+        decoder_tp_builder = _whisper_tp_builder_module()
+        weights = _make_whisper_tp_weights()
+        weights[key] = np.zeros(shape, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=message):
+            decoder_tp_builder._validate_whisper_tp(
+                weights,
+                hidden=_HIDDEN,
+                num_heads=_DEC_HEADS,
+                ffn_dim=_DEC_FFN,
+                parallel=ParallelConfig(
+                    mode="tensor_parallel",
+                    tp_size=2,
+                    rank=0,
+                ),
+            )
+
+    def test_whisper_tp_sharding_returns_original_for_single_device_mode(self):
+        decoder_tp_builder = _whisper_tp_builder_module()
+        weights = _make_whisper_tp_weights()
+        assert decoder_tp_builder.shard_whisper_decoder_weights(
+            weights,
+            parallel=ParallelConfig(),
+        ) is weights
+
+    def test_whisper_tp_shards_rank_local_decoder_weights(self):
+        decoder_tp_builder = _whisper_tp_builder_module()
+        weights = _make_whisper_tp_weights()
+        shard = decoder_tp_builder.shard_whisper_decoder_weights(
+            weights,
+            parallel=ParallelConfig(
+                mode="tensor_parallel",
+                tp_size=2,
+                rank=1,
+            ),
+        )
+
+        assert isinstance(shard, WeightDict)
+        assert shard["_tensor_parallel_size"] == 2
+        assert shard["_tensor_parallel_rank"] == 1
+        assert shard["_dec_layers"] == _DEC_LAYERS
+
+        np.testing.assert_array_equal(
+            shard["layer.0.w_q"],
+            weights["layer.0.w_q"][:, _HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.cross_w_v"],
+            weights["layer.0.cross_w_v"][:, _HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.q_bias"],
+            weights["layer.0.q_bias"][_HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.cross_b_k"],
+            weights["layer.0.cross_b_k"][_HIDDEN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_o"],
+            weights["layer.0.w_o"][_HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.cross_w_o"],
+            weights["layer.0.cross_w_o"][_HIDDEN // 2:, :],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc1"],
+            weights["layer.0.w_fc1"][:, _DEC_FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.fc1_bias"],
+            weights["layer.0.fc1_bias"][_DEC_FFN // 2:],
+        )
+        np.testing.assert_array_equal(
+            shard["layer.0.w_fc2"],
+            weights["layer.0.w_fc2"][_DEC_FFN // 2:, :],
+        )
+        assert shard["final_norm"] is weights["final_norm"]

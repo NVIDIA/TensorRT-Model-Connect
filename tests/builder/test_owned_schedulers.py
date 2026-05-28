@@ -20,7 +20,7 @@ import pytest
 
 
 # Ensure imports resolve to this workspace's Python package.
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "python"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
@@ -141,22 +141,22 @@ def test_scheduler_protocol_declares_required_methods() -> None:
 
 
 @pytest.mark.unit
-def test_package_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intent: validate `python -m tensorrt_model_connect` delegates to cli.main.
+def test_package_main_module_invokes_build_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intent: validate `python -m tensorrt_model_connect` delegates to build_cli.main.
 
-    Preconditions: A fake `tensorrt_model_connect.cli` module with callable `main` is injected.
+    Preconditions: A fake `tensorrt_model_connect.build_cli` module with callable `main` is injected.
     Postconditions: Importing/executing `tensorrt_model_connect.__main__` calls fake `main` once.
     """
     calls: list[str] = []
 
-    fake_cli = types.ModuleType("tensorrt_model_connect.cli")
+    fake_cli = types.ModuleType("tensorrt_model_connect.build_cli")
 
     def _fake_main() -> None:
         calls.append("called")
 
     fake_cli.main = _fake_main  # type: ignore[attr-defined]
 
-    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.build_cli", fake_cli)
     sys.modules.pop("tensorrt_model_connect.__main__", None)
 
     runpy.run_module("tensorrt_model_connect.__main__", run_name="__main__")
@@ -172,16 +172,10 @@ def test_package_init_exports_expected_symbols() -> None:
     Postconditions: Public symbols from `tensorrt_model_connect.__init__` exist and are usable.
     """
     import importlib
-    import tensorrt_model_connect
 
-    # Repo layout may expose an outer namespace package at `tensorrt_model_connect`.
-    # Validate exports from the concrete runtime package in either layout.
-    pkg = tensorrt_model_connect
-    if getattr(tensorrt_model_connect, "__file__", None) is None:
-        pkg = importlib.import_module("tensorrt_model_connect.tensorrt_model_connect")
+    pkg = importlib.import_module("tensorrt_model_connect")
 
-    if hasattr(pkg, "__version__"):
-        assert pkg.__version__ == "0.1.0"
+    assert pkg.__version__ == "0.1.0"
     assert callable(pkg.build)
     assert callable(pkg.build_bundle)
     assert callable(pkg.write_bundle)

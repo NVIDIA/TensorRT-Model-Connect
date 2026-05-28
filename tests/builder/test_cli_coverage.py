@@ -1,4 +1,4 @@
-"""Coverage-focused tests for CLI control flow in tensorrt_model_connect.cli.
+"""Coverage-focused tests for CLI control flow in tensorrt_model_connect.build_cli.
 
 Trace: ARCH-ENG-001, UD-ENG-02
 Intent: Validate CLI control flow branches including version lookup fallbacks, inspect output formatting, build dispatch, and error handling.
@@ -21,7 +21,7 @@ import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 import tensorrt_model_connect  # noqa: E402
-import tensorrt_model_connect.cli as cli  # noqa: E402
+import tensorrt_model_connect.build_cli as cli  # noqa: E402
 
 
 def test_get_version_prefers_importlib_metadata():
@@ -138,9 +138,6 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
 
     monkeypatch.setattr(cli, "_cmd_build", fake_cmd_build)
 
-    def fake_parse_known_args(self, *args, **kwargs):
-        return argparse.Namespace(command=None), []
-
     parsed_build_args = argparse.Namespace(
         command="build",
         model="repo/model",
@@ -154,13 +151,12 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
         parse_args_argv["value"] = list(args or [])
         return parsed_build_args
 
-    monkeypatch.setattr(argparse.ArgumentParser, "parse_known_args", fake_parse_known_args)
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", fake_parse_args)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "trtmc-build",
+            "trtmc",
             "repo/model",
             "-o",
             "/tmp/out.trtfb",
@@ -195,7 +191,7 @@ def test_main_without_args_prints_help_and_exits_zero(monkeypatch):
     Preconditions: argv contains only program name, so no command or build args are provided.
     Postconditions: main prints help and exits with code 0.
     """
-    monkeypatch.setattr(sys, "argv", ["trtmc-build"])
+    monkeypatch.setattr(sys, "argv", ["trtmc"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()
@@ -215,7 +211,7 @@ def test_main_explicit_version_dispatch(monkeypatch):
         return 23
 
     monkeypatch.setattr(cli, "_cmd_version", fake_cmd_version)
-    monkeypatch.setattr(sys, "argv", ["trtmc-build", "version"])
+    monkeypatch.setattr(sys, "argv", ["trtmc", "version"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()
@@ -226,24 +222,20 @@ def test_main_explicit_version_dispatch(monkeypatch):
 
 def test_main_unknown_command_prints_help_and_exits_one(monkeypatch):
     """Intent: hit defensive branch where dispatch lookup returns no handler.
-    Preconditions: parse_known_args is monkeypatched to return an unknown command token.
+    Preconditions: parse_args is monkeypatched to return an unknown command token.
     Postconditions: main prints help and exits with code 1.
     """
     help_calls = {"count": 0}
 
-    def fake_parse_known_args(self, *args, **kwargs):
-        return argparse.Namespace(command="unknown-command"), []
+    def fake_parse_args(self, args=None, namespace=None):
+        return argparse.Namespace(command="unknown-command")
 
     def fake_print_help(self):
         help_calls["count"] += 1
 
-    monkeypatch.setattr(
-        argparse.ArgumentParser,
-        "parse_known_args",
-        fake_parse_known_args,
-    )
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", fake_parse_args)
     monkeypatch.setattr(argparse.ArgumentParser, "print_help", fake_print_help)
-    monkeypatch.setattr(sys, "argv", ["trtmc-build", "unknown-command"])
+    monkeypatch.setattr(sys, "argv", ["trtmc", "unknown-command"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()

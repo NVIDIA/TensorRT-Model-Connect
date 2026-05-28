@@ -25,6 +25,12 @@
 - Do not publish CI reports to GitHub Pages unless the user explicitly changes
   that decision.
 
+## Dos And Don'ts
+
+- Do keep validation criteria meaningful and aligned with the behavior under
+  test.
+- Never change the test passing criteria for the purpose of passing CI. If you believe the test is faulty, escalate to a human
+
 ## Repo Skills
 
 - Codex skills packaged for this repo are registered through

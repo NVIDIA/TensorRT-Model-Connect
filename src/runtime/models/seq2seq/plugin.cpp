@@ -3,6 +3,7 @@
 
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -12,12 +13,48 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+namespace {
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const auto value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
+    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+} // namespace
 
 class Seq2SeqPipeline final : public IPipeline {
   public:
@@ -209,10 +246,25 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
         opts.cuda_graphs = ctx.cuda_graphs;
 
         const auto& json = ctx.config_json;
+        const auto tp_config = parse_tensor_parallel_runtime_config(json);
+        DistributedRuntimeGroup tp_group;
+        if (tp_config.enabled)
+            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+
         auto enc_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "seq2seq encoder", opts);
-        auto dec_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "seq2seq decoder", opts);
+
+        ModuleCreateOptions decoder_opts = opts;
+        if (tp_config.enabled) {
+            decoder_opts.distributed_communicator = tp_group.communicator;
+            decoder_opts.distributed_owner = tp_group.owner;
+        }
+
+        const std::string decoder_section =
+            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
+        auto dec_loaded =
+            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, decoder_section),
+                                      "seq2seq decoder", decoder_opts);
         int32_t decoder_layers = extract_json_int(json, "decoder_layers", ctx.config.num_layers);
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
         int32_t max_source_length = extract_json_int(
@@ -223,7 +275,7 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
         int32_t bos_token_id = (ctx.config.id_bos >= 0) ? ctx.config.id_bos : -1;
         int32_t pad_token_id = extract_json_int(json, "pad_token_id", 1);
         cudaStream_t stream = dec_loaded.module->stream();
-        int32_t kv_dim = compute_kv_dim(ctx.config);
+        int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         auto state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);
         if (!state->ok())

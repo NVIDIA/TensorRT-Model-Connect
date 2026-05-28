@@ -9,6 +9,7 @@ import json
 import os
 import pytest
 import warnings
+from pathlib import Path
 
 # Try to import manifest_loader
 try:
@@ -221,6 +222,33 @@ class TestManifestValidation:
         assert case.execution_profiles["runtime"] == "custom-runtime"
         assert case.execution_profiles["reference"] == "chronos"
 
+    def test_nemotron_labs_diffusion_manifests_cover_model_card_modes(self):
+        """The 8B model-card generation surfaces should all have nightly cases."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        manifest_paths = [
+            models_dir / "nemotron-labs-diffusion-8b-ar.json",
+            models_dir / "nemotron-labs-diffusion-8b-diffusion.json",
+            models_dir / "nemotron-labs-diffusion-8b-linear-spec.json",
+            models_dir / "nemotron-labs-diffusion-8b.json",
+        ]
+        cases = [load_manifest(path) for path in manifest_paths]
+
+        modes = {case.inputs["generation_mode"] for case in cases}
+        assert modes == {"ar", "diffusion", "linear_spec", "linear_spec_lora"}
+        assert {case.bundle for case in cases} == {"nemotron-labs-diffusion-8b.trtfb"}
+        assert all(case.runtime_strategy == "nemotron_labs_diffusion" for case in cases)
+        assert all(
+            case.reference_family == "nemotron_labs_diffusion_model_card"
+            for case in cases
+        )
+        assert all(case.user_contract == "model_card_generation_parity" for case in cases)
+        assert all(case.metadata["ci_tier"] == "nightly_only" for case in cases)
+        assert all(case.metadata["contract_config"]["enable_thinking"] is False for case in cases)
+        assert all(
+            case.threshold_overrides["canonical_token_agreement_rate"] == 1.0
+            for case in cases
+        )
+
     def test_quantization_block_propagates_to_metadata(self, tmp_path):
         """Quantization manifests should preserve the generic quant block."""
         path = self._write_manifest(tmp_path, {
@@ -302,73 +330,3 @@ class TestManifestValidation:
         assert [stage.name for stage in case.stages] == ["end_to_end"]
         assert all(stage.required for stage in case.stages)
         assert "Wan-specific" in case.metadata["notes"]
-
-    def test_sana_wm_manifest_preserves_official_demo_inputs(self):
-        """SANA-WM e2e should expose the model-card image/prompt/action contract."""
-        manifest_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "e2e",
-            "models",
-            "sana-wm-bidirectional.json",
-        )
-        case = load_manifest(manifest_path)
-
-        assert case.task_strategy == "diffusion_media_generation"
-        assert case.reference_backend == "hf_diffusers"
-        assert case.inputs["image"] == "asset/sana_wm/demo_0.png"
-        assert case.inputs["prompt_file"] == "asset/sana_wm/demo_0.txt"
-        assert case.inputs["camera_intrinsics"] == "asset/sana_wm/demo_0_intrinsics.npy"
-        assert case.inputs["action"] == "w-80,jw-40,w-40,lw-60,w-100"
-        assert case.inputs["translation_speed"] == 0.055
-        assert case.inputs["rotation_speed_deg"] == 1.2
-        assert case.inputs["num_inference_steps"] == 60
-        assert case.inputs["cfg_scale"] == 5.0
-        assert case.inputs["fps"] == 16
-        assert case.inputs["flow_shift"] == 9.8
-        assert case.inputs["sana_wm_require_official_script"] is True
-        assert case.inputs["video_num_frames"] == 321
-        asset_paths = {
-            req.args["path"]
-            for req in case.preflight
-            if req.kind == "asset_exists"
-        }
-        assert asset_paths == {
-            "asset/sana_wm/demo_0.png",
-            "asset/sana_wm/demo_0.txt",
-            "asset/sana_wm/demo_0_intrinsics.npy",
-        }
-        script_reqs = [
-            req for req in case.preflight if req.kind == "sana_wm_script_available"
-        ]
-        assert len(script_reqs) == 1
-        assert script_reqs[0].gating is False
-        native_plan_reqs = [
-            req for req in case.preflight if req.kind == "sana_wm_native_plans_available"
-        ]
-        assert len(native_plan_reqs) == 1
-        assert native_plan_reqs[0].gating is True
-        entrypoint_reqs = [
-            req
-            for req in case.preflight
-            if req.kind == "sana_wm_runtime_entrypoint_available"
-        ]
-        assert len(entrypoint_reqs) == 1
-        assert entrypoint_reqs[0].args["hf_id"] == case.hf_id
-        assert entrypoint_reqs[0].gating is True
-        module_reqs = {
-            (req.args["module"], req.args["phase"])
-            for req in case.preflight
-            if req.kind == "python_module_available"
-        }
-        assert ("ftfy", "build") not in module_reqs
-        assert {
-            ("diffusers", "reference"),
-            ("torch", "reference"),
-            ("PIL", "reference"),
-        }.issubset(module_reqs)
-        assert {
-            ("diffusers", "runtime"),
-            ("torch", "runtime"),
-            ("PIL", "runtime"),
-        }.isdisjoint(module_reqs)

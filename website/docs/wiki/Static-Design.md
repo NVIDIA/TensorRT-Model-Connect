@@ -21,7 +21,7 @@ source file. No aspirational content is included.
 
 The system has two stages:
 
-1. **Python build** (`tensorrt_model_connect/`) -- converts HuggingFace models into
+1. **Python build** (`python/tensorrt_model_connect/`) -- converts HuggingFace models into
    self-describing `.trtfb` bundles containing serialized TensorRT engine
    plans, tokenizer data, and JSON config.
 2. **C++ runtime** -- loads `.trtfb` bundles, deserializes TRT engines, and
@@ -555,7 +555,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_kv_cache_update_plan.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/core/flow_match_euler_scheduler.cpp`, `src/runtime/pipelines/text_generation_pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
+| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_kv_cache_update_plan.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/core/flow_match_euler_scheduler.cpp`, `src/runtime/models/text_generation/pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
 | **Purpose** | Core runtime helpers not covered by other UD entries. `decoded_image.h` holds decoded pixel data. `device_kv_cache_update_plan.h` describes cache update operations. `device_tensor.cpp` implements GPU tensor memory management. `flow_match_euler_scheduler.cpp` implements the `FlowMatchEulerScheduler` (see UD-SCHED-01). `generation_backend.h` defines the `IGenerationBackend` interface. `step_state.h` defines the `IStepState` interface. `stb_impl.cpp` provides STB image library implementation. `trt_graph_builder.cpp` provides TRT network construction utilities. |
 
 ### UD-ENC-EMBED-01: Embedding Support
@@ -636,64 +636,64 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/config.py` |
+| **Files** | `python/tensorrt_model_connect/config.py` |
 | **Purpose** | Parses HuggingFace `config.json` into `ModelConfig` dataclass. Handles nested configs (VL `text_config`), architecture-specific field mapping, and safe defaults. |
 
 ### UD-BLD-FAM-01: Family Plugin System
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/families/base.py`, `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` |
-| **Purpose** | `FamilyPlugin` protocol in `base.py` defines the contract: `match()`, `load_weights()`, `runtime_strategy()`, `embed_input()`. `__init__.py` uses `pkgutil.iter_modules()` to auto-discover all `.py` files with a module-level `plugin` attribute. 63 family plugins currently exist. |
+| **Files** | `python/tensorrt_model_connect/families/base.py`, `python/tensorrt_model_connect/families/__init__.py` |
+| **Purpose** | `FamilyPlugin` protocol in `base.py` defines the contract: `match()`, `load_weights()`, `runtime_strategy()`, `embed_input()`. `__init__.py` uses `pkgutil.iter_modules()` to auto-discover all `.py` files with a module-level `plugin` attribute. 68 family plugins currently exist. |
 | **Plugins** | `albert`, `bark`, `bart`, `bert`, `bloom`, `canary`, `codegen`, `convbert`, `deberta`, `deepseek_ocr`, `deepseek_v2`, `distilbert`, `dpr`, `eagle_vlm`, `electra`, `falcon`, `fnet`, `flux`, `gemma`, `glm`, `gpt2`, `gpt_neo`, `gpt_neox`, `gpt_oss`, `granite`, `internlm`, `internvl`, `llama`, `m2m_100`, `magpie_tts`, `mamba`, `marian`, `mistral`, `mixtral`, `modernbert`, `mpnet`, `nemotron`, `nemotron_h`, `olmo`, `olmo2`, `opt`, `personaplex`, `phi`, `phi4_multimodal`, `phi_moe`, `pixart`, `qwen`, `qwen3_5`, `qwen3_omni`, `qwen_moe`, `qwen_vl`, `roberta`, `rwkv`, `sam`, `segformer`, `stablelm`, `starcoder2`, `t5`, `wan_t2v`, `whisper`, `xglm`, `xlnet`, `z_image` |
 
 ### UD-BLD-CKP-01: Checkpoint Mapper
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py` |
+| **Files** | `python/tensorrt_model_connect/checkpoint_mapper.py` |
 | **Purpose** | Loads HuggingFace safetensors, maps weight keys to engine builder's expected names, performs GQA head expansion, handles tied embeddings, and applies biases. |
 
 ### UD-BLD-GRP-01: Graph Ops
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` |
+| **Files** | `python/tensorrt_model_connect/graph_ops.py` |
 | **Purpose** | Layer 1 atomic TRT graph operations (tensor-in/tensor-out). RoPE, ALiBi, RMSNorm, LayerNorm, attention (MHA/GQA), SwiGLU, GELU, convolutions, padding, ELU, and more. Each function takes `INetworkDefinition` tensors and returns tensors. |
 
 ### UD-BLD-BLK-01: Graph Blocks
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` |
+| **Files** | `python/tensorrt_model_connect/graph_blocks.py` |
 | **Purpose** | Layer 2 composable blocks built from graph ops. `add_attention_block()`, `add_swiglu_mlp()`, `add_gelu_fc_mlp()`, `apply_norm()`. These compose multiple graph ops into reusable building blocks for decoder layers. |
 
 ### UD-BLD-STD-01: Standard Decoder Builder
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` |
+| **Files** | `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` |
 | **Purpose** | Layer 3 engine builder. Constructs a complete TRT network for standard decoder models by stacking graph blocks. Handles embedding, positional encoding, N transformer layers, final norm, and logit projection. |
 
 ### UD-BLD-BDL-01: Bundle Writer
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` |
+| **Files** | `python/tensorrt_model_connect/bundle_writer.py` |
 | **Purpose** | Writes `.trtfb` bundle files. Serializes config JSON + engine plan + tokenizer data + optional extra sections into the bundle format. |
 
 ### UD-BLD-ENG-01: Engine Builder
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` |
-| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`trtmc-build build`) and Python API (`tensorrt_model_connect.build()`). |
+| **Files** | `python/tensorrt_model_connect/engine_builder.py` |
+| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`./build/trtmc build`) and Python API (`tensorrt_model_connect.build()`). |
 
 ### UD-BLD-DBG-01: Debug Runner
 
 | Field | Value |
 |---|---|
-| **Files** | `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` |
+| **Files** | `python/tensorrt_model_connect/debug_runner.py` |
 | **Purpose** | Pure-Python TRT inference with device-resident state. `TrtRunner` for decoder KV cache models, `MambaTrtRunner` for SSM models, `VLTrtRunner` for vision-language models. Used by diff tools and E2E harness for Python-side TRT inference. |
 
 ---

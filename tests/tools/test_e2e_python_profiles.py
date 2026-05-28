@@ -105,16 +105,6 @@ def test_runtime_cli_hf_python_only_applies_to_speech_to_speech(tmp_path):
     )
     assert base_ctx.runtime_cli_hf_python() == ""
 
-    sana_ctx = RunContext(
-        case=_make_case(
-            runtime_strategy="diffusion_sana_wm",
-            task_strategy="diffusion_media_generation",
-        ),
-        hf_python="/usr/bin/python3",
-        runtime_python="/tmp/runtime-python",
-    )
-    assert sana_ctx.runtime_cli_hf_python() == ""
-
     speech_ctx = RunContext(
         case=_make_case(
             runtime_strategy="speech_to_speech",

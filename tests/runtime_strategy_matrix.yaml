@@ -14,6 +14,14 @@
       "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
       "diff_framework_check_classes": ["LayerDiffTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
     },
+    "nemotron_labs_diffusion": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": ["run"],
+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "Hybrid AR/diffusion decoding uses model-card generation methods not yet represented by the generic layer/logit diff framework."
+    },
     "diffusion": {
       "task_strategy": "diffusion_media_generation",
       "cli_commands": ["generate-video"],

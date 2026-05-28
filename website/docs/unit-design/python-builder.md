@@ -6,7 +6,7 @@ The Python builder turns a Python-first checkpoint into a native runtime bundle.
 
 ```mermaid
 flowchart TD
-  Args["trtmc-build CLI args"] --> CLI["cli.py"]
+  Args["trtmc build args"] --> CLI["build_cli.py"]
   CLI --> ConfigLayer["runtime_config CLI merge"]
   CLI --> EngineBuilder["engine_builder.py"]
   EngineBuilder --> ModelConfig["ModelConfig"]
@@ -24,13 +24,13 @@ flowchart TD
 
 ## CLI
 
-`tensorrt_model_connect/tensorrt_model_connect/cli.py` owns command parsing for `trtmc-build`. It handles early `--rtx` backend selection, auto method selection, Python profile re-exec, config resolution, quantization flags, and inspection.
+`python/tensorrt_model_connect/build_cli.py` owns command parsing for `trtmc build`. It handles early `--rtx` backend selection, auto method selection, Python profile re-exec, config resolution, quantization flags, and inspection.
 
 The CLI should stay thin. It should translate user intent into builder options and leave model-specific behavior to family plugins or engine builders.
 
 ## Engine builder
 
-`tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` orchestrates model resolution, plugin selection, weight loading, engine building, and bundle writing.
+`python/tensorrt_model_connect/engine_builder.py` orchestrates model resolution, plugin selection, weight loading, engine building, and bundle writing.
 
 Think of `engine_builder.py` as the build coordinator:
 
@@ -43,7 +43,7 @@ Think of `engine_builder.py` as the build coordinator:
 
 ## Family plugins
 
-`tensorrt_model_connect/tensorrt_model_connect/families/` owns raw TRT family support. Each plugin declares matching logic and build behavior. Auto-discovery lives in `families/__init__.py`.
+`python/tensorrt_model_connect/families/` owns raw TRT family support. Each plugin declares matching logic and build behavior. Auto-discovery lives in `families/__init__.py`.
 
 The `FamilyPlugin` protocol is the contract. Required methods are:
 
@@ -90,13 +90,13 @@ The design goal is to avoid repeating TensorRT layer wiring in every family plug
 
 ## Torch-TRT engine definitions
 
-`tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/` owns Torch export and Torch-TRT compilation flows. These bundles still run through the same C++ runtime.
+`python/tensorrt_model_connect/engine_defs/torch_trt/` owns Torch export and Torch-TRT compilation flows. These bundles still run through the same C++ runtime.
 
 Torch-TRT engine definitions are useful when the fastest path to support is compiling a PyTorch module shape rather than hand-writing a TensorRT graph. The runtime still sees a bundle with a `runtime_strategy`.
 
 ## Runtime config
 
-`tensorrt_model_connect/tensorrt_model_connect/runtime_config/` mirrors C++ config schema logic for build-time and bundle-time config resolution.
+`python/tensorrt_model_connect/runtime_config/` mirrors C++ config schema logic for build-time and bundle-time config resolution.
 
 The merge order is:
 

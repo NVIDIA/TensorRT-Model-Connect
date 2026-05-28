@@ -499,9 +499,13 @@ ImageResult video_to_image(const VideoResult& vr, int32_t default_h, int32_t def
 WanPipeline::WanPipeline(std::unique_ptr<TrtModule> text_encoder,
                          std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
                          DiffusionConfig config, PreprocessorWeights weights,
-                         std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
-    : text_encoder_(std::move(text_encoder)), denoiser_(std::move(denoiser)), vae_(std::move(vae)),
-      config_(std::move(config)), weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
+                         std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                         std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
+                         int32_t tensor_parallel_size)
+    : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
+      tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
+      denoiser_(std::move(denoiser)), vae_(std::move(vae)), config_(std::move(config)),
+      weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {}
 
 WanPipeline::~WanPipeline() = default;
@@ -1101,6 +1105,30 @@ bool WanPipeline::run_wan_vae_decode(int32_t z_dim, int32_t t_lat, int32_t h_lat
     return true;
 }
 
+ImageResult WanPipeline::finish_wan_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat,
+                                               int32_t w_lat, std::vector<float>& latents,
+                                               VideoResult& result) {
+    denormalize_wan_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
+
+    if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
+        std::cerr << "[wan-t2v] TP rank " << tensor_parallel_rank_
+                  << " skips VAE decode; rank 0 writes video artifacts\n";
+        ImageResult empty;
+        empty.num_frames = 0;
+        return empty;
+    }
+
+    if (!run_wan_vae_decode(z_dim, t_lat, h_lat, w_lat, latents, result)) {
+        return video_to_image(result, config_.video_height, config_.video_width);
+    }
+
+    result.num_frames = config_.video_num_frames;
+    std::cerr << "[diffusion] Video generation complete: " << result.num_frames << " frames, "
+              << result.height << "x" << result.width << "\n";
+
+    return video_to_image(result, config_.video_height, config_.video_width);
+}
+
 // ---------------------------------------------------------------------------
 // Main generation pipeline
 // ---------------------------------------------------------------------------
@@ -1205,20 +1233,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         return video_to_image(result, config_.video_height, config_.video_width);
     }
 
-    // Denormalize latents and decode VAE
-    denormalize_wan_latents(config_, layout.z_dim, layout.t_lat, layout.h_lat, layout.w_lat,
-                            latents);
-
-    if (!run_wan_vae_decode(layout.z_dim, layout.t_lat, layout.h_lat, layout.w_lat, latents,
-                            result)) {
-        return video_to_image(result, config_.video_height, config_.video_width);
-    }
-
-    result.num_frames = config_.video_num_frames;
-    std::cerr << "[diffusion] Video generation complete: " << result.num_frames << " frames, "
-              << result.height << "x" << result.width << "\n";
-
-    return video_to_image(result, config_.video_height, config_.video_width);
+    return finish_wan_generation(layout.z_dim, layout.t_lat, layout.h_lat, layout.w_lat, latents,
+                                 result);
 }
 
 } // namespace trtmc

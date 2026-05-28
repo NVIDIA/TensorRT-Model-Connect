@@ -158,7 +158,7 @@ class TestProfilingCommands:
 
 class TestValidation:
     def test_build_step(self, full_prompt):
-        assert "trtmc-build build" in full_prompt
+        assert "./build/trtmc build" in full_prompt
 
     def test_correctness_step(self, full_prompt):
         assert "diff_logits" in full_prompt

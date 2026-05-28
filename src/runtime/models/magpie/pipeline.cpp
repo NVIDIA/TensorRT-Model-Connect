@@ -102,7 +102,6 @@ MagpiePipeline::MagpiePipeline(
     cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)),
       decoder_state_(std::move(decoder_state)), codec_(std::move(codec)),
-      lt_module_(std::move(lt_module)), prefill_module_(std::move(prefill_module)),
       decoder_state_uncond_(std::move(decoder_state_uncond)), cross_k_(std::move(cross_k)),
       cross_v_(std::move(cross_v)), cross_k_uncond_(std::move(cross_k_uncond)),
       cross_v_uncond_(std::move(cross_v_uncond)), encoder_output_(std::move(encoder_output)),
@@ -117,8 +116,9 @@ MagpiePipeline::MagpiePipeline(
       device_all_codes_(static_cast<std::size_t>(512) * config.num_codebooks * sizeof(int32_t)),
       device_logits_cond_(0), device_logits_uncond_(0),
       device_rand_vals_(static_cast<std::size_t>(config.num_codebooks) * sizeof(float)),
-      stream_(stream), config_(config), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)), rng_(std::random_device{}()) {
+      prefill_module_(std::move(prefill_module)), lt_module_(std::move(lt_module)), stream_(stream),
+      config_(config), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      rng_(std::random_device{}()) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder module");
     if (!decoder_state_ || !decoder_state_->ok())
@@ -579,6 +579,7 @@ bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t
 // ---------------------------------------------------------------------------
 
 bool MagpiePipeline::run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t frame) {
+    (void)frame;
 #if TRTMC_HAS_CUDA_KERNELS
     // Save conditioned logits
     void* cond_logits_ptr = decoder_->device_ptr("logits");
@@ -617,7 +618,6 @@ bool MagpiePipeline::run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t fr
     return true;
 #else
     (void)state;
-    (void)frame;
     return false;
 #endif
 }

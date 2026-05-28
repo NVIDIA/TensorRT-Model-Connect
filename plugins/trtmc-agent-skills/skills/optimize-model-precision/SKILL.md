@@ -40,11 +40,11 @@ docker exec <container> bash -c "cd <repo> && <command>"
 Build examples:
 
 ```bash
-trtmc-build build <model> -o <output>.trtfb \
+./build/trtmc build <model> -o <output>.trtfb \
   --precision fp16 \
   --max-cache-length 256
 
-trtmc-build build <model> -o <output>.trtfb \
+./build/trtmc build <model> -o <output>.trtfb \
   --precision fp16 \
   --quantize fp8 \
   --quant-scales <scales>.json \
@@ -54,7 +54,7 @@ trtmc-build build <model> -o <output>.trtfb \
 Inspect:
 
 ```bash
-trtmc-build inspect <bundle>.trtfb
+./build/trtmc inspect <bundle>.trtfb
 ```
 
 Validate through the E2E harness:

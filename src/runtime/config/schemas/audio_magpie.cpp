@@ -1,5 +1,5 @@
 // Registration for the "audio_magpie" namespace schema.
-// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py.
+// Mirrors python/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py.
 
 #include "trtmc/config/schemas/audio_magpie.h"
 

@@ -11,12 +11,17 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 
-from .. import save_full_stderr
+from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
+
+_MPI_STREAM_TAG_RE = re.compile(
+    r"\[[^\]]+,(?P<rank>\d+)\]<(?P<stream>stdout|stderr)>:")
 
 
 class NeuralOperatorRunner:
@@ -50,6 +55,14 @@ class NeuralOperatorRunner:
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
 
+        distributed_runtime = _distributed_runtime_config(case)
+        if distributed_runtime:
+            _ensure_distributed_runtime_env(case, ctx, env)
+            extra_env = distributed_runtime.get("env", {})
+            if isinstance(extra_env, dict):
+                env.update({str(k): str(v) for k, v in extra_env.items()})
+            cmd = _wrap_distributed_command(cmd, case, env)
+
         logger.info("Running neural operator: %s", " ".join(cmd))
         t0 = time.monotonic()
         result = subprocess.run(
@@ -67,7 +80,15 @@ class NeuralOperatorRunner:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)
 
-        data = _parse_field_output(result.stdout.strip(), output_path)
+        stdout = (
+            _extract_rank_zero_stdout(result.stdout)
+            if distributed_runtime else result.stdout.strip()
+        )
+        stderr = (
+            _strip_mpi_stream_tags(result.stderr)
+            if distributed_runtime else result.stderr
+        )
+        data = _parse_field_output(stdout, output_path)
 
         return StageOutput(
             stage_name=stage.name,
@@ -76,9 +97,11 @@ class NeuralOperatorRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
-                "stdout": result.stdout or "",
-                "stderr": result.stderr or "",
+                "stdout": stdout or "",
+                "stderr": stderr or "",
                 "input_mode": input_mode,
+                **({"distributed_runtime": distributed_runtime}
+                   if distributed_runtime else {}),
             },
         )
 
@@ -201,6 +224,89 @@ def _parse_field_output(stdout: str, output_path: str | None) -> dict:
 
     data["raw_output"] = stdout
     return data
+
+
+def _distributed_runtime_config(case: E2ECase | None) -> dict:
+    if case is None:
+        return {}
+    config = case.metadata.get("distributed_runtime", {})
+    return config if isinstance(config, dict) and config.get("enabled") else {}
+
+
+def _extract_rank_zero_stdout(stdout: str) -> str:
+    text = stdout or ""
+    tags = list(_MPI_STREAM_TAG_RE.finditer(text))
+    if not tags:
+        return text.strip()
+
+    rank0_parts: list[str] = []
+    for index, match in enumerate(tags):
+        start = match.end()
+        end = tags[index + 1].start() if index + 1 < len(tags) else len(text)
+        if match.group("stream") == "stdout" and int(match.group("rank")) == 0:
+            rank0_parts.append(text[start:end])
+    return "".join(rank0_parts).strip()
+
+
+def _strip_mpi_stream_tags(text: str) -> str:
+    return _MPI_STREAM_TAG_RE.sub("", text or "")
+
+
+def _safe_artifact_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name or "case")
+
+
+def _ensure_distributed_runtime_env(
+    case: E2ECase,
+    ctx: RunContext,
+    env: dict[str, str],
+) -> None:
+    if not _distributed_runtime_config(case):
+        return
+    if env.get("TRTMC_NCCL_RENDEZVOUS"):
+        return
+
+    safe_name = _safe_artifact_name(case.name)
+    root = (
+        Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+        if ctx.artifacts_dir else Path(tempfile.gettempdir())
+    )
+    path = root / f"{safe_name}.nccl_rendezvous.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(path)
+
+
+def _wrap_distributed_command(
+    cmd: list[str],
+    case: E2ECase | None,
+    env: dict[str, str],
+) -> list[str]:
+    config = _distributed_runtime_config(case)
+    if not config:
+        return cmd
+
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    launcher_args = config.get("launcher_args")
+    if isinstance(launcher_args, list):
+        prefix = [launcher] + [str(arg) for arg in launcher_args]
+    else:
+        prefix = [launcher, "--tag-output", "-np", str(world_size)]
+
+    export_env = config.get("export_env", ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"])
+    if isinstance(export_env, list) and Path(launcher).name == "mpirun":
+        export_names = [str(name) for name in export_env]
+        if "TRTMC_NCCL_RENDEZVOUS" in env and "TRTMC_NCCL_RENDEZVOUS" not in export_names:
+            export_names.append("TRTMC_NCCL_RENDEZVOUS")
+        for name in export_names:
+            if name in env:
+                prefix.extend(["-x", name])
+
+    return prefix + cmd
 
 
 plugin = NeuralOperatorRunner()

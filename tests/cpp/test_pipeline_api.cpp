@@ -74,7 +74,8 @@ static void test_has_trt_returns_bool() {
 }
 
 static void test_sizeof_ipipeline_is_vtable() {
-    check(sizeof(trtmc::IPipeline) == sizeof(void*), "sizeof(IPipeline) equals vtable pointer size");
+    check(sizeof(trtmc::IPipeline) == sizeof(void*),
+          "sizeof(IPipeline) equals vtable pointer size");
 }
 
 static void test_delete_null_safe() {
@@ -116,6 +117,16 @@ static void test_ipipeline_default_virtuals() {
         threw = true;
     }
     check(threw, "default generate_image throws");
+
+    // Default generate_image(string, image) should throw via the text-only
+    // image-generation overload.
+    threw = false;
+    try {
+        pipeline.generate_image("prompt", nullptr, 0, 0);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "default generate_image(string,image) throws");
 
     // Default generate_audio should throw
     threw = false;

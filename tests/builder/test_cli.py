@@ -1,11 +1,11 @@
-"""Tests for cli.py — argument parsing edge cases.
+"""Tests for build_cli.py — argument parsing edge cases.
 
 Pure Python, no TRT needed. Tests the CLI argument parser without
 actually invoking engine builds.
 
 Trace: ARCH-ENG-001, UD-ENG-01
-Intent: Validate that the trtmc-build CLI correctly parses build/inspect/version subcommands and their arguments.
-Preconditions: tensorrt_model_connect.cli is importable; no TRT or GPU required.
+Intent: Validate that the trtmc CLI correctly parses build/inspect/version subcommands and their arguments.
+Preconditions: tensorrt_model_connect.build_cli is importable; no TRT or GPU required.
 Postconditions: Parsed arguments match expected values for all subcommands, defaults, and edge cases.
 """
 
@@ -23,13 +23,13 @@ class TestBuildArgs:
     def test_build_with_all_args(self):
         """Verify build command parses all arguments."""
         test_args = [
-            "trtmc-build", "build", "Qwen/Qwen3-0.6B",
+            "trtmc", "build", "Qwen/Qwen3-0.6B",
             "-o", "/tmp/out.trtfb",
             "--max-cache-length", "512",
             "--verbose",
         ]
         with patch.object(sys, "argv", test_args):
-            parser = argparse.ArgumentParser(prog="trtmc-build")
+            parser = argparse.ArgumentParser(prog="trtmc")
             subparsers = parser.add_subparsers(dest="command")
             build_p = subparsers.add_parser("build")
             build_p.add_argument("model")
@@ -71,17 +71,54 @@ class TestBuildArgs:
 
     def test_parse_dynamic_kv_profile_rows(self):
         """Comma-separated dynamic-KV profile rows parse into integer lists."""
-        from tensorrt_model_connect.cli import _parse_profile_rows
+        from tensorrt_model_connect.build_cli import _parse_profile_rows
 
         assert _parse_profile_rows("32,64,128") == [32, 64, 128]
         assert _parse_profile_rows(" 32, 64 ,128 ") == [32, 64, 128]
 
     def test_parse_dynamic_kv_profile_rows_rejects_empty(self):
         """Empty profile-row strings are rejected with a parser-style error."""
-        from tensorrt_model_connect.cli import _parse_profile_rows
+        from tensorrt_model_connect.build_cli import _parse_profile_rows
 
         with pytest.raises(argparse.ArgumentTypeError):
             _parse_profile_rows(" , ")
+
+
+class TestMainParser:
+    def test_build_accepts_trust_remote_code(self, monkeypatch, tmp_path):
+        """The real build parser accepts E2E manifest trust-remote-code commands."""
+        import tensorrt_model_connect.build_cli as cli
+
+        captured: dict[str, argparse.Namespace] = {}
+
+        def _fake_cmd_build(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(cli, "_cmd_build", _fake_cmd_build)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "trtmc",
+                "build",
+                "Qwen/Qwen3.5-9B",
+                "-o",
+                str(tmp_path / "out.trtfb"),
+                "--max-cache-length",
+                "256",
+                "--trust-remote-code",
+                "--build-timing-json",
+                str(tmp_path / "timing.json"),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        assert captured["args"].trust_remote_code is True
+        assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
 
 
 class TestInspectArgs:
@@ -98,8 +135,8 @@ class TestInspectArgs:
 
 class TestVersionCommand:
     def test_version_exits_zero(self):
-        """trtmc-build version should return 0."""
-        from tensorrt_model_connect.cli import _cmd_version
+        """trtmc version should return 0."""
+        from tensorrt_model_connect.build_cli import _cmd_version
         result = _cmd_version(argparse.Namespace())
         assert result == 0
 
@@ -107,7 +144,7 @@ class TestVersionCommand:
 class TestCmdBuildValidation:
     def test_missing_model(self):
         """_cmd_build returns 1 when model is empty."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         args = argparse.Namespace(model="", output="out.trtfb", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
@@ -115,7 +152,7 @@ class TestCmdBuildValidation:
 
     def test_missing_output(self):
         """_cmd_build returns 1 when output is empty."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         args = argparse.Namespace(model="some-model", output="", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
@@ -156,7 +193,7 @@ class TestCmdInspect:
             f.write(header_json)
             f.write(b"\x00" * 100)  # fake engine plan
 
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path)))
         assert result == 0
 
@@ -166,9 +203,47 @@ class TestCmdInspect:
         assert "qwen" in captured.out
         assert "engine_plan" in captured.out
 
+    def test_list_engine_sections_marks_split_decoder_roles(self, tmp_path):
+        """Split decoder bundles should label decode and prefill plans distinctly."""
+        import json
+        import struct
+
+        bundle_path = tmp_path / "split.trtfb"
+        header = {
+            "model_id": "test-model",
+            "model_type": "qwen3",
+            "family": "qwen",
+            "trt_version": "10.0.0",
+            "gpu_name": "A100",
+            "created_at": "2025-01-01T00:00:00Z",
+            "vocab_size": 32000,
+            "hidden_size": 1024,
+            "num_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "max_cache_length": 256,
+            "sections": {
+                "engine_plan": {"offset": 0, "size": 100},
+                "prefill_engine_plan": {"offset": 100, "size": 200},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+
+        with open(bundle_path, "wb") as f:
+            f.write(b"TRTFB\x00\x01\x00")
+            f.write(struct.pack("<Q", len(header_json)))
+            f.write(header_json)
+            f.write(b"\x00" * 300)
+
+        from tensorrt_model_connect.build_cli import list_engine_sections
+
+        roles = {entry["name"]: entry["role"] for entry in list_engine_sections(str(bundle_path))}
+        assert roles["engine_plan"] == "decode"
+        assert roles["prefill_engine_plan"] == "prefill"
+
     def test_inspect_nonexistent_file(self):
         """_cmd_inspect returns 1 for non-existent file."""
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
             bundle_path="/nonexistent/path/bundle.trtfb"))
         assert result == 1
@@ -178,14 +253,14 @@ class TestCmdInspect:
         bundle_path = tmp_path / "bad.trtfb"
         bundle_path.write_bytes(b"NOT_TRTFB_MAGIC_1234567890")
 
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
             bundle_path=str(bundle_path)))
         assert result == 1
 
     def test_inspect_empty_bundle_path(self):
         """_cmd_inspect returns 1 when bundle_path is empty."""
-        from tensorrt_model_connect.cli import _cmd_inspect
+        from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(bundle_path=""))
         assert result == 1
 
@@ -195,7 +270,7 @@ class TestCmdBuildMocked:
 
     def test_build_calls_engine_builder_with_correct_args(self, tmp_path):
         """Verify _cmd_build passes model, output, cache length, verbose to build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         captured_kwargs = {}
@@ -235,7 +310,7 @@ class TestCmdBuildMocked:
 
     def test_verbose_flag_propagated(self, tmp_path):
         """Verify verbose=True is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received_verbose = []
@@ -264,7 +339,7 @@ class TestCmdBuildMocked:
 
     def test_max_cache_length_propagated(self, tmp_path):
         """Verify max_cache_length value is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received_cache = []
@@ -294,7 +369,7 @@ class TestCmdBuildMocked:
 
     def test_dynamic_kv_cache_propagated(self, tmp_path):
         """Verify dynamic_kv_cache is forwarded to engine_builder.build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received = []
@@ -328,7 +403,7 @@ class TestCmdBuildMocked:
 
     def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
         """Verify explicit dynamic-KV profile rows are forwarded to build()."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         received = []
@@ -371,9 +446,55 @@ class TestCmdBuildMocked:
         finally:
             eb.build = original_build
 
+    def test_decoder_engine_layout_propagated(self, tmp_path):
+        """Verify --decoder-engine-layout is forwarded to engine_builder.build()."""
+        from tensorrt_model_connect.build_cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        received = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       decoder_engine_layout="split", **kwargs):
+            received.append(decoder_engine_layout)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                decoder_engine_layout="dual_profile",
+                dynamic_kv_cache=False,
+                dynamic_kv_profile_rows=None,
+                precision="fp32",
+                quantize=None,
+                quant_scales=None,
+                quant_calibration_samples=512,
+                verbose=False,
+                fp8=False,
+                fp8_scales=None,
+                save_fp8_scales=None,
+                triattention_stats=None,
+                triattention_kv_budget=None,
+                triattention_divide_length=128,
+                triattention_recent_window=128,
+                triattention_score_aggregation="mean",
+                triattention_count_prompt_tokens=True,
+                triattention_protect_prefill=True,
+                triattention_disable_mlr=False,
+                triattention_disable_trig=False,
+                method="trt",
+                _skip_profile_resolution=True,
+            )
+            _cmd_build(args)
+            assert received == ["dual_profile"]
+        finally:
+            eb.build = original_build
+
     def test_build_exception_returns_1(self, tmp_path):
         """When engine_builder.build() raises, _cmd_build returns 1."""
-        from tensorrt_model_connect.cli import _cmd_build
+        from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
         def mock_build(*args, **kwargs):
@@ -397,7 +518,7 @@ class TestCmdBuildMocked:
 
     def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
         """Chronos-family builds should re-exec into their declared Python profile."""
-        import tensorrt_model_connect.cli as cli
+        import tensorrt_model_connect.build_cli as cli
         import tensorrt_model_connect.python_profiles as profile_mod
 
         captured: dict[str, object] = {}
@@ -437,7 +558,7 @@ class TestCmdBuildMocked:
         with patch.object(
             sys,
             "argv",
-            ["trtmc-build", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
+            ["trtmc", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
         ):
             assert cli._cmd_build(args) == 0
 

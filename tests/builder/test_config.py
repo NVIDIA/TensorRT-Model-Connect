@@ -199,15 +199,6 @@ class TestEdgeCases:
         }))
         assert cfg.hidden_act == "gelu_new"
 
-    def test_hidden_activation_fallback(self):
-        """Gemma3 text configs use hidden_activation instead of hidden_act."""
-        cfg = ModelConfig.from_json(json.dumps({
-            "hidden_size": 768,
-            "num_attention_heads": 12,
-            "hidden_activation": "gelu_pytorch_tanh",
-        }))
-        assert cfg.hidden_act == "gelu_pytorch_tanh"
-
     def test_rope_theta_from_rope_parameters(self):
         """Llama-3.1 variants store rope_theta inside rope_parameters."""
         cfg = ModelConfig.from_json(json.dumps({

@@ -13,6 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests.builder.conftest import requires_trt
+
 try:
     from tensorrt_model_connect import graph_ops
 except (ImportError, ModuleNotFoundError):
@@ -482,10 +484,37 @@ class TestMakeYarnRopeTable:
 
 
 # ===================================================================
-# TRT graph op tests (require TRT + GPU)
+# 4b. make_llama4_attention_scale_table
 # ===================================================================
 
-from tests.builder.conftest import requires_trt
+class TestMakeLlama4AttentionScaleTable:
+    """Tests for the Llama-4-style per-position query scale table."""
+
+    def test_values_match_hf_formula(self):
+        table = graph_ops.make_llama4_attention_scale_table(
+            max_cache_length=10,
+            beta=0.1,
+            original_max_position_embeddings=4,
+        )
+        positions = np.arange(10, dtype=np.float64)
+        expected = 1.0 + 0.1 * np.log1p(np.floor(positions / 4.0))
+        np.testing.assert_allclose(table[:, 0], expected.astype(np.float32), atol=1e-7)
+
+    def test_positions_before_original_window_are_unscaled(self):
+        table = graph_ops.make_llama4_attention_scale_table(
+            max_cache_length=4,
+            beta=0.1,
+            original_max_position_embeddings=4,
+        )
+        np.testing.assert_allclose(table, np.ones((4, 1), dtype=np.float32))
+
+    def test_zero_beta_disables_scaling(self):
+        table = graph_ops.make_llama4_attention_scale_table(
+            max_cache_length=8,
+            beta=0.0,
+            original_max_position_embeddings=4,
+        )
+        np.testing.assert_allclose(table, np.ones((8, 1), dtype=np.float32))
 
 
 # ===================================================================

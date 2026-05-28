@@ -98,19 +98,6 @@ bool test_extract_json_string_nested_braces() {
     return true;
 }
 
-// Intention: Verify JSON string escapes are unescaped before returning.
-// Setup:     JSON with escaped quote and newline characters.
-// Mechanism: Calls extract_json_string and verifies the decoded string.
-bool test_extract_json_string_escapes() {
-    const std::string json = R"({"prompt": "Generate an \"Enhanced prompt\"\nUser Prompt: "})";
-    const std::string result = trtmc::extract_json_string(json, "prompt", "");
-    if (result != "Generate an \"Enhanced prompt\"\nUser Prompt: ") {
-        std::cerr << "extract_json_string_escapes: got '" << result << "'" << std::endl;
-        return false;
-    }
-    return true;
-}
-
 // ---------------------------------------------------------------------------
 // extract_json_int tests
 // ---------------------------------------------------------------------------
@@ -459,7 +446,6 @@ int main() {
     run("extract_json_string_present", test_extract_json_string_present);
     run("extract_json_string_absent", test_extract_json_string_absent);
     run("extract_json_string_nested", test_extract_json_string_nested_braces);
-    run("extract_json_string_escapes", test_extract_json_string_escapes);
     run("extract_json_string_empty_value", test_extract_json_string_empty_value_returns_fallback);
     run("extract_json_int_positive", test_extract_json_int_positive);
     run("extract_json_int_negative", test_extract_json_int_negative);

@@ -20,7 +20,7 @@
 This test mirrors what Phase 4 clusters do in production:
 
     1. Declare a namespaced schema (here inline — in production it would
-       be a file under ``tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/``).
+       be a file under ``python/tensorrt_model_connect/runtime_config/schemas/``).
     2. Register it with the singleton SchemaRegistry.
     3. Supply values via ``--set`` tokens through
        :func:`resolve_cli_config`.
@@ -36,7 +36,7 @@ The entire production-surface diff for landing a new feature is:
       plus one manifest line in cmake/trtmc_config_schemas.cmake
     - One test file here
 
-No edits to cli.py, engine_builder.py, pipeline_factory.cpp, or any
+No edits to build_cli.py, engine_builder.py, pipeline_factory.cpp, or any
 shared dispatcher. This test stands in for the "one-shot demo" that
 would exercise exactly that diff.
 """
@@ -133,7 +133,7 @@ def test_defaults_flow_through_without_any_contribution():
     assert bundle.source_of("demo_feature", "max_candidates") == Layer.SCHEMA_DEFAULT
 
 
-# ---- 3. --set flows through without touching cli.py ------------------------
+# ---- 3. --set flows through without touching build_cli.py ------------------------
 
 
 def test_set_token_routes_to_new_feature_without_cli_edit():
@@ -226,7 +226,7 @@ def test_scalability_claim_documented():
     list, that's a coupling point; update the design before adding.
     """
     expected_new_files_per_feature = [
-        "tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/<name>.py",
+        "python/tensorrt_model_connect/runtime_config/schemas/<name>.py",
         "include/trtmc/config/schemas/<name>.h",
         "src/runtime/config/schemas/<name>.cpp",
         "tests/builder/test_config_<name>_or_similar.py",

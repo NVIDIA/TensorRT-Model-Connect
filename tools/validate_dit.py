@@ -124,7 +124,7 @@ def main():
     # --- TRT ---
     print("[validate-dit] Loading DiT weights & building TRT engine ...",
           file=sys.stderr)
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
     from tensorrt_model_connect.families.pixart.standard_dit_builder import build_standard_dit_engine, load_dit_weights
 
     t0 = time.time()

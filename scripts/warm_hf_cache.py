@@ -59,10 +59,12 @@ _HF_ALLOW_PATTERNS = [
     "pytorch_model.bin",
     "tokenizer.json",
     "tokenizer_config.json",
+    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "normalizer.json",
     "special_tokens_map.json",
+    "linear_spec_lora/**",
     "*.model",
     "*.spm",
     "*.py",
@@ -88,6 +90,12 @@ _HF_ALLOW_PATTERNS = [
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
+_REQUIRED_FILES_BY_HF_ID = {
+    "nvidia/Nemotron-Labs-Diffusion-8B": [
+        "linear_spec_lora/adapter_config.json",
+        "linear_spec_lora/adapter_model.safetensors",
+    ],
+}
 _DIFFUSERS_WEIGHT_COMPONENTS = {
     "controlnet",
     "image_encoder",
@@ -114,21 +122,6 @@ _MAGPIE_REFERENCE_DEPENDENCIES = [
         "magpie-wavlm-discriminator",
         "microsoft/wavlm-base-plus",
     ),
-]
-_SANA_WM_HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
-_SANA_WM_METADATA_ALLOW_PATTERNS = ["README.md", "config.yaml"]
-_SANA_WM_FULL_ALLOW_PATTERNS = [
-    "README.md",
-    "model_index.json",
-    "config.yaml",
-    "pipeline*.py",
-    "asset/sana_wm/**",
-    "inference_video_scripts/**",
-    "scheduler/**",
-    "dit/**",
-    "vae/**",
-    "text_encoder/**",
-    "refiner/**",
 ]
 
 parser = argparse.ArgumentParser(
@@ -208,34 +201,25 @@ def _is_cached(hf_id: str) -> bool:
     """Return True if the model has a usable local snapshot.
 
     A snapshot directory alone is not enough: partial cache entries can contain
-    only config/tokenizer metadata. The offline build phase needs at least one
-    HF entrypoint config and at least one local weight artifact.
+    only config/tokenizer metadata, and orphan snapshots without the requested
+    revision ref cannot be resolved by the offline build phase.  Use
+    ``snapshot_download(local_files_only=True)`` here so the warm-cache skip
+    decision follows the same Hugging Face cache resolution path as the later
+    offline builder.
     """
-    cache_dir = pathlib.Path(hf_constants.HF_HUB_CACHE)
-    # HF cache layout: models--{org}--{model}/snapshots/{sha}/
-    repo_dir = cache_dir / ("models--" + hf_id.replace("/", "--"))
-    snapshots_dir = repo_dir / "snapshots"
-    if not snapshots_dir.is_dir():
+    try:
+        local_dir = snapshot_download(
+            hf_id,
+            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            local_files_only=True,
+        )
+    except Exception:
         return False
 
-    snapshot_paths = [
-        path for path in snapshots_dir.iterdir()
-        if path.is_dir()
-    ]
-    ref_main = repo_dir / "refs" / "main"
-    if ref_main.is_file():
-        commit = ref_main.read_text().strip()
-        main_snapshot = snapshots_dir / commit
-        if main_snapshot.is_dir():
-            snapshot_paths = [main_snapshot] + [
-                path for path in snapshot_paths
-                if path != main_snapshot
-            ]
-
-    return any(_snapshot_has_required_files(path) for path in snapshot_paths)
+    return _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id)
 
 
-def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
+def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:
     files = [
         str(path.relative_to(snapshot_dir))
         for path in snapshot_dir.rglob("*")
@@ -253,11 +237,13 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
         for name in files
         for pattern in _WEIGHT_PATTERNS
     )
+    required_files = _REQUIRED_FILES_BY_HF_ID.get(hf_id, [])
+    has_required_files = all((snapshot_dir / name).is_file() for name in required_files)
     if (snapshot_dir / "model_index.json").is_file():
-        return has_entrypoint and has_weights and not _diffusers_missing_weight_components(
+        return has_entrypoint and has_weights and has_required_files and not _diffusers_missing_weight_components(
             snapshot_dir
         )
-    return has_entrypoint and has_weights
+    return has_entrypoint and has_weights and has_required_files
 
 
 def _diffusers_missing_weight_components(snapshot_dir: pathlib.Path) -> list[str]:
@@ -299,21 +285,6 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
     )
 
 
-def _truthy_env(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _allow_patterns_for_hf_id(hf_id: str) -> list[str]:
-    if hf_id.rstrip("/") == _SANA_WM_HF_ID:
-        if _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
-            return list(_SANA_WM_FULL_ALLOW_PATTERNS)
-        # SANA-WM is unusually large. Keep CI cache warming aligned with the
-        # builder default: fetch the YAML contract unless full weights are
-        # explicitly requested.
-        return list(_SANA_WM_METADATA_ALLOW_PATTERNS)
-    return _HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
-
-
 selective = filter_names is not None
 scope = f"selective ({len(entries)} models)" if selective else f"all {len(entries)} models"
 print(f"Warming HF cache — {scope}...")
@@ -338,9 +309,9 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_allow_patterns_for_hf_id(hf_id),
+            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
         )
-        if not _snapshot_has_required_files(pathlib.Path(local_dir)):
+        if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
             raise RuntimeError(
                 "downloaded snapshot is still missing a config/model_index "
                 "entrypoint or required local weight artifact")

@@ -24,7 +24,7 @@ This document defines the software architectural design for the tensorrt-model-c
 
 The scope covers:
 
-- The Python builder package (`tensorrt_model_connect/`) and its plugin-based family architecture.
+- The Python builder package (`python/tensorrt_model_connect/`) and its plugin-based family architecture.
 - The C++ runtime and its manifest-registered plugin-based pipeline dispatch.
 - The `.trtfb` bundle format that bridges the two phases.
 - Core runtime abstractions: `TrtModule`, `KvCache`, `RecurrentState`.
@@ -38,7 +38,7 @@ The system operates in two strictly separated phases:
 
 | Phase | Language | Entry Point | Input | Output |
 |-------|----------|-------------|-------|--------|
-| **Build** | Python | `trtmc-build build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
+| **Build** | Python | `./build/trtmc build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
 | **Run** | C++ | `trtmc run` / `trtmc::load()` / C ABI | `.trtfb` bundle | Task-specific results |
 
 The bundle is the sole interface between the two phases. The C++ runtime never reads HuggingFace model directories directly. All model-specific architectural decisions (attention type, normalization, activation functions, weight layout) are baked into the TRT engine plan at build time.
@@ -67,12 +67,12 @@ The Python builder is a fully plugin-based system. Adding a new model family req
 
 ### 3.1 Package Structure
 
-- **Package root**: `tensorrt_model_connect/tensorrt_model_connect/`
-- **Entry points**: `cli.py` (CLI), `__init__.py` (Python API), `__main__.py`
+- **Package root**: `python/tensorrt_model_connect/`
+- **Entry points**: `build_cli.py` (builder CLI), `__init__.py` (Python API), `__main__.py`
 
 ### 3.2 Orchestration Flow
 
-The orchestrator in `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` executes:
+The orchestrator in `python/tensorrt_model_connect/engine_builder.py` executes:
 
 1. **Resolve model** -- download from HuggingFace or use local directory.
 2. **Parse config** -- `config.py` reads `config.json` into `ModelConfig`.
@@ -83,7 +83,7 @@ The orchestrator in `tensorrt_model_connect/tensorrt_model_connect/engine_builde
 
 ### 3.3 Family Plugin Protocol
 
-Defined in `tensorrt_model_connect/tensorrt_model_connect/families/base.py` as a Python `Protocol`:
+Defined in `python/tensorrt_model_connect/families/base.py` as a Python `Protocol`:
 
 ```python
 class FamilyPlugin(Protocol):
@@ -98,7 +98,7 @@ class FamilyPlugin(Protocol):
 
 ### 3.4 Plugin Auto-Discovery
 
-`tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 67 Python files in the families directory (65 plugins + `base.py` protocol + `__init__.py` auto-discovery module). Batch onboarding can use the autopilot system (`scripts/autopilot/autorun.py`), which launches configurable agent CLI sessions that follow `AGENTS.md` and the repo-local skills.
+`python/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan family modules and packages. Any module exposing a `plugin` attribute is registered automatically. The current checkout has 68 family plugins. Batch onboarding can use the autopilot system (`scripts/autopilot/autorun.py`), which launches configurable agent CLI sessions that follow `AGENTS.md` and the repo-local skills.
 
 Key discovery functions:
 - `find_plugin(model_type)` -- matches standard models by HF `model_type`.
@@ -110,11 +110,11 @@ The TRT graph building is layered:
 
 | Layer | File | Responsibility |
 |-------|------|----------------|
-| 1. Atomic ops | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Tensor-in/tensor-out ops: RoPE, RMSNorm, attention, ALiBi, conv, etc. |
-| 2. Composable blocks | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Multi-op blocks: SwiGLU MLP, GELU MLP, attention block, apply_norm |
-| 3. Standard decoder | `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` | Full decoder engine: embedding, N transformer layers, LM head |
+| 1. Atomic ops | `python/tensorrt_model_connect/graph_ops.py` | Tensor-in/tensor-out ops: RoPE, RMSNorm, attention, ALiBi, conv, etc. |
+| 2. Composable blocks | `python/tensorrt_model_connect/graph_blocks.py` | Multi-op blocks: SwiGLU MLP, GELU MLP, attention block, apply_norm |
+| 3. Standard decoder | `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Family-local decoder engine builders: embedding, N transformer layers, LM head |
 
-Most decoder families call into `standard_decoder_builder.py`. Specialized architectures (Mamba, Whisper, Bark, diffusion) build custom graphs in their plugin or dedicated builder modules.
+Most decoder families call into their family-local `standard_decoder_builder.py`. Specialized architectures (Mamba, Whisper, Bark, diffusion) build custom graphs in their plugin or dedicated builder modules.
 
 ### 3.6 Specialized Builders
 
@@ -143,7 +143,7 @@ Beyond the standard decoder, the build package contains dedicated engine builder
 
 ### 3.7 Debug Runner
 
-`tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` provides pure-Python TRT inference runners that mirror C++ runtime behavior:
+`python/tensorrt_model_connect/debug_runner.py` provides pure-Python TRT inference runners that mirror C++ runtime behavior:
 
 - `TrtRunner` -- standard decoder with device-resident KV cache.
 - `MambaTrtRunner` -- SSM with device-resident conv + SSM state.
@@ -151,11 +151,11 @@ Beyond the standard decoder, the build package contains dedicated engine builder
 
 These are used by diff-testing tools (`tools/diff_logits.py`, `tools/diff_layers.py`, `tools/diff_vl.py`) and the E2E test harness.
 
-Additionally, `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` provides a `DiffusionRunner` for pure-Python TRT inference of diffusion models (text encoding, denoising loop, VAE decode), following the same pattern as the decoder `TrtRunner`.
+Additionally, `python/tensorrt_model_connect/diffusion_runner.py` provides a `DiffusionRunner` for pure-Python TRT inference of diffusion models (text encoding, denoising loop, VAE decode), following the same pattern as the decoder `TrtRunner`.
 
 ### 3.8 Scheduler Package
 
-`tensorrt_model_connect/tensorrt_model_connect/schedulers/` contains Python diffusion noise schedulers used during build-time validation and debug runner inference. Currently implements `flow_match_euler.py` (Flow Matching Euler Discrete), matching the C++ `FlowMatchEulerScheduler`.
+`python/tensorrt_model_connect/schedulers/` contains Python diffusion noise schedulers used during build-time validation and debug runner inference. Currently implements `flow_match_euler.py` (Flow Matching Euler Discrete), matching the C++ `FlowMatchEulerScheduler`.
 
 ---
 
@@ -259,7 +259,7 @@ Provides `find_section(bundle, name)` for exact-name lookup and `find_sections_b
 
 - **Header**: `src/bundle/bundle_format.h`
 - **Implementation**: `src/bundle/bundle_format.cpp`
-- **Writer**: `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`
+- **Writer**: `python/tensorrt_model_connect/bundle_writer.py`
 
 ### 5.1 Binary Layout
 
@@ -547,20 +547,20 @@ All paths below are relative to the repository root and have been verified to ex
 ### Python Builder
 | Path | Purpose |
 |------|---------|
-| `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` | Build orchestrator |
-| `tensorrt_model_connect/tensorrt_model_connect/config.py` | HF config.json parser |
-| `tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py` | Safetensors weight loader |
-| `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | Bundle file writer |
-| `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Atomic TRT graph ops |
-| `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Composable graph blocks |
-| `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` | Standard decoder engine builder |
-| `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` | Python TRT inference runners (decoder, Mamba, VL) |
-| `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` | Python TRT diffusion runner |
-| `tensorrt_model_connect/tensorrt_model_connect/pipeline.py` | Subprocess wrapper around C++ trtmc binary |
-| `tensorrt_model_connect/tensorrt_model_connect/schedulers/` | Python diffusion schedulers (flow_match_euler) |
-| `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
-| `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
-| `tensorrt_model_connect/tensorrt_model_connect/cli.py` | CLI entry point |
+| `python/tensorrt_model_connect/engine_builder.py` | Build orchestrator |
+| `python/tensorrt_model_connect/config.py` | HF config.json parser |
+| `python/tensorrt_model_connect/checkpoint_mapper.py` | Safetensors weight loader |
+| `python/tensorrt_model_connect/bundle_writer.py` | Bundle file writer |
+| `python/tensorrt_model_connect/graph_ops.py` | Atomic TRT graph ops |
+| `python/tensorrt_model_connect/graph_blocks.py` | Composable graph blocks |
+| `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Family-local standard decoder engine builder |
+| `python/tensorrt_model_connect/debug_runner.py` | Python TRT inference runners (decoder, Mamba, VL) |
+| `python/tensorrt_model_connect/diffusion_runner.py` | Python TRT diffusion runner |
+| `python/tensorrt_model_connect/pipeline.py` | Subprocess wrapper around C++ trtmc binary |
+| `python/tensorrt_model_connect/schedulers/` | Python diffusion schedulers (flow_match_euler) |
+| `python/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
+| `python/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
+| `python/tensorrt_model_connect/build_cli.py` | Python builder CLI entry point |
 
 ### C++ Runtime -- Public API
 | Path | Purpose |

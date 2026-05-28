@@ -1,7 +1,7 @@
 """End-to-end Torch-TRT parity tests for numeric time-series models.
 
 These tests exercise the real user flow:
-  1. Build a local HF checkpoint into a `.trtfb` bundle via `trtmc-build`
+  1. Build a local HF checkpoint into a `.trtfb` bundle via `trtmc build`
   2. Run C++ inference via `build/trtmc solve`
   3. Compare the output against the official Python reference implementation
 
@@ -14,7 +14,6 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
-import shutil
 import tempfile
 
 import pytest
@@ -28,7 +27,11 @@ TRTMC_BIN = REPO_ROOT / "build" / "trtmc"
 
 
 def _has_torchtrt() -> bool:
-    return importlib.util.find_spec("torch_tensorrt") is not None
+    try:
+        import torch_tensorrt  # noqa: F401
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 requires_torchtrt = pytest.mark.skipif(
@@ -69,11 +72,10 @@ def _parse_solve_stdout(stdout: str) -> torch.Tensor:
 
 
 def _build_bundle(model_dir: Path, bundle_path: Path, *, max_cache_length: int) -> None:
-    tensorrt_model_connect_bin = shutil.which("trtmc-build")
-    assert tensorrt_model_connect_bin, "Expected trtmc-build console script in PATH"
+    assert TRTMC_BIN.exists(), f"Expected built trtmc binary at {TRTMC_BIN}"
     _run(
         [
-            tensorrt_model_connect_bin,
+            str(TRTMC_BIN),
             "build",
             str(model_dir),
             "-o",

@@ -4,9 +4,14 @@ on:
   schedule:
     - cron: "0 10 * * *"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test with the full nightly workflow"
+        required: false
+        default: "main"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: trtmc-nightly-main
@@ -19,18 +24,17 @@ env:
   HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}
-  TRTMC_CI_IMAGE: ${{ vars.TRTMC_CI_IMAGE || 'trtf-dev-gb300:latest' }}
+  TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+  TRTMC_CI_CONTAINER_NAME: trtmc-ci-${{ github.run_id }}-${{ github.run_attempt }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
-  TRTMC_GPU_DEVICES: ${{ vars.TRTMC_GPU_DEVICES || '1,2' }}
+  TRTMC_PACKAGE_PYTHON_TAGS: ${{ vars.TRTMC_PACKAGE_PYTHON_TAGS || 'py310 py312' }}
+  TRTMC_PACKAGE_WHEEL_ARCH: ${{ vars.TRTMC_PACKAGE_WHEEL_ARCH || 'manylinux_2_39_aarch64' }}
   PYTHONHASHSEED: "0"
   PYTHON_COVERAGE_MIN_LINE: "38"
   PYTHON_COVERAGE_MIN_BRANCH: "25"
   CPP_COVERAGE_MIN_LINE: "36"
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
-  CPP_CPU_ONLY_COVERAGE_MIN_LINE: "33"
-  CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION: "43"
-  CPP_CPU_ONLY_COVERAGE_MIN_BRANCH: "19"
   FULL_E2E: "true"
   RUN_COVERAGE_MAP: "true"
   REBUILD_ENGINES: "true"
@@ -39,12 +43,13 @@ env:
   DIFFUSION_VLM_MAX_SIDE: "512"
   DIFFUSION_VLM_MAX_NEW_TOKENS: "384"
   DIFFUSION_VLM_TIMEOUT: "45m"
+  NIGHTLY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'main' }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   nightly-ci:
-    name: Nightly Full CI on GitHub main
+    name: Nightly Full CI
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 
@@ -57,9 +62,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$GITHUB_WORKSPACE" ]; then
-            chmod a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
+            docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
             docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
-              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
+              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_MANYLINUX_CI_IMAGE if the runner uses a different local manylinux image tag."
               exit 1
             }
             docker run --rm \
@@ -80,10 +86,10 @@ jobs:
               '
           fi
 
-      - name: Check out GitHub main tip
+      - name: Check out nightly ref
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ env.NIGHTLY_REF }}
           fetch-depth: 0
           clean: false
           lfs: false
@@ -92,64 +98,149 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main --quiet
-          echo "CI_BASE_REF=HEAD~1" >> "$GITHUB_ENV"
-          echo "Running nightly on GitHub main tip: $(git rev-parse HEAD)"
+          if [ "$NIGHTLY_REF" = "main" ]; then
+            base="HEAD~1"
+          else
+            base="origin/main"
+          fi
+          echo "CI_BASE_REF=$base" >> "$GITHUB_ENV"
+          echo "Running nightly on GitHub ref '$NIGHTLY_REF': $(git rev-parse HEAD)"
 
       - name: Report CI mode
         run: |
           set -euo pipefail
-          echo "CI mode: nightly/full E2E on GitHub main"
+          echo "CI mode: nightly/full E2E on GitHub ref '$NIGHTLY_REF'"
           echo "FULL_E2E=$FULL_E2E"
           echo "RUN_COVERAGE_MAP=$RUN_COVERAGE_MAP"
           echo "REBUILD_ENGINES=$REBUILD_ENGINES"
 
-      - name: Setup TensorRT-Model-Connect
+      - name: Start CI container
         timeout-minutes: 5
-        run: bash .github/scripts/run-gha-stage.sh setup
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Build trtmc pip package
+        timeout-minutes: 30
+        run: bash .github/scripts/run-gha-stage.sh package
 
       - name: Impact analysis
+        if: ${{ always() }}
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh impact
 
-      - name: Build all
+      - name: Build C++ test executables
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh build
 
       - name: Check family coverage
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh family-coverage
 
       - name: Check cyclomatic complexity
+        if: ${{ always() }}
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh complexity
 
       - name: Lint changed files
+        if: ${{ always() }}
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh lint
 
       - name: C++ unit tests
+        if: ${{ always() }}
         timeout-minutes: 20
         run: bash .github/scripts/run-gha-stage.sh cpp-unit
 
       - name: Python builder and tools tests
+        if: ${{ always() }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh python-builder
 
       - name: C++ coverage
+        if: ${{ always() }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh cpp-coverage
 
       - name: Graph-op GPU tests
+        if: ${{ always() }}
         timeout-minutes: 20
         run: bash .github/scripts/run-gha-stage.sh graph-ops
 
       - name: Full E2E tests
+        if: ${{ always() }}
         timeout-minutes: 360
         run: bash .github/scripts/run-gha-stage.sh full-e2e
 
       - name: Generate coverage map
+        if: ${{ always() }}
         timeout-minutes: 90
         run: bash .github/scripts/run-gha-stage.sh coverage-map
+
+      - name: Qwen smoke test from trtmc pip package
+        timeout-minutes: 60
+        run: bash .github/scripts/run-gha-stage.sh wheel-qwen-smoke
+
+      - name: Upload trtmc pip package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-pip-package-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+          path: dist/*.whl
+
+      - name: Publish trtmc pip package to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          compgen -G "dist/*.whl" >/dev/null || {
+            echo "::error::No trtmc wheel found under dist/"
+            exit 1
+          }
+          release_payload="$(python3 - <<'PY'
+          import json
+          import os
+
+          tag = f"trtmc-nightly-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          print(json.dumps({
+              "tag_name": tag,
+              "target_commitish": os.environ["GITHUB_SHA"],
+              "name": f"TRTMC Nightly {os.environ['GITHUB_RUN_ID']} attempt {os.environ['GITHUB_RUN_ATTEMPT']}",
+              "body": f"Nightly TensorRT-Model-Connect pip package built by {run_url}.",
+              "draft": False,
+              "prerelease": True,
+              "make_latest": "false",
+          }))
+          PY
+          )"
+          curl -sSfL \
+            -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "$release_payload" \
+            > release.json
+          upload_url="$(python3 - <<'PY'
+          import json
+          print(json.load(open("release.json"))["upload_url"].split("{", 1)[0])
+          PY
+          )"
+          for asset in dist/*.whl; do
+            name="$(basename "$asset")"
+            curl -sSfL \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$asset" \
+              "${upload_url}?name=${name}" \
+              > /dev/null
+            echo "Published release asset: $name"
+          done
 
       - name: Write CI summary
         if: always()
@@ -185,3 +276,7 @@ jobs:
             coverage_map.json
             coverage/
             e2e_artifacts/
+
+      - name: Stop CI container
+        if: always()
+        run: docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true

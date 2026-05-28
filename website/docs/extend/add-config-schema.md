@@ -21,7 +21,7 @@ A schema lets new features use this generic surface instead of adding another be
 | --- | --- |
 | C++ public generated headers | `include/trtmc/config/schemas/` |
 | C++ schema implementation | `src/runtime/config/schemas/` |
-| Python runtime config | `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/` |
+| Python runtime config | `python/tensorrt_model_connect/runtime_config/schemas/` |
 | CMake manifest | `cmake/trtmc_config_schemas.cmake` |
 
 ## Implementation checklist

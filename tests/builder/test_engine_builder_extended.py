@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
+    import tensorrt_model_connect.engine_builder as engine_builder
     from tensorrt_model_connect.engine_builder import (
         _get_trt_version,
         _get_gpu_name,
+        _find_sentencepiece_model,
         _ensure_tokenizer_json,
         build_bundle,
     )
@@ -116,6 +119,30 @@ class TestGetGpuName:
 # ---------------------------------------------------------------------------
 
 
+class TestFindSentencePieceModel:
+    def test_prefers_source_spm(self, tmp_path):
+        """source.spm remains the preferred encoder-side SentencePiece file."""
+        source = tmp_path / "source.spm"
+        spiece = tmp_path / "spiece.model"
+        source.write_bytes(b"source")
+        spiece.write_bytes(b"spiece")
+
+        assert _find_sentencepiece_model(tmp_path) == source
+
+    def test_falls_back_to_spiece_model(self, tmp_path):
+        """PixArt/T5 tokenizer directories commonly ship spiece.model."""
+        spiece = tmp_path / "spiece.model"
+        spiece.write_bytes(b"spiece")
+
+        assert _find_sentencepiece_model(tmp_path) == spiece
+
+    def test_falls_back_to_any_model_extension(self, tmp_path):
+        custom = tmp_path / "custom.model"
+        custom.write_bytes(b"custom")
+
+        assert _find_sentencepiece_model(tmp_path) == custom
+
+
 class TestEnsureTokenizerJson:
     def test_tokenizer_json_already_exists(self, tmp_path):
         """When tokenizer.json exists, function is a no-op (early return)."""
@@ -198,6 +225,36 @@ class TestEnsureTokenizerJson:
 # ---------------------------------------------------------------------------
 # build_bundle orchestration
 # ---------------------------------------------------------------------------
+
+
+def build_standard_decoder_engine(config, weights, max_cache_length, *, verbose=False):
+    _decoder_engine_role = config.raw.get("_decoder_engine_role")
+    profile_mode = "prefill" if _decoder_engine_role == "prefill" else "dual_profile"
+    return f"{_decoder_engine_role}:{profile_mode}".encode()
+
+
+class _SplitDecoderPlugin:
+    name = "qwen"
+    runtime_strategy = "decoder_kv_cache"
+
+    def load_weights(self, model_dir, config, *, precision="fp32"):
+        return {}
+
+    def build_engine(
+        self,
+        config,
+        weights,
+        max_cache_length,
+        *,
+        precision="fp32",
+        verbose=False,
+    ):
+        return build_standard_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            verbose=verbose,
+        )
 
 
 class TestBuildBundleOrchestration:
@@ -672,6 +729,142 @@ class TestBuildBundleOrchestration:
                             )
 
         assert seen["precision"] == "fp16"
+
+    def test_split_decoder_builds_use_role_scoped_timing_caches(self, tmp_path, monkeypatch):
+        """Split prefill/decode builds should not share the global timing cache."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+        scopes = []
+
+        @contextmanager
+        def fake_scoped_timing_cache(scope):
+            scopes.append(scope)
+            yield
+
+        monkeypatch.setattr(
+            engine_builder.trt_compat,
+            "scoped_timing_cache",
+            fake_scoped_timing_cache,
+        )
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                   return_value=_SplitDecoderPlugin()):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                       return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                           return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                            build_bundle(
+                                str(model_dir),
+                                output_path,
+                                precision="bf16",
+                            )
+
+        sections = mock_write.call_args[0][2]
+        assert [section.name for section in sections[:2]] == [
+            "engine_plan",
+            "prefill_engine_plan",
+        ]
+        assert sections[0].data == b"decode:dual_profile"
+        assert sections[1].data == b"prefill:prefill"
+        assert scopes == [
+            "split-qwen3-h64-l2-bf16-noquant-prefill",
+            "split-qwen3-h64-l2-bf16-noquant-decode",
+        ]
+
+    @pytest.mark.parametrize(
+        ("pipeline_class", "plugin_name", "runtime_strategy"),
+        [
+            ("FluxPipeline", "flux", "diffusion_flux"),
+            ("Flux2Pipeline", "flux", "diffusion_flux"),
+            ("PixArtSigmaPipeline", "pixart", "diffusion_pixart"),
+            ("WanPipeline", "wan_t2v", "diffusion_wan"),
+        ],
+    )
+    def test_supported_diffusion_tensor_parallel_builds_rank_denoisers(
+        self, tmp_path, pipeline_class, plugin_name, runtime_strategy,
+    ):
+        """Supported diffusion TP families reach build_components and package rank plans."""
+        from tensorrt_model_connect.parallel_config import ParallelConfig
+
+        model_dir = tmp_path / f"{plugin_name}_diffusers"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": pipeline_class}))
+        output_path = str(tmp_path / f"{plugin_name}.trtfb")
+        seen = {}
+
+        class _DiffusionPlugin:
+            def load_weights(self, model_dir, config):
+                seen["model_type"] = config.model_type
+                return {}
+
+            def build_components(
+                self,
+                model_dir,
+                config,
+                weights,
+                *,
+                parallel_config=None,
+                verbose=False,
+                fp8_scales=None,
+            ):
+                seen["parallel"] = parallel_config
+                return {
+                    "text_encoders": [("t5", b"t5")],
+                    "denoiser_ranks": {
+                        0: b"denoiser0",
+                        1: b"denoiser1",
+                        2: b"denoiser2",
+                        3: b"denoiser3",
+                    },
+                    "vae_decoder": b"vae",
+                }
+
+            def get_diffusion_config(self, config):
+                return {}
+
+        plugin = _DiffusionPlugin()
+        plugin.name = plugin_name
+        plugin.runtime_strategy = runtime_strategy
+
+        with patch("tensorrt_model_connect.engine_builder.find_diffusion_plugin",
+                    return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._setup_trt_import"):
+                with patch("tensorrt_model_connect.trt_compat.tensorrt_version",
+                            return_value="11.0.0"):
+                    with patch("tensorrt_model_connect.trt_compat.resolved_summary",
+                                return_value="TensorRT: version=11.0.0"):
+                        with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                                    return_value="NVIDIA A100"):
+                            with patch(
+                                "tensorrt_model_connect.engine_builder._detect_diffusion_tokenizer_add_special_tokens",
+                                return_value=False,
+                            ):
+                                with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                                    build_bundle(
+                                        str(model_dir),
+                                        output_path,
+                                        parallel_config=ParallelConfig(
+                                            mode="tensor_parallel",
+                                            tp_size=4,
+                                        ),
+                                    )
+
+        assert seen["model_type"] == plugin_name
+        assert seen["parallel"].enabled
+        assert seen["parallel"].tp_size == 4
+
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        assert section_map["denoiser_plan_tp_rank0"] == b"denoiser0"
+        assert section_map["denoiser_plan_tp_rank1"] == b"denoiser1"
+        assert section_map["denoiser_plan_tp_rank2"] == b"denoiser2"
+        assert section_map["denoiser_plan_tp_rank3"] == b"denoiser3"
+
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        assert cfg["tensor_parallel_mode"] == "tensor_parallel"
+        assert cfg["tensor_parallel_size"] == 4
 
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""

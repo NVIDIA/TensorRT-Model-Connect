@@ -2,7 +2,7 @@
 
 Discovers manifests with test_type=="diffusion" and runs a multi-stage validation:
 
-1. Build bundle from HF model via trtmc-build (subprocess)
+1. Build bundle from HF model via trtmc build (subprocess)
 2. Run debug_diffusion_pipeline.py for 9-step TRT-vs-HF component comparison
 3. Run C++ binary: generate-video (30 steps, PNG frames)
 4. Check frame pixel statistics (catches washed-out / all-black / low-contrast)
@@ -65,10 +65,10 @@ def _diffusion_model_by_name(name):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_diffusion_bundle(hf_id, bundle_path, build_args, precision="fp32"):
+def _build_diffusion_bundle(trtmc_binary, hf_id, bundle_path, build_args, precision="fp32"):
     """Build a diffusion .trtfb bundle as a subprocess."""
     cmd = [
-        "trtmc-build", "build",
+        str(trtmc_binary), "build",
         hf_id, "-o", str(bundle_path),
     ]
     max_cache = build_args.get("max_cache_length", 256)
@@ -238,7 +238,7 @@ def _copy_sample_frames(frame_dir, engine_dir, model_name, expected_frames):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(params=_diffusion_model_ids() or ["__no_diffusion_models__"])
-def diffusion_entry(request, engine_dir):
+def diffusion_entry(request, engine_dir, trtmc_binary):
     """Parametrized fixture yielding one diffusion model entry at a time."""
     name = request.param
     if name == "__no_diffusion_models__":
@@ -262,7 +262,7 @@ def diffusion_entry(request, engine_dir):
     build_args = entry.get("build_args", {})
     precision = entry.get("precision", "fp32")
     build_time = _build_diffusion_bundle(
-        hf_id, bundle_path, build_args, precision)
+        trtmc_binary, hf_id, bundle_path, build_args, precision)
 
     entry["bundle_path"] = str(bundle_path)
     entry["was_cached"] = False

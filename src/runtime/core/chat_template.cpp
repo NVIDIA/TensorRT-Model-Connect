@@ -12,7 +12,10 @@ struct FormatMarker {
     ChatTemplateFormat format;
 };
 
-static constexpr std::array<FormatMarker, 8> kDetectTable = {{
+static constexpr std::array<FormatMarker, 10> kDetectTable = {{
+    {"truncate_history_thinking", ChatTemplateFormat::kNemotronLabsDiffusion},
+    {"enable_thinking if enable_thinking is defined else False",
+     ChatTemplateFormat::kNemotronLabsDiffusion},
     {"<|im_start|>", ChatTemplateFormat::kChatML},
     {"[INST]", ChatTemplateFormat::kMistral},
     {"<|user|>", ChatTemplateFormat::kPhi},
@@ -59,6 +62,13 @@ static std::string apply_nemotron_h(const std::string& prompt, bool enable_think
     return r;
 }
 
+static std::string apply_nemotron_labs_diffusion(const std::string& prompt, bool enable_thinking) {
+    std::string r = "<|im_start|>system\n<|im_end|>\n<|im_start|>user\n" + prompt +
+                    "<|im_end|>\n<|im_start|>assistant\n";
+    r += enable_thinking ? "<think>\n" : "<think></think>";
+    return r;
+}
+
 std::string apply_chat_template(ChatTemplateFormat format, const std::string& prompt,
                                 bool enable_thinking) {
     switch (format) {
@@ -76,6 +86,8 @@ std::string apply_chat_template(ChatTemplateFormat format, const std::string& pr
         return "<extra_id_0>System\n\n<extra_id_1>User\n" + prompt + "\n<extra_id_1>Assistant\n";
     case ChatTemplateFormat::kNemotronH:
         return apply_nemotron_h(prompt, enable_thinking);
+    case ChatTemplateFormat::kNemotronLabsDiffusion:
+        return apply_nemotron_labs_diffusion(prompt, enable_thinking);
     case ChatTemplateFormat::kNone:
     default:
         return prompt;

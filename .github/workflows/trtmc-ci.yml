@@ -23,18 +23,17 @@ env:
   HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}
-  TRTMC_CI_IMAGE: ${{ vars.TRTMC_CI_IMAGE || 'trtf-dev-gb300:latest' }}
+  TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+  TRTMC_CI_CONTAINER_NAME: trtmc-ci-${{ github.run_id }}-${{ github.run_attempt }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
-  TRTMC_GPU_DEVICES: ${{ vars.TRTMC_GPU_DEVICES || '1,2' }}
+  TRTMC_PACKAGE_PYTHON_TAGS: ${{ vars.TRTMC_PACKAGE_PYTHON_TAGS || 'py312' }}
+  TRTMC_PACKAGE_WHEEL_ARCH: ${{ vars.TRTMC_PACKAGE_WHEEL_ARCH || 'manylinux_2_39_aarch64' }}
   PYTHONHASHSEED: "0"
   PYTHON_COVERAGE_MIN_LINE: "38"
   PYTHON_COVERAGE_MIN_BRANCH: "25"
   CPP_COVERAGE_MIN_LINE: "36"
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
-  CPP_CPU_ONLY_COVERAGE_MIN_LINE: "33"
-  CPP_CPU_ONLY_COVERAGE_MIN_FUNCTION: "43"
-  CPP_CPU_ONLY_COVERAGE_MIN_BRANCH: "19"
   FULL_E2E: "false"
   RUN_COVERAGE_MAP: "false"
   REBUILD_ENGINES: "true"
@@ -61,9 +60,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$GITHUB_WORKSPACE" ]; then
-            chmod a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
+            docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
             docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
-              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
+              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_MANYLINUX_CI_IMAGE if the runner uses a different local manylinux image tag."
               exit 1
             }
             docker run --rm \
@@ -131,15 +131,19 @@ jobs:
             echo "CI mode: branch/manual unit gates"
           fi
 
-      - name: Setup TensorRT-Model-Connect
+      - name: Start CI container
         timeout-minutes: 5
-        run: bash .github/scripts/run-gha-stage.sh setup
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Build trtmc pip package
+        timeout-minutes: 30
+        run: bash .github/scripts/run-gha-stage.sh package
 
       - name: Impact analysis
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh impact
 
-      - name: Build all
+      - name: Build C++ test executables
         timeout-minutes: 15
         run: bash .github/scripts/run-gha-stage.sh build
 
@@ -211,3 +215,8 @@ jobs:
             coverage_map.json
             coverage/
             e2e_artifacts/
+            dist/*.whl
+
+      - name: Stop CI container
+        if: always()
+        run: docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true

@@ -14,6 +14,14 @@ import time
 
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from .text_generation import (
+    _distributed_runtime_config,
+    _ensure_distributed_runtime_env,
+    _extract_rank_zero_stdout,
+    _maybe_start_gpu_memory_sampler,
+    _strip_mpi_stream_tags,
+    _wrap_distributed_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +53,33 @@ class EncoderOnlyRunner:
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
 
+        distributed_runtime = _distributed_runtime_config(case)
+        if distributed_runtime:
+            _ensure_distributed_runtime_env(case, ctx, env)
+            extra_env = distributed_runtime.get("env", {})
+            if isinstance(extra_env, dict):
+                env.update({str(k): str(v) for k, v in extra_env.items()})
+            cmd = _wrap_distributed_command(cmd, case, env)
+
         logger.info("Running encoder-only: %s", " ".join(cmd))
         t0 = time.monotonic()
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=600,
-        )
+        memory_sampler = _maybe_start_gpu_memory_sampler(
+            distributed_runtime, ctx, case, env)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=env, timeout=600,
+            )
+        finally:
+            memory_meta = memory_sampler.stop() if memory_sampler is not None else None
         elapsed = time.monotonic() - t0
+        stdout_for_parse = (
+            _extract_rank_zero_stdout(result.stdout)
+            if distributed_runtime else result.stdout.strip()
+        )
+        stderr_for_display = (
+            _strip_mpi_stream_tags(result.stderr)
+            if distributed_runtime else result.stderr
+        )
 
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
@@ -62,18 +91,26 @@ class EncoderOnlyRunner:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)
 
-        data = _parse_encoder_output(result.stdout.strip())
+        data = _parse_encoder_output(stdout_for_parse)
+
+        metadata = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+        }
+        if distributed_runtime:
+            metadata["distributed_runtime"] = distributed_runtime
+            metadata["rank_zero_stdout"] = stdout_for_parse
+            metadata["stderr_without_mpi_tags"] = stderr_for_display
+        if memory_meta is not None:
+            metadata["gpu_memory"] = memory_meta
 
         return StageOutput(
             stage_name=stage.name,
             data=data,
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stdout": result.stdout or "",
-                "stderr": result.stderr or "",
-            },
+            metadata=metadata,
         )
 
 
