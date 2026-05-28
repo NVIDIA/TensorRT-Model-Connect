@@ -113,15 +113,20 @@ def build_standard_decoder_engine(
         Serialized engine plan bytes.
     """
     import os as _os
+    # Mark the graph as honoring the internal decoder role contract. This is
+    # embedded in the mutable config for family helpers that need to branch on
+    # the active engine layout while building.
+    config.raw["_decoder_engine_layout_supported"] = True
+    decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
+
     gemma_post_norm_residual = _uses_gemma_post_norm_residual(config)
     attention_softcap = _attention_logit_softcap(config)
     if gemma_post_norm_residual and activation == "silu":
         activation = config.hidden_act or "gelu_pytorch_tanh"
 
-    # Dispatch to the dual-profile builder by default (one engine, two
-    # optimization profiles — Profile 0 = batched prefill, Profile 1 =
-    # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
-    # insertion through every projection matmul via
+    # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
+    # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
+    # every projection matmul via
     # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
     #
     # The legacy single-profile graph below stays in place for paths the
@@ -140,10 +145,13 @@ def build_standard_decoder_engine(
         or debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
-        or attention_softcap is not None
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
-    if not _dual_profile_disabled_for:
+    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "split prefill engine is not supported for this standard decoder "
+            "configuration")
+    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -157,6 +165,7 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
             verbose=verbose,
+            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
@@ -335,6 +344,7 @@ def build_standard_decoder_engine(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    final_logit_softcap = config.raw.get("final_logit_softcapping")
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
     # ---------------------------------------------------------------
@@ -494,6 +504,10 @@ def build_standard_decoder_engine(
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
                                         dtype=work_np_dtype)
 
+    if final_logit_softcap is not None and float(final_logit_softcap) > 0.0:
+        logits = graph_ops.add_tanh_softcap(
+            network, logits, float(final_logit_softcap), scalar_shape=(1, 1))
+
     # Logits output: always FP32 for accurate argmax/sampling
     if work_trt_dtype != trt.float32:
         logits_cast = network.add_cast(logits, trt.float32)
@@ -516,7 +530,7 @@ def build_standard_decoder_engine(
     # Build engine
     # ---------------------------------------------------------------
     if verbose:
-        print(f"[trtmc-build] Building TRT engine ({num_layers} layers, "
+        print(f"[trtmc build] Building TRT engine ({num_layers} layers, "
               f"hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, "
               f"mlp={mlp_size}, "
               f"cache={max_cache_length}, precision={precision}) ...",
