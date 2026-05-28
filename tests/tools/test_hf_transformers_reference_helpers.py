@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+
+import pytest
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.references import hf_transformers
 from tests.e2e_harness.references.hf_transformers import (
     HfTransformersReference,
     _decode_vl_generated_text,
+    _json_output_reader,
+    _npy_output_reader,
     _normalize_nemotron_labs_diffusion_mode,
+    _read_text_artifact,
     _vl_fallback_prompt,
     _vl_prompt_has_image_placeholder,
+    run_reference_subprocess,
 )
 
 
@@ -72,6 +79,103 @@ def test_nemotron_labs_diffusion_mode_aliases() -> None:
         _normalize_nemotron_labs_diffusion_mode("linear-speculation-lora")
         == "linear_spec_lora"
     )
+
+
+def test_run_reference_subprocess_loads_artifacts(monkeypatch, tmp_path) -> None:
+    json_path = tmp_path / "out.json"
+    npy_path = tmp_path / "out.npy"
+    text_path = tmp_path / "out.txt"
+
+    def _fake_run(cmd, **kwargs):
+        import numpy as np
+
+        assert cmd == ["/ref/python", "-c", "print('ok')"]
+        assert kwargs["timeout"] == 5
+        assert kwargs["env"]["LD_LIBRARY_PATH"] == "/libs"
+        json_path.write_text(json.dumps({"answer": 42}), encoding="utf-8")
+        np.save(npy_path, np.array([1, 2, 3], dtype=np.int32))
+        text_path.write_text("done", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="warn\n")
+
+    monkeypatch.setattr(hf_transformers.subprocess, "run", _fake_run)
+
+    out = run_reference_subprocess(
+        command=["/ref/python", "-c", "print('ok')"],
+        timeout_s=5,
+        label="hf_helper",
+        artifact_dir=str(tmp_path),
+        case_name="case-a",
+        stage_name="full_generation",
+        env={"LD_LIBRARY_PATH": "/libs"},
+        output_readers=(
+            _json_output_reader(str(json_path)),
+            _npy_output_reader(str(npy_path), "values", path_key="values_path"),
+        ),
+        text_reader=lambda: _read_text_artifact(str(text_path)),
+        include_stdio_metadata=True,
+        metadata={"trust_remote_code": False},
+        failure_label="HF helper",
+    )
+
+    assert out.stage_name == "full_generation"
+    assert out.data["answer"] == 42
+    assert out.data["values_path"] == str(npy_path)
+    assert out.data["values"].tolist() == [1, 2, 3]
+    assert out.text == "done"
+    assert out.metadata == {
+        "returncode": 0,
+        "stdout": "OK\n",
+        "stderr": "warn\n",
+        "trust_remote_code": False,
+    }
+
+
+def test_run_reference_subprocess_nonzero_saves_full_stderr(
+    monkeypatch, tmp_path
+) -> None:
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="bad stderr")
+
+    monkeypatch.setattr(hf_transformers.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run_reference_subprocess(
+            command=["/ref/python", "-c", "raise SystemExit(7)"],
+            timeout_s=5,
+            label="hf_helper",
+            artifact_dir=str(tmp_path),
+            case_name="case-a",
+            stage_name="full_generation",
+            failure_label="HF helper",
+        )
+
+    assert "HF helper failed for case-a (rc=7)" in str(excinfo.value)
+    assert "bad stderr" in str(excinfo.value)
+    log_path = tmp_path / "case-a" / "hf_helper_stderr.log"
+    assert log_path.read_text(encoding="utf-8") == "bad stderr"
+
+
+def test_run_reference_subprocess_timeout_saves_stderr(monkeypatch, tmp_path) -> None:
+    def _fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"], stderr="late stderr")
+
+    monkeypatch.setattr(hf_transformers.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run_reference_subprocess(
+            command=["/ref/python", "-c", "while True: pass"],
+            timeout_s=5,
+            label="hf_helper",
+            artifact_dir=str(tmp_path),
+            case_name="case-a",
+            stage_name="full_generation",
+            failure_label="HF helper",
+        )
+
+    assert "HF helper timed out for case-a" in str(excinfo.value)
+    assert "late stderr" in str(excinfo.value)
+    log_path = tmp_path / "case-a" / "hf_helper_stderr.log"
+    assert log_path.read_text(encoding="utf-8") == "late stderr"
 
 
 def test_nemotron_labs_diffusion_reference_uses_custom_auto_model_path(

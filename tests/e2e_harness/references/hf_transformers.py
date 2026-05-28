@@ -14,7 +14,9 @@ import sys
 import tempfile
 import textwrap
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
@@ -171,6 +173,157 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
 def _normalize_nemotron_labs_diffusion_mode(mode: object) -> str:
     normalized = str(mode or "").strip().lower().replace("-", "_")
     return _NEMOTRON_LABS_DIFFUSION_MODES.get(normalized, normalized)
+
+
+ReferenceOutputReader = Callable[[], dict[str, Any]]
+
+
+def _coerce_stream_text(stream: object) -> str:
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode(errors="replace")
+    return str(stream)
+
+
+def _read_text_artifact(path: str, *, encoding: str = "utf-8") -> str:
+    artifact_path = Path(path)
+    if not artifact_path.is_file():
+        return ""
+    return artifact_path.read_text(encoding=encoding)
+
+
+def _json_output_reader(path: str, *, encoding: str = "utf-8") -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        artifact_path = Path(path)
+        if not artifact_path.is_file():
+            return {}
+        return json.loads(artifact_path.read_text(encoding=encoding))
+
+    return _reader
+
+
+def _json_text_reader(
+    path: str, key: str = "text", *, encoding: str = "utf-8"
+) -> Callable[[], str]:
+    def _reader() -> str:
+        data = _json_output_reader(path, encoding=encoding)()
+        value = data.get(key, "")
+        return "" if value is None else str(value)
+
+    return _reader
+
+
+def _npy_output_reader(
+    path: str,
+    data_key: str,
+    *,
+    path_key: str = "",
+    allow_pickle: bool = False,
+) -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        artifact_path = Path(path)
+        if not artifact_path.is_file():
+            return {}
+        import numpy as np
+
+        data: dict[str, Any] = {}
+        if path_key:
+            data[path_key] = path
+        data[data_key] = np.load(artifact_path, allow_pickle=allow_pickle)
+        return data
+
+    return _reader
+
+
+def _existing_path_reader(path: str, data_key: str) -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        return {data_key: path} if Path(path).is_file() else {}
+
+    return _reader
+
+
+def _reference_env(ctx: RunContext) -> dict[str, str]:
+    env = dict(os.environ)
+    if ctx.ld_library_path:
+        env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+    return env
+
+
+def run_reference_subprocess(
+    *,
+    command: Sequence[str],
+    timeout_s: float,
+    label: str,
+    artifact_dir: str,
+    case_name: str,
+    stage_name: str,
+    env: Mapping[str, str] | None = None,
+    output_readers: Iterable[ReferenceOutputReader] = (),
+    text_reader: Callable[[], str] | None = None,
+    logits_reader: Callable[[], Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    include_stdio_metadata: bool = False,
+    failure_label: str | None = None,
+) -> StageOutput:
+    """Run a reference subprocess and build the matching StageOutput."""
+    failure_prefix = failure_label or label.replace("_", " ")
+    cmd = list(command)
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=dict(env) if env is not None else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - t0
+        stderr = _coerce_stream_text(exc.stderr)
+        truncated, log_path = save_full_stderr(
+            stderr, artifact_dir, label, case_name
+        )
+        msg = f"{failure_prefix} timed out for {case_name} after {elapsed:.0f}s"
+        if truncated:
+            msg += f":\n{truncated}"
+        if log_path:
+            msg += f" (full stderr: {log_path})"
+        raise RuntimeError(msg) from exc
+    except Exception as exc:
+        raise RuntimeError(f"{failure_prefix} failed for {case_name}: {exc}") from exc
+    elapsed = time.monotonic() - t0
+
+    if result.returncode != 0:
+        truncated, log_path = save_full_stderr(
+            result.stderr or "", artifact_dir, label, case_name
+        )
+        msg = (
+            f"{failure_prefix} failed for {case_name} "
+            f"(rc={result.returncode}):\n{truncated}"
+        )
+        if log_path:
+            msg += f" (full stderr: {log_path})"
+        raise RuntimeError(msg)
+
+    data: dict[str, Any] = {}
+    for reader in output_readers:
+        data.update(reader() or {})
+
+    output_metadata: dict[str, Any] = {"returncode": result.returncode}
+    if include_stdio_metadata:
+        output_metadata.update({"stdout": result.stdout, "stderr": result.stderr})
+    if metadata:
+        output_metadata.update(dict(metadata))
+
+    return StageOutput(
+        stage_name=stage_name,
+        data=data,
+        text=text_reader() if text_reader is not None else None,
+        logits=logits_reader() if logits_reader is not None else None,
+        timing_s=elapsed,
+        metadata=output_metadata,
+    )
 
 
 class HfTransformersReference:
@@ -332,58 +485,23 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
         logger.info("HF reference: running %s", case.name)
-        t0 = time.monotonic()
-        try:
-            result = subprocess.run(
-                [python, "-c", script],
-                capture_output=True, text=True, timeout=1800,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            elapsed = time.monotonic() - t0
-            raise RuntimeError(
-                f"HF reference timed out for {case.name} after {elapsed:.0f}s"
-            )
-        except Exception as e:
-            raise RuntimeError(f"HF reference failed for {case.name}: {e}") from e
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_full_generation", case.name)
-            msg = f"HF reference failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        # Read generated text
-        text = ""
-        if Path(text_path).is_file():
-            text = Path(text_path).read_text(encoding="utf-8")
-
-        data = {}
-        if Path(logits_path).is_file():
-            data["logits_path"] = logits_path
-
-        meta = {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "trust_remote_code": trust_remote_code,
-        }
-
-        return StageOutput(
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_full_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
             stage_name=stage.name,
-            data=data,
-            text=text,
-            logits=logits_path if Path(logits_path).is_file() else None,
-            timing_s=elapsed,
-            metadata=meta,
+            env=_reference_env(ctx),
+            output_readers=(_existing_path_reader(logits_path, "logits_path"),),
+            text_reader=lambda: _read_text_artifact(text_path),
+            logits_reader=(
+                lambda: logits_path if Path(logits_path).is_file() else None
+            ),
+            metadata={"trust_remote_code": trust_remote_code},
+            include_stdio_metadata=True,
+            failure_label="HF reference",
         )
 
     def _run_nemotron_labs_diffusion_generation(
@@ -573,76 +691,47 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
         logger.info(
             "HF reference: running %s with Nemotron Labs Diffusion %s mode",
             case.name,
             generation_mode,
         )
-        t0 = time.monotonic()
-        try:
-            result = subprocess.run(
-                [python, "-c", script],
-                capture_output=True, text=True, timeout=1800,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            elapsed = time.monotonic() - t0
-            raise RuntimeError(
-                f"HF reference timed out for {case.name} after {elapsed:.0f}s"
-            )
-        except Exception as e:
-            raise RuntimeError(f"HF reference failed for {case.name}: {e}") from e
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr,
-                ctx.artifacts_dir or "",
-                "hf_nemotron_labs_diffusion",
-                case.name,
-            )
-            msg = (
-                f"HF reference failed for {case.name} "
-                f"(rc={result.returncode}):\n{truncated}"
-            )
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        text = ""
-        if Path(text_path).is_file():
-            text = Path(text_path).read_text(encoding="utf-8")
-        token_ids = []
-        eos_token_id = None
-        if Path(tokens_path).is_file():
-            token_payload = json.loads(Path(tokens_path).read_text(encoding="utf-8"))
-            raw_token_ids = token_payload.get("token_ids", [])
-            if isinstance(raw_token_ids, list):
-                token_ids = [int(token) for token in raw_token_ids]
-            if token_payload.get("eos_token_id") is not None:
-                eos_token_id = int(token_payload["eos_token_id"])
-
-        return StageOutput(
-            stage_name=stage.name,
-            data={
+        def _nemotron_outputs() -> dict[str, Any]:
+            token_ids = []
+            eos_token_id = None
+            if Path(tokens_path).is_file():
+                token_payload = json.loads(
+                    Path(tokens_path).read_text(encoding="utf-8")
+                )
+                raw_token_ids = token_payload.get("token_ids", [])
+                if isinstance(raw_token_ids, list):
+                    token_ids = [int(token) for token in raw_token_ids]
+                if token_payload.get("eos_token_id") is not None:
+                    eos_token_id = int(token_payload["eos_token_id"])
+            return {
                 "generation_mode": generation_mode,
                 "text_path": text_path if Path(text_path).is_file() else "",
                 "tokens_path": tokens_path if Path(tokens_path).is_file() else "",
                 "token_ids": token_ids,
                 "eos_token_id": eos_token_id,
-            },
-            text=text,
-            timing_s=elapsed,
+            }
+
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_nemotron_labs_diffusion",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_nemotron_outputs,),
+            text_reader=lambda: _read_text_artifact(text_path),
             metadata={
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
                 "trust_remote_code": trust_remote_code,
                 "generation_mode": generation_mode,
             },
+            include_stdio_metadata=True,
+            failure_label="HF reference",
         )
 
 
@@ -747,33 +836,17 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_encoder_only",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF encoder-only",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_encoder_only", case.name)
-            msg = f"HF encoder-only failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     @staticmethod
     def _resolve_image_path(image_path: str) -> str:
@@ -851,34 +924,17 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_embedding",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF embedding ref",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_embedding", case.name)
-            msg = (f"HF embedding ref failed for {case.name} "
-                   f"(rc={result.returncode}):\n{truncated}")
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_image_classification_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -955,42 +1011,17 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=900, env=env,
-        )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_image_classification", case.name)
-            msg = (
-                f"HF image classification failed for {case.name} "
-                f"(rc={result.returncode}):\n{truncated}"
-            )
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-
-        return StageOutput(
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=900,
+            label="hf_image_classification",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
             stage_name=stage.name,
-            data=data,
-            timing_s=elapsed,
-            metadata={
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            },
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            include_stdio_metadata=True,
+            failure_label="HF image classification",
         )
 
     def _run_segmentation_ref(
@@ -1033,60 +1064,44 @@ class HfTransformersReference:
             print(f"OK classes={{class_map.max() + 1}}")
         """)
 
+        def _segmentation_outputs() -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            if Path(output_path).is_file():
+                data["class_map_path"] = output_path
+                import numpy as np
+
+                data["class_map"] = np.load(output_path)
+
+                try:
+                    from PIL import Image
+
+                    cmap = data["class_map"]
+                    num_classes = int(cmap.max()) + 1
+                    np.random.seed(42)
+                    palette = np.random.randint(
+                        0, 255, (num_classes, 3), dtype=np.uint8
+                    )
+                    palette[0] = [0, 0, 0]
+                    colored = palette[cmap]
+                    viz_path = output_path.replace(".npy", "_viz.png")
+                    Image.fromarray(colored).save(viz_path)
+                    data["viz_path"] = viz_path
+                except Exception as e:
+                    logger.warning("Failed to save segmentation viz: %s", e)
+            return data
+
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_segmentation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_segmentation_outputs,),
+            failure_label="HF segmentation",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_segmentation", case.name)
-            msg = f"HF segmentation failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data["class_map_path"] = output_path
-            import numpy as np
-            data["class_map"] = np.load(output_path)
-
-            # Save colorized PNG for human inspection
-            try:
-                from PIL import Image
-                cmap = data["class_map"]
-                num_classes = int(cmap.max()) + 1
-                # Simple colormap: class index -> hue
-                h, w = cmap.shape
-                rgb = np.zeros((h, w, 3), dtype=np.uint8)
-                for c in range(num_classes):
-                    mask = cmap == c
-                    # Distribute hues evenly across classes
-                    hue = int(255 * c / max(num_classes, 1))
-                    rgb[mask] = [hue, 180, 200 if c > 0 else 40]
-                # Convert HSV-like to simple distinguishable colors
-                np.random.seed(42)
-                palette = np.random.randint(0, 255, (num_classes, 3), dtype=np.uint8)
-                palette[0] = [0, 0, 0]  # background black
-                colored = palette[cmap]
-                viz_path = output_path.replace(".npy", "_viz.png")
-                Image.fromarray(colored).save(viz_path)
-                data["viz_path"] = viz_path
-            except Exception as e:
-                logger.warning("Failed to save segmentation viz: %s", e)
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_reranking_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -1168,33 +1183,17 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_reranking",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF reranking",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_reranking", case.name)
-            msg = f"HF reranking failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_speech_to_text_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -1263,35 +1262,18 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_speech_to_text",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            text_reader=_json_text_reader(output_path),
+            failure_label="HF speech-to-text",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_speech_to_text", case.name)
-            msg = f"HF speech-to-text failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        text = ""
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-            text = data.get("text", "")
-
-        return StageOutput(
-            stage_name=stage.name, data=data, text=text, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_canary_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -1367,36 +1349,18 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="nemo_canary_stt",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            text_reader=_json_text_reader(output_path),
+            failure_label="NeMo Canary reference",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "nemo_canary_stt", case.name)
-            msg = (f"NeMo Canary reference failed for {case.name} "
-                   f"(rc={result.returncode}):\n{truncated}")
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        text = ""
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-            text = data.get("text", "")
-
-        return StageOutput(
-            stage_name=stage.name, data=data, text=text, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_object_detection_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -1451,33 +1415,17 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_object_detection",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF object detection",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_object_detection", case.name)
-            msg = f"HF object detection failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
 
     def _run_text_to_audio_ref(
@@ -1566,36 +1514,20 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_text_to_audio",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(
+                _json_output_reader(output_path),
+                _existing_path_reader(wav_path, "wav_path"),
+            ),
+            failure_label="HF text-to-audio",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_text_to_audio", case.name)
-            msg = (f"HF text-to-audio failed for {case.name} "
-                   f"(rc={result.returncode}):\n{truncated}")
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-        if Path(wav_path).is_file():
-            data["wav_path"] = wav_path
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
     def _run_vl_full_generation(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -1702,38 +1634,18 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=1800, env=env,
-        )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_vl_generation", case.name)
-            msg = (f"HF VL generation failed for {case.name} "
-                   f"(rc={result.returncode}):\n{truncated}")
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        text = ""
-        if Path(text_path).is_file():
-            text = Path(text_path).read_text(encoding="utf-8")
-
-        return StageOutput(
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_vl_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
             stage_name=stage.name,
-            data={"text": text},
-            text=text,
-            timing_s=elapsed,
-            metadata={"returncode": result.returncode,
-                       "trust_remote_code": trust_remote_code},
+            env=_reference_env(ctx),
+            output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
+            text_reader=lambda: _read_text_artifact(text_path),
+            metadata={"trust_remote_code": trust_remote_code},
+            failure_label="HF VL generation",
         )
 
     def _run_prompted_segmentation_ref(
@@ -1828,38 +1740,21 @@ class HfTransformersReference:
         """)
 
         python = ctx.reference_python_path() or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_prompted_segmentation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(
+                _json_output_reader(output_path),
+                _existing_path_reader(masks_path, "masks_path"),
+                _existing_path_reader(segmented_image_path, "segmented_image_path"),
+            ),
+            failure_label="HF prompted segmentation",
         )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_prompted_segmentation", case.name)
-            msg = (f"HF prompted segmentation failed for {case.name} "
-                   f"(rc={result.returncode}):\n{truncated}")
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
-        if Path(masks_path).is_file():
-            data["masks_path"] = masks_path
-        if Path(segmented_image_path).is_file():
-            data["segmented_image_path"] = segmented_image_path
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
 
 
 plugin = HfTransformersReference()
