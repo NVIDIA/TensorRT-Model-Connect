@@ -8,3 +8,5 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+cosmos-reason1-7b         XFAIL  (qwen2_5_vl-based but bundle build fails on Cosmos-specific weight layout differences from vanilla Qwen2.5-VL; needs qwen_vl plugin extension)
+cosmos-reason2-2b         XFAIL  (qwen3_vl-based; HF reference fails with "Image features and image tokens do not match" — prompt format needs image placeholder tokens not yet handled by the harness)
