@@ -472,6 +472,22 @@ class TestSharedModules:
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
+    def test_shared_builders_directory_all_models(self, imap):
+        """builders/default_decoder.py -> all models."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/builders/default_decoder.py", imap)
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
+    def test_shared_builder_utils_all_models(self, imap):
+        """builders/utils.py is shared builder support."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/builders/utils.py",
+            imap,
+        )
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
     def test_config_all_models(self, imap):
         """config.py -> all models."""
         match = test_impact.classify_file(

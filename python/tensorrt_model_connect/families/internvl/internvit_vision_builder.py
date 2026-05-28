@@ -33,6 +33,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
+from ...builders.utils import create_builder_context
 
 trt = trt_compat.get_trt()
 
@@ -316,11 +317,13 @@ def build_internvit_vision_engine(
               f"attn_style={attn_style}, ln_style={ln_style}",
               file=sys.stderr)
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    trt_builder = trt.Builder(logger)
-    network = trt_builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = trt_builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=2 << 30,
+    )
+    trt_builder = builder_context.builder
+    network = builder_context.network
+    trt_config = builder_context.config
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([eps_val], dtype=np.float32))

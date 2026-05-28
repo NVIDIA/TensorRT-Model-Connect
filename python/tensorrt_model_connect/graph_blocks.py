@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # blocks themselves).
 # ---------------------------------------------------------------------------
 
-def _make_matmul_fn(network, dtype, quant_ctx):
+def make_matmul_fn(network, dtype, quant_ctx):
     """Create a matmul callable that routes through quant_ctx if present.
 
     Returns a function: (lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor
@@ -54,6 +54,9 @@ def _make_matmul_fn(network, dtype, quant_ctx):
                 network, lhs, lhs_w, rhs_w, rhs_weights, weight_name,
                 dtype=dtype)
         return matmul
+
+
+_make_matmul_fn = make_matmul_fn
 
 
 def infer_kv_attention_size(

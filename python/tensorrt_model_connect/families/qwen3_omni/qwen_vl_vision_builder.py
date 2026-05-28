@@ -26,6 +26,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
+from ...builders.utils import create_builder_context
 
 trt = trt_compat.get_trt()
 
@@ -226,11 +227,13 @@ def build_qwen_vl_vision_engine(
               f"merged={num_merged}, embed={embed_dim}, "
               f"text_hidden={text_hidden_size}", file=sys.stderr)
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=2 << 30,
+    )
+    builder = builder_context.builder
+    network = builder_context.network
+    trt_config = builder_context.config
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([eps_val], dtype=np.float32))
@@ -670,11 +673,13 @@ def build_qwen3_vl_vision_engine(
               f"embed={embed_dim}, text_hidden={text_hidden_size}, "
               f"deepstack={deepstack_indexes}", file=sys.stderr)
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=2 << 30,
+    )
+    builder = builder_context.builder
+    network = builder_context.network
+    trt_config = builder_context.config
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([eps_val], dtype=np.float32))
