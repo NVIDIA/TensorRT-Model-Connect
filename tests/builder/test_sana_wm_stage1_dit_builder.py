@@ -261,7 +261,7 @@ def test_add_rmsnorm_uses_runtime_rounded_weight_values() -> None:
 
 def test_add_layernorm_no_affine_uses_registered_bf16_plugin(monkeypatch) -> None:
     ml_dtypes = pytest.importorskip("ml_dtypes")
-    monkeypatch.delenv("TRTMC_SANA_WM_LAYER_NORM_PLUGIN", raising=False)
+    monkeypatch.setenv("TRTMC_SANA_WM_LAYER_NORM_PLUGIN", "1")
     network = _FakeNetwork()
     creator = _FakePluginCreator()
     monkeypatch.setattr(
@@ -1124,11 +1124,31 @@ def test_lower_sana_wm_stage1_gdn_forward_components_unrolls_frames() -> None:
     )
 
 
+def test_create_sana_wm_gdn_plugin_is_opt_in(monkeypatch) -> None:
+    creator = _FakePluginCreator()
+    monkeypatch.delenv("TRTMC_SANA_WM_GDN_PLUGIN", raising=False)
+    monkeypatch.setattr(
+        stage1_dit_builder,
+        "_get_sana_wm_gdn_plugin_creator",
+        lambda trt_module: creator,
+    )
+
+    plugin = stage1_dit_builder._create_sana_wm_gdn_plugin(
+        _FakeTrtWithPlugin,
+        mode=0,
+        reverse_output=False,
+    )
+
+    assert plugin is None
+    assert creator.created == []
+
+
 def test_lower_sana_wm_stage1_gdn_forward_components_uses_registered_plugin(
     monkeypatch,
 ) -> None:
     network = _FakeNetwork()
     creator = _FakePluginCreator()
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "1")
     monkeypatch.setattr(
         stage1_dit_builder,
         "_get_sana_wm_gdn_plugin_creator",
@@ -1197,6 +1217,7 @@ def test_lower_sana_wm_stage1_gdn_forward_components_uses_registered_plugin(
 def test_lower_sana_wm_stage1_gdn_core_prefers_combined_plugin(monkeypatch) -> None:
     network = _FakeNetwork()
     creator = _FakePluginCreator()
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "1")
     monkeypatch.setattr(
         stage1_dit_builder,
         "_get_sana_wm_gdn_plugin_creator",
@@ -1264,6 +1285,7 @@ def test_lower_sana_wm_stage1_gdn_core_prefers_combined_plugin(monkeypatch) -> N
 def test_lower_sana_wm_stage1_gdn_core_uses_raw_fused_plugin(monkeypatch) -> None:
     network = _FakeNetwork()
     creator = _FakePluginCreator()
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "1")
     monkeypatch.setenv("TRTMC_SANA_WM_RAW_GDN_PLUGIN", "1")
     monkeypatch.setattr(
         stage1_dit_builder,
@@ -1359,6 +1381,7 @@ def test_lower_sana_wm_stage1_gdn_core_uses_raw_fused_plugin(monkeypatch) -> Non
 
 def test_add_t2i_modulate_uses_registered_bf16_plugin(monkeypatch) -> None:
     ml_dtypes = pytest.importorskip("ml_dtypes")
+    monkeypatch.setenv("TRTMC_SANA_WM_T2I_MODULATE_PLUGIN", "1")
     network = _FakeNetwork()
     creator = _FakePluginCreator()
     monkeypatch.setattr(
@@ -1392,6 +1415,7 @@ def test_add_t2i_modulate_uses_registered_bf16_plugin(monkeypatch) -> None:
 def test_lower_sana_wm_stage1_camera_forward_uses_registered_plugin(monkeypatch) -> None:
     network = _FakeNetwork()
     creator = _FakePluginCreator()
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "1")
     monkeypatch.setattr(
         stage1_dit_builder,
         "_get_sana_wm_gdn_plugin_creator",

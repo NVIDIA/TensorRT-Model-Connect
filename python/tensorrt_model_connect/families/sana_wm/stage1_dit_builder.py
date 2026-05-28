@@ -834,6 +834,8 @@ def _create_sana_wm_gdn_plugin(
     head_dim: int | None = None,
     norm_eps: float | None = None,
 ) -> Any | None:
+    if os.environ.get("TRTMC_SANA_WM_GDN_PLUGIN", "0") in ("0", "false", "False"):
+        return None
     creator = _get_sana_wm_gdn_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
         return None
@@ -888,7 +890,7 @@ def _create_sana_wm_patch_embed_plugin(
     in_channels: int,
     kernel_shape: tuple[int, int, int],
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_PATCH_EMBED_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_PATCH_EMBED_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_patch_embed_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -939,7 +941,7 @@ def _create_sana_wm_timestep_plugin(
     frequency_dim: int,
     hidden_size: int,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_TIMESTEP_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_TIMESTEP_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_timestep_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1009,7 +1011,7 @@ def _create_sana_wm_gate_proj_plugin(
     output_dim: int,
     activation: int = 0,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_GATE_PROJ_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_GATE_PROJ_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_gate_proj_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1057,7 +1059,7 @@ def _apply_sana_wm_decay_plugin(
     trt_module: Any,
     name: str,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_DECAY_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_DECAY_PLUGIN", "0") in ("0", "false", "False"):
         return None
     add_plugin = getattr(network, "add_plugin_v2", None)
     if add_plugin is None:
@@ -1099,7 +1101,7 @@ def _add_sana_wm_bf16_linear_plugin(
     name: str,
     activation: int = 0,
 ) -> Any | None:
-    if not _is_bf16_dtype(dtype) or os.environ.get(env_var, "1") in (
+    if not _is_bf16_dtype(dtype) or os.environ.get(env_var, "0") in (
         "0",
         "false",
         "False",
@@ -1145,7 +1147,7 @@ def _add_sana_wm_bf16_linear_plugin(
 
 
 def _create_sana_wm_t2i_modulate_plugin(trt_module: Any) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_T2I_MODULATE_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_T2I_MODULATE_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_t2i_modulate_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginFieldCollection"):
@@ -1158,7 +1160,7 @@ def _create_sana_wm_t2i_modulate_plugin(trt_module: Any) -> Any | None:
 
 
 def _create_sana_wm_layer_norm_plugin(trt_module: Any, *, eps: float) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_LAYER_NORM_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_LAYER_NORM_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_layer_norm_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1187,7 +1189,7 @@ def _create_sana_wm_short_conv_plugin(
     weight: np.ndarray,
     bias: np.ndarray | None,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_SHORT_CONV_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_SHORT_CONV_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_short_conv_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1236,7 +1238,7 @@ def _create_sana_wm_qk_rope_plugin(
     k_norm_weight: np.ndarray,
     torch_rms: bool = False,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_QK_ROPE_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_QK_ROPE_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_qk_rope_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1301,7 +1303,7 @@ def _create_sana_wm_cam_prep_plugin(
     q_norm_weight: np.ndarray,
     k_norm_weight: np.ndarray,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_CAMERA_PREP_PLUGIN", "1") in (
+    if os.environ.get("TRTMC_SANA_WM_CAMERA_PREP_PLUGIN", "0") in (
         "0",
         "false",
         "False",
@@ -1363,7 +1365,7 @@ def _create_sana_wm_rope_plugin(
     use_double: bool = False,
     output_bf16: bool = False,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_ROPE_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_ROPE_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_rope_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1401,7 +1403,7 @@ def _create_sana_wm_ucpe_plugin(
     inverse: bool,
     tree_reduce: bool = True,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_UCPE_PLUGIN", "1") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_UCPE_PLUGIN", "0") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_ucpe_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1533,7 +1535,7 @@ def _add_patch_embed3d(
         and _is_bf16_dtype(dtype)
         and patch_size == (1, 1, 1)
         and (kernel_t, kernel_h, kernel_w) == (1, 1, 1)
-        and os.environ.get("TRTMC_SANA_WM_PATCH_EMBED_LINEAR_PLUGIN", "1")
+        and os.environ.get("TRTMC_SANA_WM_PATCH_EMBED_LINEAR_PLUGIN", "0")
         not in ("0", "false", "False")
     ):
         flatten = network.add_shuffle(inp)
@@ -2977,7 +2979,7 @@ def lower_sana_wm_stage1_camera_preamble(
     if (
         both_triton_gdn
         and _is_bf16_dtype(dtype)
-        and os.environ.get("TRTMC_SANA_WM_CAMERA_QK_NORM_PLUGIN", "1")
+        and os.environ.get("TRTMC_SANA_WM_CAMERA_QK_NORM_PLUGIN", "0")
         not in ("0", "false", "False")
         and hasattr(network, "add_plugin_v2")
     ):
