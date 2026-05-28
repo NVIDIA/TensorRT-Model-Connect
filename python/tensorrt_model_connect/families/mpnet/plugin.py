@@ -24,6 +24,10 @@ from ...checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
 )
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from .encoder_builder import build_encoder_engine
 
 
@@ -214,7 +218,9 @@ class MpnetPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
         public_module = sys.modules.get(__package__)
         compute_relative_position_bias = getattr(
             public_module,
@@ -231,6 +237,18 @@ class MpnetPlugin:
             bias_matrix = compute_relative_position_bias(
                 max_cache_length, num_buckets, num_heads, bias_table)
             weights["relative_position_bias"] = bias_matrix
+
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="MPNet tensor-parallel builds")
+            if quant_ctx is not None:
+                raise ValueError("MPNet tensor-parallel builds do not support quantization")
+            from .tp_builder import build_tp_encoder_engine
+            return build_tp_encoder_engine(
+                config, weights,
+                max_seq_length=max_cache_length,
+                verbose=verbose,
+                parallel_config=parallel)
 
         return builder(
             config, weights,

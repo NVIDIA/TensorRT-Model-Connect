@@ -53,7 +53,7 @@ class EncoderPlugin final : public IPipelinePlugin {
         }
 
         auto loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, engine_section), "engine_plan", opts);
+            ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(), opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<EncoderPipeline>(std::move(loaded.module),

@@ -1,0 +1,57 @@
+{
+  "name": "deberta-base-tp4",
+  "trace_id": "IT-E2E-DEBERTA-TP4-01",
+  "hf_id": "microsoft/deberta-base",
+  "bundle": "deberta-base-tp4.trtfb",
+  "family": "deberta",
+  "runtime_strategy": "encoder_only",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 1,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "notes": "DeBERTa TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as deberta-base.",
+  "core": false,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ]
+}
