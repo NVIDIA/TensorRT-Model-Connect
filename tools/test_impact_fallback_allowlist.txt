@@ -197,6 +197,7 @@ shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/bundle
 shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/config.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/tp_builder.py # shared Torch-TensorRT TP builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/graph_blocks.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/graph_ops.py # shared Python builder surface; broad builder impact is intentional
