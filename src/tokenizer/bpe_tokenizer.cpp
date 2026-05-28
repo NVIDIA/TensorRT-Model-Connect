@@ -1172,6 +1172,15 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
+    static bool is_space_split_pre_tokenizer(const nlohmann::json& pt,
+                                             const std::string& pt_type) {
+        if (pt_type != "Split")
+            return false;
+        if (!pt.contains("pattern") || !pt["pattern"].contains("String"))
+            return false;
+        return pt["pattern"]["String"].get<std::string>() == " ";
+    }
+
     void detect_pre_tokenizer(const nlohmann::json& j) {
         mUsePreTokenizer = true;
         mPreTokenizerVariant = pretok::Variant::kGpt2;
@@ -1187,9 +1196,7 @@ class BpeTokenizer final : public ITokenizer {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
-        } else if (pt_type == "Split" && pt.contains("pattern") &&
-                   pt["pattern"].contains("String") &&
-                   pt["pattern"]["String"].get<std::string>() == " ") {
+        } else if (is_space_split_pre_tokenizer(pt, pt_type)) {
             // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
             // pre-tokenizer with spaces already normalized to U+2581.
             mUsePreTokenizer = false;
@@ -1292,21 +1299,36 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
+    static bool normalizer_sequence_prepends(const nlohmann::json& norm,
+                                             const std::string& norm_type) {
+        if (norm_type != "Sequence" || !norm.contains("normalizers"))
+            return false;
+        for (auto& sub : norm["normalizers"]) {
+            if (sub.value("type", "") == "Prepend")
+                return true;
+        }
+        return false;
+    }
+
+    static bool normalizer_replaces_space_with_sentence_piece(const nlohmann::json& norm,
+                                                              const std::string& norm_type) {
+        if (norm_type != "Replace")
+            return false;
+        if (!norm.contains("pattern") || !norm["pattern"].contains("String"))
+            return false;
+        if (norm["pattern"]["String"].get<std::string>() != " ")
+            return false;
+        return norm.value("content", "") == "\xe2\x96\x81";
+    }
+
     void detect_normalizer(const nlohmann::json& j) {
         if (!j.contains("normalizer") || j["normalizer"].is_null())
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
-        if (norm_type == "Sequence" && norm.contains("normalizers")) {
-            for (auto& sub : norm["normalizers"]) {
-                if (sub.value("type", "") == "Prepend") {
-                    mSentencePiecePrependAlways = true;
-                }
-            }
-        } else if (norm_type == "Replace" && norm.contains("pattern") &&
-                   norm["pattern"].contains("String") &&
-                   norm["pattern"]["String"].get<std::string>() == " " &&
-                   norm.value("content", "") == "\xe2\x96\x81") {
+        if (normalizer_sequence_prepends(norm, norm_type)) {
+            mSentencePiecePrependAlways = true;
+        } else if (normalizer_replaces_space_with_sentence_piece(norm, norm_type)) {
             // Gemma replaces spaces with ▁ but does not prepend ▁ to the
             // first token. Preserve the old prepend-if-missing behavior for
             // Metaspace-style SentencePiece models.
