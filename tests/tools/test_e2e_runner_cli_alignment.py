@@ -15,10 +15,12 @@ from tests.e2e_harness.references import hf_diffusers
 from tests.e2e_harness.runners import (
     audio_speech,
     diffusion,
+    embedding,
     neural_operator,
     object_detection,
     omni,
     segmentation,
+    text_generation,
 )
 
 
@@ -126,6 +128,75 @@ def test_neural_operator_runner_accepts_branch_only_inputs(monkeypatch, tmp_path
     assert out.metadata["input_mode"] == "branch"
 
 
+def test_neural_operator_runner_wraps_distributed_command(monkeypatch, tmp_path):
+    case = _make_case(
+        "neural_operator",
+        inputs={"field_input": [0.1, 0.2, 0.3]},
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+                "export_env": ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"],
+            }
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    ctx.ld_library_path = "/tmp/lib"
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        stdout = (
+            "[1,0]<stdout>:Output [3]: 1 2 3\n"
+            "[1,1]<stdout>:Output [3]: 1 2 3\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(neural_operator.subprocess, "run", _fake_run)
+
+    out = neural_operator.NeuralOperatorRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["mpirun", "--tag-output", "-np", "4"]
+    assert "-x" in cmd
+    assert "TRTMC_NCCL_RENDEZVOUS" in captured["env"]
+    assert out.data["output_field"] == [1.0, 2.0, 3.0]
+
+
+def test_neural_operator_runner_accepts_fragmented_mpi_stdout(monkeypatch, tmp_path):
+    case = _make_case(
+        "neural_operator",
+        inputs={"field_input": [0.1, 0.2, 0.3]},
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+            }
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        stdout = (
+            "[1,0]<stdout>:Output [3]: 1 2 0.084"
+            "[1,1]<stdout>:Output [3]: 9 9 9\n"
+            "[1,0]<stdout>:77899432182312\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(neural_operator.subprocess, "run", _fake_run)
+
+    out = neural_operator.NeuralOperatorRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    assert out.data["output_field"] == [1.0, 2.0, 0.08477899432182312]
+
+
 def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     case = _make_case(
         "text_to_audio",
@@ -162,6 +233,42 @@ def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     assert "audio_magpie.temperature=0.6" in cmd
     assert "audio_magpie.seed=42" in cmd
     assert "TRTMC_MAGPIE_SEED" not in captured["env"]
+    assert out.metadata["command"] == cmd
+
+
+def test_bark_distributed_audio_runner_wraps_mpirun_once(monkeypatch, tmp_path):
+    case = _make_case(
+        "text_to_audio",
+        inputs={"prompt": "hello"},
+        family="bark",
+        runtime_strategy="text_to_audio_bark",
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+            },
+        },
+        determinism={"seed": 42},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(audio_speech.subprocess, "run", _fake_run)
+
+    out = audio_speech.TextToAudioRunner().run_stage(
+        case, StageSpec(name="generate"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["mpirun", "--tag-output", "-np", "4"]
+    assert cmd.count("mpirun") == 1
+    assert "trtmc_rank_audio" in cmd
+    assert "audio_bark.seed=42" in cmd
     assert out.metadata["command"] == cmd
 
 
@@ -452,6 +559,56 @@ def test_omni_runner_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, 
     assert "--stage" not in cmd
     assert out.metadata["entrypoint"] == "embed"
     assert out.data["embedding"] == [0.1, 0.2]
+
+
+def test_embedding_parser_accepts_fragmented_json_from_mpirun() -> None:
+    stdout = '{"embedding": [0.1, 0.2,\n 0.3], "dim": 3}\n'
+
+    assert embedding._parse_embedding(stdout) == [0.1, 0.2, 0.3]
+
+
+def test_text_generation_runner_maps_diffusion_mode_flags(monkeypatch, tmp_path):
+    case = _make_case(
+        "text_generation_causal",
+        inputs={
+            "prompt": "hello",
+            "max_new_tokens": 32,
+            "generation_mode": "diffusion",
+            "block_length": 32,
+            "threshold": 0.9,
+        },
+        family="nemotron_labs_diffusion",
+        runtime_strategy="nemotron_labs_diffusion",
+        ci_lane="acceptance",
+        reference_family="nemotron_labs_diffusion_model_card",
+        user_contract="model_card_generation_parity",
+        metadata={"contract_config": {}},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        output_path = cmd[cmd.index("-o") + 1]
+        tmp_path.joinpath(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write('{"id":0,"generated":"ok","token_ids":[1,2,3]}\n')
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(text_generation.subprocess, "run", _fake_run)
+
+    out = text_generation.TextGenerationCausalRunner().run_stage(
+        case, StageSpec(name="full_generation"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--generation-mode" in cmd
+    assert "diffusion" in cmd
+    assert "--block-length" in cmd
+    assert "--threshold" in cmd
+    assert "-o" in cmd
+    assert out.data["token_ids"] == [1, 2, 3]
+    assert out.metadata["cpp"]["command"] == cmd
 
 
 def test_composite_runner_uses_run_without_stage_flag(monkeypatch, tmp_path):

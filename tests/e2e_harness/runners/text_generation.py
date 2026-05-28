@@ -150,8 +150,9 @@ def _wrap_distributed_command(
     export_env = config.get("export_env", ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"])
     if isinstance(export_env, list) and Path(launcher).name == "mpirun":
         export_names = [str(name) for name in export_env]
-        if "TRTMC_NCCL_RENDEZVOUS" in env and "TRTMC_NCCL_RENDEZVOUS" not in export_names:
-            export_names.append("TRTMC_NCCL_RENDEZVOUS")
+        for name in ("TRTMC_NCCL_RENDEZVOUS", "TRTMC_EMBEDDING_STDOUT"):
+            if name in env and name not in export_names:
+                export_names.append(name)
         for name in export_names:
             if name in env:
                 prefix.extend(["-x", name])

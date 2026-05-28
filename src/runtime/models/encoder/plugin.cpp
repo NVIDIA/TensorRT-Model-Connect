@@ -7,6 +7,9 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <cstdint>
+#include <string>
+
 namespace trtmc {
 
 namespace {

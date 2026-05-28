@@ -107,6 +107,8 @@ class TestQwenPlugin:
         assert "final_norm" in weights
         assert "w_out" in weights
         assert weights["_attention_size"] == self.HIDDEN
+        assert weights["_kv_attention_size"] == self.KV_HEADS * (
+            self.HIDDEN // self.HEADS)
         assert weights["_mlp_size"] == self.MLP
 
     def test_transpose_applied(self, tmp_path):
