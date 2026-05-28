@@ -114,35 +114,18 @@ def _resolve_vae_params(vae_dir: str) -> dict[str, Any]:
     return d
 
 
-def _vae_arch_supported(vae_params: dict[str, Any]) -> tuple[bool, str | None]:
-    """Return (supported, reason) for the causal_vae_3d builder.
+def _is_wan22_vae(vae_params: dict[str, Any]) -> bool:
+    """Detect the Wan 2.2 VAE shape from the diffusers config.
 
-    The v1 builder targets the Wan 2.1 VAE shape exactly. Wan 2.2's VAE
-    adds patch_size=2, is_residual=True, asymmetric encoder/decoder dims,
-    and scale_factor_spatial=16 — none of which the v1 builder models.
+    Wan 2.2 sets patch_size=2 + asymmetric encoder/decoder base_dim +
+    scale_factor_spatial=16. Any one of these flags switches dispatch to
+    the wan22 VAE builder.
     """
-    if vae_params["patch_size"] != 1:
-        return False, (
-            f"VAE patch_size={vae_params['patch_size']} (Wan 2.2 input-patch "
-            f"downsample) not modeled by the v1 causal_vae_3d_builder"
-        )
-    if vae_params["is_residual"]:
-        return False, (
-            "VAE is_residual=True (Wan 2.2 residual blocks) not modeled by "
-            "the v1 causal_vae_3d_builder"
-        )
-    if vae_params["base_dim"] != vae_params["decoder_base_dim"]:
-        return False, (
-            f"VAE encoder base_dim={vae_params['base_dim']} differs from "
-            f"decoder_base_dim={vae_params['decoder_base_dim']} (Wan 2.2 "
-            f"asymmetric encoder/decoder) not modeled by the v1 builder"
-        )
-    if vae_params["scale_factor_spatial"] not in (8,):
-        return False, (
-            f"VAE scale_factor_spatial={vae_params['scale_factor_spatial']} "
-            f"(Wan 2.2 uses 16) not modeled by the v1 builder"
-        )
-    return True, None
+    return (
+        vae_params["patch_size"] != 1
+        or vae_params["base_dim"] != vae_params["decoder_base_dim"]
+        or vae_params["scale_factor_spatial"] != 8
+    )
 
 
 # Wan 2.2 specific latents_mean / std — diffusers ships these as part of the
@@ -209,6 +192,10 @@ class WanT2VPlugin:
         from .standard_dit_tp_builder import (
             build_standard_dit_engine as build_standard_dit_tp_engine)
         from .causal_vae_3d_builder import build_causal_vae_3d_engine, load_vae_weights
+        from .wan22_causal_vae_3d_decoder_builder import (
+            build_wan22_causal_vae_3d_decoder_engine,
+            load_vae_weights_wan22,
+        )
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
@@ -229,6 +216,7 @@ class WanT2VPlugin:
         dit_p = _resolve_dit_params(transformer_dir)
         vae_p = _resolve_vae_params(vae_dir)
         is_wan22 = (dit_p["in_channels"] == 48) or (vae_p["z_dim"] == 48)
+        use_wan22_vae = _is_wan22_vae(vae_p)
 
         if parallel.enabled:
             validate_dit_tp(
@@ -237,17 +225,6 @@ class WanT2VPlugin:
                 ffn_dim=dit_p["ffn_dim"],
                 parallel=parallel.for_rank(0),
                 feature="Wan tensor parallel",
-            )
-
-        vae_ok, vae_reason = _vae_arch_supported(vae_p)
-        if not vae_ok:
-            raise NotImplementedError(
-                f"Wan 2.2 VAE not yet supported by the v1 builder: {vae_reason}. "
-                f"Detected from {Path(vae_dir) / 'config.json'!s}. The DiT "
-                f"refactor in this PR lets Wan 2.2 *DiT* engines compile, "
-                f"but the VAE differences (patch_size, is_residual, asymmetric "
-                f"encoder/decoder dims, scale_factor_spatial=16) need a "
-                f"separate VAE builder revision."
             )
 
         # Video dimensions from config (defaults match the Wan 2.1 HF reference)
@@ -332,26 +309,58 @@ class WanT2VPlugin:
             else:
                 dit_plan = build_standard_dit_engine(dit_weights, **common)
 
-        # 3. Causal 3D VAE decoder — config-driven dims
-        print("[wan-t2v] Loading VAE decoder weights ...", file=sys.stderr)
-        with timed_weight_loading(build_timing, "vae_decoder"):
-            vae_weights = load_vae_weights(
-                vae_dir,
-                z_dim=vae_p["z_dim"], base_dim=vae_p["base_dim"],
-                dim_mult=vae_p["dim_mult"],
-                num_res_blocks=vae_p["num_res_blocks"],
-                norm_type="l2_channel_norm",
-            )
-        with timed_trt_compile(build_timing, "vae_decoder"):
-            vae_plan = build_causal_vae_3d_engine(
-                vae_weights,
-                z_dim=vae_p["z_dim"], base_dim=vae_p["base_dim"],
-                dim_mult=vae_p["dim_mult"],
-                num_res_blocks=vae_p["num_res_blocks"],
-                temporal_upsample=vae_p["temporal_upsample"],
-                h_lat=h_lat, w_lat=w_lat,
-                norm_type="l2_channel_norm", verbose=verbose,
-            )
+        # 3. Causal 3D VAE decoder — config-driven dims, with separate Wan 2.2
+        # path that handles patch_size=2, decoder_base_dim, and the singular
+        # ``.upsampler.`` weight prefix.
+        print(
+            f"[wan-t2v] Loading VAE decoder weights "
+            f"({'Wan 2.2' if use_wan22_vae else 'Wan 2.1'} VAE) ...",
+            file=sys.stderr,
+        )
+        if use_wan22_vae:
+            with timed_weight_loading(build_timing, "vae_decoder"):
+                vae_weights = load_vae_weights_wan22(
+                    vae_dir,
+                    z_dim=vae_p["z_dim"],
+                    decoder_base_dim=vae_p["decoder_base_dim"],
+                    dim_mult=vae_p["dim_mult"],
+                    num_res_blocks=vae_p["num_res_blocks"],
+                )
+            # h_lat / w_lat above used scale_factor_spatial=16 — so they are
+            # already the post-pixel-shuffle latent rows/cols. The internal
+            # builder runs spatial upsamples to get to h_lat * 8, w_lat * 8
+            # and the patch_size=2 pixel-shuffle does the last 2x.
+            with timed_trt_compile(build_timing, "vae_decoder"):
+                vae_plan = build_wan22_causal_vae_3d_decoder_engine(
+                    vae_weights,
+                    z_dim=vae_p["z_dim"],
+                    decoder_base_dim=vae_p["decoder_base_dim"],
+                    dim_mult=vae_p["dim_mult"],
+                    num_res_blocks=vae_p["num_res_blocks"],
+                    temporal_upsample=vae_p["temporal_upsample"],
+                    h_lat=h_lat, w_lat=w_lat,
+                    patch_size=vae_p["patch_size"],
+                    verbose=verbose,
+                )
+        else:
+            with timed_weight_loading(build_timing, "vae_decoder"):
+                vae_weights = load_vae_weights(
+                    vae_dir,
+                    z_dim=vae_p["z_dim"], base_dim=vae_p["base_dim"],
+                    dim_mult=vae_p["dim_mult"],
+                    num_res_blocks=vae_p["num_res_blocks"],
+                    norm_type="l2_channel_norm",
+                )
+            with timed_trt_compile(build_timing, "vae_decoder"):
+                vae_plan = build_causal_vae_3d_engine(
+                    vae_weights,
+                    z_dim=vae_p["z_dim"], base_dim=vae_p["base_dim"],
+                    dim_mult=vae_p["dim_mult"],
+                    num_res_blocks=vae_p["num_res_blocks"],
+                    temporal_upsample=vae_p["temporal_upsample"],
+                    h_lat=h_lat, w_lat=w_lat,
+                    norm_type="l2_channel_norm", verbose=verbose,
+                )
 
         # 4. Preprocessor weights (DiT prelayers that live outside the engine)
         preprocessor_weights = _serialize_preprocessor_weights(dit_weights)
