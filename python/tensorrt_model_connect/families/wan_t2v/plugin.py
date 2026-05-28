@@ -97,20 +97,31 @@ def _resolve_dit_params(transformer_dir: str) -> dict[str, Any]:
 
 
 def _resolve_vae_params(vae_dir: str) -> dict[str, Any]:
-    """Read VAE architecture from vae/config.json, fall back to Wan 2.1."""
+    """Read VAE architecture from vae/config.json, fall back to Wan 2.1.
+
+    Also surfaces ``latents_mean`` and ``latents_std`` when present (Wan 2.2
+    ships them inside vae/config.json — 48 values each. Wan 2.1 does not
+    and falls back to the hardcoded 16-value tables in this module).
+
+    Handles the diffusers typo: ``temperal_downsample`` (in some configs)
+    is the same field as ``temporal_upsample`` semantically.
+    """
     cfg = _read_json(Path(vae_dir) / "config.json")
     d = dict(_WAN21_DEFAULTS["vae"])
     for key in d.keys():
         if key in cfg:
             d[key] = cfg[key]
-    # Normalize tuple fields stored as lists in JSON.
+    # `temperal_downsample` is the diffusers field name in some configs
+    # (note the typo). It encodes the same encoder downsample pattern as
+    # our `temporal_upsample` default; values match.
+    if "temperal_downsample" in cfg and "temporal_upsample" not in cfg:
+        d["temporal_upsample"] = cfg["temperal_downsample"]
     d["dim_mult"] = tuple(d["dim_mult"])
     d["temporal_upsample"] = tuple(d["temporal_upsample"])
-    # If decoder uses a different base_dim than the encoder, the diffusers
-    # config exposes it as `decoder_base_dim`. When None the decoder reuses
-    # the encoder's base_dim.
     if d["decoder_base_dim"] is None:
         d["decoder_base_dim"] = d["base_dim"]
+    d["latents_mean"] = cfg.get("latents_mean")
+    d["latents_std"] = cfg.get("latents_std")
     return d
 
 
@@ -164,6 +175,7 @@ class WanT2VPlugin:
             weights["_text_encoder_dir"] = str(model_path / "text_encoder")
             weights["_transformer_dir"] = str(model_path / "transformer")
             weights["_vae_dir"] = str(model_path / "vae")
+            weights["_scheduler_dir"] = str(model_path / "scheduler")
         else:
             raise ValueError(
                 f"Expected diffusers format with model_index.json in {model_dir}")
@@ -382,6 +394,7 @@ class WanT2VPlugin:
 
         transformer_dir = config.raw.get("_transformer_dir")
         vae_dir = config.raw.get("_vae_dir")
+        scheduler_dir = config.raw.get("_scheduler_dir")
         if transformer_dir and vae_dir:
             dit_p = _resolve_dit_params(transformer_dir)
             vae_p = _resolve_vae_params(vae_dir)
@@ -391,6 +404,8 @@ class WanT2VPlugin:
             vae_p = dict(_WAN21_DEFAULTS["vae"])
             if vae_p["decoder_base_dim"] is None:
                 vae_p["decoder_base_dim"] = vae_p["base_dim"]
+            vae_p.setdefault("latents_mean", None)
+            vae_p.setdefault("latents_std", None)
 
         is_wan22 = (dit_p["in_channels"] == 48) or (vae_p["z_dim"] == 48)
 
@@ -398,21 +413,41 @@ class WanT2VPlugin:
         video_width = config.raw.get("video_width", 832)
         video_num_frames = config.raw.get("video_num_frames", 17)
 
-        if is_wan22:
+        # Latents normalization: prefer values from vae/config.json (Wan 2.2
+        # ships them there as 48-element tables). Fall back to the hardcoded
+        # Wan 2.1 16-element tables when the config doesn't expose them.
+        if vae_p.get("latents_mean") is not None and vae_p.get("latents_std") is not None:
+            latents_mean = list(vae_p["latents_mean"])
+            latents_std = list(vae_p["latents_std"])
+        elif is_wan22:
             latents_mean = _WAN22_LATENTS_MEAN_48
             latents_std = _WAN22_LATENTS_STD_48
-            vae_model_id = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
         else:
             latents_mean = _WAN21_DEFAULTS["latents_mean"]
             latents_std = _WAN21_DEFAULTS["latents_std"]
-            vae_model_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+
+        vae_model_id = (
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers" if is_wan22
+            else "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+        )
+
+        # flow_shift comes from scheduler/scheduler_config.json. Wan 2.1 uses
+        # 3.0, Wan 2.2 uses 5.0. Default to 3.0 for backward compat when no
+        # scheduler config is available.
+        flow_shift = 3.0
+        if scheduler_dir:
+            sched_cfg = _read_json(Path(scheduler_dir) / "scheduler_config.json")
+            if "flow_shift" in sched_cfg:
+                flow_shift = float(sched_cfg["flow_shift"])
+        elif is_wan22:
+            flow_shift = 5.0
 
         return {
             "diffusion_backend_type": "wan_3d",
             "scheduler": "flow_match_euler",
             "num_inference_steps": config.raw.get("num_inference_steps", 50),
             "guidance_scale": 5.0,
-            "flow_shift": 3.0,
+            "flow_shift": flow_shift,
             "video_height": video_height,
             "video_width": video_width,
             "video_num_frames": video_num_frames,
