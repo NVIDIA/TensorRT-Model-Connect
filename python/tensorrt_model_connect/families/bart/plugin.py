@@ -34,6 +34,7 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ... import graph_ops
+from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 
 trt = trt_compat.get_trt()
@@ -164,8 +165,23 @@ class BartPlugin:
 
         return weights
 
-    def build_engine(self, config, weights, max_cache_length, *, verbose=False, debug_layer_outputs=False):
+    def build_engine(
+        self, config, weights, max_cache_length, *, verbose=False,
+        debug_layer_outputs=False, parallel_config=None,
+    ):
         self._max_cache_length = max_cache_length
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="BART tensor-parallel decoder builds")
+            from .decoder_tp_builder import build_bart_tp_decoder_engine
+            return build_bart_tp_decoder_engine(
+                config, weights, max_cache_length,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
         dec_ffn = weights["_dec_ffn"]

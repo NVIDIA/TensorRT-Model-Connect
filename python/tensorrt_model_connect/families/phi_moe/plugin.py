@@ -37,6 +37,10 @@ from ...checkpoint_mapper import (
 )
 from ... import graph_ops
 from ... import graph_blocks
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from .standard_decoder_builder import _apply_norm, _mark_debug_output
 
 
@@ -194,12 +198,27 @@ class PhiMoEPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
         """Build TRT engine with MoE layers.
 
         The attention is standard (reuses _add_decoder_layer logic), but the MLP
         is replaced with MoE routing + expert dispatch.
         """
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="Phi-MoE tensor-parallel builds")
+            from .tp_builder import build_phi_moe_tp_engine
+            return build_phi_moe_tp_engine(
+                config, weights, max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
         attention_size: int = weights.get("_attention_size", config.attention_size)
         num_experts: int = weights["_num_experts"]
         moe_intermediate: int = weights["_moe_intermediate_size"]
