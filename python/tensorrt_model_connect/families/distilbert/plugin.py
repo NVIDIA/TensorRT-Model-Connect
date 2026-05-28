@@ -30,6 +30,10 @@ from ...checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
 )
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
 from .encoder_builder import build_encoder_engine
 
 
@@ -135,8 +139,25 @@ class DistilBertPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
         public_module = sys.modules.get(__package__)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="DistilBERT tensor-parallel builds")
+            if quant_ctx is not None:
+                raise ValueError(
+                    "DistilBERT tensor-parallel builds do not support quantization")
+            from .tp_builder import build_tp_encoder_engine
+            builder = getattr(
+                public_module, "build_tp_encoder_engine", build_tp_encoder_engine)
+            return builder(
+                config, weights,
+                max_seq_length=max_cache_length,
+                verbose=verbose,
+                parallel_config=parallel)
+
         builder = getattr(public_module, "build_encoder_engine", build_encoder_engine)
         return builder(
             config, weights,
