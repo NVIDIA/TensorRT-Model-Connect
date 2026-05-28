@@ -177,7 +177,8 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
 
     const char* data = tok_data->data();
     std::size_t size = tok_data->size();
-    const auto special_frame = detect_tokenizer_special_frame(bundle);
+    const auto special_frame =
+        add_special_tokens ? detect_tokenizer_special_frame(bundle) : TokenizerSpecialFrame{};
     const bool native_add_special = special_frame.present ? false : add_special_tokens;
 
     // Try BPE

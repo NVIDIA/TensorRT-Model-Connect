@@ -107,6 +107,40 @@ static void test_exact_special_frame_overrides_native_unigram_fallback() {
               "exact special frame adds BOS without fallback EOS");
 }
 
+static void test_exact_special_frame_respects_add_special_false() {
+    const std::string tokenizer_json = R"({
+      "model": {
+        "type": "Unigram",
+        "unk_id": 0,
+        "vocab": [
+          ["<unk>", 0.0],
+          ["<s>", 0.0],
+          ["</s>", 0.0],
+          ["\u2581", -1.0],
+          ["h", -1.0],
+          ["e", -1.0]
+        ]
+      },
+      "pre_tokenizer": {
+        "type": "Metaspace",
+        "replacement": "\u2581",
+        "add_prefix_space": true
+      }
+    })";
+    auto bundle = make_bundle_with_config_and_tokenizer(
+        R"({
+          "tokenizer_add_special_tokens": 1,
+          "tokenizer_special_prefix_ids": [1],
+          "tokenizer_special_suffix_ids": [2]
+        })",
+        tokenizer_json);
+
+    auto tokenizer = trtmc::try_create_native_tokenizer(bundle, /*add_special_tokens=*/false);
+    check(tokenizer != nullptr, "create native tokenizer with special frame disabled");
+    check_ids(tokenizer->encode("he"), {3, 4, 5},
+              "exact special frame does not override add_special_tokens=false");
+}
+
 int main() {
     test_missing_field_defaults_true();
     test_integer_false_parsed();
@@ -114,6 +148,7 @@ int main() {
     test_bool_false_parsed();
     test_bool_true_parsed();
     test_exact_special_frame_overrides_native_unigram_fallback();
+    test_exact_special_frame_respects_add_special_false();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
