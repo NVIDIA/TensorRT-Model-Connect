@@ -31,10 +31,7 @@ from ...checkpoint_mapper import (
     _has_tensor,
 )
 from ... import graph_ops
-from ...parallel_config import (
-    normalize_parallel_config,
-    require_tensorrt_11_for_tensor_parallel,
-)
+from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 
 
 trt = trt_compat.get_trt()
@@ -165,30 +162,89 @@ class DebertaPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        max_cache_length: int, *, verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
-        parallel = normalize_parallel_config(parallel_config)
-        if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="DeBERTa tensor-parallel builds")
-            if quant_ctx is not None:
-                raise ValueError("DeBERTa tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_deberta_encoder_engine
-            return build_tp_deberta_encoder_engine(
-                config, weights,
-                max_seq_length=max_cache_length,
-                verbose=verbose,
-                parallel_config=parallel)
-
-        return _build_deberta_encoder_engine(
+        return build_tp_deberta_encoder_engine(
             config, weights,
             max_seq_length=max_cache_length,
-            verbose=verbose)
+            verbose=verbose,
+            parallel_config=parallel_config)
 
 
 plugin = DebertaPlugin()
+
+
+def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
+    return np.ascontiguousarray(np.array_split(arr, tp_size, axis=-1)[rank])
+
+
+def _slice_first_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
+    return np.ascontiguousarray(np.array_split(arr, tp_size, axis=0)[rank])
+
+
+def _validate_deberta_tp(config, weights, parallel) -> None:
+    parallel.validate()
+    if not parallel.enabled:
+        return
+    if parallel.rank < 0:
+        raise ValueError("DeBERTa tensor-parallel build requires a concrete rank")
+
+    tp = parallel.tp_size
+    if config.num_attention_heads % tp != 0:
+        raise ValueError(
+            "DeBERTa tensor parallel requires num_attention_heads divisible by "
+            f"tp_size ({config.num_attention_heads} vs {tp})")
+    if config.intermediate_size % tp != 0:
+        raise ValueError(
+            "DeBERTa tensor parallel requires intermediate_size divisible by "
+            f"tp_size ({config.intermediate_size} vs {tp})")
+
+    for layer_idx in range(config.num_hidden_layers):
+        prefix = f"layer.{layer_idx}"
+        for key in (
+            f"{prefix}.w_q", f"{prefix}.w_k", f"{prefix}.w_v",
+            f"{prefix}.pos_proj", f"{prefix}.pos_q_proj",
+        ):
+            if key in weights and weights[key].shape[-1] % tp != 0:
+                raise ValueError(f"{key} output dim must be divisible by tp_size")
+        for key in (f"{prefix}.q_bias", f"{prefix}.v_bias", f"{prefix}.pos_q_proj_bias"):
+            if key in weights and weights[key].shape[0] % tp != 0:
+                raise ValueError(f"{key} dim must be divisible by tp_size")
+        if weights[f"{prefix}.w_o"].shape[0] % tp != 0:
+            raise ValueError(f"{prefix}.w_o input dim must be divisible by tp_size")
+        if weights[f"{prefix}.w_fc1"].shape[-1] % tp != 0:
+            raise ValueError(f"{prefix}.w_fc1 output dim must be divisible by tp_size")
+        if weights[f"{prefix}.w_fc2"].shape[0] % tp != 0:
+            raise ValueError(f"{prefix}.w_fc2 input dim must be divisible by tp_size")
+
+
+def shard_deberta_weights(config, weights, *, parallel):
+    """Return rank-local DeBERTa weights for the TP builder."""
+    _validate_deberta_tp(config, weights, parallel)
+    if not parallel.enabled:
+        return weights
+
+    out = type(weights)()
+    for key, value in weights.items():
+        if not isinstance(value, np.ndarray):
+            out[key] = value
+            continue
+
+        if key.endswith((".w_q", ".w_k", ".w_v", ".pos_proj", ".pos_q_proj", ".w_fc1")):
+            out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith((".q_bias", ".v_bias", ".pos_q_proj_bias", ".fc1_bias")):
+            out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith((".w_o", ".w_fc2")):
+            out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
+        else:
+            out[key] = value
+
+    out["_attention_size"] = config.attention_size // parallel.tp_size
+    out["_intermediate_size"] = config.intermediate_size // parallel.tp_size
+    out["_tensor_parallel_size"] = parallel.tp_size
+    out["_tensor_parallel_rank"] = parallel.rank
+    return out
 
 
 def _add_seq_layer_norm(network, inp, hidden_size, gamma, beta, eps):
@@ -196,13 +252,22 @@ def _add_seq_layer_norm(network, inp, hidden_size, gamma, beta, eps):
         network, inp, hidden_size, gamma, beta, eps)
 
 
-def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=False):
+def build_tp_deberta_encoder_engine(
+    config, weights, max_seq_length, *, verbose=False, parallel_config=None,
+):
+    parallel = normalize_parallel_config(parallel_config)
+    if not parallel.enabled:
+        raise ValueError(
+            "build_tp_deberta_encoder_engine requires tensor_parallel mode and tp_size > 1")
+    weights = shard_deberta_weights(config, weights, parallel=parallel)
+
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
-    num_heads = config.num_attention_heads
-    head_dim = hidden // num_heads
-    intermediate = config.intermediate_size
+    full_num_heads = config.num_attention_heads
+    num_heads = config.num_attention_heads // parallel.tp_size
+    head_dim = hidden // full_num_heads
+    intermediate = config.intermediate_size // parallel.tp_size
     eps = config.rms_norm_eps
 
     deberta_cfg = weights.get("_deberta_config", {})
@@ -289,13 +354,16 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
             scale_factor=scale_factor, attn_mask=pad_mask_reshape.get_output(0),
             rel_emb_tensor=rel_emb_tensor, c2p_pos_tensor=c2p_pos_tensor,
             p2c_pos_tensor=p2c_pos_tensor, pos_att_type=pos_att_type,
-            att_span=att_span, hidden_act=hidden_act, eps=eps)
+            att_span=att_span, hidden_act=hidden_act, eps=eps,
+            tp_size=parallel.tp_size)
 
     hidden_state.name = "hidden_states"
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc build] Building DeBERTa encoder ({num_layers} layers, hidden={hidden}, seq={max_seq_length})", file=sys.stderr)
+        print(f"[trtmc build] Building DeBERTa encoder "
+              f"({num_layers} layers, hidden={hidden}, tp={parallel.tp_size}, "
+              f"seq={max_seq_length})", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
@@ -306,7 +374,7 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
 def _add_deberta_layer(*, network, hidden, weights, prefix, hidden_size, intermediate_size,
                        num_heads, head_dim, seq_length, attn_scale, scale_factor, attn_mask,
                        rel_emb_tensor, c2p_pos_tensor, p2c_pos_tensor, pos_att_type,
-                       att_span, hidden_act, eps):
+                       att_span, hidden_act, eps, tp_size):
     attention_size = num_heads * head_dim
 
     q = graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"])
@@ -378,6 +446,7 @@ def _add_deberta_layer(*, network, hidden, weights, prefix, hidden_size, interme
     context_flat.reshape_dims = (seq_length, attention_size)
 
     attn_out = graph_ops.add_matmul_rhs_constant(network, context_flat.get_output(0), attention_size, hidden_size, weights[f"{prefix}.w_o"])
+    attn_out = add_all_reduce_sum(network, attn_out, tp_size)
     attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, weights[f"{prefix}.o_bias"])
 
     residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
@@ -387,6 +456,7 @@ def _add_deberta_layer(*, network, hidden, weights, prefix, hidden_size, interme
     fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"])
     activated = graph_ops.add_activation(network, fc1, hidden_act)
     fc2 = graph_ops.add_matmul_rhs_constant(network, activated, intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"])
+    fc2 = add_all_reduce_sum(network, fc2, tp_size)
     fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"])
 
     residual2 = network.add_elementwise(normed1, fc2, trt.ElementWiseOperation.SUM)
