@@ -23,6 +23,11 @@ from ...checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ...parallel_config import (
+    normalize_parallel_config,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
 
 
@@ -173,6 +178,7 @@ class XGLMPlugin:
                 embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights
@@ -182,7 +188,28 @@ class XGLMPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        parallel_config=None,
     ) -> bytes:
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            require_tensorrt_11_for_tensor_parallel(
+                parallel, feature="XGLM tensor-parallel builds")
+            if quant_ctx is not None:
+                raise ValueError(
+                    "XGLM tensor-parallel builds do not support quantization")
+            if debug_layer_outputs:
+                raise ValueError(
+                    "XGLM tensor-parallel builds do not support debug_layer_outputs")
+            return build_dual_profile_tp_decoder_engine(
+                config, weights, max_cache_length,
+                precision=precision, quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                mlp_type="gelu_fc",
+                position_type="learned",
+                activation="gelu",
+                verbose=verbose,
+                parallel_config=parallel)
+
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
             precision=precision, quant_ctx=quant_ctx,

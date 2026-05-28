@@ -43,3 +43,19 @@ print(
 build = "chronos"
 reference = "chronos"
 
+[profiles.internlm]
+kind = "venv"
+requirements = "python_profile_requirements/internlm.lock.txt"
+system_site_packages = true
+verification_script = '''
+import einops
+import transformers
+from transformers.cache_utils import DynamicCache
+assert hasattr(DynamicCache, "from_legacy_cache")
+print(f"einops={einops.__version__} transformers={transformers.__version__}")
+'''
+
+[family_defaults.internlm]
+build = "internlm"
+runtime = "internlm"
+reference = "internlm"

@@ -22,6 +22,7 @@ try:
     from tensorrt_model_connect.engine_builder import (
         _is_hf_model_dir,
         _detect_tokenizer_add_special_tokens,
+        _detect_tokenizer_special_frame,
         _resolve_model,
         _get_trt_version,
         _trt_abi_from_version,
@@ -90,6 +91,48 @@ class TestDetectTokenizerAddSpecialTokens:
         )
 
         assert _detect_tokenizer_add_special_tokens(tmp_path) is True
+
+    def test_detects_exact_prefix_suffix_frame(self, tmp_path, monkeypatch):
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=True):
+                ids = [11, 12]
+                return [1] + ids + [2] if add_special_tokens else ids
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, trust_remote_code=True):
+                assert Path(path) == tmp_path
+                assert trust_remote_code is True
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        assert _detect_tokenizer_special_frame(tmp_path) == ([1], [2])
+
+    def test_detects_prefix_only_frame(self, tmp_path, monkeypatch):
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=True):
+                ids = [11, 12]
+                return [1] + ids if add_special_tokens else ids
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, trust_remote_code=True):
+                assert Path(path) == tmp_path
+                assert trust_remote_code is True
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        assert _detect_tokenizer_special_frame(tmp_path) == ([1], [])
 
     def test_no_tokenizer_config(self, tmp_path):
         # No tokenizer_config.json and no transformers — should return False

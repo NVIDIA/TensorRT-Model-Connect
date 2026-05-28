@@ -525,6 +525,35 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return False
 
 
+def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[int]] | None:
+    """Return exact HF add-special prefix/suffix IDs when they are representable.
+
+    Some SentencePiece tokenizers add BOS by default but not EOS. A single
+    add-special boolean is not enough for the native C++ tokenizer to mirror
+    that behavior, so bundle the exact frame when HF exposes it as a simple
+    prefix/suffix around the no-special tokenization.
+    """
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        ids_default = list(tok.encode("hello"))
+        ids_without = list(tok.encode("hello", add_special_tokens=False))
+    except Exception:
+        return None
+
+    if ids_default == ids_without:
+        return [], []
+    if not ids_without:
+        return ids_default, []
+
+    needle_len = len(ids_without)
+    for start in range(0, len(ids_default) - needle_len + 1):
+        if ids_default[start:start + needle_len] == ids_without:
+            return ids_default[:start], ids_default[start + needle_len:]
+    return None
+
+
 def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect add-special behavior from the tokenizer embedded in diffusion bundles."""
     for tok_subdir in ("tokenizer_2", "tokenizer"):
@@ -1067,8 +1096,17 @@ def build_bundle(
 
     # 5. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
-    tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
-        model_dir_path)
+    tokenizer_special_frame = _detect_tokenizer_special_frame(model_dir_path)
+    if tokenizer_special_frame is None:
+        tokenizer_special_prefix_ids: list[int] = []
+        tokenizer_special_suffix_ids: list[int] = []
+        tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
+            model_dir_path)
+    else:
+        tokenizer_special_prefix_ids, tokenizer_special_suffix_ids = (
+            tokenizer_special_frame)
+        tokenizer_add_special_tokens = bool(
+            tokenizer_special_prefix_ids or tokenizer_special_suffix_ids)
     _add_build_timing(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)
@@ -1160,6 +1198,11 @@ def build_bundle(
         cfg_dict["precision"] = precision
         cfg_dict["tokenizer_add_special_tokens"] = int(
             tokenizer_add_special_tokens)
+        if tokenizer_special_frame is not None:
+            cfg_dict["tokenizer_special_prefix_ids"] = (
+                tokenizer_special_prefix_ids)
+            cfg_dict["tokenizer_special_suffix_ids"] = (
+                tokenizer_special_suffix_ids)
         cfg_dict["decoder_engine_layout"] = actual_decoder_engine_layout
         if quant_plan is not None:
             cfg_dict["quantization"] = quant_plan.as_config_dict()
