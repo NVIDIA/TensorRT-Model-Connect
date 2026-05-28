@@ -1172,8 +1172,7 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
-    static bool is_space_split_pre_tokenizer(const nlohmann::json& pt,
-                                             const std::string& pt_type) {
+    static bool is_space_split_pre_tokenizer(const nlohmann::json& pt, const std::string& pt_type) {
         if (pt_type != "Split")
             return false;
         if (!pt.contains("pattern") || !pt["pattern"].contains("String"))
