@@ -10,7 +10,9 @@
 #include "utils/json_helpers.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,12 @@ namespace {
 struct TensorParallelRuntimeConfig {
     bool enabled{false};
     int32_t tp_size{1};
+};
+
+struct TextModuleRuntime {
+    ModuleCreateOptions options;
+    DistributedRuntimeGroup tp_group;
+    std::string engine_section{"engine_plan"};
 };
 
 TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
@@ -39,9 +47,80 @@ int32_t dim_at(const std::vector<int64_t>& shape, std::size_t idx) {
     return shape.size() > idx ? static_cast<int32_t>(shape[idx]) : 0;
 }
 
-int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+int32_t decoder_cache_row_width(const TrtModule& module, const std::string& tensor_name,
+                                const BaseConfig& config) {
+    const int32_t from_engine = dim_at(module.tensor_shape(tensor_name), 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+TextModuleRuntime initialize_text_module_runtime(const TensorParallelRuntimeConfig& tp_config) {
+    TextModuleRuntime runtime;
+    if (!tp_config.enabled)
+        return runtime;
+
+    runtime.tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+    runtime.engine_section = tp_engine_section_name(runtime.tp_group.rank);
+    return runtime;
+}
+
+void configure_text_module_options(TextModuleRuntime& runtime,
+                                   const ModuleCreateOptions& base_options,
+                                   const TensorParallelRuntimeConfig& tp_config) {
+    runtime.options = base_options;
+    if (!tp_config.enabled)
+        return;
+
+    runtime.options.distributed_communicator = runtime.tp_group.communicator;
+    runtime.options.distributed_owner = runtime.tp_group.owner;
+}
+
+KvCacheNames build_kv_cache_names(const BaseConfig& config) {
+    const auto& io = config.io_map;
+    KvCacheNames kv_names;
+    for (int32_t i = 0; i < config.num_layers; ++i) {
+        kv_names.cache_k.push_back(expand_layer_name(io.cache_k_pattern, i));
+        kv_names.cache_v.push_back(expand_layer_name(io.cache_v_pattern, i));
+        kv_names.present_k.push_back(expand_layer_name(io.present_k_pattern, i));
+        kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
+    }
+    return kv_names;
+}
+
+LoadedModule load_text_module(const PipelineContext& ctx, TextModuleRuntime& runtime,
+                              const std::shared_ptr<CudaStream>& stream) {
+    auto loaded =
+        load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
+                                  runtime.engine_section.c_str(), runtime.options);
+    loaded.module->keep_alive(stream);
+    if (runtime.tp_group.owner)
+        loaded.module->keep_alive(runtime.tp_group.owner);
+    return loaded;
+}
+
+std::unique_ptr<TrtModule> load_vision_module(IBackend* backend, const BundleFile& bundle,
+                                              const ModuleCreateOptions& options,
+                                              const std::shared_ptr<CudaStream>& stream,
+                                              bool declared_in_config) {
+    auto loaded = try_load_trt_module_from_plan(backend, find_section(bundle, "vision_engine_plan"),
+                                                "vision_engine_plan", options);
+    if (loaded.module && loaded.module->ok()) {
+        loaded.module->keep_alive(stream);
+        std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
+        return std::move(loaded.module);
+    }
+    if (declared_in_config) {
+        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
+                     "deserialization failed"
+                  << std::endl;
+    }
+    return nullptr;
+}
+
+std::string bundle_section_text(const BundleFile& bundle, const std::string& section_name) {
+    const auto* section = find_section(bundle, section_name);
+    if (section && !section->empty())
+        return std::string(section->begin(), section->end());
+    return {};
 }
 
 } // namespace
@@ -52,9 +131,7 @@ class VLPlugin final : public IPipelinePlugin {
         load_ffi_kernels_from_bundle(ctx.bundle);
 
         const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        DistributedRuntimeGroup tp_group;
-        if (tp_config.enabled)
-            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
+        auto text_runtime = initialize_text_module_runtime(tp_config);
 
         auto shared_stream = std::make_shared<CudaStream>();
         if (!shared_stream->ok())
@@ -65,31 +142,16 @@ class VLPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        auto decoder_opts = opts;
-        if (tp_config.enabled) {
-            decoder_opts.distributed_communicator = tp_group.communicator;
-            decoder_opts.distributed_owner = tp_group.owner;
-        }
+        configure_text_module_options(text_runtime, opts, tp_config);
 
-        // Build KvCacheNames from IoMap patterns.
-        const auto& io = ctx.config.io_map;
-        KvCacheNames kv_names;
-        for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
-            kv_names.cache_k.push_back(expand_layer_name(io.cache_k_pattern, i));
-            kv_names.cache_v.push_back(expand_layer_name(io.cache_v_pattern, i));
-            kv_names.present_k.push_back(expand_layer_name(io.present_k_pattern, i));
-            kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
-        }
+        KvCacheNames kv_names = build_kv_cache_names(ctx.config);
 
-        const std::string engine_section =
-            tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
-        auto loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(),
-            decoder_opts);
-        loaded.module->keep_alive(shared_stream);
+        auto loaded = load_text_module(ctx, text_runtime, shared_stream);
 
         cudaStream_t stream = loaded.module->stream();
-        int32_t kv_dim = decoder_cache_row_width(*loaded.module, ctx.config);
+        const std::string cache_k_name =
+            kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
+        int32_t kv_dim = decoder_cache_row_width(*loaded.module, cache_k_name, ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> state =
             std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
@@ -108,29 +170,14 @@ class VLPlugin final : public IPipelinePlugin {
         bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
 
         // Try to load the vision encoder engine from the bundle.
-        std::unique_ptr<TrtModule> vision_module;
-        auto vision_loaded = try_load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "vision_engine_plan",
-            opts);
-        if (vision_loaded.module && vision_loaded.module->ok()) {
-            vision_loaded.module->keep_alive(shared_stream);
-            vision_module = std::move(vision_loaded.module);
-            std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
-        } else if (has_vision_engine) {
-            std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
-                         "deserialization failed"
-                      << std::endl;
-        }
+        std::unique_ptr<TrtModule> vision_module =
+            load_vision_module(ctx.backend, ctx.bundle, opts, shared_stream, has_vision_engine);
 
         // Build VL preprocessing config from bundle's config.json +
         // preprocessor_config.json sections.
-        std::string config_text, preproc_text;
-        const auto* config_sec = find_section(ctx.bundle, "config.json");
-        if (config_sec && !config_sec->empty())
-            config_text.assign(config_sec->begin(), config_sec->end());
-        const auto* preproc_sec = find_section(ctx.bundle, "preprocessor_config.json");
-        if (preproc_sec && !preproc_sec->empty())
-            preproc_text.assign(preproc_sec->begin(), preproc_sec->end());
+        const std::string config_text = bundle_section_text(ctx.bundle, "config.json");
+        const std::string preproc_text =
+            bundle_section_text(ctx.bundle, "preprocessor_config.json");
         auto vl_preprocess = parse_vl_preprocess_config(config_text, preproc_text);
 
         return std::make_unique<VLPipeline>(std::move(loaded.module), std::move(vision_module),
