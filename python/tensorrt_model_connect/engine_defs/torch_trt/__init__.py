@@ -101,6 +101,7 @@ class TorchTrtBackend:
         *,
         precision: str = "fp16",
         verbose: bool = False,
+        parallel_config=None,
     ) -> None:
         from .compiler import build_bundle
 
@@ -109,6 +110,7 @@ class TorchTrtBackend:
         build_bundle(
             resolved_dir, output_path, max_cache_length,
             precision=precision, verbose=verbose,
+            parallel_config=parallel_config,
         )
         elapsed = time.monotonic() - t0
         print(f"[torch-trt] Done [{elapsed:.1f}s total]", file=sys.stderr)

@@ -202,6 +202,74 @@ class TestBuildBundle:
         info = TtrtBundleInfo(runtime_strategy="torchtrt_decoder")
         assert info.runtime_strategy == "torchtrt_decoder"
 
+    def test_tensor_parallel_bundle_writes_rank_sections(self, tmp_path, monkeypatch):
+        """Torch-TRT TP builds package rank-selectable engine sections."""
+        import struct
+
+        from tensorrt_model_connect.engine_defs.torch_trt import compiler
+        from tensorrt_model_connect.parallel_config import ParallelConfig
+
+        (tmp_path / "config.json").write_text(json.dumps({
+            "model_type": "patchtst",
+            "hidden_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 1,
+            "vocab_size": 0,
+        }))
+
+        class FakeModel:
+            config = SimpleNamespace(num_hidden_layers=1)
+
+        class FakeWrapper:
+            def eval(self):
+                return self
+
+        class FakePlugin:
+            name = "patchtst"
+
+            def load_model(self, *args, **kwargs):
+                return FakeModel()
+
+        class FakeStrategy:
+            name = "patchtst"
+            runtime_strategy = "patchtst_torchtrt"
+
+            def pre_export_setup(self):
+                pass
+
+            def wrap_model(self, *args, **kwargs):
+                return FakeWrapper()
+
+            def make_export_args(self, *args, **kwargs):
+                return ()
+
+        monkeypatch.setattr(compiler, "find_plugin", lambda _config: FakePlugin())
+        monkeypatch.setattr(compiler, "get_strategy", lambda _name: FakeStrategy())
+        monkeypatch.setattr(compiler, "compile_model", lambda *_, **__: b"rank-plan")
+        monkeypatch.setattr(compiler, "_inspect_engine", lambda _plan: {"inputs": {}, "outputs": {}})
+        monkeypatch.setattr(compiler, "_get_trt_version", lambda: "11.0.0")
+        monkeypatch.setattr(compiler, "_get_gpu_name", lambda: "B200")
+
+        out_path = tmp_path / "model.trtfb"
+        compiler.build_bundle(
+            str(tmp_path),
+            str(out_path),
+            parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4),
+        )
+
+        data = out_path.read_bytes()
+        header_len = struct.unpack("<Q", data[8:16])[0]
+        header = json.loads(data[16:16 + header_len])
+        sections = header["sections"]
+        assert "engine_plan" not in sections
+        assert all(f"engine_plan_tp_rank{i}" in sections for i in range(4))
+
+        cfg_offset = 16 + header_len + sections["config.json"]["offset"]
+        cfg_size = sections["config.json"]["size"]
+        cfg = json.loads(data[cfg_offset:cfg_offset + cfg_size])
+        assert cfg["tensor_parallel_mode"] == "tensor_parallel"
+        assert cfg["tensor_parallel_size"] == 4
+
 
 class TestParseModelConfig:
     """Tests for _parse_model_config — supports both config.json and model_index.json."""

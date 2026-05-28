@@ -125,6 +125,75 @@ def test_neural_operator_runner_accepts_branch_only_inputs(monkeypatch, tmp_path
     assert out.metadata["input_mode"] == "branch"
 
 
+def test_neural_operator_runner_wraps_distributed_command(monkeypatch, tmp_path):
+    case = _make_case(
+        "neural_operator",
+        inputs={"field_input": [0.1, 0.2, 0.3]},
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+                "export_env": ["LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"],
+            }
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    ctx.ld_library_path = "/tmp/lib"
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        stdout = (
+            "[1,0]<stdout>:Output [3]: 1 2 3\n"
+            "[1,1]<stdout>:Output [3]: 1 2 3\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(neural_operator.subprocess, "run", _fake_run)
+
+    out = neural_operator.NeuralOperatorRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["mpirun", "--tag-output", "-np", "4"]
+    assert "-x" in cmd
+    assert "TRTMC_NCCL_RENDEZVOUS" in captured["env"]
+    assert out.data["output_field"] == [1.0, 2.0, 3.0]
+
+
+def test_neural_operator_runner_accepts_fragmented_mpi_stdout(monkeypatch, tmp_path):
+    case = _make_case(
+        "neural_operator",
+        inputs={"field_input": [0.1, 0.2, 0.3]},
+        metadata={
+            "distributed_runtime": {
+                "enabled": True,
+                "launcher": "mpirun",
+                "world_size": 4,
+            }
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        stdout = (
+            "[1,0]<stdout>:Output [3]: 1 2 0.084"
+            "[1,1]<stdout>:Output [3]: 9 9 9\n"
+            "[1,0]<stdout>:77899432182312\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(neural_operator.subprocess, "run", _fake_run)
+
+    out = neural_operator.NeuralOperatorRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    assert out.data["output_field"] == [1.0, 2.0, 0.08477899432182312]
+
+
 def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     case = _make_case(
         "text_to_audio",

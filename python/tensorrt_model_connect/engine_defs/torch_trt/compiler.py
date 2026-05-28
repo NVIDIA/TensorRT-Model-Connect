@@ -54,6 +54,7 @@ import torch.nn as nn  # noqa: E402
 
 from .config import ModelConfig  # noqa: E402
 from ... import trt_compat  # noqa: E402
+from ...parallel_config import normalize_parallel_config  # noqa: E402
 
 PRECISION_DTYPE_MAP: dict[str, torch.dtype] = {
     "fp16": torch.float16,
@@ -71,6 +72,7 @@ def precision_to_dtype(precision: str) -> torch.dtype:
 from .families import find_plugin, ALL_PLUGINS  # noqa: E402
 from .bundle_writer import TtrtBundleInfo, BundleSection, write_bundle  # noqa: E402
 from .strategies import get_strategy  # noqa: E402
+from .tp_builder import build_torch_trt_tp_sections  # noqa: E402
 
 # Backward-compat aliases — tests and external code may import these from compiler.
 from .strategies.decoder import StatelessCacheWrapper, patch_static_cache_scatter  # noqa: F401, E402
@@ -497,6 +499,7 @@ def build_bundle(
     *,
     precision: str = "fp16",
     verbose: bool = False,
+    parallel_config=None,
 ) -> None:
     """Full pipeline: load HF model -> compile to raw TRT engine -> write .trtfb bundle.
 
@@ -519,6 +522,7 @@ def build_bundle(
     """
     model_dir_path = Path(model_dir)
     compute_dtype = precision_to_dtype(precision)
+    parallel = normalize_parallel_config(parallel_config)
     t0 = time.monotonic()
     print(
         f"[torch-trt] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
@@ -546,11 +550,21 @@ def build_bundle(
     strategy = get_strategy(strategy_name)
     print(f"[torch-trt] Strategy: {strategy.name} "
           f"(runtime_strategy={strategy.runtime_strategy})", file=sys.stderr)
+    if parallel.enabled:
+        print(
+            f"[torch-trt] Building tensor-parallel rank sections "
+            f"(tp={parallel.tp_size}) ...",
+            file=sys.stderr,
+        )
 
     # Multi-engine path: diffusion and other multi-component models.
     # The family plugin's build_components() handles loading, wrapping,
     # and compiling each component, calling compile_model() for each.
     if hasattr(plugin, 'build_components'):
+        if parallel.enabled:
+            raise NotImplementedError(
+                "Torch-TRT tensor-parallel builds are only supported for "
+                "single-engine models")
         _build_multi_engine_bundle(
             model_dir_path, plugin, config, strategy, output_path,
             precision=precision, verbose=verbose, t0=t0)
@@ -663,8 +677,17 @@ def build_bundle(
                     if normalized_strategy == "decoder_kv_cache":
                         cfg_dict["io_map"] = _decoder_io_map(config.num_hidden_layers)
                     cfg_dict["torchtrt_io_map"] = io_map
+                    cfg_dict.update(parallel.to_bundle_config_fields())
                     data = json.dumps(cfg_dict, indent=2).encode("utf-8")
                 sections.append(BundleSection(filename, data))
+
+        if parallel.enabled:
+            sections = build_torch_trt_tp_sections(
+                engine_bytes,
+                parallel_config=parallel,
+            ) + [
+                section for section in sections if section.name != "engine_plan"
+            ]
 
         write_bundle(output_path, info, sections)
         t4 = time.monotonic()

@@ -74,6 +74,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if reexec_rc is not None:
             return reexec_rc
 
+    from .parallel_config import ParallelConfig
+
+    tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
+    parallel_config = (
+        ParallelConfig(mode="tensor_parallel", tp_size=tp_size)
+        if tp_size > 1
+        else None
+    )
+
     if method_name != 'trt':
         from .engine_defs import get_engine_def
         engine_def = get_engine_def(method_name)
@@ -89,6 +98,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 max_cache_length=args.max_cache_length,
                 precision=args.precision,
                 verbose=args.verbose,
+                parallel_config=parallel_config,
             )
             return 0
         except Exception as e:
@@ -124,15 +134,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
-
-    from .parallel_config import ParallelConfig
-
-    tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
-    parallel_config = (
-        ParallelConfig(mode="tensor_parallel", tp_size=tp_size)
-        if tp_size > 1
-        else None
-    )
 
     # Resolve the registry-backed build-time config up front (before build),
     # so build-time namespaces can feed kwargs directly. Importing

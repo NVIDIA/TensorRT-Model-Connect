@@ -28,6 +28,7 @@ class BuildBackend(Protocol):
         *,
         precision: str = "fp16",
         verbose: bool = False,
+        parallel_config=None,
     ) -> None:
         """Build a .trtfb bundle from a model directory."""
         ...
