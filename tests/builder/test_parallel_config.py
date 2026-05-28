@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
+import numpy as np
 
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.parallel_config import (
@@ -39,7 +39,7 @@ def test_standard_decoder_weight_sharding_preserves_single_device() -> None:
 
 
 def test_standard_decoder_weight_sharding_slices_gelu_fc_bias() -> None:
-    cfg = ModelConfig.create_tiny("opt")
+    cfg = ModelConfig.create_tiny("gpt2")
     cfg.num_attention_heads = 4
     cfg.num_key_value_heads = 4
     cfg.intermediate_size = 32
@@ -56,10 +56,8 @@ def test_standard_decoder_weight_sharding_slices_gelu_fc_bias() -> None:
     out = shard_standard_decoder_weights(
         cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2))
 
-    np.testing.assert_array_equal(
-        out["layer.0.fc1_bias"], weights["layer.0.fc1_bias"][16:24])
-    np.testing.assert_array_equal(
-        out["layer.0.fc2_bias"], weights["layer.0.fc2_bias"])
+    np.testing.assert_array_equal(out["layer.0.fc1_bias"], weights["layer.0.fc1_bias"][16:24])
+    np.testing.assert_array_equal(out["layer.0.fc2_bias"], weights["layer.0.fc2_bias"])
     assert out["_mlp_size"] == 8
 
 
