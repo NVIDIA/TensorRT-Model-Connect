@@ -8,4 +8,4 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
-wan21-t2v-1.3b-l0-tp2    SKIP  (Wan2.1 VAE workspace alloc requests ~23GB on rank-0; combined with the rank-local denoiser plan it exceeds 24GB A30. Passes on >=32GB GPUs or with TP>=4 reducing per-rank denoiser footprint.)
+wan21-t2v-1.3b-l0         SKIP   (Wan 2.1 VAE engine carries a 23GB runtime workspace requirement that prevents deserialization alongside the denoiser engine even on A100 40GB. Engines all build; runtime gated on workspace-size optimization or >>40GB GPU.)
