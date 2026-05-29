@@ -8,6 +8,4 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
-qwen3-moe-30b-a3b-tp2    SKIP  (30B fp16 ~60 GB total, exceeds 2x A30 48 GB; passes on hosts with >= 40 GB GPUs)
-qwen3-moe-30b-a3b-instruct-2507-tp2  SKIP  (Same arch as qwen3-moe-30b-a3b-tp2; 30B fp16 ~60 GB exceeds 2x A30 48 GB. Newer Instruct-2507 variant; runs on hosts with >=40 GB GPUs.)
 qwen3-moe-tiny-random-tp2 SKIP (tiny-random has num_key_value_heads=1; TP=2 requires num_kv_heads >= tp_size; real Qwen3-MoE-30B-A3B has 4 kv_heads and works under TP2)

@@ -111,9 +111,20 @@ def _shard_qwen_moe_weights(
             out[key] = _slice_last_dim(value, rank, tp)
         elif key.endswith((".shared_expert.w_down", ".mlp.w_down", ".w_down")):
             out[key] = _slice_axis(value, 0, rank, tp)
+        elif key.endswith((".q_norm", ".k_norm")) and value.ndim == 1:
+            # Per-head norm: reshape to (num_heads, head_dim), slice the
+            # first dim for this rank, then flatten back to 1-D.
+            head_dim = int(weights.get("_attention_head_dim", 128))
+            if value.size > head_dim and value.size % head_dim == 0:
+                num_heads = value.size // head_dim
+                out[key] = _slice_axis(
+                    value.reshape(num_heads, head_dim), 0, rank, tp
+                ).reshape(-1)
+            else:
+                out[key] = value
         else:
             # Replicated: router, shared_expert_gate, embedding, norms,
-            # LM head, q_norm, k_norm.
+            # LM head.
             out[key] = value
 
     # Update size metadata if present.
