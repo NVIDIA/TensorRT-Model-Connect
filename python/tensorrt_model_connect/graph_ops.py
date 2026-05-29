@@ -51,6 +51,48 @@ def add_constant(
     return layer.get_output(0)
 
 
+def add_tanh_softcap(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    softcap: float,
+    *,
+    scalar_shape: tuple[int, ...] | None = None,
+) -> trt.ITensor:
+    """Apply ``softcap * tanh(x / softcap)`` with native TRT ops."""
+    output_dtype = inp.dtype
+    work = inp
+    if work.dtype != trt.float32:
+        work = network.add_cast(work, trt.float32).get_output(0)
+    if scalar_shape is None:
+        scalar_shape = (1,) * max(1, len(tuple(inp.shape)))
+    inv_softcap = add_constant(
+        network,
+        scalar_shape,
+        np.full(scalar_shape, 1.0 / softcap, dtype=np.float32),
+        dtype=np.float32,
+    )
+    scaled = network.add_elementwise(
+        work,
+        inv_softcap,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    capped = network.add_activation(scaled, trt.ActivationType.TANH).get_output(0)
+    softcap_const = add_constant(
+        network,
+        scalar_shape,
+        np.full(scalar_shape, softcap, dtype=np.float32),
+        dtype=np.float32,
+    )
+    result = network.add_elementwise(
+        capped,
+        softcap_const,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    if output_dtype != trt.float32:
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
+    return result
+
+
 def add_matmul_rhs_constant(
     network: trt.INetworkDefinition,
     lhs: trt.ITensor,

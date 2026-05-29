@@ -1124,9 +1124,28 @@ def test_lower_sana_wm_stage1_gdn_forward_components_unrolls_frames() -> None:
     )
 
 
-def test_create_sana_wm_gdn_plugin_is_opt_in(monkeypatch) -> None:
+def test_create_sana_wm_gdn_plugin_is_enabled_by_default(monkeypatch) -> None:
     creator = _FakePluginCreator()
     monkeypatch.delenv("TRTMC_SANA_WM_GDN_PLUGIN", raising=False)
+    monkeypatch.setattr(
+        stage1_dit_builder,
+        "_get_sana_wm_gdn_plugin_creator",
+        lambda trt_module: creator,
+    )
+
+    plugin = stage1_dit_builder._create_sana_wm_gdn_plugin(
+        _FakeTrtWithPlugin,
+        mode=0,
+        reverse_output=False,
+    )
+
+    assert plugin is creator.created[0]
+    assert creator.created[0].name == "sana_wm_gdn_0_0"
+
+
+def test_create_sana_wm_gdn_plugin_can_be_disabled(monkeypatch) -> None:
+    creator = _FakePluginCreator()
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "0")
     monkeypatch.setattr(
         stage1_dit_builder,
         "_get_sana_wm_gdn_plugin_creator",

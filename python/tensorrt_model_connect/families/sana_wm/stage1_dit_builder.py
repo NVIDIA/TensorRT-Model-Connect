@@ -834,7 +834,7 @@ def _create_sana_wm_gdn_plugin(
     head_dim: int | None = None,
     norm_eps: float | None = None,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_GDN_PLUGIN", "0") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_GDN_PLUGIN", "1") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_gdn_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
