@@ -8,8 +8,6 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
-meta-llama-3-8b-instruct        SKIP  (8B fp16 split prefill+decode engines = ~30 GB total, exceeds 24 GB A30; passes on >=32 GB GPUs; TP2 lane covers Llama 3 family validation)
-llama-3.1-8b-instruct           SKIP  (8B fp16 split prefill+decode engines = ~30 GB total, exceeds 24 GB A30; passes on >=32 GB GPUs; TP2 lane covers Llama 3.1 family validation)
 vicuna-7b-v1.5-tp2              XFAIL  (LLaMA-2 fine-tune; trtmc bundle build fails (build_fail) on first attempt with non-standard fine-tune weight format. Llama 3+ lanes cover the family.)
 llama-3.2-1b-instruct-tp2       XFAIL  (token-level argmax matches HF reference exactly (agreement=1.0, cosine=0.9999) but text-comparator reports edit-distance 0.69 due to tokenizer detokenization quirk on the 1B model. Llama-3.2-3B-Instruct-TP2 covers the 3.2 family.)
 deepseek-coder-1.3b-instruct-tp2  XFAIL  (high logit cosine (0.9931) but argmax tie-break sensitivity diverges generation early; needs sampler temperature / EOS handling tweaks to validate. The 6.7B variant shows similar generation divergence.)
