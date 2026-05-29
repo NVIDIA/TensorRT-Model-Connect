@@ -250,6 +250,8 @@ _BROAD_FALLBACK_RULES = {
 # that can reserve all GPUs for tensor-parallel E2E cases.
 _DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
 _FALLBACK_ALLOWLIST = Path("tools/test_impact_fallback_allowlist.txt")
+_PYTHON_PACKAGE_PREFIX = "python/tensorrt_model_connect/"
+_LEGACY_PYTHON_PACKAGE_PREFIX = "tensorrt_model_connect/tensorrt_model_connect/"
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -313,6 +315,28 @@ def _iter_family_python_files(families_dir: Path) -> List[tuple[str, Path]]:
         for py_file in sorted(family_dir.glob("*.py")):
             files.append((family_dir.name, py_file))
     return files
+
+
+def _repo_path(path: str) -> str:
+    return path.replace("\\", "/").strip("/")
+
+
+def _canonical_repo_path(path: str) -> str:
+    """Map legacy package paths onto the current python/ source layout."""
+    normalized = _repo_path(path)
+    if normalized.startswith(_LEGACY_PYTHON_PACKAGE_PREFIX):
+        suffix = normalized[len(_LEGACY_PYTHON_PACKAGE_PREFIX):]
+        if suffix == "cli.py":
+            suffix = "build_cli.py"
+        return _PYTHON_PACKAGE_PREFIX + suffix
+    return normalized
+
+
+def _family_source_dir(repo_root: Path) -> Path:
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
+    if families_dir.is_dir():
+        return families_dir
+    return repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
 
 
 def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
@@ -399,7 +423,7 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
-    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
+    families_dir = _family_source_dir(repo_root)
     pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
 
@@ -1476,7 +1500,7 @@ CLASSIFICATION_RULES = _classification_rules()
 
 def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     """Classify a single changed file. Lowest priority matching rule wins."""
-    path = path.replace("\\", "/").strip("/")
+    path = _canonical_repo_path(path)
     unit_tiers = _infer_unit_tiers(path)
     rebuild = _infer_rebuild_cpp(path)
 
@@ -1497,7 +1521,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     builder_tests: Set[str] = set()
     tools_tests: Set[str] = set()
     for raw_path in changed_files:
-        path = raw_path.replace("\\", "/").strip("/")
+        path = _repo_path(raw_path)
         if not path.endswith(".py"):
             continue
         if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
@@ -1583,7 +1607,14 @@ def analyze_impact(
 
     if coverage_map is not None:
         from coverage_map.select_tests import select_tests
-        sel = select_tests(changed_files, coverage_map)
+        canonical_coverage_map = {
+            _canonical_repo_path(source): tests
+            for source, tests in coverage_map.items()
+        }
+        sel = select_tests(
+            [_canonical_repo_path(path) for path in changed_files],
+            canonical_coverage_map,
+        )
         builder_tests = sel.builder_tests
         cpp_tests = sel.cpp_tests
         tools_tests = sel.tools_tests
@@ -2068,6 +2099,7 @@ def maybe_refine_match_with_diff(
     imap: ImpactMap,
 ) -> RuleMatch:
     """Narrow broad file matches when the diff is demonstrably feature-scoped."""
+    path = _canonical_repo_path(path)
     lines = _significant_diff_lines(diff_text)
     if not lines:
         return match
