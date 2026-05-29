@@ -168,9 +168,9 @@ class FakeConnectorTextModule final : public trtmc::ITrtModule {
             last_input_dtypes[name] = tensor.dtype;
             values[name] = copy_float_tensor(tensor);
         }
-        return {{"v_context", trtmc::Tensor{context_.data(), context_shape_, trtmc::DType::kFloat32}},
-                {"v_attention_mask",
-                 trtmc::Tensor{mask_.data(), mask_shape_, trtmc::DType::kFloat32}}};
+        return {
+            {"v_context", trtmc::Tensor{context_.data(), context_shape_, trtmc::DType::kFloat32}},
+            {"v_attention_mask", trtmc::Tensor{mask_.data(), mask_shape_, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
@@ -394,9 +394,9 @@ class FakeTextConnectorModule final : public trtmc::ITrtModule {
             values[name] = copy_float_tensor(tensor);
             int_value_calls[name] = copy_int_tensor(tensor);
         }
-        return {{"v_context", trtmc::Tensor{context_.data(), context_shape_, trtmc::DType::kFloat32}},
-                {"v_attention_mask",
-                 trtmc::Tensor{mask_.data(), mask_shape_, trtmc::DType::kFloat32}}};
+        return {
+            {"v_context", trtmc::Tensor{context_.data(), context_shape_, trtmc::DType::kFloat32}},
+            {"v_attention_mask", trtmc::Tensor{mask_.data(), mask_shape_, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
@@ -788,10 +788,9 @@ void test_stage1_latents_seeded_noise_is_deterministic() {
 void test_stage1_latents_seed42_matches_pytorch_cuda_bfloat16_randn() {
     const auto latents = trtmc::sana_wm_prepare_stage1_latents({0.0F}, {}, 1, 18, 1, 1, 42);
     const std::vector<float> expected{
-        0.1943359375F, 2.15625F,     -0.171875F,   0.84765625F,  -1.921875F,
-        0.65234375F,   -0.6484375F,  -0.81640625F, 0.52734375F,  -1.2734375F,
-        -1.6640625F,   -0.302734375F, -0.0927734375F, 0.19921875F, -1.1171875F,
-        1.859375F,     -0.71484375F, 0.6875F,
+        0.1943359375F,  2.15625F,     -0.171875F,  0.84765625F, -1.921875F,   0.65234375F,
+        -0.6484375F,    -0.81640625F, 0.52734375F, -1.2734375F, -1.6640625F,  -0.302734375F,
+        -0.0927734375F, 0.19921875F,  -1.1171875F, 1.859375F,   -0.71484375F, 0.6875F,
     };
 
     check(latents.values.size() == expected.size(),
@@ -805,8 +804,7 @@ void test_stage1_latents_seed42_matches_pytorch_cuda_bfloat16_randn() {
 }
 
 void test_stage1_latents_seed42_matches_pytorch_cuda_grid_stride_lanes() {
-    const auto latents =
-        trtmc::sana_wm_prepare_stage1_latents({0.0F}, {}, 1, 1245185, 1, 1, 42);
+    const auto latents = trtmc::sana_wm_prepare_stage1_latents({0.0F}, {}, 1, 1245185, 1, 1, 42);
 
     check(near(latents.values[311296], -0.96875F, 0.0F),
           "sana wm latents: seed 42 matches pytorch cuda normal4 lane one");
@@ -964,8 +962,8 @@ void test_native_stage1_solver_decodes_with_native_modules() {
         std::vector<std::string>{"input_ids", "attention_mask"});
     auto denoiser = std::make_unique<FakeTrtModule>(
         std::vector<float>(32, 0.25F), std::vector<int64_t>{2, 2, 2, 2, 2},
-        std::vector<std::string>{"x", "timestep", "y", "mask", "camera_conditions",
-                                 "raymats", "raymats_inv", "chunk_plucker"});
+        std::vector<std::string>{"x", "timestep", "y", "mask", "camera_conditions", "raymats",
+                                 "raymats_inv", "chunk_plucker"});
     auto* denoiser_ptr = denoiser.get();
     modules.stage1_denoiser = std::move(denoiser);
     modules.vae_encoder = std::make_unique<FakeTrtModule>(
@@ -1044,7 +1042,8 @@ void test_native_stage1_solver_decodes_with_native_modules() {
             check(near(first_x[moving_idx], second_x[moving_idx]),
                   "sana wm native: solver mirrors PR379 BF16 mask skip at t=1000");
             const auto& final_latents = decoder_ptr->input_value_calls[0]["latents"];
-            check(final_latents.size() == 16 && !near(first_x[moving_idx], final_latents[moving_idx]),
+            check(final_latents.size() == 16 &&
+                      !near(first_x[moving_idx], final_latents[moving_idx]),
                   "sana wm native: solver updates non-anchor latent frames after the skipped step");
             check(final_latents.size() == 16 && final_latents[moving_idx] < first_x[moving_idx],
                   "sana wm native: solver applies PR379 per-token scheduler sign");
@@ -1490,8 +1489,7 @@ void test_native_refiner_uses_split_text_connector() {
     check(result.num_frames == 1, "sana wm refiner connector: generated refined video");
     check(refiner_text_ptr->call_count == 2,
           "sana wm refiner connector: Gemma text encoder skips left-padding tokens");
-    check(refiner_text_ptr->position_ids.front() == 2 &&
-              refiner_text_ptr->position_ids.back() == 3,
+    check(refiner_text_ptr->position_ids.front() == 2 && refiner_text_ptr->position_ids.back() == 3,
           "sana wm refiner connector: valid prompt positions preserve left padding");
     check(text_connector_ptr->call_count == 1,
           "sana wm refiner connector: LTX text connector invoked once");
@@ -1507,8 +1505,7 @@ void test_native_refiner_uses_split_text_connector() {
               mask_it->second == std::vector<int32_t>({0, 0, 1, 1}),
           "sana wm refiner connector: refiner text uses left padding");
     if (!text_connector_ptr->input_value_calls.empty()) {
-        const auto& hidden =
-            text_connector_ptr->input_value_calls.front()["text_hidden_states"];
+        const auto& hidden = text_connector_ptr->input_value_calls.front()["text_hidden_states"];
         check(hidden.size() == 24 && near(hidden[0], 0.0F) && near(hidden[5], 0.0F) &&
                   near(hidden[12], 102.0F) && near(hidden[13], 1102.0F) &&
                   near(hidden[14], 2102.0F) && near(hidden[18], 203.0F),

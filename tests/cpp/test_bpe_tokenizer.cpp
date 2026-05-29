@@ -1434,8 +1434,7 @@ int main() {
         check(tok != nullptr, "gemma3_bpe_create");
 
         auto ids = tok->encode("hello world");
-        check(ids.size() == 2 && ids[0] == 12 && ids[1] == 21,
-              "gemma3_bpe_no_implicit_prefix");
+        check(ids.size() == 2 && ids[0] == 12 && ids[1] == 21, "gemma3_bpe_no_implicit_prefix");
 
         auto leading = tok->encode(" hello world");
         check(leading.size() == 2 && leading[0] == 25 && leading[1] == 21,
@@ -1443,8 +1442,7 @@ int main() {
 
         auto tok_special = trtmc::CreateBpeTokenizer(gj.data(), gj.size(), true);
         auto with_bos = tok_special->encode("hello world");
-        check(with_bos.size() == 3 && with_bos[0] == 26 && with_bos[1] == 12 &&
-                  with_bos[2] == 21,
+        check(with_bos.size() == 3 && with_bos[0] == 26 && with_bos[1] == 12 && with_bos[2] == 21,
               "gemma3_bpe_template_bos");
         auto empty_with_bos = tok_special->encode("");
         check(empty_with_bos.size() == 1 && empty_with_bos[0] == 26,
@@ -1601,7 +1599,8 @@ int main() {
         }
 
         // Without special tokens: no BOS/EOS
-        auto tok_ns = trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
+        auto tok_ns =
+            trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
         {
             auto ids = tok_ns->encode("hello");
             check(!ids.empty() && ids[0] != 200 && ids.back() != 202,

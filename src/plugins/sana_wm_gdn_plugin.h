@@ -20,8 +20,8 @@ class SanaWmGdnPlugin : public nvinfer1::IPluginV2DynamicExt {
 
     SanaWmGdnPlugin() = default;
     SanaWmGdnPlugin(Mode mode, bool reverse_output, float eps = 1.0e-6F);
-    SanaWmGdnPlugin(Mode mode, bool reverse_output, float eps, int32_t frames,
-                    int32_t head_dim, float norm_eps);
+    SanaWmGdnPlugin(Mode mode, bool reverse_output, float eps, int32_t frames, int32_t head_dim,
+                    float norm_eps);
     SanaWmGdnPlugin(const void* data, size_t length);
 
     char const* getPluginType() const noexcept override;

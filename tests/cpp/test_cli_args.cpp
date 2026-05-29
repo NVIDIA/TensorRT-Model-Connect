@@ -668,12 +668,32 @@ static void test_detect_unknown_flag_still_errors() {
 }
 
 static void test_sana_wm_model_card_alias_flags() {
-    auto args = parse({"trtmc", "generate-video", "sana.trtfb", "--output_dir", "results/demo",
-                       "--action", "w-80,jw-40,w-40,lw-60,w-100", "--intrinsics",
-                       "797.87866,830.0503,844.2675,463.7225", "--translation_speed", "0.055",
-                       "--rotation_speed_deg", "1.2", "--num_frames", "321", "--fps", "16",
-                       "--step", "60", "--cfg_scale", "5.0", "--flow_shift", "9.8", "--name",
-                       "demo_0", "--no_refiner"});
+    auto args = parse({"trtmc",
+                       "generate-video",
+                       "sana.trtfb",
+                       "--output_dir",
+                       "results/demo",
+                       "--action",
+                       "w-80,jw-40,w-40,lw-60,w-100",
+                       "--intrinsics",
+                       "797.87866,830.0503,844.2675,463.7225",
+                       "--translation_speed",
+                       "0.055",
+                       "--rotation_speed_deg",
+                       "1.2",
+                       "--num_frames",
+                       "321",
+                       "--fps",
+                       "16",
+                       "--step",
+                       "60",
+                       "--cfg_scale",
+                       "5.0",
+                       "--flow_shift",
+                       "9.8",
+                       "--name",
+                       "demo_0",
+                       "--no_refiner"});
     check(!args.parse_error, "sana wm model-card aliases no parse error");
     check(args.output_path == "results/demo", "sana wm model-card output_dir alias");
     check(args.action == "w-80,jw-40,w-40,lw-60,w-100", "sana wm model-card action");

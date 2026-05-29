@@ -339,13 +339,11 @@ CliArgs parse_args(int argc, char** argv) {
             args.camera_intrinsics = argv[++i];
             continue;
         }
-        if ((arg == "--translation-speed" || arg == "--translation_speed") &&
-            need_value(arg)) {
+        if ((arg == "--translation-speed" || arg == "--translation_speed") && need_value(arg)) {
             args.translation_speed = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
-        if ((arg == "--rotation-speed-deg" || arg == "--rotation_speed_deg") &&
-            need_value(arg)) {
+        if ((arg == "--rotation-speed-deg" || arg == "--rotation_speed_deg") && need_value(arg)) {
             args.rotation_speed_deg = static_cast<float>(std::atof(argv[++i]));
             continue;
         }

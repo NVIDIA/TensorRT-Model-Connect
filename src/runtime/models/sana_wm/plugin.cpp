@@ -6,8 +6,8 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/tokenizer.h"
 
-#include <iostream>
 #include <algorithm>
+#include <iostream>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -55,8 +55,10 @@ sana_wm_expected_temporal_tiles(const SanaWmRuntimeConfig& config, int32_t laten
     return tiles;
 }
 
-std::vector<std::pair<int32_t, int32_t>> sana_wm_expected_spatial_tiles(
-    int32_t latent_size, int32_t tile_min_size, int32_t tile_stride, bool use_tiling) {
+std::vector<std::pair<int32_t, int32_t>> sana_wm_expected_spatial_tiles(int32_t latent_size,
+                                                                        int32_t tile_min_size,
+                                                                        int32_t tile_stride,
+                                                                        bool use_tiling) {
     std::vector<std::pair<int32_t, int32_t>> tiles;
     if (!use_tiling || latent_size <= tile_min_size) {
         tiles.push_back({0, latent_size});
@@ -82,9 +84,9 @@ sana_wm_expected_vae_tile_shapes(const SanaWmRuntimeConfig& config) {
         std::max(1, config.vae_tile_sample_stride_width / config.vae_spatial_stride);
 
     const auto temporal_tiles = sana_wm_expected_temporal_tiles(config, latent_frames);
-    const bool spatial_tiled = config.vae_use_spatial_tiling &&
-                               (latent_height > tile_latent_min_height ||
-                                latent_width > tile_latent_min_width);
+    const bool spatial_tiled =
+        config.vae_use_spatial_tiling &&
+        (latent_height > tile_latent_min_height || latent_width > tile_latent_min_width);
     const auto height_tiles = sana_wm_expected_spatial_tiles(
         latent_height, tile_latent_min_height, tile_latent_stride_height, spatial_tiled);
     const auto width_tiles = sana_wm_expected_spatial_tiles(
@@ -99,9 +101,9 @@ sana_wm_expected_vae_tile_shapes(const SanaWmRuntimeConfig& config) {
 }
 
 std::vector<SanaWmVaeDecoderTile> load_sana_wm_vae_tile_modules(const PipelineContext& ctx,
-                                                                 const SanaWmRuntimeConfig& config,
-                                                                 const std::string& prefix,
-                                                                 const ModuleCreateOptions& opts) {
+                                                                const SanaWmRuntimeConfig& config,
+                                                                const std::string& prefix,
+                                                                const ModuleCreateOptions& opts) {
     std::vector<SanaWmVaeDecoderTile> tiles;
     const auto expected_shapes = sana_wm_expected_vae_tile_shapes(config);
     for (const auto& [frames, height, width] : expected_shapes) {
@@ -112,9 +114,8 @@ std::vector<SanaWmVaeDecoderTile> load_sana_wm_vae_tile_modules(const PipelineCo
         }
     }
     if (!tiles.empty() && tiles.size() != expected_shapes.size()) {
-        std::cerr << "[trtmc] Ignoring incomplete SANA-WM VAE tile plan set for " << prefix
-                  << " (" << tiles.size() << "/" << expected_shapes.size() << " present)"
-                  << std::endl;
+        std::cerr << "[trtmc] Ignoring incomplete SANA-WM VAE tile plan set for " << prefix << " ("
+                  << tiles.size() << "/" << expected_shapes.size() << " present)" << std::endl;
         tiles.clear();
     }
     return tiles;

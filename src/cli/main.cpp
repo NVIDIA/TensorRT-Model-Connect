@@ -264,8 +264,8 @@ std::optional<std::string> read_numpy_header(std::ifstream& in, const std::strin
             error = "failed to read NumPy header length from " + path;
             return std::nullopt;
         }
-        header_len = static_cast<std::uint32_t>(bytes[0]) |
-                     (static_cast<std::uint32_t>(bytes[1]) << 8U);
+        header_len =
+            static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8U);
     } else if (version[0] == 2U || version[0] == 3U) {
         unsigned char bytes[4]{};
         if (!in.read(reinterpret_cast<char*>(bytes), sizeof(bytes))) {
@@ -374,8 +374,7 @@ bool looks_like_numpy_path(const std::string& value) {
 
 bool looks_like_sana_wm_video_request(const CliArgs& args) {
     return !args.action.empty() || !args.camera_path.empty() || !args.camera_intrinsics.empty() ||
-           args.translation_speed >= 0.0F || args.rotation_speed_deg >= 0.0F ||
-           args.no_refiner;
+           args.translation_speed >= 0.0F || args.rotation_speed_deg >= 0.0F || args.no_refiner;
 }
 
 std::optional<std::vector<float>>
@@ -419,9 +418,9 @@ parse_float_values(const std::string& csv, const std::string& flag_name, std::st
     return values;
 }
 
-std::optional<std::vector<float>>
-parse_float_values_or_numpy(const std::string& value, const std::string& flag_name,
-                            std::string& error) {
+std::optional<std::vector<float>> parse_float_values_or_numpy(const std::string& value,
+                                                              const std::string& flag_name,
+                                                              std::string& error) {
     if (looks_like_numpy_path(value) || std::filesystem::exists(value))
         return read_numpy_float_array(value, error);
     return parse_float_values(value, flag_name, error);
@@ -786,9 +785,9 @@ int cmd_generate_video(const CliArgs& args) {
     }
 
     std::string prompt = args.prompt;
-    const bool model_card_prompt_file =
-        args.prompt_file.empty() && !prompt.empty() && looks_like_sana_wm_video_request(args) &&
-        std::filesystem::is_regular_file(prompt);
+    const bool model_card_prompt_file = args.prompt_file.empty() && !prompt.empty() &&
+                                        looks_like_sana_wm_video_request(args) &&
+                                        std::filesystem::is_regular_file(prompt);
     if (prompt.empty() || model_card_prompt_file) {
         std::string error;
         auto loaded = read_text_file(prompt.empty() ? args.prompt_file : prompt, error);
