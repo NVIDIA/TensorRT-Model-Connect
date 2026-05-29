@@ -833,7 +833,7 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
 
 def test_sana_wm_plugin_embeds_prebuilt_refiner_text_connector_plan(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
-    plans = _write_native_plan_set(tmp_path, include_refiner_text_connector=True)
+    _write_native_plan_set(tmp_path, include_refiner_text_connector=True)
     _write_tokenizer(tmp_path)
 
     cfg = ModelConfig.from_dir(tmp_path)

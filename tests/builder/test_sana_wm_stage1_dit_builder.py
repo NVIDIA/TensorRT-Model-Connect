@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip("tensorrt_model_connect")
 safetensors_numpy = pytest.importorskip("safetensors.numpy")
 
-from tensorrt_model_connect.checkpoint_mapper import WeightDict
-from tensorrt_model_connect.families.sana_wm import stage1_dit_builder
+from tensorrt_model_connect.checkpoint_mapper import WeightDict  # noqa: E402
+from tensorrt_model_connect.families.sana_wm import stage1_dit_builder  # noqa: E402
 
 
 def _raw_sana_wm_config() -> dict:
