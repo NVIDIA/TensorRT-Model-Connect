@@ -76,7 +76,143 @@ def _resolve_external_script() -> Path | None:
 
 
 def _run_external_script(script_path: Path) -> None:
-    subprocess.run([sys.executable, str(script_path), *sys.argv[1:]], check=True)
+    repo_root = script_path.parent.parent
+    env = os.environ.copy()
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(repo_root)
+        if not current_pythonpath
+        else str(repo_root) + os.pathsep + current_pythonpath
+    )
+    runner = """
+import importlib.util
+import pickle
+import sys
+import types
+from pathlib import Path
+
+script_path = Path(sys.argv[1])
+sys.argv = [str(script_path), *sys.argv[2:]]
+
+def _install_mmcv_registry_stub():
+    if importlib.util.find_spec("mmcv") is not None:
+        return
+
+    class Config(dict):
+        pass
+
+    class Registry:
+        def __init__(self, name, *args, **kwargs):
+            self.name = name
+            self.module_dict = {}
+
+        def get(self, key):
+            return self.module_dict.get(key)
+
+        def register_module(self, module=None, name=None, force=False):
+            def _register(obj):
+                key = name or obj.__name__
+                if not force and key in self.module_dict:
+                    raise KeyError(f"{key} is already registered in {self.name}")
+                self.module_dict[key] = obj
+                return obj
+
+            if module is not None:
+                return _register(module)
+            return _register
+
+        def build(self, cfg, default_args=None):
+            return build_from_cfg(cfg, self, default_args=default_args)
+
+    def build_from_cfg(cfg, registry, default_args=None):
+        if cfg is None:
+            raise TypeError("cfg must be a dict")
+        args = dict(default_args or {})
+        args.update(dict(cfg))
+        obj_type = args.pop("type")
+        obj_cls = registry.get(obj_type) if isinstance(obj_type, str) else obj_type
+        if obj_cls is None:
+            raise KeyError(f"{obj_type} is not registered in {registry.name}")
+        return obj_cls(**args)
+
+    mmcv = types.ModuleType("mmcv")
+    mmcv.Config = Config
+    mmcv.Registry = Registry
+    mmcv.build_from_cfg = build_from_cfg
+    mmcv.mkdir_or_exist = lambda path: Path(path).mkdir(parents=True, exist_ok=True)
+    mmcv.dump = lambda obj, path: Path(path).write_bytes(pickle.dumps(obj))
+    mmcv.load = lambda path: pickle.loads(Path(path).read_bytes())
+
+    runner = types.ModuleType("mmcv.runner")
+    runner.OPTIMIZERS = Registry("optimizers")
+    runner.OPTIMIZER_BUILDERS = Registry("optimizer_builders")
+    runner.DefaultOptimizerConstructor = object
+    runner.build_optimizer = lambda *args, **kwargs: None
+    runner.get_dist_info = lambda: (0, 1)
+
+    utils = types.ModuleType("mmcv.utils")
+    try:
+        import torch.nn as nn
+
+        utils._BatchNorm = nn.modules.batchnorm._BatchNorm
+        utils._InstanceNorm = nn.modules.instancenorm._InstanceNorm
+    except ImportError:
+        class _BatchNorm:
+            pass
+
+        class _InstanceNorm:
+            pass
+
+        utils._BatchNorm = _BatchNorm
+        utils._InstanceNorm = _InstanceNorm
+    logging_mod = types.ModuleType("mmcv.utils.logging")
+    logging_mod.logger_initialized = {}
+    utils.logging = logging_mod
+
+    mmcv.runner = runner
+    mmcv.utils = utils
+    sys.modules["mmcv"] = mmcv
+    sys.modules["mmcv.runner"] = runner
+    sys.modules["mmcv.utils"] = utils
+    sys.modules["mmcv.utils.logging"] = logging_mod
+
+_install_mmcv_registry_stub()
+
+spec = importlib.util.spec_from_file_location("sana_wm_official_reference", script_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"Could not load {script_path}")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def _write_png_frames(output_dir, name, video_hwc, fps, logger):
+    import numpy as np
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video = np.asarray(video_hwc)
+    if video.dtype != np.uint8:
+        if np.issubdtype(video.dtype, np.floating):
+            video = np.clip(video, 0.0, 1.0) * 255.0
+        video = video.astype(np.uint8)
+    if len(video) == 0:
+        logger.info(f"Saved 0 PNG frames to {output_dir}")
+        return output_dir
+    from PIL import Image
+
+    for idx, frame in enumerate(video):
+        Image.fromarray(frame).convert("RGB").save(output_dir / f"frame_{idx:04d}.png")
+    logger.info(f"Saved {len(video)} PNG frames to {output_dir}")
+    return output_dir
+
+module.write_video = _write_png_frames
+module.main()
+    """
+    subprocess.run(
+        [sys.executable, "-c", runner, str(script_path), *sys.argv[1:]],
+        check=True,
+        cwd=repo_root,
+        env=env,
+    )
 
 
 def _load_pipeline():
@@ -145,7 +281,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--translation_speed", type=float, default=0.055)
     parser.add_argument("--rotation_speed_deg", type=float, default=1.2)
     parser.add_argument("--num_frames", type=int, default=321)
+    parser.add_argument("--fps", type=int, default=16)
+    parser.add_argument("--step", type=int, default=60)
+    parser.add_argument("--cfg_scale", type=float, default=5.0)
+    parser.add_argument("--flow_shift", type=float, default=None)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--name", default="output")
 
     # Accepted for compatibility with the model-card script. Diffusers resolves
     # these assets from the HF repo; local override support belongs to the
@@ -153,7 +294,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="")
     parser.add_argument("--model_path", default="")
     parser.add_argument("--refiner_checkpoint", default="")
+    parser.add_argument("--refiner_root", default="")
     parser.add_argument("--refiner_gemma_root", default="")
+    parser.add_argument("--refiner_seed", type=int, default=42)
+    parser.add_argument("--sink_size", type=int, default=1)
+    parser.add_argument("--sampling_algo", default="")
+    parser.add_argument("--negative_prompt", default="")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no_action_overlay", action="store_true")
+    parser.add_argument("--offload_vae", action="store_true")
+    parser.add_argument("--offload_refiner", action="store_true")
     parser.add_argument("--no_refiner", action="store_true")
     return parser.parse_args()
 
@@ -181,6 +331,10 @@ def main() -> int:
         "translation_speed": args.translation_speed,
         "rotation_speed_deg": args.rotation_speed_deg,
         "num_frames": args.num_frames,
+        "fps": args.fps,
+        "step": args.step,
+        "cfg_scale": args.cfg_scale,
+        "flow_shift": args.flow_shift,
         "no_refiner": args.no_refiner,
     }
     required_controls = ["translation_speed", "rotation_speed_deg", "num_frames"]

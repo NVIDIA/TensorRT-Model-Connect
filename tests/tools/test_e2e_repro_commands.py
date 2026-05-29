@@ -110,6 +110,7 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
             "cfg_scale": 5.0,
             "fps": 16,
             "flow_shift": 9.8,
+            "no_action_overlay": True,
         },
         stages=[],
     )
@@ -155,7 +156,8 @@ def test_repro_commands_use_sana_wm_prompt_file_and_camera_flags(tmp_path) -> No
         "--cfg_scale 5.0 "
         "--fps 16 "
         "--flow_shift 9.8 "
-        "--output_dir results/demo"
+        "--output_dir results/demo "
+        "--no_action_overlay"
     )
 
 

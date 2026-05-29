@@ -130,28 +130,42 @@ def test_inference_sana_wm_delegates_to_external_official_script(
     sana_repo = tmp_path / "official_sana"
     external = sana_repo / "inference_video_scripts" / "inference_sana_wm.py"
     external.parent.mkdir(parents=True)
+    (sana_repo / "official_probe.py").write_text(
+        "VALUE = 'official-pythonpath-ok'\n",
+        encoding="utf-8",
+    )
     marker = tmp_path / "official_ran.txt"
     external.write_text(
         """
 import argparse
+import logging
+import numpy as np
 from pathlib import Path
+import official_probe
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--image", required=True)
-parser.add_argument("--prompt", required=True)
-parser.add_argument("--action", required=True)
-parser.add_argument("--translation_speed", required=True)
-parser.add_argument("--rotation_speed_deg", required=True)
-parser.add_argument("--num_frames", required=True)
-parser.add_argument("--output_dir", required=True)
-args = parser.parse_args()
+def write_video(output_dir, name, video_hwc, fps, logger):
+    raise AssertionError("shim should replace official write_video")
 
-assert args.image == "asset/sana_wm/demo_0.png"
-assert args.action == "w-80,jw-40,w-40,lw-60,w-100"
-assert args.translation_speed == "0.055"
-assert args.rotation_speed_deg == "1.2"
-assert args.num_frames == "321"
-Path({marker!r}).write_text(args.output_dir, encoding="utf-8")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--action", required=True)
+    parser.add_argument("--translation_speed", required=True)
+    parser.add_argument("--rotation_speed_deg", required=True)
+    parser.add_argument("--num_frames", required=True)
+    parser.add_argument("--output_dir", required=True)
+    args = parser.parse_args()
+
+    assert args.image == "asset/sana_wm/demo_0.png"
+    assert args.action == "w-80,jw-40,w-40,lw-60,w-100"
+    assert args.translation_speed == "0.055"
+    assert args.rotation_speed_deg == "1.2"
+    assert args.num_frames == "321"
+    assert official_probe.VALUE == "official-pythonpath-ok"
+    video = np.zeros((0, 1, 1, 3), dtype=np.uint8)
+    write_video(Path(args.output_dir), "demo", video, 16, logging.getLogger("test"))
+    Path({marker!r}).write_text(Path.cwd().name + ":" + args.output_dir, encoding="utf-8")
 """.format(marker=str(marker)),
         encoding="utf-8",
     )
@@ -182,7 +196,7 @@ Path({marker!r}).write_text(args.output_dir, encoding="utf-8")
     )
 
     assert module.main() == 0
-    assert marker.read_text(encoding="utf-8") == "results/demo"
+    assert marker.read_text(encoding="utf-8") == "official_sana:results/demo"
 
 
 def test_inference_sana_wm_rejects_pipeline_without_action_controls(

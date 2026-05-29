@@ -209,6 +209,33 @@ def test_run_returns_preflight_skip_without_resolving_bundle(
     assert data["stages"] == {}
 
 
+def test_sana_wm_preflight_failure_is_hard_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case(
+        "sana-wm-preflight-fail",
+        preflight=[PreflightRequirement(kind="unknown_preflight")],
+    )
+    case.runtime_strategy = "diffusion_sana_wm"
+    case.inputs["sana_wm_require_official_script"] = True
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_bundle",
+        lambda case, ctx: pytest.fail("bundle resolution should not run"),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.FAIL.value
+    assert result.failure_type == FailureType.PRECHECK_FAIL.value
+    assert result.stages == {}
+    data = _read_result_json(ctx, case)
+    assert data["status"] == E2EStatus.FAIL.value
+    assert data["failure_type"] == FailureType.PRECHECK_FAIL.value
+
+
 def test_python_module_preflight_rejects_module_that_fails_import(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

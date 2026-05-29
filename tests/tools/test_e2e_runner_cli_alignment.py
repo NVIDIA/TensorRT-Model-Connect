@@ -447,6 +447,7 @@ def test_sana_wm_reference_uses_model_card_script_contract(
             "cfg_scale": 5.0,
             "fps": 16,
             "flow_shift": 9.8,
+            "no_action_overlay": True,
             "sana_wm_require_official_script": True,
         },
     )
@@ -474,6 +475,7 @@ def test_sana_wm_reference_uses_model_card_script_contract(
     assert "--cfg_scale" in cmd
     assert "--fps" in cmd
     assert "--flow_shift" in cmd
+    assert "--no_action_overlay" in cmd
     assert "--no_refiner" not in cmd
     assert out.metadata["command"] == cmd
 

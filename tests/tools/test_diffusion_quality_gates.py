@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
 from tests.e2e_harness.comparators.diffusion import DiffusionComparator
+from tests.e2e_harness.plugins import diffusion as diffusion_plugin
 from tests.e2e_harness.plugins.diffusion import DiffusionPlugin
 
 
@@ -131,3 +132,84 @@ def test_comparator_fails_when_frame_count_differs_from_reference():
     assert frame_count.threshold == 0.0
     assert not frame_count.passed
     assert frame_count.note == "trt=320, ref=321"
+
+
+def test_sana_wm_contract_requires_official_reference_success():
+    plugin = DiffusionPlugin()
+    case = _case()
+    case.family = "sana_wm"
+    trt = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "frames_dir": "/tmp/trt_frames",
+            "num_frames": 320,
+            "frame_stats": {"mean": 0.5, "std": 0.2},
+        },
+    )
+    ref = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "returncode": 1,
+            "frames_dir": "/tmp/ref_frames",
+            "num_frames": 0,
+        },
+    )
+
+    result = plugin.verify(trt, ref, case, _threshold())
+
+    assert not result.passed
+    assert not result.metrics["reference_returncode"].passed
+
+
+def test_sana_wm_contract_gates_full_frame_similarity(monkeypatch):
+    monkeypatch.setattr(
+        diffusion_plugin,
+        "_compare_frame_dirs",
+        lambda trt_dir, ref_dir: {
+            "avg_psnr": 100.0,
+            "min_psnr": 100.0,
+            "avg_ssim": 1.0,
+            "min_ssim": 1.0,
+            "compared_frames": 2.0,
+            "trt_frames": 2.0,
+            "ref_frames": 2.0,
+        },
+    )
+    plugin = DiffusionPlugin()
+    case = _case()
+    case.family = "sana_wm"
+    trt = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "frames_dir": "/tmp/trt",
+            "num_frames": 2,
+            "frame_stats": {"mean": 0.25, "std": 0.15},
+        },
+    )
+    ref = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "returncode": 0,
+            "frames_dir": "/tmp/ref",
+            "num_frames": 2,
+            "frame_stats": {"mean": 0.25, "std": 0.15},
+        },
+    )
+
+    result = plugin.verify(
+        trt,
+        ref,
+        case,
+        _threshold(
+            contract_min_frame_count=2,
+            contract_max_frame_count_delta=0,
+            contract_psnr_threshold=90.0,
+            contract_ssim_threshold=0.99,
+            contract_min_frame_psnr=90.0,
+            contract_min_frame_ssim=0.99,
+        ),
+    )
+
+    assert result.passed
+    assert result.metrics["frame_count_delta"].value == 0.0
+    assert result.metrics["min_frame_psnr"].value == 100.0

@@ -154,10 +154,13 @@ if installed_script_path.read_bytes()[:4] != b"\x7fELF":
 native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
 native = native_dir / "trtmc"
 backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
+sana_wm_plugins = sorted(native_dir.glob("libtrtmc_sana_wm_gdn_plugin.so*"))
 if not native.is_file():
     raise SystemExit(f"packaged native trtmc executable is missing under {native_dir}")
 if not backends:
     raise SystemExit(f"packaged TensorRT backend DSO is missing under {native_dir}")
+if not sana_wm_plugins:
+    raise SystemExit(f"packaged SANA-WM TensorRT GDN plugin DSO is missing under {native_dir}")
 
 print(f"installed_wheel={wheel}")
 print(f"imported_package={package_file}")
@@ -165,6 +168,8 @@ print(f"installed_trtmc={installed_script_path}")
 print(f"packaged_native_trtmc={native}")
 for backend in backends:
     print(f"packaged_backend={backend}")
+for plugin in sana_wm_plugins:
+    print(f"packaged_sana_wm_plugin={plugin}")
 PY
 }
 
@@ -517,6 +522,30 @@ run_graph_op_tests() {
   run_with_timeout "${GRAPH_OP_TIMEOUT:-20m}" python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
 }
 
+install_sana_wm_reference_deps() {
+  local models_file="${1:-}"
+  local needs_sana=false
+  if [ -z "$models_file" ]; then
+    needs_sana=true
+  elif grep -qx "sana-wm-bidirectional" "$models_file"; then
+    needs_sana=true
+  fi
+
+  if [ "$needs_sana" != "true" ]; then
+    return 0
+  fi
+
+  echo "Installing SANA-WM official reference dependencies"
+  python -m pip install --disable-pip-version-check --quiet \
+    "flash-linear-attention>=0.4.2,<0.6" \
+    "imageio>=2.37,<3" \
+    "pyrallis>=0.3,<0.4" \
+    "pytz>=2024.1" \
+    "qwen-vl-utils>=0.0.8,<0.1" \
+    "termcolor>=2.4,<3" \
+    "timm==0.6.13"
+}
+
 run_selective_e2e() {
   if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ] || [ "${FULL_E2E:-false}" = "true" ]; then
     echo "Skipping: selective E2E only runs for pull_request events without full_e2e"
@@ -549,6 +578,7 @@ if len(models) > 10:
 
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
+  install_sana_wm_reference_deps e2e_models.txt
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
   local args=(
     --engine-dir "$ENGINE_DIR"
@@ -578,6 +608,7 @@ run_full_e2e() {
   python scripts/warm_hf_cache.py \
     --exclude-ci-tier l0_only \
     --exclude-ci-tier multi_device
+  install_sana_wm_reference_deps
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
   local args=(
     --engine-dir "$ENGINE_DIR"
@@ -863,6 +894,11 @@ for wheel in sys.argv[1:]:
         backend_entries = [
             name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
         ]
+        sana_wm_plugin_entries = [
+            name
+            for name in names
+            if "/bin/libtrtmc_sana_wm_gdn_plugin" in name and name.endswith(".so")
+        ]
         metadata = zf.read(
             next(name for name in names if name.endswith(".dist-info/METADATA"))
         ).decode()
@@ -877,6 +913,8 @@ for wheel in sys.argv[1:]:
         raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
+    if not sana_wm_plugin_entries:
+        raise SystemExit(f"{wheel}: packaged SANA-WM TensorRT GDN plugin DSO is missing")
     trt_dep_variants = (
         "Requires-Dist: tensorrt<10.17,>=10.16.1",
         "Requires-Dist: tensorrt>=10.16.1,<10.17",
@@ -905,7 +943,7 @@ for wheel in sys.argv[1:]:
             f"manylinux_2_{MAX_GLIBC_MINOR}_aarch64 or older"
         )
     print(f"validated wheel={wheel}")
-    for entry in sorted([*bin_entries, *script_entries, *backend_entries]):
+    for entry in sorted([*bin_entries, *script_entries, *backend_entries, *sana_wm_plugin_entries]):
         print(f"  {entry}")
 PY
 
@@ -948,14 +986,19 @@ dist = metadata.distribution("tensorrt-model-connect")
 native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
 native = native_dir / "trtmc"
 backends = sorted(native_dir.glob("libtrtmc_backend*.so*"))
+sana_wm_plugins = sorted(native_dir.glob("libtrtmc_sana_wm_gdn_plugin.so*"))
 print(f"wheel={dist.metadata['Name']} {dist.version}")
 print(f"native_trtmc={native}")
 if not native.is_file():
     raise SystemExit("packaged native trtmc executable is missing")
 if not backends:
     raise SystemExit("packaged native TensorRT backend DSO is missing")
+if not sana_wm_plugins:
+    raise SystemExit("packaged SANA-WM TensorRT GDN plugin DSO is missing")
 for backend in backends:
     print(f"native_backend={backend}")
+for plugin in sana_wm_plugins:
+    print(f"native_sana_wm_plugin={plugin}")
 PY
 }
 

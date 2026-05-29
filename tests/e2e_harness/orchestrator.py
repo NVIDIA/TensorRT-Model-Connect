@@ -112,6 +112,43 @@ _SANA_WM_REFINER_PLAN_SECTIONS = (
     "sana_wm_refiner_vae_decoder_plan",
 )
 _SANA_WM_TOKENIZER_FILES = ("tokenizer.json",)
+_SANA_WM_HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
+_SANA_WM_FULL_SNAPSHOT_PATTERNS = (
+    "README.md",
+    "config.yaml",
+    "asset/sana_wm/**",
+    "inference_video_scripts/**",
+    "dit/**",
+    "vae/**",
+    "text_encoder/**",
+    "refiner/**",
+)
+_SANA_WM_FULL_SNAPSHOT_REQUIRED_PATH_GROUPS = (
+    ("dit/sana_wm_1600m_720p.safetensors", ("dit/sana_wm_1600m_720p.safetensors",)),
+    (
+        "vae/diffusion_pytorch_model.safetensors",
+        (
+            "vae/diffusion_pytorch_model.safetensors",
+            "vae/model.safetensors",
+            "vae/model.safetensors.index.json",
+        ),
+    ),
+    (
+        "refiner transformer",
+        (
+            "refiner/refiner.safetensors",
+            "refiner/transformer/diffusion_pytorch_model.safetensors",
+        ),
+    ),
+    (
+        "refiner connectors",
+        (
+            "refiner/refiner.safetensors",
+            "refiner/connectors/diffusion_pytorch_model.safetensors",
+        ),
+    ),
+    ("refiner/text_encoder/", ("refiner/text_encoder",)),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +234,15 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
                 python,
                 "-c",
                 (
-                    "import importlib.util, sys; "
-                    f"sys.exit(0 if importlib.util.find_spec({module!r}) else 1)"
+                    "import importlib, sys\n"
+                    "module = sys.argv[1]\n"
+                    "try:\n"
+                    "    importlib.import_module(module)\n"
+                    "except Exception as exc:\n"
+                    "    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)\n"
+                    "    sys.exit(1)\n"
                 ),
+                module,
             ],
             capture_output=True,
             text=True,
@@ -207,7 +250,12 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
         )
         if result.returncode == 0:
             return True, f"Module {module} available in {phase} profile"
-        return False, f"Module {module} not available in {phase} profile"
+        detail = (result.stderr or result.stdout or "").strip()
+        return (
+            False,
+            f"Module {module} not importable in {phase} profile"
+            + (f": {detail}" if detail else ""),
+        )
     except Exception as exc:
         return False, f"Module check failed in {phase} profile: {exc}"
 
@@ -277,6 +325,7 @@ def _check_sana_wm_runtime_entrypoint_available(
             python = ctx.runtime_python_path() or ctx.reference_python_path() or sys.executable
             repo_root = candidate.parent.parent if candidate.parent.name == "inference_video_scripts" else candidate.parent
             env = os.environ.copy()
+            env["SANA_WM_SCRIPT"] = str(candidate)
             env["PYTHONPATH"] = (
                 str(repo_root)
                 if not env.get("PYTHONPATH")
@@ -284,7 +333,7 @@ def _check_sana_wm_runtime_entrypoint_available(
             )
             try:
                 result = subprocess.run(
-                    [python, str(candidate), "--help"],
+                    [python, str(local_shim), "--help"],
                     cwd=str(repo_root),
                     env=env,
                     capture_output=True,
@@ -295,7 +344,10 @@ def _check_sana_wm_runtime_entrypoint_available(
                 script_failures.append(f"{candidate}: help probe failed: {exc}")
                 continue
             if result.returncode == 0:
-                return True, f"SANA-WM external runtime script loaded: {candidate}"
+                return True, (
+                    "SANA-WM external runtime script loaded through reference "
+                    f"wrapper: {candidate}"
+                )
             detail = (result.stderr or result.stdout or "").strip()
             if len(detail) > 500:
                 detail = detail[-500:]
@@ -303,8 +355,18 @@ def _check_sana_wm_runtime_entrypoint_available(
                 f"{candidate}: help probe rc={result.returncode}: {detail}"
             )
 
+    if req.args.get("require_official_script", False):
+        return (
+            False,
+            "SANA-WM official runtime script unavailable or failed to load. "
+            "The repo-local compatibility shim is not an acceptable parity "
+            "oracle for this E2E. Checked external scripts: "
+            + (", ".join(checked) if checked else "<none>")
+            + (("; script load failures: " + " | ".join(script_failures)) if script_failures else ""),
+        )
+
     hf_id = str(
-        req.args.get("hf_id", "") or "Efficient-Large-Model/SANA-WM_bidirectional"
+        req.args.get("hf_id", "") or _SANA_WM_HF_ID
     )
     python = ctx.runtime_python_path() or ctx.reference_python_path() or sys.executable
     probe = (
@@ -349,7 +411,7 @@ def _check_sana_wm_runtime_entrypoint_available(
 def _check_sana_wm_native_plans_available(
     ctx: RunContext, req: PreflightRequirement
 ) -> tuple[bool, str]:
-    """Check that TRTMC has enough native plans for pure C++ SANA-WM."""
+    """Check that TRTMC can build or run native pure-C++ SANA-WM."""
     project_root = Path(__file__).resolve().parent.parent.parent
     raw_plan_dir = (
         str(req.args.get("plan_dir", "") or "")
@@ -406,6 +468,14 @@ def _check_sana_wm_native_plans_available(
                 f"SANA-WM native TensorRT plans and tokenizer found: {candidate} ({mode})",
             )
 
+    raw_ok, raw_message = _sana_wm_raw_native_inputs_available(
+        project_root,
+        req,
+        require_refiner=require_refiner,
+    )
+    if raw_ok:
+        return True, raw_message
+
     if saw_complete_plans:
         return (
             False,
@@ -424,9 +494,133 @@ def _check_sana_wm_native_plans_available(
         False,
         "SANA-WM native TensorRT plans not found for pure C++ TRTMC execution. "
         f"Required: {required}. Set SANA_WM_NATIVE_PLAN_DIR or "
-        "SANA_WM_MODEL_DIR to a directory containing trtmc_engines/*.plan. "
+        "SANA_WM_MODEL_DIR to a directory containing trtmc_engines/*.plan, "
+        "or provide a full raw SANA-WM snapshot so the direct TensorRT builders "
+        "can construct the native plans. "
         "Checked: " + (", ".join(checked) if checked else "<none>"),
     )
+
+
+def _sana_wm_raw_native_inputs_available(
+    project_root: Path,
+    req: PreflightRequirement,
+    *,
+    require_refiner: bool,
+) -> tuple[bool, str]:
+    candidates: list[Path] = []
+    for raw_model_dir in (
+        str(req.args.get("model_dir", "") or ""),
+        os.environ.get("SANA_WM_MODEL_DIR", ""),
+    ):
+        if raw_model_dir:
+            candidates.append(Path(raw_model_dir))
+
+    hf_snapshot = _sana_wm_cached_snapshot(str(req.args.get("hf_id", "") or _SANA_WM_HF_ID))
+    if hf_snapshot is not None:
+        candidates.append(hf_snapshot)
+
+    checked: list[str] = []
+    missing_by_dir: list[str] = []
+    for path in candidates:
+        candidate = _resolve_preflight_path(project_root, path)
+        if candidate in [Path(p) for p in checked]:
+            continue
+        checked.append(str(candidate))
+        if not candidate.is_dir():
+            continue
+        missing = _sana_wm_missing_raw_inputs(candidate, require_refiner=require_refiner)
+        if not missing:
+            return (
+                True,
+                "SANA-WM raw native inputs found; the E2E build will construct "
+                f"pure TensorRT plans directly from {candidate}",
+            )
+        missing_by_dir.append(f"{candidate}: missing {', '.join(missing)}")
+
+    return (
+        False,
+        "SANA-WM raw native inputs not found. Checked: "
+        + (", ".join(checked) if checked else "<none>")
+        + (". Details: " + " | ".join(missing_by_dir) if missing_by_dir else ""),
+    )
+
+
+def _is_sana_wm_raw_model_dir(path: Path) -> bool:
+    config_path = path / "config.yaml"
+    if not config_path.is_file():
+        return False
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "SanaMSVideoCamCtrl" in text and "LTX2VAE_diffusers" in text
+
+
+def _sana_wm_cached_snapshot(hf_id: str) -> Path | None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return None
+    try:
+        return Path(
+            snapshot_download(
+                hf_id,
+                allow_patterns=list(_SANA_WM_FULL_SNAPSHOT_PATTERNS),
+                local_files_only=True,
+            )
+        )
+    except Exception:
+        return None
+
+
+def _sana_wm_missing_raw_inputs(
+    model_dir: Path,
+    *,
+    require_refiner: bool,
+) -> list[str]:
+    missing: list[str] = []
+    if not _is_sana_wm_raw_model_dir(model_dir):
+        missing.append("config.yaml")
+    for label, alternatives in _SANA_WM_FULL_SNAPSHOT_REQUIRED_PATH_GROUPS:
+        if not require_refiner and label.startswith("refiner"):
+            continue
+        if not any((model_dir / rel).exists() for rel in alternatives):
+            missing.append(label)
+    if not _sana_wm_stage1_text_encoder_available(model_dir):
+        missing.append("stage-1 Gemma text encoder")
+    return missing
+
+
+def _sana_wm_stage1_text_encoder_available(model_dir: Path) -> bool:
+    candidates = [model_dir / "text_encoder"]
+    env_text_encoder = os.environ.get("SANA_WM_TEXT_ENCODER_DIR", "")
+    if env_text_encoder:
+        candidates.append(Path(env_text_encoder))
+    for candidate in candidates:
+        if str(candidate) and candidate.is_dir() and (candidate / "config.json").is_file():
+            return True
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return False
+    try:
+        snapshot_download(
+            "google/gemma-2-2b-it",
+            allow_patterns=[
+                "config.json",
+                "generation_config.json",
+                "model*.safetensors",
+                "model.safetensors.index.json",
+                "tokenizer*",
+                "tokenizer.model",
+                "special_tokens_map.json",
+            ],
+            local_files_only=True,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_preflight_path(project_root: Path, path: Path) -> Path:
@@ -472,6 +666,15 @@ def _sana_wm_tokenizer_available(candidates: list[Path]) -> tuple[bool, list[str
         if candidate.is_dir() and any((candidate / name).is_file() for name in _SANA_WM_TOKENIZER_FILES):
             return True, checked
     return False, checked
+
+
+def _preflight_failure_status(case: E2ECase) -> str:
+    if (
+        case.runtime_strategy == "diffusion_sana_wm"
+        and case.inputs.get("sana_wm_require_official_script", True)
+    ):
+        return E2EStatus.FAIL.value
+    return E2EStatus.SKIP.value
 
 
 _PREFLIGHT_CHECKERS = {
@@ -1214,6 +1417,8 @@ def _build_sana_wm_python_reference_command(case: E2ECase, ctx: RunContext) -> s
     if flow_shift is not None:
         parts.extend(["--flow_shift", str(flow_shift)])
     parts.extend(["--output_dir", "results/demo"])
+    if case.inputs.get("no_action_overlay"):
+        parts.append("--no_action_overlay")
     if case.inputs.get("no_refiner"):
         parts.append("--no_refiner")
     return " ".join(parts)
@@ -1660,7 +1865,7 @@ class E2EOrchestrator:
 
         result = E2EResult(
             case_name=state.case.name,
-            status=E2EStatus.SKIP.value,
+            status=_preflight_failure_status(state.case),
             failure_type=FailureType.PRECHECK_FAIL.value,
             oracle_level=state.case.oracle_level,
             stages={},

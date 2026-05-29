@@ -5,6 +5,7 @@
   "bundle": "sana-wm-bidirectional.trtfb",
   "model_type": "sana_wm",
   "family": "sana_wm",
+  "precision": "bf16",
   "runtime_strategy": "diffusion_sana_wm",
   "ci_tier": "nightly_only",
   "e2e_parallel_resource": "exclusive_gpu",
@@ -25,6 +26,7 @@
   "cfg_scale": 5.0,
   "fps": 16,
   "flow_shift": 9.8,
+  "no_action_overlay": true,
   "sana_wm_require_official_script": true,
   "video_num_frames": 321,
   "video_height": 704,
@@ -41,8 +43,14 @@
     "min_pixel_std": 0.01,
     "contract_min_pixel_mean": 0.02,
     "contract_max_pixel_mean": 0.98,
-    "contract_min_pixel_std": 0.01
+    "contract_min_pixel_std": 0.01,
+    "contract_min_frame_count": 320,
+    "contract_max_frame_count_delta": 0,
+    "contract_psnr_threshold": 28.0,
+    "contract_ssim_threshold": 0.97,
+    "contract_min_frame_psnr": 24.0,
+    "contract_min_frame_ssim": 0.94
   },
   "skip_text_comparison": true,
-  "notes": "Runs the SANA-WM image-to-video contract from the HF model-card command: image asset/sana_wm/demo_0.png, prompt file asset/sana_wm/demo_0.txt, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, step 60, cfg_scale 5.0, fps 16, config-resolved flow_shift 9.8, and 321 output frames. The HF reference uses the official SANA-WM script as the oracle; the TRTMC side requires native TensorRT plan sections."
+  "notes": "Runs the SANA-WM image-to-video contract from the HF model-card command: image asset/sana_wm/demo_0.png, prompt file asset/sana_wm/demo_0.txt, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, step 60, cfg_scale 5.0, fps 16, config-resolved flow_shift 9.8, and 321 output frames. The HF reference uses the official SANA-WM script as the oracle with action overlay disabled so E2E compares the generated world frames; the TRTMC side requires native TensorRT plan sections."
 }

@@ -21,6 +21,13 @@ struct SanaWmGdnShape {
     int32_t spatial{0};
 };
 
+struct SanaWmUcpeShape {
+    int32_t batch{0};
+    int32_t heads{0};
+    int32_t tokens{0};
+    int32_t head_dim{0};
+};
+
 std::size_t align_bytes(std::size_t value) {
     constexpr std::size_t kAlign = 256;
     return ((value + kAlign - 1) / kAlign) * kAlign;
@@ -138,6 +145,17 @@ SanaWmGdnShape parse_raw_shape(const nvinfer1::Dims& dims, int32_t frames, int32
     return shape;
 }
 
+SanaWmUcpeShape parse_ucpe_shape(const nvinfer1::Dims& dims) {
+    SanaWmUcpeShape shape;
+    if (dims.nbDims == 4) {
+        shape.batch = dims.d[0];
+        shape.heads = dims.d[1];
+        shape.tokens = dims.d[2];
+        shape.head_dim = dims.d[3];
+    }
+    return shape;
+}
+
 __device__ int64_t bhtds_offset(const SanaWmGdnShape shape, int32_t b, int32_t h, int32_t t,
                                 int32_t d, int32_t s) {
     return (((static_cast<int64_t>(b) * shape.heads + h) * shape.frames + t) *
@@ -229,6 +247,22 @@ __device__ int64_t raw_output_offset(const SanaWmGdnShape shape, int32_t b, int3
     return raw_bnc_offset(shape, b, t, s, h, d);
 }
 
+__device__ int64_t ucpe_feat_offset(const SanaWmUcpeShape shape, int32_t b, int32_t h,
+                                    int32_t n, int32_t d) {
+    return (((static_cast<int64_t>(b) * shape.heads + h) * shape.tokens + n) *
+                shape.head_dim +
+            d);
+}
+
+__device__ int64_t ucpe_matrix_offset(const SanaWmUcpeShape shape, int32_t b, int32_t n,
+                                      int32_t row, int32_t col) {
+    return ((static_cast<int64_t>(b) * shape.tokens + n) * 4 + row) * 4 + col;
+}
+
+__device__ int64_t ucpe_rope_offset(const SanaWmUcpeShape shape, int32_t n, int32_t pair) {
+    return static_cast<int64_t>(n) * (shape.head_dim / 4) + pair;
+}
+
 __device__ int64_t norm_weight_offset(const SanaWmGdnShape shape, int32_t h, int32_t d) {
     return static_cast<int64_t>(h) * shape.head_dim + d;
 }
@@ -312,6 +346,104 @@ __device__ __forceinline__ uint16_t phase_c_den_bf16_bits(float value, int32_t h
         return static_cast<uint16_t>(rounded - 1U);
     }
     return rounded;
+}
+
+__device__ __forceinline__ float ucpe_transform_value(const float* feats, const float* matrix,
+                                                       const float* rope_cos,
+                                                       const float* rope_sin,
+                                                       SanaWmUcpeShape shape, int32_t b,
+                                                       int32_t h, int32_t n, int32_t d,
+                                                       bool inverse) {
+    const int32_t geom_dim = shape.head_dim / 2;
+    if (d < geom_dim) {
+        const int32_t group = d / 4;
+        const int32_t row = d - group * 4;
+        const int32_t base_d = group * 4;
+        float acc = 0.0F;
+#pragma unroll
+        for (int32_t col = 0; col < 4; ++col) {
+            const float m = matrix[ucpe_matrix_offset(shape, b, n, row, col)];
+            const float x = feats[ucpe_feat_offset(shape, b, h, n, base_d + col)];
+            acc += m * x;
+        }
+        return acc;
+    }
+
+    const int32_t rope_d = d - geom_dim;
+    const int32_t pair = rope_d / 2;
+    const int32_t even_d = geom_dim + pair * 2;
+    const int32_t odd_d = even_d + 1;
+    const float even = feats[ucpe_feat_offset(shape, b, h, n, even_d)];
+    const float odd = feats[ucpe_feat_offset(shape, b, h, n, odd_d)];
+    const float c = rope_cos[ucpe_rope_offset(shape, n, pair)];
+    const float s = rope_sin[ucpe_rope_offset(shape, n, pair)];
+    if ((rope_d & 1) == 0) {
+        return inverse ? even * c + odd * s : even * c - odd * s;
+    }
+    return inverse ? odd * c - even * s : even * s + odd * c;
+}
+
+__global__ void ucpe_kernel(float* out, const float* feats, const float* matrix,
+                            const float* rope_cos, const float* rope_sin,
+                            SanaWmUcpeShape shape, bool inverse) {
+    const int64_t total = static_cast<int64_t>(shape.batch) * shape.heads * shape.tokens *
+                          shape.head_dim;
+    for (int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         linear < total; linear += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        const int32_t d = static_cast<int32_t>(linear % shape.head_dim);
+        int64_t rem = linear / shape.head_dim;
+        const int32_t n = static_cast<int32_t>(rem % shape.tokens);
+        rem /= shape.tokens;
+        const int32_t h = static_cast<int32_t>(rem % shape.heads);
+        const int32_t b = static_cast<int32_t>(rem / shape.heads);
+        const float value =
+            ucpe_transform_value(feats, matrix, rope_cos, rope_sin, shape, b, h, n, d, inverse);
+        out[linear] = value;
+    }
+}
+
+__global__ void ucpe_downscale_kernel(float* out, const float* feats, const float* matrix,
+                                      const float* rope_cos, const float* rope_sin,
+                                      SanaWmUcpeShape shape, bool inverse) {
+    __shared__ float transformed[256];
+    __shared__ float ref_sums[256];
+    __shared__ float transformed_sums[256];
+
+    const int64_t vector = blockIdx.x;
+    const int32_t n = static_cast<int32_t>(vector % shape.tokens);
+    int64_t rem = vector / shape.tokens;
+    const int32_t h = static_cast<int32_t>(rem % shape.heads);
+    const int32_t b = static_cast<int32_t>(rem / shape.heads);
+    const int32_t d = threadIdx.x;
+
+    float ref_value = 0.0F;
+    float transformed_value = 0.0F;
+    if (d < shape.head_dim) {
+        ref_value = feats[ucpe_feat_offset(shape, b, h, n, d)];
+        transformed_value =
+            ucpe_transform_value(feats, matrix, rope_cos, rope_sin, shape, b, h, n, d, inverse);
+        transformed[d] = transformed_value;
+    }
+    ref_sums[d] = d < shape.head_dim ? ref_value * ref_value : 0.0F;
+    transformed_sums[d] =
+        d < shape.head_dim ? transformed_value * transformed_value : 0.0F;
+    __syncthreads();
+
+    for (int32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (d < stride) {
+            ref_sums[d] += ref_sums[d + stride];
+            transformed_sums[d] += transformed_sums[d + stride];
+        }
+        __syncthreads();
+    }
+
+    if (d < shape.head_dim) {
+        const float inv_dim = 1.0F / static_cast<float>(shape.head_dim);
+        const float ref_rms = sqrtf(ref_sums[0] * inv_dim + 1.0e-6F);
+        const float transformed_rms = sqrtf(transformed_sums[0] * inv_dim + 1.0e-6F);
+        const float scale = fminf(ref_rms / fmaxf(transformed_rms, 1.0e-6F), 1.0F);
+        out[ucpe_feat_offset(shape, b, h, n, d)] = transformed[d] * scale;
+    }
 }
 
 __device__ __forceinline__ uint16_t camera_phase_c_num_bf16_bits(float value, int32_t h,
@@ -2378,6 +2510,151 @@ int32_t launch_main_raw_combined(SanaWmGdnShape shape, const void* const* inputs
 }
 
 } // namespace
+
+SanaWmUcpePlugin::SanaWmUcpePlugin(int32_t frames, int32_t spatial, int32_t heads,
+                                   int32_t head_dim, bool inverse, bool tree_reduce,
+                                   bool downscale)
+    : frames_(frames), spatial_(spatial), heads_(heads), head_dim_(head_dim),
+      inverse_(inverse), tree_reduce_(tree_reduce), downscale_(downscale) {}
+
+SanaWmUcpePlugin::SanaWmUcpePlugin(const void* data, size_t length) {
+    if (length < 6 * sizeof(int32_t)) {
+        return;
+    }
+    const auto* p = static_cast<const int32_t*>(data);
+    frames_ = p[0];
+    spatial_ = p[1];
+    heads_ = p[2];
+    head_dim_ = p[3];
+    inverse_ = p[4] != 0;
+    tree_reduce_ = p[5] != 0;
+    downscale_ = length >= 7 * sizeof(int32_t) && p[6] != 0;
+}
+
+char const* SanaWmUcpePlugin::getPluginType() const noexcept {
+    return kPLUGIN_NAME;
+}
+
+char const* SanaWmUcpePlugin::getPluginVersion() const noexcept {
+    return kPLUGIN_VERSION;
+}
+
+int32_t SanaWmUcpePlugin::getNbOutputs() const noexcept {
+    return 1;
+}
+
+int32_t SanaWmUcpePlugin::initialize() noexcept {
+    return 0;
+}
+
+void SanaWmUcpePlugin::terminate() noexcept {}
+
+void SanaWmUcpePlugin::destroy() noexcept {
+    delete this;
+}
+
+size_t SanaWmUcpePlugin::getSerializationSize() const noexcept {
+    return 7 * sizeof(int32_t);
+}
+
+void SanaWmUcpePlugin::serialize(void* buffer) const noexcept {
+    auto* p = static_cast<int32_t*>(buffer);
+    p[0] = frames_;
+    p[1] = spatial_;
+    p[2] = heads_;
+    p[3] = head_dim_;
+    p[4] = inverse_ ? 1 : 0;
+    p[5] = tree_reduce_ ? 1 : 0;
+    p[6] = downscale_ ? 1 : 0;
+}
+
+void SanaWmUcpePlugin::setPluginNamespace(char const* ns) noexcept {
+    namespace_ = ns ? ns : "";
+}
+
+char const* SanaWmUcpePlugin::getPluginNamespace() const noexcept {
+    return namespace_.c_str();
+}
+
+nvinfer1::DataType SanaWmUcpePlugin::getOutputDataType(int32_t, nvinfer1::DataType const*,
+                                                       int32_t) const noexcept {
+    return nvinfer1::DataType::kFLOAT;
+}
+
+SanaWmUcpePlugin* SanaWmUcpePlugin::clone() const noexcept {
+    auto* p =
+        new SanaWmUcpePlugin(frames_, spatial_, heads_, head_dim_, inverse_, tree_reduce_,
+                             downscale_);
+    p->namespace_ = namespace_;
+    return p;
+}
+
+nvinfer1::DimsExprs
+SanaWmUcpePlugin::getOutputDimensions(int32_t outputIndex, nvinfer1::DimsExprs const* inputs,
+                                      int32_t, nvinfer1::IExprBuilder& exprBuilder) noexcept {
+    (void)outputIndex;
+    (void)exprBuilder;
+    return inputs[0];
+}
+
+bool SanaWmUcpePlugin::supportsFormatCombination(int32_t pos,
+                                                 nvinfer1::PluginTensorDesc const* inOut,
+                                                 int32_t, int32_t) noexcept {
+    return inOut[pos].format == nvinfer1::TensorFormat::kLINEAR &&
+           inOut[pos].type == nvinfer1::DataType::kFLOAT;
+}
+
+void SanaWmUcpePlugin::configurePlugin(nvinfer1::DynamicPluginTensorDesc const*, int32_t,
+                                       nvinfer1::DynamicPluginTensorDesc const*,
+                                       int32_t) noexcept {}
+
+size_t SanaWmUcpePlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const*, int32_t,
+                                          nvinfer1::PluginTensorDesc const*,
+                                          int32_t) const noexcept {
+    return 0;
+}
+
+int32_t SanaWmUcpePlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
+                                  nvinfer1::PluginTensorDesc const*, void const* const* inputs,
+                                  void* const* outputs, void*, cudaStream_t stream) noexcept {
+    auto shape = parse_ucpe_shape(inputDesc[0].dims);
+    if (shape.batch <= 0 || shape.heads <= 0 || shape.tokens <= 0 || shape.head_dim <= 0 ||
+        shape.head_dim % 4 != 0 || (downscale_ && shape.head_dim > 256)) {
+        return 1;
+    }
+    if ((frames_ > 0 && spatial_ > 0 && shape.tokens != frames_ * spatial_) ||
+        (heads_ > 0 && shape.heads != heads_) || (head_dim_ > 0 && shape.head_dim != head_dim_)) {
+        return 1;
+    }
+    auto* out = static_cast<float*>(outputs[0]);
+    const auto* feats = static_cast<const float*>(inputs[0]);
+    const auto* matrix = static_cast<const float*>(inputs[1]);
+    const auto* rope_cos = static_cast<const float*>(inputs[2]);
+    const auto* rope_sin = static_cast<const float*>(inputs[3]);
+    if (downscale_) {
+        int32_t threads = next_power_of_two(shape.head_dim);
+        if (threads < 32) {
+            threads = 32;
+        }
+        if (threads > 256) {
+            return 1;
+        }
+        const int64_t vectors = static_cast<int64_t>(shape.batch) * shape.heads * shape.tokens;
+        ucpe_downscale_kernel<<<static_cast<uint32_t>(vectors), threads, 0, stream>>>(
+            out, feats, matrix, rope_cos, rope_sin, shape, inverse_);
+        return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+    }
+    const int64_t total = static_cast<int64_t>(shape.batch) * shape.heads * shape.tokens *
+                          shape.head_dim;
+    const int32_t threads = 256;
+    const int32_t blocks =
+        static_cast<int32_t>((total + threads - 1) / threads > 65535
+                                 ? 65535
+                                 : (total + threads - 1) / threads);
+    ucpe_kernel<<<blocks, threads, 0, stream>>>(out, feats, matrix, rope_cos, rope_sin, shape,
+                                                inverse_);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+}
 
 SanaWmGdnPlugin::SanaWmGdnPlugin(Mode mode, bool reverse_output, float eps)
     : mode_(mode), reverse_output_(reverse_output), eps_(eps) {}

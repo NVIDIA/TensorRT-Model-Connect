@@ -28,7 +28,7 @@ def _compute_ssim(a: np.ndarray, b: np.ndarray) -> float:
                  ((mu_a ** 2 + mu_b ** 2 + c1) * (var_a + var_b + c2)))
 
 
-def _compare_frame_dirs(trt_dir: str, ref_dir: str) -> tuple[float, float] | None:
+def _compare_frame_dirs(trt_dir: str, ref_dir: str) -> dict[str, float] | None:
     try:
         from PIL import Image
     except ImportError:
@@ -46,7 +46,15 @@ def _compare_frame_dirs(trt_dir: str, ref_dir: str) -> tuple[float, float] | Non
         ref_img = np.asarray(Image.open(ref_frame).convert("RGB"), dtype=np.float32) / 255.0
         psnr_values.append(_compute_psnr(trt_img, ref_img))
         ssim_values.append(_compute_ssim(trt_img, ref_img))
-    return float(np.mean(psnr_values)), float(np.mean(ssim_values))
+    return {
+        "avg_psnr": float(np.mean(psnr_values)),
+        "min_psnr": float(np.min(psnr_values)),
+        "avg_ssim": float(np.mean(ssim_values)),
+        "min_ssim": float(np.min(ssim_values)),
+        "compared_frames": float(len(psnr_values)),
+        "trt_frames": float(len(trt_frames)),
+        "ref_frames": float(len(ref_frames)),
+    }
 
 
 def _threshold(
@@ -72,6 +80,7 @@ class DiffusionPlugin:
     def verify(self, trt_output, ref_output, case, threshold):
         stage = trt_output.stage_name
         is_video = case.reference_family == "diffusers_video_gen"
+        is_sana_wm = case.family == "sana_wm"
         metrics = {}
 
         # Sub-stages: invariant checks only (no images/frames produced yet)
@@ -91,6 +100,16 @@ class DiffusionPlugin:
             metrics["has_frames"] = MetricResult(
                 value=float(num_frames), threshold=1.0, operator=">=",
                 passed=has_frames, note="video frames produced")
+            min_frame_count = threshold.metrics.get("contract_min_frame_count")
+            if min_frame_count is not None:
+                trt_frame_count_ok = float(num_frames) >= float(min_frame_count)
+                metrics["min_frame_count"] = MetricResult(
+                    value=float(num_frames),
+                    threshold=float(min_frame_count),
+                    operator=">=",
+                    passed=trt_frame_count_ok,
+                    note="TRT frame count",
+                )
         else:
             # Image health: check output path or frames_dir (runners may use either)
             image_path = (trt_output.data.get("image_path")
@@ -104,6 +123,17 @@ class DiffusionPlugin:
             metrics["has_image"] = MetricResult(
                 value=1.0 if has_image else 0.0, threshold=1.0, operator="==",
                 passed=has_image, note="image file produced")
+
+        if is_sana_wm:
+            ref_rc = ref_output.data.get("returncode")
+            ref_ok = ref_rc == 0
+            metrics["reference_returncode"] = MetricResult(
+                value=float(ref_rc) if isinstance(ref_rc, int) else -1.0,
+                threshold=0.0,
+                operator="==",
+                passed=ref_ok,
+                note="official SANA-WM reference script",
+            )
 
         # Pixel / frame statistics (check pixel_stats or frame_stats)
         trt_pixels = trt_output.data.get("pixel_stats") or trt_output.data.get("frame_stats")
@@ -156,6 +186,18 @@ class DiffusionPlugin:
                 value=std, threshold=min_std, operator=">=",
                 passed=std_ok, note="reference non-uniform check")
 
+            min_frame_count = threshold.metrics.get("contract_min_frame_count")
+            if min_frame_count is not None:
+                ref_num_frames = float(ref_output.data.get("num_frames", 0) or 0)
+                ref_frame_count_ok = ref_num_frames >= float(min_frame_count)
+                metrics["reference_min_frame_count"] = MetricResult(
+                    value=ref_num_frames,
+                    threshold=float(min_frame_count),
+                    operator=">=",
+                    passed=ref_frame_count_ok,
+                    note="official reference frame count",
+                )
+
         if isinstance(trt_pixels, dict) and isinstance(ref_pixels, dict):
             trt_std = float(trt_pixels.get("std", 0.0))
             ref_std = float(ref_pixels.get("std", 0.0))
@@ -186,7 +228,16 @@ class DiffusionPlugin:
             "contract_psnr_threshold", threshold.metrics.get("psnr"))
         ssim_threshold = threshold.metrics.get(
             "contract_ssim_threshold", threshold.metrics.get("ssim"))
-        if psnr_threshold is not None or ssim_threshold is not None:
+        min_psnr_threshold = threshold.metrics.get("contract_min_frame_psnr")
+        min_ssim_threshold = threshold.metrics.get("contract_min_frame_ssim")
+        max_frame_count_delta = threshold.metrics.get("contract_max_frame_count_delta")
+        if (
+            psnr_threshold is not None
+            or ssim_threshold is not None
+            or min_psnr_threshold is not None
+            or min_ssim_threshold is not None
+            or max_frame_count_delta is not None
+        ):
             trt_frames_dir = trt_output.data.get("frames_dir")
             ref_frames_dir = ref_output.data.get("frames_dir")
             frame_similarity = (
@@ -202,16 +253,60 @@ class DiffusionPlugin:
                     metrics["ssim"] = MetricResult(
                         value=0.0, threshold=ssim_threshold, operator=">=",
                         passed=False, note="frame similarity unavailable")
+                if min_psnr_threshold is not None:
+                    metrics["min_frame_psnr"] = MetricResult(
+                        value=0.0, threshold=min_psnr_threshold, operator=">=",
+                        passed=False, note="frame similarity unavailable")
+                if min_ssim_threshold is not None:
+                    metrics["min_frame_ssim"] = MetricResult(
+                        value=0.0, threshold=min_ssim_threshold, operator=">=",
+                        passed=False, note="frame similarity unavailable")
+                if max_frame_count_delta is not None:
+                    metrics["frame_count_delta"] = MetricResult(
+                        value=1.0e9, threshold=max_frame_count_delta,
+                        operator="<=", passed=False,
+                        note="frame similarity unavailable")
             else:
-                psnr, ssim = frame_similarity
                 if psnr_threshold is not None:
+                    psnr = frame_similarity["avg_psnr"]
                     metrics["psnr"] = MetricResult(
                         value=psnr, threshold=psnr_threshold, operator=">=",
                         passed=psnr >= psnr_threshold)
                 if ssim_threshold is not None:
+                    ssim = frame_similarity["avg_ssim"]
                     metrics["ssim"] = MetricResult(
                         value=ssim, threshold=ssim_threshold, operator=">=",
                         passed=ssim >= ssim_threshold)
+                if min_psnr_threshold is not None:
+                    min_psnr = frame_similarity["min_psnr"]
+                    metrics["min_frame_psnr"] = MetricResult(
+                        value=min_psnr,
+                        threshold=min_psnr_threshold,
+                        operator=">=",
+                        passed=min_psnr >= min_psnr_threshold,
+                    )
+                if min_ssim_threshold is not None:
+                    min_ssim = frame_similarity["min_ssim"]
+                    metrics["min_frame_ssim"] = MetricResult(
+                        value=min_ssim,
+                        threshold=min_ssim_threshold,
+                        operator=">=",
+                        passed=min_ssim >= min_ssim_threshold,
+                    )
+                if max_frame_count_delta is not None:
+                    delta = abs(
+                        frame_similarity["trt_frames"] - frame_similarity["ref_frames"]
+                    )
+                    metrics["frame_count_delta"] = MetricResult(
+                        value=delta,
+                        threshold=max_frame_count_delta,
+                        operator="<=",
+                        passed=delta <= max_frame_count_delta,
+                        note=(
+                            f"trt={int(frame_similarity['trt_frames'])}, "
+                            f"ref={int(frame_similarity['ref_frames'])}"
+                        ),
+                    )
 
         # PSNR against reference (if available as numpy arrays)
         trt_arr = trt_output.data.get("pixels")

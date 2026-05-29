@@ -257,13 +257,14 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
         reqs.append(PreflightRequirement(
             kind="sana_wm_script_available",
             args={"path": manifest.get("sana_wm_script", "")},
-            gating=False,
+            gating=True,
         ))
         reqs.append(PreflightRequirement(
             kind="sana_wm_runtime_entrypoint_available",
             args={
                 "hf_id": manifest.get("hf_id", ""),
                 "path": manifest.get("sana_wm_script", ""),
+                "require_official_script": True,
             },
             gating=True,
         ))
@@ -303,7 +304,18 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
     # runtime is native C++/TensorRT; only the official oracle uses Python.
     if task_strategy == "diffusion_media_generation":
         if runtime_strategy == "diffusion_sana_wm":
-            for module in ("diffusers", "torch", "PIL"):
+            for module in (
+                "diffusers",
+                "fla",
+                "imageio",
+                "PIL",
+                "pyrallis",
+                "pytz",
+                "qwen_vl_utils",
+                "termcolor",
+                "timm",
+                "torch",
+            ):
                 reqs.append(PreflightRequirement(
                     kind="python_module_available",
                     args={"module": module, "phase": "reference"},
@@ -431,6 +443,7 @@ def _build_inputs(manifest: dict) -> dict:
         "intrinsics",
         "fps",
         "flow_shift",
+        "no_action_overlay",
         "no_refiner",
         "sana_wm_script",
         "sana_wm_native_plan_dir",
@@ -551,8 +564,8 @@ def _build_metadata(manifest: dict) -> dict:
         "negative_prompt", "cfg_scale", "height", "width",
         "image_height", "image_width",
         "action", "camera", "camera_path", "translation_speed", "rotation_speed_deg",
-        "camera_intrinsics", "intrinsics", "fps", "flow_shift", "no_refiner",
-        "sana_wm_script",
+        "camera_intrinsics", "intrinsics", "fps", "flow_shift", "no_action_overlay",
+        "no_refiner", "sana_wm_script",
         "sana_wm_native_plan_dir", "sana_wm_model_dir", "sana_wm_tokenizer_dir",
         "sana_wm_require_official_script",
     }

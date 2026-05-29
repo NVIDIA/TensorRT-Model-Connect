@@ -730,6 +730,8 @@ print(f"Generated {{len(frames)}} frames")
             cmd.extend(["--image", image_path])
         else:
             cmd.extend(["--image", ""])
+        if case.inputs.get("no_action_overlay"):
+            cmd.append("--no_action_overlay")
         if case.inputs.get("no_refiner"):
             cmd.append("--no_refiner")
         env = _ref_subprocess_env()

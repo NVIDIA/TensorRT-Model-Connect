@@ -76,16 +76,26 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(package_bin),
             keep_path=False,
         )
+        copy(
+            self,
+            "libtrtmc_sana_wm_gdn_plugin.so*",
+            src=self.build_folder,
+            dst=str(package_bin),
+            keep_path=False,
+        )
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
+        sana_wm_plugins = sorted(package_bin.glob("libtrtmc_sana_wm_gdn_plugin.so*"))
         if not native.is_file():
             raise ConanException("TRTMC native executable was not staged into the wheel package")
         if not installed_script.is_file():
             raise ConanException("TRTMC native executable was not staged as the wheel script")
         if not backends:
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
+        if not sana_wm_plugins:
+            raise ConanException("SANA-WM TensorRT GDN plugin DSO was not staged into the wheel package")
 
         for executable in (native, installed_script):
             mode = executable.stat().st_mode

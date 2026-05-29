@@ -12,6 +12,9 @@ from tensorrt_model_connect.checkpoint_mapper import WeightDict  # noqa: E402
 from tensorrt_model_connect.families.sana_wm import stage1_dit_builder  # noqa: E402
 
 
+SANA_WM_GDN_PLUGIN_NAME = "libtrtmc_sana_wm_gdn_plugin.so"
+
+
 def _raw_sana_wm_config() -> dict:
     return {
         "video_num_frames": 321,
@@ -1143,6 +1146,40 @@ def test_create_sana_wm_gdn_plugin_is_enabled_by_default(monkeypatch) -> None:
     assert creator.created[0].name == "sana_wm_gdn_0_0"
 
 
+def test_candidate_sana_wm_gdn_plugin_libraries_include_packaged_and_build_paths(
+    monkeypatch, tmp_path
+) -> None:
+    source_root = tmp_path / "repo"
+    module_path = (
+        source_root
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "sana_wm"
+        / "stage1_dit_builder.py"
+    )
+    package_plugin = (
+        source_root / "python" / "tensorrt_model_connect" / "bin" / SANA_WM_GDN_PLUGIN_NAME
+    )
+    build_plugin = source_root / "build" / SANA_WM_GDN_PLUGIN_NAME
+    package_plugin.parent.mkdir(parents=True)
+    build_plugin.parent.mkdir(parents=True)
+    package_plugin.write_bytes(b"plugin")
+    build_plugin.write_bytes(b"plugin")
+    env_plugin = tmp_path / "custom-plugin.so"
+    monkeypatch.setattr(stage1_dit_builder, "__file__", str(module_path))
+    monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN_LIBRARY", str(env_plugin))
+
+    candidates = stage1_dit_builder._candidate_sana_wm_gdn_plugin_libraries()
+
+    assert candidates[:3] == [
+        str(env_plugin),
+        str(package_plugin),
+        str(build_plugin),
+    ]
+    assert SANA_WM_GDN_PLUGIN_NAME in candidates
+
+
 def test_create_sana_wm_gdn_plugin_can_be_disabled(monkeypatch) -> None:
     creator = _FakePluginCreator()
     monkeypatch.setenv("TRTMC_SANA_WM_GDN_PLUGIN", "0")
@@ -1590,13 +1627,65 @@ def test_lower_sana_wm_stage1_camera_ucpe_stabilizes_and_discounts_beta() -> Non
     assert ucpe.k_rot.name == "blocks.0.attn.cam_ucpe.k_bhdn"
     assert ucpe.v.name == "blocks.0.attn.cam_ucpe.v_bhdn"
     assert ucpe.beta.name == "blocks.0.attn.cam_ucpe.beta_discounted"
-    assert len(network.matrix_multiply) == 4
+    assert len(network.matrix_multiply) == 3
+    assert any(getattr(layer.inp, "name", "") == "raymats_inv" for layer in network.casts)
     assert [layer.op for layer in network.reductions].count("avg") >= 7
     assert [layer.op for layer in network.reductions].count("sum") == 2
     assert any(layer.op == "max" for layer in network.elementwise)
     assert any(layer.op == "min" for layer in network.elementwise)
     assert any(layer.reshape_dims == (1, 1, 4, 1, 4, 4) for layer in network.shuffles)
     assert any(layer.reshape_dims == (1, 2, 4, 1, 4, 1) for layer in network.shuffles)
+
+
+def test_apply_ucpe_block_uses_registered_plugin_by_default(monkeypatch) -> None:
+    network = _FakeNetwork()
+    creator = _FakePluginCreator()
+    monkeypatch.setattr(
+        stage1_dit_builder,
+        "_get_sana_wm_ucpe_plugin_creator",
+        lambda trt_module: creator,
+    )
+    shape = stage1_dit_builder.SanaWmStage1Shape(
+        batch_size=1,
+        latent_channels=2,
+        latent_frames=2,
+        latent_height=1,
+        latent_width=2,
+        text_max_length=4,
+        text_embed_dim=8,
+        chunk_plucker_channels=3,
+    )
+
+    out = stage1_dit_builder._apply_ucpe_block_diagonal_to_bhnd(
+        network,
+        _FakeTensor("feats", dtype=_FakeTrt.float16),
+        _FakeTensor("raymats", dtype=_FakeTrt.float32),
+        _FakeTensor("cos", dtype=_FakeTrt.float32),
+        _FakeTensor("sin", dtype=_FakeTrt.float32),
+        shape,
+        num_heads=2,
+        head_dim=8,
+        inverse_rope=True,
+        trt_module=_FakeTrtWithPlugin,
+        dtype=np.float16,
+        name="blocks.0.attn.cam_ucpe.k",
+        rms_downscale=True,
+    )
+
+    assert out.name == "blocks.0.attn.cam_ucpe.k"
+    assert len(network.plugins) == 1
+    assert len(network.plugins[0].inputs) == 4
+    assert len(network.matrix_multiply) == 0
+    assert len(network.slices) == 0
+    assert len(network.concatenations) == 0
+    assert len(network.reductions) == 0
+    assert creator.created[0].name == "sana_wm_ucpe"
+    assert int(creator.created[0].fields["frames"][0]) == 2
+    assert int(creator.created[0].fields["spatial"][0]) == 2
+    assert int(creator.created[0].fields["heads"][0]) == 2
+    assert int(creator.created[0].fields["head_dim"][0]) == 8
+    assert int(creator.created[0].fields["inverse"][0]) == 1
+    assert int(creator.created[0].fields["downscale"][0]) == 1
 
 
 def test_lower_sana_wm_stage1_camera_ucpe_can_skip_stabilization_for_both_triton() -> None:
@@ -1855,8 +1944,8 @@ def test_build_sana_wm_stage1_dit_engine_starts_direct_trt_network(monkeypatch) 
     assert builder.network.inputs[0] == ("x", "float16", (2, 128, 41, 22, 40))
     assert len(builder.network.convolutions) == 10
     assert builder.network.convolutions[0].kernel_shape == (1, 1, 1)
-    assert len(builder.network.matrix_multiply) == 764
-    assert len(builder.network.slices) == 1515
+    assert len(builder.network.matrix_multiply) == 763
+    assert len(builder.network.slices) == 1513
     assert builder.network.inputs[6] == ("raymats_inv", "float32", (2, 41 * 22 * 40, 4, 4))
     assert len(builder.network.softmax) == 1
     assert [output.name for output in builder.network.outputs] == ["output0"]
@@ -1886,7 +1975,7 @@ def test_build_sana_wm_stage1_dit_engine_lowers_hybrid_softmax_block(monkeypatch
     assert builder.network is not None
     assert len(builder.network.softmax) == 1
     assert len(builder.network.attentions) == 2
-    assert [layer.decomposable for layer in builder.network.attentions] == [False, False]
+    assert [layer.decomposable for layer in builder.network.attentions] == [True, True]
     assert [layer.axes for layer in builder.network.softmax] == [1 << 3]
-    assert len(builder.network.matrix_multiply) == 24
+    assert len(builder.network.matrix_multiply) == 23
     assert len(builder.network.outputs) == 1

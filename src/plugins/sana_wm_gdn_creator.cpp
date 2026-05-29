@@ -111,9 +111,77 @@ class SanaWmGdnCreator : public nvinfer1::IPluginCreator {
     std::string ns_;
 };
 
+class SanaWmUcpeCreator : public nvinfer1::IPluginCreator {
+  public:
+    SanaWmUcpeCreator() {
+        fields_.push_back({"frames", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"spatial", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"heads", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"head_dim", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"inverse", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"tree_reduce", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"downscale", nullptr, nvinfer1::PluginFieldType::kINT32, 1});
+        fc_.nbFields = static_cast<int32_t>(fields_.size());
+        fc_.fields = fields_.data();
+    }
+
+    char const* getPluginName() const noexcept override { return SanaWmUcpePlugin::kPLUGIN_NAME; }
+
+    char const* getPluginVersion() const noexcept override {
+        return SanaWmUcpePlugin::kPLUGIN_VERSION;
+    }
+
+    nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fc_; }
+
+    void setPluginNamespace(char const* ns) noexcept override { ns_ = ns ? ns : ""; }
+
+    char const* getPluginNamespace() const noexcept override { return ns_.c_str(); }
+
+    nvinfer1::IPluginV2* createPlugin(char const* /*name*/,
+                                      nvinfer1::PluginFieldCollection const* fc) noexcept override {
+        int32_t frames = 0;
+        int32_t spatial = 0;
+        int32_t heads = 0;
+        int32_t head_dim = 0;
+        int32_t inverse = 0;
+        int32_t tree_reduce = 1;
+        int32_t downscale = 0;
+        if (fc != nullptr) {
+            for (int32_t i = 0; i < fc->nbFields; ++i) {
+                const auto& f = fc->fields[i];
+                if (read_int_plugin_field(f, "frames", frames))
+                    continue;
+                if (read_int_plugin_field(f, "spatial", spatial))
+                    continue;
+                if (read_int_plugin_field(f, "heads", heads))
+                    continue;
+                if (read_int_plugin_field(f, "head_dim", head_dim))
+                    continue;
+                if (read_int_plugin_field(f, "inverse", inverse))
+                    continue;
+                read_int_plugin_field(f, "tree_reduce", tree_reduce);
+                read_int_plugin_field(f, "downscale", downscale);
+            }
+        }
+        return new SanaWmUcpePlugin(frames, spatial, heads, head_dim, inverse != 0,
+                                    tree_reduce != 0, downscale != 0);
+    }
+
+    nvinfer1::IPluginV2* deserializePlugin(char const* /*name*/, void const* data,
+                                           size_t length) noexcept override {
+        return new SanaWmUcpePlugin(data, length);
+    }
+
+  private:
+    std::vector<nvinfer1::PluginField> fields_;
+    nvinfer1::PluginFieldCollection fc_{};
+    std::string ns_;
+};
+
 } // namespace trtmc
 
 static nvinfer1::PluginRegistrar<trtmc::SanaWmGdnCreator> pluginRegistrarSanaWmGdn{};
+static nvinfer1::PluginRegistrar<trtmc::SanaWmUcpeCreator> pluginRegistrarSanaWmUcpe{};
 
 extern "C" void sana_wm_gdn_plugin_force_link() {}
 

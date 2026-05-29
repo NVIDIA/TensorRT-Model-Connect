@@ -158,6 +158,33 @@ class TestManifestValidation:
         assert len(matches) == 1
         assert matches[0].gating is False
 
+    def test_sana_wm_manifest_requires_official_reference_preflight(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "sana-wm-test",
+            "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+            "family": "sana_wm",
+            "runtime_strategy": "diffusion_sana_wm",
+            "test_image": "asset/sana_wm/demo_0.png",
+            "prompt_file": "asset/sana_wm/demo_0.txt",
+            "camera_intrinsics": "asset/sana_wm/demo_0_intrinsics.npy",
+        })
+        case = load_manifest(path)
+
+        script = [
+            req for req in case.preflight
+            if req.kind == "sana_wm_script_available"
+        ]
+        entrypoint = [
+            req for req in case.preflight
+            if req.kind == "sana_wm_runtime_entrypoint_available"
+        ]
+
+        assert len(script) == 1
+        assert script[0].gating is True
+        assert len(entrypoint) == 1
+        assert entrypoint[0].gating is True
+        assert entrypoint[0].args["require_official_script"] is True
+
     def test_bool_not_accepted_as_int(self, tmp_path):
         """Boolean values should not pass the int type check."""
         data = {

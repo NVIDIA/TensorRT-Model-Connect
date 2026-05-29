@@ -573,7 +573,7 @@ def _stage1_explicit_softmax_attention() -> bool:
 def _stage1_decomposable_softmax_attention() -> bool:
     value = os.environ.get(_STAGE1_DECOMPOSABLE_SOFTMAX_ENV)
     if value is None:
-        return False
+        return True
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
@@ -734,13 +734,19 @@ def _candidate_sana_wm_gdn_plugin_libraries() -> list[str]:
         value = os.environ.get(env_name)
         if value:
             candidates.extend(part for part in value.split(os.pathsep) if part)
-    candidates.extend(
-        (
-            "libtrtmc_sana_wm_gdn_plugin.so",
-            "trtmc_sana_wm_gdn_plugin.dll",
-            "libtrtmc_sana_wm_gdn_plugin.dylib",
-        )
+    library_names = (
+        "libtrtmc_sana_wm_gdn_plugin.so",
+        "trtmc_sana_wm_gdn_plugin.dll",
+        "libtrtmc_sana_wm_gdn_plugin.dylib",
     )
+    package_root = Path(__file__).resolve().parents[2]
+    source_root = Path(__file__).resolve().parents[4]
+    for directory in (package_root / "bin", source_root / "build"):
+        for name in library_names:
+            candidate = directory / name
+            if candidate.is_file():
+                candidates.append(str(candidate))
+    candidates.extend(library_names)
     return candidates
 
 
@@ -1402,8 +1408,9 @@ def _create_sana_wm_ucpe_plugin(
     head_dim: int,
     inverse: bool,
     tree_reduce: bool = True,
+    downscale: bool = False,
 ) -> Any | None:
-    if os.environ.get("TRTMC_SANA_WM_UCPE_PLUGIN", "0") in ("0", "false", "False"):
+    if os.environ.get("TRTMC_SANA_WM_UCPE_PLUGIN", "1") in ("0", "false", "False"):
         return None
     creator = _get_sana_wm_ucpe_plugin_creator(trt_module)
     if creator is None or not hasattr(trt_module, "PluginField"):
@@ -1417,6 +1424,7 @@ def _create_sana_wm_ucpe_plugin(
         ("head_dim", head_dim),
         ("inverse", int(inverse)),
         ("tree_reduce", int(tree_reduce)),
+        ("downscale", int(downscale)),
     ):
         arr = np.asarray([value], dtype=np.int32)
         refs.append(arr)
@@ -3628,6 +3636,7 @@ def _apply_ucpe_block_diagonal_to_bhnd(
     dtype: np.dtype,
     name: str,
     keep_fp32_output: bool = False,
+    rms_downscale: bool = False,
 ) -> Any:
     token_count = shape.latent_frames * shape.latent_height * shape.latent_width
     geom_dim = head_dim // 2
@@ -3642,6 +3651,7 @@ def _apply_ucpe_block_diagonal_to_bhnd(
             head_dim=head_dim,
             inverse=inverse_rope,
             tree_reduce=not keep_fp32_output,
+            downscale=rms_downscale,
         )
         if plugin is not None:
             feats_fp32 = _cast_to_dtype(network, feats, trt_module.float32)
@@ -3709,6 +3719,15 @@ def _apply_ucpe_block_diagonal_to_bhnd(
     out = concat.get_output(0)
     if dtype != np.float32 and not keep_fp32_output:
         out = _cast_to_dtype(network, out, _trt_dtype_for_np(trt_module, dtype))
+    if rms_downscale:
+        out = _downscale_to_reference_rms_bhnd(
+            network,
+            feats,
+            out,
+            trt_module=trt_module,
+            dtype=dtype,
+            name=f"{name}.rms_downscaled",
+        )
     return _set_tensor_name(out, name)
 
 
@@ -3924,18 +3943,7 @@ def _lower_sana_wm_camera_prep_plugin(
         _transpose_last_two_4x4(network, inputs["raymats"], trt_module, name=f"{name}.P_T"),
         trt_module.float32,
     )
-    p_inv = _cast_to_dtype(
-        network,
-        _invert_se3_4x4(
-            network,
-            inputs["raymats"],
-            shape,
-            trt_module,
-            dtype=dtype,
-            name=f"{name}.P_inv",
-        ),
-        trt_module.float32,
-    )
+    p_inv = _cast_to_dtype(network, inputs["raymats_inv"], trt_module.float32)
     cos, sin = _add_ucpe_cam_rope_constants(
         network,
         shape,
@@ -4024,14 +4032,7 @@ def lower_sana_wm_stage1_camera_ucpe(
     k_bhnd = _transpose_bhdn_to_bhnd(network, camera_k, trt_module, name=f"{name}.k_bhnd")
     v_bhnd = _transpose_bhdn_to_bhnd(network, camera.v, trt_module, name=f"{name}.v_bhnd")
     p_t = _transpose_last_two_4x4(network, inputs["raymats"], trt_module, name=f"{name}.P_T")
-    p_inv = _invert_se3_4x4(
-        network,
-        inputs["raymats"],
-        shape,
-        trt_module,
-        dtype=dtype,
-        name=f"{name}.P_inv",
-    )
+    p_inv = _cast_to_dtype(network, inputs["raymats_inv"], trt_module.float32)
     cos, sin = _add_ucpe_cam_rope_constants(
         network,
         shape,
@@ -4054,6 +4055,7 @@ def lower_sana_wm_stage1_camera_ucpe(
         trt_module=trt_module,
         dtype=dtype,
         name=f"{name}.q",
+        rms_downscale=stabilize_transforms,
     )
     k_trans_for_inflation = _apply_ucpe_block_diagonal_to_bhnd(
         network,
@@ -4069,6 +4071,7 @@ def lower_sana_wm_stage1_camera_ucpe(
         dtype=dtype,
         name=f"{name}.k",
         keep_fp32_output=keep_inflation_k_fp32,
+        rms_downscale=stabilize_transforms,
     )
     k_trans_raw = k_trans_for_inflation
     if keep_inflation_k_fp32 and dtype != np.float32:
@@ -4090,6 +4093,7 @@ def lower_sana_wm_stage1_camera_ucpe(
         trt_module=trt_module,
         dtype=dtype,
         name=f"{name}.v",
+        rms_downscale=stabilize_transforms,
     )
     beta = None
     if discount_beta:
@@ -4107,31 +4111,6 @@ def lower_sana_wm_stage1_camera_ucpe(
     q_trans = q_trans_raw
     k_trans = k_trans_raw
     v_trans = v_trans_raw
-    if stabilize_transforms:
-        q_trans = _downscale_to_reference_rms_bhnd(
-            network,
-            q_bhnd,
-            q_trans_raw,
-            trt_module=trt_module,
-            dtype=dtype,
-            name=f"{name}.q_stabilized",
-        )
-        k_trans = _downscale_to_reference_rms_bhnd(
-            network,
-            k_bhnd,
-            k_trans_raw,
-            trt_module=trt_module,
-            dtype=dtype,
-            name=f"{name}.k_stabilized",
-        )
-        v_trans = _downscale_to_reference_rms_bhnd(
-            network,
-            v_bhnd,
-            v_trans_raw,
-            trt_module=trt_module,
-            dtype=dtype,
-            name=f"{name}.v_stabilized",
-        )
     return SanaWmStage1CameraUcpe(
         q_rot=_transpose_bhnd_to_bhdn(network, q_trans, trt_module, name=f"{name}.q_bhdn"),
         k_rot=_transpose_bhnd_to_bhdn(network, k_trans, trt_module, name=f"{name}.k_bhdn"),

@@ -864,6 +864,12 @@ if(TARGET trtmc_backend_trt)
   endif()
 endif()
 
+if(TARGET trtmc_sana_wm_gdn_plugin)
+  install(TARGETS trtmc_sana_wm_gdn_plugin
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif()
+
 # Install public headers
 install(DIRECTORY include/trtmc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtmc

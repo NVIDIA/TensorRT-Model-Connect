@@ -325,12 +325,6 @@ def build_sana_wm_refiner_dit_engine(
         ),
         dtype=np.float32,
     )
-    self_mask = graph.add_constant(
-        network,
-        (1, 1, shape.total_tokens, shape.total_tokens),
-        _streaming_self_attention_mask(shape.total_tokens, shape.context_tokens),
-        dtype=np.float32,
-    )
     cross_mask = ltx._make_cross_attention_mask(
         network, context_mask_in, text_seq_len=shape.text_seq_len
     )
@@ -350,11 +344,9 @@ def build_sana_wm_refiner_dit_engine(
             dtype=op_dtype,
         )
         norm_hidden = ltx._modulate(network, norm_hidden, scale_msa, shift_msa)
-        attn_hidden = ltx._ltx_attention(
+        attn_hidden = _refiner_streaming_self_attention(
             network,
             norm_hidden,
-            None,
-            self_mask,
             weights,
             f"{p}.attn1",
             dim=shape.dim,
@@ -368,6 +360,7 @@ def build_sana_wm_refiner_dit_engine(
             rotary_sin=rotary_sin_t,
             rot_half=rot_half,
             constant_dtype=weight_dtype,
+            context_tokens=shape.context_tokens,
         )
         hidden = ltx._residual_gated(network, hidden, attn_hidden, gate_msa)
 
@@ -620,6 +613,140 @@ def _streaming_self_attention_mask(total_tokens: int, context_tokens: int) -> np
     if 0 < context_tokens < total_tokens:
         mask[:, :, :context_tokens, context_tokens:] = -10000.0
     return mask
+
+
+def _slice_attention_4d(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    *,
+    start_seq: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+) -> trt.ITensor:
+    return network.add_slice(
+        tensor,
+        (0, 0, start_seq, 0),
+        (1, num_heads, seq_len, head_dim),
+        (1, 1, 1, 1),
+    ).get_output(0)
+
+
+def _refiner_streaming_self_attention(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    weights: "Mapping[str, np.ndarray]",
+    prefix: str,
+    *,
+    dim: int,
+    num_heads: int,
+    head_dim: int,
+    q_seq_len: int,
+    kv_seq_len: int,
+    eps_t: trt.ITensor,
+    dtype: np.dtype,
+    rotary_cos: trt.ITensor,
+    rotary_sin: trt.ITensor,
+    rot_half: trt.ITensor,
+    constant_dtype: np.dtype,
+    context_tokens: int,
+) -> trt.ITensor:
+    """SANA-WM/LTX-2 self-attention with the upstream sink/current split.
+
+    Sink tokens attend only sink tokens; current tokens attend all tokens. This
+    is equivalent to the dense additive mask, but keeps TensorRT on native
+    attention calls instead of materializing a 36080x36080 mask.
+    """
+    if q_seq_len != kv_seq_len:
+        raise ValueError("SANA-WM refiner self-attention expects equal Q/KV lengths")
+
+    q = ltx._linear(
+        network, hidden, dim, dim, weights, f"{prefix}.to_q", dtype,
+        constant_dtype=constant_dtype,
+    )
+    k = ltx._linear(
+        network, hidden, dim, dim, weights, f"{prefix}.to_k", dtype,
+        constant_dtype=constant_dtype,
+    )
+    v = ltx._linear(
+        network, hidden, dim, dim, weights, f"{prefix}.to_v", dtype,
+        constant_dtype=constant_dtype,
+    )
+
+    graph = _ensure_graph_ops()
+    q = graph.add_rms_norm(
+        network, q, dim, weights[f"{prefix}.norm_q.weight"], eps_t, dtype=dtype
+    )
+    k = graph.add_rms_norm(
+        network, k, dim, weights[f"{prefix}.norm_k.weight"], eps_t, dtype=dtype
+    )
+    q = ltx._apply_ltx_rope(network, q, rotary_cos, rotary_sin, rot_half)
+    k = ltx._apply_ltx_rope(network, k, rotary_cos, rotary_sin, rot_half)
+
+    q4 = ltx._to_attention_4d(
+        network, q, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim
+    )
+    k4 = ltx._to_attention_4d(
+        network, k, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim
+    )
+    v4 = ltx._to_attention_4d(
+        network, v, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim
+    )
+    if 0 < context_tokens < q_seq_len:
+        current_tokens = q_seq_len - context_tokens
+        q_context = _slice_attention_4d(
+            network,
+            q4,
+            start_seq=0,
+            seq_len=context_tokens,
+            num_heads=num_heads,
+            head_dim=head_dim,
+        )
+        k_context = _slice_attention_4d(
+            network,
+            k4,
+            start_seq=0,
+            seq_len=context_tokens,
+            num_heads=num_heads,
+            head_dim=head_dim,
+        )
+        v_context = _slice_attention_4d(
+            network,
+            v4,
+            start_seq=0,
+            seq_len=context_tokens,
+            num_heads=num_heads,
+            head_dim=head_dim,
+        )
+        q_current = _slice_attention_4d(
+            network,
+            q4,
+            start_seq=context_tokens,
+            seq_len=current_tokens,
+            num_heads=num_heads,
+            head_dim=head_dim,
+        )
+        context_ctx = graph._add_attention_core(  # noqa: SLF001 - shared TRT primitive
+            network, q_context, k_context, v_context, causal=False, mask=None
+        )
+        current_ctx = graph._add_attention_core(  # noqa: SLF001 - shared TRT primitive
+            network, q_current, k4, v4, causal=False, mask=None
+        )
+        concat = network.add_concatenation([context_ctx, current_ctx])
+        concat.axis = 2
+        ctx4 = concat.get_output(0)
+    else:
+        ctx4 = graph._add_attention_core(  # noqa: SLF001 - shared TRT primitive
+            network, q4, k4, v4, causal=False, mask=None
+        )
+
+    ctx = ltx._from_attention_4d(
+        network, ctx4, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim
+    )
+    return ltx._linear(
+        network, ctx, dim, dim, weights, f"{prefix}.to_out.0", dtype,
+        constant_dtype=constant_dtype,
+    )
 
 
 def _refiner_block_modulation(

@@ -88,6 +88,53 @@ _HF_ALLOW_PATTERNS = [
 ]
 
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
+_SANA_WM_HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
+_SANA_WM_STAGE1_TEXT_ENCODER_HF_ID = "google/gemma-2-2b-it"
+_SANA_WM_ALLOW_PATTERNS = [
+    "README.md",
+    "config.yaml",
+    "asset/sana_wm/**",
+    "inference_video_scripts/**",
+    "dit/**",
+    "vae/**",
+    "text_encoder/**",
+    "refiner/**",
+]
+_SANA_WM_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS = [
+    "config.json",
+    "generation_config.json",
+    "model*.safetensors",
+    "model.safetensors.index.json",
+    "tokenizer*",
+    "tokenizer.model",
+    "special_tokens_map.json",
+]
+_SANA_WM_REQUIRED_PATH_GROUPS = [
+    ("dit/sana_wm_1600m_720p.safetensors", ["dit/sana_wm_1600m_720p.safetensors"]),
+    (
+        "vae/diffusion_pytorch_model.safetensors",
+        [
+            "vae/diffusion_pytorch_model.safetensors",
+            "vae/model.safetensors",
+            "vae/model.safetensors.index.json",
+        ],
+    ),
+    (
+        "refiner transformer",
+        [
+            "refiner/refiner.safetensors",
+            "refiner/transformer/diffusion_pytorch_model.safetensors",
+        ],
+    ),
+    (
+        "refiner connectors",
+        [
+            "refiner/refiner.safetensors",
+            "refiner/connectors/diffusion_pytorch_model.safetensors",
+        ],
+    ),
+    ("refiner/text_encoder/", ["refiner/text_encoder"]),
+]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
 _REQUIRED_FILES_BY_HF_ID = {
@@ -172,6 +219,14 @@ for m in manifests:
     if filter_names is not None and name not in filter_names:
         continue
     entries.append((name, d["hf_id"], bool(d.get("gated"))))
+    if str(d.get("runtime_strategy", "")) == "diffusion_sana_wm":
+        entries.append(
+            (
+                f"{name}-stage1-text-encoder",
+                _SANA_WM_STAGE1_TEXT_ENCODER_HF_ID,
+                False,
+            )
+        )
     if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
         needs_tts_asr_verifier = True
         if str(d.get("family", "")) == "magpie_tts":
@@ -210,7 +265,7 @@ def _is_cached(hf_id: str) -> bool:
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_allow_patterns_for(hf_id),
             local_files_only=True,
         )
     except Exception:
@@ -219,7 +274,29 @@ def _is_cached(hf_id: str) -> bool:
     return _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id)
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _allow_patterns_for(hf_id: str) -> list[str]:
+    if hf_id == _SANA_WM_HF_ID:
+        return list(_SANA_WM_ALLOW_PATTERNS)
+    if hf_id == _SANA_WM_STAGE1_TEXT_ENCODER_HF_ID:
+        return list(_SANA_WM_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS)
+    return _HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
+
+
 def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:
+    if hf_id == _SANA_WM_HF_ID:
+        if not (snapshot_dir / "config.yaml").is_file():
+            return False
+        if not _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
+            return True
+        return all(
+            any((snapshot_dir / candidate).exists() for candidate in alternatives)
+            for _, alternatives in _SANA_WM_REQUIRED_PATH_GROUPS
+        )
+
     files = [
         str(path.relative_to(snapshot_dir))
         for path in snapshot_dir.rglob("*")
@@ -309,7 +386,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_allow_patterns_for(hf_id),
         )
         if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
             raise RuntimeError(

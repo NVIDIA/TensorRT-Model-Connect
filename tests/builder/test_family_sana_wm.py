@@ -19,6 +19,23 @@ sana_wm_plugin_mod = importlib.import_module(
     "tensorrt_model_connect.families.sana_wm.plugin"
 )
 
+_SANA_WM_ENV_VARS = (
+    "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS",
+    "SANA_WM_MODEL_DIR",
+    "SANA_WM_NATIVE_PLAN_DIR",
+    "SANA_WM_STAGE1_TOKENIZER_DIR",
+    "SANA_WM_TOKENIZER_DIR",
+    "SANA_WM_TEXT_ENCODER_DIR",
+    "SANA_WM_REFINER_TOKENIZER_DIR",
+    "SANA_WM_REFINER_TEXT_ENCODER_DIR",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_sana_wm_env(monkeypatch) -> None:
+    for name in _SANA_WM_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
 
 def _sana_yaml() -> str:
     return """
