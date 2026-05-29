@@ -360,6 +360,37 @@ def test_diffusion_runner_maps_sana_wm_optional_no_refiner(monkeypatch, tmp_path
     assert "--no_refiner" in captured["cmd"]
 
 
+def test_diffusion_runner_preserves_qwen_image_edit_input_image(monkeypatch, tmp_path):
+    image_path = tmp_path / "edit.png"
+    image_path.write_bytes(b"png")
+    case = _make_case(
+        "diffusion_media_generation",
+        family="qwen_image",
+        runtime_strategy="diffusion_qwen_image",
+        inputs={
+            "prompt": "turn this into watercolor",
+            "image": str(image_path),
+            "num_inference_steps": 2,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(diffusion.subprocess, "run", _fake_run)
+
+    diffusion.DiffusionMediaRunner().run_stage(case, StageSpec(name="end_to_end"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[1] == "run"
+    assert "--image" in cmd
+    assert str(image_path) in cmd
+
+
 def test_diffusion_runner_prefers_sana_wm_camera_npy_over_action(monkeypatch, tmp_path):
     camera = tmp_path / "asset" / "sana_wm" / "camera.npy"
     intrinsics = tmp_path / "asset" / "sana_wm" / "intrinsics.npy"

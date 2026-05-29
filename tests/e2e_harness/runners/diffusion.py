@@ -502,6 +502,8 @@ class DiffusionMediaRunner:
                     cmd.extend(["--width", str(width)])
                 if "seed" in case.inputs:
                     cmd.extend(["--seed", str(case.inputs["seed"])])
+                if image_path:
+                    cmd.extend(["--image", image_path])
                 if qwen_image_initial_latents_raw:
                     cmd.extend([
                         "--initial-latents-raw", qwen_image_initial_latents_raw])

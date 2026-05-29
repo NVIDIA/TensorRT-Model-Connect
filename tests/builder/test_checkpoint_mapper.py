@@ -198,6 +198,62 @@ class TestLoadStandardWeights:
         assert fp16_weights["layer.0.w_q"].dtype == np.float16
         assert fp16_weights["layer.0.input_norm"].dtype == np.float32
 
+    def test_custom_model_prefix_and_lm_head_key(self, tmp_path):
+        """Load standard weights from checkpoints with non-model tensor roots."""
+        from safetensors.numpy import save_file
+
+        config = {
+            "model_type": "nemotron_labs_diffusion",
+            "vocab_size": 16,
+            "hidden_size": 8,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        tensors = {
+            "encoder.embed_tokens.weight": np.random.randn(16, 8).astype(np.float32),
+            "encoder.layers.0.input_layernorm.weight": np.random.randn(8).astype(np.float32),
+            "encoder.layers.0.post_attention_layernorm.weight": np.random.randn(8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.self_attn.q_proj.weight": np.random.randn(8, 8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.self_attn.k_proj.weight": np.random.randn(8, 8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.self_attn.v_proj.weight": np.random.randn(8, 8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.self_attn.o_proj.weight": np.random.randn(8, 8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.mlp.gate_proj.weight": np.random.randn(16, 8).astype(
+                np.float32
+            ),
+            "encoder.layers.0.mlp.up_proj.weight": np.random.randn(16, 8).astype(np.float32),
+            "encoder.layers.0.mlp.down_proj.weight": np.random.randn(8, 16).astype(
+                np.float32
+            ),
+            "encoder.norm.weight": np.random.randn(8).astype(np.float32),
+            "diffusion_head.weight": np.random.randn(16, 8).astype(np.float32),
+        }
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = load_standard_weights(
+            tmp_path,
+            cfg,
+            model_prefix="encoder",
+            lm_head_key="diffusion_head.weight",
+        )
+
+        assert weights["embedding"].shape == (16, 8)
+        assert weights["layer.0.w_q"].shape == (8, 8)
+        assert weights["final_norm"].shape == (8,)
+        assert weights["w_out"].shape == (8, 16)
+
     def test_transpose_applied(self, tmp_path):
         """Verify projections are transposed from [out, in] to [in, out]."""
         config = {

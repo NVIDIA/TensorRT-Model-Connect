@@ -105,6 +105,10 @@ def load_standard_weights(
     config: ModelConfig,
     *,
     precision: str = "fp32",
+    model_prefix: str = "model",
+    embedding_key: str | None = None,
+    final_norm_key: str | None = None,
+    lm_head_key: str = "lm_head.weight",
 ) -> WeightDict:
     """Load HF safetensors and map to standard weight dict."""
     model_dir = Path(model_dir)
@@ -116,7 +120,19 @@ def load_standard_weights(
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
     target_dtype = _target_np_dtype(precision)
-    embedding_key, layer_prefix, final_norm_key, lm_head_key = _standard_key_layout(readers)
+    if (
+        model_prefix == "model"
+        and embedding_key is None
+        and final_norm_key is None
+        and lm_head_key == "lm_head.weight"
+    ):
+        embedding_key, layer_prefix, final_norm_key, lm_head_key = _standard_key_layout(readers)
+    else:
+        layer_prefix = model_prefix
+        if embedding_key is None:
+            embedding_key = f"{model_prefix}.embed_tokens.weight"
+        if final_norm_key is None:
+            final_norm_key = f"{model_prefix}.norm.weight"
 
     weights = WeightDict()
 
