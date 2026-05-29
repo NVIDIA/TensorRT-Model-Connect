@@ -8,3 +8,4 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+nemotron-h-nano-9b-tp2    XFAIL  (trtmc TP=2 build+runtime PASS, both ranks output "The capital of France is Paris."; golden snapshot expects just "Paris" so NED=0.839 > 0.15 threshold; need longer snapshot or stricter prompt)
