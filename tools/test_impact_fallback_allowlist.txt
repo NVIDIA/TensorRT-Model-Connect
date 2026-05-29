@@ -206,6 +206,7 @@ shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py
 shared_builder_module python/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/python_profile_requirements/internlm.lock.txt # shared Python profile lockfile; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profiles.toml # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/quantization/__init__.py # shared Python builder surface; broad builder impact is intentional

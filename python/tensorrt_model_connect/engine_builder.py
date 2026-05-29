@@ -24,6 +24,13 @@ from .triattention_export import (
     TriAttentionBundleConfig,
     export_triattention_stats_section,
 )
+from .parallel_config import (
+    ParallelConfig,
+    normalize_parallel_config,
+    rank_denoiser_section,
+    rank_engine_section,
+    require_tensorrt_11_for_tensor_parallel,
+)
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -31,7 +38,7 @@ def _setup_trt_import(rtx: bool) -> None:
     if not rtx:
         return
     trt_compat.configure_backend(rtx=True)
-    print("[trtmc-build] Using TensorRT-RTX backend", file=sys.stderr)
+    print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
 
 
 def _build_timing_phase(timing: dict, key: str) -> float:
@@ -82,9 +89,11 @@ _HF_ALLOW_PATTERNS = [
     "elf_params.npz",
     "tokenizer.json",
     "tokenizer_config.json",
+    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",
+    "linear_spec_lora/**",
     "*.model",
     "*.spm",
     "*.py",
@@ -222,6 +231,68 @@ def _call_supports_kwarg(func, name: str) -> bool:
     )
 
 
+def _quant_format_name(quant_ctx) -> str | None:
+    quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    return getattr(quant_format, "name", None)
+
+
+def _plugin_supports_parallel_quantization(plugin, quant_ctx) -> bool:
+    supports = getattr(plugin, "supports_parallel_quantization", None)
+    if not callable(supports):
+        return False
+    return bool(supports(_quant_format_name(quant_ctx)))
+
+
+def _plugin_uses_standard_decoder_builder(plugin) -> bool:
+    """Best-effort check for family plugins routed through the standard decoder."""
+    try:
+        source = inspect.getsource(plugin.build_engine)
+    except (OSError, TypeError):
+        return False
+    return "build_standard_decoder_engine" in source
+
+
+def _plugin_supports_split_decoder_roles(plugin) -> bool:
+    """Return True when the family's standard builder honors split roles."""
+    if not _plugin_uses_standard_decoder_builder(plugin):
+        return False
+    build_globals = getattr(plugin.build_engine, "__globals__", {})
+    standard_builder = build_globals.get("build_standard_decoder_engine")
+    if standard_builder is None:
+        return False
+    try:
+        source = inspect.getsource(standard_builder)
+    except (OSError, TypeError):
+        return False
+    return (
+        "_decoder_engine_role" in source
+        and "profile_mode" in source
+    )
+
+
+def _can_build_split_decoder_engines(
+    plugin,
+    runtime_strategy: str,
+    *,
+    dynamic_kv_cache: bool,
+    triattention_enabled: bool,
+) -> bool:
+    """Return True when split prefill/decode engines are supported.
+
+    The split layout relies on ``standard_decoder_builder`` honoring the
+    internal ``_decoder_engine_role`` passthrough. Custom MoE, recurrent,
+    VL/embed-input, TriAttention, and dynamic-KV runtimes keep their existing
+    single-engine behavior until they opt into the same contract.
+    """
+    if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+        return False
+    if dynamic_kv_cache or triattention_enabled:
+        return False
+    if bool(getattr(plugin, "embed_input", False)):
+        return False
+    return _plugin_supports_split_decoder_roles(plugin)
+
+
 def _load_plugin_weights(
     plugin,
     model_dir: str,
@@ -338,23 +409,25 @@ def _resolve_model(model_id_or_path: str) -> str:
             "Install it with: pip install huggingface_hub"
         )
 
-    print(f"[trtmc-build] Downloading {model_id_or_path} ...", file=sys.stderr)
+    print(f"[trtmc build] Downloading {model_id_or_path} ...", file=sys.stderr)
     try:
         allow_patterns = _HF_ALLOW_PATTERNS + ["*.nemo"]
         if _is_sana_wm_model_ref(model_id_or_path):
             allow_patterns = _sana_wm_allow_patterns()
-        local_dir = snapshot_download(repo_id=model_id_or_path, allow_patterns=allow_patterns)
+        local_dir = snapshot_download(
+            repo_id=model_id_or_path, allow_patterns=allow_patterns)
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)
 
     # Prefer HF config when both HF files and .nemo are present.
     dl_path = Path(local_dir)
     if _is_hf_model_dir(dl_path):
-        print(f"[trtmc-build] Downloaded to {local_dir}", file=sys.stderr)
+        print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
         return local_dir
 
     if _is_sana_wm_model_dir(dl_path):
-        print(f"[trtmc-build] Downloaded SANA-WM config to {local_dir}", file=sys.stderr)
+        print(f"[trtmc build] Downloaded SANA-WM config to {local_dir}",
+              file=sys.stderr)
         return local_dir
 
     # Fallback for NeMo-only snapshots.
@@ -362,7 +435,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     if nemo_files:
         return _resolve_nemo_archive(nemo_files[0])
 
-    print(f"[trtmc-build] Downloaded to {local_dir}", file=sys.stderr)
+    print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
     return local_dir
 
 
@@ -377,7 +450,7 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
     import json
     import tempfile
 
-    print(f"[trtmc-build] Resolving NeMo archive: {nemo_path}", file=sys.stderr)
+    print(f"[trtmc build] Resolving NeMo archive: {nemo_path}", file=sys.stderr)
 
     # Extract model_config.yaml from the tar
     import tarfile
@@ -438,7 +511,7 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
         import os
         os.symlink(str(nemo_path.resolve()), str(nemo_link))
 
-    print(f"[trtmc-build] NeMo resolved: model_type={model_type}, "
+    print(f"[trtmc build] NeMo resolved: model_type={model_type}, "
           f"tmp_dir={tmp_dir}", file=sys.stderr)
     return tmp_dir
 
@@ -501,6 +574,35 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return False
 
 
+def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[int]] | None:
+    """Return exact HF add-special prefix/suffix IDs when they are representable.
+
+    Some SentencePiece tokenizers add BOS by default but not EOS. A single
+    add-special boolean is not enough for the native C++ tokenizer to mirror
+    that behavior, so bundle the exact frame when HF exposes it as a simple
+    prefix/suffix around the no-special tokenization.
+    """
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        ids_default = list(tok.encode("hello"))
+        ids_without = list(tok.encode("hello", add_special_tokens=False))
+    except Exception:
+        return None
+
+    if ids_default == ids_without:
+        return [], []
+    if not ids_without:
+        return ids_default, []
+
+    needle_len = len(ids_without)
+    for start in range(0, len(ids_default) - needle_len + 1):
+        if ids_default[start:start + needle_len] == ids_without:
+            return ids_default[:start], ids_default[start + needle_len:]
+    return None
+
+
 def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect add-special behavior from the tokenizer embedded in diffusion bundles."""
     for tok_subdir in ("tokenizer_2", "tokenizer"):
@@ -531,19 +633,37 @@ def _detect_sana_wm_tokenizer_add_special_tokens(
         if configured:
             configured_path = Path(str(configured))
             candidate = (
-                configured_path if configured_path.is_absolute() else model_dir / configured_path
+                configured_path
+                if configured_path.is_absolute()
+                else model_dir / configured_path
             )
             if candidate not in candidates:
                 candidates.append(candidate)
-    candidates.extend(
-        [
-            model_dir / "text_encoder",
-        ]
-    )
+    candidates.append(model_dir / "text_encoder")
     for tok_dir in candidates:
         if tok_dir.is_dir():
             return _detect_tokenizer_add_special_tokens(tok_dir)
     return _detect_tokenizer_add_special_tokens(model_dir)
+
+
+def _find_sentencepiece_model(model_dir: Path) -> Path | None:
+    """Return the best SentencePiece model file for tokenizer.json conversion."""
+    preferred = (
+        model_dir / "source.spm",
+        model_dir / "spiece.model",
+        model_dir / "tokenizer.model",
+    )
+    for path in preferred:
+        if path.exists():
+            return path
+
+    candidates = sorted(
+        {
+            *model_dir.glob("*.spm"),
+            *model_dir.glob("*.model"),
+        }
+    )
+    return candidates[0] if candidates else None
 
 
 def _ensure_tokenizer_json(model_dir: Path) -> None:
@@ -564,21 +684,22 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
         tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
         tok.save_pretrained(str(model_dir))
         if (model_dir / "tokenizer.json").exists():
-            print("[trtmc-build] Generated tokenizer.json from slow tokenizer",
+            print("[trtmc build] Generated tokenizer.json from slow tokenizer",
                   file=sys.stderr)
             return
     except Exception:
         pass
 
-    # --- Attempt 2: build from SentencePiece .spm + vocab.json ---
+    # --- Attempt 2: build from SentencePiece model + optional vocab.json ---
     # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
     # vocab.json (combined source+target vocabulary with IDs).  We build a
     # Unigram tokenizer.json using the full combined vocab (so IDs match the
     # TRT engine) with scores from the SPM model for source tokens and a
     # default low score for target-only tokens.
-    spm_candidates = list(model_dir.glob("*.spm"))
-    source_spm = model_dir / "source.spm"
-    spm_path = source_spm if source_spm.exists() else (spm_candidates[0] if spm_candidates else None)
+    #
+    # Diffusers T5 tokenizers, including PixArt, commonly ship spiece.model
+    # instead of a .spm file.
+    spm_path = _find_sentencepiece_model(model_dir)
     vocab_json_path = model_dir / "vocab.json"
     if spm_path is not None:
         try:
@@ -621,14 +742,14 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
 
             out_path = str(model_dir / "tokenizer.json")
             tokenizer.save(out_path)
-            print(f"[trtmc-build] Generated tokenizer.json from {spm_path.name} "
+            print(f"[trtmc build] Generated tokenizer.json from {spm_path.name} "
                   f"({len(vocab)} tokens)", file=sys.stderr)
             return
         except Exception as e:
-            print(f"[trtmc-build] Warning: SentencePiece conversion failed: {e}",
+            print(f"[trtmc build] Warning: SentencePiece conversion failed: {e}",
                   file=sys.stderr)
 
-    print("[trtmc-build] Warning: could not generate tokenizer.json "
+    print("[trtmc build] Warning: could not generate tokenizer.json "
           "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
 
 
@@ -637,6 +758,7 @@ def build_bundle(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
@@ -659,6 +781,7 @@ def build_bundle(
     # the TRTMC_MAGPIE_MAX_SOURCE_POS env var; passed to families via
     # config.raw, same passthrough pattern.
     audio_magpie_max_source_positions: int = 0,
+    parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
 ) -> None:
@@ -668,12 +791,20 @@ def build_bundle(
         model_dir: Path to HF model directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
         max_cache_length: KV cache length for the engine.
+        decoder_engine_layout: ``"split"`` builds separate prefill/decode
+            engines for supported decoder LLMs. ``"dual_profile"`` keeps the
+            low-VRAM single-engine/multi-profile layout.
         verbose: Print detailed logs.
     """
+    if decoder_engine_layout not in ("split", "dual_profile"):
+        raise ValueError(
+            "decoder_engine_layout must be 'split' or 'dual_profile', "
+            f"got {decoder_engine_layout!r}")
     _setup_trt_import(rtx)
+    parallel = normalize_parallel_config(parallel_config)
     try:
         print(
-            f"[trtmc-build] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
+            f"[trtmc build] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
             file=sys.stderr,
         )
     except ImportError as exc:
@@ -700,13 +831,16 @@ def build_bundle(
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
-            build_timing=build_timing)
+            build_timing=build_timing,
+            parallel_config=parallel)
         return
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
+    config.raw["_model_dir"] = str(model_dir_path)
+    config.raw["_decoder_engine_layout"] = decoder_engine_layout
     config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
-    print(f"[trtmc-build] Model: {config.model_type} "
+    print(f"[trtmc build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
           f"vocab={config.vocab_size})", file=sys.stderr)
 
@@ -718,11 +852,11 @@ def build_bundle(
             f"No family plugin for model_type={config.model_type!r}. "
             f"Supported: {supported}")
 
-    print(f"[trtmc-build] Family: {plugin.name}", file=sys.stderr)
+    print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
 
     # 3. Load weights
     t1 = time.monotonic()
-    print("[trtmc-build] Loading weights ...", file=sys.stderr)
+    print("[trtmc build] Loading weights ...", file=sys.stderr)
     try:
         weights = _load_plugin_weights(
             plugin, str(model_dir_path), config, precision=precision)
@@ -730,7 +864,7 @@ def build_bundle(
         weights_elapsed = time.monotonic() - t1
         _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
         _write_build_timing(build_timing)
-    print(f"[trtmc-build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
+    print(f"[trtmc build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
 
     # 3b. Build quantization context (if requested)
     quant_ctx = None
@@ -762,7 +896,7 @@ def build_bundle(
                 build_timing, "quantization_context_s",
                 time.monotonic() - quant_t0)
             _write_build_timing(build_timing)
-        print(f"[trtmc-build] Quantization: {quant_plan.quant_format}",
+        print(f"[trtmc build] Quantization: {quant_plan.quant_format}",
               file=sys.stderr)
 
     # 4. Build TRT engine
@@ -820,7 +954,7 @@ def build_bundle(
             config=config,
         )
         print(
-            "[trtmc-build] TriAttention: embedded calibration stats "
+            "[trtmc build] TriAttention: embedded calibration stats "
             f"from {triattention_stats_path} (kv_budget={kv_budget}, "
             f"divide_length={triattention_divide_length}, "
             f"recent_window={triattention_recent_window})",
@@ -849,32 +983,151 @@ def build_bundle(
         config.raw["_dynamic_kv_opt_length"] = max_cache_length
         config.raw["_dynamic_kv_profile_rows"] = dynamic_kv_profile_rows
 
-    print(f"[trtmc-build] Building TRT engine (cache={max_cache_length}) ...",
-          file=sys.stderr)
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(parallel)
+        if quant_ctx is not None and not _plugin_supports_parallel_quantization(
+            plugin, quant_ctx
+        ):
+            raise ValueError("Tensor-parallel decoder builds do not support quantization yet")
+        if enable_dynamic_kv_cache:
+            raise NotImplementedError(
+                "Tensor-parallel decoder builds do not support dynamic_kv_cache "
+                "or TriAttention yet")
+        if not _call_supports_kwarg(plugin.build_engine, "parallel_config"):
+            raise ValueError(
+                f"Plugin {plugin.name} does not support tensor-parallel builds")
+        print(
+            f"[trtmc-build] Building tensor-parallel TRT engines "
+            f"(tp={parallel.tp_size}, cache={max_cache_length}) ...",
+            file=sys.stderr,
+        )
+
     # Pass precision/quant_ctx only if the plugin accepts them (not all do).
     extra_kwargs = {}
     if _call_supports_kwarg(plugin.build_engine, 'precision'):
         extra_kwargs['precision'] = precision
     if _call_supports_kwarg(plugin.build_engine, 'quant_ctx'):
         extra_kwargs['quant_ctx'] = quant_ctx
+    if _call_supports_kwarg(plugin.build_engine, 'parallel_config'):
+        extra_kwargs['parallel_config'] = parallel
+
+    def _split_timing_cache_scope(role: str) -> str:
+        quant_label = quantize or "noquant"
+        return (
+            f"split-{config.model_type}-h{config.hidden_size}"
+            f"-l{config.num_hidden_layers}-{precision}-{quant_label}-{role}"
+        )
+
+    def _build_plugin_engine_with_role(role: str) -> bytes:
+        previous_role = config.raw.get("_decoder_engine_role")
+        config.raw["_decoder_engine_role"] = role
+        try:
+            return plugin.build_engine(
+                config, weights, max_cache_length, verbose=verbose,
+                **extra_kwargs)
+        finally:
+            if previous_role is None:
+                config.raw.pop("_decoder_engine_role", None)
+            else:
+                config.raw["_decoder_engine_role"] = previous_role
+
+    def _build_split_plugin_engine_with_role(role: str) -> bytes:
+        with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
+            return _build_plugin_engine_with_role(role)
+
+    split_supported = (
+        not parallel.enabled and
+        decoder_engine_layout == "split" and
+        _can_build_split_decoder_engines(
+            plugin,
+            runtime_strategy,
+            dynamic_kv_cache=enable_dynamic_kv_cache,
+            triattention_enabled=triattention_cfg is not None,
+        )
+    )
+
+    engine_plan: bytes
+    prefill_engine_plan: bytes | None = None
+    tp_engine_plans: dict[int, bytes] = {}
+    actual_decoder_engine_layout = "single"
     engine_t0 = time.monotonic()
     try:
-        engine_plan = plugin.build_engine(
-            config, weights, max_cache_length, verbose=verbose,
-            **extra_kwargs)
+        if parallel.enabled:
+            for rank in range(parallel.tp_size):
+                rank_kwargs = dict(extra_kwargs)
+                rank_kwargs["parallel_config"] = parallel.for_rank(rank)
+                print(f"[trtmc-build]   rank {rank}/{parallel.tp_size} ...",
+                      file=sys.stderr)
+                tp_engine_plans[rank] = plugin.build_engine(
+                    config, weights, max_cache_length, verbose=verbose,
+                    **rank_kwargs)
+            engine_plan = tp_engine_plans[0]
+            actual_decoder_engine_layout = "dual_profile"
+        elif split_supported:
+            print(
+                f"[trtmc build] Building split decoder engines "
+                f"(cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
+            prefill_t0 = time.monotonic()
+            prefill_engine_plan = _build_split_plugin_engine_with_role("prefill")
+            prefill_elapsed = time.monotonic() - prefill_t0
+            _add_build_timing(
+                build_timing, "trt_compile_prefill_engine_s", prefill_elapsed)
+            print(
+                f"[trtmc build] Prefill engine built [{prefill_elapsed:.1f}s] "
+                f"({len(prefill_engine_plan) / (1024 * 1024):.1f} MB)",
+                file=sys.stderr,
+            )
+
+            decode_t0 = time.monotonic()
+            engine_plan = _build_split_plugin_engine_with_role("decode")
+            decode_elapsed = time.monotonic() - decode_t0
+            _add_build_timing(
+                build_timing, "trt_compile_decode_engine_s", decode_elapsed)
+            print(
+                f"[trtmc build] Decode engine built [{decode_elapsed:.1f}s] "
+                f"({len(engine_plan) / (1024 * 1024):.1f} MB)",
+                file=sys.stderr,
+            )
+            actual_decoder_engine_layout = "split"
+        else:
+            if decoder_engine_layout == "split" and runtime_strategy in (
+                "decoder_kv_cache", "decoder_moe"
+            ):
+                print(
+                    "[trtmc build] Split decoder layout is not supported for "
+                    f"family={plugin.name}; using existing single-engine path",
+                    file=sys.stderr,
+                )
+            print(f"[trtmc build] Building TRT engine (cache={max_cache_length}) ...",
+                  file=sys.stderr)
+            role = "dual_profile" if decoder_engine_layout == "dual_profile" else "decode"
+            engine_plan = _build_plugin_engine_with_role(role)
+            if decoder_engine_layout == "dual_profile":
+                actual_decoder_engine_layout = "dual_profile"
     finally:
         engine_elapsed = time.monotonic() - engine_t0
         _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
         _add_build_timing(build_timing, "trt_compile_main_engine_s", engine_elapsed)
         _write_build_timing(build_timing)
-    print(f"[trtmc-build] Engine built [{engine_elapsed:.1f}s] "
-          f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
+    if actual_decoder_engine_layout == "split":
+        total_mb = (len(engine_plan) + len(prefill_engine_plan or b"")) / (1024 * 1024)
+        print(f"[trtmc build] Split engines built [{engine_elapsed:.1f}s] "
+              f"({total_mb:.1f} MB total)", file=sys.stderr)
+    elif parallel.enabled:
+        total_mb = sum(len(plan) for plan in tp_engine_plans.values()) / (1024 * 1024)
+        print(f"[trtmc-build] Tensor-parallel engines built [{engine_elapsed:.1f}s] "
+              f"({total_mb:.1f} MB total)", file=sys.stderr)
+    else:
+        print(f"[trtmc build] Engine built [{engine_elapsed:.1f}s] "
+              f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
     # 4b. Build vision engine (optional, VL models only)
     vision_plan = None
     build_vision = getattr(plugin, 'build_vision_engine', None)
     if build_vision is not None:
-        print("[trtmc-build] Building vision encoder engine ...",
+        print("[trtmc build] Building vision encoder engine ...",
               file=sys.stderr)
         vision_t0 = time.monotonic()
         try:
@@ -887,7 +1140,7 @@ def build_bundle(
                 build_timing, "trt_compile_vision_engine_s", vision_elapsed)
             _write_build_timing(build_timing)
         if vision_plan is not None:
-            print(f"[trtmc-build] Vision engine built [{vision_elapsed:.1f}s] "
+            print(f"[trtmc build] Vision engine built [{vision_elapsed:.1f}s] "
                   f"({len(vision_plan) / (1024 * 1024):.1f} MB)",
                   file=sys.stderr)
 
@@ -895,15 +1148,19 @@ def build_bundle(
     extra_engines = {}
     build_extra = getattr(plugin, 'build_extra_engines', None)
     if build_extra is not None:
-        print("[trtmc-build] Building extra engines ...", file=sys.stderr)
+        print("[trtmc build] Building extra engines ...", file=sys.stderr)
         extra_t0 = time.monotonic()
         compile_before_extra = _build_timing_phase(build_timing, "trt_compile_s")
         try:
             build_extra_kwargs = {"verbose": verbose}
             if _call_supports_kwarg(build_extra, "precision"):
                 build_extra_kwargs["precision"] = precision
+            if _call_supports_kwarg(build_extra, "quant_ctx"):
+                build_extra_kwargs["quant_ctx"] = quant_ctx
             if _call_supports_kwarg(build_extra, "build_timing"):
                 build_extra_kwargs["build_timing"] = build_timing
+            if _call_supports_kwarg(build_extra, "parallel_config"):
+                build_extra_kwargs["parallel_config"] = parallel
             extra_engines = build_extra(
                 config, weights, max_cache_length, **build_extra_kwargs) or {}
         finally:
@@ -914,20 +1171,32 @@ def build_bundle(
             _add_build_timing(
                 build_timing, "trt_compile_extra_engines_s", extra_elapsed)
             _write_build_timing(build_timing)
-        print(f"[trtmc-build] Extra engines built [{extra_elapsed:.1f}s]",
+        print(f"[trtmc build] Extra engines built [{extra_elapsed:.1f}s]",
               file=sys.stderr)
         for ename, eplan in extra_engines.items():
-            print(f"[trtmc-build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
+            print(f"[trtmc build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
                   file=sys.stderr)
 
     # 5. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
     if runtime_strategy == "diffusion_sana_wm":
+        tokenizer_special_frame = None
+        tokenizer_special_prefix_ids: list[int] = []
+        tokenizer_special_suffix_ids: list[int] = []
         tokenizer_add_special_tokens = _detect_sana_wm_tokenizer_add_special_tokens(
             model_dir_path, config.raw, weights)
     else:
-        tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
-            model_dir_path)
+        tokenizer_special_frame = _detect_tokenizer_special_frame(model_dir_path)
+        if tokenizer_special_frame is None:
+            tokenizer_special_prefix_ids = []
+            tokenizer_special_suffix_ids = []
+            tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
+                model_dir_path)
+        else:
+            tokenizer_special_prefix_ids, tokenizer_special_suffix_ids = (
+                tokenizer_special_frame)
+            tokenizer_add_special_tokens = bool(
+                tokenizer_special_prefix_ids or tokenizer_special_suffix_ids)
     _add_build_timing(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)
@@ -956,7 +1225,18 @@ def build_bundle(
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
-    sections = [BundleSection("engine_plan", engine_plan)]
+    if parallel.enabled:
+        sections = [
+            BundleSection(rank_engine_section(rank), plan)
+            for rank, plan in sorted(tp_engine_plans.items())
+        ]
+    else:
+        # For split decoder bundles, keep ``engine_plan`` as the decode-only
+        # engine for compatibility with existing tools and add the prefill engine
+        # under a role-specific section.
+        sections = [BundleSection("engine_plan", engine_plan)]
+        if prefill_engine_plan is not None:
+            sections.append(BundleSection("prefill_engine_plan", prefill_engine_plan))
 
     # Add vision engine section if present
     if vision_plan is not None:
@@ -1009,12 +1289,19 @@ def build_bundle(
         cfg_dict["precision"] = precision
         cfg_dict["tokenizer_add_special_tokens"] = int(
             tokenizer_add_special_tokens)
+        if tokenizer_special_frame is not None:
+            cfg_dict["tokenizer_special_prefix_ids"] = (
+                tokenizer_special_prefix_ids)
+            cfg_dict["tokenizer_special_suffix_ids"] = (
+                tokenizer_special_suffix_ids)
+        cfg_dict["decoder_engine_layout"] = actual_decoder_engine_layout
         if quant_plan is not None:
             cfg_dict["quantization"] = quant_plan.as_config_dict()
         elif quantize:
             cfg_dict["quantization"] = {"format": quantize}
         if triattention_cfg is not None:
             cfg_dict["triattention"] = triattention_cfg.to_dict()
+        cfg_dict.update(parallel.to_bundle_config_fields())
         if enable_dynamic_kv_cache:
             cfg_dict["dynamic_kv_cache"] = True
             cfg_dict["dynamic_kv_profile_rows"] = config.raw.get(
@@ -1049,6 +1336,12 @@ def build_bundle(
             audio_cfg = get_audio_config(config)
             if audio_cfg is not None:
                 cfg_dict.update(audio_cfg)
+        # Inject optional LoRA/adaptor config from plugin.
+        get_lora_config = getattr(plugin, 'get_lora_config', None)
+        if get_lora_config is not None:
+            lora_cfg = get_lora_config(config)
+            if lora_cfg is not None:
+                cfg_dict.update(lora_cfg)
         # Inject generic config overrides from plugin.
         # Build the final dict so overrides appear FIRST in the
         # serialized JSON.  The C++ fast_path_config parser uses
@@ -1076,8 +1369,9 @@ def build_bundle(
     # runtime from the parsed ModelConfig.
     embedded_config_json = False
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
-                     "vocab.json", "merges.txt", "special_tokens_map.json",
-                     "tokenizer.model", "preprocessor_config.json"):
+                     "chat_template.jinja", "vocab.json", "merges.txt",
+                     "special_tokens_map.json", "tokenizer.model",
+                     "preprocessor_config.json"):
         file_path = model_dir_path / filename
         if file_path.exists():
             data = file_path.read_bytes()
@@ -1111,7 +1405,7 @@ def build_bundle(
     t4 = time.monotonic()
     build_timing["total_s"] = t4 - t0
     _write_build_timing(build_timing)
-    print(f"[trtmc-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
+    print(f"[trtmc build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
 
 
@@ -1128,16 +1422,18 @@ def _build_diffusion_bundle(
     rtx: bool = False,
     diffusion_overrides: dict | None = None,
     build_timing: dict | None = None,
+    parallel_config: ParallelConfig | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
     if build_timing is None:
         build_timing = _new_build_timing()
+    parallel = normalize_parallel_config(parallel_config)
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
     pipeline_class = model_index.get("_class_name", "")
 
-    print(f"[trtmc-build] Diffusion pipeline: {pipeline_class}",
+    print(f"[trtmc build] Diffusion pipeline: {pipeline_class}",
           file=sys.stderr)
 
     # Auto-discover plugin from pipeline_classes attribute
@@ -1152,6 +1448,9 @@ def _build_diffusion_bundle(
             f"Supported: {supported}")
 
     model_type = getattr(plugin, 'name', pipeline_class.lower())
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Diffusion tensor-parallel builds")
     config = ModelConfig(model_type=model_type, raw=model_index)
     config.raw["max_cache_length"] = max_cache_length
     if diffusion_overrides:
@@ -1160,7 +1459,7 @@ def _build_diffusion_bundle(
         build_bundle, "_model_id_or_path_orig", str(model_dir_path)
     )
 
-    print(f"[trtmc-build] Family: {plugin.name}", file=sys.stderr)
+    print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
 
     # Load weights (lightweight — just paths for diffusion)
     t1 = time.monotonic()
@@ -1171,7 +1470,7 @@ def _build_diffusion_bundle(
         weights_elapsed = time.monotonic() - t1
         _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
         _write_build_timing(build_timing)
-    print(f"[trtmc-build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
+    print(f"[trtmc build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
 
     # Propagate transformer config to ModelConfig so get_diffusion_config can access it
     if "_transformer_config" in weights:
@@ -1184,7 +1483,7 @@ def _build_diffusion_bundle(
             raise ValueError(
                 f"Plugin {plugin.name} does not support FP8 auto-calibration. "
                 f"Use --fp8-scales with a pre-computed scales JSON instead.")
-        print(f"[trtmc-build] Running FP8 auto-calibration for {plugin.name} ...",
+        print(f"[trtmc build] Running FP8 auto-calibration for {plugin.name} ...",
               file=sys.stderr)
         calibrate_t0 = time.monotonic()
         try:
@@ -1194,7 +1493,7 @@ def _build_diffusion_bundle(
                 build_timing, "fp8_calibration_s",
                 time.monotonic() - calibrate_t0)
             _write_build_timing(build_timing)
-        print(f"[trtmc-build] Calibrated {len(fp8_scales)} layers",
+        print(f"[trtmc build] Calibrated {len(fp8_scales)} layers",
               file=sys.stderr)
 
     # Save FP8 scales to JSON if requested
@@ -1206,7 +1505,7 @@ def _build_diffusion_bundle(
             build_timing, "fp8_scales_write_s",
             time.monotonic() - save_scales_t0)
         _write_build_timing(build_timing)
-        print(f"[trtmc-build] Saved FP8 scales to {save_fp8_scales} "
+        print(f"[trtmc build] Saved FP8 scales to {save_fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
 
     # Build all component engines
@@ -1228,6 +1527,11 @@ def _build_diffusion_bundle(
             build_components_kwargs["precision"] = precision
         if _call_supports_kwarg(build_components, "build_timing"):
             build_components_kwargs["build_timing"] = build_timing
+        if _call_supports_kwarg(build_components, "parallel_config"):
+            build_components_kwargs["parallel_config"] = parallel
+        elif parallel.enabled:
+            raise NotImplementedError(
+                f"Plugin {plugin.name} does not accept parallel_config for diffusion TP")
         components = build_components(
             str(model_dir_path), config, weights, **build_components_kwargs)
     finally:
@@ -1246,7 +1550,7 @@ def _build_diffusion_bundle(
         raise ValueError(
             f"Plugin {plugin.name}.build_components() returned None")
 
-    print(f"[trtmc-build] All engines built [{components_elapsed:.1f}s]",
+    print(f"[trtmc build] All engines built [{components_elapsed:.1f}s]",
           file=sys.stderr)
 
     # Assemble bundle sections
@@ -1262,17 +1566,48 @@ def _build_diffusion_bundle(
             file=sys.stderr,
         )
 
-    # Denoiser plan
-    denoiser_plan = components["denoiser"]
-    sections.append(BundleSection("denoiser_plan", denoiser_plan))
-    print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
-          file=sys.stderr)
+    # Denoiser plan(s)
+    if parallel.enabled:
+        denoiser_rank_plans = components.get("denoiser_ranks")
+        if not isinstance(denoiser_rank_plans, dict):
+            raise ValueError(
+                f"Plugin {plugin.name}.build_components() did not return denoiser_ranks")
+        for rank in range(parallel.tp_size):
+            denoiser_plan = denoiser_rank_plans.get(rank)
+            if denoiser_plan is None:
+                denoiser_plan = denoiser_rank_plans.get(str(rank))
+            if denoiser_plan is None:
+                raise ValueError(f"Missing tensor-parallel denoiser plan for rank {rank}")
+            section_name = rank_denoiser_section(rank)
+            sections.append(BundleSection(section_name, denoiser_plan))
+            print(
+                f"  {section_name}: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
+                file=sys.stderr,
+            )
+    else:
+        denoiser_plan = components["denoiser"]
+        sections.append(BundleSection("denoiser_plan", denoiser_plan))
+        print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
 
     # VAE decoder plan
     vae_plan = components["vae_decoder"]
     sections.append(BundleSection("vae_decoder_plan", vae_plan))
     print(f"  vae_decoder: {len(vae_plan) / (1024 * 1024):.1f} MB",
           file=sys.stderr)
+
+    # Optional image-edit components. Text-to-image bundles omit these.
+    if "vision_engine" in components:
+        vision_plan = components["vision_engine"]
+        sections.append(BundleSection("vision_engine_plan", vision_plan))
+        print(f"  vision_engine: {len(vision_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
+
+    if "vae_encoder" in components:
+        vae_encoder_plan = components["vae_encoder"]
+        sections.append(BundleSection("vae_encoder_plan", vae_encoder_plan))
+        print(f"  vae_encoder: {len(vae_encoder_plan) / (1024 * 1024):.1f} MB",
+              file=sys.stderr)
 
     # Preprocessor weights (patch embedding, timestep MLP, text projection)
     if "preprocessor_weights" in components:
@@ -1326,6 +1661,7 @@ def _build_diffusion_bundle(
             diff_cfg = get_diff_config(config)
             if diff_cfg is not None:
                 cfg_dict.update(diff_cfg)
+        cfg_dict.update(parallel.to_bundle_config_fields())
 
         cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
 
@@ -1404,7 +1740,7 @@ def _build_diffusion_bundle(
     t4 = time.monotonic()
     build_timing["total_s"] = t4 - t0
     _write_build_timing(build_timing)
-    print(f"[trtmc-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
+    print(f"[trtmc build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
 
 
@@ -1413,6 +1749,7 @@ def build(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
@@ -1433,6 +1770,7 @@ def build(
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
     audio_magpie_max_source_positions: int = 0,
+    parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
 ) -> None:
@@ -1446,6 +1784,7 @@ def build(
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
         max_cache_length: KV cache length for the engine.
+        decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
@@ -1455,6 +1794,7 @@ def build(
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
+                 decoder_engine_layout=decoder_engine_layout,
                  dynamic_kv_cache=dynamic_kv_cache,
                  dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
                  precision=precision,
@@ -1473,5 +1813,6 @@ def build(
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+                 parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path)

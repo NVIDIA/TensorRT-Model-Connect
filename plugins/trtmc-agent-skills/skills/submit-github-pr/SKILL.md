@@ -17,6 +17,8 @@ description: >-
 - Use `gh` for GitHub PR operations.
 - Use `$write-git-messages` to draft the PR title/body and any commit or squash
   message.
+- This skill opens PRs only. Do not merge from this skill. If the user asks to
+  babysit or merge the PR, switch to `$pr-babysitter` and follow its CI gate.
 
 ## Quick Flow
 
@@ -135,6 +137,7 @@ gh pr view --repo NVIDIA/TensorRT-Model-Connect --web
 gh pr checks --repo NVIDIA/TensorRT-Model-Connect <pr-number>
 ```
 
-Wait for GitHub CI before merging. Merge only when asked or when the task
-explicitly includes merge authority; follow repository rules for squash or
-rebase merge.
+Do not merge from this skill, even if the task includes merge authority. Use
+`$pr-babysitter` for monitoring and merging. It has the required hard CI gate
+and explicitly forbids `gh pr merge --auto` and any merge while checks are
+queued, pending, running, missing, skipped unexpectedly, or failing.

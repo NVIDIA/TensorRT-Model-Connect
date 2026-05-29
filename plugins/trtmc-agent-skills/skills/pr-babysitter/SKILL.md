@@ -26,6 +26,9 @@ branch, and push updated commits. Work sequentially and report every PR state.
   `gh pr merge --auto` or any equivalent API flag.
 - When merge authority is granted, merge only after the latest CI for the
   current PR head has completed successfully and the PR is mergeable.
+- Treat GitHub branch protection and rulesets as insufficient evidence of CI
+  safety. The repository may allow a squash or rebase merge while checks are
+  still queued, pending, running, or absent; that is still forbidden here.
 - If a fix needs unavailable hardware, product judgment, or broad scope, stop
   and report the blocker.
 
@@ -90,8 +93,11 @@ gh pr checks <number> --repo NVIDIA/TensorRT-Model-Connect
 ## Merge After CI
 
 Only merge when the user has explicitly authorized merging. Never treat
-auto-merge as a way to wait for CI. GitHub auto-merge has previously accepted a
-merge request while a check was still queued, so it is forbidden for this skill.
+auto-merge as a way to wait for CI. A `gh pr merge --auto` invocation has
+previously merged immediately while a check was still queued because the
+repository ruleset did not require status checks. Auto-merge is forbidden for
+this skill. This is an agent-side hard gate: if GitHub would allow the merge
+before CI is green, do not merge anyway.
 
 Before merging, verify all of the following against the latest PR head:
 
@@ -101,11 +107,21 @@ Before merging, verify all of the following against the latest PR head:
   shows the same head SHA whose checks passed.
 - `mergeable` is `MERGEABLE` and `mergeStateStatus` is clean enough for the
   repository ruleset, such as `CLEAN`.
-- No required check is pending, queued, running, skipped unexpectedly, or
-  failing.
+- Every expected CI check in `statusCheckRollup` has completed with conclusion
+  `SUCCESS`. Treat `QUEUED`, `PENDING`, `IN_PROGRESS`, `WAITING`,
+  `REQUESTED`, empty conclusion, missing check rollup, skipped unexpectedly,
+  or failing as a merge blocker.
+- The same completed successful check set belongs to the current `headRefOid`.
+  If a new commit lands after checks pass, restart the wait.
 
-If any check is pending or queued, wait and poll. If any check fails, diagnose
-and fix it. Do not merge.
+If `gh pr checks` exits nonzero, including exit code 8 for pending checks, do
+not merge. If any check is pending or queued, wait and poll. If any check fails,
+diagnose and fix it. If no CI checks are reported for the head SHA, report a
+human blocker instead of merging.
+
+Do not infer safety from `mergeable=MERGEABLE`, an allowed merge button, a
+ruleset that lacks required status checks, or successful local tests. Those are
+not substitutes for completed successful GitHub CI.
 
 Use an explicit merge command only after those checks pass. Do not include
 `--auto`:
