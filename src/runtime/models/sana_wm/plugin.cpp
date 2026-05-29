@@ -35,15 +35,43 @@ std::string vae_tile_section_name(const std::string& prefix, int32_t frames, int
            std::to_string(width) + "_plan";
 }
 
+std::vector<std::pair<int32_t, int32_t>>
+sana_wm_expected_temporal_tiles(const SanaWmRuntimeConfig& config, int32_t latent_frames) {
+    const int32_t tile_latent_min_frames =
+        std::max(1, config.vae_tile_sample_min_num_frames / config.vae_time_stride);
+    const int32_t tile_latent_stride_frames =
+        std::max(1, config.vae_tile_sample_stride_num_frames / config.vae_time_stride);
+    std::vector<std::pair<int32_t, int32_t>> tiles;
+    if (!config.vae_use_framewise_decoding || latent_frames <= tile_latent_min_frames) {
+        tiles.push_back({0, latent_frames});
+        return tiles;
+    }
+    for (int32_t t0 = 0; t0 < latent_frames; t0 += tile_latent_stride_frames) {
+        const int32_t frames = std::min(tile_latent_min_frames + 1, latent_frames - t0);
+        if (t0 > 0 && frames <= 1)
+            continue;
+        tiles.push_back({t0, frames});
+    }
+    return tiles;
+}
+
+std::vector<std::pair<int32_t, int32_t>> sana_wm_expected_spatial_tiles(
+    int32_t latent_size, int32_t tile_min_size, int32_t tile_stride, bool use_tiling) {
+    std::vector<std::pair<int32_t, int32_t>> tiles;
+    if (!use_tiling || latent_size <= tile_min_size) {
+        tiles.push_back({0, latent_size});
+        return tiles;
+    }
+    for (int32_t start = 0; start < latent_size; start += tile_stride)
+        tiles.push_back({start, std::min(tile_min_size, latent_size - start)});
+    return tiles;
+}
+
 std::set<std::tuple<int32_t, int32_t, int32_t>>
 sana_wm_expected_vae_tile_shapes(const SanaWmRuntimeConfig& config) {
     const int32_t latent_frames = (config.num_frames - 1) / config.vae_time_stride + 1;
     const int32_t latent_height = config.height / config.vae_spatial_stride;
     const int32_t latent_width = config.width / config.vae_spatial_stride;
-    const int32_t tile_latent_min_frames =
-        std::max(1, config.vae_tile_sample_min_num_frames / config.vae_time_stride);
-    const int32_t tile_latent_stride_frames =
-        std::max(1, config.vae_tile_sample_stride_num_frames / config.vae_time_stride);
     const int32_t tile_latent_min_height =
         std::max(1, config.vae_tile_sample_min_height / config.vae_spatial_stride);
     const int32_t tile_latent_min_width =
@@ -53,30 +81,14 @@ sana_wm_expected_vae_tile_shapes(const SanaWmRuntimeConfig& config) {
     const int32_t tile_latent_stride_width =
         std::max(1, config.vae_tile_sample_stride_width / config.vae_spatial_stride);
 
-    std::vector<std::pair<int32_t, int32_t>> temporal_tiles;
-    if (config.vae_use_framewise_decoding && latent_frames > tile_latent_min_frames) {
-        for (int32_t t0 = 0; t0 < latent_frames; t0 += tile_latent_stride_frames) {
-            const int32_t frames = std::min(tile_latent_min_frames + 1, latent_frames - t0);
-            if (t0 > 0 && frames <= 1)
-                continue;
-            temporal_tiles.push_back({t0, frames});
-        }
-    } else {
-        temporal_tiles.push_back({0, latent_frames});
-    }
-
-    std::vector<std::pair<int32_t, int32_t>> height_tiles;
-    std::vector<std::pair<int32_t, int32_t>> width_tiles;
-    if (config.vae_use_spatial_tiling &&
-        (latent_height > tile_latent_min_height || latent_width > tile_latent_min_width)) {
-        for (int32_t y0 = 0; y0 < latent_height; y0 += tile_latent_stride_height)
-            height_tiles.push_back({y0, std::min(tile_latent_min_height, latent_height - y0)});
-        for (int32_t x0 = 0; x0 < latent_width; x0 += tile_latent_stride_width)
-            width_tiles.push_back({x0, std::min(tile_latent_min_width, latent_width - x0)});
-    } else {
-        height_tiles.push_back({0, latent_height});
-        width_tiles.push_back({0, latent_width});
-    }
+    const auto temporal_tiles = sana_wm_expected_temporal_tiles(config, latent_frames);
+    const bool spatial_tiled = config.vae_use_spatial_tiling &&
+                               (latent_height > tile_latent_min_height ||
+                                latent_width > tile_latent_min_width);
+    const auto height_tiles = sana_wm_expected_spatial_tiles(
+        latent_height, tile_latent_min_height, tile_latent_stride_height, spatial_tiled);
+    const auto width_tiles = sana_wm_expected_spatial_tiles(
+        latent_width, tile_latent_min_width, tile_latent_stride_width, spatial_tiled);
 
     std::set<std::tuple<int32_t, int32_t, int32_t>> shapes;
     for (const auto& [_t0, frames] : temporal_tiles)

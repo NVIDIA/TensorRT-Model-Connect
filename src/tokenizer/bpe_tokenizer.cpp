@@ -1172,6 +1172,20 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
+    void detect_standalone_split_pre_tokenizer(const nlohmann::json& pt) {
+        if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
+            int digit_group = 0;
+            mPreTokenizerVariant =
+                classify_split_regex(pt["pattern"]["Regex"].get<std::string>(), digit_group);
+            mPreTokenizerDigitGroup = digit_group;
+            return;
+        }
+        if (pt.contains("pattern") && pt["pattern"].contains("String") &&
+            pt["pattern"]["String"] == " ") {
+            mUsePreTokenizer = false;
+        }
+    }
+
     void detect_pre_tokenizer(const nlohmann::json& j) {
         mUsePreTokenizer = true;
         mPreTokenizerVariant = pretok::Variant::kGpt2;
@@ -1191,15 +1205,7 @@ class BpeTokenizer final : public ITokenizer {
             mIsMetaspace = true;
             mUsePreTokenizer = false;
         } else if (pt_type == "Split") {
-            if (pt.contains("pattern") && pt["pattern"].contains("Regex")) {
-                int digit_group = 0;
-                mPreTokenizerVariant =
-                    classify_split_regex(pt["pattern"]["Regex"].get<std::string>(), digit_group);
-                mPreTokenizerDigitGroup = digit_group;
-            } else if (pt.contains("pattern") && pt["pattern"].contains("String") &&
-                       pt["pattern"]["String"] == " ") {
-                mUsePreTokenizer = false;
-            }
+            detect_standalone_split_pre_tokenizer(pt);
         } else if (pt_type.empty()) {
             mUsePreTokenizer = false;
         } else {
@@ -1296,28 +1302,32 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
+    static bool normalizer_replaces_space(const nlohmann::json& norm) {
+        return norm.value("type", "") == "Replace" && norm.contains("pattern") &&
+               norm["pattern"].contains("String") && norm["pattern"]["String"] == " " &&
+               norm.value("content", "") == "\xe2\x96\x81";
+    }
+
+    void apply_sentencepiece_normalizer(const nlohmann::json& norm) {
+        if (norm.value("type", "") == "Prepend") {
+            mSentencePiecePrependAlways = true;
+        } else if (normalizer_replaces_space(norm)) {
+            mSentencePiecePrefixIfMissing = false;
+        }
+    }
+
     void detect_normalizer(const nlohmann::json& j) {
         if (!j.contains("normalizer") || j["normalizer"].is_null())
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
-        if (norm_type == "Replace" && norm.contains("pattern") &&
-            norm["pattern"].contains("String") && norm["pattern"]["String"] == " " &&
-            norm.value("content", "") == "\xe2\x96\x81") {
+        if (normalizer_replaces_space(norm)) {
             mSentencePiecePrefixIfMissing = false;
             return;
         }
         if (norm_type == "Sequence" && norm.contains("normalizers")) {
-            for (auto& sub : norm["normalizers"]) {
-                if (sub.value("type", "") == "Prepend") {
-                    mSentencePiecePrependAlways = true;
-                } else if (sub.value("type", "") == "Replace" && sub.contains("pattern") &&
-                           sub["pattern"].contains("String") &&
-                           sub["pattern"]["String"] == " " &&
-                           sub.value("content", "") == "\xe2\x96\x81") {
-                    mSentencePiecePrefixIfMissing = false;
-                }
-            }
+            for (auto& sub : norm["normalizers"])
+                apply_sentencepiece_normalizer(sub);
         }
     }
 

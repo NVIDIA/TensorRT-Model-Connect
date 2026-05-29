@@ -89,6 +89,38 @@ ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
     return ArrayParseState::kReady;
 }
 
+void append_json_escape(std::string& out, char c) {
+    switch (c) {
+    case '"':
+        out.push_back('"');
+        break;
+    case '\\':
+        out.push_back('\\');
+        break;
+    case '/':
+        out.push_back('/');
+        break;
+    case 'b':
+        out.push_back('\b');
+        break;
+    case 'f':
+        out.push_back('\f');
+        break;
+    case 'n':
+        out.push_back('\n');
+        break;
+    case 'r':
+        out.push_back('\r');
+        break;
+    case 't':
+        out.push_back('\t');
+        break;
+    default:
+        out.push_back(c);
+        break;
+    }
+}
+
 bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
     if (pos >= text.size() || text[pos] != '"') {
         return false;
@@ -99,35 +131,7 @@ bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& o
     for (++pos; pos < text.size(); ++pos) {
         const char c = text[pos];
         if (escape) {
-            switch (c) {
-            case '"':
-                out.push_back('"');
-                break;
-            case '\\':
-                out.push_back('\\');
-                break;
-            case '/':
-                out.push_back('/');
-                break;
-            case 'b':
-                out.push_back('\b');
-                break;
-            case 'f':
-                out.push_back('\f');
-                break;
-            case 'n':
-                out.push_back('\n');
-                break;
-            case 'r':
-                out.push_back('\r');
-                break;
-            case 't':
-                out.push_back('\t');
-                break;
-            default:
-                out.push_back(c);
-                break;
-            }
+            append_json_escape(out, c);
             escape = false;
             continue;
         }
@@ -196,6 +200,9 @@ std::string extract_json_string(const std::string& text, const std::string& key,
     std::size_t pos = first_quote;
     std::string parsed;
     if (!read_quoted_token(text, pos, parsed)) {
+        return fallback;
+    }
+    if (parsed.empty()) {
         return fallback;
     }
     return parsed;

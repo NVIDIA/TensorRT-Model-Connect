@@ -9,6 +9,44 @@
 
 namespace trtmc {
 
+namespace {
+
+bool plugin_field_has_type(const nvinfer1::PluginField& field, const char* name,
+                           nvinfer1::PluginFieldType type) {
+    return std::strcmp(field.name, name) == 0 && field.type == type && field.data != nullptr;
+}
+
+bool read_int_plugin_field(const nvinfer1::PluginField& field, const char* name, int32_t& out) {
+    if (!plugin_field_has_type(field, name, nvinfer1::PluginFieldType::kINT32))
+        return false;
+    out = *static_cast<const int32_t*>(field.data);
+    return true;
+}
+
+bool read_float_plugin_field(const nvinfer1::PluginField& field, const char* name, float& out) {
+    if (!plugin_field_has_type(field, name, nvinfer1::PluginFieldType::kFLOAT32))
+        return false;
+    out = *static_cast<const float*>(field.data);
+    return true;
+}
+
+SanaWmGdnPlugin::Mode gdn_mode_from_int(int32_t mode) {
+    switch (mode) {
+    case 1:
+        return SanaWmGdnPlugin::Mode::kCamera;
+    case 2:
+        return SanaWmGdnPlugin::Mode::kMainCombined;
+    case 3:
+        return SanaWmGdnPlugin::Mode::kMainRawCombined;
+    case 4:
+        return SanaWmGdnPlugin::Mode::kCameraCombined;
+    default:
+        return SanaWmGdnPlugin::Mode::kMain;
+    }
+}
+
+} // namespace
+
 class SanaWmGdnCreator : public nvinfer1::IPluginCreator {
   public:
     SanaWmGdnCreator() {
@@ -45,40 +83,20 @@ class SanaWmGdnCreator : public nvinfer1::IPluginCreator {
         if (fc != nullptr) {
             for (int32_t i = 0; i < fc->nbFields; ++i) {
                 const auto& f = fc->fields[i];
-                if (std::strcmp(f.name, "mode") == 0 &&
-                    f.type == nvinfer1::PluginFieldType::kINT32 && f.data != nullptr) {
-                    mode = *static_cast<const int32_t*>(f.data);
-                } else if (std::strcmp(f.name, "reverse_output") == 0 &&
-                           f.type == nvinfer1::PluginFieldType::kINT32 &&
-                           f.data != nullptr) {
-                    reverse = *static_cast<const int32_t*>(f.data);
-                } else if (std::strcmp(f.name, "eps") == 0 &&
-                           f.type == nvinfer1::PluginFieldType::kFLOAT32 &&
-                           f.data != nullptr) {
-                    eps = *static_cast<const float*>(f.data);
-                } else if (std::strcmp(f.name, "frames") == 0 &&
-                           f.type == nvinfer1::PluginFieldType::kINT32 && f.data != nullptr) {
-                    frames = *static_cast<const int32_t*>(f.data);
-                } else if (std::strcmp(f.name, "head_dim") == 0 &&
-                           f.type == nvinfer1::PluginFieldType::kINT32 && f.data != nullptr) {
-                    head_dim = *static_cast<const int32_t*>(f.data);
-                } else if (std::strcmp(f.name, "norm_eps") == 0 &&
-                           f.type == nvinfer1::PluginFieldType::kFLOAT32 &&
-                           f.data != nullptr) {
-                    norm_eps = *static_cast<const float*>(f.data);
-                }
+                if (read_int_plugin_field(f, "mode", mode))
+                    continue;
+                if (read_int_plugin_field(f, "reverse_output", reverse))
+                    continue;
+                if (read_float_plugin_field(f, "eps", eps))
+                    continue;
+                if (read_int_plugin_field(f, "frames", frames))
+                    continue;
+                if (read_int_plugin_field(f, "head_dim", head_dim))
+                    continue;
+                read_float_plugin_field(f, "norm_eps", norm_eps);
             }
         }
-        auto plugin_mode = SanaWmGdnPlugin::Mode::kMain;
-        if (mode == 1) {
-            plugin_mode = SanaWmGdnPlugin::Mode::kCamera;
-        } else if (mode == 2) {
-            plugin_mode = SanaWmGdnPlugin::Mode::kMainCombined;
-        } else if (mode == 3) {
-            plugin_mode = SanaWmGdnPlugin::Mode::kMainRawCombined;
-        } else if (mode == 4) {
-            plugin_mode = SanaWmGdnPlugin::Mode::kCameraCombined;
-        }
+        auto plugin_mode = gdn_mode_from_int(mode);
         return new SanaWmGdnPlugin(plugin_mode, reverse != 0, eps, frames, head_dim, norm_eps);
     }
 
