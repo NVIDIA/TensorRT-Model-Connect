@@ -442,6 +442,23 @@ def make_yarn_rope_table_half_dim(
     return table
 
 
+def make_llama4_attention_scale_table(
+    max_cache_length: int,
+    beta: float,
+    original_max_position_embeddings: int,
+) -> np.ndarray:
+    """Build the per-position query scale used by Llama-4-style RoPE."""
+    if max_cache_length <= 0:
+        return np.ones((max(max_cache_length, 0), 1), dtype=np.float32)
+    if beta == 0.0 or original_max_position_embeddings <= 0:
+        return np.ones((max_cache_length, 1), dtype=np.float32)
+    positions = np.arange(max_cache_length, dtype=np.float64)
+    scale = 1.0 + float(beta) * np.log1p(
+        np.floor(positions / float(original_max_position_embeddings))
+    )
+    return scale.reshape(max_cache_length, 1).astype(np.float32)
+
+
 def add_layer_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -768,6 +785,7 @@ def add_windowed_self_attention_with_rope(
     num_windows: int,
     cos_table: np.ndarray,
     sin_table: np.ndarray,
+    window_patch_counts: np.ndarray | None = None,
     q_bias: np.ndarray | None = None,
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
@@ -776,15 +794,29 @@ def add_windowed_self_attention_with_rope(
 ) -> trt.ITensor:
     """Windowed self-attention with precomputed RoPE.
 
-    Splits the sequence into non-overlapping windows and runs attention
-    independently per window. Patches must already be reordered so that
-    each window's patches are contiguous in the sequence.
+    Splits the already window-ordered sequence into windows. Most Qwen-VL
+    builds have equal-sized windows and use one batched attention op; HF
+    smart-resized images can produce partial edge windows, which are handled
+    by static per-window slices when ``window_patch_counts`` is provided.
 
     Input hidden: [seq_length, hidden_size]
     cos_table/sin_table: [seq_length, hidden_size]
     Output: [seq_length, hidden_size]
     """
     head_dim = hidden_size // num_heads
+    counts = None
+    if window_patch_counts is not None:
+        counts = [
+            int(v) for v in np.asarray(window_patch_counts).reshape(-1).tolist() if int(v) > 0
+        ]
+        if not counts or sum(counts) != seq_length:
+            raise ValueError(
+                "window_patch_counts must be positive and sum to seq_length: "
+                f"sum={sum(counts) if counts else 0}, seq_length={seq_length}"
+            )
+        if all(c == counts[0] for c in counts):
+            num_windows = len(counts)
+            counts = None
     win_seq = seq_length // num_windows  # patches per window
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
@@ -815,37 +847,55 @@ def add_windowed_self_attention_with_rope(
         network, k, num_heads, head_dim, cos_const, sin_const,
         rotary_embedding_dim=rope_dim, sequence_length=seq_length)
 
-    # Reshape to [num_windows, win_seq, num_heads, head_dim]
-    # then transpose to [num_windows, num_heads, win_seq, head_dim].
-    q_win = network.add_shuffle(q)
-    q_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
-    q_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+    if counts is None:
+        q_win = network.add_shuffle(q)
+        q_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+        q_win.second_transpose = trt.Permutation([0, 2, 1, 3])
 
-    k_win = network.add_shuffle(k)
-    k_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
-    k_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+        k_win = network.add_shuffle(k)
+        k_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+        k_win.second_transpose = trt.Permutation([0, 2, 1, 3])
 
-    v_win = network.add_shuffle(v)
-    v_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
-    v_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+        v_win = network.add_shuffle(v)
+        v_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+        v_win.second_transpose = trt.Permutation([0, 2, 1, 3])
 
-    context = add_attention_core(
-        network,
-        q_win.get_output(0),
-        k_win.get_output(0),
-        v_win.get_output(0),
-        scale=attn_scale,
-    )
+        context = add_attention_core(
+            network, q_win.get_output(0), k_win.get_output(0), v_win.get_output(0),
+            scale=attn_scale,
+        )
+        ctx_flat = network.add_shuffle(context)
+        ctx_flat.first_transpose = trt.Permutation([0, 2, 1, 3])
+        ctx_flat.reshape_dims = (seq_length, hidden_size)
+        context_flat = ctx_flat.get_output(0)
+    else:
+        window_outputs = []
+        offset = 0
+        for window_len in counts:
+            q_slice = network.add_slice(
+                q, start=(offset, 0), shape=(window_len, hidden_size), stride=(1, 1))
+            k_slice = network.add_slice(
+                k, start=(offset, 0), shape=(window_len, hidden_size), stride=(1, 1))
+            v_slice = network.add_slice(
+                v, start=(offset, 0), shape=(window_len, hidden_size), stride=(1, 1))
+            window_outputs.append(add_attention_from_rows(
+                network,
+                q_slice.get_output(0),
+                k_slice.get_output(0),
+                v_slice.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                q_seq=window_len,
+                kv_seq=window_len,
+                scale=attn_scale,
+            ))
+            offset += window_len
+        concat = network.add_concatenation(window_outputs)
+        concat.axis = 0
+        context_flat = concat.get_output(0)
 
-    # Reshape back: [NW, NH, win_seq, head_dim]
-    # -> [NW, win_seq, NH, head_dim] -> [seq_length, hidden_size]
-    ctx_flat = network.add_shuffle(context)
-    ctx_flat.first_transpose = trt.Permutation([0, 2, 1, 3])
-    ctx_flat.reshape_dims = (seq_length, hidden_size)
-
-    # Output projection
     out = add_matmul_rhs_constant(
-        network, ctx_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
+        network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
