@@ -8,5 +8,5 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
-wan22-ti2v-5b-l0          SKIP   (Wan 2.2 VAE decoder builder lands; full pipeline however needs the TI2V-5B HF diffusers reference to load on rank-0 for comparison, which is ~10 GB params + workspace and exceeds 24 GB A30 (Wan 2.1 1.3B already OOMs at 23 GB; 5B much more). Lane passes the build path; gated on the same host memory constraint as the Wan 2.1 lanes. Passes on >=40 GB GPUs.)
 wan21-t2v-1.3b-l0         SKIP   (HF diffusers reference for Wan 2.1 1.3B exhausts 24 GB on rank-0 — same upstream-side OOM as the wan21-t2v-1.3b-l0-tp2 lane. Passes on >=32 GB GPUs.)
+wan22-ti2v-5b-l0          SKIP   (HF diffusers reference for Wan 2.2 TI2V-5B exhausts 40 GB on rank-0 (39.42 GiB used). Wan 2.2 TRT engines compile cleanly end-to-end; lane gated on host memory. Passes on >=80 GB GPUs.)
