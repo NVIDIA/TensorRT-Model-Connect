@@ -60,6 +60,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
+    "diffusion_sana_wm": "diffusion_media_generation",
     "torchtrt_decoder": "text_generation_causal",
     "torchtrt_diffusion": "diffusion_media_generation",
     "diffusion_pixart_torchtrt": "diffusion_media_generation",
@@ -390,6 +391,8 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
             paths.add(normalized)
         elif normalized.startswith("data/"):
             paths.add(f"tests/e2e/{normalized}")
+        elif normalized.startswith("asset/"):
+            paths.add(normalized)
     return sorted(paths)
 
 
@@ -775,6 +778,11 @@ def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
         return _models_for_task_strategies(task_strategies, imap)
 
     return _resolver
+
+
+def _sana_wm_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    return sorted(imap.family_to_models.get("sana_wm", []))
 
 
 def _runtime_strategy_models(
@@ -1432,6 +1440,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             }),
             resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=486,
+            name="sana_wm_inference_script",
+            matcher=_path_equals("inference_video_scripts/inference_sana_wm.py"),
+            resolver=_match_result(
+                "sana_wm_inference_script", _sana_wm_models, ["tools"], False,
+            ),
+            covered_by=("TestSanaWmImpactRules.test_sana_wm_scoped_paths",),
         ),
         ClassificationRule(
             priority=490,
