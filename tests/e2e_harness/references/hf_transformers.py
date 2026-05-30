@@ -79,7 +79,7 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
 def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     """Return a model-family prompt that preserves one image placeholder."""
     lower_id = hf_id.lower()
-    if "qwen" in lower_id and "vl" in lower_id:
+    if (("qwen" in lower_id and "vl" in lower_id) or "cosmos-reason" in lower_id):
         return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
     if "internvl" in lower_id:
         return f"<IMG_CONTEXT>\n{prompt}"
@@ -1608,9 +1608,26 @@ class HfTransformersReference:
                 inputs = processor(
                     text=text_input, images=image, return_tensors="pt")
             except Exception:
-                # Fallback for models without chat template
-                inputs = processor(
-                    text=fallback_text, images=image, return_tensors="pt")
+                # Some processors loaded from a local snapshot path lack a
+                # processor-level chat template but the tokenizer still has
+                # one embedded in tokenizer_config.json (Qwen2.5-VL,
+                # Qwen3-VL, Cosmos-Reason). Try that with a flat string
+                # message that already includes the image placeholder so
+                # the processor can expand image_pad against the image.
+                tok_template = getattr(getattr(processor, "tokenizer", None),
+                                       "chat_template", None)
+                if tok_template:
+                    flat_messages = [{{"role": "user",
+                                       "content": fallback_text}}]
+                    text_input = processor.tokenizer.apply_chat_template(
+                        flat_messages, tokenize=False,
+                        add_generation_prompt=True)
+                    inputs = processor(
+                        text=text_input, images=image, return_tensors="pt")
+                else:
+                    # Fallback for models without any chat template
+                    inputs = processor(
+                        text=fallback_text, images=image, return_tensors="pt")
 
             with torch.no_grad():
                 generated_ids = model.generate(

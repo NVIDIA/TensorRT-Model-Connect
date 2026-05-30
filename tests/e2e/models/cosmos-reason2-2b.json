@@ -1,0 +1,15 @@
+{
+  "name": "cosmos-reason2-2b",
+  "trace_id": "IT-E2E-COSMOSR2-2B-01",
+  "hf_id": "nvidia/Cosmos-Reason2-2B",
+  "bundle": "cosmos-reason2-2b.trtfb",
+  "family": "qwen_vl",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 384,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "trust_remote_code": false
+}
