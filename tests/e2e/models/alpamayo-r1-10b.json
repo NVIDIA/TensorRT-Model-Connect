@@ -4,7 +4,7 @@
   "hf_id": "nvidia/Alpamayo-R1-10B",
   "bundle": "alpamayo-r1-10b.trtfb",
   "family": "alpamayo_r1",
-  "runtime_strategy": "trajectory_action",
+  "runtime_strategy": "decoder_kv_cache",
   "max_cache_length": 256,
   "prompt": "Predict next 64 waypoints from current driving context.",
   "max_new_tokens": 64,
