@@ -1,0 +1,21 @@
+{
+  "name": "cosmos-transfer1-7b-l0",
+  "trace_id": "IT-E2E-COSMOS-TRANSFER1-7B-L0-01",
+  "hf_id": "nvidia/Cosmos-Transfer1-7B",
+  "bundle": "cosmos-transfer1-7b-l0.trtfb",
+  "model_type": "cosmos_transfer",
+  "family": "cosmos_transfer",
+  "runtime_strategy": "diffusion",
+  "ci_tier": "l0_only",
+  "user_contract": "diffusion_video",
+  "description": "NVIDIA Cosmos-Transfer1-7B video transfer scaffold.",
+  "build_args": { "max_cache_length": 256 },
+  "test_prompt": "Transfer scene to a snowy winter night.",
+  "test_type": "diffusion",
+  "video_num_frames": 9,
+  "video_height": 256,
+  "video_width": 256,
+  "num_inference_steps": 4,
+  "skip_text_comparison": true,
+  "notes": "Cosmos-Transfer1-7B is NVIDIA's video-to-video transfer model (style/scene/lighting transfer over an input video). Distinct from Cosmos-Predict (image-to-video) and Cosmos-Reason (VLM). Repo ships 155 files including a 4kupscaler_control.pt, edge_control.pt, depth_control.pt and base_model.pt — uses ControlNet-style multi-modal conditioning. Onboarding needs (1) a new family `cosmos_transfer` with custom .pt loading, (2) a ControlNet-aware diffusion sampler that conditions on edge/depth/seg/etc. control signals derived from the input video."
+}

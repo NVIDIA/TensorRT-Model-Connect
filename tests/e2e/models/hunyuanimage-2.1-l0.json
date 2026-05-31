@@ -1,0 +1,21 @@
+{
+  "name": "hunyuanimage-2.1-l0",
+  "trace_id": "IT-E2E-HUNYUAN-IMAGE-21-L0-01",
+  "hf_id": "tencent/HunyuanImage-2.1",
+  "bundle": "hunyuanimage-2.1-l0.trtfb",
+  "model_type": "hunyuan_image",
+  "family": "hunyuan_image",
+  "runtime_strategy": "diffusion",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_image_gen",
+  "user_contract": "diffusion_image",
+  "description": "HunyuanImage 2.1 (Tencent) text-to-image L0 scaffold.",
+  "build_args": { "max_cache_length": 256 },
+  "test_prompt": "A cheerful small red robot walking through a sunlit garden",
+  "test_type": "diffusion",
+  "image_height": 256,
+  "image_width": 256,
+  "num_inference_steps": 4,
+  "skip_text_comparison": true,
+  "notes": "HunyuanImage 2.1 is Tencent's text-to-image diffusion model. Repo layout: dit/ (main + refiner + fp8 + distilled variants), vae/, and dual text encoders (byT5 + Qwen-VL). Uses a custom HunyuanImage-2.1 library (not standard diffusers). Onboarding needs (1) new family 'hunyuan_image' that detects model_name from config.json, (2) custom pipeline runner for the (text encoder x2 -> dit -> refiner -> vae) flow, (3) optional fp8 / distilled variants. Lane is scaffolding only — XFAIL until family exists."
+}

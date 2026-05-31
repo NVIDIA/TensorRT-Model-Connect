@@ -1,0 +1,21 @@
+{
+  "name": "cosmos-predict2-2b-l0",
+  "trace_id": "IT-E2E-COSMOS-PREDICT2-2B-L0-01",
+  "hf_id": "nvidia/Cosmos-Predict2-2B-Video2World",
+  "bundle": "cosmos-predict2-2b-l0.trtfb",
+  "model_type": "cosmos_predict",
+  "family": "cosmos_predict",
+  "runtime_strategy": "diffusion",
+  "ci_tier": "l0_only",
+  "user_contract": "diffusion_video",
+  "description": "NVIDIA Cosmos-Predict2-2B-Video2World image-to-video diffusion scaffold.",
+  "build_args": { "max_cache_length": 256 },
+  "test_prompt": "A drone shot of a city at sunset, smooth camera movement.",
+  "test_type": "diffusion",
+  "video_num_frames": 9,
+  "video_height": 256,
+  "video_width": 256,
+  "num_inference_steps": 4,
+  "skip_text_comparison": true,
+  "notes": "Cosmos-Predict2 (Video2World) is NVIDIA's image-to-video diffusion model in the Cosmos foundation-models suite. Uses the custom `cosmos` Python library (not standard diffusers). Onboarding needs (1) a new family `cosmos_predict` with custom .pt loading (NVIDIA Cosmos checkpoints are PyTorch .pt files, not diffusers safetensors), (2) bespoke diffusion sampler matching the Cosmos training recipe. Multiple checkpoint variants exist (2B, 14B, multiview, single-view, Video2World, Predict2.5)."
+}
