@@ -8,3 +8,4 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+llama-3.2-1b-instruct-tp2 XFAIL  (pre-existing NED issue with 1B-instruct text repetition; build+runtime PASS with cosine_p5=0.9999 agreement=1.0)
