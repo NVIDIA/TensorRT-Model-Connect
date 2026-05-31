@@ -1,0 +1,23 @@
+{
+  "name": "ltx-2-l0",
+  "trace_id": "IT-E2E-LTX2-L0-01",
+  "hf_id": "Lightricks/LTX-2",
+  "bundle": "ltx-2-l0.trtfb",
+  "model_type": "ltx_video",
+  "family": "ltx_2",
+  "runtime_strategy": "diffusion_ltx2",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "LTX-2 (Lightricks) L0 representative.",
+  "build_args": { "max_cache_length": 256 },
+  "test_prompt": "A cheerful small red robot with glossy metal panels walks through a sunlit botanical garden filled with colorful flowers, butterflies, and soft golden light. Smooth cinematic camera movement, detailed textures, vibrant colors, shallow depth of field, high quality.",
+  "test_type": "diffusion",
+  "video_num_frames": 9,
+  "video_height": 256,
+  "video_width": 256,
+  "num_inference_steps": 4,
+  "guidance_scale": 0.0,
+  "skip_text_comparison": true,
+  "notes": "LTX-2 differs from LTX-Video on several axes: (1) it adds audio_vae/connectors/latent_upsampler/vocoder components beyond the standard text+DiT+vae pipeline, (2) tokenizer has audio preprocessor config (audio-conditioned generation), (3) outputs both video frames and audio. Lane is scaffolding only — onboarding needs a new family 'ltx_2' that handles all 7 components. The existing ltx_video family on main only covers Lightricks/LTX-Video (5 components: T5 text encoder + DiT + VAE + scheduler + tokenizer)."
+}

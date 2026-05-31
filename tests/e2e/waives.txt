@@ -9,3 +9,5 @@ phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with 
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
 llama-3.2-1b-instruct-tp2 XFAIL  (pre-existing NED issue with 1B-instruct text repetition; build+runtime PASS with cosine_p5=0.9999 agreement=1.0)
+alpamayo-r1-10b           XFAIL  (scaffolding lane; needs new family `alpamayo_r1` with custom action heads on Qwen-VL-3 backbone + flow-matching diffusion + 4000-token trajectory tokenizer — see manifest notes)
+ltx-2-l0                  XFAIL  (scaffolding lane; LTX-2 adds audio_vae/connectors/latent_upsampler/vocoder beyond LTX-Video — needs new family `ltx_2` separate from `ltx_video` — see manifest notes)

@@ -1,0 +1,13 @@
+{
+  "name": "alpamayo-r1-10b",
+  "trace_id": "IT-E2E-ALPAMAYO-R1-10B-01",
+  "hf_id": "nvidia/Alpamayo-R1-10B",
+  "bundle": "alpamayo-r1-10b.trtfb",
+  "family": "alpamayo_r1",
+  "runtime_strategy": "trajectory_action",
+  "max_cache_length": 256,
+  "prompt": "Predict next 64 waypoints from current driving context.",
+  "max_new_tokens": 64,
+  "trust_remote_code": true,
+  "notes": "Alpamayo-R1-10B is an autonomous-driving trajectory prediction model with a Qwen3-VL backbone and custom action heads (PerWaypointActionInProj, Unicycle Accel Curvature action space, flow-matching diffusion over trajectories). 4000-token trajectory tokenizer feeds VLM-style decoder; 64 waypoint output via diffusion. Lane is scaffolding only — onboarding needs (1) a new family 'alpamayo_r1' that matches model_type=alpamayo_r1, (2) custom load_weights handling action_in_proj/action_out_proj/traj_tokenizer weights, (3) flow-matching scheduler integration in the runtime, (4) waypoint decoder building on the QwenVL3 backbone in families/qwen_vl. See PR #176 for the qwen_vl TP base."
+}
