@@ -132,6 +132,12 @@ Streaming adds two concerns that offline transcription does not have:
 
 Magpie supports chunked audio callbacks in the C++ API and `trtmc serve-audio` in the CLI.
 
+VoxCPM2 is currently recognized as a detection-only family. Its upstream
+`voxcpm` workflow uses LocEnc, TSLM/RALM, LocDiT diffusion, and AudioVAE rather
+than the Bark or Magpie acoustic/codec layout, so TensorRT bundle construction
+stops with an explicit unsupported message until those components have native
+builder and runtime support.
+
 ```mermaid
 flowchart LR
   Prompt["Text prompt"] --> TextTok["Text or phoneme tokens"]

@@ -389,6 +389,9 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # VoxCPM2 (detected TTS family, TensorRT runtime pending)
+    ("voxcpm2", "voxcpm2"),
+    ("vox_cpm2", "voxcpm2"),
     # Qwen3.5 (hybrid DeltaNet + Attention)
     ("qwen3_5", "qwen3_5"),
     ("qwen3.5", "qwen3_5"),
@@ -568,6 +571,10 @@ class TestRuntimeStrategy:
     def test_nemotron_speech_streaming_strategy(self):
         plugin = find_plugin("nemotron_speech_streaming")
         assert getattr(plugin, "runtime_strategy", None) == "speech_to_text_rnnt"
+
+    def test_voxcpm2_strategy(self):
+        plugin = find_plugin("voxcpm2")
+        assert getattr(plugin, "runtime_strategy", None) == "text_to_audio_voxcpm2"
 
     def test_standard_decoder_no_strategy(self):
         """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""

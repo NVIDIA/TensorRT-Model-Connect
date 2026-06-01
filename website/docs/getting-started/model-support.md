@@ -7,7 +7,8 @@ Model support is defined by two source-of-truth surfaces:
 - Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
 
-The current checkout contains 68 Python family plugins and 122 E2E model manifests.
+The current checkout contains Python family plugins and E2E model manifests for
+the supported and experimental surfaces below.
 
 ## Support Levels
 
@@ -19,6 +20,7 @@ Use these terms when reading the tables:
 | Builder support | A Python family plugin can create bundle artifacts, but runtime or E2E coverage may be narrower. |
 | Runtime strategy support | A C++ plugin and pipeline shape exist for bundles that carry the strategy. Specific families still need builder and manifest coverage. |
 | Experimental support | The path exists but may have stricter environment, model-size, precision, or parity limits. Read the manifest and tutorial caveats before relying on it. |
+| Detection-only support | The model family is recognized and documented, but bundle/runtime construction stops with an explicit unsupported message. |
 | Not supported by listing alone | A HuggingFace model name that resembles a family is not automatically supported. The family plugin and runtime strategy must match the model's config and request-time behavior. |
 
 The E2E manifests are the most concrete proof because they name the model ID, runtime strategy, prompt/input shape, verifier, and tolerances.
@@ -49,9 +51,18 @@ internlm, internvl, llama, m2m_100, magpie_tts, mamba, marian, mistral,
 mixtral, modernbert, mpnet, nemotron, nemotron_h, nemotron_speech_streaming,
 olmo, olmo2, opt, personaplex, phi, phi4_multimodal, phi_moe, pixart,
 qwen, qwen3_5, qwen3_omni, qwen_moe, qwen_vl, roberta, rwkv, sam,
-segformer, stablelm, starcoder2, t5, wan_t2v, whisper, xglm, xlnet,
-z_image
+segformer, stablelm, starcoder2, t5, voxcpm2, wan_t2v, whisper, xglm,
+xlnet, z_image
 ```
+
+:::caution VoxCPM2 status
+`openbmb/VoxCPM2` is detection-only in this checkout. The `voxcpm2` family
+plugin recognizes `architecture: "voxcpm2"` configs and the `audio_voxcpm2`
+schema reserves generation knobs from the upstream `voxcpm` API, but the
+TensorRT builder/runtime is not implemented yet. This model is not routed
+through Bark or Magpie because VoxCPM2 uses LocEnc, TSLM/RALM, LocDiT, and
+AudioVAE components that need dedicated support.
+:::
 
 ## How support is resolved
 

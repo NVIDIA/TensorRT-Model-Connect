@@ -39,6 +39,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "text_to_audio": "text_to_audio",
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
+    "text_to_audio_voxcpm2": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
@@ -911,6 +912,21 @@ def _task_strategy_models_from_group(
     return _resolver
 
 
+def _runtime_config_schema_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    namespace = _group(context)
+    models: Set[str] = set()
+    for model, metadata in imap.model_metadata.items():
+        runtime_config = metadata.get("runtime_config")
+        if isinstance(runtime_config, dict) and namespace in runtime_config:
+            models.add(model)
+
+    if namespace.startswith("audio_"):
+        suffix = namespace.removeprefix("audio_")
+        models.update(imap.strategy_to_models.get(f"text_to_audio_{suffix}", []))
+
+    return sorted(models)
+
+
 def _no_impact_resolver(
     context: RuleContext,
     imap: ImpactMap,
@@ -1030,6 +1046,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result("specialized_builder", _specialized_builder_models),
             covered_by=("TestDeclarativeClassificationRules.test_specialized_builder_rule",),
+        ),
+        ClassificationRule(
+            priority=95,
+            name="runtime_config_schema",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/runtime_config/schemas/(audio_\w+)\.py$"
+            ),
+            resolver=_match_result(
+                "runtime_config_schema",
+                _runtime_config_schema_models,
+            ),
+            covered_by=("TestRuntimeConfigSchemaScope.test_python_audio_schema_scope",),
         ),
         ClassificationRule(
             priority=100,
@@ -1171,6 +1199,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "TestCppScope.test_scoped_cpp_helper_gpu_matmul",
                 "TestCppScope.test_scoped_cpp_helper_diffusion_seam",
             ),
+        ),
+        ClassificationRule(
+            priority=225,
+            name="cpp_config_schema",
+            matcher=_regex_rule(
+                r"(?:src/runtime/config/schemas|include/trtmc/config/schemas)/(audio_\w+)\.(?:cpp|h)$"
+            ),
+            resolver=_match_result("cpp_config_schema", _runtime_config_schema_models),
+            covered_by=("TestRuntimeConfigSchemaScope.test_cpp_audio_schema_scope",),
         ),
         ClassificationRule(
             priority=230,

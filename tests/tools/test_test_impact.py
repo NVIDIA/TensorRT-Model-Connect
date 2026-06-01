@@ -99,6 +99,8 @@ def mock_repo(tmp_path):
          "hf_id": "Q/Q25VL", "test_image": "data/test_img.jpeg", "core": True},
         {"name": "bark-small", "family": "bark", "runtime_strategy": "text_to_audio_bark",
          "hf_id": "suno/bark", "core": True},
+        {"name": "voxcpm2", "family": "voxcpm2", "runtime_strategy": "text_to_audio_voxcpm2",
+         "hf_id": "openbmb/VoxCPM2", "runtime_config": {"audio_voxcpm2": {}}},
         {"name": "sam-vit", "family": "sam", "runtime_strategy": "prompted_segmentation",
          "hf_id": "fb/sam", "core": True},
         {"name": "segformer-b0", "family": "segformer", "runtime_strategy": "segmentation",
@@ -274,6 +276,8 @@ class TestDeclarativeClassificationRules:
         }
 
         assert priorities["cpp_scoped_helper"] < priorities["cpp_source"]
+        assert priorities["cpp_config_schema"] < priorities["cpp_source"]
+        assert priorities["runtime_config_schema"] < priorities["shared_builder_module"]
 
     @pytest.mark.parametrize(
         "path,rule_name",
@@ -494,6 +498,36 @@ class TestSharedModules:
             "python/tensorrt_model_connect/config.py", imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
+
+
+class TestRuntimeConfigSchemaScope:
+    def test_python_audio_schema_scope(self, imap):
+        """audio runtime config schema changes route to the matching TTS model."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/runtime_config/schemas/audio_voxcpm2.py",
+            imap,
+        )
+
+        assert match.rule == "runtime_config_schema"
+        assert match.models == ["voxcpm2"]
+        assert match.unit_tiers == ["builder"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/runtime/config/schemas/audio_voxcpm2.cpp",
+            "include/trtmc/config/schemas/audio_voxcpm2.h",
+        ],
+    )
+    def test_cpp_audio_schema_scope(self, imap, path):
+        """C++ audio schema changes route to the matching TTS model."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "cpp_config_schema"
+        assert match.models == ["voxcpm2"]
+        assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +903,14 @@ class TestHarness:
         assert match.rule == "harness_runner"
         assert "qwen3-0.6b" in match.models
         assert "bert-base" not in match.models
+
+    def test_text_to_audio_runner_includes_voxcpm2_strategy(self, imap):
+        """text_to_audio_voxcpm2 maps onto the text_to_audio task strategy."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/runners/audio_speech.py", imap)
+        assert match.rule == "harness_runner"
+        assert "bark-small" in match.models
+        assert "voxcpm2" in match.models
 
     def test_harness_comparator(self, imap):
         """comparators/diffusion.py -> diffusion models."""

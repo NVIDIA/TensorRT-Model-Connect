@@ -1,0 +1,32 @@
+{
+  "name": "voxcpm2",
+  "trace_id": "IT-E2E-VOXCPM2-01",
+  "hf_id": "openbmb/VoxCPM2",
+  "bundle": "voxcpm2.trtfb",
+  "family": "voxcpm2",
+  "runtime_strategy": "text_to_audio_voxcpm2",
+  "task_strategy": "text_to_audio",
+  "reference_backend": "custom_python",
+  "oracle_level": "L1_external_reference",
+  "test_type": "audio",
+  "max_cache_length": 8192,
+  "prompt": "VoxCPM2 brings multilingual text to speech to TensorRT Model Connect.",
+  "max_new_tokens": 0,
+  "trust_remote_code": true,
+  "runtime_config": {
+    "audio_voxcpm2": {
+      "cfg_value": 2.0,
+      "inference_timesteps": 10,
+      "normalize": true,
+      "denoise": true,
+      "retry_badcase": true,
+      "retry_badcase_max_times": 3,
+      "retry_badcase_ratio_threshold": 6.0,
+      "seed": 42
+    }
+  },
+  "metadata": {
+    "reference_note": "Full E2E validation needs a voxcpm-based reference runner; the HF Transformers Bark reference path is not valid for VoxCPM2."
+  },
+  "skip": "Detection-only coverage: VoxCPM2 is not a Bark or Magpie variant, and TensorRT runtime support still needs LocEnc, TSLM/RALM, LocDiT diffusion, and AudioVAE implementation."
+}
