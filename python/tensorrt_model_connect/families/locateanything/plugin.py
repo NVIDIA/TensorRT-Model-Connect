@@ -5,15 +5,12 @@ LocateAnything-3B is a custom-code vision-language model:
   - Projector: LayerNorm + two-layer MLP (``mlp1``).
   - Text: Qwen2.5 decoder under ``language_model.model.*``.
 
-This plugin wires the Qwen text decoder and bundle metadata.  The MoonViT
-vision engine is intentionally not emitted yet because the current C++ VL
-runtime passes only ``pixel_values`` to vision engines, while LocateAnything
-requires patchified inputs plus ``image_grid_hws``.
+This plugin wires a fixed single-image TRT MC contract: 448x448 image input,
+14x14 MoonViT patches, 32x32 patch grid, 2x2 merge, and 256 image tokens.
 """
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -109,13 +106,11 @@ class LocateAnythingPlugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> bytes | None:
-        print(
-            "[trtmc build] LocateAnything MoonViT vision engine is not yet "
-            "emitted: runtime support for image_grid_hws is required. "
-            "Building text decoder only.",
-            file=sys.stderr,
-        )
-        return None
+        from .vision_builder import build_locateanything_vision_engine
+
+        return build_locateanything_vision_engine(
+            model_dir, config, fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+            verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         vision_config = config.raw.get("vision_config")
@@ -139,22 +134,25 @@ class LocateAnythingPlugin:
             "image_token_id": config.raw.get(
                 "image_token_index", config.raw.get("image_token_id", 151665)),
             "fixed_image_size": fixed_image_size,
+            "patch_size": patch_size,
+            "merge_size": merge_h,
             "num_image_pad_tokens": num_image_tokens,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": "locateanything_patchify",
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std": [0.5, 0.5, 0.5],
+            "temporal_patch_size": 1,
             "interpolation": "bicubic",
             "vl_prompt_template": (
                 "<|im_start|>system\n"
                 "You are a helpful assistant.<|im_end|>\n"
                 "<|im_start|>user\n"
-                "<image-1>{prompt}<|im_end|>\n"
+                "<img>{image_pads}</img>{prompt}<|im_end|>\n"
                 "<|im_start|>assistant\n"
             ),
             "image_token_str": "<IMG_CONTEXT>",
-            "locateanything_vision_engine_supported": False,
-            "locateanything_vision_note": (
-                "MoonViT requires patchified pixel_values plus image_grid_hws; "
-                "current TRT MC VL runtime passes only pixel_values."),
+            "locateanything_fixed_vision_grid_h": grid_h,
+            "locateanything_fixed_vision_grid_w": grid_w,
             "box_start_token_id": config.raw.get("box_start_token_id", 151668),
             "box_end_token_id": config.raw.get("box_end_token_id", 151669),
             "coord_start_token_id": config.raw.get("coord_start_token_id", 151677),

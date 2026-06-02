@@ -13,5 +13,5 @@
   "layer_atol": 0.05,
   "test_image": "tests/e2e/data/test_img.jpeg",
   "trust_remote_code": true,
-  "skip": "LocateAnything text decoder packaging is supported, but MoonViT vision execution needs runtime support for image_grid_hws before end-to-end image grounding can be validated."
+  "notes": "Initial LocateAnything support uses the fixed 448x448 single-image MoonViT path and the existing TRT MC autoregressive VL generation path."
 }

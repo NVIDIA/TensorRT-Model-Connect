@@ -116,8 +116,7 @@ TextResult VLPipeline::generate(const std::string& prompt, const float* image_pi
 
     std::vector<float> features;
     std::vector<std::vector<float>> deepstack_features;
-    if (!run_vision_encoder(preprocessed.pixel_values.data(), preprocessed.pixel_values.size(),
-                            features, &deepstack_features))
+    if (!run_vision_encoder(preprocessed, features, &deepstack_features))
         throw std::runtime_error("VLPipeline: vision encoder failed");
 
     int32_t dim = infer_feature_dim(*vision_encoder_, config_.vision_output_dim);
@@ -354,7 +353,7 @@ void VLPipeline::run_text_step_with_embed(int32_t token_id, const float* input_e
     state_->advance();
 }
 
-bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel_count,
+bool VLPipeline::run_vision_encoder(const PreprocessedImage& preprocessed,
                                     std::vector<float>& image_features,
                                     std::vector<std::vector<float>>* deepstack_features) {
     if (!vision_encoder_ || !vision_encoder_->ok())
@@ -362,7 +361,7 @@ bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel
 
     // Build input tensor for pixel values
     Tensor pixel_t;
-    pixel_t.data = const_cast<float*>(pixel_values);
+    pixel_t.data = const_cast<float*>(preprocessed.pixel_values.data());
     // Get the shape from the vision engine's input
     auto inputs_info = vision_encoder_->input_info();
     for (const auto& info : inputs_info) {
@@ -373,12 +372,21 @@ bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel
     }
     if (pixel_t.shape.empty()) {
         // Fallback: use the pixel_count as a flat shape
-        pixel_t.shape = {static_cast<int64_t>(pixel_count)};
+        pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
     }
     pixel_t.dtype = DType::kFloat32;
 
     TensorMap inputs;
     inputs["pixel_values"] = pixel_t;
+
+    if (vision_encoder_->has_input("image_grid_hws") && !preprocessed.image_grid_hws.empty()) {
+        Tensor grid_t;
+        grid_t.data = const_cast<int32_t*>(preprocessed.image_grid_hws.data());
+        grid_t.shape = {
+            static_cast<int64_t>(preprocessed.image_grid_hws.size() / 2), 2};
+        grid_t.dtype = DType::kInt32;
+        inputs["image_grid_hws"] = grid_t;
+    }
 
     auto outputs = vision_encoder_->forward(inputs);
 

@@ -1928,9 +1928,14 @@ class TestLocateAnythingPlugin:
         assert vl_cfg["num_image_pad_tokens"] == 256
         assert vl_cfg["vision_output_dim"] == self.HIDDEN
         assert vl_cfg["preprocessor_type"] == "locateanything_patchify"
+        assert vl_cfg["patch_size"] == 14
+        assert vl_cfg["merge_size"] == 2
+        assert vl_cfg["image_mean"] == [0.5, 0.5, 0.5]
+        assert vl_cfg["image_std"] == [0.5, 0.5, 0.5]
         assert vl_cfg["image_token_str"] == "<IMG_CONTEXT>"
-        assert vl_cfg["locateanything_vision_engine_supported"] is False
+        assert "locateanything_vision_engine_supported" not in vl_cfg
         assert vl_cfg["box_start_token_id"] == 151668
+        assert "{image_pads}" in vl_cfg["vl_prompt_template"]
         assert "{prompt}" in vl_cfg["vl_prompt_template"]
 
 

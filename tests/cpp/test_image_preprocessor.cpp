@@ -297,6 +297,43 @@ static void test_simple_chw_strategy()
     check(in_range, "simple_chw: all normalized values in [-1.1, 1.1]");
 }
 
+// Test: locateanything_patchify strategy produces [patches, C, pH, pW] plus grid metadata.
+static void test_locateanything_patchify_strategy()
+{
+    trtmc_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
+    const std::string image_path = write_test_ppm(dir);
+
+    trtmc::VLPreprocessConfig config;
+    config.fixed_image_size = 4;
+    config.patch_size = 2;
+    config.in_channels = 3;
+    config.preprocessor_type = "locateanything_patchify";
+    config.interpolation = "nearest";
+    config.image_mean[0] = 0.5F;
+    config.image_mean[1] = 0.5F;
+    config.image_mean[2] = 0.5F;
+    config.image_std[0] = 0.5F;
+    config.image_std[1] = 0.5F;
+    config.image_std[2] = 0.5F;
+
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
+
+    check(result.ok, "locateanything_patchify: image loaded successfully");
+    check(result.channels == 3, "locateanything_patchify: channels = C = 3");
+    check(result.height == 4, "locateanything_patchify: height = fixed_image_size = 4");
+    check(result.width == 4, "locateanything_patchify: width = fixed_image_size = 4");
+    check(result.image_grid_hws.size() == 2, "locateanything_patchify: grid has two entries");
+    check(result.image_grid_hws[0] == 2, "locateanything_patchify: grid height = 2");
+    check(result.image_grid_hws[1] == 2, "locateanything_patchify: grid width = 2");
+
+    const std::size_t expected_size = 4 * 3 * 2 * 2;
+    check(result.pixel_values.size() == expected_size,
+          "locateanything_patchify: pixel_values size = patches * C * pH * pW");
+    check_near(result.pixel_values[0], -1.0F, 1e-5F,
+               "locateanything_patchify: first patch first red pixel normalized");
+}
+
 // Test: load non-existent image returns ok=false.
 static void test_load_missing_image()
 {
@@ -826,6 +863,7 @@ int main()
 
     test_qwen_merge_group_strategy();
     test_simple_chw_strategy();
+    test_locateanything_patchify_strategy();
     test_load_missing_image();
     test_format_vl_prompt();
     test_parse_vl_config();

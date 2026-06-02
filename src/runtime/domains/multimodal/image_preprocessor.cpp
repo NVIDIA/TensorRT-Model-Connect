@@ -349,6 +349,64 @@ static PreprocessedImage preprocess_simple_chw(
     return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// Strategy: locateanything_patchify
+// ---------------------------------------------------------------------------
+
+static PreprocessedImage preprocess_locateanything_patchify(
+    const LoadedImage& loaded,
+    const VLPreprocessConfig& config)
+{
+    PreprocessedImage result;
+    const int patch = config.patch_size;
+    const int channels = loaded.channels;
+    const int height = loaded.target_size;
+    const int width = loaded.target_size;
+    if (patch <= 0 || height % patch != 0 || width % patch != 0 || channels <= 0)
+    {
+        std::cerr << "[trtmc] Invalid LocateAnything patchify shape" << std::endl;
+        return result;
+    }
+
+    const int grid_h = height / patch;
+    const int grid_w = width / patch;
+    const int num_patches = grid_h * grid_w;
+    result.pixel_values.resize(
+        static_cast<std::size_t>(num_patches) * channels * patch * patch);
+
+    for (int gh = 0; gh < grid_h; ++gh)
+    {
+        for (int gw = 0; gw < grid_w; ++gw)
+        {
+            const int patch_idx = gh * grid_w + gw;
+            for (int c = 0; c < channels; ++c)
+            {
+                for (int ph = 0; ph < patch; ++ph)
+                {
+                    for (int pw = 0; pw < patch; ++pw)
+                    {
+                        const std::size_t dst =
+                            (((static_cast<std::size_t>(patch_idx) * channels + c) * patch + ph)
+                             * patch + pw);
+                        const std::size_t src =
+                            (static_cast<std::size_t>(c) * height + gh * patch + ph) * width
+                            + gw * patch + pw;
+                        result.pixel_values[dst] = loaded.img_chw[src];
+                    }
+                }
+            }
+        }
+    }
+
+    result.image_grid_hws = {grid_h, grid_w};
+    result.channels = channels;
+    result.height = height;
+    result.width = width;
+    result.ok = true;
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
@@ -377,6 +435,8 @@ static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preproc
         return {load_pad_center_resize_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "simple_chw")
         return {load_resize_normalize, preprocess_simple_chw, false};
+    if (preprocessor_type == "locateanything_patchify")
+        return {load_resize_normalize, preprocess_locateanything_patchify, false};
 
     const bool warn_unknown = (preprocessor_type != "qwen_merge_group");
     return {load_resize_normalize, preprocess_qwen_merge_group, warn_unknown};
@@ -506,6 +566,10 @@ static void parse_base_vl_config(
     cfg.preprocessor_type = extract_json_string(config_text, "preprocessor_type", "qwen_merge_group");
     cfg.image_token_id = extract_json_int(config_text, "image_token_id", -1);
     cfg.fixed_image_size = extract_json_int(config_text, "fixed_image_size", 448);
+    cfg.patch_size = extract_json_int(config_text, "patch_size", cfg.patch_size);
+    cfg.merge_size = extract_json_int(config_text, "merge_size", cfg.merge_size);
+    cfg.temporal_patch_size = extract_json_int(
+        config_text, "temporal_patch_size", cfg.temporal_patch_size);
     cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 256);
     cfg.vision_output_dim = extract_json_int(config_text, "vision_output_dim", 0);
     cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");

@@ -32,6 +32,7 @@ struct VLPreprocessConfig {
 // Preprocessed pixel values ready for the vision TRT engine.
 struct PreprocessedImage {
     std::vector<float> pixel_values;  // Layout depends on preprocessor_type
+    std::vector<int32_t> image_grid_hws;  // [height, width] patch grid for patchified inputs
     int32_t channels{0};              // C*T for qwen_merge_group, C for simple_chw
     int32_t height{0};
     int32_t width{0};
@@ -45,6 +46,7 @@ struct PreprocessedImage {
 //   "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
 //   "aspect_preserve_chw": [C, H, W] aspect-ratio-preserving resize + zero-pad
 //   "pad_center_chw":      [C, H, W] aspect-ratio-preserving resize + center-pad with mean color
+//   "locateanything_patchify": [num_patches, C, patch_size, patch_size]
 //
 // NOTE: Only single-image input is supported. Multi-image batching
 // is not yet implemented; callers must process one image at a time.
