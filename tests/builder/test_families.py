@@ -301,6 +301,8 @@ _POSITIVE_MATCH_CASES = [
     ("qwen2_vl", "qwen_vl"),
     ("qwen2_5_vl", "qwen_vl"),
     ("qwen3_vl", "qwen_vl"),
+    # Lance (staged with model_type stamped "lance"; understanding path)
+    ("lance", "lance"),
     # OLMo
     ("olmo", "olmo"),
     # XGLM

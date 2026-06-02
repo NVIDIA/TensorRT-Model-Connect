@@ -1,0 +1,18 @@
+{
+  "name": "lance-3b-x2t-image",
+  "trace_id": "IT-E2E-LANCE-X2T-01",
+  "hf_id": "bytedance-research/Lance",
+  "bundle": "lance-3b-x2t-image.trtfb",
+  "family": "lance",
+  "runtime_strategy": "vision_language",
+  "precision": "bf16",
+  "max_cache_length": 384,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "trust_remote_code": false,
+  "core": false,
+  "skip_reason": "Lance image-understanding (x2t) is wired through the lance family plugin + vision_language runtime and is VERIFIED ACCURATE end-to-end at bf16: `trtmc run` on tests/e2e/data/test_img.jpeg answers 'White car driving on the street.' / 'White', and the TRT decoder matches an independent eager reference exactly per-layer and per-logit. Reduced-precision embed bundles rely on the #184 fix (now in main). Not yet auto-runnable in the harness because (1) the Lance HF repo is not a flat checkpoint and must be staged via scripts/prepare_lance_model.py (the harness runs `trtmc build <hf_id>` directly), and (2) there is no HF AutoModel reference for Lance (library_name=Lance, custom modeling.lance) so a Lance reference adapter is needed. Remove skip_reason once staging is wired into the VL runner and a Lance reference backend exists."
+}

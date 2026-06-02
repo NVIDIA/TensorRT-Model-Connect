@@ -101,6 +101,7 @@ no_impact scripts/magpie_tokenizer.py # developer utility script; no CI test imp
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/new_torchtrt_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
+no_impact scripts/prepare_lance_model.py # one-off Lance model staging helper; not imported by package/tests, no CI test impact is intentional
 no_impact scripts/profile_magpie_tts.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
