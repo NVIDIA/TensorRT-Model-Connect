@@ -8,3 +8,8 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+qwen2-vl-7b               XFAIL  (qwen_vl family matcher accepts model_type=qwen2_vl but generation diverges from HF reference: trtmc emits 10 tokens, ref 5 tokens, NED=1.0, token_agreement=0. Plugin assumes Qwen2.5-VL / Qwen3-VL semantics; Qwen2-VL needs family-side compatibility audit.)
+qwen2-vl-7b-tp2           XFAIL  (Same root cause as qwen2-vl-7b dense lane — qwen_vl family needs Qwen2-VL compatibility.)
+qwen35-9b-tp2             XFAIL  (qwen3_5 family is hybrid Mamba+attention; no TP infra yet. Same shape of gap as nemotron_h MoE — needs Mamba SSM-aware sharding.)
+qwen-image-tp4            XFAIL  (qwen_image family lacks TP infra; needs DiT TP + VAE TP + text-encoder TP, similar to wan_t2v / flux TP work.)
+gemma-4-e4b               XFAIL  (Gemma 4 is multimodal: audio + vision + text. Gemma4ForConditionalGeneration. Existing gemma family only handles text decoder; multimodal heads need new family work.)

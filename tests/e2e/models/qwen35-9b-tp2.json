@@ -1,0 +1,39 @@
+{
+  "name": "qwen35-9b-tp2",
+  "trace_id": "IT-E2E-Q35-TP2-01",
+  "hf_id": "Qwen/Qwen3.5-9B",
+  "bundle": "qwen35-9b-tp2.trtfb",
+  "family": "qwen3_5",
+  "runtime_strategy": "hybrid_mamba_attention",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.005,
+  "trust_remote_code": true,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 2
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 2 }, "gating": true }
+  ],
+  "notes": "Qwen3.5-9B TP=2 lane. qwen3_5 family is hybrid Mamba+attention; current TP infra targets dense/MoE decoders. Lane scaffolded to mark the gap — needs Mamba SSM-aware TP sharding in qwen3_5 family (similar to nemotron_h hybrid TP from PR #128)."
+}

@@ -1,0 +1,15 @@
+{
+  "name": "gemma-4-e4b",
+  "trace_id": "IT-E2E-GMA4-E4B-01",
+  "hf_id": "google/gemma-4-E4B-it",
+  "bundle": "gemma-4-e4b.trtfb",
+  "family": "gemma",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 256,
+  "prompt": "What is 2 + 2? Answer with just the number.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false,
+  "notes": "Gemma 4 E4B (multimodal: audio + vision + text). model_type=gemma4, Gemma4ForConditionalGeneration. Config nests audio_config (gemma4_audio: 12-layer conv-subsampling encoder) + vision_config + text decoder, plus boa/boi/eoa special tokens. Existing gemma family only handles Gemma 1/2 text-only — new family work needed to add multimodal heads. Scaffolded to mark the gap."
+}
