@@ -90,6 +90,63 @@ select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepsta
     return embeds;
 }
 
+Tensor make_pixel_values_tensor(const PreprocessedImage& preprocessed, const TrtModule& encoder) {
+    Tensor pixel_t;
+    pixel_t.data = const_cast<float*>(preprocessed.pixel_values.data());
+    for (const auto& info : encoder.input_info()) {
+        if (info.name == "pixel_values") {
+            pixel_t.shape = info.shape;
+            break;
+        }
+    }
+    if (pixel_t.shape.empty())
+        pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
+    pixel_t.dtype = DType::kFloat32;
+    return pixel_t;
+}
+
+void add_image_grid_input(TensorMap& inputs, const PreprocessedImage& preprocessed,
+                          const TrtModule& encoder) {
+    if (!encoder.has_input("image_grid_hws") || preprocessed.image_grid_hws.empty())
+        return;
+
+    Tensor grid_t;
+    grid_t.data = const_cast<int32_t*>(preprocessed.image_grid_hws.data());
+    grid_t.shape = {static_cast<int64_t>(preprocessed.image_grid_hws.size() / 2), 2};
+    grid_t.dtype = DType::kInt32;
+    inputs["image_grid_hws"] = grid_t;
+}
+
+bool copy_float_output(const TensorMap& outputs, const std::string& name,
+                       std::vector<float>& values) {
+    auto it = outputs.find(name);
+    if (it == outputs.end())
+        return false;
+
+    auto n = it->second.numel();
+    values.resize(static_cast<std::size_t>(n));
+    std::memcpy(values.data(), it->second.data, n * sizeof(float));
+    return true;
+}
+
+void copy_deepstack_outputs(const TensorMap& outputs,
+                            std::vector<std::vector<float>>* deepstack_features) {
+    if (deepstack_features == nullptr)
+        return;
+
+    deepstack_features->clear();
+    for (std::size_t i = 0;; ++i) {
+        const std::string name = "deepstack_features_" + std::to_string(i);
+        auto ds_it = outputs.find(name);
+        if (ds_it == outputs.end())
+            break;
+        auto ds_n = ds_it->second.numel();
+        deepstack_features->emplace_back(static_cast<std::size_t>(ds_n));
+        std::memcpy(deepstack_features->back().data(), ds_it->second.data,
+                    ds_n * sizeof(float));
+    }
+}
+
 } // namespace
 
 std::pair<int32_t, int32_t> VLPipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
@@ -359,62 +416,18 @@ bool VLPipeline::run_vision_encoder(const PreprocessedImage& preprocessed,
     if (!vision_encoder_ || !vision_encoder_->ok())
         return false;
 
-    // Build input tensor for pixel values
-    Tensor pixel_t;
-    pixel_t.data = const_cast<float*>(preprocessed.pixel_values.data());
-    // Get the shape from the vision engine's input
-    auto inputs_info = vision_encoder_->input_info();
-    for (const auto& info : inputs_info) {
-        if (info.name == "pixel_values") {
-            pixel_t.shape = info.shape;
-            break;
-        }
-    }
-    if (pixel_t.shape.empty()) {
-        // Fallback: use the pixel_count as a flat shape
-        pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
-    }
-    pixel_t.dtype = DType::kFloat32;
-
     TensorMap inputs;
-    inputs["pixel_values"] = pixel_t;
-
-    if (vision_encoder_->has_input("image_grid_hws") && !preprocessed.image_grid_hws.empty()) {
-        Tensor grid_t;
-        grid_t.data = const_cast<int32_t*>(preprocessed.image_grid_hws.data());
-        grid_t.shape = {
-            static_cast<int64_t>(preprocessed.image_grid_hws.size() / 2), 2};
-        grid_t.dtype = DType::kInt32;
-        inputs["image_grid_hws"] = grid_t;
-    }
+    inputs["pixel_values"] = make_pixel_values_tensor(preprocessed, *vision_encoder_);
+    add_image_grid_input(inputs, preprocessed, *vision_encoder_);
 
     auto outputs = vision_encoder_->forward(inputs);
 
-    // Extract image_features output
-    auto it = outputs.find("image_features");
-    if (it == outputs.end()) {
+    if (!copy_float_output(outputs, "image_features", image_features)) {
         std::cerr << "[trtmc] Vision encoder has no 'image_features' output" << std::endl;
         return false;
     }
 
-    auto n = it->second.numel();
-    image_features.resize(static_cast<std::size_t>(n));
-    std::memcpy(image_features.data(), it->second.data, n * sizeof(float));
-
-    if (deepstack_features != nullptr) {
-        deepstack_features->clear();
-        for (std::size_t i = 0;; ++i) {
-            const std::string name = "deepstack_features_" + std::to_string(i);
-            auto ds_it = outputs.find(name);
-            if (ds_it == outputs.end())
-                break;
-            auto ds_n = ds_it->second.numel();
-            deepstack_features->emplace_back(static_cast<std::size_t>(ds_n));
-            std::memcpy(deepstack_features->back().data(), ds_it->second.data,
-                        ds_n * sizeof(float));
-        }
-    }
-
+    copy_deepstack_outputs(outputs, deepstack_features);
     return true;
 }
 
