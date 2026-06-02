@@ -256,6 +256,40 @@ static void test_truncated_bundle_throws() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_max_batch_size_parse_and_back_compat() {
+    // New bundles carry the per-component cap; legacy bundles omit the
+    // block and the parser defaults all three components to 1.
+    const auto tmp = make_temp_dir();
+    std::vector<char> plan_data = {'P', 'L', 'A', 'N'};
+
+    const auto new_path = (tmp / "new.trtfb").string();
+    write_bundle_with_sections(new_path, R"({
+  "model_id": "flux-bs4", "family": "diffusion_flux",
+  "max_batch_size": {"dit": 4, "text_encoder": 8, "vae": 1},
+  "sections": {"engine_plan": {"offset": 0, "size": 4}}
+})",
+                               {plan_data});
+    const auto loaded_new = trtmc::ReadBundleFile(new_path);
+    check(loaded_new.info.max_batch_size.dit == 4 &&
+              loaded_new.info.max_batch_size.text_encoder == 8 &&
+              loaded_new.info.max_batch_size.vae == 1,
+          "max_batch_size parsed from header");
+
+    const auto legacy_path = (tmp / "legacy.trtfb").string();
+    write_bundle_with_sections(legacy_path, R"({
+  "model_id": "legacy", "family": "qwen",
+  "sections": {"engine_plan": {"offset": 0, "size": 4}}
+})",
+                               {plan_data});
+    const auto loaded_legacy = trtmc::ReadBundleFile(legacy_path);
+    check(loaded_legacy.info.max_batch_size.dit == 1 &&
+              loaded_legacy.info.max_batch_size.text_encoder == 1 &&
+              loaded_legacy.info.max_batch_size.vae == 1,
+          "absent max_batch_size defaults to {1,1,1}");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
 int main() {
     test_read_valid_bundle();
     test_magic_validation();
@@ -265,6 +299,7 @@ int main() {
     test_inspect_returns_metadata();
     test_tokenizer_add_special_tokens_header();
     test_truncated_bundle_throws();
+    test_max_batch_size_parse_and_back_compat();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

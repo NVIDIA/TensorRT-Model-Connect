@@ -21,6 +21,7 @@ from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
 from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+from ...engine_builder import add_dynamic_batch_profile
 
 
 trt = trt_compat.get_trt()
@@ -94,13 +95,28 @@ def build_qwen3_encoder_engine(
     eps: float = 1e-6,
     output_layer: int = -2,
     verbose: bool = False,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
 ) -> bytes:
     """Build Qwen3 text encoder TRT engine.
 
     Args:
         output_layer: Which layer's output to return. -2 means second-to-last.
+        max_batch_size: Maximum batch size for the dynamic batch profile.
+            When ``max_batch_size == 1`` (default), behavior is identical to
+            the previous static-shape build (no batch dim, no profile).
+            When > 1, a leading batch dim is added to the inputs and a single
+            wide optimization profile ``kMIN=1, kOPT=opt_batch_size,
+            kMAX=max_batch_size`` is attached (design Decisions A and C).
+        opt_batch_size: kOPT for the dynamic batch profile. Defaults to
+            ``min(max_batch_size, 4)`` per design Decision C.
         All other args describe the Qwen3 architecture.
     """
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    if opt_batch_size is None:
+        opt_batch_size = min(max_batch_size, 4)
+    dynamic_batch = max_batch_size > 1
     if output_layer < 0:
         output_layer = num_layers + output_layer  # e.g., 36 + (-2) = 34
 
@@ -113,9 +129,17 @@ def build_qwen3_encoder_engine(
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
-    # Inputs
-    input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
-    attn_mask = network.add_input("attention_mask", trt.float32, (max_seq_len,))
+    # Inputs. With dynamic batch, the leading dim becomes runtime-dynamic
+    # (``-1``); the static-batch path keeps today's no-batch-dim shape.
+    if dynamic_batch:
+        input_ids = network.add_input(
+            "input_ids", trt.int32, (-1, max_seq_len))
+        attn_mask = network.add_input(
+            "attention_mask", trt.float32, (-1, max_seq_len))
+    else:
+        input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
+        attn_mask = network.add_input(
+            "attention_mask", trt.float32, (max_seq_len,))
 
     # Constants
     eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
@@ -242,9 +266,21 @@ def build_qwen3_encoder_engine(
     out_final.name = "text_embeddings"
     network.mark_output(out_final)
 
+    if dynamic_batch:
+        add_dynamic_batch_profile(
+            builder, config, network,
+            input_names=["input_ids", "attention_mask"],
+            max_batch=max_batch_size,
+            opt_batch=opt_batch_size,
+            static_shape={
+                "input_ids": (max_seq_len,),
+                "attention_mask": (max_seq_len,),
+            },
+        )
+
     print(f"[qwen3-encoder] Building TRT engine "
           f"(layers={num_layers}, hidden={hidden_size}, output_layer={output_layer}, "
-          f"seq_len={max_seq_len}) ...", file=sys.stderr)
+          f"seq_len={max_seq_len}, max_batch={max_batch_size}) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:

@@ -44,6 +44,7 @@ from tensorrt_model_connect import trt_compat
 
 from ... import graph_ops
 from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
+from ...engine_builder import add_dynamic_batch_profile
 
 
 trt = trt_compat.get_trt()
@@ -172,8 +173,29 @@ def build_z_image_dit_engine(
     adaln_embed_dim: int = 256,
     eps: float = 1e-5,
     verbose: bool = False,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
 ) -> bytes:
-    """Build Z-Image DiT TRT engine."""
+    """Build Z-Image DiT TRT engine.
+
+    When ``max_batch_size == 1`` (default), engine inputs keep their original
+    static shapes (no leading batch dim) — byte-for-byte identical to today's
+    behavior. When ``max_batch_size > 1``, ``hidden_states``,
+    ``encoder_hidden_states``, and ``timestep_embedding`` gain a dynamic
+    leading batch dim and a single wide optimization profile (kMIN=1,
+    kOPT=``opt_batch_size``, kMAX=``max_batch_size``) is attached
+    per design Decisions A and C. ``opt_batch_size`` defaults to
+    ``min(max_batch_size, 4)``.
+
+    RoPE caches (``rotary_cos``, ``rotary_sin``) are shared across the batch
+    and remain non-batched even in the dynamic-batch path.
+    """
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    if opt_batch_size is None:
+        opt_batch_size = min(max_batch_size, 4)
+    dynamic_batch = max_batch_size > 1
+
     total_seq = num_patches + text_seq_len
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
     out_channels = weights["final_linear.weight"].shape[1]
@@ -184,13 +206,25 @@ def build_z_image_dit_engine(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
-    # Inputs (no batch dim -- static shapes)
-    noise_inp = network.add_input(
-        "hidden_states", trt.float32, (num_patches, dim))
-    caption_inp = network.add_input(
-        "encoder_hidden_states", trt.float32, (text_seq_len, dim))
-    temb_inp = network.add_input(
-        "timestep_embedding", trt.float32, (1, adaln_embed_dim))
+    # Inputs. Static-batch path keeps today's no-batch-dim shapes; the
+    # dynamic-batch path turns the leading dim of the batched tensors into
+    # a runtime-dynamic ``-1``. ``temb`` already carries a static leading
+    # singleton in the static path; it becomes the batch dim under
+    # max_batch_size > 1. Rotary caches are batch-invariant and stay 2-D.
+    if dynamic_batch:
+        noise_inp = network.add_input(
+            "hidden_states", trt.float32, (-1, num_patches, dim))
+        caption_inp = network.add_input(
+            "encoder_hidden_states", trt.float32, (-1, text_seq_len, dim))
+        temb_inp = network.add_input(
+            "timestep_embedding", trt.float32, (-1, adaln_embed_dim))
+    else:
+        noise_inp = network.add_input(
+            "hidden_states", trt.float32, (num_patches, dim))
+        caption_inp = network.add_input(
+            "encoder_hidden_states", trt.float32, (text_seq_len, dim))
+        temb_inp = network.add_input(
+            "timestep_embedding", trt.float32, (1, adaln_embed_dim))
     rope_cos = network.add_input(
         "rotary_cos", trt.float32, (total_seq, head_dim))
     rope_sin = network.add_input(
@@ -401,9 +435,25 @@ def build_z_image_dit_engine(
     output_final.name = "output"
     network.mark_output(output_final)
 
+    if dynamic_batch:
+        add_dynamic_batch_profile(
+            builder, config, network,
+            input_names=[
+                "hidden_states", "encoder_hidden_states", "timestep_embedding"
+            ],
+            max_batch=max_batch_size,
+            opt_batch=opt_batch_size,
+            static_shape={
+                "hidden_states": (num_patches, dim),
+                "encoder_hidden_states": (text_seq_len, dim),
+                "timestep_embedding": (adaln_embed_dim,),
+            },
+        )
+
     print(f"[z-image-dit] Building TRT engine "
           f"(dim={dim}, layers={num_layers}, refiners={num_refiner_layers}, "
-          f"patches={num_patches}, text_seq={text_seq_len}, out_ch={out_channels}) ...",
+          f"patches={num_patches}, text_seq={text_seq_len}, out_ch={out_channels}, "
+          f"max_batch={max_batch_size}) ...",
           file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)

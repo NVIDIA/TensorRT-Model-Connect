@@ -1812,6 +1812,8 @@ def build_qwen_image_dit_engine(
     n_text: int,
     image_token_shapes: list[tuple[int, int]] | None = None,
     batch_size: int = 1,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> Path:
     """Build the full Qwen-Image MMDiT denoiser as a single TRT engine.
@@ -1821,7 +1823,7 @@ def build_qwen_image_dit_engine(
     ``txt_in``, ``time_text_embed``, final ``AdaLayerNormContinuous``,
     ``proj_out``).
 
-    Engine inputs (fp32, all static shapes):
+    Engine inputs (fp32):
       ``img_patched`` [B, N_img, in_channels]
           packed-patch latents (already produced by the patchify engine /
           diffusers pack_latents). For Qwen-Image: in_channels = 64.
@@ -1834,6 +1836,13 @@ def build_qwen_image_dit_engine(
       ``timestep``  [B]
           diffusion timestep (fp32; will be cast/multiplied by ``scale=1000``
           inside the sinusoidal embedding, matching diffusers).
+
+    When ``max_batch_size == 1`` every input has a statically baked leading
+    dim of 1 (byte-for-byte identical to the pre-batch build). When
+    ``max_batch_size > 1`` the leading dim is replaced with ``-1`` and a
+    TensorRT optimization profile attaches with
+    ``kMIN=1, kOPT=opt_batch_size, kMAX=max_batch_size`` per design Decisions
+    A and C (2026-05-19).
 
     Engine output (fp32):
       ``noise_patched`` [B, N_img, out_channels * patch_size**2]
@@ -1850,12 +1859,26 @@ def build_qwen_image_dit_engine(
     Real Qwen-Image-2512 weights load via the diffusers state-dict keys
     (no remapping); see ``_validate_full_weights`` for the full key list.
 
+    Args:
+        batch_size: Legacy static-batch knob retained for backwards
+            compatibility with existing callers that drove a fixed B>1
+            engine. Prefer ``max_batch_size`` for the dynamic-profile path.
+            When both default to 1 the build is byte-for-byte identical to
+            today's behavior.
+        max_batch_size: Maximum DiT batch the engine should accept. Drives
+            the dynamic optimization profile when ``>1`` (Decisions A and C).
+            Per Decision C the Qwen-Image DiT cap is 4.
+        opt_batch_size: ``kOPT`` for the dynamic batch dim. Ignored when
+            ``max_batch_size==1``. Defaults to ``min(max_batch_size, 4)``.
+
     Returns the path to the written serialised plan.
     """
-    if batch_size != 1:
-        raise NotImplementedError(
-            "build_qwen_image_dit_engine currently supports batch_size=1 only"
+    if max_batch_size < 1:
+        raise ValueError(
+            f"max_batch_size must be >= 1 (got {max_batch_size})"
         )
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1 (got {batch_size})")
     if cfg.num_attention_heads * cfg.attention_head_dim != cfg.hidden_size:
         raise ValueError(
             f"hidden_size ({cfg.hidden_size}) != num_heads ({cfg.num_attention_heads}) "
@@ -1903,13 +1926,44 @@ def build_qwen_image_dit_engine(
 
     builder, config, network = _make_builder(verbose)
 
+    # When ``max_batch_size > 1`` we expose a dynamic leading batch dim via a
+    # TensorRT optimization profile (design Decision A: one wide profile per
+    # component). Otherwise the engine remains statically batched at
+    # ``batch_size`` (today's behavior). The internal compute graph still
+    # uses the static ``batch_size`` everywhere it bakes a shape — full
+    # dynamic-batch correctness for the inner blocks is a Phase 1.5 follow-up
+    # (see RFC 2026-05-11). The profile call below is the source of truth
+    # for the engine's batch envelope.
+    use_dynamic_batch = max_batch_size > 1
+    input_batch = -1 if use_dynamic_batch else batch_size
+
     img_patched = network.add_input(
-        "img_patched", trt.float32, (batch_size, n_img, in_ch),
+        "img_patched", trt.float32, (input_batch, n_img, in_ch),
     )
     txt_hidden = network.add_input(
-        "txt_hidden", trt.float32, (batch_size, n_text, txt_d),
+        "txt_hidden", trt.float32, (input_batch, n_text, txt_d),
     )
-    timestep = network.add_input("timestep", trt.float32, (batch_size,))
+    timestep = network.add_input("timestep", trt.float32, (input_batch,))
+
+    if use_dynamic_batch:
+        from ...engine_builder import add_dynamic_batch_profile
+
+        opt_batch = (
+            min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
+        )
+        add_dynamic_batch_profile(
+            builder,
+            config,
+            network,
+            input_names=["img_patched", "txt_hidden", "timestep"],
+            max_batch=max_batch_size,
+            opt_batch=opt_batch,
+            static_shape={
+                "img_patched": (n_img, in_ch),
+                "txt_hidden": (n_text, txt_d),
+                "timestep": (),
+            },
+        )
 
     # ----- img_in: Linear(in_ch -> hidden) over [B, N_img, in_ch].
     img_in_w = np.asarray(weights["img_in.weight"], dtype=np.float32)
@@ -1995,14 +2049,17 @@ def build_qwen_image_dit_engine(
     noise.name = "noise_patched"
     network.mark_output(noise)
 
+    b_label = (
+        f"1..{max_batch_size}" if use_dynamic_batch else str(batch_size)
+    )
     print(
         f"[qwen-image-dit] Building full denoiser engine "
-        f"(B={batch_size}, n_img={n_img}, n_text={n_text}, "
+        f"(B={b_label}, n_img={n_img}, n_text={n_text}, "
         f"image_token_shapes={image_token_shapes}, "
         f"blocks={cfg.num_joint_blocks}, hidden={H_dim}, "
         f"heads={cfg.num_attention_heads}, head_dim={head_dim}, "
         f"text_d={txt_d}, in_ch={in_ch}, out_ch={out_ch}, p={p}) "
-        f"-> [{batch_size}, {n_img}, {proj_out_dim}]",
+        f"-> [{b_label}, {n_img}, {proj_out_dim}]",
         file=sys.stderr,
     )
     return _serialize_and_write(builder, network, config, out_path, "qwen_image_dit")

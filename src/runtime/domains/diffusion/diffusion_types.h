@@ -47,6 +47,18 @@ struct DiffusionConfig {
     float vae_scaling_factor{0.0F};
 
     std::string diffusion_backend_type{"wan_3d"};
+
+    // Per-call requested batch size. Defaults to 1 = today's behavior.
+    // Pipelines clamp/chunk against the per-component caps below.
+    int32_t batch_size{1};
+
+    // Engine batch envelope sourced from the bundle's max_batch_size block.
+    // Defaults to all-1 so legacy bundles (no field) keep B=1 semantics.
+    struct {
+        int32_t dit{1};
+        int32_t text_encoder{1};
+        int32_t vae{1};
+    } max_batch_size;
 };
 
 /// Preprocessor weights for the DiT (external to the TRT engine graph).

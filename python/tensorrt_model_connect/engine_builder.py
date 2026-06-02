@@ -175,6 +175,48 @@ def _sanitize_dynamic_kv_profile_rows(
     return sanitized
 
 
+def add_dynamic_batch_profile(
+    builder,
+    config,
+    network,
+    *,
+    input_names: list[str],
+    max_batch: int,
+    opt_batch: int,
+    static_shape: dict[str, tuple[int, ...]],
+) -> None:
+    """Attach one TensorRT profile with a dynamic leading batch dimension.
+
+    Used by every diffusion engine builder so the leading dim of each named
+    input is dynamic in the range ``[1, max_batch]`` with kOPT=``opt_batch``.
+    ``static_shape[name]`` is the per-input shape *without* the batch dim
+    (e.g. ``(num_patches, hidden_dim)``).
+    """
+    del network  # The profile API is name-based; arg kept for call-site clarity.
+    if max_batch < 1:
+        raise ValueError(f"max_batch must be >= 1 (got {max_batch})")
+    if not (1 <= opt_batch <= max_batch):
+        raise ValueError(
+            "opt_batch must satisfy 1 <= opt_batch <= max_batch "
+            f"(got opt_batch={opt_batch}, max_batch={max_batch})"
+        )
+    missing = [name for name in input_names if name not in static_shape]
+    if missing:
+        raise KeyError(
+            f"static_shape missing entries for: {', '.join(missing)}"
+        )
+    profile = builder.create_optimization_profile()
+    for name in input_names:
+        tail = tuple(static_shape[name])
+        profile.set_shape(
+            name,
+            min=(1, *tail),
+            opt=(opt_batch, *tail),
+            max=(max_batch, *tail),
+        )
+    config.add_optimization_profile(profile)
+
+
 def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
     """Re-raise HF download errors with clear, actionable messages."""
     exc_type = type(exc).__name__

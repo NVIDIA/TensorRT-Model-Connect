@@ -170,6 +170,7 @@ add_library(trtmc_core
   src/runtime/domains/audio/audio_types.cpp
   src/runtime/domains/audio/mel_spectrogram.cpp
   src/runtime/domains/audio/audio_bundle_validation.cpp
+  src/runtime/domains/diffusion/batch_utils.cpp
   src/runtime/domains/diffusion/diffusion_preprocessor.cpp
   src/runtime/domains/diffusion/qwen_image_types.cpp
   src/tokenizer/vocab_tokenizer.cpp
@@ -704,6 +705,7 @@ trtmc_add_test(test_diffusion_generation_plan)
 trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
+trtmc_add_test(test_diffusion_batch_utils)
 trtmc_add_test(test_ltx_video_pipeline)
 
 # Recurrent (Mamba / RWKV)

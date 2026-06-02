@@ -323,6 +323,8 @@ def build_qwen25vl_text_encoder_engine(
     image_grid_thw: tuple[int, int, int] | None = None,
     vision_spatial_merge_size: int = 2,
     vision_tokens_per_second: int = 2,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> Path:
     """Build the TRT engine and serialize the plan to ``out_path``.
@@ -356,11 +358,34 @@ def build_qwen25vl_text_encoder_engine(
             used to build the static vision/text plan.
         vision_spatial_merge_size: Qwen2.5-VL spatial merge size.
         vision_tokens_per_second: Qwen2.5-VL temporal mRoPE scale.
+        max_batch_size: Maximum prompt batch size the engine should accept.
+            When ``1`` (default) the engine is byte-for-byte identical to the
+            pre-batch build (engine inputs are ``[max_seq_len]``). When ``>1``
+            the engine inputs gain a dynamic leading batch dim
+            ``[-1, max_seq_len]`` with a TensorRT optimization profile of
+            ``kMIN=1, kOPT=opt_batch_size, kMAX=max_batch_size``. Per the
+            diffusion batch-inference design (Decision C, 2026-05-19) the
+            text encoder caps at 8 for Qwen-Image.
+        opt_batch_size: Optimization-profile ``kOPT`` for the dynamic batch
+            dim. Ignored when ``max_batch_size==1``. Defaults to
+            ``min(max_batch_size, 4)`` to match the N-of-best UX target.
         verbose: Enable TRT verbose logging.
 
     Returns:
         Resolved ``Path`` to the written plan file.
+
+    Notes:
+        The internal compute graph still assumes a rank-1 ``[max_seq_len]``
+        layout; the batched-graph rewrite lives in a follow-up. ``max_batch_size
+        > 1`` is currently wired through the builder signature and the
+        dynamic-batch profile, but a full bf16 batched compute path is
+        deferred. Tests monkeypatch TRT so they exercise the wiring rather
+        than the full graph.
     """
+    if max_batch_size < 1:
+        raise ValueError(
+            f"max_batch_size must be >= 1 (got {max_batch_size})"
+        )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -399,14 +424,47 @@ def build_qwen25vl_text_encoder_engine(
     max_S = cfg.max_seq_len
 
     # ---- Engine inputs (stay fp32 -- C++ runtime / debug runner bind fp32). ----
-    input_ids = network.add_input("input_ids", trt.int32, (max_S,))
-    attn_mask_1d = network.add_input("attention_mask", trt.float32, (max_S,))
+    # When ``max_batch_size > 1`` the leading dim becomes dynamic via a TRT
+    # optimization profile; otherwise the engine keeps the rank-1 shape that
+    # the pre-batch path used so old bundles/build callers behave identically.
+    # Edit-mode `image_hidden` / `image_mask` keep their rank-2/rank-1 shapes
+    # — Edit-mode batching is a follow-up.
+    use_dynamic_batch = max_batch_size > 1
+    if use_dynamic_batch:
+        input_ids = network.add_input("input_ids", trt.int32, (-1, max_S))
+        attn_mask_1d = network.add_input(
+            "attention_mask", trt.float32, (-1, max_S))
+    else:
+        input_ids = network.add_input("input_ids", trt.int32, (max_S,))
+        attn_mask_1d = network.add_input(
+            "attention_mask", trt.float32, (max_S,))
     image_hidden = None
     image_mask_1d = None
     if enable_image_inputs:
         image_hidden = network.add_input(
             "image_hidden", trt.float32, (max_S, cfg.hidden_size))
         image_mask_1d = network.add_input("image_mask", trt.float32, (max_S,))
+
+    if use_dynamic_batch:
+        # Diffusion batch-inference RFC, Decision C: kMIN=1, kOPT=min(N,4),
+        # kMAX=N. Single wide profile per component (Decision A).
+        from ...engine_builder import add_dynamic_batch_profile
+
+        opt_batch = (
+            min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
+        )
+        add_dynamic_batch_profile(
+            builder,
+            trt_config,
+            network,
+            input_names=["input_ids", "attention_mask"],
+            max_batch=max_batch_size,
+            opt_batch=opt_batch,
+            static_shape={
+                "input_ids": (max_S,),
+                "attention_mask": (max_S,),
+            },
+        )
 
     # ---- Shared constants. ----
     # eps stored in work dtype so it doesn't constantly need upcasting.
