@@ -14,6 +14,9 @@
   "logit_atol": 0.005,
   "layer_atol": 0.1,
   "trust_remote_code": true,
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.9
+  },
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
