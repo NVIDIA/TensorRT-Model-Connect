@@ -142,8 +142,7 @@ void copy_deepstack_outputs(const TensorMap& outputs,
             break;
         auto ds_n = ds_it->second.numel();
         deepstack_features->emplace_back(static_cast<std::size_t>(ds_n));
-        std::memcpy(deepstack_features->back().data(), ds_it->second.data,
-                    ds_n * sizeof(float));
+        std::memcpy(deepstack_features->back().data(), ds_it->second.data, ds_n * sizeof(float));
     }
 }
 

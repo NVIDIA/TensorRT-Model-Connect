@@ -31,9 +31,9 @@ struct VLPreprocessConfig {
 
 // Preprocessed pixel values ready for the vision TRT engine.
 struct PreprocessedImage {
-    std::vector<float> pixel_values;  // Layout depends on preprocessor_type
-    std::vector<int32_t> image_grid_hws;  // [height, width] patch grid for patchified inputs
-    int32_t channels{0};              // C*T for qwen_merge_group, C for simple_chw
+    std::vector<float> pixel_values;     // Layout depends on preprocessor_type
+    std::vector<int32_t> image_grid_hws; // [height, width] patch grid for patchified inputs
+    int32_t channels{0};                 // C*T for qwen_merge_group, C for simple_chw
     int32_t height{0};
     int32_t width{0};
     bool ok{false};
@@ -52,23 +52,18 @@ struct PreprocessedImage {
 // is not yet implemented; callers must process one image at a time.
 runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_path);
 
-PreprocessedImage preprocess_decoded_image(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config);
+PreprocessedImage preprocess_decoded_image(const runtime::adapters::io::DecodedImage& image,
+                                           const VLPreprocessConfig& config);
 
-PreprocessedImage load_and_preprocess_image(
-    const std::string& image_path,
-    const VLPreprocessConfig& config);
+PreprocessedImage load_and_preprocess_image(const std::string& image_path,
+                                            const VLPreprocessConfig& config);
 
 // Format a VL prompt with image pad tokens from the template.
 // Replaces {image_pads} and {prompt} in vl_prompt_template.
-std::string format_vl_prompt(
-    const std::string& user_prompt,
-    const VLPreprocessConfig& config);
+std::string format_vl_prompt(const std::string& user_prompt, const VLPreprocessConfig& config);
 
 // Parse VLPreprocessConfig from config.json text.
-VLPreprocessConfig parse_vl_preprocess_config(
-    const std::string& config_text,
-    const std::string& preprocessor_config_text);
+VLPreprocessConfig parse_vl_preprocess_config(const std::string& config_text,
+                                              const std::string& preprocessor_config_text);
 
 } // namespace trtmc

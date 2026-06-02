@@ -1,4 +1,7 @@
 #include "runtime/domains/multimodal/image_preprocessor.h"
+
+#include "stb_image.h"
+#include "stb_image_resize2.h"
 #include "trtmc/runtime/domains/multimodal/image_transform_helper.h"
 #include "utils/json_helpers.h"
 
@@ -7,17 +10,13 @@
 #include <iostream>
 #include <string>
 
-#include "stb_image.h"
-#include "stb_image_resize2.h"
-
 namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // Interpolation filter resolution
 // ---------------------------------------------------------------------------
 
-static stbir_filter resolve_stbir_filter(const std::string& interpolation)
-{
+static stbir_filter resolve_stbir_filter(const std::string& interpolation) {
     if (interpolation == "bilinear")
         return STBIR_FILTER_TRIANGLE;
     if (interpolation == "nearest")
@@ -31,39 +30,30 @@ static stbir_filter resolve_stbir_filter(const std::string& interpolation)
 // ---------------------------------------------------------------------------
 
 struct LoadedImage {
-    std::vector<float> img_chw;  // [C, H, W] normalized
+    std::vector<float> img_chw; // [C, H, W] normalized
     int target_size{0};
     int channels{0};
     bool ok{false};
 };
 
 // Resize raw uint8 RGB buffer to target_size x target_size using the given filter.
-static std::vector<unsigned char> resize_raw(
-    const unsigned char* raw, int width, int height,
-    int target_size, stbir_filter filter)
-{
-    std::vector<unsigned char> resized(
-        static_cast<std::size_t>(target_size) * target_size * 3);
+static std::vector<unsigned char> resize_raw(const unsigned char* raw, int width, int height,
+                                             int target_size, stbir_filter filter) {
+    std::vector<unsigned char> resized(static_cast<std::size_t>(target_size) * target_size * 3);
 
-    void* result = stbir_resize(
-        raw, width, height, width * 3,
-        resized.data(), target_size, target_size, target_size * 3,
-        STBIR_RGB, STBIR_TYPE_UINT8,
-        STBIR_EDGE_CLAMP, filter);
+    void* result =
+        stbir_resize(raw, width, height, width * 3, resized.data(), target_size, target_size,
+                     target_size * 3, STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, filter);
 
-    if (result == nullptr)
-    {
+    if (result == nullptr) {
         return {};
     }
     return resized;
 }
 
 // Convert resized uint8 HWC buffer to float32 CHW, normalizing per channel.
-static bool normalize_to_chw(
-    const std::vector<unsigned char>& resized,
-    int target_size, const VLPreprocessConfig& config,
-    std::vector<float>& out_chw)
-{
+static bool normalize_to_chw(const std::vector<unsigned char>& resized, int target_size,
+                             const VLPreprocessConfig& config, std::vector<float>& out_chw) {
     ImageNormalizationParams params;
     params.width = target_size;
     params.height = target_size;
@@ -81,14 +71,11 @@ static bool normalize_to_chw(
 // Load strategies
 // ---------------------------------------------------------------------------
 
-static LoadedImage load_resize_normalize(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config)
-{
+static LoadedImage load_resize_normalize(const runtime::adapters::io::DecodedImage& image,
+                                         const VLPreprocessConfig& config) {
     LoadedImage loaded;
 
-    if (image.empty())
-    {
+    if (image.empty()) {
         std::cerr << "[trtmc] Failed to preprocess image: decoded image missing" << std::endl;
         return loaded;
     }
@@ -99,15 +86,13 @@ static LoadedImage load_resize_normalize(
     auto resized = resize_raw(image.pixels.data(), image.width, image.height, target_size,
                               resolve_stbir_filter(config.interpolation));
 
-    if (resized.empty())
-    {
+    if (resized.empty()) {
         std::cerr << "[trtmc] Failed to resize image" << std::endl;
         return loaded;
     }
 
     // 3. Normalize to [C, H, W]
-    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
-    {
+    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw)) {
         std::cerr << "[trtmc] Failed to normalize image" << std::endl;
         return loaded;
     }
@@ -118,15 +103,13 @@ static LoadedImage load_resize_normalize(
 }
 
 // Center-crop to square, then resize + normalize.
-static LoadedImage load_crop_resize_normalize(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config)
-{
+static LoadedImage load_crop_resize_normalize(const runtime::adapters::io::DecodedImage& image,
+                                              const VLPreprocessConfig& config) {
     LoadedImage loaded;
 
-    if (image.empty())
-    {
-        std::cerr << "[trtmc] Failed to preprocess cropped image: decoded image missing" << std::endl;
+    if (image.empty()) {
+        std::cerr << "[trtmc] Failed to preprocess cropped image: decoded image missing"
+                  << std::endl;
         return loaded;
     }
 
@@ -135,12 +118,10 @@ static LoadedImage load_crop_resize_normalize(
     const int x_off = (image.width - crop_size) / 2;
     const int y_off = (image.height - crop_size) / 2;
 
-    std::vector<unsigned char> cropped(
-        static_cast<std::size_t>(crop_size) * crop_size * 3);
-    for (int y = 0; y < crop_size; ++y)
-    {
-        const unsigned char* src_row = image.pixels.data()
-            + (static_cast<std::size_t>(y + y_off) * image.width + x_off) * 3;
+    std::vector<unsigned char> cropped(static_cast<std::size_t>(crop_size) * crop_size * 3);
+    for (int y = 0; y < crop_size; ++y) {
+        const unsigned char* src_row =
+            image.pixels.data() + (static_cast<std::size_t>(y + y_off) * image.width + x_off) * 3;
         unsigned char* dst_row = cropped.data() + static_cast<std::size_t>(y) * crop_size * 3;
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(crop_size) * 3);
     }
@@ -148,14 +129,12 @@ static LoadedImage load_crop_resize_normalize(
     const int target_size = config.fixed_image_size;
     auto resized = resize_raw(cropped.data(), crop_size, crop_size, target_size,
                               resolve_stbir_filter(config.interpolation));
-    if (resized.empty())
-    {
+    if (resized.empty()) {
         std::cerr << "[trtmc] Failed to resize cropped image" << std::endl;
         return loaded;
     }
 
-    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
-    {
+    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw)) {
         std::cerr << "[trtmc] Failed to normalize cropped image" << std::endl;
         return loaded;
     }
@@ -166,15 +145,14 @@ static LoadedImage load_crop_resize_normalize(
 }
 
 // Aspect-ratio-preserving resize + zero-pad to square, then normalize.
-static LoadedImage load_aspect_preserve_resize_normalize(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config)
-{
+static LoadedImage
+load_aspect_preserve_resize_normalize(const runtime::adapters::io::DecodedImage& image,
+                                      const VLPreprocessConfig& config) {
     LoadedImage loaded;
 
-    if (image.empty())
-    {
-        std::cerr << "[trtmc] Failed to preprocess aspect-preserve image: decoded image missing" << std::endl;
+    if (image.empty()) {
+        std::cerr << "[trtmc] Failed to preprocess aspect-preserve image: decoded image missing"
+                  << std::endl;
         return loaded;
     }
 
@@ -182,39 +160,33 @@ static LoadedImage load_aspect_preserve_resize_normalize(
     const stbir_filter filter = resolve_stbir_filter(config.interpolation);
 
     // Compute scaled dimensions that fit inside target_size x target_size
-    const float scale = static_cast<float>(target_size) /
-                        static_cast<float>(std::max(image.width, image.height));
+    const float scale =
+        static_cast<float>(target_size) / static_cast<float>(std::max(image.width, image.height));
     const int new_w = std::max(1, static_cast<int>(image.width * scale));
     const int new_h = std::max(1, static_cast<int>(image.height * scale));
 
     // Resize preserving aspect ratio
-    std::vector<unsigned char> resized_small(
-        static_cast<std::size_t>(new_w) * new_h * 3);
+    std::vector<unsigned char> resized_small(static_cast<std::size_t>(new_w) * new_h * 3);
 
     void* resize_result = stbir_resize(
-        image.pixels.data(), image.width, image.height, image.width * 3,
-        resized_small.data(), new_w, new_h, new_w * 3,
-        STBIR_RGB, STBIR_TYPE_UINT8,
-        STBIR_EDGE_CLAMP, filter);
+        image.pixels.data(), image.width, image.height, image.width * 3, resized_small.data(),
+        new_w, new_h, new_w * 3, STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, filter);
 
-    if (resize_result == nullptr)
-    {
+    if (resize_result == nullptr) {
         std::cerr << "[trtmc] Failed to resize image (aspect-preserve)" << std::endl;
         return loaded;
     }
 
     // Zero-pad to target_size x target_size (top-left aligned)
-    std::vector<unsigned char> padded(
-        static_cast<std::size_t>(target_size) * target_size * 3, 0);
-    for (int y = 0; y < new_h; ++y)
-    {
-        const unsigned char* src_row = resized_small.data() + static_cast<std::size_t>(y) * new_w * 3;
+    std::vector<unsigned char> padded(static_cast<std::size_t>(target_size) * target_size * 3, 0);
+    for (int y = 0; y < new_h; ++y) {
+        const unsigned char* src_row =
+            resized_small.data() + static_cast<std::size_t>(y) * new_w * 3;
         unsigned char* dst_row = padded.data() + static_cast<std::size_t>(y) * target_size * 3;
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(new_w) * 3);
     }
 
-    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
-    {
+    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw)) {
         std::cerr << "[trtmc] Failed to normalize aspect-preserve image" << std::endl;
         return loaded;
     }
@@ -226,15 +198,14 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 
 // Aspect-ratio-preserving resize + center-pad with mean color, then normalize.
 // Matches PIL ImageOps.pad(image, (size, size), color=mean*255).
-static LoadedImage load_pad_center_resize_normalize(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config)
-{
+static LoadedImage
+load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& image,
+                                 const VLPreprocessConfig& config) {
     LoadedImage loaded;
 
-    if (image.empty())
-    {
-        std::cerr << "[trtmc] Failed to preprocess pad-center image: decoded image missing" << std::endl;
+    if (image.empty()) {
+        std::cerr << "[trtmc] Failed to preprocess pad-center image: decoded image missing"
+                  << std::endl;
         return loaded;
     }
 
@@ -250,17 +221,13 @@ static LoadedImage load_pad_center_resize_normalize(
     const int new_h = std::max(1, static_cast<int>(image.height * scale));
 
     // Resize preserving aspect ratio
-    std::vector<unsigned char> resized_small(
-        static_cast<std::size_t>(new_w) * new_h * 3);
+    std::vector<unsigned char> resized_small(static_cast<std::size_t>(new_w) * new_h * 3);
 
     void* resize_result = stbir_resize(
-        image.pixels.data(), image.width, image.height, image.width * 3,
-        resized_small.data(), new_w, new_h, new_w * 3,
-        STBIR_RGB, STBIR_TYPE_UINT8,
-        STBIR_EDGE_CLAMP, filter);
+        image.pixels.data(), image.width, image.height, image.width * 3, resized_small.data(),
+        new_w, new_h, new_w * 3, STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, filter);
 
-    if (resize_result == nullptr)
-    {
+    if (resize_result == nullptr) {
         std::cerr << "[trtmc] Failed to resize image (pad-center)" << std::endl;
         return loaded;
     }
@@ -270,10 +237,8 @@ static LoadedImage load_pad_center_resize_normalize(
     const unsigned char pad_g = static_cast<unsigned char>(config.image_mean[1] * 255.0F);
     const unsigned char pad_b = static_cast<unsigned char>(config.image_mean[2] * 255.0F);
 
-    std::vector<unsigned char> padded(
-        static_cast<std::size_t>(target_size) * target_size * 3);
-    for (std::size_t i = 0; i < padded.size(); i += 3)
-    {
+    std::vector<unsigned char> padded(static_cast<std::size_t>(target_size) * target_size * 3);
+    for (std::size_t i = 0; i < padded.size(); i += 3) {
         padded[i + 0] = pad_r;
         padded[i + 1] = pad_g;
         padded[i + 2] = pad_b;
@@ -282,17 +247,15 @@ static LoadedImage load_pad_center_resize_normalize(
     // Center the resized image in the padded canvas
     const int x_off = (target_size - new_w) / 2;
     const int y_off = (target_size - new_h) / 2;
-    for (int y = 0; y < new_h; ++y)
-    {
-        const unsigned char* src_row = resized_small.data()
-            + static_cast<std::size_t>(y) * new_w * 3;
-        unsigned char* dst_row = padded.data()
-            + (static_cast<std::size_t>(y + y_off) * target_size + x_off) * 3;
+    for (int y = 0; y < new_h; ++y) {
+        const unsigned char* src_row =
+            resized_small.data() + static_cast<std::size_t>(y) * new_w * 3;
+        unsigned char* dst_row =
+            padded.data() + (static_cast<std::size_t>(y + y_off) * target_size + x_off) * 3;
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(new_w) * 3);
     }
 
-    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
-    {
+    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw)) {
         std::cerr << "[trtmc] Failed to normalize pad-center image" << std::endl;
         return loaded;
     }
@@ -306,10 +269,8 @@ static LoadedImage load_pad_center_resize_normalize(
 // Strategy: qwen_merge_group
 // ---------------------------------------------------------------------------
 
-static PreprocessedImage preprocess_qwen_merge_group(
-    const LoadedImage& loaded,
-    const VLPreprocessConfig& config)
-{
+static PreprocessedImage preprocess_qwen_merge_group(const LoadedImage& loaded,
+                                                     const VLPreprocessConfig& config) {
     PreprocessedImage result;
     ImageTransformParams params;
     params.layout = ImageTransformLayout::kQwenMergeGroup;
@@ -321,8 +282,7 @@ static PreprocessedImage preprocess_qwen_merge_group(
 
     result.height = loaded.target_size;
     result.width = loaded.target_size;
-    result.ok = transform_chw_layout(
-        loaded.img_chw, params, result.pixel_values, result.channels);
+    result.ok = transform_chw_layout(loaded.img_chw, params, result.pixel_values, result.channels);
     return result;
 }
 
@@ -330,10 +290,8 @@ static PreprocessedImage preprocess_qwen_merge_group(
 // Strategy: simple_chw
 // ---------------------------------------------------------------------------
 
-static PreprocessedImage preprocess_simple_chw(
-    const LoadedImage& loaded,
-    const VLPreprocessConfig& config)
-{
+static PreprocessedImage preprocess_simple_chw(const LoadedImage& loaded,
+                                               const VLPreprocessConfig& config) {
     PreprocessedImage result;
     ImageTransformParams params;
     params.layout = ImageTransformLayout::kSimpleChw;
@@ -342,29 +300,24 @@ static PreprocessedImage preprocess_simple_chw(
 
     result.height = loaded.target_size;
     result.width = loaded.target_size;
-    result.ok = transform_chw_layout(
-        loaded.img_chw, params, result.pixel_values, result.channels);
+    result.ok = transform_chw_layout(loaded.img_chw, params, result.pixel_values, result.channels);
 
     (void)config;
     return result;
 }
 
-
 // ---------------------------------------------------------------------------
 // Strategy: locateanything_patchify
 // ---------------------------------------------------------------------------
 
-static PreprocessedImage preprocess_locateanything_patchify(
-    const LoadedImage& loaded,
-    const VLPreprocessConfig& config)
-{
+static PreprocessedImage preprocess_locateanything_patchify(const LoadedImage& loaded,
+                                                            const VLPreprocessConfig& config) {
     PreprocessedImage result;
     const int patch = config.patch_size;
     const int channels = loaded.channels;
     const int height = loaded.target_size;
     const int width = loaded.target_size;
-    if (patch <= 0 || height % patch != 0 || width % patch != 0 || channels <= 0)
-    {
+    if (patch <= 0 || height % patch != 0 || width % patch != 0 || channels <= 0) {
         std::cerr << "[trtmc] Invalid LocateAnything patchify shape" << std::endl;
         return result;
     }
@@ -372,26 +325,21 @@ static PreprocessedImage preprocess_locateanything_patchify(
     const int grid_h = height / patch;
     const int grid_w = width / patch;
     const int num_patches = grid_h * grid_w;
-    result.pixel_values.resize(
-        static_cast<std::size_t>(num_patches) * channels * patch * patch);
+    result.pixel_values.resize(static_cast<std::size_t>(num_patches) * channels * patch * patch);
 
-    for (int gh = 0; gh < grid_h; ++gh)
-    {
-        for (int gw = 0; gw < grid_w; ++gw)
-        {
+    for (int gh = 0; gh < grid_h; ++gh) {
+        for (int gw = 0; gw < grid_w; ++gw) {
             const int patch_idx = gh * grid_w + gw;
-            for (int c = 0; c < channels; ++c)
-            {
-                for (int ph = 0; ph < patch; ++ph)
-                {
-                    for (int pw = 0; pw < patch; ++pw)
-                    {
+            for (int c = 0; c < channels; ++c) {
+                for (int ph = 0; ph < patch; ++ph) {
+                    for (int pw = 0; pw < patch; ++pw) {
                         const std::size_t dst =
-                            (((static_cast<std::size_t>(patch_idx) * channels + c) * patch + ph)
-                             * patch + pw);
+                            (((static_cast<std::size_t>(patch_idx) * channels + c) * patch + ph) *
+                                 patch +
+                             pw);
                         const std::size_t src =
-                            (static_cast<std::size_t>(c) * height + gh * patch + ph) * width
-                            + gw * patch + pw;
+                            (static_cast<std::size_t>(c) * height + gh * patch + ph) * width +
+                            gw * patch + pw;
                         result.pixel_values[dst] = loaded.img_chw[src];
                     }
                 }
@@ -411,13 +359,11 @@ static PreprocessedImage preprocess_locateanything_patchify(
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-using LoadImageFn = LoadedImage (*)(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config);
+using LoadImageFn = LoadedImage (*)(const runtime::adapters::io::DecodedImage& image,
+                                    const VLPreprocessConfig& config);
 
-using PreprocessImageFn = PreprocessedImage (*)(
-    const LoadedImage& loaded,
-    const VLPreprocessConfig& config);
+using PreprocessImageFn = PreprocessedImage (*)(const LoadedImage& loaded,
+                                                const VLPreprocessConfig& config);
 
 struct PreprocessDispatch {
     LoadImageFn load_fn;
@@ -425,8 +371,7 @@ struct PreprocessDispatch {
     bool warn_unknown_type{false};
 };
 
-static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preprocessor_type)
-{
+static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preprocessor_type) {
     if (preprocessor_type == "center_crop_chw")
         return {load_crop_resize_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "aspect_preserve_chw")
@@ -442,24 +387,19 @@ static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preproc
     return {load_resize_normalize, preprocess_qwen_merge_group, warn_unknown};
 }
 
-static PreprocessedImage run_preprocess_dispatch(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config,
-    const PreprocessDispatch& dispatch)
-{
+static PreprocessedImage run_preprocess_dispatch(const runtime::adapters::io::DecodedImage& image,
+                                                 const VLPreprocessConfig& config,
+                                                 const PreprocessDispatch& dispatch) {
     LoadedImage loaded = dispatch.load_fn(image, config);
-    if (!loaded.ok)
-    {
+    if (!loaded.ok) {
         return PreprocessedImage{};
     }
     return dispatch.preprocess_fn(loaded, config);
 }
 
-runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_path)
-{
+runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_path) {
     runtime::adapters::io::DecodedImage image;
-    if (image_path.empty())
-    {
+    if (image_path.empty()) {
         return image;
     }
 
@@ -467,10 +407,9 @@ runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_pa
     int height = 0;
     int channels = 0;
     unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
-    if (raw == nullptr)
-    {
-        std::cerr << "[trtmc] Failed to load image: " << image_path
-                  << " (" << stbi_failure_reason() << ")" << std::endl;
+    if (raw == nullptr) {
+        std::cerr << "[trtmc] Failed to load image: " << image_path << " (" << stbi_failure_reason()
+                  << ")" << std::endl;
         return image;
     }
 
@@ -482,39 +421,28 @@ runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_pa
     return image;
 }
 
-PreprocessedImage preprocess_decoded_image(
-    const runtime::adapters::io::DecodedImage& image,
-    const VLPreprocessConfig& config)
-{
+PreprocessedImage preprocess_decoded_image(const runtime::adapters::io::DecodedImage& image,
+                                           const VLPreprocessConfig& config) {
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
-    if (dispatch.warn_unknown_type)
-    {
-        std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \""
-                  << config.preprocessor_type << "\", falling back to qwen_merge_group"
-                  << std::endl;
+    if (dispatch.warn_unknown_type) {
+        std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \"" << config.preprocessor_type
+                  << "\", falling back to qwen_merge_group" << std::endl;
     }
 
     return run_preprocess_dispatch(image, config, dispatch);
 }
 
-PreprocessedImage load_and_preprocess_image(
-    const std::string& image_path,
-    const VLPreprocessConfig& config)
-{
+PreprocessedImage load_and_preprocess_image(const std::string& image_path,
+                                            const VLPreprocessConfig& config) {
     return preprocess_decoded_image(decode_image_rgb(image_path), config);
 }
 
-std::string format_vl_prompt(
-    const std::string& user_prompt,
-    const VLPreprocessConfig& config)
-{
+std::string format_vl_prompt(const std::string& user_prompt, const VLPreprocessConfig& config) {
     // Build image_pads string: repeat image_token_str num_image_pad_tokens times
     std::string image_pads;
-    image_pads.reserve(
-        static_cast<std::size_t>(config.num_image_pad_tokens)
-        * config.image_token_str.size());
-    for (int32_t i = 0; i < config.num_image_pad_tokens; ++i)
-    {
+    image_pads.reserve(static_cast<std::size_t>(config.num_image_pad_tokens) *
+                       config.image_token_str.size());
+    for (int32_t i = 0; i < config.num_image_pad_tokens; ++i) {
         image_pads += config.image_token_str;
     }
 
@@ -523,25 +451,21 @@ std::string format_vl_prompt(
 
     const std::string pads_placeholder = "{image_pads}";
     const std::size_t pads_pos = result.find(pads_placeholder);
-    if (pads_pos != std::string::npos)
-    {
+    if (pads_pos != std::string::npos) {
         result.replace(pads_pos, pads_placeholder.size(), image_pads);
     }
 
     const std::string prompt_placeholder = "{prompt}";
     const std::size_t prompt_pos = result.find(prompt_placeholder);
-    if (prompt_pos != std::string::npos)
-    {
+    if (prompt_pos != std::string::npos) {
         result.replace(prompt_pos, prompt_placeholder.size(), user_prompt);
     }
 
     return result;
 }
 
-static void assign_image_norm_triplet(const std::vector<float>& values, float (&target)[3])
-{
-    if (values.size() < 3)
-    {
+static void assign_image_norm_triplet(const std::vector<float>& values, float (&target)[3]) {
+    if (values.size() < 3) {
         return;
     }
     target[0] = values[0];
@@ -549,27 +473,23 @@ static void assign_image_norm_triplet(const std::vector<float>& values, float (&
     target[2] = values[2];
 }
 
-static void unescape_newline_sequences(std::string& text)
-{
+static void unescape_newline_sequences(std::string& text) {
     std::size_t pos = 0;
-    while ((pos = text.find("\\n", pos)) != std::string::npos)
-    {
+    while ((pos = text.find("\\n", pos)) != std::string::npos) {
         text.replace(pos, 2, "\n");
         ++pos;
     }
 }
 
-static void parse_base_vl_config(
-    const std::string& config_text,
-    VLPreprocessConfig& cfg)
-{
-    cfg.preprocessor_type = extract_json_string(config_text, "preprocessor_type", "qwen_merge_group");
+static void parse_base_vl_config(const std::string& config_text, VLPreprocessConfig& cfg) {
+    cfg.preprocessor_type =
+        extract_json_string(config_text, "preprocessor_type", "qwen_merge_group");
     cfg.image_token_id = extract_json_int(config_text, "image_token_id", -1);
     cfg.fixed_image_size = extract_json_int(config_text, "fixed_image_size", 448);
     cfg.patch_size = extract_json_int(config_text, "patch_size", cfg.patch_size);
     cfg.merge_size = extract_json_int(config_text, "merge_size", cfg.merge_size);
-    cfg.temporal_patch_size = extract_json_int(
-        config_text, "temporal_patch_size", cfg.temporal_patch_size);
+    cfg.temporal_patch_size =
+        extract_json_int(config_text, "temporal_patch_size", cfg.temporal_patch_size);
     cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 256);
     cfg.vision_output_dim = extract_json_int(config_text, "vision_output_dim", 0);
     cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
@@ -577,13 +497,10 @@ static void parse_base_vl_config(
     cfg.interpolation = extract_json_string(config_text, "interpolation", "bicubic");
 }
 
-static void maybe_apply_resample_fallback(
-    const std::string& config_text,
-    const std::string& preprocessor_config_text,
-    VLPreprocessConfig& cfg)
-{
-    if (!extract_json_string(config_text, "interpolation", "").empty())
-    {
+static void maybe_apply_resample_fallback(const std::string& config_text,
+                                          const std::string& preprocessor_config_text,
+                                          VLPreprocessConfig& cfg) {
+    if (!extract_json_string(config_text, "interpolation", "").empty()) {
         return;
     }
 
@@ -596,13 +513,10 @@ static void maybe_apply_resample_fallback(
         cfg.interpolation = "bicubic";
 }
 
-static void apply_preprocessor_config_overrides(
-    const std::string& config_text,
-    const std::string& preprocessor_config_text,
-    VLPreprocessConfig& cfg)
-{
-    if (preprocessor_config_text.empty())
-    {
+static void apply_preprocessor_config_overrides(const std::string& config_text,
+                                                const std::string& preprocessor_config_text,
+                                                VLPreprocessConfig& cfg) {
+    if (preprocessor_config_text.empty()) {
         return;
     }
 
@@ -619,10 +533,8 @@ static void apply_preprocessor_config_overrides(
     maybe_apply_resample_fallback(config_text, preprocessor_config_text, cfg);
 }
 
-static void apply_config_image_norm_overrides(
-    const std::string& config_text,
-    VLPreprocessConfig& cfg)
-{
+static void apply_config_image_norm_overrides(const std::string& config_text,
+                                              VLPreprocessConfig& cfg) {
     auto mean_vals = extract_json_float_array(config_text, "image_mean", 3);
     assign_image_norm_triplet(mean_vals, cfg.image_mean);
 
@@ -630,10 +542,8 @@ static void apply_config_image_norm_overrides(
     assign_image_norm_triplet(std_vals, cfg.image_std);
 }
 
-VLPreprocessConfig parse_vl_preprocess_config(
-    const std::string& config_text,
-    const std::string& preprocessor_config_text)
-{
+VLPreprocessConfig parse_vl_preprocess_config(const std::string& config_text,
+                                              const std::string& preprocessor_config_text) {
     VLPreprocessConfig cfg;
     parse_base_vl_config(config_text, cfg);
     unescape_newline_sequences(cfg.vl_prompt_template);
