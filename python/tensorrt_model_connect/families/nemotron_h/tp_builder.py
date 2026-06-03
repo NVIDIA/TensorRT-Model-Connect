@@ -28,6 +28,10 @@ def _slice_first_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
     return np.ascontiguousarray(np.array_split(arr, tp_size, axis=0)[rank])
 
 
+def _slice_middle_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
+    return np.ascontiguousarray(np.array_split(arr, tp_size, axis=1)[rank])
+
+
 def _take_last_dim_segments(arr: np.ndarray, segments: list[tuple[int, int]]) -> np.ndarray:
     return np.ascontiguousarray(
         np.concatenate([arr[..., start:end] for start, end in segments], axis=-1))
@@ -135,16 +139,34 @@ def _validate_nemotron_h_tp(
         raise ValueError(
             "Nemotron-H tensor parallel requires num_attention_heads divisible by tp_size "
             f"({config.num_attention_heads} vs {tp})")
-    if int(config.num_key_value_heads) % tp != 0:
-        raise ValueError(
-            "Nemotron-H tensor parallel requires num_key_value_heads divisible by tp_size "
-            f"({config.num_key_value_heads} vs {tp})")
+    # When num_key_value_heads is divisible by tp_size, we shard K/V across
+    # ranks; otherwise we replicate K/V (every rank carries the full KV head
+    # bank) -- mirrors the policy used by the Qwen-MoE TP builder. This is
+    # required for highly-GQA models like Nemotron-3-Super (num_kv_heads=2)
+    # running at tp_size=8.
 
     for key in ("_d_inner", "_mamba_num_heads", "_n_groups", "_mlp_size"):
         if int(weights[key]) % tp != 0:
             raise ValueError(
                 f"Nemotron-H tensor parallel requires {key} divisible by tp_size "
                 f"({weights[key]} vs {tp})")
+
+    # MoE checks only apply if the layer stack actually contains MoE-FFN
+    # ("E") layers. We shard the routed-expert intermediate dimension across
+    # ranks (column-shard up, row-shard down -> allreduce), and shard the
+    # shared-expert intermediate too. The latent dimension is replicated.
+    if int(weights.get("_num_moe_layers", 0)) > 0:
+        moe_inter = int(weights.get("_moe_intermediate_size", 0))
+        if moe_inter % tp != 0:
+            raise ValueError(
+                "Nemotron-H tensor parallel requires moe_intermediate_size "
+                f"divisible by tp_size ({moe_inter} vs {tp})")
+        shared_inter = int(weights.get("_shared_expert_intermediate_size", 0))
+        if shared_inter and shared_inter % tp != 0:
+            raise ValueError(
+                "Nemotron-H tensor parallel requires "
+                "moe_shared_expert_intermediate_size divisible by tp_size "
+                f"({shared_inter} vs {tp})")
 
 
 def shard_nemotron_h_weights(
@@ -159,6 +181,7 @@ def shard_nemotron_h_weights(
         return weights
 
     dims = _mamba2_rank_dims(weights, parallel)
+    shard_kv = int(config.num_key_value_heads) % parallel.tp_size == 0
     out = type(weights)()
     for key, value in weights.items():
         if not isinstance(value, np.ndarray):
@@ -174,12 +197,35 @@ def shard_nemotron_h_weights(
             out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
         elif key.endswith(".mamba_out_proj"):
             out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
+        # ---- MoE 'E' layer: per-expert packed banks. Shard the routed
+        # expert intermediate dim (axis -1 on up: [E, latent, inter],
+        # axis 1 on down: [E, inter, latent]). The latent dim stays
+        # replicated, and fc1/fc2 latent projections + router stay
+        # replicated. Must match BEFORE the generic .w_up/.w_down rules.
+        elif key.endswith(".experts.w_up"):
+            out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith(".experts.w_down"):
+            out[key] = _slice_middle_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith(".shared_expert.w_up"):
+            out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith(".shared_expert.w_down"):
+            out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith((".router", ".router_bias",
+                            ".moe_fc1", ".moe_fc2")):
+            # Router scoring and latent projections are replicated.
+            out[key] = value
         elif key.endswith(".w_up"):
             out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
         elif key.endswith(".w_down"):
             out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
-        elif key.endswith((".w_q", ".w_k", ".w_v")):
+        elif key.endswith(".w_q"):
             out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith((".w_k", ".w_v")):
+            if shard_kv:
+                out[key] = _slice_last_dim(
+                    value, parallel.rank, parallel.tp_size)
+            else:
+                out[key] = value
         elif key.endswith(".w_o"):
             out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
         else:
@@ -191,6 +237,14 @@ def shard_nemotron_h_weights(
     out["_n_groups"] = dims["local_groups"]
     out["_attention_size"] = int(weights["_attention_size"]) // parallel.tp_size
     out["_mlp_size"] = int(weights["_mlp_size"]) // parallel.tp_size
+    if int(weights.get("_num_moe_layers", 0)) > 0:
+        out["_moe_intermediate_size"] = (
+            int(weights["_moe_intermediate_size"]) // parallel.tp_size)
+        shared_inter = int(
+            weights.get("_shared_expert_intermediate_size", 0))
+        if shared_inter:
+            out["_shared_expert_intermediate_size"] = (
+                shared_inter // parallel.tp_size)
     out["_tensor_parallel_size"] = parallel.tp_size
     out["_tensor_parallel_rank"] = parallel.rank
     return out
@@ -427,6 +481,198 @@ def _add_mlp_tp_layer(
     return {"hidden": residual.get_output(0)}
 
 
+def _add_packed_latent_experts_tp(
+    network: trt.INetworkDefinition,
+    latent_in: trt.ITensor,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+) -> trt.ITensor:
+    """Run all routed experts on the rank-local sharded intermediate dim.
+
+    Same shape/dataflow as the non-TP variant in plugin.py, except w_up/w_down
+    contain only this rank's slice of the moe_intermediate dim:
+      w_up:   [num_experts, latent, moe_intermediate // tp]
+      w_down: [num_experts, moe_intermediate // tp, latent]
+    The down-proj output is in latent dim and must be summed across ranks
+    (we defer that allreduce until after the routed+shared combine).
+    """
+    num_experts, latent_size, _ = w_up.shape
+
+    inp_3d = network.add_shuffle(latent_in)
+    inp_3d.reshape_dims = (1, 1, latent_size)
+    expert_scale = graph_ops.add_constant(
+        network, (num_experts, 1, 1),
+        np.ones((num_experts, 1, 1), dtype=np.float32))
+    batched = network.add_elementwise(
+        inp_3d.get_output(0), expert_scale, trt.ElementWiseOperation.PROD)
+
+    up_w = graph_ops.add_constant(network, w_up.shape, w_up)
+    down_w = graph_ops.add_constant(network, w_down.shape, w_down)
+
+    up = network.add_matrix_multiply(
+        batched.get_output(0), trt.MatrixOperation.NONE,
+        up_w, trt.MatrixOperation.NONE)
+    relu = network.add_activation(up.get_output(0), trt.ActivationType.RELU)
+    relu2 = network.add_elementwise(
+        relu.get_output(0), relu.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    down = network.add_matrix_multiply(
+        relu2.get_output(0), trt.MatrixOperation.NONE,
+        down_w, trt.MatrixOperation.NONE)
+    return down.get_output(0)
+
+
+def _add_moe_tp_layer(
+    *,
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    eps_tensor: trt.ITensor,
+    weights: "WeightDict",
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    top_k: int,
+    moe_intermediate: int,
+    moe_latent: int,
+    shared_expert_intermediate: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    tp_size: int,
+) -> dict[str, trt.ITensor]:
+    """Tensor-parallel Nemotron-3-Super latent MoE block.
+
+    Sharding policy (mirrors the routed-+-shared-expert flow in plugin.py):
+      - router gate, router_bias, fc1_latent_proj, fc2_latent_proj REPLICATED
+      - per-expert up: column-shard (moe_intermediate axis)
+      - per-expert down: row-shard (contracting moe_intermediate axis); each
+        rank's expert output is a partial sum in latent space
+      - shared expert: column-shard up + row-shard down on the hidden->shared
+        intermediate->hidden path; each rank's shared output is partial in
+        hidden space
+      - The routed latent partial is projected back to hidden by the replicated
+        fc2; both partials are summed locally and then all-reduced once.
+    """
+    normed = graph_ops.add_rms_norm(
+        network, hidden, hidden_size,
+        weights[f"{prefix}.input_norm"], eps_tensor)
+
+    # Replicated latent down-projection (every rank computes full latent).
+    latent_in = graph_ops.add_matmul_rhs_constant(
+        network, normed, hidden_size, moe_latent,
+        weights[f"{prefix}.moe_fc1"])
+
+    # Per-rank sharded expert bank in latent space.
+    expert_outs = _add_packed_latent_experts_tp(
+        network, latent_in,
+        weights[f"{prefix}.experts.w_up"],
+        weights[f"{prefix}.experts.w_down"])
+
+    # Replicated router (same gating decision on every rank).
+    router_logits = graph_ops.add_matmul_rhs_constant(
+        network, normed, hidden_size, num_experts,
+        weights[f"{prefix}.router"])
+    scores_l = network.add_activation(
+        router_logits, trt.ActivationType.SIGMOID)
+    scores = scores_l.get_output(0)
+
+    router_bias = weights.get(f"{prefix}.router_bias")
+    if router_bias is not None:
+        bias_const = graph_ops.add_constant(
+            network, (1, num_experts),
+            router_bias.reshape(1, num_experts))
+        sel_l = network.add_elementwise(
+            scores, bias_const, trt.ElementWiseOperation.SUM)
+        sel_scores = sel_l.get_output(0)
+    else:
+        sel_scores = scores
+
+    topk = network.add_topk(
+        sel_scores, trt.TopKOperation.MAX, top_k, 1 << 1)
+    top_indices = topk.get_output(1)
+
+    idx_1d = network.add_shuffle(top_indices)
+    idx_1d.reshape_dims = (top_k,)
+    gathered = network.add_gather(scores, idx_1d.get_output(0), 1)
+    raw_weights = gathered.get_output(0)
+
+    if norm_topk_prob:
+        sum_w = network.add_reduce(
+            raw_weights, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+        norm_w = network.add_elementwise(
+            raw_weights, sum_w.get_output(0),
+            trt.ElementWiseOperation.DIV)
+        combine_w = norm_w.get_output(0)
+    else:
+        combine_w = raw_weights
+
+    if routed_scaling_factor != 1.0:
+        scale_const = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([routed_scaling_factor], dtype=np.float32))
+        scaled = network.add_elementwise(
+            combine_w, scale_const, trt.ElementWiseOperation.PROD)
+        combine_w = scaled.get_output(0)
+
+    routed_latent = None
+    for k in range(top_k):
+        idx_slice = network.add_slice(
+            top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
+        idx_flat = network.add_shuffle(idx_slice.get_output(0))
+        idx_flat.reshape_dims = (1,)
+
+        w_slice = network.add_slice(
+            combine_w, start=(0, k), shape=(1, 1), stride=(1, 1))
+        w_reshape = network.add_shuffle(w_slice.get_output(0))
+        w_reshape.reshape_dims = (1, 1, 1)
+
+        pick = network.add_gather(expert_outs, idx_flat.get_output(0), 0)
+        scaled_pick = network.add_elementwise(
+            pick.get_output(0), w_reshape.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        flat_pick = network.add_shuffle(scaled_pick.get_output(0))
+        flat_pick.reshape_dims = (1, moe_latent)
+
+        if routed_latent is None:
+            routed_latent = flat_pick.get_output(0)
+        else:
+            sum_l = network.add_elementwise(
+                routed_latent, flat_pick.get_output(0),
+                trt.ElementWiseOperation.SUM)
+            routed_latent = sum_l.get_output(0)
+
+    # Replicated latent->hidden projection. After this the routed_hidden is
+    # still a partial-sum across ranks (because the routed_latent only sums
+    # this rank's slice of moe_intermediate).
+    routed_hidden = graph_ops.add_matmul_rhs_constant(
+        network, routed_latent, moe_latent, hidden_size,
+        weights[f"{prefix}.moe_fc2"])
+
+    shared_w_up = weights.get(f"{prefix}.shared_expert.w_up")
+    if shared_w_up is not None and shared_expert_intermediate > 0:
+        s_up = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden_size, shared_expert_intermediate,
+            shared_w_up)
+        s_relu = network.add_activation(s_up, trt.ActivationType.RELU)
+        s_relu2 = network.add_elementwise(
+            s_relu.get_output(0), s_relu.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        shared_hidden = graph_ops.add_matmul_rhs_constant(
+            network, s_relu2.get_output(0), shared_expert_intermediate,
+            hidden_size,
+            weights[f"{prefix}.shared_expert.w_down"])
+        combined = network.add_elementwise(
+            routed_hidden, shared_hidden, trt.ElementWiseOperation.SUM)
+        mlp_partial = combined.get_output(0)
+    else:
+        mlp_partial = routed_hidden
+
+    # Single all-reduce on the combined hidden partial.
+    mlp_out = add_all_reduce_sum(network, mlp_partial, tp_size)
+    residual = network.add_elementwise(
+        hidden, mlp_out, trt.ElementWiseOperation.SUM)
+    return {"hidden": residual.get_output(0)}
+
+
 def build_nemotron_h_tp_engine(
     config: "ModelConfig",
     weights: "WeightDict",
@@ -459,11 +705,30 @@ def build_nemotron_h_tp_engine(
     n_groups = int(rank_weights["_n_groups"])
     num_mamba = int(rank_weights["_num_mamba_layers"])
     num_attn = int(rank_weights["_num_attention_layers"])
+    num_moe = int(rank_weights.get("_num_moe_layers", 0))
     attention_size = int(rank_weights["_attention_size"])
     mlp_size = int(rank_weights["_mlp_size"])
+    # MoE metadata (only meaningful when num_moe > 0). Note that
+    # _moe_intermediate_size has already been divided by tp_size by the
+    # sharding step, while _moe_latent_size stays full (replicated).
+    num_experts = int(rank_weights.get("_num_experts", 0))
+    num_experts_per_tok = int(rank_weights.get("_num_experts_per_tok", 0))
+    moe_intermediate = int(rank_weights.get("_moe_intermediate_size", 0))
+    moe_latent = int(rank_weights.get("_moe_latent_size", 0))
+    shared_expert_intermediate = int(
+        rank_weights.get("_shared_expert_intermediate_size", 0))
+    routed_scaling_factor = float(
+        rank_weights.get("_routed_scaling_factor", 1.0))
+    norm_topk_prob = bool(rank_weights.get("_norm_topk_prob", True))
 
     num_heads = int(config.num_attention_heads) // parallel.tp_size
-    num_kv_heads = int(config.num_key_value_heads) // parallel.tp_size
+    # K/V sharding policy mirrors qwen_moe: shard when divisible, replicate
+    # otherwise (so highly-GQA models like Nemotron-3-Super with KV=2 still
+    # work at large tp_size).
+    shard_kv = int(config.num_key_value_heads) % parallel.tp_size == 0
+    num_kv_heads = (
+        int(config.num_key_value_heads) // parallel.tp_size
+        if shard_kv else int(config.num_key_value_heads))
     head_dim = int(config.head_dim)
     kv_attention_size = num_kv_heads * head_dim
     attention_window = max_cache_length + 1
@@ -579,6 +844,24 @@ def build_nemotron_h_tp_engine(
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
             attn_counter += 1
+        elif lt == "moe":
+            result = _add_moe_tp_layer(
+                network=network,
+                hidden=hidden_state,
+                eps_tensor=eps_tensor,
+                weights=rank_weights,
+                prefix=prefix,
+                hidden_size=hidden,
+                num_experts=num_experts,
+                top_k=num_experts_per_tok,
+                moe_intermediate=moe_intermediate,
+                moe_latent=moe_latent,
+                shared_expert_intermediate=shared_expert_intermediate,
+                routed_scaling_factor=routed_scaling_factor,
+                norm_topk_prob=norm_topk_prob,
+                tp_size=parallel.tp_size,
+            )
+            hidden_state = result["hidden"]
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
@@ -612,7 +895,9 @@ def build_nemotron_h_tp_engine(
             "[trtmc build] Nemotron-H TP engine "
             f"(rank={parallel.rank}/{parallel.tp_size}, {num_layers}L, "
             f"local_mamba_heads={mamba_num_heads}, local_attn_heads={num_heads}, "
-            f"local_mlp={mlp_size})",
+            f"local_mlp={mlp_size}, num_moe={num_moe}, "
+            f"experts={num_experts}, top_k={num_experts_per_tok}, "
+            f"local_moe_inter={moe_intermediate}, moe_latent={moe_latent})",
             file=sys.stderr,
         )
 
