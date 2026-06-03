@@ -330,3 +330,26 @@ class TestManifestValidation:
         assert [stage.name for stage in case.stages] == ["end_to_end"]
         assert all(stage.required for stage in case.stages)
         assert "Wan-specific" in case.metadata["notes"]
+
+    def test_voxcpm2_manifest_uses_official_reference_and_exact_audio_gate(self):
+        """VoxCPM2 must preserve HF/TRT WAVs and compare exact waveform parity."""
+        manifest_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "e2e",
+            "models",
+            "voxcpm2.json",
+        )
+        case = load_manifest(manifest_path)
+
+        assert case.hf_id == "openbmb/VoxCPM2"
+        assert case.family == "voxcpm2"
+        assert case.reference_backend == "voxcpm"
+        assert case.oracle_level == "L1_external_reference"
+        assert case.reference_family == "tts_voxcpm2"
+        assert case.user_contract == "tts_audio"
+        assert case.inputs["cfg_value"] == 2.0
+        assert case.inputs["inference_timesteps"] == 10
+        assert case.threshold_overrides["exact_waveform_match"] == 1.0
+        assert case.stages[0].artifact_type == "waveform"
+        assert case.stages[0].comparison_mode == "waveform_exact"

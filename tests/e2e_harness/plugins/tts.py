@@ -1,4 +1,4 @@
-"""Contract test plugin for TTS models (Bark, Magpie).
+"""Contract test plugin for TTS models (Bark, Magpie, VoxCPM2).
 
 Verifies TTS output via:
 1. Audio health checks (WAV exists, non-silence, duration)
@@ -143,7 +143,7 @@ def _run_asr_roundtrip(
 class TTSPlugin:
     """Contract plugin for TTS: audio health + ASR round-trip verification."""
 
-    reference_families = ["tts_bark", "tts_magpie"]
+    reference_families = ["tts_bark", "tts_magpie", "tts_voxcpm2"]
     user_contract = "tts_audio"
 
     def configure_reference(self, case: E2ECase) -> dict:

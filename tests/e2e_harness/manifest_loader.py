@@ -70,6 +70,7 @@ _DEFAULT_ORACLE_LEVEL: dict[str, str] = {
     "hf_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torchtrt_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "nemo": OracleLevel.L1_EXTERNAL_REFERENCE.value,
+    "voxcpm": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torch_reference": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "custom_python": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "golden_snapshot": OracleLevel.L3_SNAPSHOT_REGRESSION.value,

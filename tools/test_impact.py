@@ -195,6 +195,7 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     ],
     "hf_diffusers": ["diffusion_media_generation"],
     "torch_reference": ["speech_to_speech", "omni_multimodal", "neural_operator"],
+    "voxcpm": ["text_to_audio"],
 }
 
 # E2E threshold profile filename (stem) -> task_strategies
