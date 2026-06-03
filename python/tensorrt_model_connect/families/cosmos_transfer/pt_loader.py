@@ -141,7 +141,6 @@ def load_pt_state_dict(
         Flat dict mapping weight name to a NumPy array. Empty dict if the
         file is missing.
     """
-    import numpy as np
     import torch
 
     p = Path(path)

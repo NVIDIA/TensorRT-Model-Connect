@@ -117,8 +117,8 @@ def load_t5_weights_from_pt(
         # Relative attention bias is only on layer 0 in T5-v1_1.
         if i == 0:
             bias_key = (
-                f"encoder.block.0.layer.0.SelfAttention."
-                f"relative_attention_bias.weight"
+                "encoder.block.0.layer.0.SelfAttention."
+                "relative_attention_bias.weight"
             )
             if bias_key in raw:
                 w[bias_key] = raw[bias_key].astype(np.float32)

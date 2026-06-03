@@ -119,7 +119,7 @@ def build_cosmos_controlnet_engine(
     # call into TensorRT, and gives a clear error if the .pt file is the
     # wrong modality / a different release.
     # ------------------------------------------------------------------
-    head_dim = dim // num_heads
+    dim // num_heads
     if dim % num_heads != 0:
         raise ValueError(
             f"dim={dim} not divisible by num_heads={num_heads}; "
