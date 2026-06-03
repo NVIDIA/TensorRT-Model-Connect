@@ -107,6 +107,7 @@ class TestFindPlugin:
             "olmo", "xglm", "gpt_neox", "gpt_neo", "codegen",
             "bloom", "mamba", "mixtral",
             "qwen2_vl", "qwen2_5_vl",
+            "voxcpm2",
         ]
         for model_type in known_types:
             plugin = find_plugin(model_type)

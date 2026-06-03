@@ -157,6 +157,24 @@ class ModelConfig:
                         merged["vision_config"] = thinker_cfg["vision_config"]
                     d = merged
 
+        # VoxCPM2 and similar model cards keep their autoregressive language
+        # backbone under "lm_config" while the top-level architecture names the
+        # full multimodal/audio model.
+        if not d.get("hidden_size"):
+            lm_config = d.get("lm_config")
+            if isinstance(lm_config, dict):
+                top_model_type = d.get("model_type")
+                top_architecture = d.get("architecture")
+                top_architectures = d.get("architectures")
+                merged = {**d, **lm_config}
+                if top_model_type:
+                    merged["model_type"] = top_model_type
+                if top_architecture:
+                    merged["architecture"] = top_architecture
+                if top_architectures:
+                    merged["architectures"] = top_architectures
+                d = merged
+
         # Handle non-standard config key names:
         #   GPT-2: n_embd, n_head, n_layer, n_inner
         #   XGLM/Bloom: d_model, attention_heads, num_layers, ffn_dim

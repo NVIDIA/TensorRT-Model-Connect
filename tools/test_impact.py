@@ -39,6 +39,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "text_to_audio": "text_to_audio",
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
+    "text_to_audio_voxcpm2": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
@@ -214,7 +215,8 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
     "audio_helpers": [
         "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
-        "text_to_audio_magpie", "speech_to_speech", "omni_multimodal",
+        "text_to_audio_magpie", "text_to_audio_voxcpm2", "speech_to_speech",
+        "omni_multimodal",
     ],
 }
 

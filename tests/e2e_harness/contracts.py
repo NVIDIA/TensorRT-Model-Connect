@@ -953,6 +953,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "text_to_audio": "text_to_audio",              # legacy alias
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
+    "text_to_audio_voxcpm2": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",

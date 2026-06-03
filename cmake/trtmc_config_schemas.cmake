@@ -14,6 +14,7 @@ set(TRTMC_CONFIG_SCHEMAS
   "runtime.cpp|register_runtime_schema"
   "audio_bark.cpp|register_audio_bark_schema"
   "audio_magpie.cpp|register_audio_magpie_schema"
+  "audio_voxcpm2.cpp|register_audio_voxcpm2_schema"
   "platform.cpp|register_platform_schema"
 )
 

@@ -1,0 +1,36 @@
+{
+  "name": "voxcpm2",
+  "trace_id": "IT-E2E-VOXCPM2-01",
+  "hf_id": "openbmb/VoxCPM2",
+  "bundle": "voxcpm2.trtfb",
+  "family": "voxcpm2",
+  "runtime_strategy": "text_to_audio_voxcpm2",
+  "test_type": "audio",
+  "max_cache_length": 8192,
+  "prompt": "VoxCPM2 brings multilingual text to speech into TensorRT Model Connect.",
+  "max_new_tokens": 0,
+  "trust_remote_code": false,
+  "runtime_config": {
+    "audio_voxcpm2": {
+      "cfg_value": 2.0,
+      "inference_timesteps": 10,
+      "normalize": true,
+      "denoise": true,
+      "retry_badcase": true,
+      "retry_badcase_max_times": 3,
+      "retry_badcase_ratio_threshold": 6.0
+    }
+  },
+  "preflight_requirements": [
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "voxcpm",
+        "phase": "reference",
+        "timeout_s": 60
+      },
+      "gating": true
+    }
+  ],
+  "skip": "VoxCPM2 detection, config metadata, runtime strategy routing, and runtime config schema are registered, but TensorRT builders/runtime for the upstream tokenizer-free LocEnc -> TSLM -> RALM -> LocDiT -> AudioVAE V2 stack are not implemented yet. The model currently requires the external voxcpm library path."
+}

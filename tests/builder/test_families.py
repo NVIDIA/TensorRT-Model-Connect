@@ -391,6 +391,9 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # VoxCPM2 (tokenizer-free diffusion autoregressive TTS)
+    ("voxcpm2", "voxcpm2"),
+    ("vox_cpm2", "voxcpm2"),
     # Qwen3.5 (hybrid DeltaNet + Attention)
     ("qwen3_5", "qwen3_5"),
     ("qwen3.5", "qwen3_5"),
