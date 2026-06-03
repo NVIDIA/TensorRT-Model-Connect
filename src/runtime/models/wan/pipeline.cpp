@@ -581,15 +581,23 @@ bool WanPipeline::run_denoiser(const std::vector<float>& hidden, const std::vect
     const int32_t num_patches =
         static_cast<int32_t>(hidden.size() / static_cast<std::size_t>(dit_dim));
 
+    // ``temb_lead`` matches the AdaLN modulation leading dimension baked into
+    // the DiT engine: 1 for Wan 2.1 (scalar timestep broadcast across
+    // patches) and num_patches for Wan 2.2 (per-patch timestep embedding).
+    const int64_t temb_lead =
+        config_.expand_timesteps ? static_cast<int64_t>(num_patches) : 1;
+
     TensorMap inputs;
     inputs["hidden_states"] =
         Tensor{const_cast<float*>(hidden.data()),
                {static_cast<int64_t>(num_patches), static_cast<int64_t>(dit_dim)},
                DType::kFloat32};
     inputs["timestep_embedding"] = Tensor{
-        const_cast<float*>(temb_6d.data()), {6, static_cast<int64_t>(dit_dim)}, DType::kFloat32};
+        const_cast<float*>(temb_6d.data()),
+        {temb_lead, static_cast<int64_t>(6 * dit_dim)}, DType::kFloat32};
     inputs["time_embed"] = Tensor{
-        const_cast<float*>(time_embed.data()), {static_cast<int64_t>(dit_dim)}, DType::kFloat32};
+        const_cast<float*>(time_embed.data()),
+        {temb_lead, static_cast<int64_t>(dit_dim)}, DType::kFloat32};
     inputs["encoder_hidden_states"] =
         Tensor{const_cast<float*>(encoder_hidden.data()),
                {static_cast<int64_t>(encoder_hidden.size() / static_cast<std::size_t>(dit_dim)),
@@ -648,16 +656,47 @@ void WanPipeline::compute_timestep_embedding(float timestep, std::vector<float>&
                     weights_.time_emb_0_bias.data(), hidden_1.data(), 1, freq_dim, dim);
     cpu_silu_inplace(hidden_1.data(), static_cast<std::size_t>(dim));
 
-    time_embed.resize(static_cast<std::size_t>(dim));
+    // Compute the single-row time embed and 6d projection first, then expand
+    // (tile) the rows ``num_patches`` times when the DiT was trained with
+    // ``expand_timesteps=True``. For pure T2V the per-patch timestep is the
+    // same scalar across every spatial-temporal patch, so tiling matches the
+    // diffusers reference exactly without re-running the MLPs per patch.
+    std::vector<float> time_embed_row(static_cast<std::size_t>(dim));
     cpu_matmul_bias(hidden_1.data(), weights_.time_emb_2_weight.data(),
-                    weights_.time_emb_2_bias.data(), time_embed.data(), 1, dim, dim);
+                    weights_.time_emb_2_bias.data(), time_embed_row.data(), 1, dim, dim);
 
-    std::vector<float> silu_te(time_embed.begin(), time_embed.end());
+    std::vector<float> silu_te(time_embed_row.begin(), time_embed_row.end());
     cpu_silu_inplace(silu_te.data(), static_cast<std::size_t>(dim));
 
-    temb_6d.resize(static_cast<std::size_t>(6 * dim));
+    std::vector<float> temb_6d_row(static_cast<std::size_t>(6 * dim));
     cpu_matmul_bias(silu_te.data(), weights_.time_proj_weight.data(),
-                    weights_.time_proj_bias.data(), temb_6d.data(), 1, dim, 6 * dim);
+                    weights_.time_proj_bias.data(), temb_6d_row.data(), 1, dim, 6 * dim);
+
+    int32_t rows = 1;
+    if (config_.expand_timesteps) {
+        const int32_t t_lat =
+            (config_.video_num_frames - 1) / std::max(config_.scale_factor_temporal, 1) + 1;
+        const int32_t h_lat = config_.video_height / std::max(config_.scale_factor_spatial, 1);
+        const int32_t w_lat = config_.video_width / std::max(config_.scale_factor_spatial, 1);
+        int32_t pt = 1, ph = 2, pw = 2;
+        if (config_.patch_size.size() >= 3) {
+            pt = config_.patch_size[0];
+            ph = config_.patch_size[1];
+            pw = config_.patch_size[2];
+        }
+        rows = (t_lat / std::max(pt, 1)) * (h_lat / std::max(ph, 1)) * (w_lat / std::max(pw, 1));
+        rows = std::max(rows, 1);
+    }
+
+    time_embed.resize(static_cast<std::size_t>(rows) * static_cast<std::size_t>(dim));
+    temb_6d.resize(static_cast<std::size_t>(rows) * static_cast<std::size_t>(6 * dim));
+    for (int32_t r = 0; r < rows; ++r) {
+        std::copy_n(time_embed_row.data(), dim,
+                    time_embed.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(dim));
+        std::copy_n(temb_6d_row.data(), 6 * dim,
+                    temb_6d.data() +
+                        static_cast<std::size_t>(r) * static_cast<std::size_t>(6 * dim));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ DiffusionConfig make_diffusion_config(const std::string& json) {
     dc.guidance_embeds = extract_json_int(json, "guidance_embeds", 0) != 0;
     dc.use_rope = extract_json_int(json, "use_rope", 1) != 0;
     dc.vae_scaling_factor = extract_json_float(json, "vae_scaling_factor", 0.0F);
+    dc.expand_timesteps = extract_json_int(json, "expand_timesteps", 0) != 0;
     dc.diffusion_backend_type = extract_json_string(json, "diffusion_backend_type", "wan_3d");
     return dc;
 }

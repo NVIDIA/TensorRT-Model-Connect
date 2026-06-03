@@ -52,6 +52,7 @@ def build_standard_dit_engine(
     use_rope: bool = True,
     eps: float = 1e-6,
     verbose: bool = False,
+    expand_timesteps: bool = False,
 ) -> bytes:
     """Build DiT denoiser TRT engine plan.
 
@@ -89,11 +90,23 @@ def build_standard_dit_engine(
             fixed position embeddings, e.g. PixArt).
         eps: LayerNorm epsilon.
         verbose: Enable TRT builder verbose logging.
+        expand_timesteps: When True, the engine consumes per-patch timestep
+            embeddings — ``timestep_embedding`` has shape ``(num_patches,
+            6 * dim)`` and ``time_embed`` has shape ``(num_patches, dim)``.
+            Matches diffusers ``WanTransformer3DModel`` with
+            ``expand_timesteps=True`` (Wan 2.2). When False (default), the
+            timestep is broadcast as a scalar across all patches (Wan 2.1
+            behaviour).
 
     Returns:
         Serialized TRT engine plan bytes.
     """
     head_dim = dim // num_heads
+    # Per-patch leading dimension for the AdaLN modulation tensors when
+    # the model was trained with ``expand_timesteps=True``. Each row of the
+    # input then carries an independent timestep embedding instead of a
+    # single value broadcast over the patch axis.
+    temb_lead = num_patches if expand_timesteps else 1
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -105,12 +118,15 @@ def build_standard_dit_engine(
     # Inputs
     hidden_inp = network.add_input(
         "hidden_states", trt.float32, (num_patches, dim))
-    # Block modulation temb from external embedder: [1, 6 * dim]
+    # Block modulation temb from external embedder.
+    # Wan 2.1: [1, 6*dim] (broadcast across patches).
+    # Wan 2.2 (expand_timesteps=True): [num_patches, 6*dim] (per-patch).
     temb_inp = network.add_input(
-        "timestep_embedding", trt.float32, (1, 6 * dim))
-    # Time embed for final output modulation: [1, dim]
+        "timestep_embedding", trt.float32, (temb_lead, 6 * dim))
+    # Time embed for the final output AdaLN modulation.
+    # Wan 2.1: [1, dim] (broadcast). Wan 2.2: [num_patches, dim].
     time_embed_inp = network.add_input(
-        "time_embed", trt.float32, (1, dim))
+        "time_embed", trt.float32, (temb_lead, dim))
     encoder_hidden = network.add_input(
         "encoder_hidden_states", trt.float32, (text_seq_len, context_dim))
 
@@ -150,13 +166,15 @@ def build_standard_dit_engine(
         modulation = network.add_elementwise(
             sst_const, temb_inp, trt.ElementWiseOperation.SUM)
 
-        # Chunk into 6 parts: shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff
+        # Chunk into 6 parts: shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff.
+        # Each chunk has shape (temb_lead, dim) — broadcast over patches when
+        # expand_timesteps=False, per-patch when True.
         chunks = []
         for i in range(6):
             s = network.add_slice(
                 modulation.get_output(0),
                 start=(0, i * dim),
-                shape=(1, dim),
+                shape=(temb_lead, dim),
                 stride=(1, 1),
             )
             chunks.append(s.get_output(0))
@@ -356,16 +374,19 @@ def build_standard_dit_engine(
 
     # --- Final output: AdaLN modulation + projection ---
     # HF: shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
-    # scale_shift_table: [1, 2, dim], time_embed: [1, dim] -> unsqueeze -> [1, 1, dim]
-    # Result after add: [1, 2, dim], chunk -> shift [1, 1, dim], scale [1, 1, dim]
-    final_sst = weights["scale_shift_table"]  # [1, 2, dim]
+    # scale_shift_table: [1, 2, dim], time_embed: [B, dim] -> unsqueeze -> [B, 1, dim]
+    # Result after add: [B, 2, dim], chunk -> shift [B, 1, dim], scale [B, 1, dim].
+    # With expand_timesteps=True we use B = num_patches so each patch carries
+    # its own (shift, scale); otherwise B = 1 and the modulation broadcasts.
+    final_sst = weights["scale_shift_table"]  # [1, 2, dim] in the checkpoint
     final_sst_const = graph_ops.add_constant(
         network, (1, 2 * dim), final_sst.reshape(1, 2 * dim))
 
-    # time_embed_inp: [1, dim] -> tile to [1, 2*dim] for broadcast add
+    # time_embed_inp: [temb_lead, dim] -> tile across the modulation axis to
+    # produce [temb_lead, 2*dim] so we can add the (shift, scale) constant.
     time_embed_tiled = network.add_concatenation(
         [time_embed_inp, time_embed_inp])
-    time_embed_tiled.axis = 1  # [1, 2*dim]
+    time_embed_tiled.axis = 1  # [temb_lead, 2*dim]
 
     final_modulation = network.add_elementwise(
         final_sst_const, time_embed_tiled.get_output(0),
@@ -373,10 +394,10 @@ def build_standard_dit_engine(
 
     final_shift = network.add_slice(
         final_modulation.get_output(0),
-        start=(0, 0), shape=(1, dim), stride=(1, 1))
+        start=(0, 0), shape=(temb_lead, dim), stride=(1, 1))
     final_scale = network.add_slice(
         final_modulation.get_output(0),
-        start=(0, dim), shape=(1, dim), stride=(1, 1))
+        start=(0, dim), shape=(temb_lead, dim), stride=(1, 1))
 
     # Final LayerNorm + AdaLN modulation
     hidden = graph_ops.add_adaptive_layernorm(
@@ -400,7 +421,8 @@ def build_standard_dit_engine(
 
     # --- Build ---
     print(f"[dit-builder] Building TRT engine "
-          f"(dim={dim}, layers={num_layers}, patches={num_patches}) ...",
+          f"(dim={dim}, layers={num_layers}, patches={num_patches}, "
+          f"expand_timesteps={expand_timesteps}) ...",
           file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
