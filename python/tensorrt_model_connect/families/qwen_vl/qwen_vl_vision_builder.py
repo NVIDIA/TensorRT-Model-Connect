@@ -988,7 +988,6 @@ def _compute_qwen2_vl_rope_tables(
         sin_table: [num_patches, embed_dim] float32
     """
     head_dim = embed_dim // num_heads
-    num_patches = grid_h * grid_w
 
     # Qwen2VisionRotaryEmbedding: dim = head_dim // 2; inv_freq covers half of dim.
     rope_dim = head_dim // 2
