@@ -7,7 +7,7 @@ Model support is defined by two source-of-truth surfaces:
 - Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
 
-The current checkout contains 68 Python family plugins and 122 E2E model manifests.
+The current checkout contains 75 Python family plugins and 196 E2E model manifests.
 
 ## Support Levels
 
@@ -22,6 +22,10 @@ Use these terms when reading the tables:
 | Not supported by listing alone | A HuggingFace model name that resembles a family is not automatically supported. The family plugin and runtime strategy must match the model's config and request-time behavior. |
 
 The E2E manifests are the most concrete proof because they name the model ID, runtime strategy, prompt/input shape, verifier, and tolerances.
+
+## Detection-Only Families
+
+`voxcpm2` matches upstream `openbmb/VoxCPM2` configs with `architecture: "voxcpm2"` and records text-to-audio metadata such as 48 kHz output and 16 kHz reference-audio input. It is not first-class E2E support yet: raw TensorRT builds raise an explicit blocker until a dedicated `text_to_audio_voxcpm2` runtime implements the model's LocEnc -> TSLM -> RALM -> LocDiT path and AudioVAE V2 decode.
 
 ## Supported task families
 
@@ -42,15 +46,16 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 The current Python plugin inventory is:
 
 ```text
-albert, bark, bart, bert, bloom, canary, codegen, convbert, deberta,
-deepseek_ocr, deepseek_v2, distilbert, dpr, eagle_vlm, electra, falcon,
-flux, fnet, gemma, glm, gpt2, gpt_neo, gpt_neox, gpt_oss, granite,
-internlm, internvl, llama, m2m_100, magpie_tts, mamba, marian, mistral,
-mixtral, modernbert, mpnet, nemotron, nemotron_h, nemotron_speech_streaming,
-olmo, olmo2, opt, personaplex, phi, phi4_multimodal, phi_moe, pixart,
-qwen, qwen3_5, qwen3_omni, qwen_moe, qwen_vl, roberta, rwkv, sam,
-segformer, stablelm, starcoder2, t5, wan_t2v, whisper, xglm, xlnet,
-z_image
+albert, bark, bart, bert, bloom, canary, chronos_bolt, codegen, convbert,
+deberta, deepseek_ocr, deepseek_v2, distilbert, dpr, eagle_vlm, electra,
+elf_flow, falcon, flux, fnet, gemma, glm, gpt2, gpt_neo, gpt_neox, gpt_oss,
+granite, internlm, internvl, lance, llama, ltx_video, m2m_100, magpie_tts,
+mamba, marian, mistral, mixtral, modernbert, mpnet, nemotron, nemotron_h,
+nemotron_labs_diffusion, nemotron_speech_streaming, olmo, olmo2, opt,
+patchtsmixer, patchtst, personaplex, phi, phi4_multimodal, phi_moe, pixart,
+qwen, qwen3_5, qwen3_omni, qwen_image, qwen_moe, qwen_vl, roberta, rwkv,
+sam, segformer, stablelm, starcoder2, t5, timesfm, timm_vit, voxcpm2,
+wan_t2v, whisper, xglm, xlnet, z_image
 ```
 
 ## How support is resolved

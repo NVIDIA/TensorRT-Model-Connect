@@ -119,10 +119,13 @@ class ModelConfig:
                 d = merged
 
         # Eagle VLM / Nemotron VL models nest LLM config under "llm_config".
+        # VoxCPM2 uses the shorter "lm_config" key for its TSLM dimensions.
         # Merge into top level like text_config, preserving top-level
         # model_type, architectures, and vision_config.
         if not d.get("hidden_size"):
             llm_config = d.get("llm_config")
+            if not isinstance(llm_config, dict):
+                llm_config = d.get("lm_config")
             if isinstance(llm_config, dict):
                 top_model_type = d.get("model_type")
                 top_architectures = d.get("architectures")

@@ -208,6 +208,7 @@ class TestPluginDiscovery:
         """
         _EXEMPT_PLUGINS = {
             "qwen3_omni",  # omni_multimodal strategy not yet wired in E2E harness
+            "voxcpm2",  # detection-only until a LocEnc/TSLM/RALM/LocDiT runtime lands
         }
 
         models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
@@ -391,6 +392,10 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # VoxCPM2 (tokenizer-free diffusion autoregressive TTS; detection-only)
+    ("voxcpm2", "voxcpm2"),
+    ("vox_cpm2", "voxcpm2"),
+    ("vox-cpm2", "voxcpm2"),
     # Qwen3.5 (hybrid DeltaNet + Attention)
     ("qwen3_5", "qwen3_5"),
     ("qwen3.5", "qwen3_5"),
