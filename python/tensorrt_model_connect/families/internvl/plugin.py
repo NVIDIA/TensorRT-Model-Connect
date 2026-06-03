@@ -84,7 +84,7 @@ class InternVLPlugin:
                 parallel_config=parallel)
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, verbose=verbose,
+            config, weights, max_cache_length, precision=precision, verbose=verbose,
             quant_ctx=quant_ctx, embed_input=True,
             debug_layer_outputs=debug_layer_outputs)
 

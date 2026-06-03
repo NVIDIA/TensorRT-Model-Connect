@@ -129,7 +129,7 @@ def build_qwen_vl_tp_decoder_engine(
     input_embed_tensor = None
     use_input_embed_tensor = None
     if embed_input:
-        input_embed_tensor = network.add_input("input_embed", work_trt_dtype, (1, hidden))
+        input_embed_tensor = network.add_input("input_embed", trt.float32, (1, hidden))
         use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (1,))
 
     deepstack_embed_inputs: list[trt.ITensor] = []
@@ -137,7 +137,7 @@ def build_qwen_vl_tp_decoder_engine(
     if deepstack_num_levels > 0:
         for level in range(deepstack_num_levels):
             deepstack_embed_inputs.append(network.add_input(
-                f"deepstack_embed_{level}", work_trt_dtype, (1, hidden)))
+                f"deepstack_embed_{level}", trt.float32, (1, hidden)))
         deepstack_active_tensor = network.add_input(
             "deepstack_active", trt.float32, (1,))
 
@@ -191,6 +191,7 @@ def build_qwen_vl_tp_decoder_engine(
 
     token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
+        token_embed_for_math = _cast_work_dtype(token_embed)
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (1, 1)
         flag_for_math = flag_broadcast.get_output(0)
@@ -199,12 +200,17 @@ def build_qwen_vl_tp_decoder_engine(
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
             dtype=work_np_dtype)
+        one_const = _cast_work_dtype(one_const)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math, trt.ElementWiseOperation.SUB).get_output(0)
         tok_part = network.add_elementwise(
-            inv_flag, token_embed, trt.ElementWiseOperation.PROD).get_output(0)
+            inv_flag, token_embed_for_math, trt.ElementWiseOperation.PROD).get_output(0)
+        input_embed_for_math = input_embed_tensor
+        if input_embed_for_math.dtype != work_trt_dtype:
+            input_embed_for_math = network.add_cast(
+                input_embed_for_math, work_trt_dtype).get_output(0)
         embed_part = network.add_elementwise(
-            flag_for_math, input_embed_tensor, trt.ElementWiseOperation.PROD).get_output(0)
+            flag_for_math, input_embed_for_math, trt.ElementWiseOperation.PROD).get_output(0)
         hidden_state = network.add_elementwise(
             tok_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
     else:
@@ -382,10 +388,14 @@ def _add_tp_decoder_layer(
             ds_active_broadcast = network.add_shuffle(deepstack_active)
             ds_active_broadcast.reshape_dims = (1, 1)
             active = ds_active_broadcast.get_output(0)
-            if active.dtype != deepstack_embed.dtype:
-                active = network.add_cast(active, deepstack_embed.dtype).get_output(0)
+            deepstack_for_math = deepstack_embed
+            if deepstack_for_math.dtype != residual1.dtype:
+                deepstack_for_math = network.add_cast(
+                    deepstack_for_math, residual1.dtype).get_output(0)
+            if active.dtype != deepstack_for_math.dtype:
+                active = network.add_cast(active, deepstack_for_math.dtype).get_output(0)
             ds_scaled = network.add_elementwise(
-                deepstack_embed, active, trt.ElementWiseOperation.PROD).get_output(0)
+                deepstack_for_math, active, trt.ElementWiseOperation.PROD).get_output(0)
             residual1 = network.add_elementwise(
                 residual1, ds_scaled, trt.ElementWiseOperation.SUM).get_output(0)
         norm2 = _apply_norm(

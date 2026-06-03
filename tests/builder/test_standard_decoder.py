@@ -171,6 +171,34 @@ class TestTensorNamingContract:
         assert "token_id" in inputs
         assert "logits" in outputs
 
+    def test_bf16_embed_input_keeps_external_features_fp32(self):
+        """VL image features stay fp32 while reduced-precision cache uses bf16."""
+        import tensorrt as trt
+        from tensorrt_model_connect.builders.default_decoder import build_standard_decoder_engine
+        from tensorrt_model_connect.config import ModelConfig
+
+        hidden, vocab, num_layers = 16, 32, 2
+        num_heads = 4
+        max_cache = 4
+        config = ModelConfig(
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=10000.0,
+        )
+        weights = _make_weights(hidden, vocab, num_layers, hidden, 32)
+
+        plan = build_standard_decoder_engine(
+            config, weights, max_cache, embed_input=True, precision="bf16")
+        engine = _deserialize_engine(plan)
+
+        assert engine.get_tensor_dtype("input_embed") == trt.float32
+        assert engine.get_tensor_dtype("use_input_embed") == trt.float32
+        assert engine.get_tensor_dtype("cache_k_0") == trt.bfloat16
+
     def test_debug_layer_outputs(self):
         """With debug_layer_outputs=True, per-layer debug outputs appear."""
         plan = self._build_engine(debug_layer_outputs=True)

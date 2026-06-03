@@ -66,3 +66,30 @@ def test_qwen_vl_plugin_routes_parallel_builds(
     assert kwargs["embed_input"] is True
     assert kwargs["deepstack_num_levels"] == deepstack_num_levels
     assert kwargs["verbose"] is True
+
+
+def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"qwen-vl-plan"
+
+    monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
+
+    result = module.QwenVLPlugin().build_engine(
+        _config(qwen3=False),
+        {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
+        31,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert result == b"qwen-vl-plan"
+    _, _, max_cache_length, kwargs = calls["build"]
+    assert max_cache_length == 31
+    assert kwargs["precision"] == "bf16"
+    assert kwargs["embed_input"] is True
+    assert kwargs["verbose"] is True

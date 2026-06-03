@@ -102,3 +102,39 @@ def test_internvl_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
             parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4, rank=0),
             debug_layer_outputs=True,
         )
+
+
+def test_internvl_non_parallel_build_forwards_precision(monkeypatch) -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.internvl.plugin")
+    calls = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = {
+            "config": config,
+            "weights": weights,
+            "max_cache_length": max_cache_length,
+            "kwargs": kwargs,
+        }
+        return b"internvl-plan"
+
+    monkeypatch.setattr(plugin_module, "build_standard_decoder_engine", fake_build)
+
+    config = object()
+    weights = WeightDict()
+    result = plugin_module.plugin.build_engine(
+        config,
+        weights,
+        max_cache_length=512,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert result == b"internvl-plan"
+    assert calls["build"]["config"] is config
+    assert calls["build"]["weights"] is weights
+    assert calls["build"]["max_cache_length"] == 512
+    kwargs = calls["build"]["kwargs"]
+    assert kwargs["precision"] == "bf16"
+    assert kwargs["embed_input"] is True
+    assert kwargs["verbose"] is True

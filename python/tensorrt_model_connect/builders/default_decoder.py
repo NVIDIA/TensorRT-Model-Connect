@@ -210,7 +210,7 @@ def build_standard_decoder_engine(
     use_input_embed_tensor = None
     if embed_input:
         input_embed_tensor = network.add_input(
-            "input_embed", work_trt_dtype, (1, hidden))
+            "input_embed", trt.float32, (1, hidden))
         use_input_embed_tensor = network.add_input(
             "use_input_embed", trt.float32, (1,))
 
@@ -333,6 +333,7 @@ def build_standard_decoder_engine(
     token_embed = gather.get_output(0)
 
     if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
+        token_embed_for_math = _cast_work_dtype(token_embed)
         # Conditional embedding: (1 - flag) * token_embed + flag * input_embed
         # use_input_embed is [1] scalar (FP32), broadcast to [1, hidden]
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
@@ -344,16 +345,21 @@ def build_standard_decoder_engine(
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
             dtype=work_np_dtype)
+        one_const = _cast_work_dtype(one_const)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math,
             trt.ElementWiseOperation.SUB)
         # (1 - flag) * token_embed
         tok_part = network.add_elementwise(
-            inv_flag.get_output(0), token_embed,
+            inv_flag.get_output(0), token_embed_for_math,
             trt.ElementWiseOperation.PROD)
+        input_embed_for_math = input_embed_tensor
+        if input_embed_for_math.dtype != work_trt_dtype:
+            input_embed_for_math = network.add_cast(
+                input_embed_for_math, work_trt_dtype).get_output(0)
         # flag * input_embed
         embed_part = network.add_elementwise(
-            flag_for_math, input_embed_tensor,
+            flag_for_math, input_embed_for_math,
             trt.ElementWiseOperation.PROD)
         # sum
         hidden_state_sum = network.add_elementwise(
