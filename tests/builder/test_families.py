@@ -421,6 +421,10 @@ _POSITIVE_MATCH_CASES = [
     # M2M-100 / NLLB (encoder-decoder seq2seq)
     ("m2m_100", "m2m_100"),
     ("nllb", "m2m_100"),
+    # LTX-2 (Lightricks image-to-video with audio)
+    ("ltx_2", "ltx_2"),
+    ("ltx-2", "ltx_2"),
+    ("ltx2", "ltx_2"),
 ]
 
 
