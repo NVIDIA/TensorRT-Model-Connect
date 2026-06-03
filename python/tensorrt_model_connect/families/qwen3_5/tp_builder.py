@@ -122,8 +122,6 @@ def _slice_deltanet_in_proj_qkv(
     weight: np.ndarray, dims: dict[str, int],
 ) -> np.ndarray:
     """Shard the [hidden, conv_dim] in_proj_qkv into [hidden, local_conv_dim]."""
-    qk_dim = dims["qk_dim"]
-    d_inner = dims["d_inner"]
     q_offset = dims["q_offset"]
     k_offset = dims["k_offset"]
     v_offset = dims["v_offset"]
@@ -145,8 +143,6 @@ def _slice_conv1d_along_first(
 
     Matches the in_proj_qkv segmentation in the global conv_dim axis (axis 0).
     """
-    qk_dim = dims["qk_dim"]
-    d_inner = dims["d_inner"]
     q_offset = dims["q_offset"]
     k_offset = dims["k_offset"]
     v_offset = dims["v_offset"]
