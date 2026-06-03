@@ -110,6 +110,7 @@ class ReferenceFamily(enum.Enum):
     ASR_CANARY = "asr_canary"
     TTS_BARK = "tts_bark"
     TTS_MAGPIE = "tts_magpie"
+    TTS_VOXCPM2 = "tts_voxcpm2"
     S2S_PERSONAPLEX = "s2s_personaplex"
 
     # --- Segmentation ---
@@ -820,34 +821,36 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "bark-large": ReferenceFamily.TTS_BARK.value,
     # 5.21 TTS_MAGPIE
     "magpie-tts-357m": ReferenceFamily.TTS_MAGPIE.value,
-    # 5.22 S2S_PERSONAPLEX
+    # 5.22 TTS_VOXCPM2
+    "voxcpm2": ReferenceFamily.TTS_VOXCPM2.value,
+    # 5.23 S2S_PERSONAPLEX
     "personaplex-7b": ReferenceFamily.S2S_PERSONAPLEX.value,
-    # 5.23 SEGMENTATION_SEGFORMER
+    # 5.24 SEGMENTATION_SEGFORMER
     "segformer-b0-ade": ReferenceFamily.SEGMENTATION_SEGFORMER.value,
-    # 5.24 PROMPTED_SEGMENTATION_SAM
+    # 5.25 PROMPTED_SEGMENTATION_SAM
     "sam-vit-base": ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value,
-    # 5.24a IMAGE_CLASSIFICATION
+    # 5.26 IMAGE_CLASSIFICATION
     "timm-vit-base-p16-224-augreg-in21k-ft-in1k": ReferenceFamily.IMAGE_CLASSIFICATION.value,
-    # 5.25 DIFFUSERS_IMAGE_GEN
+    # 5.27 DIFFUSERS_IMAGE_GEN
     "flux-schnell": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     "flux-2-dev": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     "pixart-sigma-1024": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     "z-image-turbo": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
-    # 5.26 DIFFUSERS_VIDEO_GEN
+    # 5.28 DIFFUSERS_VIDEO_GEN
     "wan21-t2v-1.3b": ReferenceFamily.DIFFUSERS_VIDEO_GEN.value,
-    # 5.27 ELF diffusion text generation
+    # 5.29 ELF diffusion text generation
     "elf-b-owt-l0": ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value,
     "elf-b-xsum-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
     "elf-b-de-en-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
-    # 5.28 TIME_SERIES_POINT_FORECAST
+    # 5.30 TIME_SERIES_POINT_FORECAST
     "patchtst-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
     "patchtsmixer-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
     "timesfm-2.0-500m-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    # 5.29 TIME_SERIES_QUANTILE_FORECAST
+    # 5.31 TIME_SERIES_QUANTILE_FORECAST
     "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
-    # 5.30 TIME_SERIES_REGRESSION
+    # 5.32 TIME_SERIES_REGRESSION
     "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
-    # 5.31 NEMOTRON_LABS_DIFFUSION_MODEL_CARD
+    # 5.33 NEMOTRON_LABS_DIFFUSION_MODEL_CARD
     "nemotron-labs-diffusion-8b-ar": ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value,
     "nemotron-labs-diffusion-8b-diffusion": (
         ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
@@ -887,6 +890,7 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.ASR_CANARY.value: UserContract.EXACT_TRANSCRIPT.value,
     ReferenceFamily.TTS_BARK.value: UserContract.TTS_AUDIO.value,
     ReferenceFamily.TTS_MAGPIE.value: UserContract.TTS_AUDIO.value,
+    ReferenceFamily.TTS_VOXCPM2.value: UserContract.TTS_AUDIO.value,
     ReferenceFamily.S2S_PERSONAPLEX.value: UserContract.SPEECH_RESPONSE.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: UserContract.SEGMENTATION_MASK.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
@@ -926,6 +930,7 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.ASR_CANARY.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.TTS_BARK.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.TTS_MAGPIE.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
+    ReferenceFamily.TTS_VOXCPM2.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.S2S_PERSONAPLEX.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,

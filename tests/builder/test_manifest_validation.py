@@ -249,6 +249,19 @@ class TestManifestValidation:
             for case in cases
         )
 
+    def test_voxcpm2_manifest_records_runtime_blocker(self):
+        """VoxCPM2 is contract-only until a native C++ runtime exists."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        case = load_manifest(models_dir / "voxcpm2.json")
+
+        assert case.family == "voxcpm2"
+        assert case.runtime_strategy == "text_to_audio_voxcpm2"
+        assert case.task_strategy == "text_to_audio"
+        assert case.reference_backend == "custom_python"
+        assert case.metadata["skip_reason"]
+        assert "LocEnc" in case.metadata["architecture"]
+        assert case.metadata["output_sample_rate_hz"] == 48000
+
     def test_quantization_block_propagates_to_metadata(self, tmp_path):
         """Quantization manifests should preserve the generic quant block."""
         path = self._write_manifest(tmp_path, {

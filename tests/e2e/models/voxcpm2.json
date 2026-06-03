@@ -1,0 +1,51 @@
+{
+  "name": "voxcpm2",
+  "trace_id": "IT-E2E-VOXCPM2-01",
+  "hf_id": "openbmb/VoxCPM2",
+  "bundle": "voxcpm2.trtfb",
+  "family": "voxcpm2",
+  "runtime_strategy": "text_to_audio_voxcpm2",
+  "task_strategy": "text_to_audio",
+  "reference_backend": "custom_python",
+  "oracle_level": "L2_internal_reference",
+  "reference_family": "tts_voxcpm2",
+  "user_contract": "tts_audio",
+  "ci_tier": "contract_only",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "skip": "VoxCPM2 is registered for detection and manifest coverage only. Native TRT execution requires a new text_to_audio_voxcpm2 runtime for the tokenizer-free LocEnc -> TSLM -> RALM -> LocDiT stack plus AudioVAE V2; the existing Bark and Magpie text-to-audio runtimes cannot execute this architecture.",
+  "prompt": "VoxCPM2 brings multilingual support, creative voice design, and controllable voice cloning.",
+  "max_new_tokens": 0,
+  "runtime_config": {
+    "voxcpm2": {
+      "cfg_value": 2.0,
+      "inference_timesteps": 10,
+      "normalize": true,
+      "denoise": true,
+      "output_sample_rate": 48000,
+      "reference_sample_rate": 16000
+    }
+  },
+  "preflight_requirements": [
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "voxcpm",
+        "phase": "reference",
+        "timeout_s": 180
+      },
+      "gating": false
+    }
+  ],
+  "metadata": {
+    "upstream_model_card": "https://huggingface.co/openbmb/VoxCPM2",
+    "upstream_entrypoint": "from voxcpm import VoxCPM; VoxCPM.from_pretrained(\"openbmb/VoxCPM2\")",
+    "license": "Apache-2.0",
+    "model_size": "2B parameters",
+    "tensor_type": "BF16",
+    "architecture": "Tokenizer-free diffusion autoregressive TTS: LocEnc -> TSLM -> RALM -> LocDiT",
+    "output_sample_rate_hz": 48000,
+    "reference_sample_rate_hz": 16000,
+    "known_runtime_limitation": "No C++ TensorRT runtime, bundle schema, or reference runner exists yet for VoxCPM2's voxcpm library architecture."
+  }
+}
