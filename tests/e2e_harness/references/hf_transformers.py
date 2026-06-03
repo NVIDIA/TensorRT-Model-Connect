@@ -96,6 +96,11 @@ def _vl_prompt_has_image_placeholder(text: str) -> bool:
     ))
 
 
+def _is_locateanything_vl_case(case: E2ECase) -> bool:
+    """Return true for LocateAnything VL cases."""
+    return case.family.lower() == "locateanything" or "locateanything" in case.hf_id.lower()
+
+
 def _normalize_vl_prompt_guard(text: str) -> str:
     """Normalize decoded VL text for prompt-only reference detection."""
     normalized = " ".join(str(text or "").split()).strip().lower()
@@ -1533,6 +1538,9 @@ class HfTransformersReference:
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         """Run HF vision-language model for reference generation."""
+        if _is_locateanything_vl_case(case):
+            return self._run_locateanything_vl_full_generation(case, stage, ctx)
+
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         text_path = str(Path(model_dir) / "hf_vl_text.txt")
@@ -1645,6 +1653,266 @@ class HfTransformersReference:
             output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
             text_reader=lambda: _read_text_artifact(text_path),
             metadata={"trust_remote_code": trust_remote_code},
+            failure_label="HF VL generation",
+        )
+
+    def _run_locateanything_vl_full_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run LocateAnything HF reference without the optional remote processor."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        text_path = str(Path(model_dir) / "hf_vl_text.txt")
+
+        prompt = case.inputs.get("prompt", "Describe this image.")
+        max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json
+            import sys
+            from pathlib import Path
+
+            import torch
+            from tensorrt_model_connect.debug_runner import (
+                preprocess_image_inputs_for_trt,
+            )
+            from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            max_new_tokens = {max_new_tokens}
+            trust_remote_code = {trust_remote_code!r}
+            image_path = {image_path!r}
+            text_path = {text_path!r}
+
+            def _install_tied_weight_compat():
+                from transformers.cache_utils import DynamicCache
+                from transformers.modeling_utils import PreTrainedModel
+
+                if not hasattr(DynamicCache, "to_legacy_cache"):
+                    def _to_legacy_cache(self):
+                        return tuple(
+                            (layer.keys, layer.values) for layer in self.layers
+                        )
+
+                    DynamicCache.to_legacy_cache = _to_legacy_cache
+
+                if not hasattr(DynamicCache, "from_legacy_cache"):
+                    @classmethod
+                    def _from_legacy_cache(cls, past_key_values=None):
+                        cache = cls()
+                        if past_key_values is None:
+                            return cache
+                        for layer_idx, (key_states, value_states) in enumerate(
+                            past_key_values
+                        ):
+                            cache.update(key_states, value_states, layer_idx)
+                        return cache
+
+                    DynamicCache.from_legacy_cache = _from_legacy_cache
+
+                if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+                    PreTrainedModel.all_tied_weights_keys = {{}}
+                original = PreTrainedModel.get_expanded_tied_weights_keys
+
+                def _compat_get_expanded_tied_weights_keys(self, all_submodels=False):
+                    tied_mapping = getattr(self, "_tied_weights_keys", None)
+                    if not isinstance(tied_mapping, list):
+                        return original(self, all_submodels=all_submodels)
+                    if all_submodels:
+                        expanded_tied_weights = {{}}
+                        for prefix, submodule in self.named_modules(
+                            remove_duplicate=False
+                        ):
+                            if isinstance(submodule, PreTrainedModel):
+                                submodel_tied_weights = (
+                                    submodule.get_expanded_tied_weights_keys(
+                                        all_submodels=False
+                                    )
+                                )
+                                if prefix:
+                                    submodel_tied_weights = {{
+                                        f"{{prefix}}.{{key}}": f"{{prefix}}.{{value}}"
+                                        for key, value in submodel_tied_weights.items()
+                                    }}
+                                expanded_tied_weights.update(submodel_tied_weights)
+                        return expanded_tied_weights
+                    if not getattr(self.config, "tie_word_embeddings", False):
+                        return {{}}
+                    if "lm_head.weight" in tied_mapping:
+                        return {{"lm_head.weight": "model.embed_tokens.weight"}}
+                    return {{}}
+
+                PreTrainedModel.get_expanded_tied_weights_keys = (
+                    _compat_get_expanded_tied_weights_keys
+                )
+
+            def _load_locateanything_config(model_ref):
+                config = AutoConfig.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                raw_config_path = Path(model_ref) / "config.json"
+                if raw_config_path.is_file() and hasattr(config, "text_config"):
+                    raw_config = json.loads(raw_config_path.read_text(encoding="utf-8"))
+                    raw_text_config = raw_config.get("text_config", {{}})
+                    if not hasattr(config.text_config, "rope_theta"):
+                        rope_theta = raw_text_config.get("rope_theta")
+                        if rope_theta is None:
+                            rope_parameters = raw_text_config.get("rope_parameters", {{}})
+                            rope_theta = rope_parameters.get("rope_theta", 10000.0)
+                        config.text_config.rope_theta = float(rope_theta)
+                return config
+
+            def _load_locateanything_tokenizer(model_ref):
+                try:
+                    return AutoTokenizer.from_pretrained(
+                        model_ref, trust_remote_code=trust_remote_code)
+                except Exception as auto_exc:
+                    from tokenizers import Tokenizer
+
+                    model_path = Path(model_ref)
+                    raw_tokenizer = Tokenizer.from_file(
+                        str(model_path / "tokenizer.json"))
+                    tokenizer_config = {{}}
+                    tokenizer_config_path = model_path / "tokenizer_config.json"
+                    if tokenizer_config_path.is_file():
+                        tokenizer_config = json.loads(
+                            tokenizer_config_path.read_text(encoding="utf-8"))
+                    model_max_length = int(
+                        tokenizer_config.get("model_max_length", 16384))
+
+                    class TokenizersWrapper:
+                        def __init__(self, tok, max_length):
+                            self._tok = tok
+                            self.model_max_length = max_length
+
+                        def encode(self, text, add_special_tokens=False):
+                            return self._tok.encode(
+                                text,
+                                add_special_tokens=add_special_tokens).ids
+
+                        def __call__(self, text, return_tensors=None):
+                            ids = self.encode(text, add_special_tokens=False)
+                            if return_tensors == "pt":
+                                input_ids = torch.tensor([ids], dtype=torch.long)
+                                attention_mask = torch.ones_like(input_ids)
+                                return {{
+                                    "input_ids": input_ids,
+                                    "attention_mask": attention_mask,
+                                }}
+                            return {{"input_ids": ids}}
+
+                        def decode(self, ids, skip_special_tokens=True):
+                            if torch.is_tensor(ids):
+                                ids = ids.detach().cpu().tolist()
+                            if isinstance(ids, int):
+                                ids = [ids]
+                            return self._tok.decode(
+                                [int(token) for token in ids],
+                                skip_special_tokens=skip_special_tokens)
+
+                        def batch_decode(self, batch_ids, skip_special_tokens=True):
+                            return [
+                                self.decode(ids, skip_special_tokens=skip_special_tokens)
+                                for ids in batch_ids
+                            ]
+
+                    print(
+                        f"WARN AutoTokenizer failed ({{auto_exc}}); "
+                        "using tokenizer.json fallback",
+                        file=sys.stderr,
+                    )
+                    return TokenizersWrapper(raw_tokenizer, model_max_length)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            _install_tied_weight_compat()
+            config = _load_locateanything_config(model_ref)
+            tokenizer = _load_locateanything_tokenizer(model_ref)
+            model = AutoModel.from_pretrained(
+                model_ref, config=config, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.to(device)
+            model.eval()
+
+            image_inputs = preprocess_image_inputs_for_trt(
+                image_path,
+                preprocessor_type="locateanything_patchify",
+                fixed_image_size=448,
+                image_mean=(0.5, 0.5, 0.5),
+                image_std=(0.5, 0.5, 0.5),
+                patch_size=14,
+                interpolation="bicubic",
+            )
+            pixel_values = torch.from_numpy(image_inputs["pixel_values"]).to(device)
+            image_grid_hws = torch.from_numpy(
+                image_inputs["image_grid_hws"]).to(device=device, dtype=torch.int32)
+
+            image_pads = "<IMG_CONTEXT>" * 256
+            prompt_text = (
+                "<|im_start|>system\\n"
+                "You are a helpful assistant.<|im_end|>\\n"
+                "<|im_start|>user\\n"
+                f"<img>{{image_pads}}</img>{{prompt}}<|im_end|>\\n"
+                "<|im_start|>assistant\\n"
+            )
+            inputs = tokenizer(prompt_text, return_tensors="pt")
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+
+            generate_kwargs = {{
+                "pixel_values": pixel_values,
+                "image_grid_hws": image_grid_hws,
+                "input_ids": input_ids,
+                "tokenizer": tokenizer,
+                "max_new_tokens": max_new_tokens,
+                "use_cache": True,
+                "generation_mode": "slow",
+                "do_sample": False,
+            }}
+            if attention_mask is not None:
+                generate_kwargs["attention_mask"] = attention_mask
+
+            with torch.no_grad():
+                output = model.generate(**generate_kwargs)
+
+            if isinstance(output, str):
+                text = output
+            elif isinstance(output, (list, tuple)) and output and isinstance(output[0], str):
+                text = output[0]
+            else:
+                input_len = input_ids.shape[-1]
+                generated_ids = output[0][input_len:] if output.ndim > 1 else output[input_len:]
+                text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            if not text.strip():
+                raise RuntimeError("HF LocateAnything reference produced empty text")
+
+            with open(text_path, "w") as f:
+                f.write(text)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_vl_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
+            text_reader=lambda: _read_text_artifact(text_path),
+            metadata={
+                "trust_remote_code": trust_remote_code,
+                "reference_variant": "locateanything_manual_processor",
+            },
             failure_label="HF VL generation",
         )
 
