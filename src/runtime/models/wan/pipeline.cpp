@@ -584,20 +584,19 @@ bool WanPipeline::run_denoiser(const std::vector<float>& hidden, const std::vect
     // ``temb_lead`` matches the AdaLN modulation leading dimension baked into
     // the DiT engine: 1 for Wan 2.1 (scalar timestep broadcast across
     // patches) and num_patches for Wan 2.2 (per-patch timestep embedding).
-    const int64_t temb_lead =
-        config_.expand_timesteps ? static_cast<int64_t>(num_patches) : 1;
+    const int64_t temb_lead = config_.expand_timesteps ? static_cast<int64_t>(num_patches) : 1;
 
     TensorMap inputs;
     inputs["hidden_states"] =
         Tensor{const_cast<float*>(hidden.data()),
                {static_cast<int64_t>(num_patches), static_cast<int64_t>(dit_dim)},
                DType::kFloat32};
-    inputs["timestep_embedding"] = Tensor{
-        const_cast<float*>(temb_6d.data()),
-        {temb_lead, static_cast<int64_t>(6 * dit_dim)}, DType::kFloat32};
-    inputs["time_embed"] = Tensor{
-        const_cast<float*>(time_embed.data()),
-        {temb_lead, static_cast<int64_t>(dit_dim)}, DType::kFloat32};
+    inputs["timestep_embedding"] = Tensor{const_cast<float*>(temb_6d.data()),
+                                          {temb_lead, static_cast<int64_t>(6 * dit_dim)},
+                                          DType::kFloat32};
+    inputs["time_embed"] = Tensor{const_cast<float*>(time_embed.data()),
+                                  {temb_lead, static_cast<int64_t>(dit_dim)},
+                                  DType::kFloat32};
     inputs["encoder_hidden_states"] =
         Tensor{const_cast<float*>(encoder_hidden.data()),
                {static_cast<int64_t>(encoder_hidden.size() / static_cast<std::size_t>(dit_dim)),
@@ -692,7 +691,8 @@ void WanPipeline::compute_timestep_embedding(float timestep, std::vector<float>&
     temb_6d.resize(static_cast<std::size_t>(rows) * static_cast<std::size_t>(6 * dim));
     for (int32_t r = 0; r < rows; ++r) {
         std::copy_n(time_embed_row.data(), dim,
-                    time_embed.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(dim));
+                    time_embed.data() +
+                        static_cast<std::size_t>(r) * static_cast<std::size_t>(dim));
         std::copy_n(temb_6d_row.data(), 6 * dim,
                     temb_6d.data() +
                         static_cast<std::size_t>(r) * static_cast<std::size_t>(6 * dim));
