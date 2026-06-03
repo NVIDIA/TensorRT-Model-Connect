@@ -421,6 +421,10 @@ _POSITIVE_MATCH_CASES = [
     # M2M-100 / NLLB (encoder-decoder seq2seq)
     ("m2m_100", "m2m_100"),
     ("nllb", "m2m_100"),
+    # Cosmos-Predict (diffusion video)
+    ("cosmos_predict", "cosmos_predict"),
+    ("cosmos-predict", "cosmos_predict"),
+    ("cosmos2_video_to_world", "cosmos_predict"),
 ]
 
 
