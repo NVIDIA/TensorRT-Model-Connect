@@ -88,12 +88,21 @@ _HF_ALLOW_PATTERNS = [
 ]
 
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
+_HF_EXTRA_ALLOW_PATTERNS_BY_HF_ID = {
+    "openbmb/VoxCPM2": [
+        "audiovae.pth",
+    ],
+}
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
 _REQUIRED_FILES_BY_HF_ID = {
     "nvidia/Nemotron-Labs-Diffusion-8B": [
         "linear_spec_lora/adapter_config.json",
         "linear_spec_lora/adapter_model.safetensors",
+    ],
+    "openbmb/VoxCPM2": [
+        "audiovae.pth",
+        "tokenization_voxcpm2.py",
     ],
 }
 _DIFFUSERS_WEIGHT_COMPONENTS = {
@@ -197,6 +206,14 @@ for name, hf_id, gated in entries:
 entries = deduped_entries
 
 
+def _allow_patterns_for(hf_id: str) -> list[str]:
+    return (
+        _HF_ALLOW_PATTERNS
+        + _HF_EXTRA_ALLOW_PATTERNS
+        + _HF_EXTRA_ALLOW_PATTERNS_BY_HF_ID.get(hf_id, [])
+    )
+
+
 def _is_cached(hf_id: str) -> bool:
     """Return True if the model has a usable local snapshot.
 
@@ -210,7 +227,7 @@ def _is_cached(hf_id: str) -> bool:
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_allow_patterns_for(hf_id),
             local_files_only=True,
         )
     except Exception:
@@ -309,7 +326,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_allow_patterns_for(hf_id),
         )
         if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
             raise RuntimeError(

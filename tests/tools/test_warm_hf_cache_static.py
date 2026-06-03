@@ -12,6 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 HELPER_FUNCTIONS = {
+    "_allow_patterns_for",
     "_component_has_weight",
     "_diffusers_missing_weight_components",
     "_is_diffusers_component_enabled",
@@ -40,11 +41,18 @@ def _load_cache_helpers() -> dict:
                 "linear_spec_lora/adapter_config.json",
                 "linear_spec_lora/adapter_model.safetensors",
             ],
+            "openbmb/VoxCPM2": [
+                "audiovae.pth",
+                "tokenization_voxcpm2.py",
+            ],
         },
         "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
         "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
         "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
         "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
+        "_HF_EXTRA_ALLOW_PATTERNS_BY_HF_ID": {
+            "openbmb/VoxCPM2": ["audiovae.pth"],
+        },
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -59,6 +67,13 @@ def test_magpie_reference_dependencies_are_warmed() -> None:
     assert "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps" in text
     assert "google/byt5-small" in text
     assert "microsoft/wavlm-base-plus" in text
+
+
+def test_voxcpm2_audio_vae_is_warmed() -> None:
+    text = WARM_HF_CACHE.read_text()
+    assert '"openbmb/VoxCPM2"' in text
+    assert '"audiovae.pth"' in text
+    assert '"tokenization_voxcpm2.py"' in text
 
 
 def test_nemotron_labs_diffusion_lora_files_are_warmed() -> None:
@@ -143,6 +158,36 @@ def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) 
     (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
     assert helpers["_snapshot_has_required_files"](
         snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+
+
+def test_voxcpm2_snapshot_requires_audio_vae_and_custom_tokenizer(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="openbmb/VoxCPM2")
+
+    (snapshot / "tokenization_voxcpm2.py").write_text("# tokenizer")
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="openbmb/VoxCPM2")
+
+    (snapshot / "audiovae.pth").write_bytes(b"vae")
+    assert helpers["_snapshot_has_required_files"](
+        snapshot, hf_id="openbmb/VoxCPM2")
+
+
+def test_voxcpm2_cache_allow_patterns_include_audio_vae() -> None:
+    helpers = _load_cache_helpers()
+
+    assert helpers["_allow_patterns_for"]("openbmb/VoxCPM2") == [
+        "config.json",
+        "model.safetensors",
+        "*.nemo",
+        "audiovae.pth",
+    ]
 
 
 def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
