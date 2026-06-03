@@ -4,7 +4,7 @@
   "hf_id": "openbmb/VoxCPM2",
   "bundle": "voxcpm2.trtfb",
   "family": "voxcpm2",
-  "runtime_strategy": "text_to_audio",
+  "runtime_strategy": "text_to_audio_voxcpm2",
   "reference_backend": "voxcpm",
   "oracle_level": "L1_external_reference",
   "reference_family": "tts_voxcpm2",

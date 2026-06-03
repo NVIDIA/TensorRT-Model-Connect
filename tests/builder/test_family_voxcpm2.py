@@ -39,6 +39,7 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
     cfg = _voxcpm2_config(tmp_path)
 
     assert plugin.matches(cfg.model_type)
+    assert plugin.runtime_strategy == "text_to_audio_voxcpm2"
     weights = plugin.load_weights(str(tmp_path), cfg)
     assert weights["_architecture"] == "voxcpm2"
     assert weights["_voxcpm2_components"] == ("locenc", "tslm", "ralm", "locdit")

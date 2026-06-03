@@ -28,7 +28,7 @@ def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
 
 class VoxCPM2Plugin:
     name = "voxcpm2"
-    runtime_strategy = "text_to_audio"
+    runtime_strategy = "text_to_audio_voxcpm2"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().replace("-", "_") in {"voxcpm2", "vox_cpm2"}

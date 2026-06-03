@@ -44,7 +44,7 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
     assert case.name == "voxcpm2"
     assert case.hf_id == "openbmb/VoxCPM2"
     assert case.family == "voxcpm2"
-    assert case.runtime_strategy == "text_to_audio"
+    assert case.runtime_strategy == "text_to_audio_voxcpm2"
     assert case.task_strategy == "text_to_audio"
     assert case.reference_backend == "voxcpm"
     assert case.reference_family == "tts_voxcpm2"

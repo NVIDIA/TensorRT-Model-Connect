@@ -39,6 +39,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "text_to_audio": "text_to_audio",
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
+    "text_to_audio_voxcpm2": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
@@ -215,7 +216,8 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
     "audio_helpers": [
         "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
-        "text_to_audio_magpie", "speech_to_speech", "omni_multimodal",
+        "text_to_audio_magpie", "text_to_audio_voxcpm2", "speech_to_speech",
+        "omni_multimodal",
     ],
 }
 
@@ -394,6 +396,19 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
     return sorted(paths)
 
 
+def _iter_runtime_config_namespaces(value: object) -> List[str]:
+    """Return runtime_config namespace keys referenced by a manifest."""
+    if not isinstance(value, dict):
+        return []
+    runtime_config = value.get("runtime_config")
+    if not isinstance(runtime_config, dict):
+        return []
+    return sorted(
+        key for key in runtime_config
+        if isinstance(key, str) and key.strip()
+    )
+
+
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
@@ -444,6 +459,9 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
         for data_path in _iter_manifest_data_paths(data):
             e2e_data_file_to_models_sets.setdefault(data_path, set()).add(name)
+        for namespace in _iter_runtime_config_namespaces(data):
+            manifest_field_to_models_sets.setdefault(
+                f"runtime_config.{namespace}", set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
     cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
@@ -778,6 +796,11 @@ def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
     return _resolver
 
 
+def _runtime_config_schema_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    namespace = _group(context)
+    return sorted(imap.manifest_field_to_models.get(f"runtime_config.{namespace}", []))
+
+
 def _runtime_strategy_models(
     strategies_getter: Callable[[RuleContext, ImpactMap], List[str]],
 ) -> ModelsResolver:
@@ -1024,6 +1047,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=90,
+            name="runtime_config_schema",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/runtime_config/schemas/(\w+)\.py$"
+            ),
+            resolver=_match_result("runtime_config_schema", _runtime_config_schema_models),
+            covered_by=("TestHarness.test_runtime_config_schema_scope",),
+        ),
+        ClassificationRule(
+            priority=95,
             name="specialized_builder",
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/(\w+)\.py$",

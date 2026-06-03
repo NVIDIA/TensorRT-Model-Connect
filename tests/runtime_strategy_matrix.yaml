@@ -204,6 +204,14 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio']."
     },
+    "text_to_audio_voxcpm2": {
+      "task_strategy": "text_to_audio",
+      "cli_commands": ["generate-audio"],
+      "runner_class": "tests.e2e_harness.runners.audio_speech.TextToAudioRunner",
+      "comparator_class": "tests.e2e_harness.comparators.text_to_audio.TextToAudioComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_voxcpm2']."
+    },
     "vision_language": {
       "task_strategy": "vision_language_generation",
       "cli_commands": ["run"],

@@ -344,6 +344,7 @@ class TestManifestValidation:
 
         assert case.hf_id == "openbmb/VoxCPM2"
         assert case.family == "voxcpm2"
+        assert case.runtime_strategy == "text_to_audio_voxcpm2"
         assert case.reference_backend == "voxcpm"
         assert case.oracle_level == "L1_external_reference"
         assert case.reference_family == "tts_voxcpm2"

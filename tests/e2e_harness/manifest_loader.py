@@ -532,6 +532,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "text_to_audio",              # legacy alias
     "text_to_audio_bark",
     "text_to_audio_magpie",
+    "text_to_audio_voxcpm2",
     "speech_to_speech",
     "diffusion",                  # legacy alias
     "diffusion_flux",

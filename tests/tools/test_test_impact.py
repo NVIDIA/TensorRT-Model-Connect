@@ -98,7 +98,8 @@ def mock_repo(tmp_path):
         {"name": "qwen25vl-3b", "family": "qwen_vl", "runtime_strategy": "vision_language",
          "hf_id": "Q/Q25VL", "test_image": "data/test_img.jpeg", "core": True},
         {"name": "bark-small", "family": "bark", "runtime_strategy": "text_to_audio_bark",
-         "hf_id": "suno/bark", "core": True},
+         "hf_id": "suno/bark", "core": True,
+         "runtime_config": {"audio_bark": {"seed": 123}}},
         {"name": "sam-vit", "family": "sam", "runtime_strategy": "prompted_segmentation",
          "hf_id": "fb/sam", "core": True},
         {"name": "segformer-b0", "family": "segformer", "runtime_strategy": "segmentation",
@@ -903,6 +904,15 @@ class TestHarness:
         assert match.rule == "torchtrt_strategy"
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
+
+    def test_runtime_config_schema_scope(self, imap):
+        """runtime_config schema files select manifests that use that namespace."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/runtime_config/schemas/audio_bark.py",
+            imap)
+        assert match.rule == "runtime_config_schema"
+        assert match.models == ["bark-small"]
+        assert "builder" in match.unit_tiers
 
     def test_harness_shared(self, imap):
         """e2e_harness/orchestrator.py -> ALL models."""
