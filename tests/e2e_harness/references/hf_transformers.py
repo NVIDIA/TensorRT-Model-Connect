@@ -1829,6 +1829,44 @@ class HfTransformersReference:
                     )
                     return TokenizersWrapper(raw_tokenizer, model_max_length)
 
+            def _repair_locateanything_rotary_buffers(model):
+                # Restore non-persistent Qwen2 RoPE buffers zeroed by remote loading.
+                repaired = 0
+                model_device = next(model.parameters()).device
+                for module in model.language_model.modules():
+                    if not (
+                        hasattr(module, "_set_cos_sin_cache")
+                        and hasattr(module, "base")
+                        and hasattr(module, "dim")
+                    ):
+                        continue
+                    buffer_device = getattr(
+                        getattr(module, "inv_freq", None), "device", model_device)
+                    inv_freq = 1.0 / (
+                        float(module.base) ** (
+                            torch.arange(
+                                0,
+                                int(module.dim),
+                                2,
+                                device=buffer_device,
+                                dtype=torch.float32,
+                            ) / float(module.dim)
+                        )
+                    )
+                    module.register_buffer("inv_freq", inv_freq, persistent=False)
+                    seq_len = int(
+                        getattr(
+                            module,
+                            "max_position_embeddings",
+                            getattr(model.config.text_config, "max_position_embeddings", 32768),
+                        )
+                    )
+                    module._set_cos_sin_cache(
+                        seq_len=seq_len, device=inv_freq.device, dtype=torch.float32)
+                    repaired += 1
+                if repaired == 0:
+                    raise RuntimeError("LocateAnything reference did not find RoPE buffers")
+
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             _install_tied_weight_compat()
             config = _load_locateanything_config(model_ref)
@@ -1838,6 +1876,7 @@ class HfTransformersReference:
                 torch_dtype={torch_dtype_expr})
             model.to(device)
             model.eval()
+            _repair_locateanything_rotary_buffers(model)
 
             image_inputs = preprocess_image_inputs_for_trt(
                 image_path,
