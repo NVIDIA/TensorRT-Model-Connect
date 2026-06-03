@@ -1,0 +1,21 @@
+{
+  "name": "cosmos-transfer1-7b-l0",
+  "trace_id": "IT-E2E-COSMOS-TRANSFER1-7B-L0",
+  "hf_id": "nvidia/Cosmos-Transfer1-7B",
+  "bundle": "cosmos-transfer1-7b-l0.trtfb",
+  "family": "cosmos_transfer",
+  "runtime_strategy": "diffusion",
+  "model_type": "cosmos_transfer",
+  "precision": "fp16",
+  "skip": "Cosmos-Transfer1 family builders are scaffold-only; remove skip once cosmos_dit_builder + cosmos_vae_builder + cosmos_transfer_controlnet_builder are implemented (post GPU validation).",
+  "build_args": {
+    "video_height": 256,
+    "video_width": 256,
+    "video_num_frames": 9,
+    "num_inference_steps": 4,
+    "guidance_scale": 7.0,
+    "controlnet_modalities": ["edge"]
+  },
+  "prompt": "A futuristic cityscape at sunset, cinematic lighting, high detail.",
+  "max_cache_length": 512
+}
