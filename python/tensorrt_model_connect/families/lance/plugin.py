@@ -30,10 +30,12 @@ precision relies on the #184 builder fix (now in main): for embed bundles
 forwards ``precision`` so bf16/fp16 build true reduced-precision engines.
 
 Checkpoint layout: the Lance HF repo is not a flat HF checkpoint (it nests
-``Lance_3B/llm_config.json`` and a separate ``Qwen2.5-VL-ViT/`` dir). Run
-``scripts/prepare_lance_model.py`` to stage a directory this plugin can build:
-``config.json`` (model_type=lance), ``model.safetensors``, the tokenizer files,
-and the ViT at ``vision/model.safetensors``.
+``Lance_3B/llm_config.json`` and a separate ``Qwen2.5-VL-ViT/`` dir).
+``trtmc build bytedance-research/Lance`` stages it automatically via
+``families.lance.staging`` (config.json with model_type=lance, the LLM
+``model.safetensors``, the tokenizer files, and the ViT at
+``vision/model.safetensors``); ``scripts/prepare_lance_model.py`` is an optional
+convenience wrapper around the same staging.
 """
 from __future__ import annotations
 

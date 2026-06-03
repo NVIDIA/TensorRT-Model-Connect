@@ -357,6 +357,15 @@ def _resolve_model(model_id_or_path: str) -> str:
         if nemo_files:
             return _resolve_nemo_archive(nemo_files[0])
 
+    # Handle an unpacked Lance repo (nested Lance_3B/ + Qwen2.5-VL-ViT/, not a
+    # flat HF checkpoint) by staging it into a buildable dir. Cheap no-op for
+    # any non-Lance local dir.
+    if local.is_dir():
+        from .families.lance.staging import resolve_and_stage_lance
+        staged = resolve_and_stage_lance(str(local))
+        if staged is not None:
+            return staged
+
     # Treat as HuggingFace repo ID — download to HF cache.
     try:
         from huggingface_hub import snapshot_download
@@ -385,6 +394,14 @@ def _resolve_model(model_id_or_path: str) -> str:
     nemo_files = sorted(dl_path.glob("*.nemo"))
     if nemo_files:
         return _resolve_nemo_archive(nemo_files[0])
+
+    # Non-flat repo: probe + stage the Lance repo if its file list matches.
+    # Returns None cheaply for anything that isn't Lance.
+    from .families.lance.staging import resolve_and_stage_lance
+    staged = resolve_and_stage_lance(model_id_or_path)
+    if staged is not None:
+        print(f"[trtmc build] Staged Lance repo from {model_id_or_path}", file=sys.stderr)
+        return staged
 
     print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
     return local_dir

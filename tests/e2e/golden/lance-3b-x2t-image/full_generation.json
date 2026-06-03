@@ -1,0 +1,4 @@
+{
+  "_comment": "Golden reference for the Lance x2t image-understanding E2E (full_generation stage). Captured from a validated bf16 `trtmc run` on tests/e2e/data/test_img.jpeg with the prompt 'What color is the vehicle in this image? Answer in one word.'. The VL comparator passes when non_empty AND (normalized_text_edit_distance <= 0.5 OR token_agreement_rate >= 0.3); this robustly accepts the correct answer (case/whitespace tolerant) and fails the reduced-precision garbage that motivated #182/#184.",
+  "text": "White"
+}

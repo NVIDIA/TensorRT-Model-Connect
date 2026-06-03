@@ -37,6 +37,7 @@ catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule 
 catch_all tests/assets/test_scene.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/e2e/golden/lance-3b-x2t-image/full_generation.json # Lance E2E golden reference; catch-all is conservative (only affects the lance-3b-x2t-image E2E comparison)
 catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/test_cache_correctness.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/test_diffusion_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
