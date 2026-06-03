@@ -960,3 +960,382 @@ def build_qwen3_vl_vision_engine(
         raise RuntimeError("TensorRT Qwen3-VL vision engine build failed")
 
     return bytes(plan)
+
+
+# ---------------------------------------------------------------------------
+# Qwen2-VL vision engine builder (LayerNorm, GELU FC MLP, full attention,
+# 2D RoPE — no windowing, no DeepStack)
+# ---------------------------------------------------------------------------
+
+def _compute_qwen2_vl_rope_tables(
+    grid_h: int,
+    grid_w: int,
+    embed_dim: int,
+    num_heads: int,
+    merge_size: int = 2,
+    rope_theta: float = 10000.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Port of HF Qwen2-VL's ``rot_pos_emb`` (vision-side) for a fixed image.
+
+    Qwen2-VL uses the same 2D rotary positional encoding as Qwen2.5-VL but
+    WITHOUT any window-index reordering (Qwen2-VL has no windowed attention).
+    Patches arrive at attention in merge-group order (the ``qwen_merge_group``
+    preprocessor reorders pixels so the conv output is already merge-grouped),
+    so the position IDs must be computed in merge-group order too.
+
+    Returns:
+        cos_table: [num_patches, embed_dim] float32
+        sin_table: [num_patches, embed_dim] float32
+    """
+    head_dim = embed_dim // num_heads
+    num_patches = grid_h * grid_w
+
+    # Qwen2VisionRotaryEmbedding: dim = head_dim // 2; inv_freq covers half of dim.
+    rope_dim = head_dim // 2
+    inv_freq = 1.0 / (
+        rope_theta ** (np.arange(0, rope_dim, 2, dtype=np.float64) / rope_dim))
+
+    max_grid = max(grid_h, grid_w)
+    freqs = np.outer(
+        np.arange(max_grid, dtype=np.float64), inv_freq
+    )  # [max_grid, rope_dim // 2]
+
+    # Build merge-group ordered position IDs (matches HF rot_pos_emb's
+    # reshape -> transpose -> flatten pattern).
+    hpos = (np.arange(grid_h, dtype=np.int32).reshape(-1, 1)
+            * np.ones((1, grid_w), dtype=np.int32))
+    hpos = hpos.reshape(
+        grid_h // merge_size, merge_size, grid_w // merge_size, merge_size)
+    hpos = hpos.transpose(0, 2, 1, 3).flatten()
+
+    wpos = (np.ones((grid_h, 1), dtype=np.int32)
+            * np.arange(grid_w, dtype=np.int32).reshape(1, -1))
+    wpos = wpos.reshape(
+        grid_h // merge_size, merge_size, grid_w // merge_size, merge_size)
+    wpos = wpos.transpose(0, 2, 1, 3).flatten()
+
+    h_freqs = freqs[hpos]
+    w_freqs = freqs[wpos]
+    pos_emb = np.concatenate(
+        [h_freqs, w_freqs], axis=1)  # [num_patches, rope_dim]
+
+    # cat(emb, emb) to fill full head_dim
+    pos_emb_full = np.concatenate([pos_emb, pos_emb], axis=1)
+
+    cos = np.cos(pos_emb_full).astype(np.float32)
+    sin = np.sin(pos_emb_full).astype(np.float32)
+    cos_table = np.tile(cos, (1, num_heads))  # [num_patches, embed_dim]
+    sin_table = np.tile(sin, (1, num_heads))
+
+    return cos_table, sin_table
+
+
+def build_qwen2_vl_vision_engine(
+    vision_config: dict,
+    weights: WeightDict,
+    *,
+    fixed_image_size: int = 448,
+    fixed_image_height: int | None = None,
+    fixed_image_width: int | None = None,
+    verbose: bool = False,
+) -> bytes:
+    """Build Qwen2-VL (original) vision encoder TRT engine.
+
+    Differences from Qwen2.5-VL ``build_qwen_vl_vision_engine``:
+      - Vision config uses legacy field names: ``embed_dim``/``num_heads``/
+        ``depth``/``mlp_ratio`` instead of ``hidden_size``/``num_attention_heads``/
+        ``num_hidden_layers``/``intermediate_size``.
+      - **LayerNorm (with bias)** for ``norm1``/``norm2`` (Qwen2.5-VL uses RMSNorm).
+      - **Full self-attention everywhere** (Qwen2.5-VL uses windowed attention
+        with a few full-attention block indexes).
+      - **GELU FC MLP** with weights ``mlp.fc1`` / ``mlp.fc2`` (Qwen2.5-VL uses
+        SwiGLU with ``mlp.gate_proj`` / ``mlp.up_proj`` / ``mlp.down_proj``).
+      - **Merger ln_q is LayerNorm (with bias)** (Qwen2.5-VL's merger ln_q is RMSNorm).
+      - **No window_index reorder** of patches or merger outputs.
+
+    Engine I/O (fixed shapes):
+      Input:  pixel_values [T*C, fixed_H, fixed_W] float32
+      Output: image_features [num_merged_tokens, text_hidden_size] float32
+    """
+    # ---- Vision config translation (Qwen2-VL legacy field names) ----
+    embed_dim = vision_config.get(
+        "embed_dim", vision_config.get("hidden_size", 1280))
+    num_heads = vision_config.get(
+        "num_heads", vision_config.get("num_attention_heads", 16))
+    num_layers = vision_config.get(
+        "depth", vision_config.get("num_hidden_layers", 32))
+    mlp_ratio = float(vision_config.get("mlp_ratio", 4.0))
+    mlp_hidden = vision_config.get("intermediate_size", 0)
+    if not mlp_hidden:
+        mlp_hidden = int(embed_dim * mlp_ratio)
+    in_channels = vision_config.get("in_channels", 3)
+    temporal_patch_size = vision_config.get("temporal_patch_size", 2)
+    patch_size = vision_config.get("patch_size", 14)
+    merge_size = vision_config.get("spatial_merge_size", 2)
+    eps_val = vision_config.get("layer_norm_eps", 1e-6)
+    rope_theta = float(vision_config.get("rope_theta", 10000.0))
+
+    fixed_h = int(
+        fixed_image_height if fixed_image_height is not None else fixed_image_size)
+    fixed_w = int(
+        fixed_image_width if fixed_image_width is not None else fixed_image_size)
+    if fixed_h <= 0 or fixed_w <= 0:
+        raise ValueError("fixed image dimensions must be positive")
+    if fixed_h % patch_size or fixed_w % patch_size:
+        raise ValueError(
+            "fixed image dimensions must be divisible by patch_size")
+
+    grid_h = fixed_h // patch_size
+    grid_w = fixed_w // patch_size
+    num_patches = grid_h * grid_w
+    merge_unit = merge_size * merge_size
+    num_merged = num_patches // merge_unit
+
+    # The merger's fc2 (mlp.2) output dimension = text hidden size.
+    merger_fc2_w = weights.get("visual.merger.mlp.2.weight")
+    if merger_fc2_w is not None:
+        text_hidden_size = merger_fc2_w.shape[0]
+    else:
+        text_hidden_size = vision_config.get("text_hidden_size", embed_dim)
+
+    if verbose:
+        print(f"[trtmc build] Qwen2-VL Vision: image={fixed_h}x{fixed_w}, "
+              f"grid={grid_h}x{grid_w}, patches={num_patches}, "
+              f"merged={num_merged}, embed={embed_dim}, "
+              f"mlp_hidden={mlp_hidden}, "
+              f"text_hidden={text_hidden_size}", file=sys.stderr)
+
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=2 << 30,
+    )
+    builder = builder_context.builder
+    network = builder_context.network
+    trt_config = builder_context.config
+
+    eps_tensor = graph_ops.add_constant(
+        network, (1, 1), np.array([eps_val], dtype=np.float32))
+
+    # ---------------------------------------------------------------
+    # Input: pixel_values [T*C, H, W]
+    # ---------------------------------------------------------------
+    input_channels = temporal_patch_size * in_channels
+    pixel_values = network.add_input(
+        "pixel_values", trt.float32,
+        (input_channels, fixed_h, fixed_w))
+
+    # ---------------------------------------------------------------
+    # Stage 1: 3D Patch Embedding
+    # ---------------------------------------------------------------
+    patch_embed_w = weights.get("visual.patch_embed.proj.weight")
+    patch_embed_b = weights.get("visual.patch_embed.proj.bias")
+    if patch_embed_w is None:
+        raise RuntimeError("Missing visual.patch_embed.proj.weight")
+
+    hidden = graph_ops.add_patch_embed_3d(
+        network, pixel_values,
+        patch_embed_w.astype(np.float32),
+        patch_embed_b.astype(np.float32) if patch_embed_b is not None else None,
+        in_channels=in_channels, embed_dim=embed_dim,
+        temporal_patch_size=temporal_patch_size, patch_size=patch_size)
+
+    # ---------------------------------------------------------------
+    # Stage 2: Precompute 2D RoPE tables (merge-group ordered, NO window reorder)
+    # ---------------------------------------------------------------
+    cos_table, sin_table = _compute_qwen2_vl_rope_tables(
+        grid_h, grid_w, embed_dim, num_heads,
+        merge_size=merge_size, rope_theta=rope_theta)
+
+    # ---------------------------------------------------------------
+    # Stage 3: ViT Transformer blocks
+    #   - Pre-/post-LayerNorm (with bias)
+    #   - Full self-attention with 2D RoPE
+    #   - GELU FC MLP (mlp.fc1 -> GELU -> mlp.fc2)
+    # ---------------------------------------------------------------
+    for layer_idx in range(num_layers):
+        prefix = f"visual.blocks.{layer_idx}"
+
+        # Pre-attention LayerNorm (Qwen2-VL uses nn.LayerNorm — has bias).
+        ln1_gamma = weights.get(f"{prefix}.norm1.weight")
+        ln1_beta = weights.get(f"{prefix}.norm1.bias")
+        if ln1_gamma is None:
+            raise RuntimeError(f"Missing {prefix}.norm1.weight")
+        if ln1_beta is None:
+            # Defensive: HF Qwen2VL norm1 always has bias, but tolerate
+            # missing bias by treating it as zero (still LayerNorm semantics).
+            ln1_beta = np.zeros(embed_dim, dtype=np.float32)
+        normed = graph_ops.add_layer_norm(
+            network, hidden, embed_dim,
+            ln1_gamma.astype(np.float32),
+            ln1_beta.astype(np.float32),
+            eps_tensor)
+
+        # ---- Self-attention with 2D RoPE (full attention) ----
+        # Weight key conventions: HF Qwen2-VL stores fused QKV as a single
+        # ``visual.blocks.{i}.attn.qkv.weight/bias`` (in_features=embed_dim,
+        # out_features=3*embed_dim).
+        w_q = weights.get(f"{prefix}.attn.qkv.weight_q")
+        w_k = weights.get(f"{prefix}.attn.qkv.weight_k")
+        w_v = weights.get(f"{prefix}.attn.qkv.weight_v")
+        w_o = weights.get(f"{prefix}.attn.proj.weight")
+
+        if w_q is None:
+            qkv_w = weights.get(f"{prefix}.attn.qkv.weight")
+            if qkv_w is None:
+                raise RuntimeError(f"Missing {prefix}.attn.qkv.weight")
+            qkv_w = qkv_w.astype(np.float32)
+            # HF stores [out=3*embed_dim, in=embed_dim]; split along axis 0
+            # then transpose to [in, out] for TRT matmul.
+            w_q = qkv_w[:embed_dim, :].T.copy()
+            w_k = qkv_w[embed_dim:2 * embed_dim, :].T.copy()
+            w_v = qkv_w[2 * embed_dim:, :].T.copy()
+
+        q_bias = weights.get(f"{prefix}.attn.qkv.bias_q")
+        k_bias = weights.get(f"{prefix}.attn.qkv.bias_k")
+        v_bias = weights.get(f"{prefix}.attn.qkv.bias_v")
+        o_bias = weights.get(f"{prefix}.attn.proj.bias")
+
+        if q_bias is None:
+            qkv_b = weights.get(f"{prefix}.attn.qkv.bias")
+            if qkv_b is not None:
+                qkv_b = qkv_b.astype(np.float32)
+                q_bias = qkv_b[:embed_dim].copy()
+                k_bias = qkv_b[embed_dim:2 * embed_dim].copy()
+                v_bias = qkv_b[2 * embed_dim:].copy()
+
+        w_o_np = (w_o.astype(np.float32).T.copy() if w_o is not None
+                  else np.zeros((embed_dim, embed_dim), dtype=np.float32))
+
+        attn_out = graph_ops.add_self_attention_block_with_rope(
+            network, normed,
+            w_q=w_q.astype(np.float32),
+            w_k=w_k.astype(np.float32),
+            w_v=w_v.astype(np.float32),
+            w_o=w_o_np,
+            hidden_size=embed_dim,
+            num_heads=num_heads,
+            seq_length=num_patches,
+            cos_table=cos_table,
+            sin_table=sin_table,
+            q_bias=q_bias.astype(np.float32) if q_bias is not None else None,
+            k_bias=k_bias.astype(np.float32) if k_bias is not None else None,
+            v_bias=v_bias.astype(np.float32) if v_bias is not None else None,
+            o_bias=o_bias.astype(np.float32) if o_bias is not None else None,
+        )
+
+        # Residual after attention
+        res1 = network.add_elementwise(
+            hidden, attn_out, trt.ElementWiseOperation.SUM)
+
+        # Post-attention LayerNorm
+        ln2_gamma = weights.get(f"{prefix}.norm2.weight")
+        ln2_beta = weights.get(f"{prefix}.norm2.bias")
+        if ln2_gamma is None:
+            raise RuntimeError(f"Missing {prefix}.norm2.weight")
+        if ln2_beta is None:
+            ln2_beta = np.zeros(embed_dim, dtype=np.float32)
+        normed2 = graph_ops.add_layer_norm(
+            network, res1.get_output(0), embed_dim,
+            ln2_gamma.astype(np.float32),
+            ln2_beta.astype(np.float32),
+            eps_tensor)
+
+        # ---- GELU FC MLP ----
+        # HF Qwen2-VL VisionMlp: fc1 -> quick_gelu (tanh approximation
+        # in practice) -> fc2.  Stored keys are ``mlp.fc1.{weight,bias}``
+        # and ``mlp.fc2.{weight,bias}``.
+        fc1_w = weights.get(f"{prefix}.mlp.fc1.weight")
+        fc1_b = weights.get(f"{prefix}.mlp.fc1.bias")
+        fc2_w = weights.get(f"{prefix}.mlp.fc2.weight")
+        fc2_b = weights.get(f"{prefix}.mlp.fc2.bias")
+        if fc1_w is None or fc2_w is None:
+            raise RuntimeError(
+                f"Missing {prefix}.mlp.fc1/fc2 weights for Qwen2-VL")
+
+        fc1 = graph_ops.add_matmul_rhs_constant(
+            network, normed2, embed_dim, mlp_hidden,
+            fc1_w.astype(np.float32).T.copy())
+        if fc1_b is not None:
+            fc1 = graph_ops.add_bias_sum(
+                network, fc1, mlp_hidden, fc1_b.astype(np.float32))
+
+        activated = graph_ops.add_gelu_new(network, fc1)
+
+        fc2 = graph_ops.add_matmul_rhs_constant(
+            network, activated, mlp_hidden, embed_dim,
+            fc2_w.astype(np.float32).T.copy())
+        if fc2_b is not None:
+            fc2 = graph_ops.add_bias_sum(
+                network, fc2, embed_dim, fc2_b.astype(np.float32))
+
+        # Residual after MLP
+        res2 = network.add_elementwise(
+            res1.get_output(0), fc2, trt.ElementWiseOperation.SUM)
+        hidden = res2.get_output(0)
+
+    # ---------------------------------------------------------------
+    # Stage 4: PatchMerger (Qwen2VLPatchMerger)
+    #   - LayerNorm (with bias) on per-patch embed_dim
+    #   - reshape -> [num_merged, merged_dim]
+    #   - Linear(merged_dim, hidden_dim) -> GELU -> Linear(hidden_dim, text_hidden)
+    # ---------------------------------------------------------------
+    merger_ln_w = weights.get("visual.merger.ln_q.weight")
+    merger_ln_b = weights.get("visual.merger.ln_q.bias")
+    merger_fc1_w = weights.get("visual.merger.mlp.0.weight")
+    merger_fc1_b = weights.get("visual.merger.mlp.0.bias")
+    merger_fc2_b = weights.get("visual.merger.mlp.2.bias")
+
+    if merger_ln_w is None or merger_fc1_w is None or merger_fc2_w is None:
+        raise RuntimeError(
+            "Missing Qwen2-VL merger weights "
+            "(visual.merger.ln_q.weight, visual.merger.mlp.{0,2}.weight)")
+
+    # ln_q is LayerNorm for Qwen2-VL (HF uses nn.LayerNorm in Qwen2VLPatchMerger).
+    # If, defensively, no bias is present, treat as zero.
+    if merger_ln_b is None:
+        merger_ln_b = np.zeros(embed_dim, dtype=np.float32)
+    normed_patches = graph_ops.add_layer_norm(
+        network, hidden, embed_dim,
+        merger_ln_w.astype(np.float32),
+        merger_ln_b.astype(np.float32),
+        eps_tensor)
+
+    merged_dim = embed_dim * merge_unit
+    reshape_merge = network.add_shuffle(normed_patches)
+    reshape_merge.reshape_dims = (num_merged, merged_dim)
+    merged_features = reshape_merge.get_output(0)
+
+    merger_fc1_hidden = merger_fc1_w.shape[0]
+    fc1_out = graph_ops.add_matmul_rhs_constant(
+        network, merged_features, merged_dim, merger_fc1_hidden,
+        merger_fc1_w.astype(np.float32).T.copy())
+    if merger_fc1_b is not None:
+        fc1_out = graph_ops.add_bias_sum(
+            network, fc1_out, merger_fc1_hidden,
+            merger_fc1_b.astype(np.float32))
+
+    activated_merged = graph_ops.add_gelu_new(network, fc1_out)
+
+    fc2_out = graph_ops.add_matmul_rhs_constant(
+        network, activated_merged, merger_fc1_hidden, text_hidden_size,
+        merger_fc2_w.astype(np.float32).T.copy())
+    if merger_fc2_b is not None:
+        fc2_out = graph_ops.add_bias_sum(
+            network, fc2_out, text_hidden_size,
+            merger_fc2_b.astype(np.float32))
+
+    # No window-index reverse needed (no windowing was applied).
+    fc2_out.name = "image_features"
+    network.mark_output(fc2_out)
+
+    if verbose:
+        print(f"[trtmc build] Building Qwen2-VL vision TRT engine "
+              f"({num_layers} layers, embed={embed_dim}, "
+              f"patches={num_patches}, merged={num_merged}, "
+              f"text_hidden={text_hidden_size}) ...", file=sys.stderr)
+
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError("TensorRT Qwen2-VL vision engine build failed")
+
+    return bytes(plan)
