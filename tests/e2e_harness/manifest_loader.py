@@ -535,6 +535,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion",                  # legacy alias
     "diffusion_flux",
     "diffusion_ltx",
+    "diffusion_ltx_2",
     "diffusion_wan",
     "diffusion_zimage",
     "diffusion_qwen_image",
