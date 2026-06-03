@@ -150,7 +150,7 @@ class Gemma4Plugin:
 
         text_cfg = self._text_config(config)
         hidden = int(text_cfg.get("hidden_size", config.hidden_size))
-        vocab = int(text_cfg.get("vocab_size", config.vocab_size))
+        int(text_cfg.get("vocab_size", config.vocab_size))
         num_layers = int(
             text_cfg.get("num_hidden_layers", config.num_hidden_layers))
         num_heads = int(
