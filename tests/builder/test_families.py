@@ -421,6 +421,9 @@ _POSITIVE_MATCH_CASES = [
     # M2M-100 / NLLB (encoder-decoder seq2seq)
     ("m2m_100", "m2m_100"),
     ("nllb", "m2m_100"),
+    # Gemma 4 (multimodal: audio + vision + text)
+    ("gemma4", "gemma4"),
+    ("gemma4_text", "gemma4"),
 ]
 
 
