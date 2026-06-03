@@ -36,6 +36,27 @@ def _mark_debug_output(network: trt.INetworkDefinition, tensor: trt.ITensor, nam
     network.mark_output(out)
 
 
+def _const_in_work_dtype(
+    network: trt.INetworkDefinition,
+    shape,
+    values: np.ndarray,
+    work_np_dtype: np.dtype,
+    work_trt_dtype,
+) -> trt.ITensor:
+    """Materialize a TRT constant and force its dtype to match work_trt_dtype.
+
+    For bf16 builds we still author the numpy buffer as float16 (numpy has no
+    native bfloat16). Without this cast the constant is tagged as fp16 in the
+    network and trips TRT's strict-typing check when consumed in elementwise
+    ops alongside bf16 tensors (e.g. ElementWiseOperation SUB must have same
+    input types. But they are of types Half and BFloat16.).
+    """
+    const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+    if const.dtype != work_trt_dtype:
+        const = network.add_cast(const, work_trt_dtype).get_output(0)
+    return const
+
+
 def _ensure_tp_metadata(config: "ModelConfig", weights: "WeightDict") -> "WeightDict":
     if "_kv_attention_size" in weights:
         return weights
@@ -196,13 +217,17 @@ def build_qwen_vl_tp_decoder_engine(
         flag_for_math = flag_broadcast.get_output(0)
         if work_trt_dtype != trt.float32:
             flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
-        one_const = graph_ops.add_constant(
+        # In bf16 builds the gathered embedding inherits the embedding_table
+        # tag (fp16, because numpy has no bfloat16). Normalize it to the work
+        # dtype before mixing with flag_for_math/input_embed_tensor (bf16).
+        token_embed_math = _cast_work_dtype(token_embed)
+        one_const = _const_in_work_dtype(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            work_np_dtype, work_trt_dtype)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math, trt.ElementWiseOperation.SUB).get_output(0)
         tok_part = network.add_elementwise(
-            inv_flag, token_embed, trt.ElementWiseOperation.PROD).get_output(0)
+            inv_flag, token_embed_math, trt.ElementWiseOperation.PROD).get_output(0)
         embed_part = network.add_elementwise(
             flag_for_math, input_embed_tensor, trt.ElementWiseOperation.PROD).get_output(0)
         hidden_state = network.add_elementwise(

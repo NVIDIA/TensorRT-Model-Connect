@@ -341,9 +341,18 @@ def build_standard_decoder_engine(
         flag_for_math = flag_broadcast.get_output(0)
         if work_trt_dtype != trt.float32:
             flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
+        # bf16 fix: numpy has no native bfloat16, so add_constant stores the
+        # 1.0 as fp16 storage with fp16 TRT dtype. Cast to work_trt_dtype so
+        # the SUB below doesn't fail with "Half vs BFloat16" type mismatch.
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
             dtype=work_np_dtype)
+        if one_const.dtype != work_trt_dtype:
+            one_const = network.add_cast(one_const, work_trt_dtype).get_output(0)
+        # Same cast for token_embed: the gathered embedding inherits the
+        # embedding_table dtype (fp16 storage even in bf16 builds).
+        if token_embed.dtype != work_trt_dtype:
+            token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math,
             trt.ElementWiseOperation.SUB)
