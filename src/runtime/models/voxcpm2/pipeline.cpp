@@ -137,9 +137,8 @@ struct RuntimeScalarInputs {
     }
 };
 
-OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
-                           const audio::VoxCPM2GenerationStage& stage,
-                           const OwnedStageTensor& input, const RuntimeScalarInputs& controls) {
+void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
+                             const audio::VoxCPM2GenerationStage& stage) {
     if (!component.module->has_input(stage.input_artifact)) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
@@ -150,7 +149,12 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
             "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
             ") is missing required output binding '" + stage.output_artifact + "'");
     }
+}
 
+OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
+                           const audio::VoxCPM2GenerationStage& stage,
+                           const OwnedStageTensor& input, const RuntimeScalarInputs& controls) {
+    validate_stage_bindings(component, stage);
     TensorMap inputs;
     inputs.emplace(stage.input_artifact, input.as_tensor());
     controls.add_to(*component.module, inputs);
@@ -221,6 +225,7 @@ void VoxCPM2Pipeline::validate_components() const {
             throw std::runtime_error("VoxCPM2Pipeline: invalid loaded module for stage " +
                                      component.name);
         }
+        validate_stage_bindings(component, stage);
     }
 }
 

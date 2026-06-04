@@ -229,15 +229,15 @@ void test_generate_audio_writes_trt_wav_from_component_waveform() {
     std::filesystem::remove_all(temp_dir);
 }
 
-void test_generate_audio_reports_missing_stage_binding() {
+void test_construct_reports_missing_stage_binding() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
-    trtmc::VoxCPM2Pipeline pipeline(make_components_missing_output_binding(), plan,
-                                    "openbmb/VoxCPM2");
 
     try {
-        (void)pipeline.generate_audio("VoxCPM2 parity prompt");
-        check(false, "voxcpm2 generate_audio rejects missing stage output binding");
+        trtmc::VoxCPM2Pipeline pipeline(make_components_missing_output_binding(), plan,
+                                        "openbmb/VoxCPM2");
+        (void)pipeline;
+        check(false, "voxcpm2 pipeline rejects missing stage output binding at construction");
     } catch (const std::runtime_error& e) {
         const std::string message = e.what();
         check(message.find("stage locenc") != std::string::npos,
@@ -272,7 +272,7 @@ void test_rejects_component_order_mismatch() {
 int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_writes_trt_wav_from_component_waveform();
-    test_generate_audio_reports_missing_stage_binding();
+    test_construct_reports_missing_stage_binding();
     test_rejects_component_order_mismatch();
 
     if (failures != 0) {
