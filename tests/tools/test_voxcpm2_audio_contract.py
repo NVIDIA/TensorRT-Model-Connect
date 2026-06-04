@@ -380,6 +380,17 @@ def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_p
 
     repro = _build_repro_commands(case, ctx, bundle_path, {})
 
+    hf_reference = repro["hf_reference_audio"]
+    assert "from voxcpm import VoxCPM" in hf_reference
+    assert "VoxCPM.from_pretrained('openbmb/VoxCPM2')" in hf_reference
+    assert "cfg_value=2.0" in hf_reference
+    assert "inference_timesteps=10" in hf_reference
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference.wav") in hf_reference
+    assert (
+        str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference_result.json")
+        in hf_reference
+    )
+
     trt_inference = repro["trt_inference"]
     assert "/tmp/trtmc generate-audio" in trt_inference
     assert bundle_path in trt_inference

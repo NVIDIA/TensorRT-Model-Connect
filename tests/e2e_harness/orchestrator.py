@@ -30,6 +30,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -734,6 +735,10 @@ def _build_repro_commands(
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
 
+    hf_reference_audio = _voxcpm_reference_repro_command(case, ctx)
+    if hf_reference_audio:
+        repro["hf_reference_audio"] = hf_reference_audio
+
     # TRT inference command (task-specific C++ binary entrypoint)
     if bundle_path and ctx.binary_path:
         image = (case.inputs.get("image") or case.inputs.get("test_image")
@@ -951,6 +956,83 @@ def _build_repro_commands(
     repro["rerun_test_rebuild"] = " ".join(rebuild_parts)
 
     return repro
+
+
+def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
+    """Return a copy-pasteable VoxCPM2 model-card reference command."""
+    if case.reference_backend != "voxcpm" or not ctx.artifacts_dir:
+        return ""
+
+    case_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+    wav_path = case_dir / "hf_reference.wav"
+    json_path = case_dir / "hf_reference_result.json"
+    python = ctx.reference_python_path() or ctx.hf_python or "python"
+
+    prompt = case.inputs.get("prompt", "Hello, this is a test.")
+    prompt_wav_path = case.inputs.get("prompt_wav_path")
+    prompt_text = case.inputs.get("prompt_text")
+    cfg_value = float(case.inputs.get("cfg_value", 2.0))
+    inference_timesteps = int(case.inputs.get("inference_timesteps", 10))
+    normalize = _input_bool(case.inputs.get("normalize", True))
+    denoise = _input_bool(case.inputs.get("denoise", True))
+    retry_badcase = _input_bool(case.inputs.get("retry_badcase", True))
+    retry_badcase_max_times = int(case.inputs.get("retry_badcase_max_times", 3))
+    retry_badcase_ratio_threshold = float(
+        case.inputs.get("retry_badcase_ratio_threshold", 6.0)
+    )
+
+    script = textwrap.dedent(
+        f"""\
+        import json
+        import math
+        from pathlib import Path
+
+        import numpy as np
+        import soundfile as sf
+        from voxcpm import VoxCPM
+
+        model = VoxCPM.from_pretrained({case.hf_id!r})
+        wav = model.generate(
+            text={prompt!r},
+            prompt_wav_path={prompt_wav_path!r},
+            prompt_text={prompt_text!r},
+            cfg_value={cfg_value!r},
+            inference_timesteps={inference_timesteps},
+            normalize={normalize!r},
+            denoise={denoise!r},
+            retry_badcase={retry_badcase!r},
+            retry_badcase_max_times={retry_badcase_max_times},
+            retry_badcase_ratio_threshold={retry_badcase_ratio_threshold!r},
+        )
+        audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+        sample_rate = int(
+            getattr(getattr(model, "tts_model", model), "sample_rate", 48000)
+        )
+        wav_path = Path({str(wav_path)!r})
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(wav_path), audio, sample_rate, subtype="FLOAT")
+        rms = float(math.sqrt(float(np.mean(np.square(audio))))) if audio.size else 0.0
+        result = {{
+            "cfg_value": {cfg_value!r},
+            "duration_s": float(audio.size / sample_rate) if sample_rate else 0.0,
+            "inference_timesteps": {inference_timesteps},
+            "num_samples": int(audio.size),
+            "rms": rms,
+            "sample_rate": sample_rate,
+            "wav_path": str(wav_path),
+        }}
+        json_path = Path({str(json_path)!r})
+        json_path.write_text(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(result, sort_keys=True))
+        """
+    )
+    return f"{python} - <<'PY'\n{script}PY"
+
+
+def _input_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _shell_quote(s: str) -> str:
