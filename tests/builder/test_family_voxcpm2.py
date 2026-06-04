@@ -171,10 +171,120 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
 
     message = str(error.value)
     assert "raw checkpoint sources are present for locenc, tslm, ralm, locdit, audiovae" in message
-    assert "native TRT builders are not implemented yet" in message
+    assert "native TRT builders are incomplete" in message
     assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
+    assert "component 'locenc' is not implemented yet" in message
+    assert "input binding 'text_utf8'" in message
+    assert "output binding 'local_text_features'" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
+
+
+def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    calls = []
+
+    def make_builder(component_name):
+        def _builder(ctx):
+            calls.append(
+                (
+                    ctx.spec.name,
+                    ctx.spec.engine_section,
+                    ctx.spec.input_artifact,
+                    ctx.spec.output_artifact,
+                    ctx.model_dir,
+                    ctx.precision,
+                    ctx.verbose,
+                    ctx.source.config_keys,
+                )
+            )
+            return f"{component_name}-plan".encode("ascii")
+
+        return _builder
+
+    fake_builders = {
+        spec.name: make_builder(spec.name)
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
+
+    sections = plugin.build_engine(
+        cfg,
+        weights,
+        max_cache_length=16,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert sections == {
+        spec.engine_section: f"{spec.name}-plan".encode("ascii")
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    assert calls == [
+        (
+            "locenc",
+            "locenc_engine_plan",
+            "text_utf8",
+            "local_text_features",
+            tmp_path,
+            "bf16",
+            True,
+            ("encoder_config", "patch_size", "feat_dim"),
+        ),
+        (
+            "tslm",
+            "tslm_engine_plan",
+            "local_text_features",
+            "semantic_lm_states",
+            tmp_path,
+            "bf16",
+            True,
+            ("lm_config", "max_length"),
+        ),
+        (
+            "ralm",
+            "ralm_engine_plan",
+            "semantic_lm_states",
+            "acoustic_residual_states",
+            tmp_path,
+            "bf16",
+            True,
+            (
+                "lm_config",
+                "residual_lm_num_layers",
+                "scalar_quantization_latent_dim",
+                "scalar_quantization_scale",
+            ),
+        ),
+        (
+            "locdit",
+            "locdit_engine_plan",
+            "acoustic_residual_states",
+            "audio_vae_latents",
+            tmp_path,
+            "bf16",
+            True,
+            ("dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
+        ),
+        (
+            "audiovae",
+            "audiovae_engine_plan",
+            "audio_vae_latents",
+            "waveform_f32",
+            tmp_path,
+            "bf16",
+            True,
+            (
+                "audio_vae_config",
+                "audio_vae_config.sample_rate",
+                "audio_vae_config.out_sample_rate",
+            ),
+        ),
+    ]
 
 
 def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):

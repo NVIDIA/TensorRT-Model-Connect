@@ -16,20 +16,17 @@ from typing import Any
 
 from ...checkpoint_mapper import WeightDict
 from ...config import ModelConfig
+from . import component_builders as voxcpm2_component_builders
 
 
 _DEFAULT_SAMPLE_RATE = 48000
 _DEFAULT_CFG_VALUE = 2.0
 _DEFAULT_INFERENCE_TIMESTEPS = 10
-_VOXCPM2_COMPONENTS = (
-    "locenc",
-    "tslm",
-    "ralm",
-    "locdit",
-    "audiovae",
+_VOXCPM2_COMPONENTS = tuple(
+    spec.name for spec in voxcpm2_component_builders.VOXCPM2_COMPONENT_SPECS
 )
 _VOXCPM2_ENGINE_SECTIONS = tuple(
-    f"{component}_engine_plan" for component in _VOXCPM2_COMPONENTS
+    spec.engine_section for spec in voxcpm2_component_builders.VOXCPM2_COMPONENT_SPECS
 )
 _VOXCPM2_PREBUILT_ENGINE_FILENAMES = {
     component: (
@@ -151,6 +148,7 @@ def _format_raw_component_sources(
 class VoxCPM2Plugin:
     name = "voxcpm2"
     runtime_strategy = "text_to_audio_voxcpm2"
+    component_builders = voxcpm2_component_builders.DEFAULT_COMPONENT_BUILDERS
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().replace("-", "_") in {"voxcpm2", "vox_cpm2"}
@@ -200,14 +198,25 @@ class VoxCPM2Plugin:
 
         raw_sources = weights.get("_voxcpm2_raw_component_sources", {})
         if isinstance(raw_sources, dict) and len(raw_sources) == len(_VOXCPM2_COMPONENTS):
-            raise NotImplementedError(
-                "VoxCPM2 raw checkpoint sources are present for "
-                f"{', '.join(_VOXCPM2_COMPONENTS)}, but native TRT builders are "
-                "not implemented yet. Builder inputs discovered: "
-                f"{_format_raw_component_sources(raw_sources)}. Full support still "
-                "requires LocEnc, TSLM, RALM, LocDiT, and AudioVAE builders plus "
-                "a native text-to-audio runtime that writes the TRT WAV artifact."
-            )
+            try:
+                return voxcpm2_component_builders.build_voxcpm2_component_plans(
+                    model_dir,
+                    config,
+                    raw_sources,
+                    precision=precision,
+                    verbose=verbose,
+                    builders=self.component_builders,
+                )
+            except NotImplementedError as exc:
+                raise NotImplementedError(
+                    "VoxCPM2 raw checkpoint sources are present for "
+                    f"{', '.join(_VOXCPM2_COMPONENTS)}, but native TRT builders "
+                    "are incomplete. Builder inputs discovered: "
+                    f"{_format_raw_component_sources(raw_sources)}. Full support "
+                    "still requires LocEnc, TSLM, RALM, LocDiT, and AudioVAE "
+                    "builders plus a native text-to-audio runtime that writes "
+                    f"the TRT WAV artifact. First incomplete builder: {exc}"
+                ) from exc
 
         missing = [
             component
