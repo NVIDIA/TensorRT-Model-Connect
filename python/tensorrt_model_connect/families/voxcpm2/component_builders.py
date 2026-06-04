@@ -40,6 +40,57 @@ class VoxCPM2ComponentBuildContext:
     def asset_paths(self) -> tuple[Path, ...]:
         return _resolve_model_files(self.model_dir, getattr(self.source, "asset_files", ()))
 
+    def load_safetensor(self, tensor_name: str) -> Any:
+        """Load one tensor from the component's safetensors checkpoint."""
+        if not self.weight_paths:
+            raise FileNotFoundError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} has no safetensors weight files"
+            )
+        from ...checkpoint_mapper import _load_tensor, _open_safetensors
+
+        return _load_tensor(_open_safetensors(self.model_dir), tensor_name)
+
+    def load_torch_checkpoint(self) -> Mapping[str, Any]:
+        """Load a PyTorch checkpoint for components that are not safetensors."""
+        if not self.weight_paths:
+            raise FileNotFoundError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} has no PyTorch checkpoint file"
+            )
+        if len(self.weight_paths) != 1:
+            raise ValueError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} expected one PyTorch checkpoint, got "
+                f"{len(self.weight_paths)}"
+            )
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} requires torch to load "
+                f"{self.weight_paths[0].name}"
+            ) from exc
+
+        try:
+            state = torch.load(
+                self.weight_paths[0],
+                map_location="cpu",
+                weights_only=True,
+            )
+        except TypeError:
+            state = torch.load(self.weight_paths[0], map_location="cpu")
+        if isinstance(state, Mapping) and isinstance(state.get("state_dict"), Mapping):
+            state = state["state_dict"]
+        if not isinstance(state, Mapping):
+            raise TypeError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} checkpoint loaded "
+                f"{type(state).__name__}, expected mapping"
+            )
+        return state
+
 
 VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
 

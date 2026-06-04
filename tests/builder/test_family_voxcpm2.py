@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 
+import numpy as np
 import pytest
+from safetensors.numpy import save_file
 
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.runtime_config import clear_for_testing, lookup
@@ -334,6 +338,55 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
         ("locdit", (tmp_path / "model.safetensors",), ()),
         ("audiovae", (tmp_path / "audiovae.pth",), ()),
     ]
+
+
+def test_voxcpm2_component_context_loads_checkpoint_inputs(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    save_file(
+        {"locenc.weight": np.array([1.0, 2.0], dtype=np.float32)},
+        tmp_path / "model.safetensors",
+    )
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    sources = weights["_voxcpm2_raw_component_sources"]
+    specs = {spec.name: spec for spec in component_builders.VOXCPM2_COMPONENT_SPECS}
+
+    locenc_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["locenc"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["locenc"],
+        precision="bf16",
+        verbose=False,
+    )
+    np.testing.assert_array_equal(
+        locenc_ctx.load_safetensor("locenc.weight"),
+        np.array([1.0, 2.0], dtype=np.float32),
+    )
+
+    def _fake_torch_load(path, *, map_location, weights_only):
+        assert path == tmp_path / "audiovae.pth"
+        assert map_location == "cpu"
+        assert weights_only is True
+        return {"state_dict": {"decoder.weight": np.array([3.0], dtype=np.float32)}}
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(load=_fake_torch_load))
+    audiovae_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["audiovae"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["audiovae"],
+        precision="bf16",
+        verbose=False,
+    )
+
+    state_dict = audiovae_ctx.load_torch_checkpoint()
+    np.testing.assert_array_equal(
+        state_dict["decoder.weight"],
+        np.array([3.0], dtype=np.float32),
+    )
 
 
 def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):
