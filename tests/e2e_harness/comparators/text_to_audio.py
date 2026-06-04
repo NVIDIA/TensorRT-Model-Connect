@@ -9,6 +9,7 @@ Compares TRT Bark-style audio generation output against reference with metrics:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from pathlib import Path
@@ -17,6 +18,37 @@ from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, Sta
 from tools import compare_wav_exact
 
 logger = logging.getLogger(__name__)
+
+
+def _write_exact_compare_sidecar(
+    trt_wav_path: str,
+    ref_wav_path: str,
+    exact_result: dict,
+) -> str:
+    """Persist exact WAV comparison payload next to the TRT WAV artifact."""
+    trt_path = Path(trt_wav_path)
+    ref_path = Path(ref_wav_path)
+    if not trt_path.parent.is_dir():
+        return ""
+
+    sidecar = trt_path.with_name("compare_wav_exact.json")
+    payload = {
+        "command": [
+            "python",
+            "tools/compare_wav_exact.py",
+            str(trt_path),
+            str(ref_path),
+        ],
+        "result": exact_result,
+    }
+    try:
+        sidecar.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("failed to write exact WAV compare sidecar: %s", exc)
+        return ""
+    return str(sidecar)
 
 
 def _compute_mel_spectrogram(samples, sample_rate: int = 24000, n_fft: int = 1024,
@@ -181,12 +213,21 @@ class TextToAudioComparator:
                     ),
                 )
 
+            sidecar_path = _write_exact_compare_sidecar(
+                trt_wav_path, ref_wav_path, exact_result
+            )
+
             for name, passed in exact_checks.items():
                 metrics[name] = MetricResult(
                     value=1.0 if passed else 0.0,
                     threshold=1.0,
                     operator="==",
                     passed=passed,
+                    note=(
+                        f"exact_compare_result={sidecar_path}"
+                        if sidecar_path and name == "waveform_exact_match"
+                        else ""
+                    ),
                 )
                 if not passed:
                     all_pass = False

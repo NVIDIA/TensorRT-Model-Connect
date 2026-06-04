@@ -182,6 +182,18 @@ def test_exact_waveform_mode_passes_identical_wavs(tmp_path):
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["sample_rate_exact"].passed
     assert result.metrics["waveform_exact_match"].passed
+    sidecar = tmp_path / "compare_wav_exact.json"
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["command"] == [
+        "python",
+        "tools/compare_wav_exact.py",
+        str(trt_wav),
+        str(ref_wav),
+    ]
+    assert payload["result"]["metrics"]["waveform_exact_match"] is True
+    assert result.metrics["waveform_exact_match"].note == (
+        f"exact_compare_result={sidecar}"
+    )
 
 
 def test_exact_waveform_mode_fails_sample_mismatch(tmp_path):
