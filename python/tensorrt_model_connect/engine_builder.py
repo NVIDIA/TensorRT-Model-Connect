@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -304,6 +305,44 @@ def _load_plugin_weights(
     if _call_supports_kwarg(plugin.load_weights, "precision"):
         kwargs["precision"] = precision
     return plugin.load_weights(model_dir, config, **kwargs)
+
+
+def _coerce_engine_sections(engine_result) -> tuple[bytes | None, list[BundleSection]]:
+    """Normalize plugin engine output to bundle sections.
+
+    Most family plugins return a single serialized engine plan. Sectioned
+    runtimes such as VoxCPM2 need multiple named primary engines and no generic
+    ``engine_plan``. Returning ``{section_name: plan_bytes}`` gives those
+    plugins a direct bundle path while preserving the existing byte contract.
+    """
+    if isinstance(engine_result, (bytes, bytearray, memoryview)):
+        data = bytes(engine_result)
+        return data, [BundleSection("engine_plan", data)]
+
+    if not isinstance(engine_result, Mapping):
+        raise TypeError(
+            "build_engine() must return bytes or a mapping of bundle section "
+            f"name to bytes, got {type(engine_result).__name__}"
+        )
+
+    sections: list[BundleSection] = []
+    for name, data in engine_result.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("build_engine() returned an invalid bundle section name")
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                "build_engine() section "
+                f"{name!r} must be bytes, got {type(data).__name__}"
+            )
+        sections.append(BundleSection(name, bytes(data)))
+    if not sections:
+        raise ValueError("build_engine() returned no bundle engine sections")
+
+    engine_plan = next(
+        (section.data for section in sections if section.name == "engine_plan"),
+        None,
+    )
+    return engine_plan, sections
 
 
 def _is_hf_model_dir(path: Path) -> bool:
@@ -963,8 +1002,9 @@ def build_bundle(
         )
     )
 
-    engine_plan: bytes
+    engine_plan: bytes | None = None
     prefill_engine_plan: bytes | None = None
+    primary_engine_sections: list[BundleSection] = []
     tp_engine_plans: dict[int, bytes] = {}
     actual_decoder_engine_layout = "single"
     engine_t0 = time.monotonic()
@@ -1020,7 +1060,8 @@ def build_bundle(
             print(f"[trtmc build] Building TRT engine (cache={max_cache_length}) ...",
                   file=sys.stderr)
             role = "dual_profile" if decoder_engine_layout == "dual_profile" else "decode"
-            engine_plan = _build_plugin_engine_with_role(role)
+            engine_result = _build_plugin_engine_with_role(role)
+            engine_plan, primary_engine_sections = _coerce_engine_sections(engine_result)
             if decoder_engine_layout == "dual_profile":
                 actual_decoder_engine_layout = "dual_profile"
     finally:
@@ -1037,8 +1078,19 @@ def build_bundle(
         print(f"[trtmc-build] Tensor-parallel engines built [{engine_elapsed:.1f}s] "
               f"({total_mb:.1f} MB total)", file=sys.stderr)
     else:
-        print(f"[trtmc build] Engine built [{engine_elapsed:.1f}s] "
-              f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
+        if primary_engine_sections and engine_plan is None:
+            total_mb = sum(len(section.data) for section in primary_engine_sections) / (
+                1024 * 1024
+            )
+            print(
+                f"[trtmc build] Engine sections built [{engine_elapsed:.1f}s] "
+                f"({len(primary_engine_sections)} sections, {total_mb:.1f} MB total)",
+                file=sys.stderr,
+            )
+        else:
+            assert engine_plan is not None
+            print(f"[trtmc build] Engine built [{engine_elapsed:.1f}s] "
+                  f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
     # 4b. Build vision engine (optional, VL models only)
     vision_plan = None
@@ -1140,13 +1192,17 @@ def build_bundle(
             BundleSection(rank_engine_section(rank), plan)
             for rank, plan in sorted(tp_engine_plans.items())
         ]
+    elif primary_engine_sections:
+        sections = list(primary_engine_sections)
     else:
         # For split decoder bundles, keep ``engine_plan`` as the decode-only
         # engine for compatibility with existing tools and add the prefill engine
         # under a role-specific section.
+        if engine_plan is None:
+            raise RuntimeError("build_engine() did not produce any engine plan")
         sections = [BundleSection("engine_plan", engine_plan)]
-        if prefill_engine_plan is not None:
-            sections.append(BundleSection("prefill_engine_plan", prefill_engine_plan))
+    if prefill_engine_plan is not None:
+        sections.append(BundleSection("prefill_engine_plan", prefill_engine_plan))
 
     # Add vision engine section if present
     if vision_plan is not None:

@@ -382,6 +382,51 @@ class TestBuildBundleOrchestration:
                             assert engine_section.name == "engine_plan"
                             assert engine_section.data == b"FAKE_ENGINE_PLAN_DATA"
 
+    def test_build_engine_can_return_named_primary_sections(self, tmp_path):
+        """Sectioned runtimes can package primary engines without engine_plan."""
+        model_dir = self._make_model_dir(tmp_path, model_type="voxcpm2")
+        output_path = str(tmp_path / "voxcpm2.trtfb")
+
+        component_sections = {
+            "locenc_engine_plan": b"LOCENC",
+            "tslm_engine_plan": b"TSLM",
+            "ralm_engine_plan": b"RALM",
+            "locdit_engine_plan": b"LOCDIT",
+            "audiovae_engine_plan": b"AUDIOVAE",
+        }
+
+        mock_plugin = MagicMock()
+        mock_plugin.name = "voxcpm2"
+        mock_plugin.runtime_strategy = "text_to_audio_voxcpm2"
+        mock_plugin.load_weights.return_value = {}
+        mock_plugin.build_engine.return_value = component_sections
+
+        del mock_plugin.build_vision_engine
+        del mock_plugin.build_extra_engines
+        del mock_plugin.embed_input
+        del mock_plugin.get_vl_config
+        del mock_plugin.get_segmentation_config
+        del mock_plugin.get_audio_config
+        del mock_plugin.get_bundle_config_overrides
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                   return_value=mock_plugin):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                       return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                           return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                            build_bundle(str(model_dir), output_path)
+
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+
+        assert [section.name for section in sections[:5]] == list(component_sections)
+        assert "engine_plan" not in section_map
+        assert section_map["locenc_engine_plan"] == b"LOCENC"
+        assert section_map["audiovae_engine_plan"] == b"AUDIOVAE"
+
     def test_max_cache_length_forwarded(self, tmp_path):
         """max_cache_length is forwarded to plugin.build_engine."""
         model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
