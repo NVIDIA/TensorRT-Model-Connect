@@ -43,13 +43,13 @@ inline constexpr VoxCPM2TensorContract kVoxCPM2AudioFeatsTensor{
     "text_steps,patch_size,feat_dim"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2LocalTextFeaturesTensor{
     "local_text_features", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
-    "text_steps,feat_dim"};
+    "text_steps,lm_hidden_size"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2SemanticLmStatesTensor{
     "semantic_lm_states", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "lm_steps,lm_hidden_size"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2ResidualHiddenTensor{
     "residual_hidden", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
-    "lm_steps,residual_hidden_size"};
+    "lm_steps,lm_hidden_size"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2AudioVaeLatentsTensor{
     "audio_vae_latents", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "audio_frames,audio_vae_latent_dim"};

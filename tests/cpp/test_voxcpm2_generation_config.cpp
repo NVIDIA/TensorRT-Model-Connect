@@ -143,7 +143,8 @@ void test_generation_plan_description_includes_stage_order_and_artifact() {
     check(description.find("input=float32|bfloat16[text_steps,patch_size,feat_dim]") !=
               std::string::npos,
           "plan description includes LocEnc input tensor contract");
-    check(description.find("output=float32|bfloat16[text_steps,feat_dim]") != std::string::npos,
+    check(description.find("output=float32|bfloat16[text_steps,lm_hidden_size]") !=
+              std::string::npos,
           "plan description includes LocEnc output tensor contract");
     check(description.find("-> tslm(") != std::string::npos,
           "plan description includes TSLM order");

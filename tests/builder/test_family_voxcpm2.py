@@ -251,11 +251,7 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     )
     assert sources["ralm"].config_values["residual_lm_num_layers"] == 8
     assert sources["ralm"].config_values["scalar_quantization_latent_dim"] == 512
-    assert sources["ralm"].state_dict_prefixes == (
-        "fusion_concat_proj.",
-        "residual_lm.",
-        "res_to_dit_proj.",
-    )
+    assert sources["ralm"].state_dict_prefixes == ("fusion_concat_proj.", "residual_lm.")
     assert sources["ralm"].asset_files == ()
     assert sources["locdit"].config_keys == (
         "dit_config",
@@ -265,7 +261,11 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     )
     assert sources["locdit"].config_values["dit_config"]["hidden_dim"] == 1024
     assert sources["locdit"].config_values["dit_config.cfm_config"]["solver"] == "euler"
-    assert sources["locdit"].state_dict_prefixes == ("lm_to_dit_proj.", "feat_decoder.")
+    assert sources["locdit"].state_dict_prefixes == (
+        "lm_to_dit_proj.",
+        "res_to_dit_proj.",
+        "feat_decoder.",
+    )
     assert sources["locdit"].asset_files == ()
     assert sources["audiovae"].config_values["audio_vae_config"]["out_sample_rate"] == 48000
     assert sources["audiovae"].weight_files == ("audiovae.pth",)
@@ -285,7 +285,7 @@ def test_voxcpm2_component_specs_include_tensor_contracts():
     assert specs[0].output_tensor.name == "local_text_features"
     assert specs[0].output_tensor.dtype_contract == ("float32", "bfloat16")
     assert specs[0].output_tensor.rank == 2
-    assert specs[0].output_tensor.symbolic_shape == ("text_steps", "feat_dim")
+    assert specs[0].output_tensor.symbolic_shape == ("text_steps", "lm_hidden_size")
     assert specs[4].input_tensor.name == "audio_vae_latents"
     assert specs[4].input_tensor.rank == 2
     assert specs[4].output_tensor.name == "waveform_f32"
@@ -340,7 +340,7 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
     ] == [
         "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)",
         "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
-        "torch.nn.Linear(lm_to_dit_proj.)",
+        "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)",
     ]
     assert specs["locdit"].required_side_inputs == ("lm_hidden",)
     assert specs["locdit"].required_control_inputs == ("cfg_value", "inference_timesteps")
@@ -357,6 +357,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     fake_builders = dict(component_builders.DEFAULT_COMPONENT_BUILDERS)
     fake_builders["locenc"] = lambda ctx: b"LOCENC-TRT"
     fake_builders["tslm"] = lambda ctx: b"TSLM-TRT"
+    fake_builders["ralm"] = lambda ctx: b"RALM-TRT"
     monkeypatch.setattr(plugin, "component_builders", fake_builders)
 
     with pytest.raises(NotImplementedError) as error:
@@ -368,17 +369,18 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "assets: tokenization_voxcpm2.py, tokenizer_config.json" in message
     assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
-    assert "still requires RALM and LocDiT builders" in message
-    assert "component 'ralm' is not implemented yet" in message
-    assert "input binding 'semantic_lm_states'" in message
-    assert "output binding 'residual_hidden'" in message
-    assert "semantic_lm_states:float32|bfloat16" in message
+    assert "still requires a LocDiT builder" in message
+    assert "component 'locdit' is not implemented yet" in message
+    assert "input binding 'residual_hidden'" in message
+    assert "output binding 'audio_vae_latents'" in message
+    assert "residual_hidden:float32|bfloat16" in message
     assert "Prepared safetensors checkpoint inputs with 3 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
     assert "Upstream handoff:" in message
-    assert "voxcpm.modules.minicpm4.MiniCPMModel(residual_lm.)" in message
-    assert "runtime inputs: semantic_lm_states, audio_mask, local_text_features" in message
-    assert "runtime outputs: residual_hidden" in message
+    assert "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)" in message
+    assert "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)" in message
+    assert "runtime inputs: lm_hidden, residual_hidden, feat_cond" in message
+    assert "runtime outputs: audio_vae_latents" in message
     assert "required_side=text_tokens,text_mask,audio_mask" in message
     assert "Runtime binding contract:" in message
     assert "ralm(semantic_lm_states=>residual_hidden" in message
@@ -497,6 +499,103 @@ def test_voxcpm2_tslm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     assert captured["input_shapes"] == ((3, 2), (3,), (3,), (3,))
     assert captured["output_shapes"] == ((3, 2), (3, 2), (3, 2))
     assert captured["output_dtypes"] == (torch.float32, torch.float32, torch.float32)
+
+
+def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    class FakeMiniCPM4Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeMiniCPMModel(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+        def load_state_dict(self, state_dict, strict=True):
+            assert "dummy" in state_dict
+            return torch.nn.modules.module._IncompatibleKeys([], [])
+
+        def forward(self, *, inputs_embeds, is_causal):
+            assert is_causal is True
+            return inputs_embeds + 1.0, ()
+
+    voxcpm_mod = types.ModuleType("voxcpm")
+    voxcpm_modules_mod = types.ModuleType("voxcpm.modules")
+    minicpm_mod = types.ModuleType("voxcpm.modules.minicpm4")
+    minicpm_mod.MiniCPM4Config = FakeMiniCPM4Config
+    minicpm_mod.MiniCPMModel = FakeMiniCPMModel
+    monkeypatch.setitem(sys.modules, "voxcpm", voxcpm_mod)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", voxcpm_modules_mod)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", minicpm_mod)
+
+    save_file(
+        {
+            "fusion_concat_proj.weight": np.ones((2, 4), dtype=np.float32),
+            "fusion_concat_proj.bias": np.zeros(2, dtype=np.float32),
+            "residual_lm.dummy": np.array([1.0], dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architecture": "voxcpm2",
+                "lm_config": {"hidden_size": 2, "vocab_size": 128},
+                "residual_lm_num_layers": 4,
+                "residual_lm_no_rope": True,
+                "max_length": 8,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+    source = types.SimpleNamespace(
+        config_values={
+            "lm_config": {"hidden_size": 2, "vocab_size": 128},
+            "residual_lm_num_layers": 4,
+            "max_length": 8,
+        },
+        weight_files=("model.safetensors",),
+        state_dict_prefixes=("fusion_concat_proj.", "residual_lm."),
+        asset_files=(),
+    )
+    captured = {}
+
+    def fake_compile(wrapper, example_args, *, verbose):
+        output = wrapper(*example_args)
+        captured["wrapper"] = wrapper
+        captured["verbose"] = verbose
+        captured["input_shapes"] = tuple(tuple(arg.shape) for arg in example_args)
+        captured["output_shape"] = tuple(output.shape)
+        captured["output_dtype"] = output.dtype
+        return b"RALM-PLAN"
+
+    monkeypatch.setattr(component_builders, "_compile_voxcpm2_ralm_onnx", fake_compile)
+
+    plan = component_builders.build_ralm_engine(
+        component_builders.VoxCPM2ComponentBuildContext(
+            spec=component_builders.VOXCPM2_COMPONENT_SPECS[2],
+            model_dir=tmp_path,
+            config=cfg,
+            source=source,
+            precision="fp32",
+            verbose=True,
+            max_cache_length=3,
+        )
+    )
+
+    assert plan == b"RALM-PLAN"
+    assert captured["verbose"] is True
+    assert captured["input_shapes"] == ((3, 2), (3,), (3, 2))
+    assert captured["output_shape"] == (3, 2)
+    assert captured["output_dtype"] == torch.float32
+    residual_config = captured["wrapper"].residual_lm.config.kwargs
+    assert residual_config["num_hidden_layers"] == 4
+    assert residual_config["vocab_size"] == 0
+    assert residual_config["no_rope"] is True
 
 
 def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
@@ -1103,7 +1202,7 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
     ] == [
         "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)",
         "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
-        "torch.nn.Linear(lm_to_dit_proj.)",
+        "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)",
     ]
     assert locdit_inputs.checkpoint_kind == "safetensors"
     assert locdit_inputs.weight_paths == (tmp_path / "model.safetensors",)
@@ -1111,6 +1210,7 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
     assert locdit_inputs.state_dict_keys == (
         "feat_decoder.estimator.weight",
         "lm_to_dit_proj.weight",
+        "res_to_dit_proj.weight",
     )
     assert locdit_inputs.config_values["dit_config"]["hidden_dim"] == 1024
 

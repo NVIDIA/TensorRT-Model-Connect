@@ -2,8 +2,9 @@
 
 VoxCPM2 is assembled from five native stages. This module gives each stage a
 dedicated TensorRT builder entry point and keeps the expected runtime bindings
-next to the Python build surface. LocEnc, TSLM, and AudioVAE have executable
-upstream-module export paths; RALM and LocDiT still need native graph builders.
+next to the Python build surface. LocEnc, TSLM, RALM, and AudioVAE have
+executable upstream-module export paths; LocDiT still needs a native graph
+builder.
 """
 
 from __future__ import annotations
@@ -241,7 +242,7 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         "local_text_features",
         ("float32", "bfloat16"),
         2,
-        ("text_steps", "feat_dim"),
+        ("text_steps", "lm_hidden_size"),
     ),
     "semantic_lm_states": VoxCPM2TensorSpec(
         "semantic_lm_states",
@@ -253,7 +254,7 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         "residual_hidden",
         ("float32", "bfloat16"),
         2,
-        ("lm_steps", "residual_hidden_size"),
+        ("lm_steps", "lm_hidden_size"),
     ),
     "audio_vae_latents": VoxCPM2TensorSpec(
         "audio_vae_latents",
@@ -349,7 +350,7 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
             VoxCPM2UpstreamModuleRef(
                 "torch.nn",
                 "Linear",
-                ("fusion_concat_proj.", "res_to_dit_proj."),
+                ("fusion_concat_proj.",),
             ),
         ),
         ("semantic_lm_states", "audio_mask", "local_text_features"),
@@ -370,7 +371,7 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
             VoxCPM2UpstreamModuleRef(
                 "torch.nn",
                 "Linear",
-                ("lm_to_dit_proj.",),
+                ("lm_to_dit_proj.", "res_to_dit_proj."),
             ),
         ),
         ("lm_hidden", "residual_hidden", "feat_cond", "cfg_value", "inference_timesteps"),
@@ -704,7 +705,85 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
 
 
 def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.minicpm4 import MiniCPM4Config, MiniCPMModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 RALM native TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    lm_config = prepared.config_values.get("lm_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 RALM builder expected lm_config in component config values")
+
+    hidden_size = int(lm_config.get("hidden_size", 2048))
+    state = ctx.load_safetensor_group(("fusion_concat_proj.", "residual_lm."))
+    residual_lm = MiniCPMModel(
+        MiniCPM4Config(**_residual_lm_config_values(ctx, prepared))
+    )
+    residual_lm.load_state_dict(
+        _to_torch_state_dict(torch, state, "residual_lm.", dtype=compute_dtype),
+        strict=True,
+    )
+    residual_lm.to(dtype=compute_dtype)
+    residual_lm.eval()
+
+    fusion_concat_proj = torch.nn.Linear(hidden_size * 2, hidden_size)
+    fusion_concat_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "fusion_concat_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    fusion_concat_proj.to(dtype=compute_dtype)
+    fusion_concat_proj.eval()
+
+    class RALMWrapper(torch.nn.Module):
+        def __init__(self, residual_lm_module: Any, fusion_module: Any) -> None:
+            super().__init__()
+            self.residual_lm = residual_lm_module
+            self.fusion_concat_proj = fusion_module
+
+        def forward(
+            self,
+            semantic_lm_states: Any,
+            audio_mask: Any,
+            local_text_features: Any,
+        ) -> Any:
+            semantic_states = semantic_lm_states.unsqueeze(0).to(dtype=compute_dtype)
+            a_mask = audio_mask.unsqueeze(0).to(dtype=compute_dtype)
+            local_features = local_text_features.unsqueeze(0).to(dtype=compute_dtype)
+            residual_inputs = self.fusion_concat_proj(
+                torch.cat(
+                    (semantic_states, a_mask.unsqueeze(-1) * local_features),
+                    dim=-1,
+                )
+            )
+            residual_outputs, _ = self.residual_lm(
+                inputs_embeds=residual_inputs,
+                is_causal=True,
+            )
+            residual_outputs = residual_outputs.to(dtype=compute_dtype)
+            residual_hidden = torch.cat(
+                (
+                    torch.zeros_like(residual_outputs[:, 0:1, :]),
+                    residual_outputs[:, :-1, :],
+                ),
+                dim=1,
+            )
+            return residual_hidden.squeeze(0)
+
+    wrapper = RALMWrapper(residual_lm, fusion_concat_proj)
+    wrapper.eval()
+    text_steps = _ralm_export_text_steps(ctx)
+    example_args = (
+        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+        torch.zeros((text_steps,), dtype=compute_dtype),
+        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+    )
+    return _compile_voxcpm2_ralm_onnx(wrapper, example_args, verbose=ctx.verbose)
 
 
 def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
@@ -750,6 +829,33 @@ def _tslm_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
     return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
 
 
+def _ralm_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
+    if ctx.max_cache_length > 0:
+        return max(1, int(ctx.max_cache_length))
+    return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
+
+
+def _residual_lm_config_values(
+    ctx: VoxCPM2ComponentBuildContext,
+    prepared: VoxCPM2PreparedComponentInputs,
+) -> dict[str, Any]:
+    lm_config = prepared.config_values.get("lm_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 RALM builder expected lm_config in component config values")
+
+    values = copy.deepcopy(dict(lm_config))
+    values["num_hidden_layers"] = int(
+        prepared.config_values.get(
+            "residual_lm_num_layers",
+            values.get("num_hidden_layers", 8),
+        )
+    )
+    values["vocab_size"] = 0
+    raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
+    values["no_rope"] = bool(raw_config.get("residual_lm_no_rope", values.get("no_rope", False)))
+    return values
+
+
 def _compile_voxcpm2_tslm_onnx(
     wrapper: Any,
     example_args: tuple[Any, ...],
@@ -763,6 +869,23 @@ def _compile_voxcpm2_tslm_onnx(
         example_args,
         input_names=["local_text_features", "text_tokens", "text_mask", "audio_mask"],
         output_names=["semantic_lm_states", "lm_hidden", "stop_logits"],
+        verbose=verbose,
+    )
+
+
+def _compile_voxcpm2_ralm_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=["semantic_lm_states", "audio_mask", "local_text_features"],
+        output_names=["residual_hidden"],
         verbose=verbose,
     )
 

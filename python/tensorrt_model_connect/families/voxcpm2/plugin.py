@@ -2,10 +2,9 @@
 
 VoxCPM2 is a tokenizer-free diffusion/autoregressive TTS stack. This plugin
 registers the model family and exposes the generation defaults used by the E2E
-contract. Full TRT export still requires dedicated builders for RALM and
-LocDiT; LocEnc, TSLM, and AudioVAE already have raw upstream-module export
-paths. The build boundary fails explicitly until every required component engine
-exists.
+contract. Full TRT export still requires a dedicated LocDiT builder; LocEnc,
+TSLM, RALM, and AudioVAE already have raw upstream-module export paths. The
+build boundary fails explicitly until every required component engine exists.
 """
 
 from __future__ import annotations
@@ -63,8 +62,8 @@ _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
 _VOXCPM2_RAW_COMPONENT_STATE_PREFIXES = {
     "locenc": ("feat_encoder.", "enc_to_lm_proj."),
     "tslm": ("base_lm.", "fsq_layer.", "stop_proj.", "stop_head."),
-    "ralm": ("fusion_concat_proj.", "residual_lm.", "res_to_dit_proj."),
-    "locdit": ("lm_to_dit_proj.", "feat_decoder."),
+    "ralm": ("fusion_concat_proj.", "residual_lm."),
+    "locdit": ("lm_to_dit_proj.", "res_to_dit_proj.", "feat_decoder."),
     "audiovae": (),
 }
 _VOXCPM2_TOKENIZER_ASSET_FILES = (
@@ -289,7 +288,7 @@ class VoxCPM2Plugin:
                     f"{', '.join(raw_sources)}, but native TRT builders "
                     "are incomplete. Builder inputs discovered: "
                     f"{_format_raw_component_sources(raw_sources)}. Full support "
-                    "still requires RALM and LocDiT builders "
+                    "still requires a LocDiT builder "
                     "plus a native text-to-audio runtime that writes the TRT "
                     "WAV artifact. Runtime binding contract: "
                     f"{voxcpm2_component_builders.describe_voxcpm2_runtime_contracts()}. "
@@ -310,7 +309,7 @@ class VoxCPM2Plugin:
             "native component plans for LocEnc, TSLM, RALM, LocDiT, and "
             "AudioVAE plus a native text-to-audio runtime that consumes "
             "audio_voxcpm2 settings. This build can package prebuilt native "
-            "component plans and can build LocEnc, TSLM, and AudioVAE from raw "
+            "component plans and can build LocEnc, TSLM, RALM, and AudioVAE from raw "
             "checkpoint sources, but is missing artifacts for "
             f"{', '.join(missing)} under {model_dir}. Expected filenames: "
             f"{expected}."
