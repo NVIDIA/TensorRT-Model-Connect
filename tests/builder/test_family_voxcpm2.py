@@ -140,13 +140,23 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
 
     assert tuple(sources) == ("locenc", "tslm", "ralm", "locdit", "audiovae")
     assert sources["locenc"].config_keys == ("encoder_config", "patch_size", "feat_dim")
+    assert sources["locenc"].config_values["encoder_config"]["hidden_dim"] == 1024
+    assert sources["locenc"].config_values["patch_size"] == 4
+    assert sources["locenc"].config_values["feat_dim"] == 64
     assert sources["locenc"].weight_files == ("model.safetensors",)
+    assert sources["tslm"].config_values["lm_config"]["hidden_size"] == 2048
+    assert sources["tslm"].config_values["max_length"] == 8192
+    assert sources["ralm"].config_values["residual_lm_num_layers"] == 8
+    assert sources["ralm"].config_values["scalar_quantization_latent_dim"] == 512
     assert sources["locdit"].config_keys == (
         "dit_config",
         "dit_config.cfm_config",
         "patch_size",
         "feat_dim",
     )
+    assert sources["locdit"].config_values["dit_config"]["hidden_dim"] == 1024
+    assert sources["locdit"].config_values["dit_config.cfm_config"]["solver"] == "euler"
+    assert sources["audiovae"].config_values["audio_vae_config"]["out_sample_rate"] == 48000
     assert sources["audiovae"].weight_files == ("audiovae.pth",)
 
 

@@ -9,6 +9,7 @@ until those engines exist.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ class VoxCPM2RawComponentSource:
     """Raw checkpoint inputs that a future native component builder consumes."""
 
     config_keys: tuple[str, ...]
+    config_values: dict[str, Any]
     weight_files: tuple[str, ...]
 
 
@@ -102,6 +104,13 @@ def _has_raw_config_key(raw_config: dict[str, Any], key: str) -> bool:
     return True
 
 
+def _raw_config_get(raw_config: dict[str, Any], key: str) -> Any:
+    value: Any = raw_config
+    for part in key.split("."):
+        value = value[part]
+    return copy.deepcopy(value)
+
+
 def _find_raw_component_sources(
     model_dir: Path, config: ModelConfig
 ) -> dict[str, VoxCPM2RawComponentSource]:
@@ -121,6 +130,9 @@ def _find_raw_component_sources(
 
         sources[component] = VoxCPM2RawComponentSource(
             config_keys=config_keys,
+            config_values={
+                key: _raw_config_get(raw_config, key) for key in config_keys
+            },
             weight_files=weight_files,
         )
     return sources
