@@ -87,12 +87,12 @@ void test_generation_plan_preserves_acceptance_artifact_name() {
     check(std::string(plan.stages[4].name) == "audiovae", "last VoxCPM2 stage is AudioVAE");
     check(std::string(plan.stages[4].output_artifact) == "waveform_f32",
           "AudioVAE produces float waveform");
-    check(std::string(plan.stages[0].input_tensor.name) == "text_utf8",
-          "LocEnc consumes UTF-8 byte tensor");
-    check(plan.stages[0].input_tensor.rank == 1, "LocEnc text input is rank 1");
+    check(std::string(plan.stages[0].input_tensor.name) == "audio_feats",
+          "LocEnc consumes audio feature tensor");
+    check(plan.stages[0].input_tensor.rank == 3, "LocEnc audio feature input is rank 3");
     check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
-              plan.stages[0].input_tensor.dtype_contract)) == "int8",
-          "LocEnc text input is int8 bytes");
+              plan.stages[0].input_tensor.dtype_contract)) == "float32|bfloat16",
+          "LocEnc audio feature input is floating point");
     check(std::string(plan.stages[0].output_tensor.name) == "local_text_features",
           "LocEnc produces local text feature tensor");
     check(plan.stages[0].output_tensor.rank == 2, "LocEnc features are rank 2");
@@ -117,6 +117,8 @@ void test_generation_plan_preserves_acceptance_artifact_name() {
     check(std::string(plan.output_wav_artifact) == "trt_output.wav",
           "TRT output WAV artifact name is stable");
     check(plan.config.sample_rate == 48000, "plan carries output sample rate");
+    check(plan.config.patch_size == 4, "plan carries LocEnc patch size");
+    check(plan.config.feat_dim == 64, "plan carries LocEnc feature dimension");
 }
 
 void test_generation_plan_description_includes_stage_order_and_artifact() {
@@ -125,9 +127,10 @@ void test_generation_plan_description_includes_stage_order_and_artifact() {
     const auto description =
         trtmc::runtime::builders::audio::describe_voxcpm2_generation_plan(plan);
 
-    check(description.find("locenc(text_utf8=>local_text_features") != std::string::npos,
+    check(description.find("locenc(audio_feats=>local_text_features") != std::string::npos,
           "plan description includes LocEnc input/output");
-    check(description.find("input=int8[utf8_bytes]") != std::string::npos,
+    check(description.find("input=float32|bfloat16[text_steps,patch_size,feat_dim]") !=
+              std::string::npos,
           "plan description includes LocEnc input tensor contract");
     check(description.find("output=float32|bfloat16[text_steps,feat_dim]") != std::string::npos,
           "plan description includes LocEnc output tensor contract");

@@ -143,6 +143,8 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
     assert audio_cfg["reference_sample_rate"] == 16000
     assert audio_cfg["voxcpm2_cfg_value"] == 2.0
     assert audio_cfg["voxcpm2_inference_timesteps"] == 10
+    assert audio_cfg["voxcpm2_patch_size"] == 4
+    assert audio_cfg["voxcpm2_feat_dim"] == 64
 
 
 def test_voxcpm2_audio_defaults_follow_nested_audio_vae_config(tmp_path):
@@ -218,18 +220,19 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     sources = weights["_voxcpm2_raw_component_sources"]
 
     assert tuple(sources) == ("locenc", "tslm", "ralm", "locdit", "audiovae")
-    assert sources["locenc"].config_keys == ("encoder_config", "patch_size", "feat_dim")
+    assert sources["locenc"].config_keys == (
+        "lm_config",
+        "encoder_config",
+        "patch_size",
+        "feat_dim",
+    )
+    assert sources["locenc"].config_values["lm_config"]["hidden_size"] == 2048
     assert sources["locenc"].config_values["encoder_config"]["hidden_dim"] == 1024
     assert sources["locenc"].config_values["patch_size"] == 4
     assert sources["locenc"].config_values["feat_dim"] == 64
     assert sources["locenc"].weight_files == ("model.safetensors",)
     assert sources["locenc"].state_dict_prefixes == ("feat_encoder.", "enc_to_lm_proj.")
-    assert sources["locenc"].asset_files == (
-        "tokenization_voxcpm2.py",
-        "tokenizer_config.json",
-        "tokenizer.json",
-        "special_tokens_map.json",
-    )
+    assert sources["locenc"].asset_files == ()
     assert sources["tslm"].config_values["lm_config"]["hidden_size"] == 2048
     assert sources["tslm"].config_values["max_length"] == 8192
     assert sources["tslm"].state_dict_prefixes == (
@@ -238,7 +241,12 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
         "stop_proj.",
         "stop_head.",
     )
-    assert sources["tslm"].asset_files == sources["locenc"].asset_files
+    assert sources["tslm"].asset_files == (
+        "tokenization_voxcpm2.py",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "special_tokens_map.json",
+    )
     assert sources["ralm"].config_values["residual_lm_num_layers"] == 8
     assert sources["ralm"].config_values["scalar_quantization_latent_dim"] == 512
     assert sources["ralm"].state_dict_prefixes == (
@@ -268,10 +276,10 @@ def test_voxcpm2_component_specs_include_tensor_contracts():
 
     specs = component_builders.VOXCPM2_COMPONENT_SPECS
 
-    assert specs[0].input_tensor.name == "text_utf8"
-    assert specs[0].input_tensor.dtype_contract == ("int8",)
-    assert specs[0].input_tensor.rank == 1
-    assert specs[0].input_tensor.symbolic_shape == ("utf8_bytes",)
+    assert specs[0].input_tensor.name == "audio_feats"
+    assert specs[0].input_tensor.dtype_contract == ("float32", "bfloat16")
+    assert specs[0].input_tensor.rank == 3
+    assert specs[0].input_tensor.symbolic_shape == ("text_steps", "patch_size", "feat_dim")
     assert specs[0].output_tensor.name == "local_text_features"
     assert specs[0].output_tensor.dtype_contract == ("float32", "bfloat16")
     assert specs[0].output_tensor.rank == 2
@@ -336,11 +344,15 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
     assert specs["audiovae"].upstream_outputs == ("waveform_f32",)
 
 
-def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
+def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
     from tensorrt_model_connect.families.voxcpm2.plugin import plugin
 
     cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
     weights = plugin.load_weights(str(tmp_path), cfg)
+    fake_builders = dict(component_builders.DEFAULT_COMPONENT_BUILDERS)
+    fake_builders["locenc"] = lambda ctx: b"LOCENC-TRT"
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
 
     with pytest.raises(NotImplementedError) as error:
         plugin.build_engine(cfg, weights, max_cache_length=16)
@@ -351,16 +363,16 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     assert "assets: tokenization_voxcpm2.py, tokenizer_config.json" in message
     assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
-    assert "component 'locenc' is not implemented yet" in message
-    assert "input binding 'text_utf8'" in message
-    assert "output binding 'local_text_features'" in message
-    assert "text_utf8:int8[utf8_bytes] -> local_text_features:float32|bfloat16" in message
+    assert "component 'tslm' is not implemented yet" in message
+    assert "input binding 'local_text_features'" in message
+    assert "output binding 'semantic_lm_states'" in message
+    assert "local_text_features:float32|bfloat16" in message
     assert "Prepared safetensors checkpoint inputs with 2 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
     assert "Upstream handoff:" in message
-    assert "voxcpm.modules.locenc.VoxCPMLocEnc(feat_encoder.)" in message
-    assert "runtime inputs: audio_feats" in message
-    assert "runtime outputs: feat_embed, local_text_features" in message
+    assert "voxcpm.modules.minicpm4.MiniCPMModel(base_lm.)" in message
+    assert "runtime inputs: text_tokens, text_mask, local_text_features, audio_mask" in message
+    assert "runtime outputs: semantic_lm_states, lm_hidden, stop_logits" in message
     assert "Runtime binding contract:" in message
     assert "ralm(semantic_lm_states=>acoustic_residual_states" in message
     assert "required_side=local_text_features" in message
@@ -421,19 +433,14 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
         (
             "locenc",
             "locenc_engine_plan",
-            "text_utf8",
+            "audio_feats",
             "local_text_features",
             tmp_path,
             "bf16",
             True,
             16,
-            ("encoder_config", "patch_size", "feat_dim"),
-            (
-                "tokenization_voxcpm2.py",
-                "tokenizer_config.json",
-                "tokenizer.json",
-                "special_tokens_map.json",
-            ),
+            ("lm_config", "encoder_config", "patch_size", "feat_dim"),
+            (),
         ),
         (
             "tslm",
@@ -505,7 +512,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
         tmp_path / "special_tokens_map.json",
     )
     assert path_calls == [
-        ("locenc", (tmp_path / "model.safetensors",), tokenizer_asset_paths),
+        ("locenc", (tmp_path / "model.safetensors",), ()),
         ("tslm", (tmp_path / "model.safetensors",), tokenizer_asset_paths),
         ("ralm", (tmp_path / "model.safetensors",), ()),
         ("locdit", (tmp_path / "model.safetensors",), ()),
@@ -548,6 +555,160 @@ def test_voxcpm2_raw_checkpoint_reuses_partial_prebuilt_plans(tmp_path, monkeypa
         "audiovae_engine_plan": b"BUILT-audiovae",
     }
     assert calls == ["ralm", "locdit", "audiovae"]
+
+
+def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
+    from tensorrt_model_connect import checkpoint_mapper
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    class FakeTorchModule:
+        def __init__(self):
+            self.eval_called = False
+            self.dtype = None
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+        def to(self, *, dtype):
+            self.dtype = dtype
+            return self
+
+    class FakeTensor:
+        def __init__(self, shape, dtype):
+            self.shape = tuple(shape)
+            self.dtype = dtype
+
+    class FakeMiniCPM4Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.hidden_size = kwargs["hidden_size"]
+
+    class FakeLocEnc(FakeTorchModule):
+        def __init__(self, config, *, input_dim):
+            super().__init__()
+            self.config = config
+            self.input_dim = input_dim
+            self.loaded = None
+            self.strict = None
+
+        def load_state_dict(self, state, *, strict):
+            self.loaded = state
+            self.strict = strict
+
+    class FakeLinear(FakeTorchModule):
+        def __init__(self, in_features, out_features):
+            super().__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.loaded = None
+            self.strict = None
+
+        def load_state_dict(self, state, *, strict):
+            self.loaded = state
+            self.strict = strict
+
+    fake_torch = types.SimpleNamespace(
+        bfloat16="bf16",
+        float16="fp16",
+        float32="fp32",
+        as_tensor=lambda value: value,
+        nn=types.SimpleNamespace(Module=FakeTorchModule, Linear=FakeLinear),
+        zeros=lambda shape, *, dtype: FakeTensor(shape, dtype),
+    )
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_voxcpm_modules = types.ModuleType("voxcpm.modules")
+    fake_locenc = types.ModuleType("voxcpm.modules.locenc")
+    fake_minicpm4 = types.ModuleType("voxcpm.modules.minicpm4")
+    fake_locenc.VoxCPMLocEnc = FakeLocEnc
+    fake_minicpm4.MiniCPM4Config = FakeMiniCPM4Config
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_voxcpm_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.locenc", fake_locenc)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", fake_minicpm4)
+    monkeypatch.setattr(checkpoint_mapper, "_detect_framework", lambda: "numpy")
+
+    captured = {}
+
+    def _fake_compile(wrapper, example_args, *, verbose):
+        captured["wrapper"] = wrapper
+        captured["example_args"] = example_args
+        captured["verbose"] = verbose
+        return b"LOCENC-TRT"
+
+    monkeypatch.setattr(
+        component_builders,
+        "_compile_voxcpm2_locenc_onnx",
+        _fake_compile,
+    )
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    save_file(
+        {
+            "enc_to_lm_proj.bias": np.array([1.0], dtype=np.float32),
+            "enc_to_lm_proj.weight": np.array([[2.0]], dtype=np.float32),
+            "feat_encoder.encoder.layers.0.weight": np.array([3.0], dtype=np.float32),
+            "feat_encoder.in_proj.bias": np.array([4.0], dtype=np.float32),
+            "feat_encoder.in_proj.weight": np.array([[5.0]], dtype=np.float32),
+            "unrelated.weight": np.array([6.0], dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
+    weights = plugin.load_weights(str(tmp_path), cfg)
+
+    def _fake_component_builder(component_name):
+        def _builder(ctx):
+            assert ctx.max_cache_length == 9
+            return f"{component_name}-plan".encode("ascii")
+
+        return _builder
+
+    fake_builders = {
+        spec.name: _fake_component_builder(spec.name)
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    fake_builders["locenc"] = component_builders.build_locenc_engine
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
+
+    sections = plugin.build_engine(
+        cfg,
+        weights,
+        max_cache_length=9,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert sections["locenc_engine_plan"] == b"LOCENC-TRT"
+    assert captured["verbose"] is True
+    example_audio_feats = captured["example_args"][0]
+    assert example_audio_feats.shape == (9, 4, 64)
+    assert example_audio_feats.dtype == "bf16"
+
+    wrapper = captured["wrapper"]
+    feat_encoder = wrapper.feat_encoder
+    assert feat_encoder.config.kwargs["hidden_size"] == 1024
+    assert feat_encoder.config.kwargs["num_hidden_layers"] == 12
+    assert feat_encoder.config.kwargs["vocab_size"] == 0
+    assert feat_encoder.input_dim == 64
+    assert tuple(feat_encoder.loaded) == (
+        "encoder.layers.0.weight",
+        "in_proj.bias",
+        "in_proj.weight",
+    )
+    assert feat_encoder.strict is True
+    assert feat_encoder.dtype == "bf16"
+    assert feat_encoder.eval_called is True
+
+    projection = wrapper.enc_to_lm_proj
+    assert projection.in_features == 1024
+    assert projection.out_features == 2048
+    assert tuple(projection.loaded) == ("bias", "weight")
+    assert projection.strict is True
+    assert projection.dtype == "bf16"
+    assert projection.eval_called is True
+    assert wrapper.eval_called is True
 
 
 def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monkeypatch):

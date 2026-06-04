@@ -2,12 +2,14 @@
 
 VoxCPM2 is assembled from five native stages. This module gives each stage a
 dedicated TensorRT builder entry point and keeps the expected runtime bindings
-next to the Python build surface. AudioVAE has an executable upstream-module
-export path; LocEnc, TSLM, RALM, and LocDiT still need native graph builders.
+next to the Python build surface. LocEnc and AudioVAE have executable
+upstream-module export paths; TSLM, RALM, and LocDiT still need native graph
+builders.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -212,6 +214,12 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         1,
         ("utf8_bytes",),
     ),
+    "audio_feats": VoxCPM2TensorSpec(
+        "audio_feats",
+        ("float32", "bfloat16"),
+        3,
+        ("text_steps", "patch_size", "feat_dim"),
+    ),
     "local_text_features": VoxCPM2TensorSpec(
         "local_text_features",
         ("float32", "bfloat16"),
@@ -378,7 +386,7 @@ VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
     _component_spec(
         "locenc",
         "locenc_engine_plan",
-        "text_utf8",
+        "audio_feats",
         "local_text_features",
     ),
     _component_spec(
@@ -543,10 +551,6 @@ def _raise_native_builder_gap(
     )
 
 
-def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
-
-
 def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
@@ -566,6 +570,147 @@ def _torch_dtype(torch_module: Any, precision: str) -> Any:
     if normalized in {"fp16", "float16", "half"}:
         return torch_module.float16
     return torch_module.float32
+
+
+def _to_torch_state_dict(
+    torch_module: Any,
+    state: Mapping[str, Any],
+    prefix: str,
+    *,
+    dtype: Any,
+) -> dict[str, Any]:
+    converted: dict[str, Any] = {}
+    for key, value in state.items():
+        if not key.startswith(prefix):
+            continue
+        tensor = torch_module.as_tensor(value)
+        if (
+            hasattr(tensor, "is_floating_point")
+            and tensor.is_floating_point()
+            and hasattr(tensor, "to")
+        ):
+            tensor = tensor.to(dtype=dtype)
+        converted[key[len(prefix):]] = tensor
+    if not converted:
+        raise KeyError(f"VoxCPM2 checkpoint has no tensors with prefix {prefix!r}")
+    return converted
+
+
+def _locenc_minicpm_config_values(prepared: VoxCPM2PreparedComponentInputs) -> dict[str, Any]:
+    lm_config = prepared.config_values.get("lm_config")
+    encoder_config = prepared.config_values.get("encoder_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 LocEnc builder expected lm_config in component config values")
+    if not isinstance(encoder_config, Mapping):
+        raise ValueError(
+            "VoxCPM2 LocEnc builder expected encoder_config in component config values"
+        )
+
+    values = copy.deepcopy(dict(lm_config))
+    values["hidden_size"] = int(encoder_config.get("hidden_dim", values.get("hidden_size", 1024)))
+    values["intermediate_size"] = int(
+        encoder_config.get("ffn_dim", values.get("intermediate_size", 4096))
+    )
+    values["num_attention_heads"] = int(
+        encoder_config.get("num_heads", values.get("num_attention_heads", 16))
+    )
+    values["num_hidden_layers"] = int(
+        encoder_config.get("num_layers", values.get("num_hidden_layers", 4))
+    )
+    if encoder_config.get("kv_channels") is not None:
+        values["kv_channels"] = encoder_config["kv_channels"]
+    values["vocab_size"] = 0
+    return values
+
+
+def _locenc_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
+    if ctx.max_cache_length > 0:
+        return max(1, int(ctx.max_cache_length))
+    raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
+    return max(1, int(raw_config.get("max_length", 8192)))
+
+
+def _compile_voxcpm2_locenc_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=["audio_feats"],
+        output_names=["local_text_features"],
+        verbose=verbose,
+    )
+
+
+def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.locenc import VoxCPMLocEnc
+        from voxcpm.modules.minicpm4 import MiniCPM4Config
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 LocEnc native TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    lm_config = prepared.config_values.get("lm_config")
+    encoder_config = prepared.config_values.get("encoder_config")
+    if not isinstance(lm_config, Mapping) or not isinstance(encoder_config, Mapping):
+        raise ValueError(
+            "VoxCPM2 LocEnc builder expected lm_config and encoder_config in "
+            "component config values"
+        )
+
+    locenc_config = MiniCPM4Config(**_locenc_minicpm_config_values(prepared))
+    feat_dim = int(prepared.config_values.get("feat_dim", 64))
+    hidden_dim = int(encoder_config.get("hidden_dim", locenc_config.hidden_size))
+    lm_hidden_size = int(lm_config.get("hidden_size", hidden_dim))
+
+    state = ctx.load_safetensor_group(("feat_encoder.", "enc_to_lm_proj."))
+    feat_encoder = VoxCPMLocEnc(locenc_config, input_dim=feat_dim)
+    feat_encoder.load_state_dict(
+        _to_torch_state_dict(torch, state, "feat_encoder.", dtype=compute_dtype),
+        strict=True,
+    )
+    feat_encoder.to(dtype=compute_dtype)
+    feat_encoder.eval()
+
+    enc_to_lm_proj = torch.nn.Linear(hidden_dim, lm_hidden_size)
+    enc_to_lm_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "enc_to_lm_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    enc_to_lm_proj.to(dtype=compute_dtype)
+    enc_to_lm_proj.eval()
+
+    class LocEncWrapper(torch.nn.Module):
+        def __init__(self, feat_encoder_module: Any, projection_module: Any) -> None:
+            super().__init__()
+            self.feat_encoder = feat_encoder_module
+            self.enc_to_lm_proj = projection_module
+
+        def forward(self, audio_feats: Any) -> Any:
+            feat_embed = self.feat_encoder(audio_feats.unsqueeze(0))
+            local_text_features = self.enc_to_lm_proj(feat_embed)
+            return local_text_features.squeeze(0)
+
+    wrapper = LocEncWrapper(feat_encoder, enc_to_lm_proj)
+    wrapper.eval()
+    patch_size = int(prepared.config_values.get("patch_size", 4))
+    example_args = (
+        torch.zeros(
+            (_locenc_export_text_steps(ctx), patch_size, feat_dim),
+            dtype=compute_dtype,
+        ),
+    )
+    return _compile_voxcpm2_locenc_onnx(wrapper, example_args, verbose=ctx.verbose)
 
 
 def _audio_vae_export_frames(ctx: VoxCPM2ComponentBuildContext) -> int:

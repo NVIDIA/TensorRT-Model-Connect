@@ -4,8 +4,8 @@
 // The pipeline owns the five component TRT modules and the model-card
 // generation contract. The current native execution boundary chains
 // component engines through the explicit VoxCPM2 artifact tensor names; full
-// support still requires dedicated LocEnc, TSLM, RALM, LocDiT, and AudioVAE
-// TensorRT builders that emit engines with this contract.
+// support still requires dedicated TSLM, RALM, and LocDiT TensorRT builders
+// that emit engines with this contract.
 
 #include "runtime/domains/audio/voxcpm2_component_loader.h"
 #include "runtime/domains/audio/voxcpm2_generation_plan.h"

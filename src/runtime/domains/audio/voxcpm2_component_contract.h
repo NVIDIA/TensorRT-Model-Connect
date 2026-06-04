@@ -31,6 +31,9 @@ struct VoxCPM2ComponentSpec {
 
 inline constexpr VoxCPM2TensorContract kVoxCPM2TextUtf8Tensor{
     "text_utf8", VoxCPM2TensorDTypeContract::kInt8, 1, "utf8_bytes"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2AudioFeatsTensor{
+    "audio_feats", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 3,
+    "text_steps,patch_size,feat_dim"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2LocalTextFeaturesTensor{
     "local_text_features", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "text_steps,feat_dim"};
@@ -47,8 +50,8 @@ inline constexpr VoxCPM2TensorContract kVoxCPM2WaveformF32Tensor{
     "waveform_f32", VoxCPM2TensorDTypeContract::kFloat32, 1, "audio_samples"};
 
 inline constexpr std::array<VoxCPM2ComponentSpec, 5> kVoxCPM2ComponentSpecs{{
-    {"locenc", "locenc_engine_plan", "text_utf8", "local_text_features", kVoxCPM2TextUtf8Tensor,
-     kVoxCPM2LocalTextFeaturesTensor},
+    {"locenc", "locenc_engine_plan", "audio_feats", "local_text_features",
+     kVoxCPM2AudioFeatsTensor, kVoxCPM2LocalTextFeaturesTensor},
     {"tslm", "tslm_engine_plan", "local_text_features", "semantic_lm_states",
      kVoxCPM2LocalTextFeaturesTensor, kVoxCPM2SemanticLmStatesTensor},
     {"ralm", "ralm_engine_plan", "semantic_lm_states", "acoustic_residual_states",

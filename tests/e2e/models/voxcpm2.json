@@ -73,5 +73,5 @@
   "threshold_overrides": {
     "exact_waveform_match": 1.0
   },
-  "notes": "VoxCPM2 acceptance requires preserving the HF model-card WAV and the TRT WAV and enforcing exact waveform/sample-rate parity. Current family support records the build/runtime contract and has a raw AudioVAE export path; full TRT export still requires native LocEnc, TSLM, RALM, and LocDiT builders."
+  "notes": "VoxCPM2 acceptance requires preserving the HF model-card WAV and the TRT WAV and enforcing exact waveform/sample-rate parity. Current family support records the build/runtime contract and has raw LocEnc and AudioVAE export paths; full TRT export still requires native TSLM, RALM, and LocDiT builders."
 }

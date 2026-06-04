@@ -2,6 +2,7 @@
 
 #include "runtime/domains/audio/voxcpm2_config.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -98,6 +99,22 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
     if (!prompt.empty()) {
         std::memcpy(tensor.storage.data(), prompt.data(), prompt.size());
     }
+    return tensor;
+}
+
+OwnedStageTensor make_zero_audio_feats_tensor(const std::string& prompt, const VoxCPM2Config& cfg) {
+    if (cfg.patch_size <= 0 || cfg.feat_dim <= 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: patch_size and feat_dim must be positive");
+    }
+
+    OwnedStageTensor tensor;
+    const auto text_steps = static_cast<int64_t>(std::max<std::size_t>(1, prompt.size() + 1));
+    tensor.shape = {text_steps, cfg.patch_size, cfg.feat_dim};
+    tensor.dtype = DType::kFloat32;
+    const auto value_count =
+        static_cast<std::size_t>(text_steps) * static_cast<std::size_t>(cfg.patch_size) *
+        static_cast<std::size_t>(cfg.feat_dim);
+    tensor.storage.resize(value_count * sizeof(float));
     return tensor;
 }
 
@@ -331,7 +348,8 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const RuntimeScalarInputs controls(effective_plan.config);
     StageArtifacts artifacts;
     artifacts.emplace("text_utf8", make_prompt_tensor(prompt));
-    OwnedStageTensor current = artifacts.at("text_utf8");
+    artifacts.emplace("audio_feats", make_zero_audio_feats_tensor(prompt, effective_plan.config));
+    OwnedStageTensor current = artifacts.at("audio_feats");
     for (std::size_t i = 0; i < effective_plan.stages.size(); ++i) {
         current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
     }

@@ -2,9 +2,9 @@
 
 VoxCPM2 is a tokenizer-free diffusion/autoregressive TTS stack. This plugin
 registers the model family and exposes the generation defaults used by the E2E
-contract. Full TRT export requires dedicated builders for LocEnc, TSLM, RALM,
-and LocDiT; AudioVAE already has a raw upstream-module export path. The build
-boundary fails explicitly until every required component engine exists.
+contract. Full TRT export requires dedicated builders for TSLM, RALM, and
+LocDiT; LocEnc and AudioVAE already have raw upstream-module export paths. The
+build boundary fails explicitly until every required component engine exists.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ _VOXCPM2_PREBUILT_ENGINE_FILENAMES = {
     for component in _VOXCPM2_COMPONENTS
 }
 _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
-    "locenc": ("encoder_config", "patch_size", "feat_dim"),
+    "locenc": ("lm_config", "encoder_config", "patch_size", "feat_dim"),
     "tslm": ("lm_config", "max_length"),
     "ralm": (
         "lm_config",
@@ -67,7 +67,7 @@ _VOXCPM2_TOKENIZER_ASSET_FILES = (
     "tokenizer.json",
     "special_tokens_map.json",
 )
-_VOXCPM2_TEXT_COMPONENTS = {"locenc", "tslm"}
+_VOXCPM2_TEXT_COMPONENTS = {"tslm"}
 
 
 @dataclass(frozen=True)
@@ -283,7 +283,7 @@ class VoxCPM2Plugin:
                     f"{', '.join(raw_sources)}, but native TRT builders "
                     "are incomplete. Builder inputs discovered: "
                     f"{_format_raw_component_sources(raw_sources)}. Full support "
-                    "still requires LocEnc, TSLM, RALM, and LocDiT builders "
+                    "still requires TSLM, RALM, and LocDiT builders "
                     "plus a native text-to-audio runtime that writes the TRT "
                     "WAV artifact. Runtime binding contract: "
                     f"{voxcpm2_component_builders.describe_voxcpm2_runtime_contracts()}. "
@@ -304,8 +304,8 @@ class VoxCPM2Plugin:
             "native component plans for LocEnc, TSLM, RALM, LocDiT, and "
             "AudioVAE plus a native text-to-audio runtime that consumes "
             "audio_voxcpm2 settings. This build can package prebuilt native "
-            "component plans and can build AudioVAE from the raw audiovae.pth "
-            "checkpoint, but is missing artifacts for "
+            "component plans and can build LocEnc and AudioVAE from raw "
+            "checkpoint sources, but is missing artifacts for "
             f"{', '.join(missing)} under {model_dir}. Expected filenames: "
             f"{expected}."
         )
@@ -326,6 +326,8 @@ class VoxCPM2Plugin:
             "voxcpm2_architecture": str(
                 _raw_config_value(config, "architecture", config.model_type or "voxcpm2")
             ),
+            "voxcpm2_patch_size": int(_raw_config_value(config, "patch_size", 4)),
+            "voxcpm2_feat_dim": int(_raw_config_value(config, "feat_dim", 64)),
         }
 
 

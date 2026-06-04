@@ -122,13 +122,13 @@ void test_voxcpm2_component_contract_lists_native_engine_sections() {
     check(std::string(specs[0].name) == "locenc", "voxcpm2 component 0 is locenc");
     check(std::string(specs[0].engine_section) == "locenc_engine_plan",
           "voxcpm2 locenc section name");
-    check(std::string(specs[0].input_artifact) == "text_utf8",
+    check(std::string(specs[0].input_artifact) == "audio_feats",
           "voxcpm2 locenc input artifact name");
-    check(std::string(specs[0].input_tensor.name) == "text_utf8",
+    check(std::string(specs[0].input_tensor.name) == "audio_feats",
           "voxcpm2 locenc input tensor name");
-    check(specs[0].input_tensor.rank == 1, "voxcpm2 locenc input tensor rank");
+    check(specs[0].input_tensor.rank == 3, "voxcpm2 locenc input tensor rank");
     check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
-              specs[0].input_tensor.dtype_contract)) == "int8",
+              specs[0].input_tensor.dtype_contract)) == "float32|bfloat16",
           "voxcpm2 locenc input tensor dtype");
     check(std::string(specs[0].output_artifact) == "local_text_features",
           "voxcpm2 locenc output artifact name");

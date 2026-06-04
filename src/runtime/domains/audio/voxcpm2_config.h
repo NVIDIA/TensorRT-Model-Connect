@@ -21,6 +21,8 @@ struct VoxCPM2Config {
     int32_t retry_badcase_max_times{3};
     float retry_badcase_ratio_threshold{6.0F};
     int64_t seed{-1};
+    int32_t patch_size{4};
+    int32_t feat_dim{64};
 };
 
 inline VoxCPM2Config make_voxcpm2_config_from_json(const std::string& config_json) {
@@ -31,6 +33,8 @@ inline VoxCPM2Config make_voxcpm2_config_from_json(const std::string& config_jso
     cfg.cfg_value = extract_json_float(config_json, "voxcpm2_cfg_value", cfg.cfg_value);
     cfg.inference_timesteps =
         extract_json_int(config_json, "voxcpm2_inference_timesteps", cfg.inference_timesteps);
+    cfg.patch_size = extract_json_int(config_json, "voxcpm2_patch_size", cfg.patch_size);
+    cfg.feat_dim = extract_json_int(config_json, "voxcpm2_feat_dim", cfg.feat_dim);
     return cfg;
 }
 
@@ -84,7 +88,8 @@ inline std::string describe_voxcpm2_config(const VoxCPM2Config& cfg) {
        << ", retry_badcase=" << (cfg.retry_badcase ? "true" : "false")
        << ", retry_badcase_max_times=" << cfg.retry_badcase_max_times
        << ", retry_badcase_ratio_threshold=" << cfg.retry_badcase_ratio_threshold
-       << ", seed=" << cfg.seed;
+       << ", seed=" << cfg.seed << ", patch_size=" << cfg.patch_size
+       << ", feat_dim=" << cfg.feat_dim;
     return os.str();
 }
 
