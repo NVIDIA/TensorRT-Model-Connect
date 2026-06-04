@@ -146,6 +146,19 @@ class VoxCPM2ComponentBuildContext:
         return state
 
 
+@dataclass(frozen=True)
+class VoxCPM2PreparedComponentInputs:
+    component: str
+    engine_section: str
+    input_artifact: str
+    output_artifact: str
+    config_values: Mapping[str, Any]
+    weight_paths: tuple[Path, ...]
+    asset_paths: tuple[Path, ...]
+    checkpoint_kind: str
+    state_dict_keys: tuple[str, ...]
+
+
 VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
 
 
@@ -201,35 +214,94 @@ def _describe_source(source: Any) -> str:
     )
 
 
-def _raise_native_builder_gap(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+def _require_existing_paths(paths: tuple[Path, ...], *, label: str, component: str) -> None:
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"VoxCPM2 component {component!r} is missing {label}: "
+            f"{', '.join(missing)}"
+        )
+
+
+def prepare_component_inputs(
+    ctx: VoxCPM2ComponentBuildContext,
+) -> VoxCPM2PreparedComponentInputs:
+    """Resolve the native builder inputs for one VoxCPM2 stage.
+
+    This is the last pure-Python step before TensorRT graph construction. It
+    keeps component-specific config, assets, and checkpoint keys explicit so
+    the real builders can consume a stable stage-scoped input contract.
+    """
+    _require_existing_paths(ctx.weight_paths, label="weight files", component=ctx.spec.name)
+    _require_existing_paths(ctx.asset_paths, label="asset files", component=ctx.spec.name)
+
+    prefixes = tuple(getattr(ctx.source, "state_dict_prefixes", ()))
+    if prefixes:
+        keys = tuple(key for key in ctx.safetensor_keys() if key.startswith(prefixes))
+        if not keys:
+            raise KeyError(
+                "VoxCPM2 component "
+                f"{ctx.spec.name!r} found no safetensors tensors matching "
+                f"prefixes {prefixes!r}"
+            )
+        checkpoint_kind = "safetensors"
+    else:
+        state = ctx.load_torch_checkpoint()
+        keys = tuple(sorted(str(key) for key in state))
+        if not keys:
+            raise KeyError(
+                "VoxCPM2 component "
+                f"{ctx.spec.name!r} PyTorch checkpoint has no state-dict entries"
+            )
+        checkpoint_kind = "torch"
+
+    return VoxCPM2PreparedComponentInputs(
+        component=ctx.spec.name,
+        engine_section=ctx.spec.engine_section,
+        input_artifact=ctx.spec.input_artifact,
+        output_artifact=ctx.spec.output_artifact,
+        config_values=getattr(ctx.source, "config_values", {}),
+        weight_paths=ctx.weight_paths,
+        asset_paths=ctx.asset_paths,
+        checkpoint_kind=checkpoint_kind,
+        state_dict_keys=keys,
+    )
+
+
+def _raise_native_builder_gap(
+    ctx: VoxCPM2ComponentBuildContext,
+    prepared: VoxCPM2PreparedComponentInputs,
+) -> bytes:
     raise NotImplementedError(
         "VoxCPM2 native TRT builder for component "
         f"{ctx.spec.name!r} is not implemented yet. It must build "
         f"{ctx.spec.engine_section!r} with input binding "
         f"{ctx.spec.input_artifact!r} and output binding "
-        f"{ctx.spec.output_artifact!r}. Discovered source inputs: "
+        f"{ctx.spec.output_artifact!r}. Prepared "
+        f"{prepared.checkpoint_kind} checkpoint inputs with "
+        f"{len(prepared.state_dict_keys)} state entries. Discovered source inputs: "
         f"{_describe_source(ctx.source)}."
     )
 
 
 def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx)
+    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
 def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx)
+    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
 def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx)
+    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
 def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx)
+    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
 def build_audiovae_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx)
+    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
 DEFAULT_COMPONENT_BUILDERS: dict[str, VoxCPM2ComponentBuilder] = {

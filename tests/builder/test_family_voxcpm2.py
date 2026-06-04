@@ -76,7 +76,21 @@ def _write_raw_voxcpm2_checkpoint(tmp_path) -> ModelConfig:
         ),
         encoding="utf-8",
     )
-    (tmp_path / "model.safetensors").write_bytes(b"raw-safe-tensors")
+    save_file(
+        {
+            "base_lm.layers.0.weight": np.array([1.0], dtype=np.float32),
+            "enc_to_lm_proj.weight": np.array([2.0], dtype=np.float32),
+            "feat_decoder.estimator.weight": np.array([3.0], dtype=np.float32),
+            "feat_encoder.layers.0.weight": np.array([4.0], dtype=np.float32),
+            "fusion_concat_proj.weight": np.array([5.0], dtype=np.float32),
+            "lm_to_dit_proj.weight": np.array([6.0], dtype=np.float32),
+            "residual_lm.layers.0.weight": np.array([7.0], dtype=np.float32),
+            "res_to_dit_proj.weight": np.array([8.0], dtype=np.float32),
+            "stop_head.weight": np.array([9.0], dtype=np.float32),
+            "unrelated.weight": np.array([10.0], dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
     (tmp_path / "audiovae.pth").write_bytes(b"raw-audio-vae")
     for filename in (
         "tokenization_voxcpm2.py",
@@ -213,6 +227,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     assert "component 'locenc' is not implemented yet" in message
     assert "input binding 'text_utf8'" in message
     assert "output binding 'local_text_features'" in message
+    assert "Prepared safetensors checkpoint inputs with 2 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
 
 
@@ -456,6 +471,71 @@ def test_voxcpm2_component_context_loads_stage_scoped_safetensors(tmp_path):
 
     with pytest.raises(KeyError, match="found no safetensors tensors matching"):
         locenc_ctx.load_safetensor_group(("missing_prefix.",))
+
+
+def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    sources = weights["_voxcpm2_raw_component_sources"]
+    specs = {spec.name: spec for spec in component_builders.VOXCPM2_COMPONENT_SPECS}
+
+    locdit_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["locdit"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["locdit"],
+        precision="bf16",
+        verbose=False,
+    )
+    locdit_inputs = component_builders.prepare_component_inputs(locdit_ctx)
+
+    assert locdit_inputs.component == "locdit"
+    assert locdit_inputs.engine_section == "locdit_engine_plan"
+    assert locdit_inputs.input_artifact == "acoustic_residual_states"
+    assert locdit_inputs.output_artifact == "audio_vae_latents"
+    assert locdit_inputs.checkpoint_kind == "safetensors"
+    assert locdit_inputs.weight_paths == (tmp_path / "model.safetensors",)
+    assert locdit_inputs.asset_paths == ()
+    assert locdit_inputs.state_dict_keys == (
+        "feat_decoder.estimator.weight",
+        "lm_to_dit_proj.weight",
+    )
+    assert locdit_inputs.config_values["dit_config"]["hidden_dim"] == 1024
+
+    def _fake_torch_load(path, *, map_location, weights_only):
+        assert path == tmp_path / "audiovae.pth"
+        assert map_location == "cpu"
+        assert weights_only is True
+        return {
+            "state_dict": {
+                "decoder.conv.weight": np.array([1.0], dtype=np.float32),
+                "quantizer.embedding.weight": np.array([2.0], dtype=np.float32),
+            }
+        }
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(load=_fake_torch_load))
+    audiovae_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["audiovae"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["audiovae"],
+        precision="bf16",
+        verbose=False,
+    )
+    audiovae_inputs = component_builders.prepare_component_inputs(audiovae_ctx)
+
+    assert audiovae_inputs.component == "audiovae"
+    assert audiovae_inputs.engine_section == "audiovae_engine_plan"
+    assert audiovae_inputs.checkpoint_kind == "torch"
+    assert audiovae_inputs.weight_paths == (tmp_path / "audiovae.pth",)
+    assert audiovae_inputs.state_dict_keys == (
+        "decoder.conv.weight",
+        "quantizer.embedding.weight",
+    )
+    assert audiovae_inputs.config_values["audio_vae_config"]["out_sample_rate"] == 48000
 
 
 def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):
