@@ -8,6 +8,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace trtmc {
@@ -29,6 +30,8 @@ struct OwnedStageTensor {
         return tensor;
     }
 };
+
+using StageArtifacts = std::unordered_map<std::string, OwnedStageTensor>;
 
 const char* dtype_name(DType dtype) {
     switch (dtype) {
@@ -71,12 +74,11 @@ void validate_tensor_contract(const Tensor& tensor, const audio::VoxCPM2TensorCo
     }
 }
 
-OwnedStageTensor copy_stage_output(const Tensor& tensor, const audio::VoxCPM2GenerationStage& stage,
+OwnedStageTensor copy_stage_tensor(const Tensor& tensor, const std::string& artifact_name,
                                    const std::string& component_name) {
     if (tensor.data == nullptr && tensor.nbytes() > 0) {
         throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name +
-                                 " returned null data for output artifact '" +
-                                 stage.output_artifact + "'");
+                                 " returned null data for output artifact '" + artifact_name + "'");
     }
 
     OwnedStageTensor owned;
@@ -176,13 +178,32 @@ void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
     }
 }
 
+void add_declared_artifact_inputs(const ITrtModule& module, const StageArtifacts& artifacts,
+                                  TensorMap& inputs) {
+    for (const auto& artifact : artifacts) {
+        if (inputs.find(artifact.first) != inputs.end())
+            continue;
+        if (!module.has_input(artifact.first))
+            continue;
+        inputs.emplace(artifact.first, artifact.second.as_tensor());
+    }
+}
+
 OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
-                           const audio::VoxCPM2GenerationStage& stage,
-                           const OwnedStageTensor& input, const RuntimeScalarInputs& controls) {
+                           const audio::VoxCPM2GenerationStage& stage, StageArtifacts& artifacts,
+                           const RuntimeScalarInputs& controls) {
     validate_stage_bindings(component, stage);
+    const auto input_it = artifacts.find(stage.input_artifact);
+    if (input_it == artifacts.end()) {
+        throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name +
+                                 " is missing prepared input artifact '" + stage.input_artifact +
+                                 "'");
+    }
+    const auto& input = input_it->second;
     validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component.name, "input");
     TensorMap inputs;
     inputs.emplace(stage.input_artifact, input.as_tensor());
+    add_declared_artifact_inputs(*component.module, artifacts, inputs);
     controls.add_to(*component.module, inputs);
     auto outputs = component.module->forward(inputs);
     const auto output_it = outputs.find(stage.output_artifact);
@@ -193,7 +214,14 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
 
     validate_tensor_contract(output_it->second, stage.output_tensor, stage, component.name,
                              "output");
-    return copy_stage_output(output_it->second, stage, component.name);
+    artifacts[stage.output_artifact] =
+        copy_stage_tensor(output_it->second, stage.output_artifact, component.name);
+    for (const auto& output : outputs) {
+        if (output.first == stage.output_artifact)
+            continue;
+        artifacts[output.first] = copy_stage_tensor(output.second, output.first, component.name);
+    }
+    return artifacts.at(stage.output_artifact);
 }
 
 AudioResult make_audio_result(const OwnedStageTensor& waveform,
@@ -268,9 +296,11 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
 
     const auto effective_plan = audio::make_voxcpm2_generation_plan(effective_cfg);
     const RuntimeScalarInputs controls(effective_plan.config);
-    OwnedStageTensor current = make_prompt_tensor(prompt);
+    StageArtifacts artifacts;
+    artifacts.emplace("text_utf8", make_prompt_tensor(prompt));
+    OwnedStageTensor current = artifacts.at("text_utf8");
     for (std::size_t i = 0; i < effective_plan.stages.size(); ++i) {
-        current = run_stage(components_[i], effective_plan.stages[i], current, controls);
+        current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
     }
 
     auto audio = make_audio_result(current, effective_plan);

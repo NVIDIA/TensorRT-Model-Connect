@@ -33,8 +33,13 @@ namespace audio = trtmc::runtime::builders::audio;
 int failures = 0;
 int cfg_binding_hits = 0;
 int timestep_binding_hits = 0;
+int local_text_feature_binding_hits = 0;
+int locdit_aux_binding_hits = 0;
 float last_cfg_value = 0.0F;
 int32_t last_inference_timesteps = 0;
+float last_local_text_feature_value = 0.0F;
+float last_lm_hidden_value = 0.0F;
+float last_residual_hidden_value = 0.0F;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
@@ -45,27 +50,48 @@ void check(bool condition, const char* test_name) {
 
 class FakeModule final : public trtmc::ITrtModule {
   public:
+    struct ExtraOutputSpec {
+        std::string name;
+        trtmc::DType dtype{trtmc::DType::kFloat32};
+        std::vector<float> values;
+        std::vector<int64_t> shape;
+    };
+
     FakeModule(std::string input_name = "", std::string output_name = "",
                trtmc::DType output_dtype = trtmc::DType::kFloat32,
                std::vector<float> output_floats = {1.0F, 2.0F},
                std::vector<int64_t> output_shape = {},
-               std::vector<std::string> extra_input_names = {})
+               std::vector<std::string> extra_input_names = {},
+               std::vector<ExtraOutputSpec> extra_outputs = {})
         : input_name_(std::move(input_name)), output_name_(std::move(output_name)),
           output_dtype_(output_dtype), extra_input_names_(std::move(extra_input_names)) {
         set_float_output(std::move(output_floats), std::move(output_shape));
+        for (auto& output : extra_outputs) {
+            add_extra_output(std::move(output));
+        }
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         last_inputs_ = inputs;
         record_generation_controls(inputs);
+        record_auxiliary_inputs(inputs);
+        trtmc::TensorMap outputs;
         if (output_name_.empty())
-            return {};
+            return outputs;
 
         trtmc::Tensor tensor;
         tensor.data = output_storage_.data();
         tensor.shape = output_shape_;
         tensor.dtype = output_dtype_;
-        return {{output_name_, tensor}};
+        outputs.emplace(output_name_, tensor);
+        for (auto& extra : extra_outputs_) {
+            trtmc::Tensor extra_tensor;
+            extra_tensor.data = extra.storage.data();
+            extra_tensor.shape = extra.shape;
+            extra_tensor.dtype = extra.dtype;
+            outputs.emplace(extra.name, extra_tensor);
+        }
+        return outputs;
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
@@ -106,6 +132,13 @@ class FakeModule final : public trtmc::ITrtModule {
     const trtmc::TensorMap& last_inputs() const { return last_inputs_; }
 
   private:
+    struct ExtraOutput {
+        std::string name;
+        trtmc::DType dtype{trtmc::DType::kFloat32};
+        std::vector<unsigned char> storage;
+        std::vector<int64_t> shape;
+    };
+
     void record_generation_controls(const trtmc::TensorMap& inputs) const {
         if (const auto it = inputs.find("cfg_value"); it != inputs.end()) {
             ++cfg_binding_hits;
@@ -114,6 +147,23 @@ class FakeModule final : public trtmc::ITrtModule {
         if (const auto it = inputs.find("inference_timesteps"); it != inputs.end()) {
             ++timestep_binding_hits;
             last_inference_timesteps = *static_cast<int32_t*>(it->second.data);
+        }
+    }
+
+    void record_auxiliary_inputs(const trtmc::TensorMap& inputs) const {
+        if (input_name_ != "local_text_features") {
+            if (const auto it = inputs.find("local_text_features"); it != inputs.end()) {
+                ++local_text_feature_binding_hits;
+                last_local_text_feature_value = *static_cast<float*>(it->second.data);
+            }
+        }
+        if (const auto lm_it = inputs.find("lm_hidden"); lm_it != inputs.end()) {
+            if (const auto residual_it = inputs.find("residual_hidden");
+                residual_it != inputs.end()) {
+                ++locdit_aux_binding_hits;
+                last_lm_hidden_value = *static_cast<float*>(lm_it->second.data);
+                last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
+            }
         }
     }
 
@@ -126,10 +176,25 @@ class FakeModule final : public trtmc::ITrtModule {
         }
     }
 
+    void add_extra_output(ExtraOutputSpec spec) {
+        ExtraOutput output;
+        output.name = std::move(spec.name);
+        output.dtype = spec.dtype;
+        output.shape = spec.shape.empty()
+                           ? std::vector<int64_t>{static_cast<int64_t>(spec.values.size())}
+                           : std::move(spec.shape);
+        output.storage.resize(spec.values.size() * sizeof(float));
+        if (!spec.values.empty()) {
+            std::memcpy(output.storage.data(), spec.values.data(), output.storage.size());
+        }
+        extra_outputs_.push_back(std::move(output));
+    }
+
     std::string input_name_;
     std::string output_name_;
     trtmc::DType output_dtype_;
     std::vector<std::string> extra_input_names_;
+    std::vector<ExtraOutput> extra_outputs_;
     std::vector<unsigned char> output_storage_;
     std::vector<int64_t> output_shape_;
     trtmc::TensorMap last_inputs_;
@@ -174,11 +239,27 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
         const auto& stage = audio::kVoxCPM2GenerationStages[i];
         std::vector<std::string> extra_inputs;
-        if (i == 0)
+        std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
+        if (i == 1) {
+            extra_outputs.push_back(
+                {"lm_hidden", trtmc::DType::kFloat32, repeated_values(2 * 2048, 8.0F), {2, 2048}});
+        }
+        if (i == 2) {
+            extra_inputs = {"local_text_features"};
+            extra_outputs.push_back({"residual_hidden",
+                                     trtmc::DType::kFloat32,
+                                     repeated_values(2 * 512, 9.0F),
+                                     {2, 512}});
+        }
+        if (i == 3)
             extra_inputs = {"cfg_value", "inference_timesteps"};
+        if (i == 3) {
+            extra_inputs.push_back("lm_hidden");
+            extra_inputs.push_back("residual_hidden");
+        }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
-            stage_shapes[i], std::move(extra_inputs));
+            stage_shapes[i], std::move(extra_inputs), std::move(extra_outputs));
         components.push_back({spec.name, spec.engine_section, std::move(module)});
     }
     return components;
@@ -223,8 +304,13 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
 
     cfg_binding_hits = 0;
     timestep_binding_hits = 0;
+    local_text_feature_binding_hits = 0;
+    locdit_aux_binding_hits = 0;
     last_cfg_value = 0.0F;
     last_inference_timesteps = 0;
+    last_local_text_feature_value = 0.0F;
+    last_lm_hidden_value = 0.0F;
+    last_residual_hidden_value = 0.0F;
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -238,6 +324,15 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
           "voxcpm2 forwards inference_timesteps when stage declares it");
     check(last_inference_timesteps == 12,
           "voxcpm2 inference_timesteps uses GenerateConfig override");
+    check(local_text_feature_binding_hits == 1,
+          "voxcpm2 forwards preserved local_text_features to RALM");
+    check(last_local_text_feature_value == 1.0F,
+          "voxcpm2 preserved local_text_features retain stage output data");
+    check(locdit_aux_binding_hits == 1,
+          "voxcpm2 forwards lm_hidden and residual_hidden side tensors to LocDiT");
+    check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
+    check(last_residual_hidden_value == 9.0F,
+          "voxcpm2 LocDiT sees RALM residual_hidden side tensor");
 
     const auto wav_path = temp_dir / "trt_output.wav";
     check(!std::filesystem::exists(wav_path),
