@@ -9,6 +9,7 @@ until those engines exist.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,30 @@ _VOXCPM2_PREBUILT_ENGINE_FILENAMES = {
     )
     for component in _VOXCPM2_COMPONENTS
 }
+_VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
+    "locenc": ("encoder_config", "patch_size", "feat_dim"),
+    "tslm": ("lm_config", "max_length"),
+    "ralm": (
+        "lm_config",
+        "residual_lm_num_layers",
+        "scalar_quantization_latent_dim",
+        "scalar_quantization_scale",
+    ),
+    "locdit": ("dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
+    "audiovae": (
+        "audio_vae_config",
+        "audio_vae_config.sample_rate",
+        "audio_vae_config.out_sample_rate",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class VoxCPM2RawComponentSource:
+    """Raw checkpoint inputs that a future native component builder consumes."""
+
+    config_keys: tuple[str, ...]
+    weight_files: tuple[str, ...]
 
 
 def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
@@ -55,6 +80,60 @@ def _find_prebuilt_component_plans(model_dir: Path) -> dict[str, Path]:
                 plans[component] = path
                 break
     return plans
+
+
+def _find_safetensors_files(model_dir: Path) -> tuple[str, ...]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for pattern in ("model.safetensors", "model-*.safetensors", "*.safetensors"):
+        for path in sorted(model_dir.glob(pattern)):
+            if path.is_file() and path.name not in seen:
+                seen.add(path.name)
+                files.append(path.name)
+    return tuple(files)
+
+
+def _has_raw_config_key(raw_config: dict[str, Any], key: str) -> bool:
+    value: Any = raw_config
+    for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return True
+
+
+def _find_raw_component_sources(
+    model_dir: Path, config: ModelConfig
+) -> dict[str, VoxCPM2RawComponentSource]:
+    raw_config = config.raw if isinstance(config.raw, dict) else {}
+    safetensors_files = _find_safetensors_files(model_dir)
+    audio_vae_files = ("audiovae.pth",) if (model_dir / "audiovae.pth").is_file() else ()
+
+    sources: dict[str, VoxCPM2RawComponentSource] = {}
+    for component in _VOXCPM2_COMPONENTS:
+        config_keys = _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS[component]
+        if not all(_has_raw_config_key(raw_config, key) for key in config_keys):
+            continue
+
+        weight_files = audio_vae_files if component == "audiovae" else safetensors_files
+        if not weight_files:
+            continue
+
+        sources[component] = VoxCPM2RawComponentSource(
+            config_keys=config_keys,
+            weight_files=weight_files,
+        )
+    return sources
+
+
+def _format_raw_component_sources(
+    sources: dict[str, VoxCPM2RawComponentSource],
+) -> str:
+    return "; ".join(
+        f"{component}(config: {', '.join(source.config_keys)}; "
+        f"weights: {', '.join(source.weight_files)})"
+        for component, source in sources.items()
+    )
 
 
 class VoxCPM2Plugin:
@@ -78,6 +157,9 @@ class VoxCPM2Plugin:
         weights["_architecture"] = architecture
         weights["_voxcpm2_components"] = _VOXCPM2_COMPONENTS
         weights["_voxcpm2_engine_sections"] = _VOXCPM2_ENGINE_SECTIONS
+        weights["_voxcpm2_raw_component_sources"] = _find_raw_component_sources(
+            Path(model_dir), config
+        )
         weights["_sample_rate"] = int(_raw_config_value(config, "sample_rate", _DEFAULT_SAMPLE_RATE))
         weights["_cfg_value"] = float(_raw_config_value(config, "cfg_value", _DEFAULT_CFG_VALUE))
         weights["_inference_timesteps"] = int(
@@ -103,6 +185,17 @@ class VoxCPM2Plugin:
                 f"{component}_engine_plan": prebuilt_plans[component].read_bytes()
                 for component in _VOXCPM2_COMPONENTS
             }
+
+        raw_sources = weights.get("_voxcpm2_raw_component_sources", {})
+        if isinstance(raw_sources, dict) and len(raw_sources) == len(_VOXCPM2_COMPONENTS):
+            raise NotImplementedError(
+                "VoxCPM2 raw checkpoint sources are present for "
+                f"{', '.join(_VOXCPM2_COMPONENTS)}, but native TRT builders are "
+                "not implemented yet. Builder inputs discovered: "
+                f"{_format_raw_component_sources(raw_sources)}. Full support still "
+                "requires LocEnc, TSLM, RALM, LocDiT, and AudioVAE builders plus "
+                "a native text-to-audio runtime that writes the TRT WAV artifact."
+            )
 
         missing = [
             component
