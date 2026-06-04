@@ -26,17 +26,30 @@ struct VoxCPM2GenerationStage {
     const char* output_artifact;
 };
 
+inline constexpr std::array<VoxCPM2StageKind, 5> kVoxCPM2StageKinds{{
+    VoxCPM2StageKind::kLocEnc,
+    VoxCPM2StageKind::kTslm,
+    VoxCPM2StageKind::kRalm,
+    VoxCPM2StageKind::kLocDit,
+    VoxCPM2StageKind::kAudioVae,
+}};
+
 inline constexpr std::array<VoxCPM2GenerationStage, 5> kVoxCPM2GenerationStages{{
-    {VoxCPM2StageKind::kLocEnc, "locenc", "locenc_engine_plan", "text_utf8",
-     "local_text_features"},
-    {VoxCPM2StageKind::kTslm, "tslm", "tslm_engine_plan", "local_text_features",
-     "semantic_lm_states"},
-    {VoxCPM2StageKind::kRalm, "ralm", "ralm_engine_plan", "semantic_lm_states",
-     "acoustic_residual_states"},
-    {VoxCPM2StageKind::kLocDit, "locdit", "locdit_engine_plan", "acoustic_residual_states",
-     "audio_vae_latents"},
-    {VoxCPM2StageKind::kAudioVae, "audiovae", "audiovae_engine_plan", "audio_vae_latents",
-     "waveform_f32"},
+    {kVoxCPM2StageKinds[0], kVoxCPM2ComponentSpecs[0].name,
+     kVoxCPM2ComponentSpecs[0].engine_section, kVoxCPM2ComponentSpecs[0].input_artifact,
+     kVoxCPM2ComponentSpecs[0].output_artifact},
+    {kVoxCPM2StageKinds[1], kVoxCPM2ComponentSpecs[1].name,
+     kVoxCPM2ComponentSpecs[1].engine_section, kVoxCPM2ComponentSpecs[1].input_artifact,
+     kVoxCPM2ComponentSpecs[1].output_artifact},
+    {kVoxCPM2StageKinds[2], kVoxCPM2ComponentSpecs[2].name,
+     kVoxCPM2ComponentSpecs[2].engine_section, kVoxCPM2ComponentSpecs[2].input_artifact,
+     kVoxCPM2ComponentSpecs[2].output_artifact},
+    {kVoxCPM2StageKinds[3], kVoxCPM2ComponentSpecs[3].name,
+     kVoxCPM2ComponentSpecs[3].engine_section, kVoxCPM2ComponentSpecs[3].input_artifact,
+     kVoxCPM2ComponentSpecs[3].output_artifact},
+    {kVoxCPM2StageKinds[4], kVoxCPM2ComponentSpecs[4].name,
+     kVoxCPM2ComponentSpecs[4].engine_section, kVoxCPM2ComponentSpecs[4].input_artifact,
+     kVoxCPM2ComponentSpecs[4].output_artifact},
 }};
 
 struct VoxCPM2GenerationPlan {
@@ -57,6 +70,12 @@ inline bool voxcpm2_generation_plan_matches_component_contract() {
             return false;
         if (std::string(kVoxCPM2GenerationStages[i].engine_section) !=
             kVoxCPM2ComponentSpecs[i].engine_section)
+            return false;
+        if (std::string(kVoxCPM2GenerationStages[i].input_artifact) !=
+            kVoxCPM2ComponentSpecs[i].input_artifact)
+            return false;
+        if (std::string(kVoxCPM2GenerationStages[i].output_artifact) !=
+            kVoxCPM2ComponentSpecs[i].output_artifact)
             return false;
     }
     return true;

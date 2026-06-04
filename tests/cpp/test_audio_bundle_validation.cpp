@@ -122,9 +122,17 @@ void test_voxcpm2_component_contract_lists_native_engine_sections() {
     check(std::string(specs[0].name) == "locenc", "voxcpm2 component 0 is locenc");
     check(std::string(specs[0].engine_section) == "locenc_engine_plan",
           "voxcpm2 locenc section name");
+    check(std::string(specs[0].input_artifact) == "text_utf8",
+          "voxcpm2 locenc input artifact name");
+    check(std::string(specs[0].output_artifact) == "local_text_features",
+          "voxcpm2 locenc output artifact name");
     check(std::string(specs[4].name) == "audiovae", "voxcpm2 component 4 is audiovae");
     check(std::string(specs[4].engine_section) == "audiovae_engine_plan",
           "voxcpm2 audiovae section name");
+    check(std::string(specs[4].input_artifact) == "audio_vae_latents",
+          "voxcpm2 audiovae input artifact name");
+    check(std::string(specs[4].output_artifact) == "waveform_f32",
+          "voxcpm2 audiovae output artifact name");
 }
 
 void test_voxcpm2_validation_accepts_complete_required_sections() {
