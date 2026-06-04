@@ -86,6 +86,39 @@ def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
     return raw.get(key, default)
 
 
+def _raw_config_value_or_nested(
+    config: ModelConfig, key: str, nested_key: str, default: Any
+) -> Any:
+    raw = config.raw if isinstance(config.raw, dict) else {}
+    if key in raw:
+        return copy.deepcopy(raw[key])
+    if _has_raw_config_key(raw, nested_key):
+        return _raw_config_get(raw, nested_key)
+    return default
+
+
+def _output_sample_rate(config: ModelConfig) -> int:
+    return int(
+        _raw_config_value_or_nested(
+            config,
+            "sample_rate",
+            "audio_vae_config.out_sample_rate",
+            _DEFAULT_SAMPLE_RATE,
+        )
+    )
+
+
+def _reference_sample_rate(config: ModelConfig) -> int:
+    return int(
+        _raw_config_value_or_nested(
+            config,
+            "reference_sample_rate",
+            "audio_vae_config.sample_rate",
+            16000,
+        )
+    )
+
+
 def _find_prebuilt_component_plans(model_dir: Path) -> dict[str, Path]:
     plans: dict[str, Path] = {}
     for component, candidates in _VOXCPM2_PREBUILT_ENGINE_FILENAMES.items():
@@ -197,7 +230,8 @@ class VoxCPM2Plugin:
         weights["_voxcpm2_raw_component_sources"] = _find_raw_component_sources(
             Path(model_dir), config
         )
-        weights["_sample_rate"] = int(_raw_config_value(config, "sample_rate", _DEFAULT_SAMPLE_RATE))
+        weights["_sample_rate"] = _output_sample_rate(config)
+        weights["_reference_sample_rate"] = _reference_sample_rate(config)
         weights["_cfg_value"] = float(_raw_config_value(config, "cfg_value", _DEFAULT_CFG_VALUE))
         weights["_inference_timesteps"] = int(
             _raw_config_value(config, "inference_timesteps", _DEFAULT_INFERENCE_TIMESTEPS)
@@ -269,10 +303,8 @@ class VoxCPM2Plugin:
     def get_audio_config(self, config: ModelConfig) -> dict:
         """Return VoxCPM2 audio defaults injected into bundle config.json."""
         return {
-            "sample_rate": int(_raw_config_value(config, "sample_rate", _DEFAULT_SAMPLE_RATE)),
-            "reference_sample_rate": int(
-                _raw_config_value(config, "reference_sample_rate", 16000)
-            ),
+            "sample_rate": _output_sample_rate(config),
+            "reference_sample_rate": _reference_sample_rate(config),
             "voxcpm2_cfg_value": float(
                 _raw_config_value(config, "cfg_value", _DEFAULT_CFG_VALUE)
             ),

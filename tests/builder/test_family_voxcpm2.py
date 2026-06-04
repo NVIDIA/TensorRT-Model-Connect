@@ -134,6 +134,7 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
     )
     assert weights["_voxcpm2_raw_component_sources"] == {}
     assert weights["_sample_rate"] == 48000
+    assert weights["_reference_sample_rate"] == 16000
     assert weights["_cfg_value"] == 2.0
     assert weights["_inference_timesteps"] == 10
 
@@ -142,6 +143,59 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
     assert audio_cfg["reference_sample_rate"] == 16000
     assert audio_cfg["voxcpm2_cfg_value"] == 2.0
     assert audio_cfg["voxcpm2_inference_timesteps"] == 10
+
+
+def test_voxcpm2_audio_defaults_follow_nested_audio_vae_config(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architecture": "voxcpm2",
+                "lm_config": {"hidden_size": 2048},
+                "audio_vae_config": {
+                    "sample_rate": 16000,
+                    "out_sample_rate": 48000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    audio_cfg = plugin.get_audio_config(cfg)
+
+    assert weights["_sample_rate"] == 48000
+    assert weights["_reference_sample_rate"] == 16000
+    assert audio_cfg["sample_rate"] == 48000
+    assert audio_cfg["reference_sample_rate"] == 16000
+
+
+def test_voxcpm2_top_level_audio_rates_override_nested_defaults(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architecture": "voxcpm2",
+                "sample_rate": 44100,
+                "reference_sample_rate": 22050,
+                "audio_vae_config": {
+                    "sample_rate": 16000,
+                    "out_sample_rate": 48000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    audio_cfg = plugin.get_audio_config(cfg)
+
+    assert weights["_sample_rate"] == 44100
+    assert weights["_reference_sample_rate"] == 22050
+    assert audio_cfg["sample_rate"] == 44100
+    assert audio_cfg["reference_sample_rate"] == 22050
 
 
 def test_voxcpm2_build_boundary_is_explicit(tmp_path):
