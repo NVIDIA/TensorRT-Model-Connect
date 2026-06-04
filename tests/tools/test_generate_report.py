@@ -1077,6 +1077,17 @@ class TestRenderAudioModel:
         model_dir.mkdir()
         _make_tiny_wav(model_dir / "trt_output.wav")
         _make_tiny_wav(model_dir / "hf_reference.wav")
+        (model_dir / "hf_reference_result.json").write_text(
+            json.dumps(
+                {
+                    "cfg_value": 2.0,
+                    "inference_timesteps": 10,
+                    "sample_rate": 48000,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         (model_dir / "compare_wav_exact.json").write_text(
             json.dumps(
                 {
@@ -1101,6 +1112,7 @@ class TestRenderAudioModel:
             artifacts={
                 "trt_wav": "trt_output.wav",
                 "ref_wav": "hf_reference.wav",
+                "ref_result_json": "hf_reference_result.json",
                 "compare_wav_exact": "compare_wav_exact.json",
             },
         )
@@ -1112,6 +1124,9 @@ class TestRenderAudioModel:
         assert "compare_wav_exact.json" in html
         assert "tools/compare_wav_exact.py" in html
         assert "waveform_exact_match" in html
+        assert "HF Reference Result" in html
+        assert "hf_reference_result.json" in html
+        assert "inference_timesteps" in html
         assert "true" in html
 
     def test_speech_to_text_shows_transcript(self):

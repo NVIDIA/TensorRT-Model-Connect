@@ -24,6 +24,7 @@ from tests.e2e_harness.contracts import (
 from tests.e2e_harness.manifest_loader import load_manifest
 from tests.e2e_harness.orchestrator import (
     _build_repro_commands,
+    _auto_register_artifacts,
     _register_compare_artifacts,
 )
 from tests.e2e_harness.registry import get_reference, reset
@@ -162,6 +163,9 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
     assert 'subtype="FLOAT"' in script
     assert out.data["returncode"] == 0
     assert out.data["sample_rate"] == 48000
+    assert out.data["result_json_path"] == str(
+        tmp_path / "voxcpm2" / "hf_reference_result.json"
+    )
 
 
 def test_exact_waveform_mode_passes_identical_wavs(tmp_path):
@@ -271,6 +275,31 @@ def test_exact_compare_sidecar_is_registered_as_report_artifact(tmp_path):
     _register_compare_artifacts(sink, result)
 
     assert sink.artifacts["compare_wav_exact"] == "compare_wav_exact.json"
+
+
+def test_voxcpm_reference_result_json_is_registered_as_report_artifact(tmp_path):
+    result_json = tmp_path / "voxcpm2" / "hf_reference_result.json"
+    result_json.parent.mkdir()
+    result_json.write_text(json.dumps({"sample_rate": 48000}), encoding="utf-8")
+
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    out = StageOutput(
+        stage_name="full_generation",
+        data={"result_json_path": str(result_json)},
+    )
+
+    _auto_register_artifacts(sink, out, "ref")
+
+    assert sink.artifacts["ref_result_json"] == "voxcpm2/hf_reference_result.json"
 
 
 def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):

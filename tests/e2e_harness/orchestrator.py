@@ -563,6 +563,7 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
         "logits_path": "logits",
         "features_path": "features",
         "output_path": "output",
+        "result_json_path": "result_json",
         "segmentation_map_path": "segmentation_map",
         "segmented_image_path": "segmented_image",
     }

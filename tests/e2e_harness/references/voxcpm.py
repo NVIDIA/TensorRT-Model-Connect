@@ -168,6 +168,7 @@ class VoxCPMReference:
         data: dict = {
             "returncode": result.returncode,
             "stderr_truncated": stderr_truncated,
+            "result_json_path": json_path,
         }
         if stderr_log:
             data["stderr_log"] = stderr_log

@@ -1085,6 +1085,45 @@ def _render_exact_compare_payload(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _render_json_artifact_payload(
+    result: Dict[str, Any],
+    artifact_key: str,
+    title: str,
+) -> str:
+    art_dir = Path(result.get("_artifact_dir", ""))
+    refs = _as_artifact_refs(result.get("artifacts", {}).get(artifact_key))
+    if not refs or not art_dir:
+        return ""
+
+    parts: List[str] = []
+    for ref in refs:
+        path = _resolve_artifact_ref(ref, art_dir)
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        try:
+            display_path = str(path.relative_to(art_dir))
+        except ValueError:
+            display_path = str(path)
+
+        if not parts:
+            parts.append(f'<div class="repro-section"><h4>{_esc(title)}</h4>')
+        parts.append(f"<p><strong>Payload:</strong> {_esc(display_path)}</p>")
+        parts.append(_code_block(
+            json.dumps(payload, indent=2, sort_keys=True),
+            _next_cmd_id(),
+        ))
+
+    if not parts:
+        return ""
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Text comparison
 # ---------------------------------------------------------------------------
@@ -1412,6 +1451,13 @@ def render_audio_model(result: Dict[str, Any]) -> str:
         if notice:
             parts.append(notice)
 
+    parts.append(
+        _render_json_artifact_payload(
+            result,
+            "ref_result_json",
+            "HF Reference Result",
+        )
+    )
     parts.append(_render_exact_compare_payload(result))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
