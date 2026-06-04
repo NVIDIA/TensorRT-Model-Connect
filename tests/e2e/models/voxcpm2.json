@@ -46,6 +46,24 @@
     {
       "kind": "python_module_available",
       "args": {
+        "module": "torch",
+        "phase": "reference",
+        "timeout_s": 60
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "numpy",
+        "phase": "reference",
+        "timeout_s": 30
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
         "module": "voxcpm",
         "phase": "reference",
         "timeout_s": 180

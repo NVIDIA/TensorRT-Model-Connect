@@ -70,6 +70,14 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
     assert case.threshold_overrides["exact_waveform_match"] == 1.0
     assert case.stages[0].artifact_type == "waveform"
     assert case.stages[0].comparison_mode == "waveform_exact"
+    reference_modules = {
+        req.args.get("module")
+        for req in case.preflight
+        if req.kind == "python_module_available"
+        and req.args.get("phase") == "reference"
+        and req.gating
+    }
+    assert {"torch", "numpy", "voxcpm", "soundfile"} <= reference_modules
 
 
 def test_voxcpm_reference_backend_is_discoverable():
