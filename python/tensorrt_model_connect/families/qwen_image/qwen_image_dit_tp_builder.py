@@ -62,7 +62,6 @@ from ... import graph_ops
 from ...parallel_config import (
     ParallelConfig,
     _slice_first_dim,
-    _slice_last_dim,
     add_all_reduce_sum,
     normalize_parallel_config,
     validate_dit_tp,
