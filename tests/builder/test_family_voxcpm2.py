@@ -267,6 +267,8 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "acoustic_residual_states",
         "residual_hidden",
     )
+    assert specs["ralm"].required_side_inputs == ("local_text_features",)
+    assert specs["ralm"].required_control_inputs == ()
     assert [
         module.describe() for module in specs["locdit"].upstream_modules
     ] == [
@@ -274,6 +276,8 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
         "torch.nn.Linear(lm_to_dit_proj.)",
     ]
+    assert specs["locdit"].required_side_inputs == ("lm_hidden", "residual_hidden")
+    assert specs["locdit"].required_control_inputs == ("cfg_value", "inference_timesteps")
     assert specs["audiovae"].upstream_inputs == ("audio_vae_latents",)
     assert specs["audiovae"].upstream_outputs == ("waveform_f32",)
 
@@ -303,6 +307,12 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     assert "voxcpm.modules.locenc.VoxCPMLocEnc(feat_encoder.)" in message
     assert "runtime inputs: audio_feats" in message
     assert "runtime outputs: feat_embed, local_text_features" in message
+    assert "Runtime binding contract:" in message
+    assert "ralm(semantic_lm_states=>acoustic_residual_states" in message
+    assert "required_side=local_text_features" in message
+    assert "locdit(acoustic_residual_states=>audio_vae_latents" in message
+    assert "required_side=lm_hidden,residual_hidden" in message
+    assert "required_controls=cfg_value,inference_timesteps" in message
 
 
 def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
@@ -582,6 +592,11 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
         "inference_timesteps",
     )
     assert locdit_inputs.upstream_outputs == ("audio_vae_latents",)
+    assert locdit_inputs.required_side_inputs == ("lm_hidden", "residual_hidden")
+    assert locdit_inputs.required_control_inputs == (
+        "cfg_value",
+        "inference_timesteps",
+    )
     assert [
         module.describe() for module in locdit_inputs.upstream_modules
     ] == [

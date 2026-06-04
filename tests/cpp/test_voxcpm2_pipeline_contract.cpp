@@ -200,6 +200,15 @@ class FakeModule final : public trtmc::ITrtModule {
     trtmc::TensorMap last_inputs_;
 };
 
+std::vector<std::string> required_inputs_for_stage(const audio::VoxCPM2GenerationStage& stage) {
+    std::vector<std::string> inputs;
+    for (std::size_t i = 0; i < stage.required_side_input_count; ++i)
+        inputs.emplace_back(stage.required_side_inputs[i]);
+    for (std::size_t i = 0; i < stage.required_control_input_count; ++i)
+        inputs.emplace_back(stage.required_control_inputs[i]);
+    return inputs;
+}
+
 std::vector<audio::VoxCPM2LoadedComponent> make_fake_components() {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
@@ -207,7 +216,9 @@ std::vector<audio::VoxCPM2LoadedComponent> make_fake_components() {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
         const auto& stage = audio::kVoxCPM2GenerationStages[i];
         std::unique_ptr<trtmc::ITrtModule> module =
-            std::make_unique<FakeModule>(stage.input_artifact, stage.output_artifact);
+            std::make_unique<FakeModule>(stage.input_artifact, stage.output_artifact,
+                                         trtmc::DType::kFloat32, std::vector<float>{1.0F, 2.0F},
+                                         std::vector<int64_t>{}, required_inputs_for_stage(stage));
         components.push_back({spec.name, spec.engine_section, std::move(module)});
     }
     return components;
@@ -217,6 +228,16 @@ std::vector<audio::VoxCPM2LoadedComponent> make_components_missing_output_bindin
     auto components = make_fake_components();
     components[0].module =
         std::make_unique<FakeModule>(audio::kVoxCPM2GenerationStages[0].input_artifact, "");
+    return components;
+}
+
+std::vector<audio::VoxCPM2LoadedComponent> make_components_missing_locdit_side_binding() {
+    auto components = make_fake_components();
+    const auto& stage = audio::kVoxCPM2GenerationStages[3];
+    components[3].module = std::make_unique<FakeModule>(
+        stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32,
+        std::vector<float>{1.0F, 2.0F}, std::vector<int64_t>{},
+        std::vector<std::string>{"cfg_value", "inference_timesteps"});
     return components;
 }
 
@@ -238,24 +259,17 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
     for (std::size_t i = 0; i < audio::kVoxCPM2ComponentSpecs.size(); ++i) {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
         const auto& stage = audio::kVoxCPM2GenerationStages[i];
-        std::vector<std::string> extra_inputs;
+        std::vector<std::string> extra_inputs = required_inputs_for_stage(stage);
         std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
         if (i == 1) {
             extra_outputs.push_back(
                 {"lm_hidden", trtmc::DType::kFloat32, repeated_values(2 * 2048, 8.0F), {2, 2048}});
         }
         if (i == 2) {
-            extra_inputs = {"local_text_features"};
             extra_outputs.push_back({"residual_hidden",
                                      trtmc::DType::kFloat32,
                                      repeated_values(2 * 512, 9.0F),
                                      {2, 512}});
-        }
-        if (i == 3)
-            extra_inputs = {"cfg_value", "inference_timesteps"};
-        if (i == 3) {
-            extra_inputs.push_back("lm_hidden");
-            extra_inputs.push_back("residual_hidden");
         }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
@@ -362,6 +376,26 @@ void test_construct_reports_missing_stage_binding() {
     }
 }
 
+void test_construct_reports_missing_required_side_binding() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+
+    try {
+        trtmc::VoxCPM2Pipeline pipeline(make_components_missing_locdit_side_binding(), plan,
+                                        "openbmb/VoxCPM2");
+        (void)pipeline;
+        check(false, "voxcpm2 pipeline rejects missing required side binding");
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        check(message.find("stage locdit") != std::string::npos,
+              "voxcpm2 missing side binding error names stage");
+        check(message.find("locdit_engine_plan") != std::string::npos,
+              "voxcpm2 missing side binding error names engine section");
+        check(message.find("required side input binding 'lm_hidden'") != std::string::npos,
+              "voxcpm2 missing side binding error names side input");
+    }
+}
+
 void test_generate_audio_rejects_stage_tensor_contract_mismatch() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
@@ -406,6 +440,7 @@ int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_construct_reports_missing_stage_binding();
+    test_construct_reports_missing_required_side_binding();
     test_generate_audio_rejects_stage_tensor_contract_mismatch();
     test_rejects_component_order_mismatch();
 

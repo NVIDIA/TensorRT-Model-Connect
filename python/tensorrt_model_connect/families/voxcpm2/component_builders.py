@@ -41,6 +41,8 @@ class VoxCPM2ComponentSpec:
     upstream_modules: tuple["VoxCPM2UpstreamModuleRef", ...]
     upstream_inputs: tuple[str, ...]
     upstream_outputs: tuple[str, ...]
+    required_side_inputs: tuple[str, ...]
+    required_control_inputs: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,8 @@ class VoxCPM2PreparedComponentInputs:
     upstream_modules: tuple[VoxCPM2UpstreamModuleRef, ...]
     upstream_inputs: tuple[str, ...]
     upstream_outputs: tuple[str, ...]
+    required_side_inputs: tuple[str, ...]
+    required_control_inputs: tuple[str, ...]
     config_values: Mapping[str, Any]
     weight_paths: tuple[Path, ...]
     asset_paths: tuple[Path, ...]
@@ -247,6 +251,8 @@ def _component_spec(
     output_artifact: str,
 ) -> VoxCPM2ComponentSpec:
     upstream_modules, upstream_inputs, upstream_outputs = VOXCPM2_UPSTREAM_HANDOFF[name]
+    required_side_inputs = VOXCPM2_REQUIRED_SIDE_INPUTS.get(name, ())
+    required_control_inputs = VOXCPM2_REQUIRED_CONTROL_INPUTS.get(name, ())
     return VoxCPM2ComponentSpec(
         name,
         engine_section,
@@ -257,6 +263,8 @@ def _component_spec(
         upstream_modules,
         upstream_inputs,
         upstream_outputs,
+        required_side_inputs,
+        required_control_inputs,
     )
 
 
@@ -355,6 +363,15 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
     ),
 }
 
+VOXCPM2_REQUIRED_SIDE_INPUTS: Mapping[str, tuple[str, ...]] = {
+    "ralm": ("local_text_features",),
+    "locdit": ("lm_hidden", "residual_hidden"),
+}
+
+VOXCPM2_REQUIRED_CONTROL_INPUTS: Mapping[str, tuple[str, ...]] = {
+    "locdit": ("cfg_value", "inference_timesteps"),
+}
+
 
 VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
     _component_spec(
@@ -410,10 +427,38 @@ def _describe_source(source: Any) -> str:
 
 def describe_upstream_handoff(spec: VoxCPM2ComponentSpec) -> str:
     modules = ", ".join(module.describe() for module in spec.upstream_modules)
-    return (
+    description = (
         f"upstream modules: {modules}; "
         f"runtime inputs: {', '.join(spec.upstream_inputs)}; "
         f"runtime outputs: {', '.join(spec.upstream_outputs)}"
+    )
+    if spec.required_side_inputs:
+        description += (
+            f"; required side inputs: {', '.join(spec.required_side_inputs)}"
+        )
+    if spec.required_control_inputs:
+        description += (
+            f"; required control inputs: {', '.join(spec.required_control_inputs)}"
+        )
+    return description
+
+
+def describe_component_runtime_contract(spec: VoxCPM2ComponentSpec) -> str:
+    description = (
+        f"{spec.name}({spec.input_artifact}=>{spec.output_artifact}, "
+        f"section={spec.engine_section}"
+    )
+    if spec.required_side_inputs:
+        description += f", required_side={','.join(spec.required_side_inputs)}"
+    if spec.required_control_inputs:
+        description += f", required_controls={','.join(spec.required_control_inputs)}"
+    return description + ")"
+
+
+def describe_voxcpm2_runtime_contracts() -> str:
+    return "; ".join(
+        describe_component_runtime_contract(spec)
+        for spec in VOXCPM2_COMPONENT_SPECS
     )
 
 
@@ -468,6 +513,8 @@ def prepare_component_inputs(
         upstream_modules=ctx.spec.upstream_modules,
         upstream_inputs=ctx.spec.upstream_inputs,
         upstream_outputs=ctx.spec.upstream_outputs,
+        required_side_inputs=ctx.spec.required_side_inputs,
+        required_control_inputs=ctx.spec.required_control_inputs,
         config_values=getattr(ctx.source, "config_values", {}),
         weight_paths=ctx.weight_paths,
         asset_paths=ctx.asset_paths,

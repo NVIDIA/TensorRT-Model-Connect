@@ -242,7 +242,9 @@ class VoxCPM2Plugin:
                     f"{_format_raw_component_sources(raw_sources)}. Full support "
                     "still requires LocEnc, TSLM, RALM, LocDiT, and AudioVAE "
                     "builders plus a native text-to-audio runtime that writes "
-                    f"the TRT WAV artifact. First incomplete builder: {exc}"
+                    "the TRT WAV artifact. Runtime binding contract: "
+                    f"{voxcpm2_component_builders.describe_voxcpm2_runtime_contracts()}. "
+                    f"First incomplete builder: {exc}"
                 ) from exc
 
         missing = [

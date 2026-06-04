@@ -176,6 +176,38 @@ void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
             "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
             ") is missing required output binding '" + stage.output_artifact + "'");
     }
+    for (std::size_t i = 0; i < stage.required_side_input_count; ++i) {
+        const auto* name = stage.required_side_inputs[i];
+        if (!component.module->has_input(name)) {
+            throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name + " (" +
+                                     component.engine_section +
+                                     ") is missing required side input binding '" + name + "'");
+        }
+    }
+    for (std::size_t i = 0; i < stage.required_control_input_count; ++i) {
+        const auto* name = stage.required_control_inputs[i];
+        if (!component.module->has_input(name)) {
+            throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name + " (" +
+                                     component.engine_section +
+                                     ") is missing required control input binding '" + name + "'");
+        }
+    }
+}
+
+void add_required_artifact_inputs(const audio::VoxCPM2GenerationStage& stage,
+                                  const StageArtifacts& artifacts, TensorMap& inputs,
+                                  const std::string& component_name) {
+    for (std::size_t i = 0; i < stage.required_side_input_count; ++i) {
+        const auto* name = stage.required_side_inputs[i];
+        if (inputs.find(name) != inputs.end())
+            continue;
+        const auto artifact_it = artifacts.find(name);
+        if (artifact_it == artifacts.end()) {
+            throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name +
+                                     " is missing required side artifact '" + name + "'");
+        }
+        inputs.emplace(name, artifact_it->second.as_tensor());
+    }
 }
 
 void add_declared_artifact_inputs(const ITrtModule& module, const StageArtifacts& artifacts,
@@ -203,6 +235,7 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component.name, "input");
     TensorMap inputs;
     inputs.emplace(stage.input_artifact, input.as_tensor());
+    add_required_artifact_inputs(stage, artifacts, inputs, component.name);
     add_declared_artifact_inputs(*component.module, artifacts, inputs);
     controls.add_to(*component.module, inputs);
     auto outputs = component.module->forward(inputs);
