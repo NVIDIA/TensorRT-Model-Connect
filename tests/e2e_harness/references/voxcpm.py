@@ -51,6 +51,8 @@ class VoxCPMReference:
     ) -> StageOutput:
         model_id = case.hf_id
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
+        prompt_wav_path = case.inputs.get("prompt_wav_path")
+        prompt_text = case.inputs.get("prompt_text")
         cfg_value = float(case.inputs.get("cfg_value", 2.0))
         inference_timesteps = int(case.inputs.get("inference_timesteps", 10))
         normalize = _input_bool(case, "normalize", True)
@@ -92,6 +94,8 @@ class VoxCPMReference:
             model = VoxCPM.from_pretrained(%(model_id)r)
             wav = model.generate(
                 text=%(prompt)r,
+                prompt_wav_path=%(prompt_wav_path)r,
+                prompt_text=%(prompt_text)r,
                 cfg_value=%(cfg_value)r,
                 inference_timesteps=%(inference_timesteps)d,
                 normalize=%(normalize)r,
@@ -122,6 +126,8 @@ class VoxCPMReference:
                 "seed": seed,
                 "model_id": model_id,
                 "prompt": prompt,
+                "prompt_wav_path": prompt_wav_path,
+                "prompt_text": prompt_text,
                 "cfg_value": cfg_value,
                 "inference_timesteps": inference_timesteps,
                 "normalize": normalize,

@@ -59,6 +59,8 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
     assert case.reference_backend == "voxcpm"
     assert case.reference_family == "tts_voxcpm2"
     assert case.user_contract == "tts_audio"
+    assert case.inputs["prompt_wav_path"] is None
+    assert case.inputs["prompt_text"] is None
     assert case.inputs["cfg_value"] == 2.0
     assert case.inputs["inference_timesteps"] == 10
     assert case.threshold_overrides["exact_waveform_match"] == 1.0
@@ -105,6 +107,8 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
         reference_backend="voxcpm",
         inputs={
             "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
+            "prompt_wav_path": None,
+            "prompt_text": None,
             "cfg_value": 2.0,
             "inference_timesteps": 10,
         },
@@ -118,6 +122,8 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
     assert captured["cmd"][0] == "/opt/ref-python"
     script = captured["cmd"][2]
     assert "VoxCPM.from_pretrained('openbmb/VoxCPM2')" in script
+    assert "prompt_wav_path=None" in script
+    assert "prompt_text=None" in script
     assert "cfg_value=2.0" in script
     assert "inference_timesteps=10" in script
     assert 'getattr(model, "tts_model", model)' in script

@@ -16,6 +16,8 @@
   "precision": "bf16",
   "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
   "inputs": {
+    "prompt_wav_path": null,
+    "prompt_text": null,
     "cfg_value": 2.0,
     "inference_timesteps": 10,
     "normalize": true,
