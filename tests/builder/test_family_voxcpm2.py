@@ -74,6 +74,13 @@ def _write_raw_voxcpm2_checkpoint(tmp_path) -> ModelConfig:
     )
     (tmp_path / "model.safetensors").write_bytes(b"raw-safe-tensors")
     (tmp_path / "audiovae.pth").write_bytes(b"raw-audio-vae")
+    for filename in (
+        "tokenization_voxcpm2.py",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "special_tokens_map.json",
+    ):
+        (tmp_path / filename).write_text("{}", encoding="utf-8")
     return ModelConfig.from_dir(tmp_path)
 
 
@@ -144,10 +151,18 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["locenc"].config_values["patch_size"] == 4
     assert sources["locenc"].config_values["feat_dim"] == 64
     assert sources["locenc"].weight_files == ("model.safetensors",)
+    assert sources["locenc"].asset_files == (
+        "tokenization_voxcpm2.py",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "special_tokens_map.json",
+    )
     assert sources["tslm"].config_values["lm_config"]["hidden_size"] == 2048
     assert sources["tslm"].config_values["max_length"] == 8192
+    assert sources["tslm"].asset_files == sources["locenc"].asset_files
     assert sources["ralm"].config_values["residual_lm_num_layers"] == 8
     assert sources["ralm"].config_values["scalar_quantization_latent_dim"] == 512
+    assert sources["ralm"].asset_files == ()
     assert sources["locdit"].config_keys == (
         "dit_config",
         "dit_config.cfm_config",
@@ -156,8 +171,10 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     )
     assert sources["locdit"].config_values["dit_config"]["hidden_dim"] == 1024
     assert sources["locdit"].config_values["dit_config.cfm_config"]["solver"] == "euler"
+    assert sources["locdit"].asset_files == ()
     assert sources["audiovae"].config_values["audio_vae_config"]["out_sample_rate"] == 48000
     assert sources["audiovae"].weight_files == ("audiovae.pth",)
+    assert sources["audiovae"].asset_files == ()
 
 
 def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
@@ -172,6 +189,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     message = str(error.value)
     assert "raw checkpoint sources are present for locenc, tslm, ralm, locdit, audiovae" in message
     assert "native TRT builders are incomplete" in message
+    assert "assets: tokenization_voxcpm2.py, tokenizer_config.json" in message
     assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
     assert "component 'locenc' is not implemented yet" in message
@@ -200,6 +218,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
                     ctx.precision,
                     ctx.verbose,
                     ctx.source.config_keys,
+                    ctx.source.asset_files,
                 )
             )
             return f"{component_name}-plan".encode("ascii")
@@ -234,6 +253,12 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "bf16",
             True,
             ("encoder_config", "patch_size", "feat_dim"),
+            (
+                "tokenization_voxcpm2.py",
+                "tokenizer_config.json",
+                "tokenizer.json",
+                "special_tokens_map.json",
+            ),
         ),
         (
             "tslm",
@@ -244,6 +269,12 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "bf16",
             True,
             ("lm_config", "max_length"),
+            (
+                "tokenization_voxcpm2.py",
+                "tokenizer_config.json",
+                "tokenizer.json",
+                "special_tokens_map.json",
+            ),
         ),
         (
             "ralm",
@@ -259,6 +290,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
                 "scalar_quantization_latent_dim",
                 "scalar_quantization_scale",
             ),
+            (),
         ),
         (
             "locdit",
@@ -269,6 +301,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "bf16",
             True,
             ("dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
+            (),
         ),
         (
             "audiovae",
@@ -283,6 +316,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
                 "audio_vae_config.sample_rate",
                 "audio_vae_config.out_sample_rate",
             ),
+            (),
         ),
     ]
 

@@ -54,6 +54,13 @@ _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
         "audio_vae_config.out_sample_rate",
     ),
 }
+_VOXCPM2_TOKENIZER_ASSET_FILES = (
+    "tokenization_voxcpm2.py",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+)
+_VOXCPM2_TEXT_COMPONENTS = {"locenc", "tslm"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,7 @@ class VoxCPM2RawComponentSource:
     config_keys: tuple[str, ...]
     config_values: dict[str, Any]
     weight_files: tuple[str, ...]
+    asset_files: tuple[str, ...] = ()
 
 
 def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
@@ -92,6 +100,12 @@ def _find_safetensors_files(model_dir: Path) -> tuple[str, ...]:
     return tuple(files)
 
 
+def _find_tokenizer_asset_files(model_dir: Path) -> tuple[str, ...]:
+    return tuple(
+        filename for filename in _VOXCPM2_TOKENIZER_ASSET_FILES if (model_dir / filename).is_file()
+    )
+
+
 def _has_raw_config_key(raw_config: dict[str, Any], key: str) -> bool:
     value: Any = raw_config
     for part in key.split("."):
@@ -114,6 +128,7 @@ def _find_raw_component_sources(
     raw_config = config.raw if isinstance(config.raw, dict) else {}
     safetensors_files = _find_safetensors_files(model_dir)
     audio_vae_files = ("audiovae.pth",) if (model_dir / "audiovae.pth").is_file() else ()
+    tokenizer_assets = _find_tokenizer_asset_files(model_dir)
 
     sources: dict[str, VoxCPM2RawComponentSource] = {}
     for component in _VOXCPM2_COMPONENTS:
@@ -131,6 +146,7 @@ def _find_raw_component_sources(
                 key: _raw_config_get(raw_config, key) for key in config_keys
             },
             weight_files=weight_files,
+            asset_files=tokenizer_assets if component in _VOXCPM2_TEXT_COMPONENTS else (),
         )
     return sources
 
@@ -140,7 +156,8 @@ def _format_raw_component_sources(
 ) -> str:
     return "; ".join(
         f"{component}(config: {', '.join(source.config_keys)}; "
-        f"weights: {', '.join(source.weight_files)})"
+        f"weights: {', '.join(source.weight_files)}; "
+        f"assets: {', '.join(source.asset_files) or '<none>'})"
         for component, source in sources.items()
     )
 

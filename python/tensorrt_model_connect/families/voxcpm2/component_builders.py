@@ -73,7 +73,8 @@ VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
 def _describe_source(source: Any) -> str:
     config_keys = ", ".join(getattr(source, "config_keys", ())) or "<none>"
     weight_files = ", ".join(getattr(source, "weight_files", ())) or "<none>"
-    return f"config: {config_keys}; weights: {weight_files}"
+    asset_files = ", ".join(getattr(source, "asset_files", ())) or "<none>"
+    return f"config: {config_keys}; weights: {weight_files}; assets: {asset_files}"
 
 
 def _raise_native_builder_gap(ctx: VoxCPM2ComponentBuildContext) -> bytes:
