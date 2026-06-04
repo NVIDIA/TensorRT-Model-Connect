@@ -264,6 +264,7 @@ class VoxCPM2Plugin:
                     model_dir,
                     config,
                     raw_sources,
+                    max_cache_length=max_cache_length,
                     precision=precision,
                     verbose=verbose,
                     builders=self.component_builders,

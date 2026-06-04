@@ -66,6 +66,7 @@ class VoxCPM2ComponentBuildContext:
     source: Any
     precision: str
     verbose: bool
+    max_cache_length: int = 0
 
     @property
     def weight_paths(self) -> tuple[Path, ...]:
@@ -558,8 +559,87 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
 
 
+def _torch_dtype(torch_module: Any, precision: str) -> Any:
+    normalized = precision.lower()
+    if normalized in {"bf16", "bfloat16"}:
+        return torch_module.bfloat16
+    if normalized in {"fp16", "float16", "half"}:
+        return torch_module.float16
+    return torch_module.float32
+
+
+def _audio_vae_export_frames(ctx: VoxCPM2ComponentBuildContext) -> int:
+    raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
+    patch_size = int(raw_config.get("patch_size", 4))
+    if ctx.max_cache_length > 0:
+        return max(1, int(ctx.max_cache_length)) * patch_size
+    return max(1, int(raw_config.get("max_length", 8192))) * patch_size
+
+
+def _compile_voxcpm2_audio_vae_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=["audio_vae_latents"],
+        output_names=["waveform_f32"],
+        verbose=verbose,
+    )
+
+
 def build_audiovae_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.audiovae import AudioVAEConfigV2, AudioVAEV2
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 AudioVAE native TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    audio_vae_config = prepared.config_values.get("audio_vae_config")
+    if not isinstance(audio_vae_config, Mapping):
+        raise ValueError(
+            "VoxCPM2 AudioVAE builder expected audio_vae_config in "
+            "component config values"
+        )
+
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    audio_vae = AudioVAEV2(AudioVAEConfigV2(**audio_vae_config))
+    state_dict = ctx.load_torch_checkpoint()
+    audio_vae.load_state_dict(state_dict, strict=True)
+    audio_vae.to(dtype=compute_dtype)
+    audio_vae.eval()
+
+    class AudioVAEDecodeWrapper(torch.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.module = module
+
+        def forward(self, audio_vae_latents: Any) -> Any:
+            latents = audio_vae_latents.transpose(0, 1).unsqueeze(0)
+            waveform = self.module.decode(latents.float())
+            return waveform.squeeze(0).squeeze(0)
+
+    wrapper = AudioVAEDecodeWrapper(audio_vae)
+    wrapper.eval()
+    latent_dim = int(audio_vae_config.get("latent_dim", 64))
+    audio_frames = _audio_vae_export_frames(ctx)
+    example_args = (
+        torch.zeros((audio_frames, latent_dim), dtype=compute_dtype),
+    )
+    return _compile_voxcpm2_audio_vae_onnx(
+        wrapper,
+        example_args,
+        verbose=ctx.verbose,
+    )
 
 
 DEFAULT_COMPONENT_BUILDERS: dict[str, VoxCPM2ComponentBuilder] = {
@@ -576,6 +656,7 @@ def build_voxcpm2_component_plans(
     config: ModelConfig,
     sources: Mapping[str, Any],
     *,
+    max_cache_length: int = 0,
     precision: str,
     verbose: bool,
     builders: Mapping[str, VoxCPM2ComponentBuilder] | None = None,
@@ -602,6 +683,7 @@ def build_voxcpm2_component_plans(
             source=sources[spec.name],
             precision=precision,
             verbose=verbose,
+            max_cache_length=max_cache_length,
         )
         plan = selected_builders[spec.name](ctx)
         if not isinstance(plan, (bytes, bytearray, memoryview)):

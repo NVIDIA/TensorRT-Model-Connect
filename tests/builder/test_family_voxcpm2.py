@@ -389,6 +389,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
                     ctx.model_dir,
                     ctx.precision,
                     ctx.verbose,
+                    ctx.max_cache_length,
                     ctx.source.config_keys,
                     ctx.source.asset_files,
                 )
@@ -425,6 +426,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             tmp_path,
             "bf16",
             True,
+            16,
             ("encoder_config", "patch_size", "feat_dim"),
             (
                 "tokenization_voxcpm2.py",
@@ -441,6 +443,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             tmp_path,
             "bf16",
             True,
+            16,
             ("lm_config", "max_length"),
             (
                 "tokenization_voxcpm2.py",
@@ -457,6 +460,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             tmp_path,
             "bf16",
             True,
+            16,
             (
                 "lm_config",
                 "residual_lm_num_layers",
@@ -473,6 +477,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             tmp_path,
             "bf16",
             True,
+            16,
             ("dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
             (),
         ),
@@ -484,6 +489,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             tmp_path,
             "bf16",
             True,
+            16,
             (
                 "audio_vae_config",
                 "audio_vae_config.sample_rate",
@@ -505,6 +511,126 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
         ("locdit", (tmp_path / "model.safetensors",), ()),
         ("audiovae", (tmp_path / "audiovae.pth",), ()),
     ]
+
+
+def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    class FakeTorchModule:
+        def __init__(self):
+            self.eval_called = False
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+    class FakeTensor:
+        def __init__(self, shape, dtype):
+            self.shape = tuple(shape)
+            self.dtype = dtype
+
+    class FakeAudioVAEConfigV2:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeAudioVAEV2(FakeTorchModule):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.loaded = None
+            self.strict = None
+            self.dtype = None
+
+        def load_state_dict(self, state, *, strict):
+            self.loaded = state
+            self.strict = strict
+
+        def to(self, *, dtype):
+            self.dtype = dtype
+            return self
+
+    def _fake_torch_load(path, *, map_location, weights_only):
+        assert path == tmp_path / "audiovae.pth"
+        assert map_location == "cpu"
+        assert weights_only is True
+        return {"state_dict": {"decoder.conv.weight": np.array([1.0], dtype=np.float32)}}
+
+    fake_torch = types.SimpleNamespace(
+        bfloat16="bf16",
+        float16="fp16",
+        float32="fp32",
+        nn=types.SimpleNamespace(Module=FakeTorchModule),
+        load=_fake_torch_load,
+        zeros=lambda shape, *, dtype: FakeTensor(shape, dtype),
+    )
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_voxcpm_modules = types.ModuleType("voxcpm.modules")
+    fake_audiovae = types.ModuleType("voxcpm.modules.audiovae")
+    fake_audiovae.AudioVAEConfigV2 = FakeAudioVAEConfigV2
+    fake_audiovae.AudioVAEV2 = FakeAudioVAEV2
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_voxcpm_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.audiovae", fake_audiovae)
+
+    captured = {}
+
+    def _fake_compile(wrapper, example_args, *, verbose):
+        captured["wrapper"] = wrapper
+        captured["example_args"] = example_args
+        captured["verbose"] = verbose
+        return b"AUDIOVAE-TRT"
+
+    monkeypatch.setattr(
+        component_builders,
+        "_compile_voxcpm2_audio_vae_onnx",
+        _fake_compile,
+    )
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+
+    def _fake_component_builder(component_name):
+        def _builder(ctx):
+            assert ctx.max_cache_length == 7
+            return f"{component_name}-plan".encode("ascii")
+
+        return _builder
+
+    fake_builders = {
+        spec.name: _fake_component_builder(spec.name)
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    fake_builders["audiovae"] = component_builders.build_audiovae_engine
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
+
+    sections = plugin.build_engine(
+        cfg,
+        weights,
+        max_cache_length=7,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert sections["audiovae_engine_plan"] == b"AUDIOVAE-TRT"
+    assert captured["verbose"] is True
+    example_latents = captured["example_args"][0]
+    assert example_latents.shape == (28, 64)
+    assert example_latents.dtype == "bf16"
+
+    wrapper = captured["wrapper"]
+    audio_vae = wrapper.module
+    assert audio_vae.config.kwargs["out_sample_rate"] == 48000
+    assert tuple(audio_vae.loaded) == ("decoder.conv.weight",)
+    np.testing.assert_array_equal(
+        audio_vae.loaded["decoder.conv.weight"],
+        np.array([1.0], dtype=np.float32),
+    )
+    assert audio_vae.strict is True
+    assert audio_vae.dtype == "bf16"
+    assert audio_vae.eval_called is True
+    assert wrapper.eval_called is True
 
 
 def test_voxcpm2_component_context_loads_checkpoint_inputs(tmp_path, monkeypatch):
