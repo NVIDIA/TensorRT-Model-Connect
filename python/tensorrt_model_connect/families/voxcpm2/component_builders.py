@@ -38,6 +38,22 @@ class VoxCPM2ComponentSpec:
     output_artifact: str
     input_tensor: VoxCPM2TensorSpec
     output_tensor: VoxCPM2TensorSpec
+    upstream_modules: tuple["VoxCPM2UpstreamModuleRef", ...]
+    upstream_inputs: tuple[str, ...]
+    upstream_outputs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class VoxCPM2UpstreamModuleRef:
+    """Upstream VoxCPM module owned by one native TRT component."""
+
+    import_path: str
+    symbol: str
+    state_dict_prefixes: tuple[str, ...]
+
+    def describe(self) -> str:
+        prefixes = ", ".join(self.state_dict_prefixes) or "<checkpoint>"
+        return f"{self.import_path}.{self.symbol}({prefixes})"
 
 
 @dataclass(frozen=True)
@@ -171,6 +187,9 @@ class VoxCPM2PreparedComponentInputs:
     output_artifact: str
     input_tensor: VoxCPM2TensorSpec
     output_tensor: VoxCPM2TensorSpec
+    upstream_modules: tuple[VoxCPM2UpstreamModuleRef, ...]
+    upstream_inputs: tuple[str, ...]
+    upstream_outputs: tuple[str, ...]
     config_values: Mapping[str, Any]
     weight_paths: tuple[Path, ...]
     asset_paths: tuple[Path, ...]
@@ -227,6 +246,7 @@ def _component_spec(
     input_artifact: str,
     output_artifact: str,
 ) -> VoxCPM2ComponentSpec:
+    upstream_modules, upstream_inputs, upstream_outputs = VOXCPM2_UPSTREAM_HANDOFF[name]
     return VoxCPM2ComponentSpec(
         name,
         engine_section,
@@ -234,7 +254,106 @@ def _component_spec(
         output_artifact,
         VOXCPM2_TENSOR_SPECS[input_artifact],
         VOXCPM2_TENSOR_SPECS[output_artifact],
+        upstream_modules,
+        upstream_inputs,
+        upstream_outputs,
     )
+
+
+VOXCPM2_UPSTREAM_HANDOFF: Mapping[
+    str,
+    tuple[
+        tuple[VoxCPM2UpstreamModuleRef, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+    ],
+] = {
+    "locenc": (
+        (
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.locenc",
+                "VoxCPMLocEnc",
+                ("feat_encoder.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "torch.nn",
+                "Linear",
+                ("enc_to_lm_proj.",),
+            ),
+        ),
+        ("audio_feats",),
+        ("feat_embed", "local_text_features"),
+    ),
+    "tslm": (
+        (
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.minicpm4",
+                "MiniCPMModel",
+                ("base_lm.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.layers",
+                "ScalarQuantizationLayer",
+                ("fsq_layer.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "torch.nn",
+                "Linear",
+                ("stop_proj.", "stop_head."),
+            ),
+        ),
+        ("text_tokens", "text_mask", "local_text_features", "audio_mask"),
+        ("semantic_lm_states", "lm_hidden", "stop_logits"),
+    ),
+    "ralm": (
+        (
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.minicpm4",
+                "MiniCPMModel",
+                ("residual_lm.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "torch.nn",
+                "Linear",
+                ("fusion_concat_proj.", "res_to_dit_proj."),
+            ),
+        ),
+        ("semantic_lm_states", "audio_mask", "local_text_features"),
+        ("acoustic_residual_states", "residual_hidden"),
+    ),
+    "locdit": (
+        (
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.locdit",
+                "UnifiedCFM",
+                ("feat_decoder.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.locdit",
+                "VoxCPMLocDiTV2",
+                ("feat_decoder.estimator.",),
+            ),
+            VoxCPM2UpstreamModuleRef(
+                "torch.nn",
+                "Linear",
+                ("lm_to_dit_proj.",),
+            ),
+        ),
+        ("lm_hidden", "residual_hidden", "feat_cond", "cfg_value", "inference_timesteps"),
+        ("audio_vae_latents",),
+    ),
+    "audiovae": (
+        (
+            VoxCPM2UpstreamModuleRef(
+                "voxcpm.modules.audiovae",
+                "AudioVAEV2",
+                (),
+            ),
+        ),
+        ("audio_vae_latents",),
+        ("waveform_f32",),
+    ),
+}
 
 
 VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
@@ -289,6 +408,15 @@ def _describe_source(source: Any) -> str:
     )
 
 
+def describe_upstream_handoff(spec: VoxCPM2ComponentSpec) -> str:
+    modules = ", ".join(module.describe() for module in spec.upstream_modules)
+    return (
+        f"upstream modules: {modules}; "
+        f"runtime inputs: {', '.join(spec.upstream_inputs)}; "
+        f"runtime outputs: {', '.join(spec.upstream_outputs)}"
+    )
+
+
 def _require_existing_paths(paths: tuple[Path, ...], *, label: str, component: str) -> None:
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
@@ -337,6 +465,9 @@ def prepare_component_inputs(
         output_artifact=ctx.spec.output_artifact,
         input_tensor=ctx.spec.input_tensor,
         output_tensor=ctx.spec.output_tensor,
+        upstream_modules=ctx.spec.upstream_modules,
+        upstream_inputs=ctx.spec.upstream_inputs,
+        upstream_outputs=ctx.spec.upstream_outputs,
         config_values=getattr(ctx.source, "config_values", {}),
         weight_paths=ctx.weight_paths,
         asset_paths=ctx.asset_paths,
@@ -359,7 +490,8 @@ def _raise_native_builder_gap(
         f"{prepared.output_tensor.describe()}. Prepared "
         f"{prepared.checkpoint_kind} checkpoint inputs with "
         f"{len(prepared.state_dict_keys)} state entries. Discovered source inputs: "
-        f"{_describe_source(ctx.source)}."
+        f"{_describe_source(ctx.source)}. Upstream handoff: "
+        f"{describe_upstream_handoff(ctx.spec)}."
     )
 
 

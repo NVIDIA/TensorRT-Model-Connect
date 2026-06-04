@@ -230,6 +230,54 @@ def test_voxcpm2_component_specs_include_tensor_contracts():
     assert specs[4].output_tensor.symbolic_shape == ("audio_samples",)
 
 
+def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    specs = {spec.name: spec for spec in component_builders.VOXCPM2_COMPONENT_SPECS}
+
+    assert specs["locenc"].upstream_inputs == ("audio_feats",)
+    assert specs["locenc"].upstream_outputs == ("feat_embed", "local_text_features")
+    assert [
+        module.describe() for module in specs["locenc"].upstream_modules
+    ] == [
+        "voxcpm.modules.locenc.VoxCPMLocEnc(feat_encoder.)",
+        "torch.nn.Linear(enc_to_lm_proj.)",
+    ]
+
+    assert specs["tslm"].upstream_inputs == (
+        "text_tokens",
+        "text_mask",
+        "local_text_features",
+        "audio_mask",
+    )
+    assert specs["tslm"].upstream_outputs == (
+        "semantic_lm_states",
+        "lm_hidden",
+        "stop_logits",
+    )
+    assert [
+        module.describe() for module in specs["tslm"].upstream_modules
+    ] == [
+        "voxcpm.modules.minicpm4.MiniCPMModel(base_lm.)",
+        "voxcpm.modules.layers.ScalarQuantizationLayer(fsq_layer.)",
+        "torch.nn.Linear(stop_proj., stop_head.)",
+    ]
+
+    assert specs["ralm"].upstream_outputs == (
+        "acoustic_residual_states",
+        "residual_hidden",
+    )
+    assert [
+        module.describe() for module in specs["locdit"].upstream_modules
+    ] == [
+        "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)",
+        "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
+        "torch.nn.Linear(lm_to_dit_proj.)",
+    ]
+    assert specs["audiovae"].upstream_inputs == ("audio_vae_latents",)
+    assert specs["audiovae"].upstream_outputs == ("waveform_f32",)
+
+
 def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     from tensorrt_model_connect.families.voxcpm2.plugin import plugin
 
@@ -251,6 +299,10 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     assert "text_utf8:int8[utf8_bytes] -> local_text_features:float32|bfloat16" in message
     assert "Prepared safetensors checkpoint inputs with 2 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
+    assert "Upstream handoff:" in message
+    assert "voxcpm.modules.locenc.VoxCPMLocEnc(feat_encoder.)" in message
+    assert "runtime inputs: audio_feats" in message
+    assert "runtime outputs: feat_embed, local_text_features" in message
 
 
 def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
@@ -522,6 +574,21 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
     assert locdit_inputs.input_tensor.rank == 2
     assert locdit_inputs.output_tensor.name == "audio_vae_latents"
     assert locdit_inputs.output_tensor.dtype_contract == ("float32", "bfloat16")
+    assert locdit_inputs.upstream_inputs == (
+        "lm_hidden",
+        "residual_hidden",
+        "feat_cond",
+        "cfg_value",
+        "inference_timesteps",
+    )
+    assert locdit_inputs.upstream_outputs == ("audio_vae_latents",)
+    assert [
+        module.describe() for module in locdit_inputs.upstream_modules
+    ] == [
+        "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)",
+        "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
+        "torch.nn.Linear(lm_to_dit_proj.)",
+    ]
     assert locdit_inputs.checkpoint_kind == "safetensors"
     assert locdit_inputs.weight_paths == (tmp_path / "model.safetensors",)
     assert locdit_inputs.asset_paths == ()
