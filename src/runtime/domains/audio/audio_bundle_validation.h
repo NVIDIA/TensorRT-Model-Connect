@@ -10,6 +10,7 @@ namespace trtmc::runtime::builders::audio {
 enum class TextToAudioBundleKind {
     kBark,
     kMagpieTts,
+    kVoxCpm2,
 };
 
 void validate_text_to_audio_bundle_sections(

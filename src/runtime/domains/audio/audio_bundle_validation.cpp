@@ -32,6 +32,15 @@ static void validate_magpie(const trtmc::BundleFile& bundle, const std::string& 
     require_section(bundle, "magpie_ipa_vocab", bundle_path);
 }
 
+static void validate_voxcpm2(const trtmc::BundleFile& bundle, const std::string& bundle_path)
+{
+    require_section(bundle, "locenc_engine_plan", bundle_path);
+    require_section(bundle, "tslm_engine_plan", bundle_path);
+    require_section(bundle, "ralm_engine_plan", bundle_path);
+    require_section(bundle, "locdit_engine_plan", bundle_path);
+    require_section(bundle, "audiovae_engine_plan", bundle_path);
+}
+
 void validate_text_to_audio_bundle_sections(
     TextToAudioBundleKind kind,
     const trtmc::BundleFile& bundle,
@@ -44,6 +53,9 @@ void validate_text_to_audio_bundle_sections(
         break;
     case TextToAudioBundleKind::kMagpieTts:
         validate_magpie(bundle, bundle_path);
+        break;
+    case TextToAudioBundleKind::kVoxCpm2:
+        validate_voxcpm2(bundle, bundle_path);
         break;
     }
 }

@@ -4,7 +4,7 @@
 // Trace ID:       UT-AUD-CPP-01
 // Architecture:   ARCH-BDL-001
 // Unit Design:    UD-BDL-02
-// Intent:         Validate bundle section requirements for audio pipelines (Bark, Magpie)
+// Intent:         Validate bundle section requirements for audio pipelines (Bark, Magpie, VoxCPM2)
 // Preconditions:  BundleFile with audio-specific sections constructed in memory
 // Postconditions: Validation accepts complete bundles and rejects incomplete ones
 // =============================================================================
@@ -122,6 +122,51 @@ void test_magpie_validation_accepts_complete_required_sections()
     }
 }
 
+void test_voxcpm2_validation_requires_native_component_engines()
+{
+    trtmc::BundleFile bundle;
+
+    try
+    {
+        trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2,
+            bundle,
+            "voxcpm2.trtfb");
+        check(false, "voxcpm2 validation rejects missing component engines");
+    }
+    catch (const std::runtime_error& error)
+    {
+        check(
+            std::string(error.what()).find("locenc_engine_plan") != std::string::npos,
+            "voxcpm2 validation reports first missing component engine");
+    }
+}
+
+void test_voxcpm2_validation_accepts_complete_required_sections()
+{
+    trtmc::BundleFile bundle;
+    const auto plan = bytes_from_text("plan");
+
+    add_section(bundle, "locenc_engine_plan", plan);
+    add_section(bundle, "tslm_engine_plan", plan);
+    add_section(bundle, "ralm_engine_plan", plan);
+    add_section(bundle, "locdit_engine_plan", plan);
+    add_section(bundle, "audiovae_engine_plan", plan);
+
+    try
+    {
+        trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2,
+            bundle,
+            "voxcpm2.trtfb");
+        check(true, "voxcpm2 validation accepts complete component engine set");
+    }
+    catch (const std::exception&)
+    {
+        check(false, "voxcpm2 validation accepts complete component engine set");
+    }
+}
+
 } // namespace
 
 int main()
@@ -129,6 +174,8 @@ int main()
     test_bark_validation_requires_semantic_and_coarse_assets();
     test_magpie_validation_requires_ipa_tokenizer_sections();
     test_magpie_validation_accepts_complete_required_sections();
+    test_voxcpm2_validation_requires_native_component_engines();
+    test_voxcpm2_validation_accepts_complete_required_sections();
 
     if (failures > 0)
     {

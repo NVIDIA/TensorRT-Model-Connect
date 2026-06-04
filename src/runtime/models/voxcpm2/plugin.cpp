@@ -1,6 +1,7 @@
 // VoxCPM2Plugin: explicit runtime boundary for "text_to_audio_voxcpm2".
 // Full support requires native LocEnc, TSLM, RALM, LocDiT, and AudioVAE engines.
 
+#include "runtime/domains/audio/audio_bundle_validation.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <memory>
@@ -11,7 +12,9 @@ namespace trtmc {
 class VoxCPM2Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        (void)ctx;
+        runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2, ctx.bundle,
+            ctx.bundle_path);
         throw std::runtime_error(
             "VoxCPM2 TRT runtime is not implemented yet. Full openbmb/VoxCPM2 "
             "text-to-audio support requires native LocEnc, TSLM, RALM, LocDiT, "
