@@ -111,6 +111,42 @@ def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
         assert "!e2e_artifacts/e2e_report.html" not in text
 
 
+def test_premerge_ci_runs_only_when_dispatched() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    trigger_block = text.split("permissions:", maxsplit=1)[0]
+    assert "pull_request:" not in trigger_block
+    assert "push:" not in trigger_block
+    assert "workflow_dispatch:" in trigger_block
+    assert "checkout_ref:" in trigger_block
+    assert "base_ref:" in trigger_block
+    assert "pr_number:" not in trigger_block
+    assert "request_comment_url:" not in trigger_block
+    assert "ref: ${{ inputs.checkout_ref || github.ref }}" in text
+    assert "TRTMC_CI_PREMERGE:" in text
+    assert "TRTMC_CI_PR_NUMBER:" not in text
+    assert "CI mode: /trtmc-ci premerge/selective" in text
+    assert "env.TRTMC_CI_PREMERGE == 'true'" in text
+
+
+def test_comment_router_dispatches_requested_ci_and_deletes_itself() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "request-trtmc-ci.yml").read_text()
+    assert "issue_comment:" in text
+    assert "actions: write" in text
+    assert "COMMENT_BODY: ${{ github.event.comment.body }}" in text
+    assert "COMMAND: /trtmc-ci" in text
+    assert "IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}" in text
+    assert "first_line == os.environ[\"COMMAND\"]" in text
+    assert "requested = is_pull_request and first_line == os.environ[\"COMMAND\"]" in text
+    assert "gh workflow run trtmc-ci.yml" in text
+    assert "--ref main" in text
+    assert 'checkout_ref="refs/pull/${PR_NUMBER}/merge"' in text
+    assert 'base_ref="origin/main"' in text
+    assert 'pr_number="$PR_NUMBER"' not in text
+    assert "request_comment_url" not in text
+    assert "gh api --method DELETE" in text
+    assert "actions/runs/${GITHUB_RUN_ID}" in text
+
+
 def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     assert "workflow_dispatch:" in text
@@ -122,6 +158,14 @@ def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
 def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert 'base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"' in text
+
+
+def test_comment_requested_premerge_exports_pr_context_to_container() -> None:
+    wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "-e TRTMC_CI_PREMERGE" in wrapper
+    assert '"${TRTMC_CI_PREMERGE:-false}" = "true"' in script
+    assert "requested premerge PR CI" in script
 
 
 def test_nightly_attempts_all_test_stages_after_failures() -> None:

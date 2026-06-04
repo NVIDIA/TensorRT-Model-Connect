@@ -1,0 +1,62 @@
+name: TensorRT-Model-Connect CI Comment Router
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: trtmc-ci-comment-router-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  route-comment:
+    name: Route comment command
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Parse comment command
+        id: command
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMAND: /trtmc-ci
+          IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+
+          body = os.environ.get("COMMENT_BODY", "")
+          first_line = body.strip().splitlines()[0].strip() if body.strip() else ""
+          is_pull_request = os.environ.get("IS_PULL_REQUEST", "").lower() == "true"
+          requested = is_pull_request and first_line == os.environ["COMMAND"]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"requested={str(requested).lower()}\n")
+          PY
+
+      - name: Dispatch requested CI
+        if: ${{ steps.command.outputs.requested == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh workflow run trtmc-ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f checkout_ref="refs/pull/${PR_NUMBER}/merge" \
+            -f base_ref="origin/main"
+
+      - name: Delete router workflow run
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
