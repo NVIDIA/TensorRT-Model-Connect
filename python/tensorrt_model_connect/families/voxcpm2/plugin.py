@@ -3,8 +3,8 @@
 VoxCPM2 is a tokenizer-free diffusion/autoregressive TTS stack. This plugin
 registers the model family and exposes the generation defaults used by the E2E
 contract. Full TRT export requires dedicated builders for LocEnc, TSLM, RALM,
-LocDiT, and the AudioVAE waveform decoder; the build boundary fails explicitly
-until those engines exist.
+and LocDiT; AudioVAE already has a raw upstream-module export path. The build
+boundary fails explicitly until every required component engine exists.
 """
 
 from __future__ import annotations
@@ -258,7 +258,14 @@ class VoxCPM2Plugin:
             }
 
         raw_sources = weights.get("_voxcpm2_raw_component_sources", {})
-        if isinstance(raw_sources, dict) and len(raw_sources) == len(_VOXCPM2_COMPONENTS):
+        missing_prebuilt_components = tuple(
+            component
+            for component in _VOXCPM2_COMPONENTS
+            if component not in prebuilt_plans
+        )
+        if isinstance(raw_sources, dict) and all(
+            component in raw_sources for component in missing_prebuilt_components
+        ):
             try:
                 return voxcpm2_component_builders.build_voxcpm2_component_plans(
                     model_dir,
@@ -268,16 +275,17 @@ class VoxCPM2Plugin:
                     precision=precision,
                     verbose=verbose,
                     builders=self.component_builders,
+                    prebuilt_plans=prebuilt_plans,
                 )
             except NotImplementedError as exc:
                 raise NotImplementedError(
                     "VoxCPM2 raw checkpoint sources are present for "
-                    f"{', '.join(_VOXCPM2_COMPONENTS)}, but native TRT builders "
+                    f"{', '.join(raw_sources)}, but native TRT builders "
                     "are incomplete. Builder inputs discovered: "
                     f"{_format_raw_component_sources(raw_sources)}. Full support "
-                    "still requires LocEnc, TSLM, RALM, LocDiT, and AudioVAE "
-                    "builders plus a native text-to-audio runtime that writes "
-                    "the TRT WAV artifact. Runtime binding contract: "
+                    "still requires LocEnc, TSLM, RALM, and LocDiT builders "
+                    "plus a native text-to-audio runtime that writes the TRT "
+                    "WAV artifact. Runtime binding contract: "
                     f"{voxcpm2_component_builders.describe_voxcpm2_runtime_contracts()}. "
                     f"First incomplete builder: {exc}"
                 ) from exc
@@ -293,10 +301,11 @@ class VoxCPM2Plugin:
         }
         raise NotImplementedError(
             "VoxCPM2 TRT export is not implemented yet. Full support requires "
-            "dedicated LocEnc, TSLM, RALM, LocDiT, and AudioVAE TensorRT "
-            "builders plus a native text-to-audio runtime that consumes "
+            "native component plans for LocEnc, TSLM, RALM, LocDiT, and "
+            "AudioVAE plus a native text-to-audio runtime that consumes "
             "audio_voxcpm2 settings. This build can package prebuilt native "
-            "component plans, but is missing artifacts for "
+            "component plans and can build AudioVAE from the raw audiovae.pth "
+            "checkpoint, but is missing artifacts for "
             f"{', '.join(missing)} under {model_dir}. Expected filenames: "
             f"{expected}."
         )

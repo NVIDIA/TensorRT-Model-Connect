@@ -2,8 +2,8 @@
 
 VoxCPM2 is assembled from five native stages. This module gives each stage a
 dedicated TensorRT builder entry point and keeps the expected runtime bindings
-next to the Python build surface. The individual graph builders still need to
-be implemented with TensorRT network construction.
+next to the Python build surface. AudioVAE has an executable upstream-module
+export path; LocEnc, TSLM, RALM, and LocDiT still need native graph builders.
 """
 
 from __future__ import annotations
@@ -660,32 +660,43 @@ def build_voxcpm2_component_plans(
     precision: str,
     verbose: bool,
     builders: Mapping[str, VoxCPM2ComponentBuilder] | None = None,
+    prebuilt_plans: Mapping[str, Path] | None = None,
 ) -> dict[str, bytes]:
     """Build every VoxCPM2 component plan and return bundle sections."""
     selected_builders = builders or DEFAULT_COMPONENT_BUILDERS
+    selected_prebuilt_plans = prebuilt_plans or {}
     sections: dict[str, bytes] = {}
     for spec in VOXCPM2_COMPONENT_SPECS:
-        if spec.name not in sources:
-            raise NotImplementedError(
-                "VoxCPM2 raw checkpoint is missing source inputs for "
-                f"component {spec.name!r}"
+        prebuilt_path = selected_prebuilt_plans.get(spec.name)
+        if prebuilt_path is not None:
+            _require_existing_paths(
+                (prebuilt_path,),
+                label="prebuilt engine plan",
+                component=spec.name,
             )
-        if spec.name not in selected_builders:
-            raise NotImplementedError(
-                "VoxCPM2 native TRT builder registry is missing component "
-                f"{spec.name!r}"
-            )
+            plan = prebuilt_path.read_bytes()
+        else:
+            if spec.name not in sources:
+                raise NotImplementedError(
+                    "VoxCPM2 raw checkpoint is missing source inputs for "
+                    f"component {spec.name!r}"
+                )
+            if spec.name not in selected_builders:
+                raise NotImplementedError(
+                    "VoxCPM2 native TRT builder registry is missing component "
+                    f"{spec.name!r}"
+                )
 
-        ctx = VoxCPM2ComponentBuildContext(
-            spec=spec,
-            model_dir=model_dir,
-            config=config,
-            source=sources[spec.name],
-            precision=precision,
-            verbose=verbose,
-            max_cache_length=max_cache_length,
-        )
-        plan = selected_builders[spec.name](ctx)
+            ctx = VoxCPM2ComponentBuildContext(
+                spec=spec,
+                model_dir=model_dir,
+                config=config,
+                source=sources[spec.name],
+                precision=precision,
+                verbose=verbose,
+                max_cache_length=max_cache_length,
+            )
+            plan = selected_builders[spec.name](ctx)
         if not isinstance(plan, (bytes, bytearray, memoryview)):
             raise TypeError(
                 "VoxCPM2 native TRT builder for component "
@@ -694,8 +705,8 @@ def build_voxcpm2_component_plans(
         plan_bytes = bytes(plan)
         if not plan_bytes:
             raise ValueError(
-                "VoxCPM2 native TRT builder for component "
-                f"{spec.name!r} returned an empty plan"
+                "VoxCPM2 component "
+                f"{spec.name!r} produced an empty plan"
             )
         sections[spec.engine_section] = plan_bytes
     return sections

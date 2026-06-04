@@ -513,6 +513,43 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
     ]
 
 
+def test_voxcpm2_raw_checkpoint_reuses_partial_prebuilt_plans(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    (tmp_path / "locenc.plan").write_bytes(b"LOCENC-PREBUILT")
+    (tmp_path / "tslm.engine").write_bytes(b"TSLM-PREBUILT")
+    calls = []
+
+    def _builder(ctx):
+        calls.append(ctx.spec.name)
+        return f"BUILT-{ctx.spec.name}".encode("ascii")
+
+    fake_builders = {
+        spec.name: _builder for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
+
+    sections = plugin.build_engine(
+        cfg,
+        weights,
+        max_cache_length=32,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert sections == {
+        "locenc_engine_plan": b"LOCENC-PREBUILT",
+        "tslm_engine_plan": b"TSLM-PREBUILT",
+        "ralm_engine_plan": b"BUILT-ralm",
+        "locdit_engine_plan": b"BUILT-locdit",
+        "audiovae_engine_plan": b"BUILT-audiovae",
+    }
+    assert calls == ["ralm", "locdit", "audiovae"]
+
+
 def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monkeypatch):
     from tensorrt_model_connect.families.voxcpm2 import component_builders
     from tensorrt_model_connect.families.voxcpm2.plugin import plugin
