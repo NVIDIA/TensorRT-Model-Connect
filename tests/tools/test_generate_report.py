@@ -428,6 +428,55 @@ class TestRenderReport:
         assert "./build/trtmc build X" in html
         assert "Copy" in html
 
+    def test_audio_exact_compare_payload_rendered(self, tmp_path):
+        mod = _import_report()
+        compare_payload = {
+            "command": [
+                "python",
+                "tools/compare_wav_exact.py",
+                "trt_output.wav",
+                "hf_reference.wav",
+            ],
+            "result": {
+                "passed": True,
+                "metrics": {
+                    "sample_rate_exact": True,
+                    "waveform_exact_match": True,
+                },
+            },
+        }
+        (tmp_path / "compare_wav_exact.json").write_text(
+            json.dumps(compare_payload, indent=2),
+            encoding="utf-8",
+        )
+        r = _make_result(
+            name="voxcpm2",
+            task_strategy="text_to_audio",
+            family="voxcpm2",
+            hf_id="openbmb/VoxCPM2",
+            artifacts={"compare_wav_exact": "compare_wav_exact.json"},
+            metrics={
+                "waveform_exact_match": {
+                    "value": 1.0,
+                    "threshold": 1.0,
+                    "operator": "==",
+                    "passed": True,
+                    "note": "exact_compare_result=compare_wav_exact.json",
+                },
+            },
+        )
+        r["_artifact_dir"] = str(tmp_path)
+        r["case_config"]["runtime_strategy"] = "text_to_audio_voxcpm2"
+        r["case_config"]["reference_backend"] = "voxcpm"
+
+        html = mod.render_report([r])
+
+        assert "Exact WAV Compare" in html
+        assert "compare_wav_exact.json" in html
+        assert "tools/compare_wav_exact.py" in html
+        assert "waveform_exact_match" in html
+        assert "true" in html
+
     def test_timing_rendered(self):
         mod = _import_report()
         r = _make_result(timing={"build_s": 10.0, "trt_generate_s": 5.5})
