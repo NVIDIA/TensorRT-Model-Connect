@@ -721,6 +721,7 @@ trtmc_add_test(test_mel_spectrogram)
 
 # Audio — Bark
 trtmc_add_test(test_bark_generation_plan)
+trtmc_add_test(test_voxcpm2_generation_config)
 
 # Audio — Speech (PersonaPlex / Magpie)
 trtmc_add_test(test_speech_subprocess_seam      NO_SRC_INCLUDE)
