@@ -222,6 +222,7 @@ add_library(trtmc_core
   src/runtime/models/rnnt/pipeline.cpp
   src/runtime/models/bark/pipeline.cpp
   src/runtime/models/magpie/pipeline.cpp
+  src/runtime/models/voxcpm2/pipeline.cpp
   src/runtime/models/speech/pipeline.cpp
   src/runtime/models/omni/pipeline.cpp
   src/runtime/models/pixart/pipeline.cpp
@@ -722,6 +723,7 @@ trtmc_add_test(test_mel_spectrogram)
 # Audio — Bark
 trtmc_add_test(test_bark_generation_plan)
 trtmc_add_test(test_voxcpm2_generation_config)
+trtmc_add_test(test_voxcpm2_pipeline_contract)
 
 # Audio — Speech (PersonaPlex / Magpie)
 trtmc_add_test(test_speech_subprocess_seam      NO_SRC_INCLUDE)
