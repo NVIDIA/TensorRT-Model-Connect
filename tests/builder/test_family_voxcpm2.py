@@ -209,6 +209,27 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["audiovae"].asset_files == ()
 
 
+def test_voxcpm2_component_specs_include_tensor_contracts():
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    specs = component_builders.VOXCPM2_COMPONENT_SPECS
+
+    assert specs[0].input_tensor.name == "text_utf8"
+    assert specs[0].input_tensor.dtype_contract == ("int8",)
+    assert specs[0].input_tensor.rank == 1
+    assert specs[0].input_tensor.symbolic_shape == ("utf8_bytes",)
+    assert specs[0].output_tensor.name == "local_text_features"
+    assert specs[0].output_tensor.dtype_contract == ("float32", "bfloat16")
+    assert specs[0].output_tensor.rank == 2
+    assert specs[0].output_tensor.symbolic_shape == ("text_steps", "feat_dim")
+    assert specs[4].input_tensor.name == "audio_vae_latents"
+    assert specs[4].input_tensor.rank == 2
+    assert specs[4].output_tensor.name == "waveform_f32"
+    assert specs[4].output_tensor.dtype_contract == ("float32",)
+    assert specs[4].output_tensor.rank == 1
+    assert specs[4].output_tensor.symbolic_shape == ("audio_samples",)
+
+
 def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     from tensorrt_model_connect.families.voxcpm2.plugin import plugin
 
@@ -227,6 +248,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path):
     assert "component 'locenc' is not implemented yet" in message
     assert "input binding 'text_utf8'" in message
     assert "output binding 'local_text_features'" in message
+    assert "text_utf8:int8[utf8_bytes] -> local_text_features:float32|bfloat16" in message
     assert "Prepared safetensors checkpoint inputs with 2 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
 
@@ -496,6 +518,10 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
     assert locdit_inputs.engine_section == "locdit_engine_plan"
     assert locdit_inputs.input_artifact == "acoustic_residual_states"
     assert locdit_inputs.output_artifact == "audio_vae_latents"
+    assert locdit_inputs.input_tensor.name == "acoustic_residual_states"
+    assert locdit_inputs.input_tensor.rank == 2
+    assert locdit_inputs.output_tensor.name == "audio_vae_latents"
+    assert locdit_inputs.output_tensor.dtype_contract == ("float32", "bfloat16")
     assert locdit_inputs.checkpoint_kind == "safetensors"
     assert locdit_inputs.weight_paths == (tmp_path / "model.safetensors",)
     assert locdit_inputs.asset_paths == ()

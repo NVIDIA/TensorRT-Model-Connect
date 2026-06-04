@@ -124,8 +124,15 @@ void test_voxcpm2_component_contract_lists_native_engine_sections() {
           "voxcpm2 locenc section name");
     check(std::string(specs[0].input_artifact) == "text_utf8",
           "voxcpm2 locenc input artifact name");
+    check(std::string(specs[0].input_tensor.name) == "text_utf8",
+          "voxcpm2 locenc input tensor name");
+    check(specs[0].input_tensor.rank == 1, "voxcpm2 locenc input tensor rank");
+    check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
+              specs[0].input_tensor.dtype_contract)) == "int8",
+          "voxcpm2 locenc input tensor dtype");
     check(std::string(specs[0].output_artifact) == "local_text_features",
           "voxcpm2 locenc output artifact name");
+    check(specs[0].output_tensor.rank == 2, "voxcpm2 locenc output tensor rank");
     check(std::string(specs[4].name) == "audiovae", "voxcpm2 component 4 is audiovae");
     check(std::string(specs[4].engine_section) == "audiovae_engine_plan",
           "voxcpm2 audiovae section name");
@@ -133,6 +140,10 @@ void test_voxcpm2_component_contract_lists_native_engine_sections() {
           "voxcpm2 audiovae input artifact name");
     check(std::string(specs[4].output_artifact) == "waveform_f32",
           "voxcpm2 audiovae output artifact name");
+    check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
+              specs[4].output_tensor.dtype_contract)) == "float32",
+          "voxcpm2 audiovae output tensor dtype");
+    check(specs[4].output_tensor.rank == 1, "voxcpm2 audiovae output tensor rank");
 }
 
 void test_voxcpm2_validation_accepts_complete_required_sections() {

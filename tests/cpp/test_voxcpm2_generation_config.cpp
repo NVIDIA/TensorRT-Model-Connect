@@ -87,29 +87,45 @@ void test_generation_plan_preserves_acceptance_artifact_name() {
     check(std::string(plan.stages[4].name) == "audiovae", "last VoxCPM2 stage is AudioVAE");
     check(std::string(plan.stages[4].output_artifact) == "waveform_f32",
           "AudioVAE produces float waveform");
+    check(std::string(plan.stages[0].input_tensor.name) == "text_utf8",
+          "LocEnc consumes UTF-8 byte tensor");
+    check(plan.stages[0].input_tensor.rank == 1, "LocEnc text input is rank 1");
+    check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
+              plan.stages[0].input_tensor.dtype_contract)) == "int8",
+          "LocEnc text input is int8 bytes");
+    check(std::string(plan.stages[0].output_tensor.name) == "local_text_features",
+          "LocEnc produces local text feature tensor");
+    check(plan.stages[0].output_tensor.rank == 2, "LocEnc features are rank 2");
+    check(std::string(trtmc::runtime::builders::audio::voxcpm2_dtype_contract_name(
+              plan.stages[4].output_tensor.dtype_contract)) == "float32",
+          "AudioVAE waveform output is float32");
     check(std::string(plan.output_wav_artifact) == "trt_output.wav",
           "TRT output WAV artifact name is stable");
     check(plan.config.sample_rate == 48000, "plan carries output sample rate");
 }
 
 void test_generation_plan_description_includes_stage_order_and_artifact() {
-    const auto plan =
-        trtmc::runtime::builders::audio::make_voxcpm2_generation_plan(
-            trtmc::make_voxcpm2_config_from_json("{}"));
+    const auto plan = trtmc::runtime::builders::audio::make_voxcpm2_generation_plan(
+        trtmc::make_voxcpm2_config_from_json("{}"));
     const auto description =
         trtmc::runtime::builders::audio::describe_voxcpm2_generation_plan(plan);
 
     check(description.find("locenc(text_utf8=>local_text_features") != std::string::npos,
           "plan description includes LocEnc input/output");
+    check(description.find("input=int8[utf8_bytes]") != std::string::npos,
+          "plan description includes LocEnc input tensor contract");
+    check(description.find("output=float32|bfloat16[text_steps,feat_dim]") != std::string::npos,
+          "plan description includes LocEnc output tensor contract");
     check(description.find("-> tslm(") != std::string::npos,
           "plan description includes TSLM order");
     check(description.find("-> ralm(") != std::string::npos,
           "plan description includes RALM order");
     check(description.find("-> locdit(") != std::string::npos,
           "plan description includes LocDiT order");
-    check(description.find("-> audiovae(audio_vae_latents=>waveform_f32") !=
-              std::string::npos,
+    check(description.find("-> audiovae(audio_vae_latents=>waveform_f32") != std::string::npos,
           "plan description includes AudioVAE waveform output");
+    check(description.find("output=float32[audio_samples]") != std::string::npos,
+          "plan description includes waveform tensor contract");
     check(description.find("output_wav_artifact=trt_output.wav") != std::string::npos,
           "plan description includes output WAV artifact");
 }

@@ -16,11 +16,28 @@ from ...config import ModelConfig
 
 
 @dataclass(frozen=True)
+class VoxCPM2TensorSpec:
+    name: str
+    dtype_contract: tuple[str, ...]
+    rank: int
+    symbolic_shape: tuple[str, ...]
+
+    def describe(self) -> str:
+        return (
+            f"{self.name}:"
+            f"{'|'.join(self.dtype_contract)}"
+            f"[{', '.join(self.symbolic_shape)}]"
+        )
+
+
+@dataclass(frozen=True)
 class VoxCPM2ComponentSpec:
     name: str
     engine_section: str
     input_artifact: str
     output_artifact: str
+    input_tensor: VoxCPM2TensorSpec
+    output_tensor: VoxCPM2TensorSpec
 
 
 @dataclass(frozen=True)
@@ -152,6 +169,8 @@ class VoxCPM2PreparedComponentInputs:
     engine_section: str
     input_artifact: str
     output_artifact: str
+    input_tensor: VoxCPM2TensorSpec
+    output_tensor: VoxCPM2TensorSpec
     config_values: Mapping[str, Any]
     weight_paths: tuple[Path, ...]
     asset_paths: tuple[Path, ...]
@@ -162,32 +181,88 @@ class VoxCPM2PreparedComponentInputs:
 VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
 
 
+VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
+    "text_utf8": VoxCPM2TensorSpec(
+        "text_utf8",
+        ("int8",),
+        1,
+        ("utf8_bytes",),
+    ),
+    "local_text_features": VoxCPM2TensorSpec(
+        "local_text_features",
+        ("float32", "bfloat16"),
+        2,
+        ("text_steps", "feat_dim"),
+    ),
+    "semantic_lm_states": VoxCPM2TensorSpec(
+        "semantic_lm_states",
+        ("float32", "bfloat16"),
+        2,
+        ("lm_steps", "lm_hidden_size"),
+    ),
+    "acoustic_residual_states": VoxCPM2TensorSpec(
+        "acoustic_residual_states",
+        ("float32", "bfloat16"),
+        2,
+        ("lm_steps", "scalar_quantization_latent_dim"),
+    ),
+    "audio_vae_latents": VoxCPM2TensorSpec(
+        "audio_vae_latents",
+        ("float32", "bfloat16"),
+        2,
+        ("audio_frames", "audio_vae_latent_dim"),
+    ),
+    "waveform_f32": VoxCPM2TensorSpec(
+        "waveform_f32",
+        ("float32",),
+        1,
+        ("audio_samples",),
+    ),
+}
+
+
+def _component_spec(
+    name: str,
+    engine_section: str,
+    input_artifact: str,
+    output_artifact: str,
+) -> VoxCPM2ComponentSpec:
+    return VoxCPM2ComponentSpec(
+        name,
+        engine_section,
+        input_artifact,
+        output_artifact,
+        VOXCPM2_TENSOR_SPECS[input_artifact],
+        VOXCPM2_TENSOR_SPECS[output_artifact],
+    )
+
+
 VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
-    VoxCPM2ComponentSpec(
+    _component_spec(
         "locenc",
         "locenc_engine_plan",
         "text_utf8",
         "local_text_features",
     ),
-    VoxCPM2ComponentSpec(
+    _component_spec(
         "tslm",
         "tslm_engine_plan",
         "local_text_features",
         "semantic_lm_states",
     ),
-    VoxCPM2ComponentSpec(
+    _component_spec(
         "ralm",
         "ralm_engine_plan",
         "semantic_lm_states",
         "acoustic_residual_states",
     ),
-    VoxCPM2ComponentSpec(
+    _component_spec(
         "locdit",
         "locdit_engine_plan",
         "acoustic_residual_states",
         "audio_vae_latents",
     ),
-    VoxCPM2ComponentSpec(
+    _component_spec(
         "audiovae",
         "audiovae_engine_plan",
         "audio_vae_latents",
@@ -260,6 +335,8 @@ def prepare_component_inputs(
         engine_section=ctx.spec.engine_section,
         input_artifact=ctx.spec.input_artifact,
         output_artifact=ctx.spec.output_artifact,
+        input_tensor=ctx.spec.input_tensor,
+        output_tensor=ctx.spec.output_tensor,
         config_values=getattr(ctx.source, "config_values", {}),
         weight_paths=ctx.weight_paths,
         asset_paths=ctx.asset_paths,
@@ -277,7 +354,9 @@ def _raise_native_builder_gap(
         f"{ctx.spec.name!r} is not implemented yet. It must build "
         f"{ctx.spec.engine_section!r} with input binding "
         f"{ctx.spec.input_artifact!r} and output binding "
-        f"{ctx.spec.output_artifact!r}. Prepared "
+        f"{ctx.spec.output_artifact!r}. Tensor contract: "
+        f"{prepared.input_tensor.describe()} -> "
+        f"{prepared.output_tensor.describe()}. Prepared "
         f"{prepared.checkpoint_kind} checkpoint inputs with "
         f"{len(prepared.state_dict_keys)} state entries. Discovered source inputs: "
         f"{_describe_source(ctx.source)}."

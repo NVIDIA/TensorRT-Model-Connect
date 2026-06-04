@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -43,6 +44,31 @@ const char* dtype_name(DType dtype) {
         return "int8";
     }
     return "unknown";
+}
+
+std::string describe_tensor_contract(const audio::VoxCPM2TensorContract& contract) {
+    std::ostringstream os;
+    os << contract.name << ":" << audio::voxcpm2_dtype_contract_name(contract.dtype_contract) << "["
+       << contract.symbolic_shape << "]";
+    return os.str();
+}
+
+void validate_tensor_contract(const Tensor& tensor, const audio::VoxCPM2TensorContract& contract,
+                              const audio::VoxCPM2GenerationStage& stage,
+                              const std::string& component_name, const char* direction) {
+    if (!audio::voxcpm2_dtype_matches(contract.dtype_contract, tensor.dtype)) {
+        throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name + " (" +
+                                 stage.engine_section + ") " + direction + " artifact '" +
+                                 contract.name + "' has dtype " + dtype_name(tensor.dtype) +
+                                 ", expected " + describe_tensor_contract(contract));
+    }
+    if (tensor.shape.size() != contract.rank) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: stage " + component_name + " (" + stage.engine_section + ") " +
+            direction + " artifact '" + contract.name + "' has rank " +
+            std::to_string(tensor.shape.size()) + ", expected " + std::to_string(contract.rank) +
+            " for " + describe_tensor_contract(contract));
+    }
 }
 
 OwnedStageTensor copy_stage_output(const Tensor& tensor, const audio::VoxCPM2GenerationStage& stage,
@@ -154,6 +180,7 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
                            const audio::VoxCPM2GenerationStage& stage,
                            const OwnedStageTensor& input, const RuntimeScalarInputs& controls) {
     validate_stage_bindings(component, stage);
+    validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component.name, "input");
     TensorMap inputs;
     inputs.emplace(stage.input_artifact, input.as_tensor());
     controls.add_to(*component.module, inputs);
@@ -164,6 +191,8 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
                                  " did not return output artifact '" + stage.output_artifact + "'");
     }
 
+    validate_tensor_contract(output_it->second, stage.output_tensor, stage, component.name,
+                             "output");
     return copy_stage_output(output_it->second, stage, component.name);
 }
 

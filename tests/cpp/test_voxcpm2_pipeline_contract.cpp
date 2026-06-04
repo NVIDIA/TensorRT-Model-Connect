@@ -48,10 +48,11 @@ class FakeModule final : public trtmc::ITrtModule {
     FakeModule(std::string input_name = "", std::string output_name = "",
                trtmc::DType output_dtype = trtmc::DType::kFloat32,
                std::vector<float> output_floats = {1.0F, 2.0F},
+               std::vector<int64_t> output_shape = {},
                std::vector<std::string> extra_input_names = {})
         : input_name_(std::move(input_name)), output_name_(std::move(output_name)),
           output_dtype_(output_dtype), extra_input_names_(std::move(extra_input_names)) {
-        set_float_output(std::move(output_floats));
+        set_float_output(std::move(output_floats), std::move(output_shape));
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
@@ -116,8 +117,9 @@ class FakeModule final : public trtmc::ITrtModule {
         }
     }
 
-    void set_float_output(std::vector<float> values) {
-        output_shape_ = {static_cast<int64_t>(values.size())};
+    void set_float_output(std::vector<float> values, std::vector<int64_t> shape) {
+        output_shape_ = shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(values.size())}
+                                      : std::move(shape);
         output_storage_.resize(values.size() * sizeof(float));
         if (!values.empty()) {
             std::memcpy(output_storage_.data(), values.data(), output_storage_.size());
@@ -153,11 +155,20 @@ std::vector<audio::VoxCPM2LoadedComponent> make_components_missing_output_bindin
     return components;
 }
 
+std::vector<float> repeated_values(std::size_t count, float value) {
+    return std::vector<float>(count, value);
+}
+
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     const std::vector<std::vector<float>> stage_outputs = {
-        {1.0F, 2.0F}, {3.0F, 4.0F}, {5.0F, 6.0F}, {7.0F, 8.0F}, {0.0F, 0.25F, -0.25F, 0.5F},
+        repeated_values(2 * 64, 1.0F),  repeated_values(2 * 2048, 2.0F),
+        repeated_values(2 * 512, 3.0F), repeated_values(2 * 64, 4.0F),
+        {0.0F, 0.25F, -0.25F, 0.5F},
+    };
+    const std::vector<std::vector<int64_t>> stage_shapes = {
+        {2, 64}, {2, 2048}, {2, 512}, {2, 64}, {4},
     };
     for (std::size_t i = 0; i < audio::kVoxCPM2ComponentSpecs.size(); ++i) {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
@@ -167,9 +178,18 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
             extra_inputs = {"cfg_value", "inference_timesteps"};
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
-            std::move(extra_inputs));
+            stage_shapes[i], std::move(extra_inputs));
         components.push_back({spec.name, spec.engine_section, std::move(module)});
     }
+    return components;
+}
+
+std::vector<audio::VoxCPM2LoadedComponent> make_components_with_bad_locenc_output_rank() {
+    auto components = make_scripted_components();
+    const auto& stage = audio::kVoxCPM2GenerationStages[0];
+    components[0].module = std::make_unique<FakeModule>(
+        stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32,
+        std::vector<float>{1.0F, 2.0F}, std::vector<int64_t>{2});
     return components;
 }
 
@@ -247,6 +267,26 @@ void test_construct_reports_missing_stage_binding() {
     }
 }
 
+void test_generate_audio_rejects_stage_tensor_contract_mismatch() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_components_with_bad_locenc_output_rank(), plan,
+                                    "openbmb/VoxCPM2");
+
+    try {
+        trtmc::GenerateConfig gen_cfg;
+        (void)pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+        check(false, "voxcpm2 pipeline rejects wrong stage tensor rank");
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        check(message.find("output artifact 'local_text_features' has rank 1") != std::string::npos,
+              "voxcpm2 tensor contract error reports observed rank");
+        check(message.find("expected 2 for local_text_features:float32|bfloat16") !=
+                  std::string::npos,
+              "voxcpm2 tensor contract error reports expected contract");
+    }
+}
+
 void test_rejects_component_order_mismatch() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
@@ -271,6 +311,7 @@ int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_construct_reports_missing_stage_binding();
+    test_generate_audio_rejects_stage_tensor_contract_mismatch();
     test_rejects_component_order_mismatch();
 
     if (failures != 0) {
