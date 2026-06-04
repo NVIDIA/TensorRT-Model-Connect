@@ -207,6 +207,11 @@ def test_run_returns_preflight_skip_without_resolving_bundle(
     assert data["status"] == E2EStatus.SKIP.value
     assert data["failure_type"] == FailureType.PRECHECK_FAIL.value
     assert data["stages"] == {}
+    assert "build_bundle" in data["repro_commands"]
+    assert "trt_inference" in data["repro_commands"]
+    assert str(Path(ctx.engine_dir) / "preflight-skip.trtfb") in (
+        data["repro_commands"]["trt_inference"]
+    )
 
 
 def test_python_module_preflight_rejects_module_that_fails_import(

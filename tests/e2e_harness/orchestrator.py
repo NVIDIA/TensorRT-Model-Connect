@@ -722,7 +722,8 @@ def _build_repro_commands(
 
     # Build command
     max_cache = case.inputs.get("max_cache_length", 256)
-    bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
+    bundle_name = case.bundle or f"{case.name}.trtfb"
+    bundle_target = bundle_path or str(Path(ctx.engine_dir) / bundle_name)
     build_parts = [
         ctx.build_python_path() or "python", "-m", "tensorrt_model_connect.__main__", "build", case.hf_id,
         "-o", bundle_target,
@@ -741,13 +742,13 @@ def _build_repro_commands(
         repro["hf_reference_audio"] = hf_reference_audio
 
     # TRT inference command (task-specific C++ binary entrypoint)
-    if bundle_path and ctx.binary_path:
+    if bundle_target and ctx.binary_path:
         image = (case.inputs.get("image") or case.inputs.get("test_image")
                  or case.inputs.get("image_path"))
         task_strategy = case.task_strategy or ""
         if task_strategy == "diffusion_text_generation":
             infer_parts = [
-                ctx.binary_path, "run", bundle_path,
+                ctx.binary_path, "run", bundle_target,
                 "--prompt", _shell_quote(
                     case.inputs.get("prompt")
                     or case.inputs.get("source_text")
@@ -785,7 +786,7 @@ def _build_repro_commands(
             if condition_mask:
                 infer_parts.extend(["--condition-mask-raw", str(condition_mask)])
         elif task_strategy == "neural_operator":
-            infer_parts = [ctx.binary_path, "solve", bundle_path]
+            infer_parts = [ctx.binary_path, "solve", bundle_target]
             branch_input = case.inputs.get("branch_input")
             trunk_input = case.inputs.get("trunk_input")
             if branch_input is not None or trunk_input is not None:
@@ -804,7 +805,7 @@ def _build_repro_commands(
             )
             if is_qwen_image:
                 infer_parts = [
-                    ctx.binary_path, "run", bundle_path,
+                    ctx.binary_path, "run", bundle_target,
                     "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
                     "--output", "/tmp/trtmc_qwen_image/output.png",
                     "--num-inference-steps", str(case.inputs.get("num_inference_steps", 20)),
@@ -835,7 +836,7 @@ def _build_repro_commands(
                     infer_parts.extend(["--initial-latents-raw", str(qi_latent_path)])
             else:
                 infer_parts = [
-                    ctx.binary_path, "generate-video", bundle_path,
+                    ctx.binary_path, "generate-video", bundle_target,
                     "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
                     "--output", "/tmp/trtmc_frames",
                     "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
@@ -854,7 +855,7 @@ def _build_repro_commands(
                 if ctx.artifacts_dir else Path("/tmp/trtmc_trt_output.wav")
             )
             infer_parts = [
-                ctx.binary_path, "generate-audio", bundle_path,
+                ctx.binary_path, "generate-audio", bundle_target,
                 "--prompt", _shell_quote(case.inputs.get("prompt", "")),
                 "--output", str(output_path),
             ]
@@ -878,7 +879,7 @@ def _build_repro_commands(
                 infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
         elif task_strategy == "prompted_segmentation":
             infer_parts = [
-                ctx.binary_path, "segment-sam", bundle_path,
+                ctx.binary_path, "segment-sam", bundle_target,
                 "--image", str(image or ""),
                 "--output", "/tmp/trtmc_masks",
                 "--point-x", str(case.inputs.get("point_x", 0.5)),
@@ -888,18 +889,18 @@ def _build_repro_commands(
                 infer_parts.append("--background")
         elif task_strategy == "segmentation":
             infer_parts = [
-                ctx.binary_path, "segment", bundle_path,
+                ctx.binary_path, "segment", bundle_target,
                 "--image", str(image or ""),
                 "--output", "/tmp/trtmc_segmentation.png",
             ]
         elif task_strategy == "image_classification":
             infer_parts = [
-                ctx.binary_path, "classify", bundle_path,
+                ctx.binary_path, "classify", bundle_target,
                 "--image", str(image or ""),
             ]
         else:
             infer_parts = [
-                ctx.binary_path, "run", bundle_path,
+                ctx.binary_path, "run", bundle_target,
                 "--prompt", _shell_quote(case.inputs.get("prompt", "")),
                 "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
             ]
@@ -1512,6 +1513,7 @@ class E2EOrchestrator:
         if preflight_ok:
             return None
 
+        repro = _build_repro_commands(state.case, state.ctx, None, {})
         result = E2EResult(
             case_name=state.case.name,
             status=E2EStatus.SKIP.value,
@@ -1523,6 +1525,7 @@ class E2EOrchestrator:
             detailed_timing=_build_detailed_timing(state.timing, {}),
             env_fingerprint=state.env_fingerprint,
             timestamp=state.timestamp,
+            repro_commands=repro,
         )
         state.sink.finalize(result)
         return result
