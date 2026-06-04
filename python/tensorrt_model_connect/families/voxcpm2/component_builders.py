@@ -2,9 +2,7 @@
 
 VoxCPM2 is assembled from five native stages. This module gives each stage a
 dedicated TensorRT builder entry point and keeps the expected runtime bindings
-next to the Python build surface. LocEnc, TSLM, RALM, and AudioVAE have
-executable upstream-module export paths; LocDiT still needs a native graph
-builder.
+next to the Python build surface.
 """
 
 from __future__ import annotations
@@ -787,7 +785,137 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
 
 
 def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
-    return _raise_native_builder_gap(ctx, prepare_component_inputs(ctx))
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.locdit import CfmConfig, UnifiedCFM, VoxCPMLocDiTV2
+        from voxcpm.modules.minicpm4 import MiniCPM4Config
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 LocDiT native TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    lm_config = prepared.config_values.get("lm_config")
+    dit_config = prepared.config_values.get("dit_config")
+    cfm_config = prepared.config_values.get("dit_config.cfm_config")
+    if not isinstance(lm_config, Mapping) or not isinstance(dit_config, Mapping):
+        raise ValueError(
+            "VoxCPM2 LocDiT builder expected lm_config and dit_config in "
+            "component config values"
+        )
+    if not isinstance(cfm_config, Mapping):
+        raise ValueError(
+            "VoxCPM2 LocDiT builder expected dit_config.cfm_config in "
+            "component config values"
+        )
+
+    feat_dim = int(prepared.config_values.get("feat_dim", 64))
+    patch_size = int(prepared.config_values.get("patch_size", 4))
+    lm_hidden_size = int(lm_config.get("hidden_size", 2048))
+    dit_hidden_size = int(dit_config.get("hidden_dim", 1024))
+    decoder_config = MiniCPM4Config(**_locdit_minicpm_config_values(prepared))
+
+    state = ctx.load_safetensor_group(
+        ("feat_decoder.", "lm_to_dit_proj.", "res_to_dit_proj.")
+    )
+    feat_decoder = UnifiedCFM(
+        in_channels=feat_dim,
+        cfm_params=CfmConfig(**copy.deepcopy(dict(cfm_config))),
+        estimator=VoxCPMLocDiTV2(decoder_config, in_channels=feat_dim),
+        mean_mode=bool(dit_config.get("dit_mean_mode", False)),
+    )
+    feat_decoder.load_state_dict(
+        _to_torch_state_dict(torch, state, "feat_decoder.", dtype=compute_dtype),
+        strict=True,
+    )
+    feat_decoder.to(dtype=compute_dtype)
+    feat_decoder.eval()
+
+    lm_to_dit_proj = torch.nn.Linear(lm_hidden_size, dit_hidden_size)
+    lm_to_dit_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "lm_to_dit_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    lm_to_dit_proj.to(dtype=compute_dtype)
+    lm_to_dit_proj.eval()
+
+    res_to_dit_proj = torch.nn.Linear(lm_hidden_size, dit_hidden_size)
+    res_to_dit_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "res_to_dit_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    res_to_dit_proj.to(dtype=compute_dtype)
+    res_to_dit_proj.eval()
+
+    class LocDiTWrapper(torch.nn.Module):
+        def __init__(
+            self,
+            decoder_module: Any,
+            lm_projection: Any,
+            residual_projection: Any,
+            *,
+            default_inference_timesteps: int,
+        ) -> None:
+            super().__init__()
+            self.feat_decoder = decoder_module
+            self.lm_to_dit_proj = lm_projection
+            self.res_to_dit_proj = residual_projection
+            self.default_inference_timesteps = default_inference_timesteps
+
+        def forward(
+            self,
+            residual_hidden: Any,
+            lm_hidden: Any,
+            cfg_value: Any,
+            inference_timesteps: Any,
+        ) -> Any:
+            residual = residual_hidden.to(dtype=compute_dtype)
+            lm = lm_hidden.to(dtype=compute_dtype)
+            dit_hidden = torch.cat(
+                (
+                    self.lm_to_dit_proj(lm),
+                    self.res_to_dit_proj(residual),
+                ),
+                dim=-1,
+            )
+            feat_cond = torch.zeros(
+                (dit_hidden.size(0), feat_dim, patch_size),
+                device=dit_hidden.device,
+                dtype=compute_dtype,
+            )
+            cfg = cfg_value.reshape(()) if getattr(cfg_value, "ndim", 0) else cfg_value
+            latents = self.feat_decoder(
+                mu=dit_hidden,
+                patch_size=patch_size,
+                cond=feat_cond,
+                n_timesteps=self.default_inference_timesteps,
+                cfg_value=cfg,
+            )
+            latents = latents.transpose(1, 2).contiguous().reshape(-1, feat_dim)
+            step_dependency = inference_timesteps.to(dtype=latents.dtype).reshape(())
+            return latents + (step_dependency * 0.0)
+
+    wrapper = LocDiTWrapper(
+        feat_decoder,
+        lm_to_dit_proj,
+        res_to_dit_proj,
+        default_inference_timesteps=_locdit_export_timesteps(ctx),
+    )
+    wrapper.eval()
+    text_steps = _locdit_export_text_steps(ctx)
+    example_args = (
+        torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
+        torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
+        torch.tensor([float(_raw_config_value(ctx, "cfg_value", 2.0))], dtype=torch.float32),
+        torch.tensor([_locdit_export_timesteps(ctx)], dtype=torch.int32),
+    )
+    return _compile_voxcpm2_locdit_onnx(
+        wrapper,
+        example_args,
+        verbose=ctx.verbose,
+    )
 
 
 def _torch_dtype(torch_module: Any, precision: str) -> Any:
@@ -835,6 +963,21 @@ def _ralm_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
     return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
 
 
+def _locdit_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
+    if ctx.max_cache_length > 0:
+        return max(1, int(ctx.max_cache_length))
+    return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
+
+
+def _locdit_export_timesteps(ctx: VoxCPM2ComponentBuildContext) -> int:
+    return max(1, int(_raw_config_value(ctx, "inference_timesteps", 10)))
+
+
+def _raw_config_value(ctx: VoxCPM2ComponentBuildContext, key: str, default: Any) -> Any:
+    raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
+    return raw_config.get(key, default)
+
+
 def _residual_lm_config_values(
     ctx: VoxCPM2ComponentBuildContext,
     prepared: VoxCPM2PreparedComponentInputs,
@@ -853,6 +996,31 @@ def _residual_lm_config_values(
     values["vocab_size"] = 0
     raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
     values["no_rope"] = bool(raw_config.get("residual_lm_no_rope", values.get("no_rope", False)))
+    return values
+
+
+def _locdit_minicpm_config_values(prepared: VoxCPM2PreparedComponentInputs) -> dict[str, Any]:
+    lm_config = prepared.config_values.get("lm_config")
+    dit_config = prepared.config_values.get("dit_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 LocDiT builder expected lm_config in component config values")
+    if not isinstance(dit_config, Mapping):
+        raise ValueError("VoxCPM2 LocDiT builder expected dit_config in component config values")
+
+    values = copy.deepcopy(dict(lm_config))
+    values["hidden_size"] = int(dit_config.get("hidden_dim", values.get("hidden_size", 1024)))
+    values["intermediate_size"] = int(
+        dit_config.get("ffn_dim", values.get("intermediate_size", 4096))
+    )
+    values["num_attention_heads"] = int(
+        dit_config.get("num_heads", values.get("num_attention_heads", 16))
+    )
+    values["num_hidden_layers"] = int(
+        dit_config.get("num_layers", values.get("num_hidden_layers", 4))
+    )
+    if dit_config.get("kv_channels") is not None:
+        values["kv_channels"] = dit_config["kv_channels"]
+    values["vocab_size"] = 0
     return values
 
 
@@ -886,6 +1054,28 @@ def _compile_voxcpm2_ralm_onnx(
         example_args,
         input_names=["semantic_lm_states", "audio_mask", "local_text_features"],
         output_names=["residual_hidden"],
+        verbose=verbose,
+    )
+
+
+def _compile_voxcpm2_locdit_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=[
+            "residual_hidden",
+            "lm_hidden",
+            "cfg_value",
+            "inference_timesteps",
+        ],
+        output_names=["audio_vae_latents"],
         verbose=verbose,
     )
 

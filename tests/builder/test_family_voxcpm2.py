@@ -254,6 +254,7 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["ralm"].state_dict_prefixes == ("fusion_concat_proj.", "residual_lm.")
     assert sources["ralm"].asset_files == ()
     assert sources["locdit"].config_keys == (
+        "lm_config",
         "dit_config",
         "dit_config.cfm_config",
         "patch_size",
@@ -358,6 +359,9 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     fake_builders["locenc"] = lambda ctx: b"LOCENC-TRT"
     fake_builders["tslm"] = lambda ctx: b"TSLM-TRT"
     fake_builders["ralm"] = lambda ctx: b"RALM-TRT"
+    fake_builders["locdit"] = lambda ctx: component_builders._raise_native_builder_gap(
+        ctx, component_builders.prepare_component_inputs(ctx)
+    )
     monkeypatch.setattr(plugin, "component_builders", fake_builders)
 
     with pytest.raises(NotImplementedError) as error:
@@ -367,15 +371,15 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "raw checkpoint sources are present for locenc, tslm, ralm, locdit, audiovae" in message
     assert "native TRT builders are incomplete" in message
     assert "assets: tokenization_voxcpm2.py, tokenizer_config.json" in message
-    assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
+    assert "locdit(config: lm_config, dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
-    assert "still requires a LocDiT builder" in message
+    assert "still requires every component builder to complete" in message
     assert "component 'locdit' is not implemented yet" in message
     assert "input binding 'residual_hidden'" in message
     assert "output binding 'audio_vae_latents'" in message
     assert "residual_hidden:float32|bfloat16" in message
     assert "Prepared safetensors checkpoint inputs with 3 state entries" in message
-    assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
+    assert "native text-to-audio runtime to write the TRT WAV artifact" in message
     assert "Upstream handoff:" in message
     assert "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)" in message
     assert "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)" in message
@@ -598,6 +602,189 @@ def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     assert residual_config["no_rope"] is True
 
 
+def test_voxcpm2_locdit_builder_exports_named_trt_engine(tmp_path, monkeypatch):
+    from tensorrt_model_connect import checkpoint_mapper
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    class FakeTorchModule:
+        def __init__(self):
+            self.eval_called = False
+            self.dtype = None
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+        def to(self, *, dtype):
+            self.dtype = dtype
+            return self
+
+    class FakeTensor:
+        def __init__(self, shape, dtype):
+            self.shape = tuple(shape)
+            self.dtype = dtype
+
+    class FakeMiniCPM4Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.hidden_size = kwargs["hidden_size"]
+
+    class FakeCfmConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeVoxCPMLocDiTV2(FakeTorchModule):
+        def __init__(self, config, *, in_channels):
+            super().__init__()
+            self.config = config
+            self.in_channels = in_channels
+
+    class FakeUnifiedCFM(FakeTorchModule):
+        def __init__(self, *, in_channels, cfm_params, estimator, mean_mode):
+            super().__init__()
+            self.in_channels = in_channels
+            self.cfm_params = cfm_params
+            self.estimator = estimator
+            self.mean_mode = mean_mode
+            self.loaded = None
+            self.strict = None
+
+        def load_state_dict(self, state, *, strict):
+            self.loaded = state
+            self.strict = strict
+
+    class FakeLinear(FakeTorchModule):
+        def __init__(self, in_features, out_features):
+            super().__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.loaded = None
+            self.strict = None
+
+        def load_state_dict(self, state, *, strict):
+            self.loaded = state
+            self.strict = strict
+
+    fake_torch = types.SimpleNamespace(
+        bfloat16="bf16",
+        float16="fp16",
+        float32="fp32",
+        int32="int32",
+        as_tensor=lambda value: value,
+        nn=types.SimpleNamespace(Module=FakeTorchModule, Linear=FakeLinear),
+        zeros=lambda shape, *, dtype: FakeTensor(shape, dtype),
+        tensor=lambda value, *, dtype: FakeTensor((len(value),), dtype),
+    )
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_voxcpm_modules = types.ModuleType("voxcpm.modules")
+    fake_locdit = types.ModuleType("voxcpm.modules.locdit")
+    fake_minicpm4 = types.ModuleType("voxcpm.modules.minicpm4")
+    fake_locdit.CfmConfig = FakeCfmConfig
+    fake_locdit.UnifiedCFM = FakeUnifiedCFM
+    fake_locdit.VoxCPMLocDiTV2 = FakeVoxCPMLocDiTV2
+    fake_minicpm4.MiniCPM4Config = FakeMiniCPM4Config
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_voxcpm_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.locdit", fake_locdit)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", fake_minicpm4)
+    monkeypatch.setattr(checkpoint_mapper, "_detect_framework", lambda: "numpy")
+
+    captured = {}
+
+    def _fake_compile(wrapper, example_args, *, verbose):
+        captured["wrapper"] = wrapper
+        captured["example_args"] = example_args
+        captured["verbose"] = verbose
+        return b"LOCDIT-TRT"
+
+    monkeypatch.setattr(
+        component_builders,
+        "_compile_voxcpm2_locdit_onnx",
+        _fake_compile,
+    )
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    save_file(
+        {
+            "feat_decoder.estimator.decoder.weight": np.array([1.0], dtype=np.float32),
+            "lm_to_dit_proj.bias": np.array([2.0], dtype=np.float32),
+            "lm_to_dit_proj.weight": np.array([[3.0]], dtype=np.float32),
+            "res_to_dit_proj.bias": np.array([4.0], dtype=np.float32),
+            "res_to_dit_proj.weight": np.array([[5.0]], dtype=np.float32),
+            "unrelated.weight": np.array([6.0], dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
+    weights = plugin.load_weights(str(tmp_path), cfg)
+
+    def _fake_component_builder(component_name):
+        def _builder(ctx):
+            assert ctx.max_cache_length == 5
+            return f"{component_name}-plan".encode("ascii")
+
+        return _builder
+
+    fake_builders = {
+        spec.name: _fake_component_builder(spec.name)
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    fake_builders["locdit"] = component_builders.build_locdit_engine
+    monkeypatch.setattr(plugin, "component_builders", fake_builders)
+
+    sections = plugin.build_engine(
+        cfg,
+        weights,
+        max_cache_length=5,
+        precision="bf16",
+        verbose=True,
+    )
+
+    assert sections["locdit_engine_plan"] == b"LOCDIT-TRT"
+    assert captured["verbose"] is True
+    residual_hidden, lm_hidden, cfg_value, inference_timesteps = captured["example_args"]
+    assert residual_hidden.shape == (5, 2048)
+    assert residual_hidden.dtype == "bf16"
+    assert lm_hidden.shape == (5, 2048)
+    assert lm_hidden.dtype == "bf16"
+    assert cfg_value.shape == (1,)
+    assert cfg_value.dtype == "fp32"
+    assert inference_timesteps.shape == (1,)
+    assert inference_timesteps.dtype == "int32"
+
+    wrapper = captured["wrapper"]
+    feat_decoder = wrapper.feat_decoder
+    assert feat_decoder.in_channels == 64
+    assert feat_decoder.cfm_params.kwargs["solver"] == "euler"
+    assert feat_decoder.estimator.in_channels == 64
+    assert feat_decoder.estimator.config.kwargs["hidden_size"] == 1024
+    assert feat_decoder.estimator.config.kwargs["num_hidden_layers"] == 12
+    assert feat_decoder.estimator.config.kwargs["vocab_size"] == 0
+    assert tuple(feat_decoder.loaded) == ("estimator.decoder.weight",)
+    assert feat_decoder.strict is True
+    assert feat_decoder.dtype == "bf16"
+    assert feat_decoder.eval_called is True
+
+    lm_projection = wrapper.lm_to_dit_proj
+    assert lm_projection.in_features == 2048
+    assert lm_projection.out_features == 1024
+    assert tuple(lm_projection.loaded) == ("bias", "weight")
+    assert lm_projection.strict is True
+    assert lm_projection.dtype == "bf16"
+    assert lm_projection.eval_called is True
+
+    residual_projection = wrapper.res_to_dit_proj
+    assert residual_projection.in_features == 2048
+    assert residual_projection.out_features == 1024
+    assert tuple(residual_projection.loaded) == ("bias", "weight")
+    assert residual_projection.strict is True
+    assert residual_projection.dtype == "bf16"
+    assert residual_projection.eval_called is True
+    assert wrapper.default_inference_timesteps == 10
+    assert wrapper.eval_called is True
+
+
 def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
     from tensorrt_model_connect.families.voxcpm2 import component_builders
     from tensorrt_model_connect.families.voxcpm2.plugin import plugin
@@ -707,7 +894,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "bf16",
             True,
             16,
-            ("dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
+            ("lm_config", "dit_config", "dit_config.cfm_config", "patch_size", "feat_dim"),
             (),
         ),
         (
