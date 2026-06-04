@@ -27,6 +27,7 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/rnnt/plugin.cpp|register_rnnt_plugin"
   "models/bark/plugin.cpp|register_bark_plugin"
   "models/magpie/plugin.cpp|register_magpie_plugin"
+  "models/voxcpm2/plugin.cpp|register_voxcpm2_plugin"
   "models/speech/plugin.cpp|register_speech_plugin"
   "models/omni/plugin.cpp|register_omni_plugin"
   "models/flux/plugin.cpp|register_flux_plugin"

@@ -110,6 +110,7 @@ class ReferenceFamily(enum.Enum):
     ASR_CANARY = "asr_canary"
     TTS_BARK = "tts_bark"
     TTS_MAGPIE = "tts_magpie"
+    TTS_VOXCPM2 = "tts_voxcpm2"
     S2S_PERSONAPLEX = "s2s_personaplex"
 
     # --- Segmentation ---
@@ -820,6 +821,8 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "bark-large": ReferenceFamily.TTS_BARK.value,
     # 5.21 TTS_MAGPIE
     "magpie-tts-357m": ReferenceFamily.TTS_MAGPIE.value,
+    # 5.21a TTS_VOXCPM2
+    "voxcpm2": ReferenceFamily.TTS_VOXCPM2.value,
     # 5.22 S2S_PERSONAPLEX
     "personaplex-7b": ReferenceFamily.S2S_PERSONAPLEX.value,
     # 5.23 SEGMENTATION_SEGFORMER
@@ -887,6 +890,7 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.ASR_CANARY.value: UserContract.EXACT_TRANSCRIPT.value,
     ReferenceFamily.TTS_BARK.value: UserContract.TTS_AUDIO.value,
     ReferenceFamily.TTS_MAGPIE.value: UserContract.TTS_AUDIO.value,
+    ReferenceFamily.TTS_VOXCPM2.value: UserContract.TTS_AUDIO.value,
     ReferenceFamily.S2S_PERSONAPLEX.value: UserContract.SPEECH_RESPONSE.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: UserContract.SEGMENTATION_MASK.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
@@ -926,6 +930,7 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.ASR_CANARY.value: ComparisonMode.EXACT_TEXT.value,
     ReferenceFamily.TTS_BARK.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.TTS_MAGPIE.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
+    ReferenceFamily.TTS_VOXCPM2.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.S2S_PERSONAPLEX.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
@@ -953,6 +958,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "text_to_audio": "text_to_audio",              # legacy alias
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
+    "text_to_audio_voxcpm2": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",

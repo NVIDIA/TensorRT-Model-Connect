@@ -1,0 +1,75 @@
+{
+  "name": "voxcpm2",
+  "trace_id": "IT-E2E-VOXCPM2-01",
+  "hf_id": "openbmb/VoxCPM2",
+  "bundle": "voxcpm2.trtfb",
+  "family": "voxcpm2",
+  "runtime_strategy": "text_to_audio_voxcpm2",
+  "reference_backend": "voxcpm",
+  "oracle_level": "L1_external_reference",
+  "reference_family": "tts_voxcpm2",
+  "user_contract": "tts_audio",
+  "test_type": "audio",
+  "ci_tier": "nightly_only",
+  "max_cache_length": 1024,
+  "max_new_tokens": 0,
+  "precision": "bf16",
+  "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
+  "inputs": {
+    "cfg_value": 2.0,
+    "inference_timesteps": 10,
+    "normalize": true,
+    "denoise": true,
+    "retry_badcase": true,
+    "retry_badcase_max_times": 3,
+    "retry_badcase_ratio_threshold": 6.0
+  },
+  "runtime_config": {
+    "audio_voxcpm2": {
+      "cfg_value": 2.0,
+      "inference_timesteps": 10,
+      "normalize": true,
+      "denoise": true,
+      "retry_badcase": true,
+      "retry_badcase_max_times": 3,
+      "retry_badcase_ratio_threshold": 6.0
+    }
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "voxcpm",
+        "phase": "reference",
+        "timeout_s": 180
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "soundfile",
+        "phase": "reference",
+        "timeout_s": 30
+      },
+      "gating": true
+    }
+  ],
+  "stages": [
+    {
+      "name": "full_generation",
+      "required": true,
+      "artifact_type": "waveform",
+      "comparison_mode": "waveform_exact"
+    }
+  ],
+  "threshold_overrides": {
+    "exact_waveform_match": 1.0
+  },
+  "notes": "VoxCPM2 acceptance requires preserving the HF model-card WAV and the TRT WAV and enforcing exact waveform/sample-rate parity. Current family support records the build/runtime contract; full TRT export still requires native LocEnc, TSLM, RALM, and LocDiT builders."
+}

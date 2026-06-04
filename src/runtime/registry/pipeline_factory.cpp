@@ -37,6 +37,10 @@ bool json_field_is_truthy(const std::string& config_text, const char* key) {
     return rest.find("true") != std::string::npos || rest.find('1') != std::string::npos;
 }
 
+bool json_field_exists(const std::string& config_text, const char* key) {
+    return config_text.find(std::string("\"") + key + "\"") != std::string::npos;
+}
+
 std::string json_field_substr(const std::string& config_text, const char* key) {
     auto pos = config_text.find(std::string("\"") + key + "\"");
     if (pos == std::string::npos)
@@ -49,6 +53,10 @@ std::string json_field_substr(const std::string& config_text, const char* key) {
 
 std::string normalize_legacy_strategy(const std::string& strategy, const std::string& config_text) {
     if (strategy == "text_to_audio") {
+        if (json_field_exists(config_text, "voxcpm2_architecture") ||
+            json_field_exists(config_text, "audio_voxcpm2")) {
+            return "text_to_audio_voxcpm2";
+        }
         return json_field_is_truthy(config_text, "magpie_tts") ? "text_to_audio_magpie"
                                                                : "text_to_audio_bark";
     }
