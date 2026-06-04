@@ -155,6 +155,7 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["locenc"].config_values["patch_size"] == 4
     assert sources["locenc"].config_values["feat_dim"] == 64
     assert sources["locenc"].weight_files == ("model.safetensors",)
+    assert sources["locenc"].state_dict_prefixes == ("feat_encoder.", "enc_to_lm_proj.")
     assert sources["locenc"].asset_files == (
         "tokenization_voxcpm2.py",
         "tokenizer_config.json",
@@ -163,9 +164,20 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     )
     assert sources["tslm"].config_values["lm_config"]["hidden_size"] == 2048
     assert sources["tslm"].config_values["max_length"] == 8192
+    assert sources["tslm"].state_dict_prefixes == (
+        "base_lm.",
+        "fsq_layer.",
+        "stop_proj.",
+        "stop_head.",
+    )
     assert sources["tslm"].asset_files == sources["locenc"].asset_files
     assert sources["ralm"].config_values["residual_lm_num_layers"] == 8
     assert sources["ralm"].config_values["scalar_quantization_latent_dim"] == 512
+    assert sources["ralm"].state_dict_prefixes == (
+        "fusion_concat_proj.",
+        "residual_lm.",
+        "res_to_dit_proj.",
+    )
     assert sources["ralm"].asset_files == ()
     assert sources["locdit"].config_keys == (
         "dit_config",
@@ -175,9 +187,11 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     )
     assert sources["locdit"].config_values["dit_config"]["hidden_dim"] == 1024
     assert sources["locdit"].config_values["dit_config.cfm_config"]["solver"] == "euler"
+    assert sources["locdit"].state_dict_prefixes == ("lm_to_dit_proj.", "feat_decoder.")
     assert sources["locdit"].asset_files == ()
     assert sources["audiovae"].config_values["audio_vae_config"]["out_sample_rate"] == 48000
     assert sources["audiovae"].weight_files == ("audiovae.pth",)
+    assert sources["audiovae"].state_dict_prefixes == ()
     assert sources["audiovae"].asset_files == ()
 
 
@@ -387,6 +401,61 @@ def test_voxcpm2_component_context_loads_checkpoint_inputs(tmp_path, monkeypatch
         state_dict["decoder.weight"],
         np.array([3.0], dtype=np.float32),
     )
+
+
+def test_voxcpm2_component_context_loads_stage_scoped_safetensors(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    save_file(
+        {
+            "base_lm.layers.0.weight": np.array([1.0], dtype=np.float32),
+            "enc_to_lm_proj.weight": np.array([2.0], dtype=np.float32),
+            "feat_decoder.estimator.weight": np.array([3.0], dtype=np.float32),
+            "feat_encoder.layers.0.weight": np.array([4.0], dtype=np.float32),
+            "residual_lm.layers.0.weight": np.array([5.0], dtype=np.float32),
+            "unrelated.weight": np.array([6.0], dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    sources = weights["_voxcpm2_raw_component_sources"]
+    specs = {spec.name: spec for spec in component_builders.VOXCPM2_COMPONENT_SPECS}
+
+    locenc_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["locenc"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["locenc"],
+        precision="bf16",
+        verbose=False,
+    )
+    locenc_group = locenc_ctx.load_safetensor_group()
+
+    assert tuple(locenc_group) == (
+        "enc_to_lm_proj.weight",
+        "feat_encoder.layers.0.weight",
+    )
+    np.testing.assert_array_equal(
+        locenc_group["feat_encoder.layers.0.weight"],
+        np.array([4.0], dtype=np.float32),
+    )
+
+    ralm_ctx = component_builders.VoxCPM2ComponentBuildContext(
+        spec=specs["ralm"],
+        model_dir=tmp_path,
+        config=cfg,
+        source=sources["ralm"],
+        precision="bf16",
+        verbose=False,
+    )
+    assert tuple(ralm_ctx.load_safetensor_group()) == (
+        "residual_lm.layers.0.weight",
+    )
+
+    with pytest.raises(KeyError, match="found no safetensors tensors matching"):
+        locenc_ctx.load_safetensor_group(("missing_prefix.",))
 
 
 def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):

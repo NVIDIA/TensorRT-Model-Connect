@@ -54,6 +54,13 @@ _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
         "audio_vae_config.out_sample_rate",
     ),
 }
+_VOXCPM2_RAW_COMPONENT_STATE_PREFIXES = {
+    "locenc": ("feat_encoder.", "enc_to_lm_proj."),
+    "tslm": ("base_lm.", "fsq_layer.", "stop_proj.", "stop_head."),
+    "ralm": ("fusion_concat_proj.", "residual_lm.", "res_to_dit_proj."),
+    "locdit": ("lm_to_dit_proj.", "feat_decoder."),
+    "audiovae": (),
+}
 _VOXCPM2_TOKENIZER_ASSET_FILES = (
     "tokenization_voxcpm2.py",
     "tokenizer_config.json",
@@ -70,6 +77,7 @@ class VoxCPM2RawComponentSource:
     config_keys: tuple[str, ...]
     config_values: dict[str, Any]
     weight_files: tuple[str, ...]
+    state_dict_prefixes: tuple[str, ...] = ()
     asset_files: tuple[str, ...] = ()
 
 
@@ -146,6 +154,7 @@ def _find_raw_component_sources(
                 key: _raw_config_get(raw_config, key) for key in config_keys
             },
             weight_files=weight_files,
+            state_dict_prefixes=_VOXCPM2_RAW_COMPONENT_STATE_PREFIXES[component],
             asset_files=tokenizer_assets if component in _VOXCPM2_TEXT_COMPONENTS else (),
         )
     return sources
@@ -157,6 +166,7 @@ def _format_raw_component_sources(
     return "; ".join(
         f"{component}(config: {', '.join(source.config_keys)}; "
         f"weights: {', '.join(source.weight_files)}; "
+        f"state_dict: {', '.join(source.state_dict_prefixes) or '<none>'}; "
         f"assets: {', '.join(source.asset_files) or '<none>'})"
         for component, source in sources.items()
     )

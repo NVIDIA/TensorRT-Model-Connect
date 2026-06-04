@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from ...config import ModelConfig
 
@@ -50,6 +50,60 @@ class VoxCPM2ComponentBuildContext:
         from ...checkpoint_mapper import _load_tensor, _open_safetensors
 
         return _load_tensor(_open_safetensors(self.model_dir), tensor_name)
+
+    def safetensor_keys(self) -> tuple[str, ...]:
+        """Return tensor names visible from this component's safetensors input."""
+        if not self.weight_paths:
+            raise FileNotFoundError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} has no safetensors weight files"
+            )
+        from ...checkpoint_mapper import _open_safetensors
+
+        readers = _open_safetensors(self.model_dir)
+        tensor_map = getattr(readers, "tensor_map", None)
+        if tensor_map is not None:
+            return tuple(sorted(str(key) for key in tensor_map))
+        keys: set[str] = set()
+        for reader in readers:
+            keys.update(str(key) for key in reader.keys())
+        return tuple(sorted(keys))
+
+    def load_safetensor_group(
+        self, prefixes: Sequence[str] | None = None
+    ) -> Mapping[str, Any]:
+        """Load all safetensors entries for the component state-dict prefixes."""
+        selected_prefixes = tuple(
+            prefixes
+            if prefixes is not None
+            else getattr(self.source, "state_dict_prefixes", ())
+        )
+        if not selected_prefixes:
+            raise ValueError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} has no safetensors state-dict prefixes"
+            )
+        if not self.weight_paths:
+            raise FileNotFoundError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} has no safetensors weight files"
+            )
+
+        from ...checkpoint_mapper import _load_tensor, _open_safetensors
+
+        readers = _open_safetensors(self.model_dir)
+        keys = [
+            key
+            for key in self.safetensor_keys()
+            if key.startswith(selected_prefixes)
+        ]
+        if not keys:
+            raise KeyError(
+                "VoxCPM2 component "
+                f"{self.spec.name!r} found no safetensors tensors matching "
+                f"prefixes {selected_prefixes!r}"
+            )
+        return {key: _load_tensor(readers, key) for key in keys}
 
     def load_torch_checkpoint(self) -> Mapping[str, Any]:
         """Load a PyTorch checkpoint for components that are not safetensors."""
@@ -139,8 +193,12 @@ def _resolve_model_files(model_dir: Path, filenames: Any) -> tuple[Path, ...]:
 def _describe_source(source: Any) -> str:
     config_keys = ", ".join(getattr(source, "config_keys", ())) or "<none>"
     weight_files = ", ".join(getattr(source, "weight_files", ())) or "<none>"
+    state_prefixes = ", ".join(getattr(source, "state_dict_prefixes", ())) or "<none>"
     asset_files = ", ".join(getattr(source, "asset_files", ())) or "<none>"
-    return f"config: {config_keys}; weights: {weight_files}; assets: {asset_files}"
+    return (
+        f"config: {config_keys}; weights: {weight_files}; "
+        f"state_dict: {state_prefixes}; assets: {asset_files}"
+    )
 
 
 def _raise_native_builder_gap(ctx: VoxCPM2ComponentBuildContext) -> bytes:
