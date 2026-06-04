@@ -8,12 +8,12 @@
 //                 generate_audio() stage execution contract.
 // Preconditions:  No TensorRT SDK required; fake backend-neutral modules.
 // Postconditions: Pipeline validates LocEnc->TSLM->RALM->LocDiT->AudioVAE
-//                 module order, propagates artifact tensors, writes the TRT
-//                 WAV artifact, and reports exact missing stage bindings.
+//                 module order, propagates artifact tensors, leaves the TRT
+//                 WAV artifact path to the CLI, and reports exact missing stage
+//                 bindings.
 // =============================================================================
 
 #include "runtime/models/voxcpm2/pipeline.h"
-#include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -184,7 +184,7 @@ void test_constructs_with_loaded_component_contract() {
           "voxcpm2 pipeline preserves model id");
 }
 
-void test_generate_audio_writes_trt_wav_from_component_waveform() {
+void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     const auto original_cwd = std::filesystem::current_path();
     const auto temp_dir =
         std::filesystem::temp_directory_path() / "trtmc_voxcpm2_pipeline_contract";
@@ -220,10 +220,8 @@ void test_generate_audio_writes_trt_wav_from_component_waveform() {
           "voxcpm2 inference_timesteps uses GenerateConfig override");
 
     const auto wav_path = temp_dir / "trt_output.wav";
-    check(std::filesystem::exists(wav_path), "voxcpm2 writes trt_output.wav");
-    const auto wav = trtmc::io::read_wav(wav_path.string());
-    check(wav.sample_rate == 48000, "voxcpm2 wav sample rate matches plan");
-    check(wav.num_samples == 4, "voxcpm2 wav sample count matches waveform");
+    check(!std::filesystem::exists(wav_path),
+          "voxcpm2 pipeline leaves WAV writing to generate-audio --output");
 
     std::filesystem::current_path(original_cwd);
     std::filesystem::remove_all(temp_dir);
@@ -271,7 +269,7 @@ void test_rejects_component_order_mismatch() {
 
 int main() {
     test_constructs_with_loaded_component_contract();
-    test_generate_audio_writes_trt_wav_from_component_waveform();
+    test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_construct_reports_missing_stage_binding();
     test_rejects_component_order_mismatch();
 

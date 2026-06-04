@@ -1,7 +1,6 @@
 #include "runtime/models/voxcpm2/pipeline.h"
 
 #include "runtime/domains/audio/voxcpm2_config.h"
-#include "trtmc/trtmc_io.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -246,7 +245,6 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     }
 
     auto audio = make_audio_result(current, effective_plan);
-    io::write_wav(audio, effective_plan.output_wav_artifact);
     return audio;
 }
 
