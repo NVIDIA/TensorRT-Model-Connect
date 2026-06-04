@@ -1,5 +1,5 @@
 // VoxCPM2Plugin: explicit runtime boundary for "text_to_audio_voxcpm2".
-// Full support still requires native TSLM, RALM, and LocDiT engines.
+// Full acceptance requires valid component plans plus the HF/TRT WAV parity run.
 
 #include "runtime/domains/audio/audio_bundle_validation.h"
 #include "runtime/domains/audio/voxcpm2_component_loader.h"
