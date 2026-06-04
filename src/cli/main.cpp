@@ -960,6 +960,9 @@ int cmd_generate_audio(const CliArgs& args) {
 
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 0;
+    cfg.num_steps = args.num_steps;
+    cfg.cfg_scale = args.cfg_scale;
+    cfg.seed = args.seed;
 
     if (args.stream) {
         // Streaming mode: write raw PCM float32 to output file (or stdout

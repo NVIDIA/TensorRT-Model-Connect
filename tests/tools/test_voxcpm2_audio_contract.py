@@ -307,6 +307,8 @@ def test_voxcpm2_trt_runner_preserves_required_output_wav(monkeypatch, tmp_path)
 
     assert "audio_voxcpm2.cfg_value=2.0" in captured["cmd"]
     assert "audio_voxcpm2.inference_timesteps=10" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--cfg-scale") + 1] == "2.0"
+    assert captured["cmd"][captured["cmd"].index("--num-steps") + 1] == "10"
     wav_path = Path(out.data["wav_path"])
     assert wav_path == tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav"
     assert wav_path.is_file()
@@ -333,6 +335,8 @@ def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_p
     assert str(tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav") in trt_inference
     assert "--set audio_voxcpm2.cfg_value=2.0" in trt_inference
     assert "--set audio_voxcpm2.inference_timesteps=10" in trt_inference
+    assert "--cfg-scale 2.0" in trt_inference
+    assert "--num-steps 10" in trt_inference
 
     compare_cmd = repro["compare_audio_exact"]
     assert "tools/compare_wav_exact.py" in compare_cmd

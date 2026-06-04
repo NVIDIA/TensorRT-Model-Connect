@@ -304,6 +304,20 @@ class TextToAudioRunner:
             runtime_tokens = runtime_config_set_tokens(case)
             for token in runtime_tokens:
                 cmd.extend(["--set", token])
+            cfg_value = case.inputs.get(
+                "cfg_value", runtime_config_get(case, "audio_voxcpm2.cfg_value")
+            )
+            if cfg_value is not None:
+                cmd.extend(["--cfg-scale", str(cfg_value)])
+            inference_timesteps = case.inputs.get(
+                "inference_timesteps",
+                runtime_config_get(case, "audio_voxcpm2.inference_timesteps"),
+            )
+            if inference_timesteps is not None:
+                cmd.extend(["--num-steps", str(inference_timesteps)])
+            seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed"))
+            if seed is not None and int(seed) >= 0:
+                cmd.extend(["--seed", str(seed)])
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
             bark_seed = runtime_config_get(case, "audio_bark.seed")
             if case.family == "bark" and bark_seed is None:

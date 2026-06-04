@@ -53,7 +53,7 @@ from .contracts import (
 from . import _case_artifact_dir, save_full_stderr
 from .python_profiles import profile_env_var
 from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
-from .runtime_config import runtime_config_set_tokens
+from .runtime_config import runtime_config_get, runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -830,6 +830,20 @@ def _build_repro_commands(
             ]
             for token in runtime_config_set_tokens(case):
                 infer_parts.extend(["--set", token])
+            cfg_value = case.inputs.get(
+                "cfg_value", runtime_config_get(case, "audio_voxcpm2.cfg_value")
+            )
+            if cfg_value is not None:
+                infer_parts.extend(["--cfg-scale", str(cfg_value)])
+            inference_timesteps = case.inputs.get(
+                "inference_timesteps",
+                runtime_config_get(case, "audio_voxcpm2.inference_timesteps"),
+            )
+            if inference_timesteps is not None:
+                infer_parts.extend(["--num-steps", str(inference_timesteps)])
+            seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed"))
+            if seed is not None and int(seed) >= 0:
+                infer_parts.extend(["--seed", str(seed)])
             if "max_new_tokens" in case.inputs and int(case.inputs["max_new_tokens"]) > 0:
                 infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
         elif task_strategy == "prompted_segmentation":
