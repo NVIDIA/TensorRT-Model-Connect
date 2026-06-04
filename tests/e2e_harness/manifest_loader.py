@@ -538,6 +538,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_wan",
     "diffusion_zimage",
     "diffusion_qwen_image",
+    "diffusion_hunyuan_image",
     "diffusion_pixart",
     "torchtrt_diffusion",
     "diffusion_pixart_torchtrt",
