@@ -235,6 +235,8 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["locenc"].asset_files == ()
     assert sources["tslm"].config_values["lm_config"]["hidden_size"] == 2048
     assert sources["tslm"].config_values["max_length"] == 8192
+    assert sources["tslm"].config_values["scalar_quantization_latent_dim"] == 512
+    assert sources["tslm"].config_values["scalar_quantization_scale"] == 9
     assert sources["tslm"].state_dict_prefixes == (
         "base_lm.",
         "fsq_layer.",
@@ -354,6 +356,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     weights = plugin.load_weights(str(tmp_path), cfg)
     fake_builders = dict(component_builders.DEFAULT_COMPONENT_BUILDERS)
     fake_builders["locenc"] = lambda ctx: b"LOCENC-TRT"
+    fake_builders["tslm"] = lambda ctx: b"TSLM-TRT"
     monkeypatch.setattr(plugin, "component_builders", fake_builders)
 
     with pytest.raises(NotImplementedError) as error:
@@ -365,16 +368,17 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "assets: tokenization_voxcpm2.py, tokenizer_config.json" in message
     assert "locdit(config: dit_config, dit_config.cfm_config, patch_size, feat_dim" in message
     assert "audiovae(config: audio_vae_config" in message
-    assert "component 'tslm' is not implemented yet" in message
-    assert "input binding 'local_text_features'" in message
-    assert "output binding 'semantic_lm_states'" in message
-    assert "local_text_features:float32|bfloat16" in message
-    assert "Prepared safetensors checkpoint inputs with 2 state entries" in message
+    assert "still requires RALM and LocDiT builders" in message
+    assert "component 'ralm' is not implemented yet" in message
+    assert "input binding 'semantic_lm_states'" in message
+    assert "output binding 'residual_hidden'" in message
+    assert "semantic_lm_states:float32|bfloat16" in message
+    assert "Prepared safetensors checkpoint inputs with 3 state entries" in message
     assert "native text-to-audio runtime that writes the TRT WAV artifact" in message
     assert "Upstream handoff:" in message
-    assert "voxcpm.modules.minicpm4.MiniCPMModel(base_lm.)" in message
-    assert "runtime inputs: text_tokens, text_mask, local_text_features, audio_mask" in message
-    assert "runtime outputs: semantic_lm_states, lm_hidden, stop_logits" in message
+    assert "voxcpm.modules.minicpm4.MiniCPMModel(residual_lm.)" in message
+    assert "runtime inputs: semantic_lm_states, audio_mask, local_text_features" in message
+    assert "runtime outputs: residual_hidden" in message
     assert "required_side=text_tokens,text_mask,audio_mask" in message
     assert "Runtime binding contract:" in message
     assert "ralm(semantic_lm_states=>residual_hidden" in message
@@ -382,6 +386,117 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "locdit(residual_hidden=>audio_vae_latents" in message
     assert "required_side=lm_hidden" in message
     assert "required_controls=cfg_value,inference_timesteps" in message
+
+
+def test_voxcpm2_tslm_builder_wraps_upstream_modules_for_export(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    class FakeMiniCPM4Config:
+        def __init__(self, **kwargs):
+            self.hidden_size = int(kwargs["hidden_size"])
+            self.vocab_size = int(kwargs["vocab_size"])
+
+    class FakeMiniCPMModel(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(config.vocab_size, config.hidden_size)
+
+        def load_state_dict(self, state_dict, strict=True):
+            assert "dummy" in state_dict
+            return torch.nn.modules.module._IncompatibleKeys([], [])
+
+        def forward(self, *, inputs_embeds, is_causal):
+            assert is_causal is True
+            return inputs_embeds + 1.0, ()
+
+    class FakeScalarQuantizationLayer(torch.nn.Module):
+        def __init__(self, *args):
+            super().__init__()
+            self.args = args
+
+        def load_state_dict(self, state_dict, strict=True):
+            assert "dummy" in state_dict
+            return torch.nn.modules.module._IncompatibleKeys([], [])
+
+        def forward(self, values):
+            return values * 2.0
+
+    voxcpm_mod = types.ModuleType("voxcpm")
+    voxcpm_modules_mod = types.ModuleType("voxcpm.modules")
+    layers_mod = types.ModuleType("voxcpm.modules.layers")
+    minicpm_mod = types.ModuleType("voxcpm.modules.minicpm4")
+    layers_mod.ScalarQuantizationLayer = FakeScalarQuantizationLayer
+    minicpm_mod.MiniCPM4Config = FakeMiniCPM4Config
+    minicpm_mod.MiniCPMModel = FakeMiniCPMModel
+    monkeypatch.setitem(sys.modules, "voxcpm", voxcpm_mod)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", voxcpm_modules_mod)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.layers", layers_mod)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", minicpm_mod)
+
+    save_file(
+        {
+            "base_lm.dummy": np.array([1.0], dtype=np.float32),
+            "fsq_layer.dummy": np.array([2.0], dtype=np.float32),
+            "stop_proj.weight": np.eye(2, dtype=np.float32),
+            "stop_proj.bias": np.zeros(2, dtype=np.float32),
+            "stop_head.weight": np.ones((2, 2), dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architecture": "voxcpm2",
+                "lm_config": {"hidden_size": 2, "vocab_size": 128},
+                "max_length": 8,
+                "scalar_quantization_latent_dim": 1,
+                "scalar_quantization_scale": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = ModelConfig.from_dir(tmp_path)
+    source = types.SimpleNamespace(
+        config_values={
+            "lm_config": {"hidden_size": 2, "vocab_size": 128},
+            "max_length": 8,
+            "scalar_quantization_latent_dim": 1,
+            "scalar_quantization_scale": 3,
+        },
+        weight_files=("model.safetensors",),
+        state_dict_prefixes=("base_lm.", "fsq_layer.", "stop_proj.", "stop_head."),
+        asset_files=(),
+    )
+    captured = {}
+
+    def fake_compile(wrapper, example_args, *, verbose):
+        outputs = wrapper(*example_args)
+        captured["verbose"] = verbose
+        captured["input_shapes"] = tuple(tuple(arg.shape) for arg in example_args)
+        captured["output_shapes"] = tuple(tuple(out.shape) for out in outputs)
+        captured["output_dtypes"] = tuple(out.dtype for out in outputs)
+        return b"TSLM-PLAN"
+
+    monkeypatch.setattr(component_builders, "_compile_voxcpm2_tslm_onnx", fake_compile)
+
+    plan = component_builders.build_tslm_engine(
+        component_builders.VoxCPM2ComponentBuildContext(
+            spec=component_builders.VOXCPM2_COMPONENT_SPECS[1],
+            model_dir=tmp_path,
+            config=cfg,
+            source=source,
+            precision="fp32",
+            verbose=True,
+            max_cache_length=3,
+        )
+    )
+
+    assert plan == b"TSLM-PLAN"
+    assert captured["verbose"] is True
+    assert captured["input_shapes"] == ((3, 2), (3,), (3,), (3,))
+    assert captured["output_shapes"] == ((3, 2), (3, 2), (3, 2))
+    assert captured["output_dtypes"] == (torch.float32, torch.float32, torch.float32)
 
 
 def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monkeypatch):
@@ -454,7 +569,12 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "bf16",
             True,
             16,
-            ("lm_config", "max_length"),
+            (
+                "lm_config",
+                "max_length",
+                "scalar_quantization_latent_dim",
+                "scalar_quantization_scale",
+            ),
             (
                 "tokenization_voxcpm2.py",
                 "tokenizer_config.json",
