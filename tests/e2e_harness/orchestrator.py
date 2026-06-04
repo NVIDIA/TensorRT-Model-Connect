@@ -944,13 +944,15 @@ def _build_repro_commands(
     ) and ctx.artifacts_dir:
         case_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
         compare_python = ctx.reference_python_path() or ctx.hf_python or "python"
-        repro["compare_audio_exact"] = " ".join(
-            [
-                compare_python,
-                "tools/compare_wav_exact.py",
-                str(case_dir / "trt_output.wav"),
-                str(case_dir / "hf_reference.wav"),
-            ]
+        compare_parts = [
+            compare_python,
+            "tools/compare_wav_exact.py",
+            str(case_dir / "trt_output.wav"),
+            str(case_dir / "hf_reference.wav"),
+        ]
+        sidecar_path = case_dir / "compare_wav_exact.json"
+        repro["compare_audio_exact"] = (
+            f"{shlex.join(compare_parts)} > {shlex.quote(str(sidecar_path))}"
         )
 
     # Rerun with forced rebuild

@@ -434,3 +434,8 @@ def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_p
     assert "tools/compare_wav_exact.py" in compare_cmd
     assert str(tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav") in compare_cmd
     assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference.wav") in compare_cmd
+    assert ">" in compare_cmd
+    assert (
+        str(tmp_path / "artifacts" / "voxcpm2" / "compare_wav_exact.json")
+        in compare_cmd
+    )
