@@ -43,12 +43,20 @@ jobs:
         if: ${{ steps.command.outputs.requested == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_API_URL: ${{ github.event.issue.pull_request.url }}
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
+          head_ref="$(gh api "$PR_API_URL" --jq '.head.ref')"
+          head_repo="$(gh api "$PR_API_URL" --jq '.head.repo.full_name')"
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::/trtmc-ci only supports pull requests from branches in $GITHUB_REPOSITORY"
+            exit 1
+          fi
+
           gh workflow run trtmc-ci.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref main \
+            --ref "$head_ref" \
             -f checkout_ref="refs/pull/${PR_NUMBER}/merge" \
             -f base_ref="origin/main"
 

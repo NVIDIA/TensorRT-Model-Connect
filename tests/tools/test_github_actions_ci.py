@@ -137,8 +137,13 @@ def test_comment_router_dispatches_requested_ci_and_deletes_itself() -> None:
     assert "IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}" in text
     assert "first_line == os.environ[\"COMMAND\"]" in text
     assert "requested = is_pull_request and first_line == os.environ[\"COMMAND\"]" in text
+    assert "PR_API_URL: ${{ github.event.issue.pull_request.url }}" in text
+    assert "gh api \"$PR_API_URL\" --jq '.head.ref'" in text
+    assert "gh api \"$PR_API_URL\" --jq '.head.repo.full_name'" in text
+    assert "only supports pull requests from branches in $GITHUB_REPOSITORY" in text
     assert "gh workflow run trtmc-ci.yml" in text
-    assert "--ref main" in text
+    assert '--ref "$head_ref"' in text
+    assert "--ref main" not in text
     assert 'checkout_ref="refs/pull/${PR_NUMBER}/merge"' in text
     assert 'base_ref="origin/main"' in text
     assert 'pr_number="$PR_NUMBER"' not in text
