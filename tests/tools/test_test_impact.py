@@ -835,6 +835,16 @@ class TestUnitTiers:
             assert match.models == []
             assert match.unit_tiers == ["tools"]
 
+    def test_audio_compare_tool_triggers_text_to_audio_models_and_tools_tier(self, imap):
+        """Exact WAV helper edits run audio E2E selection and tools-tier tests."""
+        match = test_impact.classify_file("tools/compare_wav_exact.py", imap)
+
+        assert match.rule == "audio_compare_tool"
+        assert "bark-small" in match.models
+        assert "qwen3-0.6b" not in match.models
+        assert match.unit_tiers == ["tools"]
+        assert not match.rebuild_cpp
+
     def test_unit_tier_torchtrt_engine_defs(self, imap):
         """Torch-TRT engine-def tests run as builder tests without E2E."""
         match = test_impact.classify_file(

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _read_wav_payload(path: Path) -> dict[str, Any] | None:
+def read_wav_payload(path: Path) -> dict[str, Any] | None:
     try:
         with path.open("rb") as f:
             if f.read(4) != b"RIFF":
@@ -58,8 +58,8 @@ def _read_wav_payload(path: Path) -> dict[str, Any] | None:
 
 
 def compare_wavs(trt_wav: Path, ref_wav: Path) -> dict[str, Any]:
-    trt = _read_wav_payload(trt_wav)
-    ref = _read_wav_payload(ref_wav)
+    trt = read_wav_payload(trt_wav)
+    ref = read_wav_payload(ref_wav)
     if trt is None or ref is None:
         return {
             "passed": False,
@@ -98,6 +98,9 @@ def compare_wavs(trt_wav: Path, ref_wav: Path) -> dict[str, Any]:
             "data_bytes": len(ref["data"]),
         },
     }
+
+
+_read_wav_payload = read_wav_payload
 
 
 def main(argv: list[str] | None = None) -> int:

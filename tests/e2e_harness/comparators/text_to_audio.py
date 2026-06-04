@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import logging
 import math
-import struct
+from pathlib import Path
 
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
+from tools import compare_wav_exact
 
 logger = logging.getLogger(__name__)
 
@@ -166,26 +167,20 @@ class TextToAudioComparator:
                     metrics={},
                     message="Exact waveform comparison requires reference wav_path",
                 )
-            trt_wav = self._read_wav_payload(trt_wav_path)
-            ref_wav = self._read_wav_payload(ref_wav_path)
-            if trt_wav is None or ref_wav is None:
+            exact_result = compare_wav_exact.compare_wavs(
+                Path(trt_wav_path), Path(ref_wav_path)
+            )
+            exact_checks = exact_result.get("metrics", {})
+            if not exact_checks:
                 return CompareResult(
                     stage_name=stage.name,
                     status=StageStatus.ERROR.value,
                     metrics={},
-                    message="Exact waveform comparison could not read TRT/reference WAV",
+                    message=(
+                        "Exact waveform comparison could not read TRT/reference WAV"
+                    ),
                 )
 
-            exact_checks = {
-                "sample_rate_exact": trt_wav["sample_rate"] == ref_wav["sample_rate"],
-                "channel_count_exact": trt_wav["num_channels"] == ref_wav["num_channels"],
-                "sample_format_exact": (
-                    trt_wav["audio_format"] == ref_wav["audio_format"]
-                    and trt_wav["bits_per_sample"] == ref_wav["bits_per_sample"]
-                ),
-                "waveform_length_exact": len(trt_wav["data"]) == len(ref_wav["data"]),
-                "waveform_exact_match": trt_wav["data"] == ref_wav["data"],
-            }
             for name, passed in exact_checks.items():
                 metrics[name] = MetricResult(
                     value=1.0 if passed else 0.0,
@@ -400,52 +395,7 @@ class TextToAudioComparator:
     @staticmethod
     def _read_wav_payload(path: str):
         """Read WAV metadata and raw data chunk bytes for exact comparisons."""
-        try:
-            with open(path, "rb") as f:
-                riff = f.read(4)
-                if riff != b"RIFF":
-                    return None
-                f.read(4)  # chunk size
-                wave = f.read(4)
-                if wave != b"WAVE":
-                    return None
-
-                data_bytes = b""
-                audio_format = 1
-                num_channels = 1
-                sample_rate = 0
-                bits_per_sample = 16
-                while True:
-                    chunk_id = f.read(4)
-                    if len(chunk_id) < 4:
-                        break
-                    chunk_size_raw = f.read(4)
-                    if len(chunk_size_raw) < 4:
-                        break
-                    chunk_size = struct.unpack("<I", chunk_size_raw)[0]
-                    if chunk_id == b"fmt ":
-                        fmt_data = f.read(chunk_size)
-                        if len(fmt_data) >= 16:
-                            audio_format = struct.unpack("<H", fmt_data[0:2])[0]
-                            num_channels = struct.unpack("<H", fmt_data[2:4])[0]
-                            sample_rate = struct.unpack("<I", fmt_data[4:8])[0]
-                            bits_per_sample = struct.unpack("<H", fmt_data[14:16])[0]
-                    elif chunk_id == b"data":
-                        data_bytes = f.read(chunk_size)
-                    else:
-                        f.read(chunk_size)
-                    if chunk_size % 2 == 1:
-                        f.read(1)
-
-            return {
-                "audio_format": audio_format,
-                "num_channels": num_channels,
-                "sample_rate": sample_rate,
-                "bits_per_sample": bits_per_sample,
-                "data": data_bytes,
-            }
-        except Exception:
-            return None
+        return compare_wav_exact.read_wav_payload(Path(path))
 
 
 plugin = TextToAudioComparator()

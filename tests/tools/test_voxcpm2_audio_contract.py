@@ -212,6 +212,34 @@ def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):
     assert result["metrics"]["waveform_exact_match"] is False
 
 
+def test_compare_wav_exact_cli_reports_json_and_status(tmp_path):
+    trt_wav = tmp_path / "trt_output.wav"
+    ref_wav = tmp_path / "hf_reference.wav"
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "tools" / "compare_wav_exact.py"),
+        str(trt_wav),
+        str(ref_wav),
+    ]
+
+    _write_pcm16_wav(trt_wav, [0, 64, -64, 128])
+    _write_pcm16_wav(ref_wav, [0, 64, -64, 128])
+    passed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    assert passed.returncode == 0
+    passed_payload = json.loads(passed.stdout)
+    assert passed_payload["passed"] is True
+    assert passed_payload["metrics"]["waveform_exact_match"] is True
+
+    _write_pcm16_wav(ref_wav, [0, 64, -64, 129])
+    failed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    assert failed.returncode == 1
+    failed_payload = json.loads(failed.stdout)
+    assert failed_payload["passed"] is False
+    assert failed_payload["metrics"]["waveform_exact_match"] is False
+
+
 def test_voxcpm2_trt_runner_preserves_required_output_wav(monkeypatch, tmp_path):
     captured: dict[str, list[str]] = {}
 

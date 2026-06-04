@@ -774,6 +774,11 @@ def _no_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return []
 
 
+def _text_to_audio_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    return _models_for_task_strategies(["text_to_audio"], imap)
+
+
 def _all_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     del context
     return list(imap.all_model_names)
@@ -1465,6 +1470,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             }),
             resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=486,
+            name="audio_compare_tool",
+            matcher=_path_equals("tools/compare_wav_exact.py"),
+            resolver=_match_result(
+                "audio_compare_tool", _text_to_audio_models, ["tools"], False,
+            ),
+            covered_by=(
+                "TestUnitTiers."
+                "test_audio_compare_tool_triggers_text_to_audio_models_and_tools_tier",
+            ),
         ),
         ClassificationRule(
             priority=490,
