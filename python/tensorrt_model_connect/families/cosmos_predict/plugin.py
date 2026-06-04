@@ -205,13 +205,13 @@ class CosmosPredictPlugin:
         build_timing = _kwargs.get("build_timing")
         parallel = normalize_parallel_config(parallel_config)
         require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Cosmos-Predict2 tensor-parallel builds")
-        if parallel.enabled:
-            # Multi-GPU TP/SP variants are out of scope for this branch.
+            parallel, feature="Cosmos-Predict2 parallel builds")
+        if parallel.enabled and parallel.mode == "tensor_parallel":
+            # Cosmos uses sequence parallelism, not tensor parallelism.
             raise NotImplementedError(
-                "cosmos_predict: tensor/sequence parallel builds are not "
-                "implemented yet; rerun with parallel_config=None or "
-                "tp_size=1.")
+                "cosmos_predict: tensor_parallel is not supported; use "
+                "mode='sp_ulysses', 'sp_ring', or 'sp_allgather_kv' with a "
+                "cp_size > 1, or pass parallel_config=None for single-GPU.")
 
         # Lock per-checkpoint constants from transformer/config.json when
         # present; otherwise fall back to the 14B defaults baked into this
@@ -301,29 +301,58 @@ class CosmosPredictPlugin:
                 in_channels=dit_in_channels,
                 patch_size=dit_patch_size,
             )
+        # SP dispatch: select the DiT builder by parallel mode. All four
+        # builders share an identical kwarg signature except the SP variants
+        # also take ``parallel_config``. At cp_size=1 the SP collectives are
+        # pass-throughs, but framework validation forbids cp_size=1 with
+        # sp_* modes — so users get the dense builder for single-GPU and
+        # an sp_* builder when cp_size > 1.
+        _dit_common_kwargs = dict(
+            video_height=video_height,
+            video_width=video_width,
+            video_num_frames=video_num_frames,
+            hidden_size=dit_hidden,
+            num_heads=dit_heads,
+            head_dim=dit_head_dim,
+            num_layers=dit_layers,
+            ffn_dim=dit_ffn_dim,
+            out_channels=dit_out_channels,
+            text_embed_dim=dit_text_embed_dim,
+            text_seq_len=self._T5_MAX_SEQ_LEN,
+            adaln_lora_dim=dit_adaln_lora_dim,
+            patch_size=dit_patch_size,
+            rope_axes_dim=dit_rope_axes,
+            rope_scale=dit_rope_scale,
+            eps=dit_eps,
+            vae_scale_spatial=self._SCALE_FACTOR_SPATIAL,
+            vae_scale_temporal=self._SCALE_FACTOR_TEMPORAL,
+            verbose=verbose,
+        )
         with timed_trt_compile(build_timing, "dit"):
-            dit_plan = build_cosmos_dit_engine(
-                dit_weights,
-                video_height=video_height,
-                video_width=video_width,
-                video_num_frames=video_num_frames,
-                hidden_size=dit_hidden,
-                num_heads=dit_heads,
-                head_dim=dit_head_dim,
-                num_layers=dit_layers,
-                ffn_dim=dit_ffn_dim,
-                out_channels=dit_out_channels,
-                text_embed_dim=dit_text_embed_dim,
-                text_seq_len=self._T5_MAX_SEQ_LEN,
-                adaln_lora_dim=dit_adaln_lora_dim,
-                patch_size=dit_patch_size,
-                rope_axes_dim=dit_rope_axes,
-                rope_scale=dit_rope_scale,
-                eps=dit_eps,
-                vae_scale_spatial=self._SCALE_FACTOR_SPATIAL,
-                vae_scale_temporal=self._SCALE_FACTOR_TEMPORAL,
-                verbose=verbose,
-            )
+            if parallel.mode == "sp_ulysses":
+                from .cosmos_dit_ulysses_builder import (
+                    build_cosmos_dit_ulysses_engine)
+                dit_plan = build_cosmos_dit_ulysses_engine(
+                    config, dit_weights,
+                    parallel_config=parallel,
+                    **_dit_common_kwargs)
+            elif parallel.mode == "sp_ring":
+                from .cosmos_dit_ring_builder import (
+                    build_cosmos_dit_ring_engine)
+                dit_plan = build_cosmos_dit_ring_engine(
+                    config, dit_weights,
+                    parallel_config=parallel,
+                    **_dit_common_kwargs)
+            elif parallel.mode == "sp_allgather_kv":
+                from .cosmos_dit_allgather_kv_builder import (
+                    build_cosmos_dit_allgather_kv_engine)
+                dit_plan = build_cosmos_dit_allgather_kv_engine(
+                    config, dit_weights,
+                    parallel_config=parallel,
+                    **_dit_common_kwargs)
+            else:  # single
+                dit_plan = build_cosmos_dit_engine(
+                    dit_weights, **_dit_common_kwargs)
 
         # 3. Wan-shared causal 3D VAE decoder --------------------------------
         print("[cosmos-predict] Loading VAE decoder weights ...", file=sys.stderr)
