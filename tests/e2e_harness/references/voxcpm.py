@@ -102,7 +102,7 @@ class VoxCPMReference:
             )
             audio = np.asarray(wav, dtype=np.float32).reshape(-1)
             sample_rate = int(getattr(getattr(model, "tts_model", model), "sample_rate", 48000))
-            sf.write(%(wav_path)r, audio, sample_rate)
+            sf.write(%(wav_path)r, audio, sample_rate, subtype="FLOAT")
 
             rms = float(math.sqrt(float(np.mean(np.square(audio))))) if audio.size else 0.0
             result = {

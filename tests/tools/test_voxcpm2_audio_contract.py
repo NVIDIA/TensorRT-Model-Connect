@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import struct
 import wave
 from pathlib import Path
 
 from tests.e2e_harness.comparators.text_to_audio import TextToAudioComparator
-from tests.e2e_harness.contracts import StageOutput, StageSpec, StageStatus, ThresholdProfile
+from tests.e2e_harness.contracts import (
+    E2ECase,
+    RunContext,
+    StageOutput,
+    StageSpec,
+    StageStatus,
+    ThresholdProfile,
+)
 from tests.e2e_harness.manifest_loader import load_manifest
 from tests.e2e_harness.registry import get_reference, reset
+from tests.e2e_harness.references import voxcpm as voxcpm_reference
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +69,62 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
 def test_voxcpm_reference_backend_is_discoverable():
     reset()
     assert get_reference("voxcpm") is not None
+
+
+def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_path):
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {
+                    "cfg_value": 2.0,
+                    "duration_s": 0.1,
+                    "inference_timesteps": 10,
+                    "num_samples": 4800,
+                    "rms": 0.1,
+                    "sample_rate": 48000,
+                    "wav_path": str(tmp_path / "voxcpm2" / "hf_reference.wav"),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(voxcpm_reference.subprocess, "run", _fake_run)
+
+    case = E2ECase(
+        name="voxcpm2",
+        hf_id="openbmb/VoxCPM2",
+        family="voxcpm2",
+        runtime_strategy="text_to_audio_voxcpm2",
+        reference_backend="voxcpm",
+        inputs={
+            "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
+            "cfg_value": 2.0,
+            "inference_timesteps": 10,
+        },
+    )
+    ctx = RunContext(case=case, artifacts_dir=str(tmp_path), reference_python="/opt/ref-python")
+
+    out = voxcpm_reference.VoxCPMReference().run_stage(
+        case, StageSpec(name="full_generation"), ctx
+    )
+
+    assert captured["cmd"][0] == "/opt/ref-python"
+    script = captured["cmd"][2]
+    assert "VoxCPM.from_pretrained('openbmb/VoxCPM2')" in script
+    assert "cfg_value=2.0" in script
+    assert "inference_timesteps=10" in script
+    assert 'getattr(model, "tts_model", model)' in script
+    assert '"sample_rate", 48000' in script
+    assert 'subtype="FLOAT"' in script
+    assert out.data["returncode"] == 0
+    assert out.data["sample_rate"] == 48000
 
 
 def test_exact_waveform_mode_passes_identical_wavs(tmp_path):
