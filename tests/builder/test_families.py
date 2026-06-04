@@ -424,7 +424,7 @@ _POSITIVE_MATCH_CASES = [
     # Cosmos-Predict (diffusion video)
     ("cosmos_predict", "cosmos_predict"),
     ("cosmos-predict", "cosmos_predict"),
-    ("cosmos2_video_to_world", "cosmos_predict"),
+    ("cosmos2_video2world", "cosmos_predict"),
 ]
 
 
