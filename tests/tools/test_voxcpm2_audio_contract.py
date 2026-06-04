@@ -20,6 +20,7 @@ from tests.e2e_harness.contracts import (
 from tests.e2e_harness.manifest_loader import load_manifest
 from tests.e2e_harness.registry import get_reference, reset
 from tests.e2e_harness.references import voxcpm as voxcpm_reference
+from tests.e2e_harness.runners import audio_speech
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -180,3 +181,54 @@ def test_exact_waveform_mode_fails_sample_mismatch(tmp_path):
 
     assert result.status == StageStatus.FAILED.value
     assert not result.metrics["waveform_exact_match"].passed
+
+
+def test_voxcpm2_trt_runner_preserves_required_output_wav(monkeypatch, tmp_path):
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        wav_path = Path(cmd[cmd.index("--output") + 1])
+        _write_pcm16_wav(wav_path, [0, 64, -64, 128])
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(audio_speech.subprocess, "run", _fake_run)
+
+    case = E2ECase(
+        name="voxcpm2",
+        hf_id="openbmb/VoxCPM2",
+        family="voxcpm2",
+        runtime_strategy="text_to_audio_voxcpm2",
+        reference_backend="voxcpm",
+        bundle="voxcpm2.trtfb",
+        inputs={
+            "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
+            "cfg_value": 2.0,
+            "inference_timesteps": 10,
+        },
+        metadata={
+            "runtime_config": {
+                "audio_voxcpm2": {
+                    "cfg_value": 2.0,
+                    "inference_timesteps": 10,
+                }
+            }
+        },
+    )
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        binary_path="/tmp/trtmc",
+        engine_dir=str(tmp_path / "engines"),
+    )
+
+    out = audio_speech.TextToAudioRunner().run_stage(
+        case, StageSpec(name="full_generation"), ctx
+    )
+
+    assert "audio_voxcpm2.cfg_value=2.0" in captured["cmd"]
+    assert "audio_voxcpm2.inference_timesteps=10" in captured["cmd"]
+    wav_path = Path(out.data["wav_path"])
+    assert wav_path == tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav"
+    assert wav_path.is_file()
+    assert out.data["wav_exists"] is True

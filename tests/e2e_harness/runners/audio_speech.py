@@ -389,7 +389,7 @@ class TextToAudioRunner:
                 # comparators can access it after the tempdir is cleaned up.
                 if ctx.artifacts_dir:
                     art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
-                    dst = str(art_dir / "trt_audio.wav")
+                    dst = str(art_dir / "trt_output.wav")
                     shutil.copy2(wav_path, dst)
                     data["wav_path"] = dst
             else:
