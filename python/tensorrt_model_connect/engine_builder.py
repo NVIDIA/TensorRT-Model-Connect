@@ -117,6 +117,21 @@ _HF_ALLOW_PATTERNS = [
     "tokenizer/*",
 ]
 
+_HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
+_HF_EXTRA_ALLOW_PATTERNS_BY_HF_ID = {
+    "openbmb/VoxCPM2": [
+        "audiovae.pth",
+    ],
+}
+
+
+def _allow_patterns_for_model(model_id_or_path: str) -> list[str]:
+    return (
+        _HF_ALLOW_PATTERNS
+        + _HF_EXTRA_ALLOW_PATTERNS
+        + _HF_EXTRA_ALLOW_PATTERNS_BY_HF_ID.get(model_id_or_path, [])
+    )
+
 
 def _compute_dynamic_kv_profile_rows(
     max_cache_length: int,
@@ -409,7 +424,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         local_dir = snapshot_download(
             repo_id=model_id_or_path,
-            allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
+            allow_patterns=_allow_patterns_for_model(model_id_or_path),
         )
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)

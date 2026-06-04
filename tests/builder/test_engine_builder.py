@@ -94,6 +94,30 @@ class TestResolveModel:
         result = _resolve_model("nvidia/Magpie-TTS")
         assert result == f"resolved:{nemo_path}"
 
+    def test_voxcpm2_download_includes_audio_vae_artifact(self, tmp_path, monkeypatch):
+        """VoxCPM2 raw build inputs include the separate AudioVAE checkpoint."""
+        dl_dir = tmp_path / "dl"
+        dl_dir.mkdir()
+        (dl_dir / "config.json").write_text('{"architecture": "voxcpm2"}')
+
+        captured: dict[str, object] = {}
+        fake_hf = types.ModuleType("huggingface_hub")
+
+        def fake_snapshot_download(**kwargs):
+            captured.update(kwargs)
+            return str(dl_dir)
+
+        fake_hf.snapshot_download = fake_snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        result = _resolve_model("openbmb/VoxCPM2")
+
+        assert result == str(dl_dir)
+        allow_patterns = captured["allow_patterns"]
+        assert "audiovae.pth" in allow_patterns
+        assert "*.py" in allow_patterns
+        assert "*.nemo" in allow_patterns
+
 
 class TestFindPlugin:
     def test_supported_model_types(self):
