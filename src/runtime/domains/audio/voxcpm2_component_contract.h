@@ -47,9 +47,9 @@ inline constexpr VoxCPM2TensorContract kVoxCPM2LocalTextFeaturesTensor{
 inline constexpr VoxCPM2TensorContract kVoxCPM2SemanticLmStatesTensor{
     "semantic_lm_states", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "lm_steps,lm_hidden_size"};
-inline constexpr VoxCPM2TensorContract kVoxCPM2AcousticResidualStatesTensor{
-    "acoustic_residual_states", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
-    "lm_steps,scalar_quantization_latent_dim"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2ResidualHiddenTensor{
+    "residual_hidden", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
+    "lm_steps,residual_hidden_size"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2AudioVaeLatentsTensor{
     "audio_vae_latents", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "audio_frames,audio_vae_latent_dim"};
@@ -61,10 +61,10 @@ inline constexpr std::array<VoxCPM2ComponentSpec, 5> kVoxCPM2ComponentSpecs{{
      kVoxCPM2AudioFeatsTensor, kVoxCPM2LocalTextFeaturesTensor},
     {"tslm", "tslm_engine_plan", "local_text_features", "semantic_lm_states",
      kVoxCPM2LocalTextFeaturesTensor, kVoxCPM2SemanticLmStatesTensor},
-    {"ralm", "ralm_engine_plan", "semantic_lm_states", "acoustic_residual_states",
-     kVoxCPM2SemanticLmStatesTensor, kVoxCPM2AcousticResidualStatesTensor},
-    {"locdit", "locdit_engine_plan", "acoustic_residual_states", "audio_vae_latents",
-     kVoxCPM2AcousticResidualStatesTensor, kVoxCPM2AudioVaeLatentsTensor},
+    {"ralm", "ralm_engine_plan", "semantic_lm_states", "residual_hidden",
+     kVoxCPM2SemanticLmStatesTensor, kVoxCPM2ResidualHiddenTensor},
+    {"locdit", "locdit_engine_plan", "residual_hidden", "audio_vae_latents",
+     kVoxCPM2ResidualHiddenTensor, kVoxCPM2AudioVaeLatentsTensor},
     {"audiovae", "audiovae_engine_plan", "audio_vae_latents", "waveform_f32",
      kVoxCPM2AudioVaeLatentsTensor, kVoxCPM2WaveformF32Tensor},
 }};

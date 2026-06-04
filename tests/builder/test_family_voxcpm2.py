@@ -330,11 +330,8 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "torch.nn.Linear(stop_proj., stop_head.)",
     ]
 
-    assert specs["ralm"].upstream_outputs == (
-        "acoustic_residual_states",
-        "residual_hidden",
-    )
-    assert specs["ralm"].required_side_inputs == ("local_text_features",)
+    assert specs["ralm"].upstream_outputs == ("residual_hidden",)
+    assert specs["ralm"].required_side_inputs == ("audio_mask", "local_text_features")
     assert specs["ralm"].required_control_inputs == ()
     assert [
         module.describe() for module in specs["locdit"].upstream_modules
@@ -343,7 +340,7 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "voxcpm.modules.locdit.VoxCPMLocDiTV2(feat_decoder.estimator.)",
         "torch.nn.Linear(lm_to_dit_proj.)",
     ]
-    assert specs["locdit"].required_side_inputs == ("lm_hidden", "residual_hidden")
+    assert specs["locdit"].required_side_inputs == ("lm_hidden",)
     assert specs["locdit"].required_control_inputs == ("cfg_value", "inference_timesteps")
     assert specs["audiovae"].upstream_inputs == ("audio_vae_latents",)
     assert specs["audiovae"].upstream_outputs == ("waveform_f32",)
@@ -380,10 +377,10 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "runtime outputs: semantic_lm_states, lm_hidden, stop_logits" in message
     assert "required_side=text_tokens,text_mask,audio_mask" in message
     assert "Runtime binding contract:" in message
-    assert "ralm(semantic_lm_states=>acoustic_residual_states" in message
-    assert "required_side=local_text_features" in message
-    assert "locdit(acoustic_residual_states=>audio_vae_latents" in message
-    assert "required_side=lm_hidden,residual_hidden" in message
+    assert "ralm(semantic_lm_states=>residual_hidden" in message
+    assert "required_side=audio_mask,local_text_features" in message
+    assert "locdit(residual_hidden=>audio_vae_latents" in message
+    assert "required_side=lm_hidden" in message
     assert "required_controls=cfg_value,inference_timesteps" in message
 
 
@@ -469,7 +466,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             "ralm",
             "ralm_engine_plan",
             "semantic_lm_states",
-            "acoustic_residual_states",
+            "residual_hidden",
             tmp_path,
             "bf16",
             True,
@@ -485,7 +482,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
         (
             "locdit",
             "locdit_engine_plan",
-            "acoustic_residual_states",
+            "residual_hidden",
             "audio_vae_latents",
             tmp_path,
             "bf16",
@@ -962,9 +959,9 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
 
     assert locdit_inputs.component == "locdit"
     assert locdit_inputs.engine_section == "locdit_engine_plan"
-    assert locdit_inputs.input_artifact == "acoustic_residual_states"
+    assert locdit_inputs.input_artifact == "residual_hidden"
     assert locdit_inputs.output_artifact == "audio_vae_latents"
-    assert locdit_inputs.input_tensor.name == "acoustic_residual_states"
+    assert locdit_inputs.input_tensor.name == "residual_hidden"
     assert locdit_inputs.input_tensor.rank == 2
     assert locdit_inputs.output_tensor.name == "audio_vae_latents"
     assert locdit_inputs.output_tensor.dtype_contract == ("float32", "bfloat16")
@@ -976,7 +973,7 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
         "inference_timesteps",
     )
     assert locdit_inputs.upstream_outputs == ("audio_vae_latents",)
-    assert locdit_inputs.required_side_inputs == ("lm_hidden", "residual_hidden")
+    assert locdit_inputs.required_side_inputs == ("lm_hidden",)
     assert locdit_inputs.required_control_inputs == (
         "cfg_value",
         "inference_timesteps",

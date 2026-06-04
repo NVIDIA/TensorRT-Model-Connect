@@ -250,11 +250,11 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         2,
         ("lm_steps", "lm_hidden_size"),
     ),
-    "acoustic_residual_states": VoxCPM2TensorSpec(
-        "acoustic_residual_states",
+    "residual_hidden": VoxCPM2TensorSpec(
+        "residual_hidden",
         ("float32", "bfloat16"),
         2,
-        ("lm_steps", "scalar_quantization_latent_dim"),
+        ("lm_steps", "residual_hidden_size"),
     ),
     "audio_vae_latents": VoxCPM2TensorSpec(
         "audio_vae_latents",
@@ -354,7 +354,7 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
             ),
         ),
         ("semantic_lm_states", "audio_mask", "local_text_features"),
-        ("acoustic_residual_states", "residual_hidden"),
+        ("residual_hidden",),
     ),
     "locdit": (
         (
@@ -392,8 +392,8 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
 
 VOXCPM2_REQUIRED_SIDE_INPUTS: Mapping[str, tuple[str, ...]] = {
     "tslm": ("text_tokens", "text_mask", "audio_mask"),
-    "ralm": ("local_text_features",),
-    "locdit": ("lm_hidden", "residual_hidden"),
+    "ralm": ("audio_mask", "local_text_features"),
+    "locdit": ("lm_hidden",),
 }
 
 VOXCPM2_REQUIRED_CONTROL_INPUTS: Mapping[str, tuple[str, ...]] = {
@@ -418,12 +418,12 @@ VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
         "ralm",
         "ralm_engine_plan",
         "semantic_lm_states",
-        "acoustic_residual_states",
+        "residual_hidden",
     ),
     _component_spec(
         "locdit",
         "locdit_engine_plan",
-        "acoustic_residual_states",
+        "residual_hidden",
         "audio_vae_latents",
     ),
     _component_spec(

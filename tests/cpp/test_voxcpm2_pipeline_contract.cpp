@@ -317,12 +317,6 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
             extra_outputs.push_back(
                 {"lm_hidden", trtmc::DType::kFloat32, repeated_values(2 * 2048, 8.0F), {2, 2048}});
         }
-        if (i == 2) {
-            extra_outputs.push_back({"residual_hidden",
-                                     trtmc::DType::kFloat32,
-                                     repeated_values(2 * 512, 9.0F),
-                                     {2, 512}});
-        }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
             stage_shapes[i], std::move(extra_inputs), std::move(extra_outputs));
@@ -407,10 +401,10 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     check(last_text_mask_value == 1.0F, "voxcpm2 marks prompt tokens as text");
     check(last_audio_mask_value == 0.0F, "voxcpm2 zero-shot prompt has no audio mask");
     check(locdit_aux_binding_hits == 1,
-          "voxcpm2 forwards lm_hidden and residual_hidden side tensors to LocDiT");
+          "voxcpm2 forwards lm_hidden and residual_hidden tensors to LocDiT");
     check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
-    check(last_residual_hidden_value == 9.0F,
-          "voxcpm2 LocDiT sees RALM residual_hidden side tensor");
+    check(last_residual_hidden_value == 3.0F,
+          "voxcpm2 LocDiT sees RALM residual_hidden primary tensor");
 
     const auto wav_path = temp_dir / "trt_output.wav";
     check(!std::filesystem::exists(wav_path),
