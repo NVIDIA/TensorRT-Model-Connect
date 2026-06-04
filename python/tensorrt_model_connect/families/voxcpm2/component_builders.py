@@ -32,6 +32,14 @@ class VoxCPM2ComponentBuildContext:
     precision: str
     verbose: bool
 
+    @property
+    def weight_paths(self) -> tuple[Path, ...]:
+        return _resolve_model_files(self.model_dir, getattr(self.source, "weight_files", ()))
+
+    @property
+    def asset_paths(self) -> tuple[Path, ...]:
+        return _resolve_model_files(self.model_dir, getattr(self.source, "asset_files", ()))
+
 
 VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
 
@@ -68,6 +76,13 @@ VOXCPM2_COMPONENT_SPECS: tuple[VoxCPM2ComponentSpec, ...] = (
         "waveform_f32",
     ),
 )
+
+
+def _resolve_model_files(model_dir: Path, filenames: Any) -> tuple[Path, ...]:
+    return tuple(
+        filename if isinstance(filename, Path) else model_dir / str(filename)
+        for filename in filenames
+    )
 
 
 def _describe_source(source: Any) -> str:

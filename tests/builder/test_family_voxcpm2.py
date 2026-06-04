@@ -205,6 +205,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
     cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
     weights = plugin.load_weights(str(tmp_path), cfg)
     calls = []
+    path_calls = []
 
     def make_builder(component_name):
         def _builder(ctx):
@@ -221,6 +222,7 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
                     ctx.source.asset_files,
                 )
             )
+            path_calls.append((ctx.spec.name, ctx.weight_paths, ctx.asset_paths))
             return f"{component_name}-plan".encode("ascii")
 
         return _builder
@@ -318,6 +320,19 @@ def test_voxcpm2_raw_checkpoint_invokes_native_component_builders(tmp_path, monk
             ),
             (),
         ),
+    ]
+    tokenizer_asset_paths = (
+        tmp_path / "tokenization_voxcpm2.py",
+        tmp_path / "tokenizer_config.json",
+        tmp_path / "tokenizer.json",
+        tmp_path / "special_tokens_map.json",
+    )
+    assert path_calls == [
+        ("locenc", (tmp_path / "model.safetensors",), tokenizer_asset_paths),
+        ("tslm", (tmp_path / "model.safetensors",), tokenizer_asset_paths),
+        ("ralm", (tmp_path / "model.safetensors",), ()),
+        ("locdit", (tmp_path / "model.safetensors",), ()),
+        ("audiovae", (tmp_path / "audiovae.pth",), ()),
     ]
 
 
