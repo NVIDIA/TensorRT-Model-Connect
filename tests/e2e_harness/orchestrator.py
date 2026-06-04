@@ -576,6 +576,30 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
             sink.register_artifact(f"{prefix}_{artifact_key}", rel)
 
 
+def _register_compare_artifacts(sink: Any, result: CompareResult) -> None:
+    """Register comparison proof files referenced by metric notes."""
+    note_prefix = "exact_compare_result="
+    for metric in result.metrics.values():
+        note = getattr(metric, "note", "")
+        if not isinstance(note, str) or not note.startswith(note_prefix):
+            continue
+        raw_path = note[len(note_prefix):].strip()
+        if not raw_path:
+            continue
+
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = sink.base_dir / path
+        if not path.is_file():
+            continue
+
+        try:
+            rel_path = path.relative_to(sink.base_dir)
+        except ValueError:
+            rel_path = path
+        sink.register_artifact("compare_wav_exact", str(rel_path))
+
+
 def _collect_runtime_guard_payloads(value: Any) -> list[tuple[list[str], list[str], int | None]]:
     """Collect (command argv, stderr payloads, returncode) tuples from nested output structures."""
     payloads: list[tuple[list[str], list[str], int | None]] = []
@@ -1671,6 +1695,7 @@ class E2EOrchestrator:
 
         state.stage_results[stage.name] = compare_result
         state.sink.write_compare(stage.name, compare_result)
+        _register_compare_artifacts(state.sink, compare_result)
         if compare_result.status == StageStatus.SKIPPED.value and stage.required:
             state.required_validation_skipped = True
             state.all_stages_pass = False

@@ -12,7 +12,9 @@ from pathlib import Path
 import tools.compare_wav_exact as compare_wav_exact
 from tests.e2e_harness.comparators.text_to_audio import TextToAudioComparator
 from tests.e2e_harness.contracts import (
+    CompareResult,
     E2ECase,
+    MetricResult,
     RunContext,
     StageOutput,
     StageSpec,
@@ -20,7 +22,10 @@ from tests.e2e_harness.contracts import (
     ThresholdProfile,
 )
 from tests.e2e_harness.manifest_loader import load_manifest
-from tests.e2e_harness.orchestrator import _build_repro_commands
+from tests.e2e_harness.orchestrator import (
+    _build_repro_commands,
+    _register_compare_artifacts,
+)
 from tests.e2e_harness.registry import get_reference, reset
 from tests.e2e_harness.references import voxcpm as voxcpm_reference
 from tests.e2e_harness.runners import audio_speech
@@ -231,6 +236,41 @@ def test_compare_wav_exact_cli_payload_matches_comparator_contract(tmp_path):
     assert result["passed"] is True
     assert result["metrics"]["sample_rate_exact"] is True
     assert result["metrics"]["waveform_exact_match"] is True
+
+
+def test_exact_compare_sidecar_is_registered_as_report_artifact(tmp_path):
+    sidecar = tmp_path / "compare_wav_exact.json"
+    sidecar.write_text(
+        json.dumps({"result": {"passed": True}}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    result = CompareResult(
+        stage_name="full_generation",
+        metrics={
+            "waveform_exact_match": MetricResult(
+                value=1.0,
+                threshold=1.0,
+                operator="==",
+                passed=True,
+                note=f"exact_compare_result={sidecar}",
+            )
+        },
+    )
+
+    _register_compare_artifacts(sink, result)
+
+    assert sink.artifacts["compare_wav_exact"] == "compare_wav_exact.json"
 
 
 def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):

@@ -1071,6 +1071,49 @@ class TestRenderAudioModel:
         assert "ref_full_generation" in html
         assert "missing offline cache" in html
 
+    def test_exact_wav_compare_payload_is_visible(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "voxcpm2"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "trt_output.wav")
+        _make_tiny_wav(model_dir / "hf_reference.wav")
+        (model_dir / "compare_wav_exact.json").write_text(
+            json.dumps(
+                {
+                    "command": [
+                        "python",
+                        "tools/compare_wav_exact.py",
+                        "trt_output.wav",
+                        "hf_reference.wav",
+                    ],
+                    "result": {
+                        "passed": True,
+                        "metrics": {"waveform_exact_match": True},
+                    },
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        r = _make_result(
+            name="voxcpm2",
+            task_strategy="text_to_audio",
+            artifacts={
+                "trt_wav": "trt_output.wav",
+                "ref_wav": "hf_reference.wav",
+                "compare_wav_exact": "compare_wav_exact.json",
+            },
+        )
+        r["_artifact_dir"] = str(model_dir)
+
+        html = mod.render_audio_model(r)
+
+        assert "Exact WAV Compare" in html
+        assert "compare_wav_exact.json" in html
+        assert "tools/compare_wav_exact.py" in html
+        assert "waveform_exact_match" in html
+        assert "true" in html
+
     def test_speech_to_text_shows_transcript(self):
         mod = _import_report()
         r = _make_result(

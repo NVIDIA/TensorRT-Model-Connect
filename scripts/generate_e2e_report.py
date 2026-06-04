@@ -1005,6 +1005,86 @@ def _render_repro_commands(repro: Dict[str, str]) -> str:
     return "\n".join(parts)
 
 
+def _as_artifact_refs(value: Any) -> List[str]:
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return []
+
+
+def _resolve_artifact_ref(ref: str, art_dir: Path) -> Path:
+    path = Path(ref)
+    return path if path.is_absolute() else art_dir / ref
+
+
+def _exact_compare_refs(result: Dict[str, Any]) -> List[str]:
+    refs = _as_artifact_refs(result.get("artifacts", {}).get("compare_wav_exact"))
+    seen = set(refs)
+    for stage_data in result.get("stages", {}).values():
+        for metric in stage_data.get("metrics", {}).values():
+            if not isinstance(metric, dict):
+                continue
+            note = metric.get("note", "")
+            prefix = "exact_compare_result="
+            if not isinstance(note, str) or not note.startswith(prefix):
+                continue
+            ref = note[len(prefix):].strip()
+            if ref and ref not in seen:
+                refs.append(ref)
+                seen.add(ref)
+    return refs
+
+
+def _render_exact_compare_payload(result: Dict[str, Any]) -> str:
+    art_dir = Path(result.get("_artifact_dir", ""))
+    refs = _exact_compare_refs(result)
+    if not refs or not art_dir:
+        return ""
+
+    parts: List[str] = []
+    for ref in refs:
+        path = _resolve_artifact_ref(ref, art_dir)
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        try:
+            display_path = str(path.relative_to(art_dir))
+        except ValueError:
+            display_path = str(path)
+
+        if not parts:
+            parts.append('<div class="repro-section"><h4>Exact WAV Compare</h4>')
+        parts.append(f"<p><strong>Payload:</strong> {_esc(display_path)}</p>")
+
+        command = payload.get("command")
+        if isinstance(command, list):
+            command_text = " ".join(str(part) for part in command)
+        elif isinstance(command, str):
+            command_text = command
+        else:
+            command_text = ""
+        if command_text:
+            parts.append("<p><strong>command</strong></p>")
+            parts.append(_code_block(command_text, _next_cmd_id()))
+
+        result_payload = payload.get("result", payload)
+        parts.append("<p><strong>result</strong></p>")
+        parts.append(_code_block(
+            json.dumps(result_payload, indent=2, sort_keys=True),
+            _next_cmd_id(),
+        ))
+
+    if not parts:
+        return ""
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Text comparison
 # ---------------------------------------------------------------------------
@@ -1332,6 +1412,7 @@ def render_audio_model(result: Dict[str, Any]) -> str:
         if notice:
             parts.append(notice)
 
+    parts.append(_render_exact_compare_payload(result))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
