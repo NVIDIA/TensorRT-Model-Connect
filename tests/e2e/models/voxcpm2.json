@@ -78,6 +78,22 @@
         "timeout_s": 30
       },
       "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "tensorrt",
+        "phase": "build",
+        "timeout_s": 60
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 1
+      },
+      "gating": true
     }
   ],
   "stages": [

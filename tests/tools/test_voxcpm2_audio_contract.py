@@ -78,6 +78,20 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
         and req.gating
     }
     assert {"torch", "numpy", "voxcpm", "soundfile"} <= reference_modules
+    build_modules = {
+        req.args.get("module")
+        for req in case.preflight
+        if req.kind == "python_module_available"
+        and req.args.get("phase") == "build"
+        and req.gating
+    }
+    assert "tensorrt" in build_modules
+    assert any(
+        req.kind == "gpu_count_min"
+        and req.args.get("count") == 1
+        and req.gating
+        for req in case.preflight
+    )
 
 
 def test_voxcpm_reference_backend_is_discoverable():
