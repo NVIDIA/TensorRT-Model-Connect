@@ -102,17 +102,49 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
     return tensor;
 }
 
-OwnedStageTensor make_zero_audio_feats_tensor(const std::string& prompt, const VoxCPM2Config& cfg) {
+OwnedStageTensor make_text_tokens_tensor(const std::string& prompt, const ITokenizer* tokenizer) {
+    if (tokenizer == nullptr) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: tokenizer.json is required to build text_tokens for TSLM");
+    }
+    constexpr int32_t kAudioStartToken = 101;
+    auto ids = tokenizer->encode(prompt);
+    ids.push_back(kAudioStartToken);
+    if (ids.empty()) {
+        throw std::runtime_error("VoxCPM2Pipeline: tokenizer returned no text tokens");
+    }
+
+    OwnedStageTensor tensor;
+    tensor.shape = {static_cast<int64_t>(ids.size())};
+    tensor.dtype = DType::kInt32;
+    tensor.storage.resize(ids.size() * sizeof(int32_t));
+    std::memcpy(tensor.storage.data(), ids.data(), tensor.storage.size());
+    return tensor;
+}
+
+OwnedStageTensor make_float_mask_tensor(std::size_t token_count, float value) {
+    OwnedStageTensor tensor;
+    tensor.shape = {static_cast<int64_t>(token_count)};
+    tensor.dtype = DType::kFloat32;
+    std::vector<float> values(token_count, value);
+    tensor.storage.resize(values.size() * sizeof(float));
+    if (!values.empty()) {
+        std::memcpy(tensor.storage.data(), values.data(), tensor.storage.size());
+    }
+    return tensor;
+}
+
+OwnedStageTensor make_zero_audio_feats_tensor(std::size_t text_steps, const VoxCPM2Config& cfg) {
     if (cfg.patch_size <= 0 || cfg.feat_dim <= 0) {
         throw std::runtime_error("VoxCPM2Pipeline: patch_size and feat_dim must be positive");
     }
 
     OwnedStageTensor tensor;
-    const auto text_steps = static_cast<int64_t>(std::max<std::size_t>(1, prompt.size() + 1));
-    tensor.shape = {text_steps, cfg.patch_size, cfg.feat_dim};
+    const auto steps = static_cast<int64_t>(std::max<std::size_t>(1, text_steps));
+    tensor.shape = {steps, cfg.patch_size, cfg.feat_dim};
     tensor.dtype = DType::kFloat32;
     const auto value_count =
-        static_cast<std::size_t>(text_steps) * static_cast<std::size_t>(cfg.patch_size) *
+        static_cast<std::size_t>(steps) * static_cast<std::size_t>(cfg.patch_size) *
         static_cast<std::size_t>(cfg.feat_dim);
     tensor.storage.resize(value_count * sizeof(float));
     return tensor;
@@ -301,9 +333,10 @@ AudioResult make_audio_result(const OwnedStageTensor& waveform,
 } // namespace
 
 VoxCPM2Pipeline::VoxCPM2Pipeline(std::vector<audio::VoxCPM2LoadedComponent> components,
-                                 audio::VoxCPM2GenerationPlan plan, std::string model_id_str)
+                                 audio::VoxCPM2GenerationPlan plan, std::string model_id_str,
+                                 std::shared_ptr<ITokenizer> tokenizer)
     : components_(std::move(components)), plan_(std::move(plan)),
-      model_id_(std::move(model_id_str)) {
+      model_id_(std::move(model_id_str)), tokenizer_(std::move(tokenizer)) {
     validate_components();
 }
 
@@ -348,7 +381,13 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const RuntimeScalarInputs controls(effective_plan.config);
     StageArtifacts artifacts;
     artifacts.emplace("text_utf8", make_prompt_tensor(prompt));
-    artifacts.emplace("audio_feats", make_zero_audio_feats_tensor(prompt, effective_plan.config));
+    auto text_tokens = make_text_tokens_tensor(prompt, tokenizer_.get());
+    const auto text_token_count = static_cast<std::size_t>(text_tokens.shape.front());
+    artifacts.emplace("text_tokens", std::move(text_tokens));
+    artifacts.emplace("text_mask", make_float_mask_tensor(text_token_count, 1.0F));
+    artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0.0F));
+    artifacts.emplace("audio_feats",
+                      make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
     OwnedStageTensor current = artifacts.at("audio_feats");
     for (std::size_t i = 0; i < effective_plan.stages.size(); ++i) {
         current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);

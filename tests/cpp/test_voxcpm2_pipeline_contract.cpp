@@ -35,17 +35,53 @@ int cfg_binding_hits = 0;
 int timestep_binding_hits = 0;
 int local_text_feature_binding_hits = 0;
 int locdit_aux_binding_hits = 0;
+int tslm_text_binding_hits = 0;
 float last_cfg_value = 0.0F;
 int32_t last_inference_timesteps = 0;
 float last_local_text_feature_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
+int64_t last_text_token_count = 0;
+int32_t last_audio_start_token = 0;
+float last_text_mask_value = 0.0F;
+float last_audio_mask_value = 0.0F;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+class FakeTokenizer final : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string& text) const override {
+        std::vector<int32_t> ids;
+        ids.reserve(text.size());
+        for (const unsigned char ch : text) {
+            ids.push_back(static_cast<int32_t>(ch));
+        }
+        return ids;
+    }
+
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        std::string text;
+        text.reserve(ids.size());
+        for (const int32_t id : ids) {
+            text.push_back(static_cast<char>(id));
+        }
+        return text;
+    }
+
+    int32_t id_for_token(std::string_view) const override { return -1; }
+
+    std::string token_for_id(int32_t id) const override {
+        return std::string(1, static_cast<char>(id));
+    }
+};
+
+std::shared_ptr<trtmc::ITokenizer> make_fake_tokenizer() {
+    return std::make_shared<FakeTokenizer>();
 }
 
 class FakeModule final : public trtmc::ITrtModule {
@@ -151,6 +187,22 @@ class FakeModule final : public trtmc::ITrtModule {
     }
 
     void record_auxiliary_inputs(const trtmc::TensorMap& inputs) const {
+        if (const auto token_it = inputs.find("text_tokens"); token_it != inputs.end()) {
+            if (const auto text_mask_it = inputs.find("text_mask");
+                text_mask_it != inputs.end()) {
+                if (const auto audio_mask_it = inputs.find("audio_mask");
+                    audio_mask_it != inputs.end()) {
+                    ++tslm_text_binding_hits;
+                    last_text_token_count =
+                        token_it->second.shape.empty() ? 0 : token_it->second.shape.front();
+                    const auto* token_data = static_cast<int32_t*>(token_it->second.data);
+                    if (last_text_token_count > 0)
+                        last_audio_start_token = token_data[last_text_token_count - 1];
+                    last_text_mask_value = *static_cast<float*>(text_mask_it->second.data);
+                    last_audio_mask_value = *static_cast<float*>(audio_mask_it->second.data);
+                }
+            }
+        }
         if (input_name_ != "local_text_features") {
             if (const auto it = inputs.find("local_text_features"); it != inputs.end()) {
                 ++local_text_feature_binding_hits;
@@ -309,7 +361,8 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
 
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
-    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2");
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.cfg_scale = 3.0F;
@@ -320,11 +373,16 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     timestep_binding_hits = 0;
     local_text_feature_binding_hits = 0;
     locdit_aux_binding_hits = 0;
+    tslm_text_binding_hits = 0;
     last_cfg_value = 0.0F;
     last_inference_timesteps = 0;
     last_local_text_feature_value = 0.0F;
     last_lm_hidden_value = 0.0F;
     last_residual_hidden_value = 0.0F;
+    last_text_token_count = 0;
+    last_audio_start_token = 0;
+    last_text_mask_value = 0.0F;
+    last_audio_mask_value = 0.0F;
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -342,6 +400,12 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
           "voxcpm2 forwards preserved local_text_features to RALM");
     check(last_local_text_feature_value == 1.0F,
           "voxcpm2 preserved local_text_features retain stage output data");
+    check(tslm_text_binding_hits == 1,
+          "voxcpm2 forwards tokenizer-derived text tensors to TSLM");
+    check(last_text_token_count > 1, "voxcpm2 text token tensor is populated");
+    check(last_audio_start_token == 101, "voxcpm2 appends upstream audio_start token");
+    check(last_text_mask_value == 1.0F, "voxcpm2 marks prompt tokens as text");
+    check(last_audio_mask_value == 0.0F, "voxcpm2 zero-shot prompt has no audio mask");
     check(locdit_aux_binding_hits == 1,
           "voxcpm2 forwards lm_hidden and residual_hidden side tensors to LocDiT");
     check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
@@ -400,7 +464,7 @@ void test_generate_audio_rejects_stage_tensor_contract_mismatch() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
     trtmc::VoxCPM2Pipeline pipeline(make_components_with_bad_locenc_output_rank(), plan,
-                                    "openbmb/VoxCPM2");
+                                    "openbmb/VoxCPM2", make_fake_tokenizer());
 
     try {
         trtmc::GenerateConfig gen_cfg;

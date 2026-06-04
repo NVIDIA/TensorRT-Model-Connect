@@ -317,6 +317,11 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "lm_hidden",
         "stop_logits",
     )
+    assert specs["tslm"].required_side_inputs == (
+        "text_tokens",
+        "text_mask",
+        "audio_mask",
+    )
     assert [
         module.describe() for module in specs["tslm"].upstream_modules
     ] == [
@@ -373,6 +378,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "voxcpm.modules.minicpm4.MiniCPMModel(base_lm.)" in message
     assert "runtime inputs: text_tokens, text_mask, local_text_features, audio_mask" in message
     assert "runtime outputs: semantic_lm_states, lm_hidden, stop_logits" in message
+    assert "required_side=text_tokens,text_mask,audio_mask" in message
     assert "Runtime binding contract:" in message
     assert "ralm(semantic_lm_states=>acoustic_residual_states" in message
     assert "required_side=local_text_features" in message

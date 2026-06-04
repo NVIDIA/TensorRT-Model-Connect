@@ -214,6 +214,24 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         1,
         ("utf8_bytes",),
     ),
+    "text_tokens": VoxCPM2TensorSpec(
+        "text_tokens",
+        ("int32",),
+        1,
+        ("text_tokens",),
+    ),
+    "text_mask": VoxCPM2TensorSpec(
+        "text_mask",
+        ("float32", "bfloat16"),
+        1,
+        ("text_tokens",),
+    ),
+    "audio_mask": VoxCPM2TensorSpec(
+        "audio_mask",
+        ("float32", "bfloat16"),
+        1,
+        ("text_tokens",),
+    ),
     "audio_feats": VoxCPM2TensorSpec(
         "audio_feats",
         ("float32", "bfloat16"),
@@ -373,6 +391,7 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
 }
 
 VOXCPM2_REQUIRED_SIDE_INPUTS: Mapping[str, tuple[str, ...]] = {
+    "tslm": ("text_tokens", "text_mask", "audio_mask"),
     "ralm": ("local_text_features",),
     "locdit": ("lm_hidden", "residual_hidden"),
 }

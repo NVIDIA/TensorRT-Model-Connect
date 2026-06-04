@@ -9,6 +9,7 @@ namespace trtmc::runtime::builders::audio {
 
 enum class VoxCPM2TensorDTypeContract {
     kInt8,
+    kInt32,
     kFloat32,
     kFloat32OrBFloat16,
 };
@@ -31,6 +32,12 @@ struct VoxCPM2ComponentSpec {
 
 inline constexpr VoxCPM2TensorContract kVoxCPM2TextUtf8Tensor{
     "text_utf8", VoxCPM2TensorDTypeContract::kInt8, 1, "utf8_bytes"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2TextTokensTensor{
+    "text_tokens", VoxCPM2TensorDTypeContract::kInt32, 1, "text_tokens"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2TextMaskTensor{
+    "text_mask", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 1, "text_tokens"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2AudioMaskTensor{
+    "audio_mask", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 1, "text_tokens"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2AudioFeatsTensor{
     "audio_feats", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 3,
     "text_steps,patch_size,feat_dim"};
@@ -66,6 +73,8 @@ inline const char* voxcpm2_dtype_contract_name(VoxCPM2TensorDTypeContract dtype_
     switch (dtype_contract) {
     case VoxCPM2TensorDTypeContract::kInt8:
         return "int8";
+    case VoxCPM2TensorDTypeContract::kInt32:
+        return "int32";
     case VoxCPM2TensorDTypeContract::kFloat32:
         return "float32";
     case VoxCPM2TensorDTypeContract::kFloat32OrBFloat16:
@@ -78,6 +87,8 @@ inline bool voxcpm2_dtype_matches(VoxCPM2TensorDTypeContract dtype_contract, ::t
     switch (dtype_contract) {
     case VoxCPM2TensorDTypeContract::kInt8:
         return dtype == ::trtmc::DType::kInt8;
+    case VoxCPM2TensorDTypeContract::kInt32:
+        return dtype == ::trtmc::DType::kInt32;
     case VoxCPM2TensorDTypeContract::kFloat32:
         return dtype == ::trtmc::DType::kFloat32;
     case VoxCPM2TensorDTypeContract::kFloat32OrBFloat16:

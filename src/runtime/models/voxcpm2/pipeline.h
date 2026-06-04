@@ -10,7 +10,9 @@
 #include "runtime/domains/audio/voxcpm2_component_loader.h"
 #include "runtime/domains/audio/voxcpm2_generation_plan.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/tokenizer.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,7 +22,8 @@ class VoxCPM2Pipeline final : public IPipeline {
   public:
     VoxCPM2Pipeline(std::vector<runtime::builders::audio::VoxCPM2LoadedComponent> components,
                     runtime::builders::audio::VoxCPM2GenerationPlan plan,
-                    std::string model_id_str = "");
+                    std::string model_id_str = "",
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr);
 
     AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -33,6 +36,7 @@ class VoxCPM2Pipeline final : public IPipeline {
     std::vector<runtime::builders::audio::VoxCPM2LoadedComponent> components_;
     runtime::builders::audio::VoxCPM2GenerationPlan plan_;
     std::string model_id_;
+    std::shared_ptr<ITokenizer> tokenizer_;
 };
 
 } // namespace trtmc

@@ -96,6 +96,14 @@ void test_generation_plan_preserves_acceptance_artifact_name() {
     check(std::string(plan.stages[0].output_tensor.name) == "local_text_features",
           "LocEnc produces local text feature tensor");
     check(plan.stages[0].output_tensor.rank == 2, "LocEnc features are rank 2");
+    check(plan.stages[1].required_side_input_count == 3,
+          "TSLM requires tokenizer and mask side tensors");
+    check(std::string(plan.stages[1].required_side_inputs[0]) == "text_tokens",
+          "TSLM consumes tokenizer ids");
+    check(std::string(plan.stages[1].required_side_inputs[1]) == "text_mask",
+          "TSLM consumes text mask");
+    check(std::string(plan.stages[1].required_side_inputs[2]) == "audio_mask",
+          "TSLM consumes audio mask");
     check(plan.stages[2].required_side_input_count == 1, "RALM requires one preserved side tensor");
     check(std::string(plan.stages[2].required_side_inputs[0]) == "local_text_features",
           "RALM consumes preserved local text features");
@@ -136,6 +144,8 @@ void test_generation_plan_description_includes_stage_order_and_artifact() {
           "plan description includes LocEnc output tensor contract");
     check(description.find("-> tslm(") != std::string::npos,
           "plan description includes TSLM order");
+    check(description.find("side_inputs=text_tokens,text_mask,audio_mask") != std::string::npos,
+          "plan description includes TSLM tokenizer side inputs");
     check(description.find("-> ralm(") != std::string::npos,
           "plan description includes RALM order");
     check(description.find("-> locdit(") != std::string::npos,
