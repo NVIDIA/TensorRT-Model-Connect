@@ -29,11 +29,32 @@ _VOXCPM2_COMPONENTS = (
 _VOXCPM2_ENGINE_SECTIONS = tuple(
     f"{component}_engine_plan" for component in _VOXCPM2_COMPONENTS
 )
+_VOXCPM2_PREBUILT_ENGINE_FILENAMES = {
+    component: (
+        f"{component}_engine_plan",
+        f"{component}_engine_plan.plan",
+        f"{component}.plan",
+        f"{component}.engine",
+        f"{component}.trtplan",
+    )
+    for component in _VOXCPM2_COMPONENTS
+}
 
 
 def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
     raw = config.raw if isinstance(config.raw, dict) else {}
     return raw.get(key, default)
+
+
+def _find_prebuilt_component_plans(model_dir: Path) -> dict[str, Path]:
+    plans: dict[str, Path] = {}
+    for component, candidates in _VOXCPM2_PREBUILT_ENGINE_FILENAMES.items():
+        for filename in candidates:
+            path = model_dir / filename
+            if path.is_file():
+                plans[component] = path
+                break
+    return plans
 
 
 class VoxCPM2Plugin:
@@ -74,12 +95,32 @@ class VoxCPM2Plugin:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-    ) -> bytes:
+    ) -> bytes | dict[str, bytes]:
+        model_dir = Path(str(weights.get("_model_dir", "")))
+        prebuilt_plans = _find_prebuilt_component_plans(model_dir)
+        if len(prebuilt_plans) == len(_VOXCPM2_COMPONENTS):
+            return {
+                f"{component}_engine_plan": prebuilt_plans[component].read_bytes()
+                for component in _VOXCPM2_COMPONENTS
+            }
+
+        missing = [
+            component
+            for component in _VOXCPM2_COMPONENTS
+            if component not in prebuilt_plans
+        ]
+        expected = {
+            component: list(_VOXCPM2_PREBUILT_ENGINE_FILENAMES[component])
+            for component in missing
+        }
         raise NotImplementedError(
             "VoxCPM2 TRT export is not implemented yet. Full support requires "
             "dedicated LocEnc, TSLM, RALM, LocDiT, and AudioVAE TensorRT "
             "builders plus a native text-to-audio runtime that consumes "
-            "audio_voxcpm2 settings."
+            "audio_voxcpm2 settings. This build can package prebuilt native "
+            "component plans, but is missing artifacts for "
+            f"{', '.join(missing)} under {model_dir}. Expected filenames: "
+            f"{expected}."
         )
 
     def get_audio_config(self, config: ModelConfig) -> dict:

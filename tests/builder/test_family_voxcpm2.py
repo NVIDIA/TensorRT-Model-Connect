@@ -74,9 +74,52 @@ def test_voxcpm2_build_boundary_is_explicit(tmp_path):
     weights = plugin.load_weights(str(tmp_path), cfg)
 
     with pytest.raises(
-        NotImplementedError, match="LocEnc, TSLM, RALM, LocDiT, and AudioVAE"
+        NotImplementedError, match="missing artifacts for locenc, tslm, ralm, locdit, audiovae"
     ):
         plugin.build_engine(cfg, weights, max_cache_length=16)
+
+
+def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _voxcpm2_config(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    plans = {
+        "locenc.plan": b"LOCENC",
+        "tslm.engine": b"TSLM",
+        "ralm.trtplan": b"RALM",
+        "locdit_engine_plan.plan": b"LOCDIT",
+        "audiovae_engine_plan": b"AUDIOVAE",
+    }
+    for filename, data in plans.items():
+        (tmp_path / filename).write_bytes(data)
+
+    sections = plugin.build_engine(cfg, weights, max_cache_length=16)
+
+    assert sections == {
+        "locenc_engine_plan": b"LOCENC",
+        "tslm_engine_plan": b"TSLM",
+        "ralm_engine_plan": b"RALM",
+        "locdit_engine_plan": b"LOCDIT",
+        "audiovae_engine_plan": b"AUDIOVAE",
+    }
+
+
+def test_voxcpm2_build_engine_reports_partial_prebuilt_plan_set(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _voxcpm2_config(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    (tmp_path / "locenc.plan").write_bytes(b"LOCENC")
+    (tmp_path / "tslm.plan").write_bytes(b"TSLM")
+
+    with pytest.raises(NotImplementedError) as error:
+        plugin.build_engine(cfg, weights, max_cache_length=16)
+
+    message = str(error.value)
+    assert "missing artifacts for ralm, locdit, audiovae" in message
+    assert "ralm.plan" in message
+    assert "audiovae.trtplan" in message
 
 
 def test_audio_voxcpm2_schema_defaults_and_validators():

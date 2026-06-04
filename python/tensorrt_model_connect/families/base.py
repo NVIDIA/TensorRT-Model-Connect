@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
@@ -44,8 +44,8 @@ class FamilyPlugin(Protocol):
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx: QuantContext | None = None,
         verbose: bool = False,
-    ) -> bytes:
-        """Build TRT engine plan bytes."""
+    ) -> bytes | Mapping[str, bytes]:
+        """Build one TRT engine plan or named primary engine sections."""
         ...
 
     # ------------------------------------------------------------------
