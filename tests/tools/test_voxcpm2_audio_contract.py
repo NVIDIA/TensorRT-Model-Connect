@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import subprocess
 import struct
 import wave
 from pathlib import Path
 
+import tools.compare_wav_exact as compare_wav_exact
 from tests.e2e_harness.comparators.text_to_audio import TextToAudioComparator
 from tests.e2e_harness.contracts import (
     E2ECase,
@@ -18,6 +20,7 @@ from tests.e2e_harness.contracts import (
     ThresholdProfile,
 )
 from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness.orchestrator import _build_repro_commands
 from tests.e2e_harness.registry import get_reference, reset
 from tests.e2e_harness.references import voxcpm as voxcpm_reference
 from tests.e2e_harness.runners import audio_speech
@@ -183,6 +186,32 @@ def test_exact_waveform_mode_fails_sample_mismatch(tmp_path):
     assert not result.metrics["waveform_exact_match"].passed
 
 
+def test_compare_wav_exact_cli_payload_matches_comparator_contract(tmp_path):
+    trt_wav = tmp_path / "trt_output.wav"
+    ref_wav = tmp_path / "hf_reference.wav"
+    _write_pcm16_wav(trt_wav, [0, 64, -64, 128])
+    _write_pcm16_wav(ref_wav, [0, 64, -64, 128])
+
+    result = compare_wav_exact.compare_wavs(trt_wav, ref_wav)
+
+    assert result["passed"] is True
+    assert result["metrics"]["sample_rate_exact"] is True
+    assert result["metrics"]["waveform_exact_match"] is True
+
+
+def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):
+    trt_wav = tmp_path / "trt_output.wav"
+    ref_wav = tmp_path / "hf_reference.wav"
+    _write_pcm16_wav(trt_wav, [0, 64, -64, 128])
+    _write_pcm16_wav(ref_wav, [0, 64, -64, 129])
+
+    result = compare_wav_exact.compare_wavs(trt_wav, ref_wav)
+
+    assert result["passed"] is False
+    assert result["metrics"]["sample_rate_exact"] is True
+    assert result["metrics"]["waveform_exact_match"] is False
+
+
 def test_voxcpm2_trt_runner_preserves_required_output_wav(monkeypatch, tmp_path):
     captured: dict[str, list[str]] = {}
 
@@ -232,3 +261,30 @@ def test_voxcpm2_trt_runner_preserves_required_output_wav(monkeypatch, tmp_path)
     assert wav_path == tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav"
     assert wav_path.is_file()
     assert out.data["wav_exists"] is True
+
+
+def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_path):
+    case = load_manifest(MANIFEST_PATH)
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        binary_path="/tmp/trtmc",
+        hf_python=sys.executable,
+        engine_dir=str(tmp_path / "engines"),
+    )
+    bundle_path = str(Path(ctx.engine_dir) / "voxcpm2.trtfb")
+
+    repro = _build_repro_commands(case, ctx, bundle_path, {})
+
+    trt_inference = repro["trt_inference"]
+    assert "/tmp/trtmc generate-audio" in trt_inference
+    assert bundle_path in trt_inference
+    assert "--output" in trt_inference
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav") in trt_inference
+    assert "--set audio_voxcpm2.cfg_value=2.0" in trt_inference
+    assert "--set audio_voxcpm2.inference_timesteps=10" in trt_inference
+
+    compare_cmd = repro["compare_audio_exact"]
+    assert "tools/compare_wav_exact.py" in compare_cmd
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "trt_output.wav") in compare_cmd
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference.wav") in compare_cmd

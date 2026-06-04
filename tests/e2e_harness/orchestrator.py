@@ -53,6 +53,7 @@ from .contracts import (
 from . import _case_artifact_dir, save_full_stderr
 from .python_profiles import profile_env_var
 from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
+from .runtime_config import runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "object_detection",
     "neural_operator",
     "text_to_audio",
+    "text_to_audio_voxcpm2",
     "speech_to_text",
     "speech_to_text_rnnt",
     "speech_to_speech",
@@ -816,6 +818,20 @@ def _build_repro_commands(
                 if case.family == "ltx_video" and ctx.artifacts_dir:
                     latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
                     infer_parts.extend(["--initial-latents-raw", str(latent_path)])
+        elif task_strategy == "text_to_audio":
+            output_path = (
+                Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "trt_output.wav"
+                if ctx.artifacts_dir else Path("/tmp/trtmc_trt_output.wav")
+            )
+            infer_parts = [
+                ctx.binary_path, "generate-audio", bundle_path,
+                "--prompt", _shell_quote(case.inputs.get("prompt", "")),
+                "--output", str(output_path),
+            ]
+            for token in runtime_config_set_tokens(case):
+                infer_parts.extend(["--set", token])
+            if "max_new_tokens" in case.inputs and int(case.inputs["max_new_tokens"]) > 0:
+                infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
         elif task_strategy == "prompted_segmentation":
             infer_parts = [
                 ctx.binary_path, "segment-sam", bundle_path,
@@ -876,6 +892,21 @@ def _build_repro_commands(
             profile_exports.append(export_cmd)
     if profile_exports:
         repro["profile_env"] = "\n".join(profile_exports)
+
+    if any(
+        stage.artifact_type == "waveform" and stage.comparison_mode == "waveform_exact"
+        for stage in case.stages
+    ) and ctx.artifacts_dir:
+        case_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+        compare_python = ctx.reference_python_path() or ctx.hf_python or "python"
+        repro["compare_audio_exact"] = " ".join(
+            [
+                compare_python,
+                "tools/compare_wav_exact.py",
+                str(case_dir / "trt_output.wav"),
+                str(case_dir / "hf_reference.wav"),
+            ]
+        )
 
     # Rerun with forced rebuild
     rebuild_parts = list(rerun_parts) + ["--rebuild-engines"]

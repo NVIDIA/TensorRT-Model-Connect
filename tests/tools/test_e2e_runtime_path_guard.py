@@ -81,6 +81,22 @@ def test_runtime_guard_rejects_missing_new_runtime_confirmation(tmp_path: Path) 
     assert "did not confirm the new runtime path" in message
 
 
+def test_runtime_guard_covers_voxcpm2_text_to_audio_strategy(tmp_path: Path) -> None:
+    case = _make_case("text_to_audio_voxcpm2")
+    ctx = _make_ctx(tmp_path)
+    output = StageOutput(
+        stage_name="full_generation",
+        metadata={
+            "command": [ctx.binary_path, "generate-audio", "/tmp/voxcpm2.trtfb"],
+            "stderr": "[trtmc] Runtime path: compatibility factory mode",
+        },
+    )
+
+    message = _validate_trt_runtime_path(case, ctx, output)
+    assert message is not None
+    assert "legacy compatibility factory mode" in message
+
+
 def test_runtime_guard_reads_stderr_log_from_stage_data(tmp_path: Path) -> None:
     case = _make_case("speech_to_text")
     ctx = _make_ctx(tmp_path)
