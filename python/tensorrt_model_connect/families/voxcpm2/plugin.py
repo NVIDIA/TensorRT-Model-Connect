@@ -2,9 +2,9 @@
 
 VoxCPM2 is a tokenizer-free diffusion/autoregressive TTS stack. This plugin
 registers the model family and exposes the generation defaults used by the E2E
-contract. Full TRT export requires dedicated builders for the LocEnc, TSLM,
-RALM, and LocDiT components; the build boundary fails explicitly until those
-engines exist.
+contract. Full TRT export requires dedicated builders for LocEnc, TSLM, RALM,
+LocDiT, and the AudioVAE waveform decoder; the build boundary fails explicitly
+until those engines exist.
 """
 
 from __future__ import annotations
@@ -45,7 +45,13 @@ class VoxCPM2Plugin:
         weights = WeightDict()
         weights["_model_dir"] = str(Path(model_dir))
         weights["_architecture"] = architecture
-        weights["_voxcpm2_components"] = ("locenc", "tslm", "ralm", "locdit")
+        weights["_voxcpm2_components"] = (
+            "locenc",
+            "tslm",
+            "ralm",
+            "locdit",
+            "audiovae",
+        )
         weights["_sample_rate"] = int(_raw_config_value(config, "sample_rate", _DEFAULT_SAMPLE_RATE))
         weights["_cfg_value"] = float(_raw_config_value(config, "cfg_value", _DEFAULT_CFG_VALUE))
         weights["_inference_timesteps"] = int(
@@ -66,8 +72,9 @@ class VoxCPM2Plugin:
     ) -> bytes:
         raise NotImplementedError(
             "VoxCPM2 TRT export is not implemented yet. Full support requires "
-            "dedicated LocEnc, TSLM, RALM, and LocDiT TensorRT builders plus "
-            "a native text-to-audio runtime that consumes audio_voxcpm2 settings."
+            "dedicated LocEnc, TSLM, RALM, LocDiT, and AudioVAE TensorRT "
+            "builders plus a native text-to-audio runtime that consumes "
+            "audio_voxcpm2 settings."
         )
 
     def get_audio_config(self, config: ModelConfig) -> dict:

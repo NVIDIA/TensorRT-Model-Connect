@@ -42,7 +42,13 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
     assert plugin.runtime_strategy == "text_to_audio_voxcpm2"
     weights = plugin.load_weights(str(tmp_path), cfg)
     assert weights["_architecture"] == "voxcpm2"
-    assert weights["_voxcpm2_components"] == ("locenc", "tslm", "ralm", "locdit")
+    assert weights["_voxcpm2_components"] == (
+        "locenc",
+        "tslm",
+        "ralm",
+        "locdit",
+        "audiovae",
+    )
     assert weights["_sample_rate"] == 48000
     assert weights["_cfg_value"] == 2.0
     assert weights["_inference_timesteps"] == 10
@@ -60,7 +66,9 @@ def test_voxcpm2_build_boundary_is_explicit(tmp_path):
     cfg = _voxcpm2_config(tmp_path)
     weights = plugin.load_weights(str(tmp_path), cfg)
 
-    with pytest.raises(NotImplementedError, match="LocEnc, TSLM, RALM, and LocDiT"):
+    with pytest.raises(
+        NotImplementedError, match="LocEnc, TSLM, RALM, LocDiT, and AudioVAE"
+    ):
         plugin.build_engine(cfg, weights, max_cache_length=16)
 
 

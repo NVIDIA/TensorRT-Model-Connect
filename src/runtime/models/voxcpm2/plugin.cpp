@@ -1,5 +1,5 @@
 // VoxCPM2Plugin: explicit runtime boundary for "text_to_audio_voxcpm2".
-// Full support requires native LocEnc, TSLM, RALM, and LocDiT engines.
+// Full support requires native LocEnc, TSLM, RALM, LocDiT, and AudioVAE engines.
 
 #include "trtmc/runtime/pipeline_registry.h"
 
@@ -14,9 +14,10 @@ class VoxCPM2Plugin final : public IPipelinePlugin {
         (void)ctx;
         throw std::runtime_error(
             "VoxCPM2 TRT runtime is not implemented yet. Full openbmb/VoxCPM2 "
-            "text-to-audio support requires native LocEnc, TSLM, RALM, and LocDiT "
-            "TensorRT engines plus waveform generation that preserves the TRT WAV "
-            "artifact for comparison against the Hugging Face VoxCPM reference WAV.");
+            "text-to-audio support requires native LocEnc, TSLM, RALM, LocDiT, "
+            "and AudioVAE TensorRT engines plus waveform generation that preserves "
+            "the TRT WAV artifact for comparison against the Hugging Face VoxCPM "
+            "reference WAV.");
     }
 };
 
