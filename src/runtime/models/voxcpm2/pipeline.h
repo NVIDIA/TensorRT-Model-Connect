@@ -2,8 +2,10 @@
 
 // VoxCPM2Pipeline: native runtime boundary for openbmb/VoxCPM2.
 // The pipeline owns the five component TRT modules and the model-card
-// generation contract. Stage execution is still pending dedicated native
-// LocEnc, TSLM, RALM, LocDiT, and AudioVAE tensor I/O glue.
+// generation contract. The current native execution boundary chains
+// component engines through the explicit VoxCPM2 artifact tensor names; full
+// support still requires dedicated LocEnc, TSLM, RALM, LocDiT, and AudioVAE
+// TensorRT builders that emit engines with this contract.
 
 #include "runtime/domains/audio/voxcpm2_component_loader.h"
 #include "runtime/domains/audio/voxcpm2_generation_plan.h"
@@ -26,7 +28,6 @@ class VoxCPM2Pipeline final : public IPipeline {
     const char* pipeline_type() const override { return "VoxCPM2Pipeline"; }
 
   private:
-    std::string describe_loaded_components() const;
     void validate_components() const;
 
     std::vector<runtime::builders::audio::VoxCPM2LoadedComponent> components_;
