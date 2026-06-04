@@ -4,6 +4,7 @@
 #include "runtime/domains/audio/audio_bundle_validation.h"
 #include "runtime/domains/audio/voxcpm2_component_loader.h"
 #include "runtime/domains/audio/voxcpm2_config.h"
+#include "runtime/domains/audio/voxcpm2_generation_plan.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
@@ -28,6 +29,8 @@ class VoxCPM2Plugin final : public IPipelinePlugin {
         const auto components =
             runtime::builders::audio::load_voxcpm2_component_modules(ctx.backend, ctx.bundle, opts);
         const auto generation_cfg = make_voxcpm2_config(ctx.config_json, ctx.runtime_config);
+        const auto generation_plan =
+            runtime::builders::audio::make_voxcpm2_generation_plan(generation_cfg);
         throw std::runtime_error(
             "VoxCPM2 TRT runtime is not implemented yet. Full openbmb/VoxCPM2 "
             "text-to-audio support requires native LocEnc, TSLM, RALM, LocDiT, "
@@ -36,7 +39,8 @@ class VoxCPM2Plugin final : public IPipelinePlugin {
             "reference WAV. Loaded " +
             std::to_string(components.size()) +
             " VoxCPM2 component engine(s). Resolved audio_voxcpm2 generation config: " +
-            describe_voxcpm2_config(generation_cfg) + ".");
+            describe_voxcpm2_config(generation_cfg) + ". " +
+            runtime::builders::audio::describe_voxcpm2_generation_plan(generation_plan) + ".");
     }
 };
 

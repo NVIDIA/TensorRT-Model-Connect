@@ -4,12 +4,13 @@
 // Trace ID:       UT-AUD-VOXCPM2-CFG-01
 // Architecture:   ARCH-AUD-001
 // Unit Design:    UD-AUD-VOXCPM2-01
-// Intent:         Validate native VoxCPM2 generation defaults carried by bundle metadata.
+// Intent:         Validate native VoxCPM2 generation defaults and execution plan metadata.
 // Preconditions:  In-memory config.json fragments.
 // Postconditions: VoxCPM2 model-card generation parameters resolve before runtime execution.
 // =============================================================================
 
 #include "runtime/domains/audio/voxcpm2_config.h"
+#include "runtime/domains/audio/voxcpm2_generation_plan.h"
 
 #include <cmath>
 #include <iostream>
@@ -69,12 +70,59 @@ void test_config_description_includes_model_card_fields() {
           "description includes inference_timesteps");
 }
 
+void test_generation_plan_matches_component_contract() {
+    check(trtmc::runtime::builders::audio::voxcpm2_generation_plan_matches_component_contract(),
+          "generation plan follows component contract order and sections");
+}
+
+void test_generation_plan_preserves_acceptance_artifact_name() {
+    const auto cfg = trtmc::make_voxcpm2_config_from_json(R"json({
+      "sample_rate": 48000,
+      "voxcpm2_cfg_value": 2.0,
+      "voxcpm2_inference_timesteps": 10
+    })json");
+    const auto plan = trtmc::runtime::builders::audio::make_voxcpm2_generation_plan(cfg);
+
+    check(std::string(plan.stages[0].name) == "locenc", "first VoxCPM2 stage is LocEnc");
+    check(std::string(plan.stages[4].name) == "audiovae", "last VoxCPM2 stage is AudioVAE");
+    check(std::string(plan.stages[4].output_artifact) == "waveform_f32",
+          "AudioVAE produces float waveform");
+    check(std::string(plan.output_wav_artifact) == "trt_output.wav",
+          "TRT output WAV artifact name is stable");
+    check(plan.config.sample_rate == 48000, "plan carries output sample rate");
+}
+
+void test_generation_plan_description_includes_stage_order_and_artifact() {
+    const auto plan =
+        trtmc::runtime::builders::audio::make_voxcpm2_generation_plan(
+            trtmc::make_voxcpm2_config_from_json("{}"));
+    const auto description =
+        trtmc::runtime::builders::audio::describe_voxcpm2_generation_plan(plan);
+
+    check(description.find("locenc(text_utf8=>local_text_features") != std::string::npos,
+          "plan description includes LocEnc input/output");
+    check(description.find("-> tslm(") != std::string::npos,
+          "plan description includes TSLM order");
+    check(description.find("-> ralm(") != std::string::npos,
+          "plan description includes RALM order");
+    check(description.find("-> locdit(") != std::string::npos,
+          "plan description includes LocDiT order");
+    check(description.find("-> audiovae(audio_vae_latents=>waveform_f32") !=
+              std::string::npos,
+          "plan description includes AudioVAE waveform output");
+    check(description.find("output_wav_artifact=trt_output.wav") != std::string::npos,
+          "plan description includes output WAV artifact");
+}
+
 } // namespace
 
 int main() {
     test_model_card_defaults();
     test_bundle_audio_metadata_overrides_defaults();
     test_config_description_includes_model_card_fields();
+    test_generation_plan_matches_component_contract();
+    test_generation_plan_preserves_acceptance_artifact_name();
+    test_generation_plan_description_includes_stage_order_and_artifact();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
