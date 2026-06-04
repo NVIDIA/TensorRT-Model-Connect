@@ -49,6 +49,13 @@ def test_voxcpm2_plugin_records_metadata_and_audio_defaults(tmp_path):
         "locdit",
         "audiovae",
     )
+    assert weights["_voxcpm2_engine_sections"] == (
+        "locenc_engine_plan",
+        "tslm_engine_plan",
+        "ralm_engine_plan",
+        "locdit_engine_plan",
+        "audiovae_engine_plan",
+    )
     assert weights["_sample_rate"] == 48000
     assert weights["_cfg_value"] == 2.0
     assert weights["_inference_timesteps"] == 10

@@ -2,11 +2,14 @@
 // Full support requires native LocEnc, TSLM, RALM, LocDiT, and AudioVAE engines.
 
 #include "runtime/domains/audio/audio_bundle_validation.h"
+#include "runtime/domains/audio/voxcpm2_component_loader.h"
 #include "runtime/domains/audio/voxcpm2_config.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace trtmc {
 
@@ -15,13 +18,24 @@ class VoxCPM2Plugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         runtime::builders::audio::validate_text_to_audio_bundle_sections(
             runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2, ctx.bundle, ctx.bundle_path);
+
+        load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
+        const auto components =
+            runtime::builders::audio::load_voxcpm2_component_modules(ctx.backend, ctx.bundle, opts);
         const auto generation_cfg = make_voxcpm2_config(ctx.config_json, ctx.runtime_config);
         throw std::runtime_error(
             "VoxCPM2 TRT runtime is not implemented yet. Full openbmb/VoxCPM2 "
             "text-to-audio support requires native LocEnc, TSLM, RALM, LocDiT, "
             "and AudioVAE TensorRT engines plus waveform generation that preserves "
             "the TRT WAV artifact for comparison against the Hugging Face VoxCPM "
-            "reference WAV. Resolved audio_voxcpm2 generation config: " +
+            "reference WAV. Loaded " +
+            std::to_string(components.size()) +
+            " VoxCPM2 component engine(s). Resolved audio_voxcpm2 generation config: " +
             describe_voxcpm2_config(generation_cfg) + ".");
     }
 };

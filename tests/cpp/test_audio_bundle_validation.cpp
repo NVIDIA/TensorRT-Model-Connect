@@ -10,6 +10,7 @@
 // =============================================================================
 
 #include "runtime/domains/audio/audio_bundle_validation.h"
+#include "runtime/domains/audio/voxcpm2_component_contract.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -20,53 +21,41 @@ namespace {
 
 int failures = 0;
 
-void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-std::vector<char> bytes_from_text(const std::string& text)
-{
+std::vector<char> bytes_from_text(const std::string& text) {
     return std::vector<char>(text.begin(), text.end());
 }
 
 // Helper to add a named section to a BundleFile.
 void add_section(trtmc::BundleFile& bundle, const std::string& name,
-                 const std::vector<char>& data)
-{
+                 const std::vector<char>& data) {
     trtmc::BundleSection sec;
     sec.name = name;
     sec.data = data;
     bundle.sections.push_back(std::move(sec));
 }
 
-void test_bark_validation_requires_semantic_and_coarse_assets()
-{
+void test_bark_validation_requires_semantic_and_coarse_assets() {
     // Empty bundle — missing all required sections.
     trtmc::BundleFile bundle;
 
-    try
-    {
+    try {
         trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtmc::runtime::builders::audio::TextToAudioBundleKind::kBark,
-            bundle,
-            "bark.trtfb");
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kBark, bundle, "bark.trtfb");
         check(false, "bark validation rejects missing semantic/coarse sections");
-    }
-    catch (const std::runtime_error& error)
-    {
-        check(
-            std::string(error.what()).find("semantic_embed") != std::string::npos,
-            "bark validation reports semantic_embed");
+    } catch (const std::runtime_error& error) {
+        check(std::string(error.what()).find("semantic_embed") != std::string::npos,
+              "bark validation reports semantic_embed");
     }
 }
 
-void test_magpie_validation_requires_ipa_tokenizer_sections()
-{
+void test_magpie_validation_requires_ipa_tokenizer_sections() {
     trtmc::BundleFile bundle;
     const auto audio = bytes_from_text("audio");
     const auto text = bytes_from_text("text");
@@ -77,24 +66,18 @@ void test_magpie_validation_requires_ipa_tokenizer_sections()
     add_section(bundle, "magpie_text_embed", text);
     add_section(bundle, "magpie_context_embed", context);
 
-    try
-    {
+    try {
         trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
-            bundle,
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts, bundle,
             "magpie.trtfb");
         check(false, "magpie validation rejects missing IPA tokenizer sections");
-    }
-    catch (const std::runtime_error& error)
-    {
-        check(
-            std::string(error.what()).find("magpie_ipa") != std::string::npos,
-            "magpie validation reports IPA tokenizer sections");
+    } catch (const std::runtime_error& error) {
+        check(std::string(error.what()).find("magpie_ipa") != std::string::npos,
+              "magpie validation reports IPA tokenizer sections");
     }
 }
 
-void test_magpie_validation_accepts_complete_required_sections()
-{
+void test_magpie_validation_accepts_complete_required_sections() {
     trtmc::BundleFile bundle;
     const auto audio = bytes_from_text("audio");
     const auto text = bytes_from_text("text");
@@ -108,42 +91,43 @@ void test_magpie_validation_accepts_complete_required_sections()
     add_section(bundle, "magpie_ipa_phoneme_dict", phoneme_dict);
     add_section(bundle, "magpie_ipa_vocab", vocab);
 
-    try
-    {
+    try {
         trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
-            bundle,
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts, bundle,
             "magpie.trtfb");
         check(true, "magpie validation accepts complete section set");
-    }
-    catch (const std::exception&)
-    {
+    } catch (const std::exception&) {
         check(false, "magpie validation accepts complete section set");
     }
 }
 
-void test_voxcpm2_validation_requires_native_component_engines()
-{
+void test_voxcpm2_validation_requires_native_component_engines() {
     trtmc::BundleFile bundle;
 
-    try
-    {
+    try {
         trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2,
-            bundle,
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2, bundle,
             "voxcpm2.trtfb");
         check(false, "voxcpm2 validation rejects missing component engines");
-    }
-    catch (const std::runtime_error& error)
-    {
-        check(
-            std::string(error.what()).find("locenc_engine_plan") != std::string::npos,
-            "voxcpm2 validation reports first missing component engine");
+    } catch (const std::runtime_error& error) {
+        check(std::string(error.what()).find("locenc_engine_plan") != std::string::npos,
+              "voxcpm2 validation reports first missing component engine");
     }
 }
 
-void test_voxcpm2_validation_accepts_complete_required_sections()
-{
+void test_voxcpm2_component_contract_lists_native_engine_sections() {
+    const auto& specs = trtmc::runtime::builders::audio::kVoxCPM2ComponentSpecs;
+
+    check(specs.size() == 5, "voxcpm2 component contract lists five engines");
+    check(std::string(specs[0].name) == "locenc", "voxcpm2 component 0 is locenc");
+    check(std::string(specs[0].engine_section) == "locenc_engine_plan",
+          "voxcpm2 locenc section name");
+    check(std::string(specs[4].name) == "audiovae", "voxcpm2 component 4 is audiovae");
+    check(std::string(specs[4].engine_section) == "audiovae_engine_plan",
+          "voxcpm2 audiovae section name");
+}
+
+void test_voxcpm2_validation_accepts_complete_required_sections() {
     trtmc::BundleFile bundle;
     const auto plan = bytes_from_text("plan");
 
@@ -153,32 +137,27 @@ void test_voxcpm2_validation_accepts_complete_required_sections()
     add_section(bundle, "locdit_engine_plan", plan);
     add_section(bundle, "audiovae_engine_plan", plan);
 
-    try
-    {
+    try {
         trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2,
-            bundle,
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kVoxCpm2, bundle,
             "voxcpm2.trtfb");
         check(true, "voxcpm2 validation accepts complete component engine set");
-    }
-    catch (const std::exception&)
-    {
+    } catch (const std::exception&) {
         check(false, "voxcpm2 validation accepts complete component engine set");
     }
 }
 
 } // namespace
 
-int main()
-{
+int main() {
     test_bark_validation_requires_semantic_and_coarse_assets();
     test_magpie_validation_requires_ipa_tokenizer_sections();
     test_magpie_validation_accepts_complete_required_sections();
     test_voxcpm2_validation_requires_native_component_engines();
+    test_voxcpm2_component_contract_lists_native_engine_sections();
     test_voxcpm2_validation_accepts_complete_required_sections();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

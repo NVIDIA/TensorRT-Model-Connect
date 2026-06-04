@@ -19,6 +19,16 @@ from ...config import ModelConfig
 _DEFAULT_SAMPLE_RATE = 48000
 _DEFAULT_CFG_VALUE = 2.0
 _DEFAULT_INFERENCE_TIMESTEPS = 10
+_VOXCPM2_COMPONENTS = (
+    "locenc",
+    "tslm",
+    "ralm",
+    "locdit",
+    "audiovae",
+)
+_VOXCPM2_ENGINE_SECTIONS = tuple(
+    f"{component}_engine_plan" for component in _VOXCPM2_COMPONENTS
+)
 
 
 def _raw_config_value(config: ModelConfig, key: str, default: Any) -> Any:
@@ -45,13 +55,8 @@ class VoxCPM2Plugin:
         weights = WeightDict()
         weights["_model_dir"] = str(Path(model_dir))
         weights["_architecture"] = architecture
-        weights["_voxcpm2_components"] = (
-            "locenc",
-            "tslm",
-            "ralm",
-            "locdit",
-            "audiovae",
-        )
+        weights["_voxcpm2_components"] = _VOXCPM2_COMPONENTS
+        weights["_voxcpm2_engine_sections"] = _VOXCPM2_ENGINE_SECTIONS
         weights["_sample_rate"] = int(_raw_config_value(config, "sample_rate", _DEFAULT_SAMPLE_RATE))
         weights["_cfg_value"] = float(_raw_config_value(config, "cfg_value", _DEFAULT_CFG_VALUE))
         weights["_inference_timesteps"] = int(
