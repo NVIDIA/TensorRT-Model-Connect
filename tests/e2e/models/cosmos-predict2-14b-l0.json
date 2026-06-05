@@ -1,0 +1,38 @@
+{
+  "name": "cosmos-predict2-14b-l0",
+  "trace_id": "IT-E2E-COSMOS-PREDICT2-14B-L0-01",
+  "hf_id": "nvidia/Cosmos-Predict2-14B-Video2World",
+  "bundle": "cosmos-predict2-14b-l0.trtfb",
+  "model_type": "cosmos_predict",
+  "family": "cosmos_predict",
+  "runtime_strategy": "diffusion",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "Cosmos-Predict2 14B Video2World — high-res image+text conditioned video diffusion (T5 + CosmosTransformer3DModel 36L/40H/d128 + AutoencoderKLWan). L0 scaffold targets 384x672 at 5 frames / 15 steps; full sweep runs 720x1280 / 49 frames on B200.",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A robot arm carefully picks up a red cube from a table",
+  "test_image": "first_frame.png",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 384,
+  "video_width": 672,
+  "num_inference_steps": 15,
+  "num_conditioning_frames": 1,
+  "guidance_scale": 7.0,
+  "flow_shift": 7.0,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "min_pixel_mean": 0.10,
+  "max_pixel_mean": 0.90,
+  "min_pixel_std": 0.04,
+  "skip_text_comparison": true,
+  "skip": "scaffold only — 14B dense DiT + 3 SP variants (Ulysses, Ring, AllGather-KV) land in this PR but require B200 host validation; remove once latency sweep evidence is posted",
+  "notes": "Cosmos-Predict2 14B Video2World reuses Wan T2V's T5-11B encoder and AutoencoderKLWan VAE (per nvidia/Cosmos-Predict2-14B-Video2World/vae/config.json _name_or_path=Wan-AI/Wan2.1-T2V-1.3B-Diffusers). DiT is CosmosTransformer3DModel: hidden=5120, num_layers=36, num_heads=40, head_dim=128, ffn_dim=20480, qk_norm=rms, 3 adaLN-Zero norms per block with LoRA decomposition (rank=256), 3-axis RoPE per (T,H,W). The three SP variants ship with this PR and are exercised by tests/builder/test_sequence_parallel.py for primitive correctness."
+}
