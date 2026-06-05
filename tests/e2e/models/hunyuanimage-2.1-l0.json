@@ -34,6 +34,7 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
+  "skip": "scaffold only — hunyuan_image DiT + 32x VAE builders raise NotImplementedError pending GPU inspection of dit/config.json and vae/config.json; remove this skip once the builders land",
   "threshold_overrides": {
     "psnr": 9.0,
     "min_pixel_mean": 0.15,
