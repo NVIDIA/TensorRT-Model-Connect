@@ -132,6 +132,7 @@ def test_comment_router_dispatches_requested_ci_and_deletes_itself() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "request-trtmc-ci.yml").read_text()
     assert "issue_comment:" in text
     assert "actions: write" in text
+    assert "pull-requests: read" in text
     assert "COMMENT_BODY: ${{ github.event.comment.body }}" in text
     assert "COMMAND: /trtmc-ci" in text
     assert "IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}" in text

@@ -8,6 +8,7 @@ on:
 permissions:
   actions: write
   contents: read
+  pull-requests: read
 
 concurrency:
   group: trtmc-ci-comment-router-${{ github.event.comment.id }}
