@@ -325,6 +325,11 @@ _POSITIVE_MATCH_CASES = [
     # Wan T2V (diffusion)
     ("wan_t2v", "wan_t2v"),
     ("wan", "wan_t2v"),
+    # Cosmos 3 (omni-model: AR reasoner + DM generator with joint attention)
+    ("cosmos3", "cosmos3"),
+    ("cosmos3_nano", "cosmos3"),
+    ("cosmos3_super", "cosmos3"),
+    ("cosmos-3", "cosmos3"),
     # LTX-Video (diffusion T2V)
     ("ltx_video", "ltx_video"),
     ("ltx-video", "ltx_video"),

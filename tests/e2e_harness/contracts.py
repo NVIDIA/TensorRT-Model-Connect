@@ -974,6 +974,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
+    "diffusion_cosmos3": "diffusion_media_generation",
     "torchtrt_diffusion": "torchtrt_diffusion",
     "diffusion_pixart_torchtrt": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",

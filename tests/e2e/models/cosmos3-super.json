@@ -1,0 +1,35 @@
+{
+  "name": "cosmos3-super",
+  "trace_id": "IT-E2E-COSMOS3-SUPER-01",
+  "hf_id": "nvidia/Cosmos3-Super",
+  "bundle": "cosmos3-super.trtfb",
+  "model_type": "cosmos3",
+  "family": "cosmos3",
+  "runtime_strategy": "diffusion_cosmos3",
+  "ci_tier": "nightly_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "NVIDIA Cosmos 3 Super (64B) — unified Mixture-of-Transformers omni-model with 32B autoregressive reasoner + 32B diffusion generator sharing joint attention. Released 2026-05-31. L0 scaffold targets text→video at 480p / 5 frames / 30 steps.",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A robot arm carefully picks up a red cube from a table, smooth cinematic motion",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 480,
+  "video_width": 832,
+  "num_inference_steps": 30,
+  "guidance_scale": 5.0,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "min_pixel_mean": 0.10,
+  "max_pixel_mean": 0.90,
+  "min_pixel_std": 0.04,
+  "skip_text_comparison": true,
+  "skip": "scaffold only — Cosmos 3 MoT (AR reasoner + DM generator + joint attention + ViT/VAE/action encoders) not yet implemented; remove this skip once the builders land and B200 validation passes",
+  "notes": "Cosmos3-Super is a 64B Mixture-of-Transformers omni-model. The plugin currently raises NotImplementedError listing every missing builder. Bring-up sequence: (1) lock arch from config.json on a host with HF gated access; (2) AR reasoner TRT builder; (3) DM generator TRT builder (slot into sp_* parallel modes from #205); (4) ViT/VAE/action encoders; (5) C++ MoT runtime with interleaved AR↔DM joint attention. Targets nvidia/Cosmos3-Super on B200 8-GPU; Nano (16B) variant follows once Super lands."
+}
