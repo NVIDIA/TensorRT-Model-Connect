@@ -38,6 +38,6 @@
     "ssim": 0.75
   },
   "skip_text_comparison": true,
-  "expected_build_status": "not_implemented",
+  "skip": "scaffold only — LTX-2 joint audio-video DiT not yet implemented; remove this skip once GPU validation lands the dual-stream DiT + audio_vae + vocoder + connectors + latent_upsampler builders",
   "notes": "Scaffold lane for Lightricks/LTX-2. Plugin matches model_type=ltx_2 and emits get_diffusion_config; build_components raises NotImplementedError listing the missing builders. Promote to a real lane once the dual-stream DiT, audio VAE, vocoder, connectors and latent upsampler builders land."
 }
