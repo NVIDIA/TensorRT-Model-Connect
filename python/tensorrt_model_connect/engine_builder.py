@@ -1178,6 +1178,11 @@ def build_bundle(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)
     _write_build_timing(build_timing)
+    if getattr(plugin, "name", "") == "voxcpm2":
+        tokenizer_special_prefix_ids = []
+        tokenizer_special_suffix_ids = []
+        tokenizer_special_frame = None
+        tokenizer_add_special_tokens = False
 
     # 6. Write bundle
     trt_version = _get_trt_version()

@@ -614,7 +614,7 @@ void validate_lm_state_ready(const StageArtifacts& artifacts) {
     }
 }
 
-OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output, std::size_t step,
+OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output,
                                       const VoxCPM2Config& cfg,
                                       const std::string& artifact_name) {
     if (cfg.patch_size <= 0)
@@ -631,8 +631,11 @@ OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output, std
     }
     const auto patch_rows = static_cast<std::size_t>(cfg.patch_size);
     const auto available_rows = static_cast<std::size_t>(locdit_output.shape[0]);
-    const auto start = available_rows == patch_rows ? 0 : step * patch_rows;
-    return slice_first_dim(locdit_output, start, patch_rows, artifact_name);
+    if (available_rows < patch_rows) {
+        throw std::runtime_error("VoxCPM2Pipeline: LocDiT output artifact '" + artifact_name +
+                                 "' has fewer rows than one latent patch");
+    }
+    return slice_first_dim(locdit_output, 0, patch_rows, artifact_name);
 }
 
 OwnedStageTensor latest_hidden_row(const OwnedStageTensor& tensor,
@@ -975,7 +978,7 @@ OwnedStageTensor run_locdit_autoregressive(
     const auto& stage = plan.stages[3];
     for (std::size_t step = 0; step < generation_steps; ++step) {
         const auto locdit_output = run_stage(component, stage, artifacts, controls);
-        auto generated_patch = extract_locdit_patch(locdit_output, step, cfg, stage.output_artifact);
+        auto generated_patch = extract_locdit_patch(locdit_output, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
         artifacts["feat_cond"] = generated_patch;
         if (step > kVoxCPM2MinGenerationSteps && stop_logits_predict_stop(artifacts))

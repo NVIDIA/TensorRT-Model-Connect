@@ -416,16 +416,26 @@ class TestBuildBundleOrchestration:
                 with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                            return_value=""):
                     with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
-                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
-                            build_bundle(str(model_dir), output_path)
+                        with patch(
+                            "tensorrt_model_connect.engine_builder._detect_tokenizer_special_frame",
+                            return_value=([1], []),
+                        ):
+                            with patch(
+                                "tensorrt_model_connect.engine_builder.write_bundle"
+                            ) as mock_write:
+                                build_bundle(str(model_dir), output_path)
 
         sections = mock_write.call_args[0][2]
         section_map = {section.name: section.data for section in sections}
+        info = mock_write.call_args[0][1]
+        config_json = json.loads(section_map["config.json"].decode("utf-8"))
 
         assert [section.name for section in sections[:5]] == list(component_sections)
         assert "engine_plan" not in section_map
         assert section_map["locenc_engine_plan"] == b"LOCENC"
         assert section_map["audiovae_engine_plan"] == b"AUDIOVAE"
+        assert info.tokenizer_add_special_tokens is False
+        assert config_json["tokenizer_add_special_tokens"] == 0
 
     def test_max_cache_length_forwarded(self, tmp_path):
         """max_cache_length is forwarded to plugin.build_engine."""

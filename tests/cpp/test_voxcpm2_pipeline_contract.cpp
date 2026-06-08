@@ -43,6 +43,7 @@ float last_feat_cond_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
 float last_audio_vae_latent_value = 0.0F;
+std::vector<float> last_audio_vae_latent_values;
 int64_t last_text_token_count = 0;
 int64_t last_audio_feat_steps = 0;
 int64_t last_feat_cond_rows = 0;
@@ -328,6 +329,13 @@ class FakeModule final : public trtmc::ITrtModule {
                 last_audio_vae_latent_rows =
                     it->second.shape.empty() ? 0 : it->second.shape.front();
                 last_audio_vae_latent_value = *static_cast<float*>(it->second.data);
+                const std::size_t value_count =
+                    it->second.shape.size() == 2
+                        ? static_cast<std::size_t>(it->second.shape[0]) *
+                              static_cast<std::size_t>(it->second.shape[1])
+                        : 0;
+                const auto* values = static_cast<float*>(it->second.data);
+                last_audio_vae_latent_values.assign(values, values + value_count);
             }
         }
     }
@@ -565,6 +573,7 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_text_tokens.clear();
     last_text_mask_values.clear();
     last_audio_mask_values.clear();
+    last_audio_vae_latent_values.clear();
     locdit_feat_cond_values.clear();
     locenc_audio_feat_values.clear();
     tslm_text_token_counts.clear();
@@ -683,6 +692,26 @@ void test_generate_audio_trims_audio_vae_max_profile_output_to_generated_latents
           "voxcpm2 trims AudioVAE max-profile waveform to generated latent frames");
     check(audio.samples.size() == 8 * 3,
           "voxcpm2 trimmed AudioVAE waveform sample vector matches num_samples");
+}
+
+void test_generate_audio_reads_first_locdit_patch_from_each_static_profile_invocation() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(2), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    last_audio_vae_latent_values.clear();
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    (void)pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+
+    constexpr std::size_t kSecondPatchFirstValue = 4 * 64;
+    check(last_audio_vae_latent_values.size() > kSecondPatchFirstValue,
+          "voxcpm2 captures concatenated LocDiT patches for AudioVAE");
+    check(last_audio_vae_latent_values[0] == 4.0F,
+          "voxcpm2 first generated patch uses first LocDiT output patch");
+    check(last_audio_vae_latent_values[kSecondPatchFirstValue] == 4.0F,
+          "voxcpm2 static LocDiT profile reads the first output patch on each invocation");
 }
 
 void test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len() {
@@ -938,6 +967,7 @@ int main() {
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_generate_audio_maps_audio_vae_output0_to_waveform_artifact();
     test_generate_audio_trims_audio_vae_max_profile_output_to_generated_latents();
+    test_generate_audio_reads_first_locdit_patch_from_each_static_profile_invocation();
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
