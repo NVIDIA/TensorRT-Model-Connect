@@ -673,13 +673,7 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             semantic_lm_states = self.fsq_layer(enc_outputs) * a_mask.unsqueeze(
                 -1
             ) + enc_outputs * t_mask.unsqueeze(-1)
-            lm_hidden = torch.cat(
-                (
-                    torch.zeros_like(semantic_lm_states[:, 0:1, :]),
-                    semantic_lm_states[:, :-1, :],
-                ),
-                dim=1,
-            )
+            lm_hidden = semantic_lm_states
             stop_logits = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden)))
             return (
                 semantic_lm_states.squeeze(0),
@@ -770,14 +764,7 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
                 is_causal=True,
             )
             residual_outputs = residual_outputs.to(dtype=compute_dtype)
-            residual_hidden = torch.cat(
-                (
-                    torch.zeros_like(residual_outputs[:, 0:1, :]),
-                    residual_outputs[:, :-1, :],
-                ),
-                dim=1,
-            )
-            return residual_hidden.squeeze(0)
+            return residual_outputs.squeeze(0)
 
     wrapper = RALMWrapper(residual_lm, fusion_concat_proj)
     wrapper.eval()

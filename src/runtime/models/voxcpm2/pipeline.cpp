@@ -293,6 +293,28 @@ OwnedStageTensor make_initial_feat_cond_tensor(const VoxCPM2Config& cfg) {
     return tensor;
 }
 
+OwnedStageTensor make_int32_scalar_tensor(int32_t value) {
+    OwnedStageTensor tensor;
+    tensor.shape = {1};
+    tensor.dtype = DType::kInt32;
+    tensor.storage.resize(sizeof(int32_t));
+    std::memcpy(tensor.storage.data(), &value, tensor.storage.size());
+    return tensor;
+}
+
+OwnedStageTensor make_single_step_mask_tensor(float value) {
+    OwnedStageTensor tensor;
+    tensor.shape = {1};
+    tensor.dtype = DType::kFloat32;
+    tensor.storage.resize(sizeof(float));
+    std::memcpy(tensor.storage.data(), &value, tensor.storage.size());
+    return tensor;
+}
+
+OwnedStageTensor make_single_step_text_tokens_tensor() {
+    return make_int32_scalar_tensor(0);
+}
+
 std::size_t checked_first_dim_stride(const OwnedStageTensor& tensor,
                                      const std::string& artifact_name) {
     if (tensor.shape.empty()) {
@@ -346,6 +368,28 @@ OwnedStageTensor slice_first_dim(const OwnedStageTensor& tensor, std::size_t sta
         std::memcpy(out.storage.data(), tensor.storage.data() + offset_bytes, byte_count);
     }
     return out;
+}
+
+OwnedStageTensor make_audio_feats_from_patch(const OwnedStageTensor& patch,
+                                             const VoxCPM2Config& cfg,
+                                             const std::string& artifact_name) {
+    if (patch.shape.size() != 2) {
+        throw std::runtime_error("VoxCPM2Pipeline: generated latent patch '" + artifact_name +
+                                 "' must be rank 2 before LocEnc refresh");
+    }
+    if (patch.shape[0] != cfg.patch_size || patch.shape[1] != cfg.feat_dim) {
+        throw std::runtime_error("VoxCPM2Pipeline: generated latent patch '" + artifact_name +
+                                 "' has shape [" + std::to_string(patch.shape[0]) + "," +
+                                 std::to_string(patch.shape[1]) + "], expected [" +
+                                 std::to_string(cfg.patch_size) + "," +
+                                 std::to_string(cfg.feat_dim) + "]");
+    }
+
+    OwnedStageTensor audio_feats;
+    audio_feats.shape = {1, patch.shape[0], patch.shape[1]};
+    audio_feats.dtype = patch.dtype;
+    audio_feats.storage = patch.storage;
+    return audio_feats;
 }
 
 void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
@@ -413,6 +457,56 @@ OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output, std
     const auto available_rows = static_cast<std::size_t>(locdit_output.shape[0]);
     const auto start = available_rows == patch_rows ? 0 : step * patch_rows;
     return slice_first_dim(locdit_output, start, patch_rows, artifact_name);
+}
+
+OwnedStageTensor latest_hidden_row(const OwnedStageTensor& tensor,
+                                   std::size_t active_token_count,
+                                   const std::string& artifact_name) {
+    if (tensor.shape.empty()) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' must have a sequence dimension");
+    }
+    const auto rows = static_cast<std::size_t>(tensor.shape.front());
+    if (rows == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' has no hidden rows");
+    }
+    auto row = rows - 1;
+    if (active_token_count > 0) {
+        row = std::min(active_token_count - 1, rows - 1);
+    }
+    return slice_first_dim(tensor, row, 1, artifact_name);
+}
+
+void keep_latest_hidden_artifacts(StageArtifacts& artifacts, std::size_t active_token_count) {
+    const auto lm_it = artifacts.find("lm_hidden");
+    if (lm_it == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: LocDiT loop requires prepared lm_hidden artifact");
+    }
+    const auto residual_it = artifacts.find("residual_hidden");
+    if (residual_it == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: LocDiT loop requires prepared residual_hidden artifact");
+    }
+
+    auto lm_hidden = latest_hidden_row(lm_it->second, active_token_count, "lm_hidden");
+    auto residual_hidden =
+        latest_hidden_row(residual_it->second, active_token_count, "residual_hidden");
+    artifacts["lm_hidden"] = std::move(lm_hidden);
+    artifacts["residual_hidden"] = std::move(residual_hidden);
+}
+
+int32_t checked_position_id(std::size_t active_text_token_count, std::size_t generated_step) {
+    if (active_text_token_count >
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error("VoxCPM2Pipeline: text token count exceeds int32 position range");
+    }
+    if (generated_step >
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max()) - active_text_token_count) {
+        throw std::runtime_error("VoxCPM2Pipeline: generated step exceeds int32 position range");
+    }
+    return static_cast<int32_t>(active_text_token_count + generated_step);
 }
 
 struct RuntimeScalarInputs {
@@ -571,18 +665,45 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     return artifacts.at(stage.output_artifact);
 }
 
-OwnedStageTensor run_locdit_autoregressive(const audio::VoxCPM2LoadedComponent& component,
-                                           const audio::VoxCPM2GenerationStage& stage,
-                                           StageArtifacts& artifacts,
-                                           const RuntimeScalarInputs& controls,
-                                           std::size_t generation_steps,
-                                           const VoxCPM2Config& cfg) {
+void refresh_autoregressive_hidden_state(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components,
+    const audio::VoxCPM2GenerationPlan& plan, StageArtifacts& artifacts,
+    const RuntimeScalarInputs& controls, const OwnedStageTensor& generated_patch,
+    std::size_t completed_generation_step, std::size_t active_text_token_count,
+    const VoxCPM2Config& cfg) {
+    artifacts["audio_feats"] =
+        make_audio_feats_from_patch(generated_patch, cfg, plan.stages[3].output_artifact);
+    artifacts["text_tokens"] = make_single_step_text_tokens_tensor();
+    artifacts["text_mask"] = make_single_step_mask_tensor(0.0F);
+    artifacts["audio_mask"] = make_single_step_mask_tensor(1.0F);
+    artifacts["position_id"] =
+        make_int32_scalar_tensor(checked_position_id(active_text_token_count,
+                                                     completed_generation_step));
+
+    for (std::size_t i = 0; i < 3; ++i) {
+        (void)run_stage(components[i], plan.stages[i], artifacts, controls);
+    }
+    keep_latest_hidden_artifacts(artifacts, 1);
+}
+
+OwnedStageTensor run_locdit_autoregressive(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components,
+    const audio::VoxCPM2GenerationPlan& plan, StageArtifacts& artifacts,
+    const RuntimeScalarInputs& controls, std::size_t generation_steps,
+    std::size_t active_text_token_count, const VoxCPM2Config& cfg) {
     OwnedStageTensor generated_latents;
+    const auto& component = components[3];
+    const auto& stage = plan.stages[3];
     for (std::size_t step = 0; step < generation_steps; ++step) {
         const auto locdit_output = run_stage(component, stage, artifacts, controls);
         auto generated_patch = extract_locdit_patch(locdit_output, step, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
-        artifacts["feat_cond"] = std::move(generated_patch);
+        artifacts["feat_cond"] = generated_patch;
+        if (step + 1 < generation_steps) {
+            refresh_autoregressive_hidden_state(components, plan, artifacts, controls,
+                                                generated_patch, step + 1,
+                                                active_text_token_count, cfg);
+        }
     }
     artifacts[stage.output_artifact] = generated_latents;
     return generated_latents;
@@ -680,8 +801,10 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     }
     const auto generation_steps =
         resolve_latent_generation_steps(artifacts, active_text_token_count, cfg);
-    current = run_locdit_autoregressive(components_[3], effective_plan.stages[3], artifacts,
-                                        controls, generation_steps, effective_plan.config);
+    keep_latest_hidden_artifacts(artifacts, active_text_token_count);
+    current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
+                                        generation_steps, active_text_token_count,
+                                        effective_plan.config);
     current = run_stage(components_[4], effective_plan.stages[4], artifacts, controls);
 
     auto audio = make_audio_result(current, effective_plan);

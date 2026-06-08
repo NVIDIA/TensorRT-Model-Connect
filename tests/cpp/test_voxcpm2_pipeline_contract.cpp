@@ -57,6 +57,12 @@ std::vector<int32_t> last_text_tokens;
 std::vector<float> last_text_mask_values;
 std::vector<float> last_audio_mask_values;
 std::vector<float> locdit_feat_cond_values;
+std::vector<float> locenc_audio_feat_values;
+std::vector<int64_t> tslm_text_token_counts;
+std::vector<int32_t> tslm_audio_start_values;
+std::vector<int64_t> locdit_lm_hidden_rows;
+std::vector<int64_t> locdit_residual_hidden_rows;
+std::vector<int32_t> position_id_values;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
@@ -216,6 +222,9 @@ class FakeModule final : public trtmc::ITrtModule {
     }
 
     void record_auxiliary_inputs(const trtmc::TensorMap& inputs) const {
+        if (const auto pos_it = inputs.find("position_id"); pos_it != inputs.end()) {
+            position_id_values.push_back(*static_cast<int32_t*>(pos_it->second.data));
+        }
         if (const auto token_it = inputs.find("text_tokens"); token_it != inputs.end()) {
             if (const auto text_mask_it = inputs.find("text_mask");
                 text_mask_it != inputs.end()) {
@@ -224,11 +233,13 @@ class FakeModule final : public trtmc::ITrtModule {
                     ++tslm_text_binding_hits;
                     last_text_token_count =
                         token_it->second.shape.empty() ? 0 : token_it->second.shape.front();
+                    tslm_text_token_counts.push_back(last_text_token_count);
                     const auto* token_data = static_cast<int32_t*>(token_it->second.data);
                     last_text_tokens.assign(token_data, token_data + last_text_token_count);
                     if (last_text_token_count > 0) {
                         last_first_text_token = token_data[0];
                         last_audio_start_token = token_data[last_text_token_count - 1];
+                        tslm_audio_start_values.push_back(last_audio_start_token);
                     }
                     if (last_text_token_count > 1)
                         last_second_text_token = token_data[1];
@@ -247,6 +258,7 @@ class FakeModule final : public trtmc::ITrtModule {
             if (const auto it = inputs.find("audio_feats"); it != inputs.end()) {
                 last_audio_feat_steps =
                     it->second.shape.empty() ? 0 : it->second.shape.front();
+                locenc_audio_feat_values.push_back(*static_cast<float*>(it->second.data));
             }
         }
         if (input_name_ != "local_text_features") {
@@ -265,6 +277,12 @@ class FakeModule final : public trtmc::ITrtModule {
                     last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
                     last_feat_cond_value = *static_cast<float*>(feat_cond_it->second.data);
                     locdit_feat_cond_values.push_back(last_feat_cond_value);
+                    locdit_lm_hidden_rows.push_back(lm_it->second.shape.empty()
+                                                        ? 0
+                                                        : lm_it->second.shape.front());
+                    locdit_residual_hidden_rows.push_back(residual_it->second.shape.empty()
+                                                              ? 0
+                                                              : residual_it->second.shape.front());
                     last_feat_cond_rows = feat_cond_it->second.shape.size() > 0
                                               ? feat_cond_it->second.shape[0]
                                               : 0;
@@ -381,6 +399,9 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
         const auto& stage = audio::kVoxCPM2GenerationStages[i];
         std::vector<std::string> extra_inputs = required_inputs_for_stage(stage);
+        if (i == 1 || i == 2) {
+            extra_inputs.push_back("position_id");
+        }
         std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
         if (i == 1) {
             extra_outputs.push_back(
@@ -458,6 +479,12 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_text_mask_values.clear();
     last_audio_mask_values.clear();
     locdit_feat_cond_values.clear();
+    locenc_audio_feat_values.clear();
+    tslm_text_token_counts.clear();
+    tslm_audio_start_values.clear();
+    locdit_lm_hidden_rows.clear();
+    locdit_residual_hidden_rows.clear();
+    position_id_values.clear();
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -472,21 +499,40 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
           "voxcpm2 forwards inference_timesteps on each LocDiT autoregressive step");
     check(last_inference_timesteps == 12,
           "voxcpm2 inference_timesteps uses GenerateConfig override");
-    check(local_text_feature_binding_hits == 1,
-          "voxcpm2 forwards preserved local_text_features to RALM");
+    check(local_text_feature_binding_hits == 2,
+          "voxcpm2 forwards local_text_features to initial and refreshed RALM");
     check(last_local_text_feature_value == 1.0F,
           "voxcpm2 preserved local_text_features retain stage output data");
-    check(tslm_text_binding_hits == 1,
-          "voxcpm2 forwards tokenizer-derived text tensors to TSLM");
-    check(last_text_token_count > 1, "voxcpm2 text token tensor is populated");
-    check(last_audio_start_token == 101, "voxcpm2 appends upstream audio_start token");
-    check(last_text_mask_value == 1.0F, "voxcpm2 marks prompt tokens as text");
-    check(last_audio_mask_value == 0.0F, "voxcpm2 zero-shot prompt has no audio mask");
+    check(tslm_text_binding_hits == 2,
+          "voxcpm2 calls TSLM for prefill and generated-patch refresh");
+    check(!tslm_text_token_counts.empty() && tslm_text_token_counts[0] > 1,
+          "voxcpm2 prefill text token tensor is populated");
+    check(tslm_text_token_counts.size() == 2 && tslm_text_token_counts[1] == 1,
+          "voxcpm2 generated-patch refresh uses one-step TSLM inputs");
+    check(!tslm_audio_start_values.empty() && tslm_audio_start_values[0] == 101,
+          "voxcpm2 appends upstream audio_start token during prefill");
+    check(last_text_mask_values.size() == 1 && last_text_mask_values[0] == 0.0F,
+          "voxcpm2 generated-patch refresh clears one-step text mask");
+    check(last_audio_mask_values.size() == 1 && last_audio_mask_values[0] == 1.0F,
+          "voxcpm2 generated-patch refresh marks one-step audio mask");
+    check(locenc_audio_feat_values.size() == 2 && locenc_audio_feat_values[0] == 0.0F,
+          "voxcpm2 prefill LocEnc starts from zero-shot audio features");
+    check(locenc_audio_feat_values.size() == 2 && locenc_audio_feat_values[1] == 4.0F,
+          "voxcpm2 refresh LocEnc receives first generated latent patch");
+    check(position_id_values.size() == 2 && position_id_values[0] > 0 &&
+              position_id_values[0] == position_id_values[1],
+          "voxcpm2 forwards generated-step position_id to TSLM and RALM refresh");
     check(locdit_aux_binding_hits == 2,
           "voxcpm2 calls LocDiT once per generated latent patch");
     check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
     check(last_residual_hidden_value == 3.0F,
           "voxcpm2 LocDiT sees RALM residual_hidden primary tensor");
+    check(locdit_lm_hidden_rows.size() == 2 && locdit_lm_hidden_rows[0] == 1 &&
+              locdit_lm_hidden_rows[1] == 1,
+          "voxcpm2 LocDiT receives one TSLM hidden row per autoregressive step");
+    check(locdit_residual_hidden_rows.size() == 2 && locdit_residual_hidden_rows[0] == 1 &&
+              locdit_residual_hidden_rows[1] == 1,
+          "voxcpm2 LocDiT receives one RALM hidden row per autoregressive step");
     check(last_feat_cond_rows == 4 && last_feat_cond_cols == 64,
           "voxcpm2 LocDiT sees feat_cond patch tensors");
     check(locdit_feat_cond_values.size() == 2,
@@ -521,6 +567,7 @@ void test_generate_audio_expands_voxcpm2_multichar_cjk_tokens() {
     last_audio_start_token = 0;
 
     trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
     (void)pipeline.generate_audio("VoxCPM2 CJK token split", gen_cfg);
 
     check(tslm_text_binding_hits == 1, "voxcpm2 forwards expanded CJK tokens to TSLM");
@@ -547,6 +594,7 @@ void test_generate_audio_pads_text_tensors_to_engine_steps() {
     last_audio_mask_values.clear();
 
     trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
     (void)pipeline.generate_audio("abc", gen_cfg);
 
     check(tslm_text_binding_hits == 1, "voxcpm2 forwards padded text tensors to TSLM");
