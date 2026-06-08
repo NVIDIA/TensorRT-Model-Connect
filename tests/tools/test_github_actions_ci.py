@@ -111,6 +111,35 @@ def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
         assert "!e2e_artifacts/e2e_report.html" not in text
 
 
+def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    trigger_block = text.split("permissions:", maxsplit=1)[0]
+    assert "pull_request:" in trigger_block
+    assert "types:" in trigger_block
+    assert "- labeled" in trigger_block
+    assert "workflow_dispatch:" in trigger_block
+    assert "push:" not in trigger_block
+    assert "issues: write" in text
+    assert "pull-requests: read" in text
+    assert "github.event_name == 'workflow_dispatch'" in text
+    assert 'contains(fromJSON(\'["run-e2e", "run-full-ci"]\'), github.event.label.name)' in text
+    assert "Remove trigger label" in text
+    assert "continue-on-error: true" in text
+    assert "actions/github-script@v7" in text
+    assert "github.rest.issues.removeLabel" in text
+    assert "context.payload.pull_request.number" in text
+
+
+def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    checkout_block = text.split("- name: Check out source", maxsplit=1)[1].split(
+        "\n\n",
+        maxsplit=1,
+    )[0]
+    assert "uses: actions/checkout@v4" in checkout_block
+    assert "ref:" not in checkout_block
+
+
 def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     assert "workflow_dispatch:" in text

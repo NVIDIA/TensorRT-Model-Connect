@@ -1,9 +1,14 @@
 name: TensorRT-Model-Connect Premerge CI
 
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('PR #{0} {1}', github.event.pull_request.number, github.event.label.name) || format('Manual {0}', github.ref_name) }}
+
 on:
   pull_request:
     branches:
       - main
+    types:
+      - labeled
     paths-ignore:
       - "website/**"
       - ".github/workflows/pages.yml"
@@ -11,6 +16,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: read
 
 concurrency:
   group: trtmc-ci-${{ github.workflow }}-${{ github.ref }}
@@ -48,6 +55,14 @@ env:
 jobs:
   premerge-ci:
     name: Premerge CI
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          contains(fromJSON('["run-e2e", "run-full-ci"]'), github.event.label.name)
+        )
+      }}
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 
@@ -220,3 +235,30 @@ jobs:
       - name: Stop CI container
         if: always()
         run: docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+
+      - name: Remove trigger label
+        if: >-
+          ${{
+            always() &&
+            github.event_name == 'pull_request' &&
+            contains(fromJSON('["run-e2e", "run-full-ci"]'), github.event.label.name)
+          }}
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = context.payload.label.name;
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                name: label,
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`Trigger label '${label}' was already removed.`);
+                return;
+              }
+              throw error;
+            }
