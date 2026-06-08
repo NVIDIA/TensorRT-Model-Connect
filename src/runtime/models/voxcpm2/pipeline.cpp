@@ -416,26 +416,42 @@ void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
     target.shape[0] += chunk.shape[0];
 }
 
-std::size_t resolve_latent_generation_steps(const StageArtifacts& artifacts,
-                                            std::size_t active_text_token_count,
-                                            const GenerateConfig& cfg) {
+std::size_t resolve_latent_generation_steps(std::size_t active_text_token_count,
+                                            const GenerateConfig& cfg,
+                                            const VoxCPM2Config& voxcpm2_cfg) {
+    constexpr std::size_t kUpstreamDefaultMaxLen = 2000;
+    if (cfg.max_new_tokens > 0)
+        return static_cast<std::size_t>(cfg.max_new_tokens);
+    if (active_text_token_count == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: resolved zero active text tokens");
+    }
+    if (voxcpm2_cfg.retry_badcase_ratio_threshold < 0.0F) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: retry_badcase_ratio_threshold must be non-negative");
+    }
+
+    const auto default_steps = static_cast<std::size_t>(
+        static_cast<double>(active_text_token_count) *
+            static_cast<double>(voxcpm2_cfg.retry_badcase_ratio_threshold) +
+        10.0);
+    const auto steps = std::min(default_steps, kUpstreamDefaultMaxLen);
+    if (steps == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: resolved zero LocDiT generation steps");
+    }
+    return steps;
+}
+
+void validate_lm_state_ready(const StageArtifacts& artifacts) {
+    const auto lm_it = artifacts.find("lm_hidden");
+    if (lm_it == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: LocDiT loop requires prepared lm_hidden artifact");
+    }
     const auto residual_it = artifacts.find("residual_hidden");
     if (residual_it == artifacts.end()) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: LocDiT loop requires prepared residual_hidden artifact");
     }
-    if (residual_it->second.shape.empty()) {
-        throw std::runtime_error("VoxCPM2Pipeline: residual_hidden must be rank >= 1");
-    }
-    auto steps = static_cast<std::size_t>(residual_it->second.shape.front());
-    if (active_text_token_count > 0)
-        steps = std::min(steps, active_text_token_count);
-    if (cfg.max_new_tokens > 0)
-        steps = std::min(steps, static_cast<std::size_t>(cfg.max_new_tokens));
-    if (steps == 0) {
-        throw std::runtime_error("VoxCPM2Pipeline: resolved zero LocDiT generation steps");
-    }
-    return steps;
 }
 
 OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output, std::size_t step,
@@ -799,8 +815,9 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     for (std::size_t i = 0; i < 3; ++i) {
         current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
     }
+    validate_lm_state_ready(artifacts);
     const auto generation_steps =
-        resolve_latent_generation_steps(artifacts, active_text_token_count, cfg);
+        resolve_latent_generation_steps(active_text_token_count, cfg, effective_plan.config);
     keep_latest_hidden_artifacts(artifacts, active_text_token_count);
     current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
                                         generation_steps, active_text_token_count,

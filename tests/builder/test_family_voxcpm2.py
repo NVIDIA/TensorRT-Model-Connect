@@ -501,7 +501,7 @@ def test_voxcpm2_tslm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     assert plan == b"TSLM-PLAN"
     assert captured["verbose"] is True
     assert captured["input_shapes"] == ((3, 2), (3,), (3,), (3,))
-    assert captured["output_shapes"] == ((3, 2), (3, 2), (3, 2))
+    assert captured["output_shapes"] == ((3, 2), (1, 2), (1, 2))
     assert captured["output_dtypes"] == (torch.float32, torch.float32, torch.float32)
 
 
@@ -594,7 +594,7 @@ def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     assert plan == b"RALM-PLAN"
     assert captured["verbose"] is True
     assert captured["input_shapes"] == ((3, 2), (3,), (3, 2))
-    assert captured["output_shape"] == (3, 2)
+    assert captured["output_shape"] == (1, 2)
     assert captured["output_dtype"] == torch.float32
     residual_config = captured["wrapper"].residual_lm.config.kwargs
     assert residual_config["num_hidden_layers"] == 4

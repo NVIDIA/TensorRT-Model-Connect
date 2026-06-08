@@ -379,21 +379,26 @@ std::vector<float> repeated_values(std::size_t count, float value) {
     return std::vector<float>(count, value);
 }
 
-std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
+std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
+    std::size_t latent_patch_count = 2) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
-    auto first_patch = repeated_values(4 * 64, 4.0F);
-    auto second_patch = repeated_values(4 * 64, 5.0F);
-    locdit_latents.insert(locdit_latents.end(), first_patch.begin(), first_patch.end());
-    locdit_latents.insert(locdit_latents.end(), second_patch.begin(), second_patch.end());
+    for (std::size_t patch = 0; patch < latent_patch_count; ++patch) {
+        auto values = repeated_values(4 * 64, 4.0F + static_cast<float>(patch));
+        locdit_latents.insert(locdit_latents.end(), values.begin(), values.end());
+    }
     const std::vector<std::vector<float>> stage_outputs = {
         repeated_values(2 * 64, 1.0F),  repeated_values(2 * 2048, 2.0F),
-        repeated_values(2 * 512, 3.0F), std::move(locdit_latents),
+        repeated_values(1 * 512, 3.0F), std::move(locdit_latents),
         {0.0F, 0.25F, -0.25F, 0.5F},
     };
     const std::vector<std::vector<int64_t>> stage_shapes = {
-        {2, 64}, {2, 2048}, {2, 512}, {8, 64}, {4},
+        {2, 64},
+        {2, 2048},
+        {1, 512},
+        {static_cast<int64_t>(latent_patch_count * 4), 64},
+        {4},
     };
     for (std::size_t i = 0; i < audio::kVoxCPM2ComponentSpecs.size(); ++i) {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
@@ -405,7 +410,8 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
         std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
         if (i == 1) {
             extra_outputs.push_back(
-                {"lm_hidden", trtmc::DType::kFloat32, repeated_values(2 * 2048, 8.0F), {2, 2048}});
+                {"lm_hidden", trtmc::DType::kFloat32, repeated_values(1 * 2048, 8.0F),
+                 {1, 2048}});
         }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
@@ -452,6 +458,7 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     gen_cfg.cfg_scale = 3.0F;
     gen_cfg.num_steps = 12;
     gen_cfg.seed = 7;
+    gen_cfg.max_new_tokens = 2;
 
     cfg_binding_hits = 0;
     timestep_binding_hits = 0;
@@ -552,6 +559,32 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
 
     std::filesystem::current_path(original_cwd);
     std::filesystem::remove_all(temp_dir);
+}
+
+void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    constexpr std::size_t expected_default_steps = 22;
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(expected_default_steps), plan,
+                                    "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    cfg_binding_hits = 0;
+    timestep_binding_hits = 0;
+    locdit_aux_binding_hits = 0;
+    last_audio_vae_latent_rows = 0;
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 0;
+    (void)pipeline.generate_audio("a", gen_cfg);
+
+    check(cfg_binding_hits == static_cast<int>(expected_default_steps),
+          "voxcpm2 max_new_tokens=0 uses upstream text-length default for LocDiT steps");
+    check(timestep_binding_hits == static_cast<int>(expected_default_steps),
+          "voxcpm2 max_new_tokens=0 forwards timesteps on every default LocDiT step");
+    check(locdit_aux_binding_hits == static_cast<int>(expected_default_steps),
+          "voxcpm2 default generation length does not depend on hidden-state rows");
+    check(last_audio_vae_latent_rows == static_cast<int64_t>(expected_default_steps * 4),
+          "voxcpm2 AudioVAE receives all default generated latent patches");
 }
 
 void test_generate_audio_expands_voxcpm2_multichar_cjk_tokens() {
@@ -719,6 +752,7 @@ void test_rejects_component_order_mismatch() {
 int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
+    test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
     test_generate_audio_pads_text_tensors_to_engine_steps();
     test_generate_audio_rejects_prompt_exceeding_engine_steps();
