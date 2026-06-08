@@ -1,30 +1,22 @@
 name: TensorRT-Model-Connect Premerge CI
 
-run-name: >-
-  ${{ startsWith(inputs.checkout_ref, 'refs/pull/') && format('/trtmc-ci {0}', inputs.checkout_ref) || format('Manual {0}', inputs.checkout_ref || github.ref_name) }}
-
 on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "website/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
-    inputs:
-      checkout_ref:
-        description: "Git ref to validate. Use refs/pull/<number>/merge for /trtmc-ci PR requests."
-        required: false
-        default: ""
-      base_ref:
-        description: "Git ref used as the CI comparison base."
-        required: false
-        default: "origin/main"
 
 permissions:
   contents: read
 
 concurrency:
-  group: trtmc-ci-${{ github.workflow }}-${{ inputs.checkout_ref || github.ref }}
-  cancel-in-progress: true
+  group: trtmc-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  TRTMC_CI_BASE_REF: ${{ inputs.base_ref }}
-  TRTMC_CI_PREMERGE: ${{ startsWith(inputs.checkout_ref, 'refs/pull/') && 'true' || 'false' }}
   ENGINE_DIR: ${{ vars.TRTMC_ENGINE_DIR || '/workspace/users/yifeif/tensorrt-model-connect/engines' }}
   TRTMC_STORAGE_ROOT: ${{ vars.TRTMC_STORAGE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
   HF_HOME: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
@@ -95,7 +87,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.checkout_ref || github.ref }}
           fetch-depth: 0
           clean: false
           lfs: false
@@ -104,14 +95,18 @@ jobs:
         id: base
         run: |
           set -euo pipefail
-          base="${TRTMC_CI_BASE_REF:-}"
-          if [ -z "$base" ]; then
-            base="origin/${GITHUB_REF_NAME:-main}"
-          fi
-
-          if [[ "$base" == origin/* ]] && ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            git fetch origin "${base#origin/}" --quiet || true
-          fi
+          base=""
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              base="${{ github.event.before }}"
+              ;;
+            workflow_dispatch)
+              base="origin/${GITHUB_REF_NAME:-main}"
+              ;;
+          esac
 
           if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             if git rev-parse --verify "origin/${GITHUB_REF_NAME:-main}" >/dev/null 2>&1; then
@@ -128,10 +123,10 @@ jobs:
       - name: Report CI mode
         run: |
           set -euo pipefail
-          if [ "${TRTMC_CI_PREMERGE:-false}" = "true" ]; then
-            echo "CI mode: /trtmc-ci premerge/selective"
-          elif [ "$FULL_E2E" = "true" ]; then
+          if [ "$FULL_E2E" = "true" ]; then
             echo "CI mode: full E2E"
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "CI mode: premerge/selective"
           else
             echo "CI mode: branch/manual unit gates"
           fi
@@ -182,7 +177,7 @@ jobs:
         run: bash .github/scripts/run-gha-stage.sh graph-ops
 
       - name: Selective E2E tests
-        if: ${{ env.TRTMC_CI_PREMERGE == 'true' && env.FULL_E2E != 'true' }}
+        if: ${{ github.event_name == 'pull_request' && env.FULL_E2E != 'true' }}
         timeout-minutes: 240
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
 

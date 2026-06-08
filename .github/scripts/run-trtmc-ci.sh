@@ -488,27 +488,26 @@ sys.exit(0 if ok else 1)
 }
 
 run_cpp_coverage() {
-  if [ "${TRTMC_CI_PREMERGE:-false}" = "true" ] || [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
-    local changed_cpp
-    changed_cpp=$(git diff --diff-filter=d --name-only "$CI_BASE_REF"...HEAD -- \
-      'src/**/*.cpp' 'src/**/*.h' 'include/**/*.h' \
-      'tests/cpp/**/*.cpp' 'tests/cpp/**/*.h' 'CMakeLists.txt' || true)
-    if [ -z "$changed_cpp" ]; then
-      echo "Skipping: no C++ source, C++ tests, or CMake changes in premerge diff"
-      return 0
-    fi
-    echo "C++ coverage triggered by changed files:"
-    echo "$changed_cpp"
-  else
-    case "${GITHUB_EVENT_NAME:-}" in
-      schedule|workflow_dispatch)
-        ;;
-      *)
-        echo "Skipping: C++ coverage only runs for nightly/manual pipelines and C++-affected premerge PRs"
+  case "${GITHUB_EVENT_NAME:-}" in
+    schedule|workflow_dispatch)
+      ;;
+    pull_request)
+      local changed_cpp
+      changed_cpp=$(git diff --diff-filter=d --name-only "$CI_BASE_REF"...HEAD -- \
+        'src/**/*.cpp' 'src/**/*.h' 'include/**/*.h' \
+        'tests/cpp/**/*.cpp' 'tests/cpp/**/*.h' 'CMakeLists.txt' || true)
+      if [ -z "$changed_cpp" ]; then
+        echo "Skipping: no C++ source, C++ tests, or CMake changes in premerge diff"
         return 0
-        ;;
-    esac
-  fi
+      fi
+      echo "C++ coverage triggered by changed files:"
+      echo "$changed_cpp"
+      ;;
+    *)
+      echo "Skipping: C++ coverage only runs for nightly/manual pipelines and C++-affected premerge PRs"
+      return 0
+      ;;
+  esac
   python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
   run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh
 }
@@ -519,8 +518,8 @@ run_graph_op_tests() {
 }
 
 run_selective_e2e() {
-  if { [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ] && [ "${TRTMC_CI_PREMERGE:-false}" != "true" ]; } || [ "${FULL_E2E:-false}" = "true" ]; then
-    echo "Skipping: selective E2E only runs for requested premerge PR CI without full_e2e"
+  if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ] || [ "${FULL_E2E:-false}" = "true" ]; then
+    echo "Skipping: selective E2E only runs for pull_request events without full_e2e"
     return 0
   fi
 
