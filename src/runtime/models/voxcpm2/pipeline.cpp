@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -114,6 +115,10 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
         std::memcpy(tensor.storage.data(), prompt.data(), prompt.size());
     }
     return tensor;
+}
+
+bool is_floating_dtype(DType dtype) {
+    return dtype == DType::kFloat32 || dtype == DType::kFloat16 || dtype == DType::kBFloat16;
 }
 
 struct PreparedTextTokens {
@@ -625,6 +630,26 @@ void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
     target.shape[0] += chunk.shape[0];
 }
 
+half_bits_t fp32_to_fp16(float v) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    const uint32_t sign = (bits >> 16U) & 0x8000U;
+    int32_t exp = static_cast<int32_t>((bits >> 23U) & 0xFFU) - 127 + 15;
+    const uint32_t mant = bits & 0x7FFFFFU;
+    if (exp <= 0)
+        return static_cast<half_bits_t>(sign);
+    if (exp >= 31)
+        return static_cast<half_bits_t>(sign | 0x7C00U);
+    return static_cast<half_bits_t>(sign | (static_cast<uint32_t>(exp) << 10U) |
+                                    (mant >> 13U));
+}
+
+half_bits_t fp32_to_bf16(float v) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return static_cast<half_bits_t>(bits >> 16U);
+}
+
 float fp16_to_fp32(half_bits_t h) {
     uint32_t sign = (static_cast<uint32_t>(h) & 0x8000U) << 16U;
     uint32_t exp = (h >> 10U) & 0x1FU;
@@ -680,6 +705,128 @@ float tensor_float_value(const OwnedStageTensor& tensor, std::size_t index,
     }
     throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
                              "' is not a floating-point tensor");
+}
+
+OwnedStageTensor convert_floating_tensor_dtype(const OwnedStageTensor& tensor, DType target_dtype,
+                                               const std::string& artifact_name) {
+    if (!is_floating_dtype(tensor.dtype) || !is_floating_dtype(target_dtype)) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' cannot be converted between non-floating dtypes");
+    }
+
+    OwnedStageTensor converted;
+    converted.shape = tensor.shape;
+    converted.dtype = target_dtype;
+    const auto count = tensor_element_count(tensor, artifact_name);
+    converted.storage.resize(count * dtype_size(target_dtype));
+    if (target_dtype == DType::kFloat32) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto value = tensor_float_value(tensor, i, artifact_name);
+            std::memcpy(converted.storage.data() + i * sizeof(value), &value, sizeof(value));
+        }
+        return converted;
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto value = tensor_float_value(tensor, i, artifact_name);
+        const auto encoded = target_dtype == DType::kBFloat16 ? fp32_to_bf16(value)
+                                                              : fp32_to_fp16(value);
+        std::memcpy(converted.storage.data() + i * sizeof(encoded), &encoded, sizeof(encoded));
+    }
+    return converted;
+}
+
+Tensor tensor_for_module_input(const ITrtModule& module, const std::string& input_name,
+                               const OwnedStageTensor& tensor,
+                               std::vector<OwnedStageTensor>& converted_inputs) {
+    const auto target_dtype = module.tensor_dtype(input_name);
+    if (target_dtype == tensor.dtype)
+        return tensor.as_tensor();
+    if (is_floating_dtype(target_dtype) && is_floating_dtype(tensor.dtype)) {
+        converted_inputs.emplace_back(
+            convert_floating_tensor_dtype(tensor, target_dtype, input_name));
+        return converted_inputs.back().as_tensor();
+    }
+    return tensor.as_tensor();
+}
+
+int32_t tensor_int32_value(const OwnedStageTensor& tensor, std::size_t index,
+                           const std::string& artifact_name) {
+    const auto count = tensor_element_count(tensor, artifact_name);
+    if (index >= count) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' scalar index is out of range");
+    }
+    if (tensor.dtype != DType::kInt32) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' is not an int32 tensor");
+    }
+    int32_t value = 0;
+    std::memcpy(&value, tensor.storage.data() + index * sizeof(value), sizeof(value));
+    return value;
+}
+
+float tensor_sample_mean_abs(const OwnedStageTensor& tensor,
+                             const std::string& artifact_name) {
+    const auto count = std::min<std::size_t>(tensor_element_count(tensor, artifact_name), 64);
+    if (count == 0)
+        return 0.0F;
+    float sum = 0.0F;
+    for (std::size_t i = 0; i < count; ++i)
+        sum += std::abs(tensor_float_value(tensor, i, artifact_name));
+    return sum / static_cast<float>(count);
+}
+
+std::string tensor_shape_string(const OwnedStageTensor& tensor) {
+    std::ostringstream os;
+    os << '[';
+    for (std::size_t i = 0; i < tensor.shape.size(); ++i) {
+        if (i != 0)
+            os << ',';
+        os << tensor.shape[i];
+    }
+    os << ']';
+    return os.str();
+}
+
+void append_trace_float_summary(std::ostringstream& os, const StageArtifacts& artifacts,
+                                const char* name) {
+    const auto it = artifacts.find(name);
+    if (it == artifacts.end())
+        return;
+    os << ' ' << name << "_shape=" << tensor_shape_string(it->second)
+       << ' ' << name << "_first=" << tensor_float_value(it->second, 0, name)
+       << ' ' << name << "_mean64=" << tensor_sample_mean_abs(it->second, name);
+}
+
+void append_trace_int32_summary(std::ostringstream& os, const StageArtifacts& artifacts,
+                                const char* name) {
+    const auto it = artifacts.find(name);
+    if (it == artifacts.end())
+        return;
+    os << ' ' << name << "_shape=" << tensor_shape_string(it->second)
+       << ' ' << name << "_first=" << tensor_int32_value(it->second, 0, name);
+}
+
+void trace_lm_state(const char* phase, std::size_t step, const StageArtifacts& artifacts) {
+    static const bool enabled = std::getenv("TRTMC_VOXCPM2_STATE_TRACE") != nullptr;
+    if (!enabled)
+        return;
+
+    std::ostringstream os;
+    os << "[trtmc.voxcpm2.state] phase=" << phase << " step=" << step;
+    append_trace_int32_summary(os, artifacts, "position_id");
+    append_trace_int32_summary(os, artifacts, "text_tokens");
+    append_trace_float_summary(os, artifacts, "text_mask");
+    append_trace_float_summary(os, artifacts, "audio_mask");
+    append_trace_float_summary(os, artifacts, "local_text_features");
+    append_trace_float_summary(os, artifacts, "lm_hidden");
+    append_trace_float_summary(os, artifacts, "residual_hidden");
+    append_trace_float_summary(os, artifacts, "feat_cond");
+    append_trace_float_summary(os, artifacts, "tslm_past_kv_cache");
+    append_trace_float_summary(os, artifacts, "ralm_past_kv_cache");
+    append_trace_float_summary(os, artifacts, "stop_logits");
+    std::cerr << os.str() << '\n';
 }
 
 bool stop_logits_predict_stop(const StageArtifacts& artifacts) {
@@ -974,8 +1121,10 @@ void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
     }
 }
 
-void add_required_artifact_inputs(const audio::VoxCPM2GenerationStage& stage,
+void add_required_artifact_inputs(const ITrtModule& module,
+                                  const audio::VoxCPM2GenerationStage& stage,
                                   const StageArtifacts& artifacts, TensorMap& inputs,
+                                  std::vector<OwnedStageTensor>& converted_inputs,
                                   const std::string& component_name) {
     for (std::size_t i = 0; i < stage.required_side_input_count; ++i) {
         const auto* name = stage.required_side_inputs[i];
@@ -986,18 +1135,23 @@ void add_required_artifact_inputs(const audio::VoxCPM2GenerationStage& stage,
             throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name +
                                      " is missing required side artifact '" + name + "'");
         }
-        inputs.emplace(name, artifact_it->second.as_tensor());
+        inputs.emplace(name,
+                       tensor_for_module_input(module, name, artifact_it->second,
+                                               converted_inputs));
     }
 }
 
 void add_declared_artifact_inputs(const ITrtModule& module, const StageArtifacts& artifacts,
-                                  TensorMap& inputs) {
+                                  TensorMap& inputs,
+                                  std::vector<OwnedStageTensor>& converted_inputs) {
     for (const auto& artifact : artifacts) {
         if (inputs.find(artifact.first) != inputs.end())
             continue;
         if (!module.has_input(artifact.first))
             continue;
-        inputs.emplace(artifact.first, artifact.second.as_tensor());
+        inputs.emplace(artifact.first,
+                       tensor_for_module_input(module, artifact.first, artifact.second,
+                                               converted_inputs));
     }
 }
 
@@ -1069,9 +1223,14 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     const auto& input = input_it->second;
     validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component.name, "input");
     TensorMap inputs;
-    inputs.emplace(stage.input_artifact, input.as_tensor());
-    add_required_artifact_inputs(stage, artifacts, inputs, component.name);
-    add_declared_artifact_inputs(*component.module, artifacts, inputs);
+    std::vector<OwnedStageTensor> converted_inputs;
+    converted_inputs.reserve(8);
+    inputs.emplace(stage.input_artifact,
+                   tensor_for_module_input(*component.module, stage.input_artifact, input,
+                                           converted_inputs));
+    add_required_artifact_inputs(*component.module, stage, artifacts, inputs, converted_inputs,
+                                 component.name);
+    add_declared_artifact_inputs(*component.module, artifacts, inputs, converted_inputs);
     controls.add_to(*component.module, inputs);
     auto outputs = component.module->forward(inputs);
     const char* output_binding = stage.output_artifact;
@@ -1129,6 +1288,7 @@ OwnedStageTensor run_cache_bound_lm_prefill(
 
         (void)run_stage(components[1], plan.stages[1], artifacts, controls);
         current = run_stage(components[2], plan.stages[2], artifacts, controls);
+        trace_lm_state("prefill", pos, artifacts);
     }
     return current;
 }
@@ -1150,8 +1310,11 @@ void refresh_autoregressive_hidden_state(
 
     for (std::size_t i = 0; i < 3; ++i) {
         (void)run_stage(components[i], plan.stages[i], artifacts, controls);
+        if (i == 0)
+            trace_lm_state("refresh_locenc", completed_generation_step, artifacts);
     }
     keep_latest_lm_artifacts(artifacts, 1, true);
+    trace_lm_state("refresh_lm", completed_generation_step, artifacts);
 }
 
 OwnedStageTensor run_locdit_autoregressive(
@@ -1168,6 +1331,7 @@ OwnedStageTensor run_locdit_autoregressive(
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
         artifacts["feat_cond"] = generated_patch;
         const auto predicted_stop = stop_logits_predict_stop(artifacts);
+        trace_lm_state("locdit", step, artifacts);
         trace_stop_logits(artifacts, step, predicted_stop);
         if (step > kVoxCPM2MinGenerationSteps && predicted_stop)
             break;

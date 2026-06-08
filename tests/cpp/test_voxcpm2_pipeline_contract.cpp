@@ -23,6 +23,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -66,6 +67,10 @@ std::vector<int64_t> locdit_residual_hidden_rows;
 std::vector<int32_t> position_id_values;
 std::vector<int32_t> tslm_position_id_values;
 std::vector<int32_t> ralm_position_id_values;
+trtmc::DType last_text_mask_dtype = trtmc::DType::kFloat32;
+trtmc::DType last_audio_mask_dtype = trtmc::DType::kFloat32;
+trtmc::DType last_audio_feats_dtype = trtmc::DType::kFloat32;
+trtmc::DType last_feat_cond_dtype = trtmc::DType::kFloat32;
 std::string last_tokenizer_input;
 int tslm_cache_binding_hits = 0;
 int ralm_cache_binding_hits = 0;
@@ -75,6 +80,47 @@ void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+using half_bits_t = uint16_t;
+
+float fp16_to_fp32(half_bits_t h) {
+    uint32_t sign = (static_cast<uint32_t>(h) & 0x8000U) << 16U;
+    uint32_t exp = (h >> 10U) & 0x1FU;
+    uint32_t mant = h & 0x3FFU;
+    uint32_t bits = sign;
+    if (exp == 31U) {
+        bits |= 0x7F800000U | (mant << 13U);
+    } else if (exp != 0U) {
+        bits |= (static_cast<uint32_t>(exp - 15U + 127U) << 23U) | (mant << 13U);
+    }
+    float out = 0.0F;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+float bf16_to_fp32(half_bits_t h) {
+    const uint32_t bits = static_cast<uint32_t>(h) << 16U;
+    float out = 0.0F;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+float tensor_float_at(const trtmc::Tensor& tensor, std::size_t index) {
+    if (tensor.dtype == trtmc::DType::kFloat32)
+        return static_cast<float*>(tensor.data)[index];
+    const auto value = static_cast<half_bits_t*>(tensor.data)[index];
+    if (tensor.dtype == trtmc::DType::kBFloat16)
+        return bf16_to_fp32(value);
+    return fp16_to_fp32(value);
+}
+
+std::vector<float> tensor_float_values(const trtmc::Tensor& tensor, std::size_t count) {
+    std::vector<float> values;
+    values.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+        values.push_back(tensor_float_at(tensor, i));
+    return values;
 }
 
 class FakeTokenizer final : public trtmc::ITokenizer {
@@ -141,10 +187,12 @@ class FakeModule final : public trtmc::ITrtModule {
                std::vector<int64_t> output_shape = {},
                std::vector<std::string> extra_input_names = {},
                std::vector<ExtraOutputSpec> extra_outputs = {},
-               std::vector<int64_t> max_profile_shape = {})
+               std::vector<int64_t> max_profile_shape = {},
+               std::unordered_map<std::string, trtmc::DType> tensor_dtypes = {})
         : input_name_(std::move(input_name)), output_name_(std::move(output_name)),
           output_dtype_(output_dtype), extra_input_names_(std::move(extra_input_names)),
-          max_profile_shape_(std::move(max_profile_shape)) {
+          max_profile_shape_(std::move(max_profile_shape)),
+          tensor_dtypes_(std::move(tensor_dtypes)) {
         set_float_output(std::move(output_floats), std::move(output_shape));
         for (auto& output : extra_outputs) {
             add_extra_output(std::move(output));
@@ -203,7 +251,12 @@ class FakeModule final : public trtmc::ITrtModule {
         return std::any_of(extra_outputs_.begin(), extra_outputs_.end(),
                            [&](const ExtraOutput& output) { return output.name == name; });
     }
-    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        const auto it = tensor_dtypes_.find(name);
+        if (it != tensor_dtypes_.end())
+            return it->second;
+        return trtmc::DType::kFloat32;
+    }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
         if (name == "tslm_past_kv_cache" || name == "ralm_past_kv_cache")
             return {2, 1, 1, 1, 8, 1};
@@ -277,22 +330,23 @@ class FakeModule final : public trtmc::ITrtModule {
                     }
                     if (last_text_token_count > 1)
                         last_second_text_token = token_data[1];
-                    const auto* text_mask_data = static_cast<float*>(text_mask_it->second.data);
-                    const auto* audio_mask_data = static_cast<float*>(audio_mask_it->second.data);
-                    last_text_mask_values.assign(text_mask_data,
-                                                 text_mask_data + last_text_token_count);
-                    last_audio_mask_values.assign(audio_mask_data,
-                                                  audio_mask_data + last_text_token_count);
-                    last_text_mask_value = text_mask_data[0];
-                    last_audio_mask_value = audio_mask_data[0];
+                    last_text_mask_dtype = text_mask_it->second.dtype;
+                    last_audio_mask_dtype = audio_mask_it->second.dtype;
+                    last_text_mask_values = tensor_float_values(
+                        text_mask_it->second, static_cast<std::size_t>(last_text_token_count));
+                    last_audio_mask_values = tensor_float_values(
+                        audio_mask_it->second, static_cast<std::size_t>(last_text_token_count));
+                    last_text_mask_value = last_text_mask_values[0];
+                    last_audio_mask_value = last_audio_mask_values[0];
                 }
             }
         }
         if (input_name_ == "audio_feats") {
             if (const auto it = inputs.find("audio_feats"); it != inputs.end()) {
+                last_audio_feats_dtype = it->second.dtype;
                 last_audio_feat_steps =
                     it->second.shape.empty() ? 0 : it->second.shape.front();
-                locenc_audio_feat_values.push_back(*static_cast<float*>(it->second.data));
+                locenc_audio_feat_values.push_back(tensor_float_at(it->second, 0));
             }
         }
         if (input_name_ != "local_text_features") {
@@ -307,9 +361,10 @@ class FakeModule final : public trtmc::ITrtModule {
                 if (const auto feat_cond_it = inputs.find("feat_cond");
                     feat_cond_it != inputs.end()) {
                     ++locdit_aux_binding_hits;
-                    last_lm_hidden_value = *static_cast<float*>(lm_it->second.data);
-                    last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
-                    last_feat_cond_value = *static_cast<float*>(feat_cond_it->second.data);
+                    last_lm_hidden_value = tensor_float_at(lm_it->second, 0);
+                    last_residual_hidden_value = tensor_float_at(residual_it->second, 0);
+                    last_feat_cond_dtype = feat_cond_it->second.dtype;
+                    last_feat_cond_value = tensor_float_at(feat_cond_it->second, 0);
                     locdit_feat_cond_values.push_back(last_feat_cond_value);
                     locdit_lm_hidden_rows.push_back(lm_it->second.shape.empty()
                                                         ? 0
@@ -401,6 +456,7 @@ class FakeModule final : public trtmc::ITrtModule {
     std::vector<int64_t> output_shape_;
     std::vector<int64_t> dynamic_output_shape_;
     std::vector<int64_t> max_profile_shape_;
+    std::unordered_map<std::string, trtmc::DType> tensor_dtypes_;
     trtmc::TensorMap last_inputs_;
 };
 
@@ -452,7 +508,8 @@ std::vector<float> repeated_values(std::size_t count, float value) {
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
     std::size_t latent_patch_count = 2, bool cache_bound_lms = false,
     bool audio_vae_output0 = false, bool stop_logits_stop = false,
-    bool padded_stop_logits = false) {
+    bool padded_stop_logits = false,
+    trtmc::DType floating_input_dtype = trtmc::DType::kFloat32) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
@@ -480,6 +537,18 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
             audio_vae_output0 && i == 4 ? "output0" : stage.output_artifact;
         if (i == 1 || i == 2) {
             extra_inputs.push_back("position_id");
+        }
+        std::unordered_map<std::string, trtmc::DType> tensor_dtypes;
+        if (floating_input_dtype != trtmc::DType::kFloat32) {
+            auto maybe_mark_floating_input = [&](const std::string& name) {
+                if (name == "text_tokens" || name == "position_id" || name == "cfg_value" ||
+                    name == "inference_timesteps")
+                    return;
+                tensor_dtypes[name] = floating_input_dtype;
+            };
+            maybe_mark_floating_input(stage.input_artifact);
+            for (const auto& name : extra_inputs)
+                maybe_mark_floating_input(name);
         }
         std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
         if (i == 1) {
@@ -516,7 +585,8 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
         }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, output_name, trtmc::DType::kFloat32, stage_outputs[i],
-            stage_shapes[i], std::move(extra_inputs), std::move(extra_outputs));
+            stage_shapes[i], std::move(extra_inputs), std::move(extra_outputs),
+            std::vector<int64_t>{}, std::move(tensor_dtypes));
         components.push_back({spec.name, spec.engine_section, std::move(module)});
     }
     return components;
@@ -803,6 +873,39 @@ void test_generate_audio_uses_cache_bound_lm_step_contract() {
           "voxcpm2 cache-bound LocDiT receives current RALM hidden row");
 }
 
+void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(
+        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16), plan,
+        "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    last_text_mask_dtype = trtmc::DType::kFloat32;
+    last_audio_mask_dtype = trtmc::DType::kFloat32;
+    last_audio_feats_dtype = trtmc::DType::kFloat32;
+    last_feat_cond_dtype = trtmc::DType::kFloat32;
+    last_text_mask_values.clear();
+    last_audio_mask_values.clear();
+    locenc_audio_feat_values.clear();
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    (void)pipeline.generate_audio("ab", gen_cfg);
+
+    check(last_text_mask_dtype == trtmc::DType::kBFloat16,
+          "voxcpm2 converts TSLM text_mask to engine input dtype");
+    check(last_audio_mask_dtype == trtmc::DType::kBFloat16,
+          "voxcpm2 converts TSLM audio_mask to engine input dtype");
+    check(last_audio_feats_dtype == trtmc::DType::kBFloat16,
+          "voxcpm2 converts LocEnc audio_feats to engine input dtype");
+    check(last_feat_cond_dtype == trtmc::DType::kBFloat16,
+          "voxcpm2 converts LocDiT feat_cond to engine input dtype");
+    check(!last_text_mask_values.empty() && last_text_mask_values[0] == 0.0F,
+          "voxcpm2 preserves generated-step text mask value after dtype conversion");
+    check(!last_audio_mask_values.empty() && last_audio_mask_values[0] == 1.0F,
+          "voxcpm2 preserves generated-step audio mask value after dtype conversion");
+}
+
 void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
@@ -1042,6 +1145,7 @@ int main() {
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_current_row_for_padded_stop_logits();
     test_generate_audio_uses_cache_bound_lm_step_contract();
+    test_generate_audio_converts_float_artifacts_to_engine_input_dtype();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer();
     test_generate_audio_can_disable_voxcpm2_text_normalization();
