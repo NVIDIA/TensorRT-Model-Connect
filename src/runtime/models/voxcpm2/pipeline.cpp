@@ -34,6 +34,7 @@ struct OwnedStageTensor {
 };
 
 using StageArtifacts = std::unordered_map<std::string, OwnedStageTensor>;
+using half_bits_t = uint16_t;
 
 struct KvCacheBinding {
     const char* past;
@@ -42,6 +43,7 @@ struct KvCacheBinding {
 
 constexpr KvCacheBinding kTslmKvCache{"tslm_past_kv_cache", "tslm_present_kv_cache"};
 constexpr KvCacheBinding kRalmKvCache{"ralm_past_kv_cache", "ralm_present_kv_cache"};
+constexpr std::size_t kVoxCPM2MinGenerationSteps = 2;
 
 const char* dtype_name(DType dtype) {
     switch (dtype) {
@@ -466,6 +468,114 @@ void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
     target.shape[0] += chunk.shape[0];
 }
 
+float fp16_to_fp32(half_bits_t h) {
+    uint32_t sign = (static_cast<uint32_t>(h) & 0x8000U) << 16U;
+    uint32_t exp = (h >> 10U) & 0x1FU;
+    uint32_t mant = h & 0x3FFU;
+    uint32_t bits = sign;
+    if (exp == 31U) {
+        bits |= 0x7F800000U | (mant << 13U);
+    } else if (exp != 0U) {
+        bits |= (static_cast<uint32_t>(exp - 15U + 127U) << 23U) | (mant << 13U);
+    }
+    float out = 0.0F;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+float bf16_to_fp32(half_bits_t h) {
+    const uint32_t bits = static_cast<uint32_t>(h) << 16U;
+    float out = 0.0F;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+std::size_t tensor_element_count(const OwnedStageTensor& tensor,
+                                 const std::string& artifact_name) {
+    const auto element_size = dtype_size(tensor.dtype);
+    if (element_size == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' has unsupported dtype");
+    }
+    if (tensor.storage.size() % element_size != 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' byte size is not element-aligned");
+    }
+    return tensor.storage.size() / element_size;
+}
+
+float tensor_float_value(const OwnedStageTensor& tensor, std::size_t index,
+                         const std::string& artifact_name) {
+    const auto count = tensor_element_count(tensor, artifact_name);
+    if (index >= count) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' scalar index is out of range");
+    }
+    if (tensor.dtype == DType::kFloat32) {
+        float value = 0.0F;
+        std::memcpy(&value, tensor.storage.data() + index * sizeof(float), sizeof(value));
+        return value;
+    }
+    if (tensor.dtype == DType::kFloat16 || tensor.dtype == DType::kBFloat16) {
+        half_bits_t value = 0;
+        std::memcpy(&value, tensor.storage.data() + index * sizeof(half_bits_t), sizeof(value));
+        return tensor.dtype == DType::kFloat16 ? fp16_to_fp32(value) : bf16_to_fp32(value);
+    }
+    throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                             "' is not a floating-point tensor");
+}
+
+bool stop_logits_predict_stop(const StageArtifacts& artifacts) {
+    const auto it = artifacts.find("stop_logits");
+    if (it == artifacts.end())
+        return false;
+    const auto count = tensor_element_count(it->second, "stop_logits");
+    if (count < 2) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: stop_logits must contain at least two class logits");
+    }
+    const auto base = count - 2;
+    return tensor_float_value(it->second, base + 1, "stop_logits") >
+           tensor_float_value(it->second, base, "stop_logits");
+}
+
+std::size_t positive_first_dim(const std::vector<int64_t>& shape) {
+    if (shape.empty() || shape.front() <= 0)
+        return 0;
+    return static_cast<std::size_t>(shape.front());
+}
+
+std::size_t audio_vae_profile_frame_count(const ITrtModule& module) {
+    const auto profile_count = module.optimization_profile_count();
+    if (profile_count > 0) {
+        auto shape = module.input_profile_shape("audio_vae_latents", module.profile_idx(),
+                                                ProfileShapeSelector::kMax);
+        if (const auto frames = positive_first_dim(shape); frames > 0)
+            return frames;
+    }
+    return positive_first_dim(module.tensor_shape("audio_vae_latents"));
+}
+
+OwnedStageTensor trim_audio_vae_waveform_to_latents(OwnedStageTensor waveform,
+                                                    const OwnedStageTensor& latents,
+                                                    const ITrtModule& audio_vae_module) {
+    if (waveform.shape.size() != 1 || latents.shape.empty() || latents.shape.front() <= 0)
+        return waveform;
+    const auto latent_frames = static_cast<std::size_t>(latents.shape.front());
+    const auto profile_frames = audio_vae_profile_frame_count(audio_vae_module);
+    if (profile_frames == 0 || latent_frames >= profile_frames)
+        return waveform;
+
+    const auto sample_count = tensor_element_count(waveform, "waveform_f32");
+    if (sample_count % profile_frames != 0)
+        return waveform;
+    const auto samples_per_latent_frame = sample_count / profile_frames;
+    const auto target_samples = latent_frames * samples_per_latent_frame;
+    if (target_samples == 0 || target_samples >= sample_count)
+        return waveform;
+    return slice_first_dim(waveform, 0, target_samples, "waveform_f32");
+}
+
 std::size_t resolve_latent_generation_steps(std::size_t active_text_token_count,
                                             const GenerateConfig& cfg,
                                             const VoxCPM2Config& voxcpm2_cfg) {
@@ -868,6 +978,8 @@ OwnedStageTensor run_locdit_autoregressive(
         auto generated_patch = extract_locdit_patch(locdit_output, step, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
         artifacts["feat_cond"] = generated_patch;
+        if (step > kVoxCPM2MinGenerationSteps && stop_logits_predict_stop(artifacts))
+            break;
         if (step + 1 < generation_steps) {
             refresh_autoregressive_hidden_state(components, plan, artifacts, controls,
                                                 generated_patch, step, active_text_token_count,
@@ -983,6 +1095,9 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
                                         generation_steps, active_text_token_count,
                                         effective_plan.config);
     current = run_stage(components_[4], effective_plan.stages[4], artifacts, controls);
+    current = trim_audio_vae_waveform_to_latents(std::move(current),
+                                                 artifacts.at("audio_vae_latents"),
+                                                 *components_[4].module);
 
     auto audio = make_audio_result(current, effective_plan);
     return audio;

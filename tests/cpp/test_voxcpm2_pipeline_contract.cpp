@@ -137,9 +137,11 @@ class FakeModule final : public trtmc::ITrtModule {
                std::vector<float> output_floats = {1.0F, 2.0F},
                std::vector<int64_t> output_shape = {},
                std::vector<std::string> extra_input_names = {},
-               std::vector<ExtraOutputSpec> extra_outputs = {})
+               std::vector<ExtraOutputSpec> extra_outputs = {},
+               std::vector<int64_t> max_profile_shape = {})
         : input_name_(std::move(input_name)), output_name_(std::move(output_name)),
-          output_dtype_(output_dtype), extra_input_names_(std::move(extra_input_names)) {
+          output_dtype_(output_dtype), extra_input_names_(std::move(extra_input_names)),
+          max_profile_shape_(std::move(max_profile_shape)) {
         set_float_output(std::move(output_floats), std::move(output_shape));
         for (auto& output : extra_outputs) {
             add_extra_output(std::move(output));
@@ -206,6 +208,8 @@ class FakeModule final : public trtmc::ITrtModule {
     }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
+        if (!max_profile_shape_.empty())
+            return max_profile_shape_;
         return {};
     }
     int32_t optimization_profile_count() const override { return 1; }
@@ -386,6 +390,7 @@ class FakeModule final : public trtmc::ITrtModule {
     std::vector<unsigned char> dynamic_output_storage_;
     std::vector<int64_t> output_shape_;
     std::vector<int64_t> dynamic_output_shape_;
+    std::vector<int64_t> max_profile_shape_;
     trtmc::TensorMap last_inputs_;
 };
 
@@ -436,7 +441,7 @@ std::vector<float> repeated_values(std::size_t count, float value) {
 
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
     std::size_t latent_patch_count = 2, bool cache_bound_lms = false,
-    bool audio_vae_output0 = false) {
+    bool audio_vae_output0 = false, bool stop_logits_stop = false) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
@@ -472,6 +477,10 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
             extra_outputs.push_back(
                 {"lm_hidden", trtmc::DType::kFloat32, repeated_values(1 * 2048, 8.0F),
                  {1, 2048}});
+            extra_outputs.push_back({"stop_logits", trtmc::DType::kFloat32,
+                                     stop_logits_stop ? std::vector<float>{0.0F, 1.0F}
+                                                      : std::vector<float>{1.0F, 0.0F},
+                                     {1, 2}});
             if (cache_bound_lms) {
                 extra_outputs.push_back({"tslm_present_kv_cache", trtmc::DType::kFloat32,
                                          repeated_values(2 * 1 * 1 * 1 * 8 * 1, 9.0F),
@@ -650,6 +659,48 @@ void test_generate_audio_maps_audio_vae_output0_to_waveform_artifact() {
           "voxcpm2 maps Torch-TensorRT AudioVAE output0 to waveform_f32 samples");
     check(audio.samples.size() == 4 && audio.samples[1] == 0.25F,
           "voxcpm2 preserves waveform data from AudioVAE output0");
+}
+
+void test_generate_audio_trims_audio_vae_max_profile_output_to_generated_latents() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    auto components = make_scripted_components(2);
+    components[4].module = std::make_unique<FakeModule>(
+        "audio_vae_latents", "waveform_f32", trtmc::DType::kFloat32,
+        repeated_values(16 * 3, 0.5F), std::vector<int64_t>{16 * 3},
+        std::vector<std::string>{}, std::vector<FakeModule::ExtraOutputSpec>{},
+        std::vector<int64_t>{16, 64});
+    trtmc::VoxCPM2Pipeline pipeline(std::move(components), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+
+    check(last_audio_vae_latent_rows == 8,
+          "voxcpm2 AudioVAE trim test generated eight latent frames");
+    check(audio.num_samples == 8 * 3,
+          "voxcpm2 trims AudioVAE max-profile waveform to generated latent frames");
+    check(audio.samples.size() == 8 * 3,
+          "voxcpm2 trimmed AudioVAE waveform sample vector matches num_samples");
+}
+
+void test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(8, false, false, true), plan,
+                                    "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    locdit_aux_binding_hits = 0;
+    last_audio_vae_latent_rows = 0;
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 8;
+    (void)pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+
+    check(locdit_aux_binding_hits == 4,
+          "voxcpm2 consumes TSLM stop_logits after upstream minimum generation length");
+    check(last_audio_vae_latent_rows == 16,
+          "voxcpm2 AudioVAE receives only generated latent patches before stop");
 }
 
 void test_generate_audio_uses_cache_bound_lm_step_contract() {
@@ -886,6 +937,8 @@ int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_generate_audio_maps_audio_vae_output0_to_waveform_artifact();
+    test_generate_audio_trims_audio_vae_max_profile_output_to_generated_latents();
+    test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
