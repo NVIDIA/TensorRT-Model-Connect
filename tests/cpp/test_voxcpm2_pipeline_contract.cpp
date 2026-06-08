@@ -779,7 +779,7 @@ void test_generate_audio_uses_cache_bound_lm_step_contract() {
 void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
-    constexpr std::size_t expected_default_steps = 22;
+    constexpr std::size_t expected_default_steps = 16;
     trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(expected_default_steps), plan,
                                     "openbmb/VoxCPM2", make_fake_tokenizer());
 
@@ -793,7 +793,7 @@ void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_z
     (void)pipeline.generate_audio("a", gen_cfg);
 
     check(cfg_binding_hits == static_cast<int>(expected_default_steps),
-          "voxcpm2 max_new_tokens=0 uses upstream text-length default for LocDiT steps");
+          "voxcpm2 max_new_tokens=0 excludes audio_start from upstream default LocDiT steps");
     check(timestep_binding_hits == static_cast<int>(expected_default_steps),
           "voxcpm2 max_new_tokens=0 forwards timesteps on every default LocDiT step");
     check(locdit_aux_binding_hits == static_cast<int>(expected_default_steps),

@@ -117,6 +117,7 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
 struct PreparedTextTokens {
     OwnedStageTensor tensor;
     std::size_t actual_count{0};
+    std::size_t target_text_count{0};
 };
 
 bool read_utf8_codepoint(const std::string& text, std::size_t& offset, uint32_t& codepoint,
@@ -360,6 +361,7 @@ PreparedTextTokens make_text_tokens_tensor(const std::string& prompt, const ITok
     }
     const auto prepared_text = prepare_voxcpm2_text_for_tokenizer(prompt, cfg);
     auto ids = expand_voxcpm2_multichar_cjk_tokens(tokenizer->encode(prepared_text), *tokenizer);
+    const auto target_text_count = ids.size();
     ids.push_back(resolve_voxcpm2_audio_start_token(*tokenizer));
     if (ids.empty()) {
         throw std::runtime_error("VoxCPM2Pipeline: tokenizer returned no text tokens");
@@ -378,6 +380,7 @@ PreparedTextTokens make_text_tokens_tensor(const std::string& prompt, const ITok
 
     PreparedTextTokens prepared;
     prepared.actual_count = ids.size();
+    prepared.target_text_count = target_text_count;
     prepared.tensor.shape = {static_cast<int64_t>(padded_steps)};
     prepared.tensor.dtype = DType::kInt32;
     prepared.tensor.storage.resize(padded_ids.size() * sizeof(int32_t));
@@ -705,6 +708,7 @@ OwnedStageTensor trim_audio_vae_waveform_to_latents(OwnedStageTensor waveform,
 }
 
 std::size_t resolve_latent_generation_steps(std::size_t active_text_token_count,
+                                            std::size_t target_text_token_count,
                                             const GenerateConfig& cfg,
                                             const VoxCPM2Config& voxcpm2_cfg) {
     constexpr std::size_t kUpstreamDefaultMaxLen = 2000;
@@ -719,7 +723,7 @@ std::size_t resolve_latent_generation_steps(std::size_t active_text_token_count,
     }
 
     const auto default_steps = static_cast<std::size_t>(
-        static_cast<double>(active_text_token_count) *
+        static_cast<double>(target_text_token_count) *
             static_cast<double>(voxcpm2_cfg.retry_badcase_ratio_threshold) +
         10.0);
     const auto steps = std::min(default_steps, kUpstreamDefaultMaxLen);
@@ -1202,6 +1206,7 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const auto text_token_count = static_cast<std::size_t>(text_tokens.tensor.shape.front());
     const auto active_text_token_count = text_tokens.actual_count;
     artifacts.emplace("text_tokens", std::move(text_tokens.tensor));
+    const auto target_text_token_count = text_tokens.target_text_count;
     artifacts.emplace("text_mask", make_float_mask_tensor(text_token_count, active_text_token_count,
                                                           1.0F));
     artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
@@ -1220,7 +1225,8 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     }
     validate_lm_state_ready(artifacts);
     const auto generation_steps =
-        resolve_latent_generation_steps(active_text_token_count, cfg, effective_plan.config);
+        resolve_latent_generation_steps(active_text_token_count, target_text_token_count, cfg,
+                                        effective_plan.config);
     keep_latest_hidden_artifacts(artifacts, active_text_token_count);
     current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
                                         generation_steps, active_text_token_count,
