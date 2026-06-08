@@ -119,17 +119,15 @@ def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
     assert "- labeled" in trigger_block
     assert "workflow_dispatch:" in trigger_block
     assert "push:" not in trigger_block
-    assert "issues: write" in text
-    assert "pull-requests: read" in text
+    assert "issues: write" not in text
+    assert "pull-requests: read" not in text
     assert "github.event_name == 'workflow_dispatch'" in text
     assert "github.event.label.name == 'run-ci'" in text
     assert "run-e2e" not in text
     assert "run-full-ci" not in text
-    assert "Remove trigger label" in text
-    assert "continue-on-error: true" in text
-    assert "actions/github-script@v7" in text
-    assert "github.rest.issues.removeLabel" in text
-    assert "context.payload.pull_request.number" in text
+    assert "Remove trigger label" not in text
+    assert "actions/github-script" not in text
+    assert "github.rest.issues.removeLabel" not in text
 
 
 def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
