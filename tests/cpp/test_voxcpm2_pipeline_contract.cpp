@@ -42,10 +42,12 @@ float last_local_text_feature_value = 0.0F;
 float last_feat_cond_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
+float last_audio_vae_latent_value = 0.0F;
 int64_t last_text_token_count = 0;
 int64_t last_audio_feat_steps = 0;
 int64_t last_feat_cond_rows = 0;
 int64_t last_feat_cond_cols = 0;
+int64_t last_audio_vae_latent_rows = 0;
 int32_t last_first_text_token = 0;
 int32_t last_second_text_token = 0;
 int32_t last_audio_start_token = 0;
@@ -54,6 +56,7 @@ float last_audio_mask_value = 0.0F;
 std::vector<int32_t> last_text_tokens;
 std::vector<float> last_text_mask_values;
 std::vector<float> last_audio_mask_values;
+std::vector<float> locdit_feat_cond_values;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
@@ -261,6 +264,7 @@ class FakeModule final : public trtmc::ITrtModule {
                     last_lm_hidden_value = *static_cast<float*>(lm_it->second.data);
                     last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
                     last_feat_cond_value = *static_cast<float*>(feat_cond_it->second.data);
+                    locdit_feat_cond_values.push_back(last_feat_cond_value);
                     last_feat_cond_rows = feat_cond_it->second.shape.size() > 0
                                               ? feat_cond_it->second.shape[0]
                                               : 0;
@@ -268,6 +272,13 @@ class FakeModule final : public trtmc::ITrtModule {
                                               ? feat_cond_it->second.shape[1]
                                               : 0;
                 }
+            }
+        }
+        if (input_name_ == "audio_vae_latents") {
+            if (const auto it = inputs.find("audio_vae_latents"); it != inputs.end()) {
+                last_audio_vae_latent_rows =
+                    it->second.shape.empty() ? 0 : it->second.shape.front();
+                last_audio_vae_latent_value = *static_cast<float*>(it->second.data);
             }
         }
     }
@@ -353,13 +364,18 @@ std::vector<float> repeated_values(std::size_t count, float value) {
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components() {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
+    std::vector<float> locdit_latents;
+    auto first_patch = repeated_values(4 * 64, 4.0F);
+    auto second_patch = repeated_values(4 * 64, 5.0F);
+    locdit_latents.insert(locdit_latents.end(), first_patch.begin(), first_patch.end());
+    locdit_latents.insert(locdit_latents.end(), second_patch.begin(), second_patch.end());
     const std::vector<std::vector<float>> stage_outputs = {
         repeated_values(2 * 64, 1.0F),  repeated_values(2 * 2048, 2.0F),
-        repeated_values(2 * 512, 3.0F), repeated_values(2 * 64, 4.0F),
+        repeated_values(2 * 512, 3.0F), std::move(locdit_latents),
         {0.0F, 0.25F, -0.25F, 0.5F},
     };
     const std::vector<std::vector<int64_t>> stage_shapes = {
-        {2, 64}, {2, 2048}, {2, 512}, {2, 64}, {4},
+        {2, 64}, {2, 2048}, {2, 512}, {8, 64}, {4},
     };
     for (std::size_t i = 0; i < audio::kVoxCPM2ComponentSpecs.size(); ++i) {
         const auto& spec = audio::kVoxCPM2ComponentSpecs[i];
@@ -427,10 +443,12 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_feat_cond_value = 0.0F;
     last_lm_hidden_value = 0.0F;
     last_residual_hidden_value = 0.0F;
+    last_audio_vae_latent_value = 0.0F;
     last_text_token_count = 0;
     last_audio_feat_steps = 0;
     last_feat_cond_rows = 0;
     last_feat_cond_cols = 0;
+    last_audio_vae_latent_rows = 0;
     last_first_text_token = 0;
     last_second_text_token = 0;
     last_audio_start_token = 0;
@@ -439,6 +457,7 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_text_tokens.clear();
     last_text_mask_values.clear();
     last_audio_mask_values.clear();
+    locdit_feat_cond_values.clear();
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -446,10 +465,11 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     check(audio.num_samples == 4, "voxcpm2 audio sample count comes from waveform_f32");
     check(audio.samples.size() == 4, "voxcpm2 audio samples are populated");
     check(audio.samples[1] == 0.25F, "voxcpm2 audio preserves waveform samples");
-    check(cfg_binding_hits == 1, "voxcpm2 forwards cfg_value when stage declares it");
+    check(cfg_binding_hits == 2,
+          "voxcpm2 forwards cfg_value on each LocDiT autoregressive step");
     check(last_cfg_value == 3.0F, "voxcpm2 cfg_value uses GenerateConfig override");
-    check(timestep_binding_hits == 1,
-          "voxcpm2 forwards inference_timesteps when stage declares it");
+    check(timestep_binding_hits == 2,
+          "voxcpm2 forwards inference_timesteps on each LocDiT autoregressive step");
     check(last_inference_timesteps == 12,
           "voxcpm2 inference_timesteps uses GenerateConfig override");
     check(local_text_feature_binding_hits == 1,
@@ -462,15 +482,23 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     check(last_audio_start_token == 101, "voxcpm2 appends upstream audio_start token");
     check(last_text_mask_value == 1.0F, "voxcpm2 marks prompt tokens as text");
     check(last_audio_mask_value == 0.0F, "voxcpm2 zero-shot prompt has no audio mask");
-    check(locdit_aux_binding_hits == 1,
-          "voxcpm2 forwards lm_hidden, residual_hidden, and feat_cond tensors to LocDiT");
+    check(locdit_aux_binding_hits == 2,
+          "voxcpm2 calls LocDiT once per generated latent patch");
     check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
     check(last_residual_hidden_value == 3.0F,
           "voxcpm2 LocDiT sees RALM residual_hidden primary tensor");
     check(last_feat_cond_rows == 4 && last_feat_cond_cols == 64,
-          "voxcpm2 LocDiT sees initial feat_cond patch tensor");
-    check(last_feat_cond_value == 0.0F,
-          "voxcpm2 initial LocDiT feat_cond uses zero previous latent");
+          "voxcpm2 LocDiT sees feat_cond patch tensors");
+    check(locdit_feat_cond_values.size() == 2,
+          "voxcpm2 records one feat_cond value per LocDiT step");
+    check(locdit_feat_cond_values.size() == 2 && locdit_feat_cond_values[0] == 0.0F,
+          "voxcpm2 first LocDiT feat_cond uses zero previous latent");
+    check(locdit_feat_cond_values.size() == 2 && locdit_feat_cond_values[1] == 4.0F,
+          "voxcpm2 second LocDiT feat_cond uses first generated latent patch");
+    check(last_audio_vae_latent_rows == 8,
+          "voxcpm2 AudioVAE receives concatenated generated latent patches");
+    check(last_audio_vae_latent_value == 4.0F,
+          "voxcpm2 AudioVAE latent sequence starts with first generated patch");
 
     const auto wav_path = temp_dir / "trt_output.wav";
     check(!std::filesystem::exists(wav_path),

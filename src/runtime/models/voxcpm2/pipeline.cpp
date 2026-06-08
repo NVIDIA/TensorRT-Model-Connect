@@ -293,6 +293,128 @@ OwnedStageTensor make_initial_feat_cond_tensor(const VoxCPM2Config& cfg) {
     return tensor;
 }
 
+std::size_t checked_first_dim_stride(const OwnedStageTensor& tensor,
+                                     const std::string& artifact_name) {
+    if (tensor.shape.empty()) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' must have at least one dimension");
+    }
+    for (const auto dim : tensor.shape) {
+        if (dim < 0) {
+            throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                     "' has negative tensor dimension");
+        }
+    }
+    std::size_t stride = 1;
+    for (std::size_t i = 1; i < tensor.shape.size(); ++i) {
+        const auto dim = static_cast<std::size_t>(tensor.shape[i]);
+        if (dim != 0 &&
+            stride > std::numeric_limits<std::size_t>::max() / dim) {
+            throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                     "' shape overflows byte-size calculation");
+        }
+        stride *= dim;
+    }
+    return stride;
+}
+
+OwnedStageTensor slice_first_dim(const OwnedStageTensor& tensor, std::size_t start,
+                                 std::size_t count, const std::string& artifact_name) {
+    const auto first_dim_stride = checked_first_dim_stride(tensor, artifact_name);
+    const auto first_dim = static_cast<std::size_t>(tensor.shape.front());
+    if (start > first_dim || count > first_dim - start) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' cannot slice first dimension at " +
+                                 std::to_string(start) + " for " + std::to_string(count) +
+                                 " row(s)");
+    }
+    const auto dtype_bytes = dtype_size(tensor.dtype);
+    const auto row_bytes = first_dim_stride * dtype_bytes;
+    const auto offset_bytes = start * row_bytes;
+    const auto byte_count = count * row_bytes;
+    if (offset_bytes > tensor.storage.size() || byte_count > tensor.storage.size() - offset_bytes) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' storage is too small for requested slice");
+    }
+
+    OwnedStageTensor out;
+    out.shape = tensor.shape;
+    out.shape[0] = static_cast<int64_t>(count);
+    out.dtype = tensor.dtype;
+    out.storage.resize(byte_count);
+    if (!out.storage.empty()) {
+        std::memcpy(out.storage.data(), tensor.storage.data() + offset_bytes, byte_count);
+    }
+    return out;
+}
+
+void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
+                      const std::string& artifact_name) {
+    if (chunk.shape.empty()) {
+        throw std::runtime_error("VoxCPM2Pipeline: cannot append rank-0 artifact '" +
+                                 artifact_name + "'");
+    }
+    if (target.shape.empty()) {
+        target = chunk;
+        return;
+    }
+    if (target.dtype != chunk.dtype || target.shape.size() != chunk.shape.size()) {
+        throw std::runtime_error("VoxCPM2Pipeline: latent patch for artifact '" + artifact_name +
+                                 "' does not match accumulated tensor metadata");
+    }
+    for (std::size_t i = 1; i < target.shape.size(); ++i) {
+        if (target.shape[i] != chunk.shape[i]) {
+            throw std::runtime_error("VoxCPM2Pipeline: latent patch for artifact '" +
+                                     artifact_name + "' has incompatible trailing shape");
+        }
+    }
+    target.storage.insert(target.storage.end(), chunk.storage.begin(), chunk.storage.end());
+    target.shape[0] += chunk.shape[0];
+}
+
+std::size_t resolve_latent_generation_steps(const StageArtifacts& artifacts,
+                                            std::size_t active_text_token_count,
+                                            const GenerateConfig& cfg) {
+    const auto residual_it = artifacts.find("residual_hidden");
+    if (residual_it == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: LocDiT loop requires prepared residual_hidden artifact");
+    }
+    if (residual_it->second.shape.empty()) {
+        throw std::runtime_error("VoxCPM2Pipeline: residual_hidden must be rank >= 1");
+    }
+    auto steps = static_cast<std::size_t>(residual_it->second.shape.front());
+    if (active_text_token_count > 0)
+        steps = std::min(steps, active_text_token_count);
+    if (cfg.max_new_tokens > 0)
+        steps = std::min(steps, static_cast<std::size_t>(cfg.max_new_tokens));
+    if (steps == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: resolved zero LocDiT generation steps");
+    }
+    return steps;
+}
+
+OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output, std::size_t step,
+                                      const VoxCPM2Config& cfg,
+                                      const std::string& artifact_name) {
+    if (cfg.patch_size <= 0)
+        throw std::runtime_error("VoxCPM2Pipeline: patch_size must be positive");
+    if (locdit_output.shape.size() != 2) {
+        throw std::runtime_error("VoxCPM2Pipeline: LocDiT output artifact '" + artifact_name +
+                                 "' must be rank 2");
+    }
+    if (locdit_output.shape[1] != cfg.feat_dim) {
+        throw std::runtime_error("VoxCPM2Pipeline: LocDiT output artifact '" + artifact_name +
+                                 "' feature dimension " +
+                                 std::to_string(locdit_output.shape[1]) + " does not match " +
+                                 std::to_string(cfg.feat_dim));
+    }
+    const auto patch_rows = static_cast<std::size_t>(cfg.patch_size);
+    const auto available_rows = static_cast<std::size_t>(locdit_output.shape[0]);
+    const auto start = available_rows == patch_rows ? 0 : step * patch_rows;
+    return slice_first_dim(locdit_output, start, patch_rows, artifact_name);
+}
+
 struct RuntimeScalarInputs {
     explicit RuntimeScalarInputs(const VoxCPM2Config& cfg)
         : sample_rate(cfg.sample_rate), reference_sample_rate(cfg.reference_sample_rate),
@@ -449,6 +571,23 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     return artifacts.at(stage.output_artifact);
 }
 
+OwnedStageTensor run_locdit_autoregressive(const audio::VoxCPM2LoadedComponent& component,
+                                           const audio::VoxCPM2GenerationStage& stage,
+                                           StageArtifacts& artifacts,
+                                           const RuntimeScalarInputs& controls,
+                                           std::size_t generation_steps,
+                                           const VoxCPM2Config& cfg) {
+    OwnedStageTensor generated_latents;
+    for (std::size_t step = 0; step < generation_steps; ++step) {
+        const auto locdit_output = run_stage(component, stage, artifacts, controls);
+        auto generated_patch = extract_locdit_patch(locdit_output, step, cfg, stage.output_artifact);
+        append_first_dim(generated_latents, generated_patch, stage.output_artifact);
+        artifacts["feat_cond"] = std::move(generated_patch);
+    }
+    artifacts[stage.output_artifact] = generated_latents;
+    return generated_latents;
+}
+
 AudioResult make_audio_result(const OwnedStageTensor& waveform,
                               const audio::VoxCPM2GenerationPlan& plan) {
     if (waveform.dtype != DType::kFloat32) {
@@ -536,9 +675,14 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
                       make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
     OwnedStageTensor current = artifacts.at("audio_feats");
-    for (std::size_t i = 0; i < effective_plan.stages.size(); ++i) {
+    for (std::size_t i = 0; i < 3; ++i) {
         current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
     }
+    const auto generation_steps =
+        resolve_latent_generation_steps(artifacts, active_text_token_count, cfg);
+    current = run_locdit_autoregressive(components_[3], effective_plan.stages[3], artifacts,
+                                        controls, generation_steps, effective_plan.config);
+    current = run_stage(components_[4], effective_plan.stages[4], artifacts, controls);
 
     auto audio = make_audio_result(current, effective_plan);
     return audio;
