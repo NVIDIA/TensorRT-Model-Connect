@@ -52,6 +52,21 @@ COSMOS3_SUPER_REASONER_MROPE_SECTION = (24, 20, 20)
 # Cosmos3-Super ViT exports intermediate features at these layers (deepstack).
 COSMOS3_SUPER_DEEPSTACK_INDEXES = (8, 16, 24)
 
+# Cosmos3-Nano reasoner constants (locked from nvidia/Cosmos3-Nano config.json).
+COSMOS3_NANO_REASONER_HIDDEN_SIZE = 4096
+COSMOS3_NANO_REASONER_NUM_LAYERS = 36
+COSMOS3_NANO_REASONER_NUM_HEADS = 32
+COSMOS3_NANO_REASONER_NUM_KV_HEADS = 8
+COSMOS3_NANO_REASONER_HEAD_DIM = 128
+COSMOS3_NANO_REASONER_INTERMEDIATE_SIZE = 12288
+COSMOS3_NANO_REASONER_VOCAB_SIZE = 151936
+COSMOS3_NANO_REASONER_ROPE_THETA = 5_000_000
+COSMOS3_NANO_REASONER_RMS_NORM_EPS = 1e-6
+COSMOS3_NANO_REASONER_MAX_POSITION_EMBEDDINGS = 262_144
+# Nano ViT shares the same depth/hidden/heads as Super; only out_hidden_size
+# differs (4096 to match Nano reasoner vs 5120 for Super).
+COSMOS3_NANO_VIT_OUT_HIDDEN_SIZE = 4096
+
 
 def build_cosmos3_ar_reasoner_engine(
     config: "ModelConfig",
