@@ -62,12 +62,6 @@ from ...parallel_config import (
     normalize_parallel_config,
 )
 
-trt = trt_compat.get_trt()
-
-if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
-    from ...config import ModelConfig
-
 # Re-use the dense builder's architecture constants and small helpers so the
 # only divergence is the SP-specific I/O layout and the K/V AllGather.
 from .cosmos_dit_builder import (  # noqa: F401  (load_cosmos_dit_weights re-export)
@@ -94,6 +88,12 @@ from .cosmos_dit_builder import (  # noqa: F401  (load_cosmos_dit_weights re-exp
     _silu_2d,
     load_cosmos_dit_weights,
 )
+
+trt = trt_compat.get_trt()
+
+if TYPE_CHECKING:
+    from ...checkpoint_mapper import WeightDict
+    from ...config import ModelConfig
 
 
 # Self-attention AllGather happens along the sequence axis of a row-major

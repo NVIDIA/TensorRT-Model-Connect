@@ -342,7 +342,6 @@ def _rope_table_axis(
                           dtype=np.float32),
                 np.zeros((max(num_positions, 1), max(axis_dim // 2, 1)),
                           dtype=np.float32))
-    half = axis_dim // 2
     # inv_freq[j] = 1 / theta ** (2j / axis_dim)  for j in [0, half)
     inv_freq = 1.0 / (
         rope_theta ** (np.arange(0, axis_dim, 2, dtype=np.float64) / axis_dim))
