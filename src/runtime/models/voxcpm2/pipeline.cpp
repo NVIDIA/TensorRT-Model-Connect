@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -744,6 +747,46 @@ float tensor_float_value(const OwnedStageTensor& tensor, std::size_t index,
                              "' is not a floating-point tensor");
 }
 
+std::size_t tensor_element_count(const Tensor& tensor, const std::string& artifact_name) {
+    const auto element_size = dtype_size(tensor.dtype);
+    if (element_size == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' has unsupported dtype");
+    }
+    const auto byte_count = tensor.nbytes();
+    if (byte_count % element_size != 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' byte size is not element-aligned");
+    }
+    return byte_count / element_size;
+}
+
+float tensor_float_value(const Tensor& tensor, std::size_t index,
+                         const std::string& artifact_name) {
+    const auto count = tensor_element_count(tensor, artifact_name);
+    if (index >= count) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' scalar index is out of range");
+    }
+    if (tensor.data == nullptr) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' has null tensor data");
+    }
+    const auto* bytes = static_cast<const unsigned char*>(tensor.data);
+    if (tensor.dtype == DType::kFloat32) {
+        float value = 0.0F;
+        std::memcpy(&value, bytes + index * sizeof(float), sizeof(value));
+        return value;
+    }
+    if (tensor.dtype == DType::kFloat16 || tensor.dtype == DType::kBFloat16) {
+        half_bits_t value = 0;
+        std::memcpy(&value, bytes + index * sizeof(half_bits_t), sizeof(value));
+        return tensor.dtype == DType::kFloat16 ? fp16_to_fp32(value) : bf16_to_fp32(value);
+    }
+    throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                             "' is not a floating-point tensor");
+}
+
 OwnedStageTensor convert_floating_tensor_dtype(const OwnedStageTensor& tensor, DType target_dtype,
                                                const std::string& artifact_name) {
     if (!is_floating_dtype(tensor.dtype) || !is_floating_dtype(target_dtype)) {
@@ -803,6 +846,28 @@ int32_t tensor_int32_value(const OwnedStageTensor& tensor, std::size_t index,
     return value;
 }
 
+int32_t tensor_int32_value(const Tensor& tensor, std::size_t index,
+                           const std::string& artifact_name) {
+    const auto count = tensor_element_count(tensor, artifact_name);
+    if (index >= count) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' scalar index is out of range");
+    }
+    if (tensor.data == nullptr) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' has null tensor data");
+    }
+    if (tensor.dtype != DType::kInt32) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' is not an int32 tensor");
+    }
+    int32_t value = 0;
+    std::memcpy(&value,
+                static_cast<const unsigned char*>(tensor.data) + index * sizeof(value),
+                sizeof(value));
+    return value;
+}
+
 float tensor_sample_mean_abs(const OwnedStageTensor& tensor,
                              const std::string& artifact_name) {
     const auto count = std::min<std::size_t>(tensor_element_count(tensor, artifact_name), 64);
@@ -814,7 +879,29 @@ float tensor_sample_mean_abs(const OwnedStageTensor& tensor,
     return sum / static_cast<float>(count);
 }
 
+float tensor_sample_mean_abs(const Tensor& tensor, const std::string& artifact_name) {
+    const auto count = std::min<std::size_t>(tensor_element_count(tensor, artifact_name), 64);
+    if (count == 0)
+        return 0.0F;
+    float sum = 0.0F;
+    for (std::size_t i = 0; i < count; ++i)
+        sum += std::abs(tensor_float_value(tensor, i, artifact_name));
+    return sum / static_cast<float>(count);
+}
+
 std::string tensor_shape_string(const OwnedStageTensor& tensor) {
+    std::ostringstream os;
+    os << '[';
+    for (std::size_t i = 0; i < tensor.shape.size(); ++i) {
+        if (i != 0)
+            os << ',';
+        os << tensor.shape[i];
+    }
+    os << ']';
+    return os.str();
+}
+
+std::string tensor_shape_string(const Tensor& tensor) {
     std::ostringstream os;
     os << '[';
     for (std::size_t i = 0; i < tensor.shape.size(); ++i) {
@@ -896,6 +983,121 @@ void trace_stop_logits(const StageArtifacts& artifacts, std::size_t step, bool p
               << " logit0=" << tensor_float_value(it->second, base, "stop_logits")
               << " logit1=" << tensor_float_value(it->second, base + 1, "stop_logits")
               << " stop=" << (predicted_stop ? 1 : 0) << '\n';
+}
+
+std::string json_escape(const std::string& value) {
+    std::ostringstream os;
+    for (const char ch : value) {
+        switch (ch) {
+        case '\\':
+            os << "\\\\";
+            break;
+        case '"':
+            os << "\\\"";
+            break;
+        case '\n':
+            os << "\\n";
+            break;
+        case '\r':
+            os << "\\r";
+            break;
+        case '\t':
+            os << "\\t";
+            break;
+        default:
+            os << ch;
+            break;
+        }
+    }
+    return os.str();
+}
+
+std::string sanitize_dump_token(std::string token) {
+    for (auto& ch : token) {
+        const auto valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                           (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+        if (!valid)
+            ch = '_';
+    }
+    return token;
+}
+
+std::filesystem::path tensor_dump_file_path(const std::filesystem::path& dump_dir,
+                                            const char* phase,
+                                            std::size_t step,
+                                            const char* direction,
+                                            const std::string& name) {
+    std::ostringstream filename;
+    filename << sanitize_dump_token(phase) << '_' << std::setw(6) << std::setfill('0') << step
+             << '_' << sanitize_dump_token(direction) << '_' << sanitize_dump_token(name)
+             << ".raw";
+    return dump_dir / filename.str();
+}
+
+void append_tensor_metadata_summary(std::ostream& os, const Tensor& tensor,
+                                    const std::string& name) {
+    if (tensor_element_count(tensor, name) == 0)
+        return;
+    if (is_floating_dtype(tensor.dtype)) {
+        os << ",\"first\":" << tensor_float_value(tensor, 0, name)
+           << ",\"mean64\":" << tensor_sample_mean_abs(tensor, name);
+        return;
+    }
+    if (tensor.dtype == DType::kInt32) {
+        os << ",\"first_int\":" << tensor_int32_value(tensor, 0, name);
+    }
+}
+
+void dump_stage_tensors_if_requested(const char* phase, std::size_t step,
+                                     const char* direction,
+                                     const audio::VoxCPM2GenerationStage& stage,
+                                     const TensorMap& tensors) {
+    const char* dump_root = std::getenv("TRTMC_VOXCPM2_TENSOR_DUMP_DIR");
+    if (dump_root == nullptr || dump_root[0] == '\0' || phase == nullptr)
+        return;
+
+    const std::filesystem::path dump_dir(dump_root);
+    std::filesystem::create_directories(dump_dir);
+    const auto manifest_path = dump_dir / "manifest.jsonl";
+    std::ofstream manifest(manifest_path, std::ios::app);
+    if (!manifest) {
+        throw std::runtime_error("VoxCPM2Pipeline: failed to open tensor dump manifest '" +
+                                 manifest_path.string() + "'");
+    }
+
+    for (const auto& entry : tensors) {
+        const auto& name = entry.first;
+        const auto& tensor = entry.second;
+        if (tensor.data == nullptr && tensor.nbytes() > 0) {
+            throw std::runtime_error("VoxCPM2Pipeline: cannot dump null tensor data for '" +
+                                     name + "'");
+        }
+
+        const auto raw_path = tensor_dump_file_path(dump_dir, phase, step, direction, name);
+        std::ofstream raw(raw_path, std::ios::binary);
+        if (!raw) {
+            throw std::runtime_error("VoxCPM2Pipeline: failed to open tensor dump file '" +
+                                     raw_path.string() + "'");
+        }
+        if (tensor.nbytes() > 0) {
+            raw.write(static_cast<const char*>(tensor.data),
+                      static_cast<std::streamsize>(tensor.nbytes()));
+        }
+        if (!raw) {
+            throw std::runtime_error("VoxCPM2Pipeline: failed to write tensor dump file '" +
+                                     raw_path.string() + "'");
+        }
+
+        manifest << "{\"stage\":\"" << json_escape(stage.name) << "\",\"engine_section\":\""
+                 << json_escape(stage.engine_section) << "\",\"phase\":\""
+                 << json_escape(phase) << "\",\"step\":" << step << ",\"direction\":\""
+                 << json_escape(direction) << "\",\"name\":\"" << json_escape(name)
+                 << "\",\"dtype\":\"" << dtype_name(tensor.dtype) << "\",\"shape\":"
+                 << tensor_shape_string(tensor) << ",\"nbytes\":" << tensor.nbytes()
+                 << ",\"path\":\"" << json_escape(raw_path.string()) << "\"";
+        append_tensor_metadata_summary(manifest, tensor, name);
+        manifest << "}\n";
+    }
 }
 
 std::size_t positive_first_dim(const std::vector<int64_t>& shape) {
@@ -1250,7 +1452,9 @@ void roll_stage_cache_outputs(const audio::VoxCPM2GenerationStage& stage,
 
 OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
                            const audio::VoxCPM2GenerationStage& stage, StageArtifacts& artifacts,
-                           const RuntimeScalarInputs& controls) {
+                           const RuntimeScalarInputs& controls,
+                           const char* tensor_dump_phase = nullptr,
+                           std::size_t tensor_dump_step = 0) {
     validate_stage_bindings(component, stage);
     const auto input_it = artifacts.find(stage.input_artifact);
     if (input_it == artifacts.end()) {
@@ -1270,7 +1474,11 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
                                  component.name);
     add_declared_artifact_inputs(*component.module, artifacts, inputs, converted_inputs);
     controls.add_to(*component.module, inputs);
+    dump_stage_tensors_if_requested(tensor_dump_phase, tensor_dump_step, "input", stage,
+                                    inputs);
     auto outputs = component.module->forward(inputs);
+    dump_stage_tensors_if_requested(tensor_dump_phase, tensor_dump_step, "output", stage,
+                                    outputs);
     const char* output_binding = stage.output_artifact;
     if (outputs.find(output_binding) == outputs.end() &&
         stage.kind == audio::VoxCPM2StageKind::kAudioVae) {
@@ -1369,7 +1577,8 @@ OwnedStageTensor run_locdit_autoregressive(
         if (locdit_noise_bound) {
             artifacts["locdit_noise"] = make_locdit_noise_tensor(gen_cfg, step, cfg);
         }
-        const auto locdit_output = run_stage(component, stage, artifacts, controls);
+        const auto locdit_output = run_stage(component, stage, artifacts, controls, "locdit",
+                                             step);
         auto generated_patch = extract_locdit_patch(locdit_output, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
         artifacts["feat_cond"] = generated_patch;

@@ -16,11 +16,14 @@
 #include "runtime/models/voxcpm2/pipeline.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -77,11 +80,46 @@ std::string last_tokenizer_input;
 int tslm_cache_binding_hits = 0;
 int ralm_cache_binding_hits = 0;
 
+class ScopedEnvVar {
+  public:
+    ScopedEnvVar(std::string name, std::string value)
+        : name_(std::move(name)) {
+        const char* old = std::getenv(name_.c_str());
+        had_old_value_ = old != nullptr;
+        if (had_old_value_)
+            old_value_ = old;
+        setenv(name_.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (!had_old_value_) {
+            unsetenv(name_.c_str());
+        } else {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+  private:
+    std::string name_;
+    std::string old_value_;
+    bool had_old_value_{false};
+};
+
 void check(bool condition, const char* test_name) {
     if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream stream(path);
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return buffer.str();
 }
 
 using half_bits_t = uint16_t;
@@ -941,6 +979,61 @@ void test_generate_audio_forwards_shared_locdit_noise_latents() {
           "voxcpm2 forwards one shared LocDiT noise patch per autoregressive step");
 }
 
+void test_generate_audio_dumps_locdit_tensor_io_for_parity_debug() {
+    const auto temp_dir =
+        std::filesystem::temp_directory_path() / "trtmc_voxcpm2_tensor_dump";
+    std::filesystem::remove_all(temp_dir);
+    std::filesystem::create_directories(temp_dir);
+
+    {
+        ScopedEnvVar dump_env("TRTMC_VOXCPM2_TENSOR_DUMP_DIR", temp_dir.string());
+        trtmc::VoxCPM2Config cfg;
+        auto plan = audio::make_voxcpm2_generation_plan(cfg);
+        trtmc::VoxCPM2Pipeline pipeline(
+            make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16,
+                                     true),
+            plan, "openbmb/VoxCPM2", make_fake_tokenizer());
+
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 2;
+        gen_cfg.initial_latents.assign(2 * 4 * 64, 0.0F);
+        gen_cfg.initial_latents[0] = 0.125F;
+        gen_cfg.initial_latents[4 * 64] = -0.25F;
+
+        (void)pipeline.generate_audio("ab", gen_cfg);
+    }
+
+    const auto manifest_path = temp_dir / "manifest.jsonl";
+    const auto manifest = read_text_file(manifest_path);
+    check(manifest.find("\"phase\":\"locdit\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records LocDiT phase");
+    check(manifest.find("\"direction\":\"input\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records LocDiT inputs");
+    check(manifest.find("\"direction\":\"output\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records LocDiT outputs");
+    check(manifest.find("\"name\":\"locdit_noise\"") != std::string::npos,
+          "voxcpm2 tensor dump includes shared LocDiT noise");
+    check(manifest.find("\"name\":\"audio_vae_latents\"") != std::string::npos,
+          "voxcpm2 tensor dump includes LocDiT output latents");
+    check(manifest.find("\"dtype\":\"bfloat16\"") != std::string::npos,
+          "voxcpm2 tensor dump records engine-converted input dtype");
+
+    const auto noise_path = temp_dir / "locdit_000000_input_locdit_noise.raw";
+    const auto output_path = temp_dir / "locdit_000000_output_audio_vae_latents.raw";
+    const auto noise_exists = std::filesystem::exists(noise_path);
+    const auto output_exists = std::filesystem::exists(output_path);
+    check(std::filesystem::exists(noise_path),
+          "voxcpm2 tensor dump writes first-step LocDiT noise bytes");
+    check(output_exists,
+          "voxcpm2 tensor dump writes first-step LocDiT output bytes");
+    check(noise_exists && std::filesystem::file_size(noise_path) == 4 * 64 * sizeof(uint16_t),
+          "voxcpm2 tensor dump preserves converted BF16 noise byte size");
+    check(output_exists && std::filesystem::file_size(output_path) == 8 * 64 * sizeof(float),
+          "voxcpm2 tensor dump preserves LocDiT output byte size");
+
+    std::filesystem::remove_all(temp_dir);
+}
+
 void test_generate_audio_requires_shared_locdit_noise_for_noise_bound_engine() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
@@ -1201,6 +1294,7 @@ int main() {
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_converts_float_artifacts_to_engine_input_dtype();
     test_generate_audio_forwards_shared_locdit_noise_latents();
+    test_generate_audio_dumps_locdit_tensor_io_for_parity_debug();
     test_generate_audio_requires_shared_locdit_noise_for_noise_bound_engine();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer();
