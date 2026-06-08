@@ -229,6 +229,7 @@ shared_builder_module python/tensorrt_model_connect/runtime_config/cli_support.p
 shared_builder_module python/tensorrt_model_connect/runtime_config/config_bundle.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_config/schema_registry.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/__init__.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/families/cosmos3/ARCH.md # family-local architecture notes (markdown); no test impact
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/audio_bark.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/platform.py # shared Python builder surface; broad builder impact is intentional
