@@ -1,4 +1,4 @@
-"""NVIDIA Cosmos 3 omni-model family plugin (scaffold).
+"""NVIDIA Cosmos 3 omni-model family plugin.
 
 Cosmos 3 (released 2026-05-31) is a unified Mixture-of-Transformers (MoT)
 foundation model for physical AI. Unlike previous Cosmos releases (which split
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from ...config import ModelConfig
 from ...checkpoint_mapper import WeightDict
+from .cosmos3_ar_reasoner_builder import build_cosmos3_ar_reasoner_engine
 
 
 class Cosmos3Plugin:
@@ -74,34 +75,47 @@ class Cosmos3Plugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "bf16",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
     ) -> bytes:
-        raise NotImplementedError(
-            "Cosmos 3 uses build_components(); call that instead of "
-            "build_engine().")
+        """Build the AR reasoner engine (single-lane text→text path).
+
+        This is the reasoner-only mode — equivalent to running the Cosmos 3
+        backbone as a Qwen3-VL 32B Instruct decoder without the diffusion
+        lane. Generation tasks (text→image / text→video) require
+        ``build_components()`` once the DM generator and joint-attention
+        runtime land (Phases 4 + 6).
+        """
+        return build_cosmos3_ar_reasoner_engine(
+            config, weights, max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
+            parallel_config=parallel_config)
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        *, precision: str = "bf16", verbose: bool = False,
         parallel_config=None, **_kwargs,
     ):
         raise NotImplementedError(
-            "Cosmos 3 family scaffold — not yet wired. Missing pieces:\n"
-            "  - ARCH.md: lock the exact AR/DM layer counts, hidden dims, "
-            "head counts, and joint-attention spec from "
-            "nvidia/Cosmos3-Super/config.json\n"
-            "  - AR reasoner TRT builder (32B for Super, 8B for Nano) — "
-            "standard decoder shape + joint-attention to DM tokens\n"
-            "  - DM generator TRT builder (32B for Super, 8B for Nano) — "
-            "diffusion DiT shape + joint-attention to AR tokens; sequence-"
-            "parallel-ready via the parallel_config.sp_* modes\n"
-            "  - ViT visual encoder (probably reusable from qwen_vl)\n"
-            "  - VAE for image/video generation (probably reusable from "
-            "wan_t2v.causal_vae_3d_builder)\n"
-            "  - Action encoders (9D–57D domain-specific projections)\n"
+            "Cosmos 3 generation pipeline (build_components) not yet wired. "
+            "Remaining pieces:\n"
+            "  - DM generator TRT builder (Phase 4) — diffusion DiT lane "
+            "with the per-modality FFN experts; sequence-parallel-ready via "
+            "the parallel_config.sp_* modes from PR #205\n"
+            "  - ViT visual encoder (Phase 5; reuse families/qwen_vl/"
+            "qwen_vl_vision_builder.py for Qwen3-VL Vision)\n"
+            "  - Wan 2.2 VAE for image/video generation (Phase 5; extend "
+            "families/wan_t2v/causal_vae_3d_builder.py with base_dim=160, "
+            "z_dim=48)\n"
+            "  - Action encoders, 9D-57D domain-specific projections "
+            "(Phase 5)\n"
             "  - C++ runtime pipeline that interleaves AR token generation "
-            "and DM denoising steps with joint attention between them")
+            "and DM denoising with the two_way joint-attention mask "
+            "(Phase 6)\n"
+            "Reasoner-only (text→text) path is wired via build_engine().")
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         return {

@@ -1,0 +1,26 @@
+{
+  "name": "cosmos3-super-reasoner",
+  "trace_id": "IT-E2E-COSMOS3-SUPER-REASONER-01",
+  "hf_id": "nvidia/Cosmos3-Super",
+  "bundle": "cosmos3-super-reasoner.trtfb",
+  "model_type": "cosmos3",
+  "family": "cosmos3",
+  "runtime_strategy": "diffusion_cosmos3",
+  "ci_tier": "nightly_only",
+  "user_contract": "general",
+  "description": "Cosmos3-Super reasoner-only lane (text→text). Exercises the AR backbone alone (32B Qwen3-VL 32B Instruct architecture) without engaging the DM generator or joint-attention runtime.",
+  "build_args": {
+    "max_cache_length": 4096
+  },
+  "test_prompt": "Describe what physical-AI reasoning means in one sentence.",
+  "test_type": "text",
+  "max_new_tokens": 128,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "skip": "scaffold only — AR reasoner builder is wired (build_engine path) but B200 weight‐mapping + sanity‐check still pending; remove once nightly_only validation lands",
+  "notes": "Reasoner-only manifest. Uses build_engine() rather than build_components() since the DM lane (Phase 4) and the C++ joint-attention runtime (Phase 6) are not yet implemented. The backbone shape is identical to Qwen3-VL 32B Instruct (hidden=5120, layers=64, GQA 64:8, head_dim=128, FFN=25600, mrope=[24,20,20], rope_theta=5e6, vocab=151936) — the AR reasoner builder delegates to families/qwen_vl/decoder_tp_builder.py."
+}
