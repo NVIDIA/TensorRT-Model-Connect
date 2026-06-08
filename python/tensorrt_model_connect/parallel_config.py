@@ -69,6 +69,10 @@ class ParallelConfig:
         if self.mode in _SP_MODES and self.cp_size == 1:
             raise ValueError(
                 f"parallel.mode={self.mode!r} requires parallel.cp_size > 1")
+        # SP modes need TRT 11+ for ALL_GATHER / ALL_TO_ALL / REDUCE_SCATTER.
+        # Only verify here (not at import) so other modes work on TRT 10.
+        if self.mode in _SP_MODES:
+            _verify_trt_collective_support()
 
     def to_config_dict(self) -> dict[str, object]:
         self.validate()
@@ -404,11 +408,12 @@ def add_reduce_scatter_sum(network, tensor, cp_size: int, scatter_axis: int = -1
 
 
 def _verify_trt_collective_support() -> None:
-    """Fail fast if the active TensorRT lacks the SP collective enum members.
+    """Raise if the active TensorRT lacks the SP collective enum members.
 
-    No-op when TensorRT is not importable in the current process (e.g. host
-    tooling or CI runs that do not depend on TRT bindings). When TRT *is*
-    importable, callers can assume the four collective ops exist.
+    Only called when a sequence-parallel mode (sp_ulysses / sp_ring /
+    sp_allgather_kv) is actually requested — not at import time, so unit
+    tests and host tooling that import parallel_config under older TRT
+    builds continue to work.
     """
     from . import trt_compat
 
@@ -427,6 +432,3 @@ def _verify_trt_collective_support() -> None:
         raise RuntimeError(
             "Active TensorRT is missing required CollectiveOperation members: "
             f"{missing} (requires TRT 11+)")
-
-
-_verify_trt_collective_support()
