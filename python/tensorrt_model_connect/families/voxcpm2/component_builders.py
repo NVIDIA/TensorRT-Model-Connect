@@ -260,6 +260,12 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         2,
         ("audio_frames", "audio_vae_latent_dim"),
     ),
+    "feat_cond": VoxCPM2TensorSpec(
+        "feat_cond",
+        ("float32", "bfloat16"),
+        2,
+        ("patch_size", "feat_dim"),
+    ),
     "waveform_f32": VoxCPM2TensorSpec(
         "waveform_f32",
         ("float32",),
@@ -391,7 +397,7 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
 VOXCPM2_REQUIRED_SIDE_INPUTS: Mapping[str, tuple[str, ...]] = {
     "tslm": ("text_tokens", "text_mask", "audio_mask"),
     "ralm": ("audio_mask", "local_text_features"),
-    "locdit": ("lm_hidden",),
+    "locdit": ("lm_hidden", "feat_cond"),
 }
 
 VOXCPM2_REQUIRED_CONTROL_INPUTS: Mapping[str, tuple[str, ...]] = {
@@ -868,6 +874,7 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             self,
             residual_hidden: Any,
             lm_hidden: Any,
+            feat_cond: Any,
             cfg_value: Any,
             inference_timesteps: Any,
         ) -> Any:
@@ -880,16 +887,13 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
                 ),
                 dim=-1,
             )
-            feat_cond = torch.zeros(
-                (dit_hidden.size(0), feat_dim, patch_size),
-                device=dit_hidden.device,
-                dtype=compute_dtype,
-            )
+            cond = feat_cond.to(dtype=compute_dtype).transpose(0, 1).contiguous().unsqueeze(0)
+            cond = cond.repeat(dit_hidden.size(0), 1, 1)
             cfg = cfg_value.reshape(()) if getattr(cfg_value, "ndim", 0) else cfg_value
             latents = self.feat_decoder(
                 mu=dit_hidden,
                 patch_size=patch_size,
-                cond=feat_cond,
+                cond=cond,
                 n_timesteps=self.default_inference_timesteps,
                 cfg_value=cfg,
             )
@@ -908,6 +912,7 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     example_args = (
         torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
         torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
+        torch.zeros((patch_size, feat_dim), dtype=compute_dtype),
         torch.tensor([float(_raw_config_value(ctx, "cfg_value", 2.0))], dtype=torch.float32),
         torch.tensor([_locdit_export_timesteps(ctx)], dtype=torch.int32),
     )
@@ -1072,6 +1077,7 @@ def _compile_voxcpm2_locdit_onnx(
         input_names=[
             "residual_hidden",
             "lm_hidden",
+            "feat_cond",
             "cfg_value",
             "inference_timesteps",
         ],

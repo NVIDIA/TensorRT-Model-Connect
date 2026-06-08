@@ -279,6 +279,20 @@ OwnedStageTensor make_zero_audio_feats_tensor(std::size_t text_steps, const VoxC
     return tensor;
 }
 
+OwnedStageTensor make_initial_feat_cond_tensor(const VoxCPM2Config& cfg) {
+    if (cfg.patch_size <= 0 || cfg.feat_dim <= 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: patch_size and feat_dim must be positive");
+    }
+
+    OwnedStageTensor tensor;
+    tensor.shape = {cfg.patch_size, cfg.feat_dim};
+    tensor.dtype = DType::kFloat32;
+    const auto value_count =
+        static_cast<std::size_t>(cfg.patch_size) * static_cast<std::size_t>(cfg.feat_dim);
+    tensor.storage.resize(value_count * sizeof(float));
+    return tensor;
+}
+
 struct RuntimeScalarInputs {
     explicit RuntimeScalarInputs(const VoxCPM2Config& cfg)
         : sample_rate(cfg.sample_rate), reference_sample_rate(cfg.reference_sample_rate),
@@ -520,6 +534,7 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
     artifacts.emplace("audio_feats",
                       make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
+    artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
     OwnedStageTensor current = artifacts.at("audio_feats");
     for (std::size_t i = 0; i < effective_plan.stages.size(); ++i) {
         current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);

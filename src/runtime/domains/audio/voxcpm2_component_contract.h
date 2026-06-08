@@ -53,6 +53,8 @@ inline constexpr VoxCPM2TensorContract kVoxCPM2ResidualHiddenTensor{
 inline constexpr VoxCPM2TensorContract kVoxCPM2AudioVaeLatentsTensor{
     "audio_vae_latents", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2,
     "audio_frames,audio_vae_latent_dim"};
+inline constexpr VoxCPM2TensorContract kVoxCPM2FeatCondTensor{
+    "feat_cond", VoxCPM2TensorDTypeContract::kFloat32OrBFloat16, 2, "patch_size,feat_dim"};
 inline constexpr VoxCPM2TensorContract kVoxCPM2WaveformF32Tensor{
     "waveform_f32", VoxCPM2TensorDTypeContract::kFloat32, 1, "audio_samples"};
 

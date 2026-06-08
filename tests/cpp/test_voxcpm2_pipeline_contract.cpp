@@ -39,10 +39,13 @@ int tslm_text_binding_hits = 0;
 float last_cfg_value = 0.0F;
 int32_t last_inference_timesteps = 0;
 float last_local_text_feature_value = 0.0F;
+float last_feat_cond_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
 int64_t last_text_token_count = 0;
 int64_t last_audio_feat_steps = 0;
+int64_t last_feat_cond_rows = 0;
+int64_t last_feat_cond_cols = 0;
 int32_t last_first_text_token = 0;
 int32_t last_second_text_token = 0;
 int32_t last_audio_start_token = 0;
@@ -252,9 +255,19 @@ class FakeModule final : public trtmc::ITrtModule {
         if (const auto lm_it = inputs.find("lm_hidden"); lm_it != inputs.end()) {
             if (const auto residual_it = inputs.find("residual_hidden");
                 residual_it != inputs.end()) {
-                ++locdit_aux_binding_hits;
-                last_lm_hidden_value = *static_cast<float*>(lm_it->second.data);
-                last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
+                if (const auto feat_cond_it = inputs.find("feat_cond");
+                    feat_cond_it != inputs.end()) {
+                    ++locdit_aux_binding_hits;
+                    last_lm_hidden_value = *static_cast<float*>(lm_it->second.data);
+                    last_residual_hidden_value = *static_cast<float*>(residual_it->second.data);
+                    last_feat_cond_value = *static_cast<float*>(feat_cond_it->second.data);
+                    last_feat_cond_rows = feat_cond_it->second.shape.size() > 0
+                                              ? feat_cond_it->second.shape[0]
+                                              : 0;
+                    last_feat_cond_cols = feat_cond_it->second.shape.size() > 1
+                                              ? feat_cond_it->second.shape[1]
+                                              : 0;
+                }
             }
         }
     }
@@ -411,10 +424,13 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_cfg_value = 0.0F;
     last_inference_timesteps = 0;
     last_local_text_feature_value = 0.0F;
+    last_feat_cond_value = 0.0F;
     last_lm_hidden_value = 0.0F;
     last_residual_hidden_value = 0.0F;
     last_text_token_count = 0;
     last_audio_feat_steps = 0;
+    last_feat_cond_rows = 0;
+    last_feat_cond_cols = 0;
     last_first_text_token = 0;
     last_second_text_token = 0;
     last_audio_start_token = 0;
@@ -447,10 +463,14 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     check(last_text_mask_value == 1.0F, "voxcpm2 marks prompt tokens as text");
     check(last_audio_mask_value == 0.0F, "voxcpm2 zero-shot prompt has no audio mask");
     check(locdit_aux_binding_hits == 1,
-          "voxcpm2 forwards lm_hidden and residual_hidden tensors to LocDiT");
+          "voxcpm2 forwards lm_hidden, residual_hidden, and feat_cond tensors to LocDiT");
     check(last_lm_hidden_value == 8.0F, "voxcpm2 LocDiT sees TSLM lm_hidden side tensor");
     check(last_residual_hidden_value == 3.0F,
           "voxcpm2 LocDiT sees RALM residual_hidden primary tensor");
+    check(last_feat_cond_rows == 4 && last_feat_cond_cols == 64,
+          "voxcpm2 LocDiT sees initial feat_cond patch tensor");
+    check(last_feat_cond_value == 0.0F,
+          "voxcpm2 initial LocDiT feat_cond uses zero previous latent");
 
     const auto wav_path = temp_dir / "trt_output.wav";
     check(!std::filesystem::exists(wav_path),

@@ -110,10 +110,12 @@ void test_generation_plan_preserves_acceptance_artifact_name() {
           "RALM consumes audio mask");
     check(std::string(plan.stages[2].required_side_inputs[1]) == "local_text_features",
           "RALM consumes preserved local text features");
-    check(plan.stages[3].required_side_input_count == 1,
-          "LocDiT requires semantic hidden side tensor");
+    check(plan.stages[3].required_side_input_count == 2,
+          "LocDiT requires semantic hidden and condition side tensors");
     check(std::string(plan.stages[3].required_side_inputs[0]) == "lm_hidden",
           "LocDiT consumes TSLM hidden state");
+    check(std::string(plan.stages[3].required_side_inputs[1]) == "feat_cond",
+          "LocDiT consumes previous latent condition");
     check(std::string(plan.stages[3].input_artifact) == "residual_hidden",
           "LocDiT consumes RALM residual hidden state as primary input");
     check(plan.stages[3].required_control_input_count == 2,
@@ -158,7 +160,7 @@ void test_generation_plan_description_includes_stage_order_and_artifact() {
           "plan description includes RALM stage");
     check(description.find("side_inputs=audio_mask,local_text_features") != std::string::npos,
           "plan description includes RALM side input");
-    check(description.find("side_inputs=lm_hidden") != std::string::npos,
+    check(description.find("side_inputs=lm_hidden,feat_cond") != std::string::npos,
           "plan description includes LocDiT side inputs");
     check(description.find("controls=cfg_value,inference_timesteps") != std::string::npos,
           "plan description includes LocDiT controls");
