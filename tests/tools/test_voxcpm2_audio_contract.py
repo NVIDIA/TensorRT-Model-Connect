@@ -83,7 +83,14 @@ def test_voxcpm2_manifest_enforces_exact_reference_waveform_contract():
         and req.args.get("phase") == "reference"
         and req.gating
     }
-    assert {"torch", "numpy", "voxcpm", "soundfile"} <= reference_modules
+    assert {
+        "torch",
+        "numpy",
+        "voxcpm",
+        "wetext",
+        "modelscope",
+        "soundfile",
+    } <= reference_modules
     build_modules = {
         req.args.get("module")
         for req in case.preflight

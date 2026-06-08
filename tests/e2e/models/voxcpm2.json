@@ -73,6 +73,24 @@
     {
       "kind": "python_module_available",
       "args": {
+        "module": "wetext",
+        "phase": "reference",
+        "timeout_s": 60
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "modelscope",
+        "phase": "reference",
+        "timeout_s": 60
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
         "module": "soundfile",
         "phase": "reference",
         "timeout_s": 30
