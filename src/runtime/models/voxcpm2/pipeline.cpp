@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -102,14 +103,120 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
     return tensor;
 }
 
+bool read_utf8_codepoint(const std::string& text, std::size_t& offset, uint32_t& codepoint,
+                         std::string& bytes) {
+    if (offset >= text.size())
+        return false;
+
+    const auto first = static_cast<unsigned char>(text[offset]);
+    std::size_t length = 1;
+    if ((first & 0x80U) == 0U) {
+        codepoint = first;
+    } else if ((first & 0xE0U) == 0xC0U) {
+        codepoint = first & 0x1FU;
+        length = 2;
+    } else if ((first & 0xF0U) == 0xE0U) {
+        codepoint = first & 0x0FU;
+        length = 3;
+    } else if ((first & 0xF8U) == 0xF0U) {
+        codepoint = first & 0x07U;
+        length = 4;
+    } else {
+        codepoint = first;
+    }
+
+    if (offset + length > text.size()) {
+        length = 1;
+        codepoint = first;
+    }
+
+    for (std::size_t i = 1; i < length; ++i) {
+        const auto next = static_cast<unsigned char>(text[offset + i]);
+        if ((next & 0xC0U) != 0x80U) {
+            length = 1;
+            codepoint = first;
+            break;
+        }
+        codepoint = (codepoint << 6U) | (next & 0x3FU);
+    }
+
+    bytes.assign(text.data() + offset, length);
+    offset += length;
+    return true;
+}
+
+bool is_cjk_codepoint(uint32_t codepoint) {
+    return (codepoint >= 0x4E00U && codepoint <= 0x9FFFU) ||
+           (codepoint >= 0x3400U && codepoint <= 0x4DBFU) ||
+           (codepoint >= 0xF900U && codepoint <= 0xFAFFU) ||
+           (codepoint >= 0x20000U && codepoint <= 0x2A6DFU);
+}
+
+std::vector<std::string> voxcpm2_cjk_expansion_chars(const std::string& token) {
+    constexpr uint32_t kSentencePieceUnderline = 0x2581U;
+    std::vector<std::string> chars;
+    std::size_t offset = 0;
+    while (offset < token.size()) {
+        uint32_t codepoint = 0;
+        std::string bytes;
+        if (!read_utf8_codepoint(token, offset, codepoint, bytes))
+            break;
+        if (codepoint == kSentencePieceUnderline)
+            continue;
+        if (!is_cjk_codepoint(codepoint))
+            return {};
+        chars.push_back(std::move(bytes));
+    }
+    if (chars.size() < 2)
+        return {};
+    return chars;
+}
+
+std::vector<int32_t> expand_voxcpm2_multichar_cjk_tokens(const std::vector<int32_t>& ids,
+                                                         const ITokenizer& tokenizer) {
+    std::vector<int32_t> expanded;
+    expanded.reserve(ids.size());
+    for (const int32_t id : ids) {
+        const auto token = tokenizer.token_for_id(id);
+        const auto chars = voxcpm2_cjk_expansion_chars(token);
+        if (chars.empty()) {
+            expanded.push_back(id);
+            continue;
+        }
+
+        std::vector<int32_t> char_ids;
+        char_ids.reserve(chars.size());
+        bool resolved = true;
+        for (const auto& ch : chars) {
+            const int32_t char_id = tokenizer.id_for_token(ch);
+            if (char_id < 0) {
+                resolved = false;
+                break;
+            }
+            char_ids.push_back(char_id);
+        }
+        if (!resolved) {
+            expanded.push_back(id);
+            continue;
+        }
+        expanded.insert(expanded.end(), char_ids.begin(), char_ids.end());
+    }
+    return expanded;
+}
+
+int32_t resolve_voxcpm2_audio_start_token(const ITokenizer& tokenizer) {
+    constexpr int32_t kDefaultAudioStartToken = 101;
+    const int32_t token_id = tokenizer.id_for_token("<|audio_start|>");
+    return token_id >= 0 ? token_id : kDefaultAudioStartToken;
+}
+
 OwnedStageTensor make_text_tokens_tensor(const std::string& prompt, const ITokenizer* tokenizer) {
     if (tokenizer == nullptr) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: tokenizer.json is required to build text_tokens for TSLM");
     }
-    constexpr int32_t kAudioStartToken = 101;
-    auto ids = tokenizer->encode(prompt);
-    ids.push_back(kAudioStartToken);
+    auto ids = expand_voxcpm2_multichar_cjk_tokens(tokenizer->encode(prompt), *tokenizer);
+    ids.push_back(resolve_voxcpm2_audio_start_token(*tokenizer));
     if (ids.empty()) {
         throw std::runtime_error("VoxCPM2Pipeline: tokenizer returned no text tokens");
     }

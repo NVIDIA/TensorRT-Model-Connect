@@ -42,6 +42,8 @@ float last_local_text_feature_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
 int64_t last_text_token_count = 0;
+int32_t last_first_text_token = 0;
+int32_t last_second_text_token = 0;
 int32_t last_audio_start_token = 0;
 float last_text_mask_value = 0.0F;
 float last_audio_mask_value = 0.0F;
@@ -56,6 +58,9 @@ void check(bool condition, const char* test_name) {
 class FakeTokenizer final : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string& text) const override {
+        if (text == "VoxCPM2 CJK token split") {
+            return {500};
+        }
         std::vector<int32_t> ids;
         ids.reserve(text.size());
         for (const unsigned char ch : text) {
@@ -73,9 +78,23 @@ class FakeTokenizer final : public trtmc::ITokenizer {
         return text;
     }
 
-    int32_t id_for_token(std::string_view) const override { return -1; }
+    int32_t id_for_token(std::string_view token) const override {
+        if (token == "<|audio_start|>")
+            return 101;
+        if (token == "\xE4\xBD\xA0")
+            return 201;
+        if (token == "\xE5\xA5\xBD")
+            return 202;
+        return -1;
+    }
 
     std::string token_for_id(int32_t id) const override {
+        if (id == 500)
+            return "\xE2\x96\x81\xE4\xBD\xA0\xE5\xA5\xBD";
+        if (id == 201)
+            return "\xE4\xBD\xA0";
+        if (id == 202)
+            return "\xE5\xA5\xBD";
         return std::string(1, static_cast<char>(id));
     }
 };
@@ -196,8 +215,12 @@ class FakeModule final : public trtmc::ITrtModule {
                     last_text_token_count =
                         token_it->second.shape.empty() ? 0 : token_it->second.shape.front();
                     const auto* token_data = static_cast<int32_t*>(token_it->second.data);
-                    if (last_text_token_count > 0)
+                    if (last_text_token_count > 0) {
+                        last_first_text_token = token_data[0];
                         last_audio_start_token = token_data[last_text_token_count - 1];
+                    }
+                    if (last_text_token_count > 1)
+                        last_second_text_token = token_data[1];
                     last_text_mask_value = *static_cast<float*>(text_mask_it->second.data);
                     last_audio_mask_value = *static_cast<float*>(audio_mask_it->second.data);
                 }
@@ -374,6 +397,8 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_lm_hidden_value = 0.0F;
     last_residual_hidden_value = 0.0F;
     last_text_token_count = 0;
+    last_first_text_token = 0;
+    last_second_text_token = 0;
     last_audio_start_token = 0;
     last_text_mask_value = 0.0F;
     last_audio_mask_value = 0.0F;
@@ -412,6 +437,30 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
 
     std::filesystem::current_path(original_cwd);
     std::filesystem::remove_all(temp_dir);
+}
+
+void test_generate_audio_expands_voxcpm2_multichar_cjk_tokens() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    tslm_text_binding_hits = 0;
+    last_text_token_count = 0;
+    last_first_text_token = 0;
+    last_second_text_token = 0;
+    last_audio_start_token = 0;
+
+    trtmc::GenerateConfig gen_cfg;
+    (void)pipeline.generate_audio("VoxCPM2 CJK token split", gen_cfg);
+
+    check(tslm_text_binding_hits == 1, "voxcpm2 forwards expanded CJK tokens to TSLM");
+    check(last_text_token_count == 3,
+          "voxcpm2 multi-character CJK token expands before audio_start");
+    check(last_first_text_token == 201, "voxcpm2 first CJK character id is preserved");
+    check(last_second_text_token == 202, "voxcpm2 second CJK character id is preserved");
+    check(last_audio_start_token == 101,
+          "voxcpm2 resolves audio_start token through tokenizer");
 }
 
 void test_construct_reports_missing_stage_binding() {
@@ -497,6 +546,7 @@ void test_rejects_component_order_mismatch() {
 int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
+    test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
     test_construct_reports_missing_stage_binding();
     test_construct_reports_missing_required_side_binding();
     test_generate_audio_rejects_stage_tensor_contract_mismatch();
