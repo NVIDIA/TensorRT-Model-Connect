@@ -3,6 +3,7 @@
 #include "runtime/domains/audio/voxcpm2_config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -225,19 +226,146 @@ int32_t resolve_voxcpm2_audio_start_token(const ITokenizer& tokenizer) {
     return token_id >= 0 ? token_id : kDefaultAudioStartToken;
 }
 
+bool is_ascii_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+bool is_ascii_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+void append_spelled_small_number(std::string& out, int value) {
+    static constexpr const char* kBelowTwenty[] = {
+        "zero",      "one",       "two",      "three",    "four",
+        "five",      "six",       "seven",    "eight",    "nine",
+        "ten",       "eleven",    "twelve",   "thirteen", "fourteen",
+        "fifteen",   "sixteen",   "seventeen", "eighteen", "nineteen",
+    };
+    static constexpr const char* kTens[] = {
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+        "eighty", "ninety",
+    };
+
+    if (value < 20) {
+        out.append(kBelowTwenty[value]);
+        return;
+    }
+    if (value < 100) {
+        out.append(kTens[value / 10]);
+        if (value % 10 != 0) {
+            out.push_back(' ');
+            out.append(kBelowTwenty[value % 10]);
+        }
+        return;
+    }
+    if (value < 1000) {
+        out.append(kBelowTwenty[value / 100]);
+        out.append(" hundred");
+        if (value % 100 != 0) {
+            out.append(" and ");
+            append_spelled_small_number(out, value % 100);
+        }
+        return;
+    }
+    out.append(std::to_string(value));
+}
+
+void append_spelled_number(std::string& out, const std::string& digits) {
+    if (digits.empty())
+        return;
+    try {
+        const auto value = std::stoi(digits);
+        if (value >= 0 && value < 1000) {
+            append_spelled_small_number(out, value);
+            return;
+        }
+    } catch (const std::exception&) {
+    }
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        if (i != 0)
+            out.push_back(' ');
+        append_spelled_small_number(out, digits[i] - '0');
+    }
+}
+
+std::string collapse_voxcpm2_core_whitespace(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    bool in_space = false;
+    for (const unsigned char ch : text) {
+        if (std::isspace(ch) != 0) {
+            if (!in_space && !out.empty()) {
+                out.push_back(' ');
+            }
+            in_space = true;
+            continue;
+        }
+        out.push_back(static_cast<char>(ch));
+        in_space = false;
+    }
+    if (!out.empty() && out.back() == ' ')
+        out.pop_back();
+    return out;
+}
+
+std::string normalize_voxcpm2_english_text_for_tts(const std::string& prompt) {
+    const auto compact = collapse_voxcpm2_core_whitespace(prompt);
+    std::string punctuated;
+    punctuated.reserve(compact.size() + 8);
+    for (std::size_t i = 0; i < compact.size(); ++i) {
+        const char c = compact[i];
+        if (c == ',' || c == '.') {
+            if (!punctuated.empty() && punctuated.back() != ' ')
+                punctuated.push_back(' ');
+            punctuated.push_back(c);
+            if (i + 1 < compact.size())
+                punctuated.push_back(' ');
+            continue;
+        }
+        punctuated.push_back(c);
+    }
+
+    std::string normalized;
+    normalized.reserve(punctuated.size() + 8);
+    for (std::size_t i = 0; i < punctuated.size();) {
+        if (!is_ascii_digit(punctuated[i])) {
+            normalized.push_back(punctuated[i]);
+            ++i;
+            continue;
+        }
+        const auto begin = i;
+        while (i < punctuated.size() && is_ascii_digit(punctuated[i]))
+            ++i;
+        if (!normalized.empty() && is_ascii_alpha(normalized.back()))
+            normalized.push_back(' ');
+        append_spelled_number(normalized, punctuated.substr(begin, i - begin));
+        if (i < punctuated.size() && is_ascii_alpha(punctuated[i]))
+            normalized.push_back(' ');
+    }
+    return normalized;
+}
+
+std::string prepare_voxcpm2_text_for_tokenizer(const std::string& prompt,
+                                               const VoxCPM2Config& cfg) {
+    if (!cfg.normalize)
+        return collapse_voxcpm2_core_whitespace(prompt);
+    return normalize_voxcpm2_english_text_for_tts(prompt);
+}
+
 PreparedTextTokens make_text_tokens_tensor(const std::string& prompt, const ITokenizer* tokenizer,
-                                           int32_t max_text_steps) {
+                                           const VoxCPM2Config& cfg) {
     if (tokenizer == nullptr) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: tokenizer.json is required to build text_tokens for TSLM");
     }
-    auto ids = expand_voxcpm2_multichar_cjk_tokens(tokenizer->encode(prompt), *tokenizer);
+    const auto prepared_text = prepare_voxcpm2_text_for_tokenizer(prompt, cfg);
+    auto ids = expand_voxcpm2_multichar_cjk_tokens(tokenizer->encode(prepared_text), *tokenizer);
     ids.push_back(resolve_voxcpm2_audio_start_token(*tokenizer));
     if (ids.empty()) {
         throw std::runtime_error("VoxCPM2Pipeline: tokenizer returned no text tokens");
     }
 
-    const auto requested_steps = static_cast<std::size_t>(std::max(max_text_steps, 0));
+    const auto requested_steps = static_cast<std::size_t>(std::max(cfg.max_text_steps, 0));
     const auto padded_steps = requested_steps > 0 ? requested_steps : ids.size();
     if (ids.size() > padded_steps) {
         throw std::runtime_error(
@@ -1069,8 +1197,8 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const RuntimeScalarInputs controls(effective_plan.config);
     StageArtifacts artifacts;
     artifacts.emplace("text_utf8", make_prompt_tensor(prompt));
-    auto text_tokens = make_text_tokens_tensor(prompt, tokenizer_.get(),
-                                               effective_plan.config.max_text_steps);
+    auto text_tokens =
+        make_text_tokens_tensor(prompt, tokenizer_.get(), effective_plan.config);
     const auto text_token_count = static_cast<std::size_t>(text_tokens.tensor.shape.front());
     const auto active_text_token_count = text_tokens.actual_count;
     artifacts.emplace("text_tokens", std::move(text_tokens.tensor));

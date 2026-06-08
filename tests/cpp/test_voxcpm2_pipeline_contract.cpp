@@ -66,6 +66,7 @@ std::vector<int64_t> locdit_residual_hidden_rows;
 std::vector<int32_t> position_id_values;
 std::vector<int32_t> tslm_position_id_values;
 std::vector<int32_t> ralm_position_id_values;
+std::string last_tokenizer_input;
 int tslm_cache_binding_hits = 0;
 int ralm_cache_binding_hits = 0;
 
@@ -79,6 +80,7 @@ void check(bool condition, const char* test_name) {
 class FakeTokenizer final : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string& text) const override {
+        last_tokenizer_input = text;
         if (text == "VoxCPM2 CJK token split") {
             return {500};
         }
@@ -800,8 +802,49 @@ void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_z
           "voxcpm2 AudioVAE receives all default generated latent patches");
 }
 
+void test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    tslm_text_binding_hits = 0;
+    last_text_token_count = 0;
+    last_tokenizer_input.clear();
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    (void)pipeline.generate_audio(
+        "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.", gen_cfg);
+
+    const std::string expected =
+        "Hello ,  this is the VoxCPM two TensorRT Model Connect parity test .";
+    check(last_tokenizer_input == expected,
+          "voxcpm2 normalize=true mirrors the upstream text tokenizer input");
+    check(last_text_token_count == static_cast<int64_t>(expected.size() + 1),
+          "voxcpm2 normalized token tensor appends audio_start after prepared text");
+}
+
+void test_generate_audio_can_disable_voxcpm2_text_normalization() {
+    trtmc::VoxCPM2Config cfg;
+    cfg.normalize = false;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    last_tokenizer_input.clear();
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    (void)pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+
+    check(last_tokenizer_input == "VoxCPM2 parity prompt",
+          "voxcpm2 normalize=false preserves raw prompt tokenization");
+}
+
 void test_generate_audio_expands_voxcpm2_multichar_cjk_tokens() {
     trtmc::VoxCPM2Config cfg;
+    cfg.normalize = false;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
     trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
                                     make_fake_tokenizer());
@@ -971,6 +1014,8 @@ int main() {
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
+    test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer();
+    test_generate_audio_can_disable_voxcpm2_text_normalization();
     test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
     test_generate_audio_pads_text_tensors_to_engine_steps();
     test_generate_audio_rejects_prompt_exceeding_engine_steps();
