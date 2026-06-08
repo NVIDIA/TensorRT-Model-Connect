@@ -860,6 +860,7 @@ void trace_lm_state(const char* phase, std::size_t step, const StageArtifacts& a
     append_trace_float_summary(os, artifacts, "lm_hidden");
     append_trace_float_summary(os, artifacts, "residual_hidden");
     append_trace_float_summary(os, artifacts, "feat_cond");
+    append_trace_float_summary(os, artifacts, "locdit_noise");
     append_trace_float_summary(os, artifacts, "tslm_past_kv_cache");
     append_trace_float_summary(os, artifacts, "ralm_past_kv_cache");
     append_trace_float_summary(os, artifacts, "stop_logits");
