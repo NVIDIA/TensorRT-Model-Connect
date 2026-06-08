@@ -212,6 +212,7 @@ add_library(trtmc_core
   src/runtime/models/elf_flow/pipeline.cpp
   src/runtime/models/segmentation/segment_pipeline.cpp
   src/runtime/models/segmentation/sam_pipeline.cpp
+  src/runtime/models/segmentation/sam3_pipeline.cpp
   src/runtime/models/timm_vit/pipeline.cpp
   src/runtime/models/vision_language/pipeline.cpp
   src/runtime/models/flux/pipeline.cpp
@@ -743,6 +744,7 @@ trtmc_add_test(test_omni_audio_plan)
 # Perception (segmentation, SAM, neural operator)
 trtmc_add_test(test_neural_operator_config)
 trtmc_add_test(test_sam_prompt_seam)
+trtmc_add_test(test_sam3_pipeline)
 trtmc_add_test(test_perception_preprocess_seams)
 
 # Diffusion — conditioning

@@ -838,8 +838,14 @@ int cmd_segment_sam(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto result = pipeline->segment_prompted(image.pixels.data(), image.height, image.width,
-                                             args.point_x, args.point_y, args.is_foreground);
+    trtmc::PromptedSegmentationResult result;
+    if (!args.prompt.empty()) {
+        result = pipeline->segment_prompted_text(image.pixels.data(), image.height, image.width,
+                                                 args.prompt);
+    } else {
+        result = pipeline->segment_prompted(image.pixels.data(), image.height, image.width,
+                                            args.point_x, args.point_y, args.is_foreground);
+    }
     if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty()) {
         std::cerr << "Error: SAM produced no masks\n";
         return EXIT_FAILURE;
@@ -873,6 +879,17 @@ int cmd_segment_sam(const CliArgs& args) {
                        << ".txt";
             std::ofstream score_out(score_path.str());
             score_out << std::fixed << std::setprecision(6) << result.iou_scores[mask_idx] << '\n';
+        }
+
+        const auto box_offset = static_cast<std::size_t>(mask_idx) * 4U;
+        if (result.boxes.size() >= box_offset + 4U) {
+            std::ostringstream box_path;
+            box_path << out_dir << "/box_" << std::setw(3) << std::setfill('0') << mask_idx
+                     << ".txt";
+            std::ofstream box_out(box_path.str());
+            box_out << std::fixed << std::setprecision(6) << result.boxes[box_offset] << ' '
+                    << result.boxes[box_offset + 1U] << ' ' << result.boxes[box_offset + 2U] << ' '
+                    << result.boxes[box_offset + 3U] << '\n';
         }
     }
 

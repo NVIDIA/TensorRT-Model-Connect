@@ -367,6 +367,9 @@ _POSITIVE_MATCH_CASES = [
     ("nemotron_hybrid", "nemotron_h"),
     # SAM (prompted segmentation)
     ("sam", "sam"),
+    # SAM3 (text-prompt prompted segmentation)
+    ("sam3", "sam3"),
+    ("sam3_video", "sam3"),
     # timm Vision Transformer (image classification)
     ("vit_base_patch16_224", "timm_vit"),
     ("timm_vit", "timm_vit"),

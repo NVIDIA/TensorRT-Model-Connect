@@ -179,6 +179,7 @@ PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
     "diffusion": ["diffusion_media_generation"],
     "vl_qa": ["vision_language_generation"],
     "multimodal_chat": ["omni_multimodal"],
+    "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
     "time_series_regression": ["neural_operator"],
     "time_series_classification": ["neural_operator"],
     "tts": ["text_to_audio"],
@@ -1696,6 +1697,18 @@ def _torchtrt_tokenizer_models(imap: ImpactMap) -> List[str]:
         ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap)
 
 
+def _sam3_models(imap: ImpactMap) -> List[str]:
+    models = imap.family_to_models.get("sam3", [])
+    if models:
+        return models
+    return ["sam3"] if "sam3" in imap.all_model_names_set else []
+
+
+def _segmentation_task_models(imap: ImpactMap) -> List[str]:
+    return _models_for_task_strategies(
+        ["segmentation", "prompted_segmentation", "object_detection"], imap)
+
+
 @dataclass(frozen=True)
 class TokenDiffRefinementRule(DiffRefinementRule):
     name: str
@@ -1718,6 +1731,113 @@ class TokenDiffRefinementRule(DiffRefinementRule):
         return RuleMatch(
             self.name,
             self.models_for_impact(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+@dataclass(frozen=True)
+class Sam3ReferenceDiffRefinementRule(DiffRefinementRule):
+    name: str = "harness_reference_sam3_prompted_segmentation"
+    path: str = "tests/e2e_harness/references/hf_transformers.py"
+
+    allowed_tokens: tuple[str, ...] = (
+        "_case_artifact_dir",
+        "_existing_path_reader",
+        "_json_output_reader",
+        "_reference_env",
+        "_resolve_cached_model_ref",
+        "_run_sam3_prompted_segmentation_ref",
+        "_torch_dtype_for_case",
+        "alpha",
+        "artifact_dir",
+        "boxes",
+        "case",
+        "command",
+        "ctx",
+        "detach",
+        "device",
+        "env",
+        "eval",
+        "else",
+        "ear",
+        "failure_label",
+        "float",
+        "from_pretrained",
+        "hf_id",
+        "hf_sam3",
+        "image",
+        "image_arr",
+        "image_path",
+        "image_url",
+        "instance_segmentation",
+        "json",
+        "label",
+        "mask",
+        "model",
+        "model_card",
+        "model_ref",
+        "np.",
+        "numpy",
+        "original_sizes",
+        "output",
+        "overlay",
+        "pil",
+        "post_process_instance_segmentation",
+        "prompt",
+        "prompted_segmentation_sam3",
+        "python",
+        "reference_python_path",
+        "reference_variant",
+        "requests",
+        "result",
+        "run_reference_subprocess",
+        "sam3",
+        "sam3model",
+        "sam3processor",
+        "score",
+        "segmented",
+        "stage",
+        "sys.executable",
+        "target_sizes",
+        "text_prompt",
+        "textwrap",
+        "threshold",
+        "timeout_s",
+        "torch",
+        "trust_remote_code",
+        "with_open",
+    )
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        if path != self.path:
+            return False
+        normalized_lines = [
+            _normalize_diff_line(line)
+            for line in lines
+            if any(ch.isalpha() for ch in _normalize_diff_line(line))
+        ]
+        if not normalized_lines:
+            return False
+        if not any("sam3" in line for line in normalized_lines):
+            return False
+        return all(
+            any(token in line for token in self.allowed_tokens)
+            for line in normalized_lines
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines
+        return RuleMatch(
+            self.name,
+            _sam3_models(imap),
             match.unit_tiers,
             match.rebuild_cpp,
         )
@@ -1912,6 +2032,127 @@ class E2EWaivesModelLinesRule(DiffRefinementRule):
 
 DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     HarnessSharedFp8ScalesRule(),
+    TokenDiffRefinementRule(
+        "sam3_public_prompted_segmentation_api",
+        "include/trtmc/pipeline.h",
+        (
+            "boxes",
+            "does_not_support_segment_prompted_text",
+            "image_height",
+            "image_pixels",
+            "image_width",
+            "pipeline_type",
+            "promptedsegmentationresult",
+            "segment_prompted_text",
+            "text_prompt",
+            "vector",
+        ),
+        _segmentation_task_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_engine_builder_metadata",
+        "python/tensorrt_model_connect/engine_builder.py",
+        (
+            "getattr(plugin",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "requires_tokenizer",
+            "runtime_strategy",
+        ),
+        _sam3_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_segment_sam_cli_usage",
+        "src/cli/args.cpp",
+        (
+            "background",
+            "hf_python",
+            "point_x",
+            "point_y",
+            "prompt",
+            "segment-sam",
+        ),
+        _segmentation_task_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_segment_sam_cli_runtime",
+        "src/cli/main.cpp",
+        (
+            ".txt",
+            "args.prompt",
+            "box",
+            "else",
+            "image.height",
+            "image.pixels",
+            "image.width",
+            "is_foreground",
+            "mask_idx",
+            "out_dir",
+            "point_x",
+            "point_y",
+            "promptedsegmentationresult",
+            "result.boxes",
+            "segment_prompted",
+            "segment_prompted_text",
+            "setfill",
+            "setprecision",
+            "static_cast",
+            "std::",
+        ),
+        _segmentation_task_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_perception_config",
+        "src/runtime/domains/perception/perception_types.h",
+        (
+            "image_mean",
+            "image_size",
+            "image_std",
+            "class_map",
+            "low_res_mask_size",
+            "mask_threshold",
+            "masks",
+            "not_a_point_embed",
+            "num_mask_outputs",
+            "num_queries",
+            "point_embed_bg",
+            "point_embed_fg",
+            "sam3config",
+            "score_threshold",
+            "shared_image_pe",
+            "text_max_position_embeddings",
+            "text_pad_token_id",
+            "text_projection_dim",
+            "vector",
+        ),
+        _segmentation_task_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_bpe_end_of_word_suffix",
+        "src/tokenizer/bpe_tokenizer.cpp",
+        (
+            "chars.back",
+            "end_of_word_suffix",
+            "j[\"model\"].value",
+            "mendofwordsuffix",
+            "string",
+        ),
+        _sam3_models,
+    ),
+    TokenDiffRefinementRule(
+        "sam3_harness_contract",
+        "tests/e2e_harness/contracts.py",
+        (
+            "comparisonmode.mask_overlap",
+            "prompted_mask",
+            "prompted_segmentation_sam3",
+            "referencefamily.prompted_segmentation_sam3",
+            "sam3",
+            "usercontract.prompted_mask",
+        ),
+        _sam3_models,
+    ),
+    Sam3ReferenceDiffRefinementRule(),
     TokenDiffRefinementRule(
         "e2e_warm_hf_cache_diffusers_components",
         "scripts/warm_hf_cache.py",

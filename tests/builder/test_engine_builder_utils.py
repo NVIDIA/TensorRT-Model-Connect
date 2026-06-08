@@ -217,6 +217,9 @@ class TestHfAllowPatterns:
     def test_contains_tokenizer(self):
         assert "tokenizer.json" in _HF_ALLOW_PATTERNS
 
+    def test_contains_processor_config(self):
+        assert "processor_config.json" in _HF_ALLOW_PATTERNS
+
     def test_contains_sharded(self):
         assert "model-*.safetensors" in _HF_ALLOW_PATTERNS
 

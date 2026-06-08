@@ -1,0 +1,26 @@
+{
+  "name": "sam3",
+  "trace_id": "IT-E2E-SAM3-01",
+  "hf_id": "facebook/sam3",
+  "bundle": "sam3.trtfb",
+  "family": "sam3",
+  "runtime_strategy": "prompted_segmentation",
+  "test_type": "prompted_segmentation",
+  "reference_family": "prompted_segmentation_sam3",
+  "precision": "fp32",
+  "max_cache_length": 1,
+  "prompt": "ear",
+  "trust_remote_code": false,
+  "gated": true,
+  "inputs": {
+    "image_url": "http://images.cocodataset.org/val2017/000000077595.jpg",
+    "prompt": "ear"
+  },
+  "threshold_overrides": {
+    "num_masks_consistency": 1.0,
+    "iou_per_prompt": 0.7,
+    "box_iou_mean": 0.95,
+    "score_abs_error_mean": 0.05
+  },
+  "core": false
+}

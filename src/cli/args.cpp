@@ -76,7 +76,7 @@ void print_usage() {
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
-           "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\n"
+           "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH] "
            "[--score-threshold F]\n"

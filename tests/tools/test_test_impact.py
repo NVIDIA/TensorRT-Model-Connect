@@ -101,6 +101,8 @@ def mock_repo(tmp_path):
          "hf_id": "suno/bark", "core": True},
         {"name": "sam-vit", "family": "sam", "runtime_strategy": "prompted_segmentation",
          "hf_id": "fb/sam", "core": True},
+        {"name": "sam3", "family": "sam3", "runtime_strategy": "prompted_segmentation",
+         "hf_id": "facebook/sam3", "core": True},
         {"name": "segformer-b0", "family": "segformer", "runtime_strategy": "segmentation",
          "hf_id": "nv/segformer", "core": True},
         {"name": "mixtral-15m", "family": "mixtral", "runtime_strategy": "decoder_moe",
@@ -172,6 +174,8 @@ def mock_repo(tmp_path):
         },
     )
     _write_family(families_dir, "sam",
+                  "from ..config import C\nfrom ..graph_ops import rope\n")
+    _write_family(families_dir, "sam3",
                   "from ..config import C\nfrom ..graph_ops import rope\n")
     _write_family(families_dir, "segformer",
                   "from ..config import C\nfrom ..graph_ops import conv\n")
@@ -886,6 +890,16 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
+    def test_harness_segmentation_plugin(self, imap):
+        """plugins/segmentation.py -> segmentation and prompted segmentation models."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/plugins/segmentation.py", imap)
+        assert match.rule == "harness_plugin"
+        assert "sam3" in match.models
+        assert "sam-vit" in match.models
+        assert "segformer-b0" in match.models
+        assert "qwen3-0.6b" not in match.models
+
     def test_harness_threshold_profile(self, imap):
         """Diffusion threshold profiles should stay scoped to diffusion models."""
         match = test_impact.classify_file(
@@ -955,6 +969,14 @@ class TestHarness:
         """Diff refinement dispatch keeps named rules in reviewable order."""
         assert [rule.name for rule in test_impact.DIFF_REFINEMENT_RULES] == [
             "harness_shared_fp8_scales",
+            "sam3_public_prompted_segmentation_api",
+            "sam3_engine_builder_metadata",
+            "sam3_segment_sam_cli_usage",
+            "sam3_segment_sam_cli_runtime",
+            "sam3_perception_config",
+            "sam3_bpe_end_of_word_suffix",
+            "sam3_harness_contract",
+            "harness_reference_sam3_prompted_segmentation",
             "e2e_warm_hf_cache_diffusers_components",
             "shared_builder_fp8_scales_cli",
             "shared_builder_fp8_scales_engine",
@@ -967,6 +989,207 @@ class TestHarness:
         ]
         assert all(callable(rule.matches) and callable(rule.refine)
                    for rule in test_impact.DIFF_REFINEMENT_RULES)
+
+    def test_sam3_public_pipeline_rule_refines_prompted_segmentation_diff(self, imap):
+        """SAM3 prompted-segmentation API additions stay scoped to segmentation."""
+        diff_text = """
+diff --git a/include/trtmc/pipeline.h b/include/trtmc/pipeline.h
+@@ -1 +1 @@
++    std::vector<float> boxes;      // [num_masks, 4], xyxy absolute pixel coordinates
++    virtual PromptedSegmentationResult segment_prompted_text(const float* image_pixels,
++                                                             int32_t image_height,
++                                                             int32_t image_width,
++                                                             const std::string& text_prompt) {
++        (void)image_pixels;
++        (void)text_prompt;
++        throw std::runtime_error(std::string(pipeline_type()) +
++                                 " does not support segment_prompted_text()");
+"""
+        broad = test_impact.classify_file("include/trtmc/pipeline.h", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "include/trtmc/pipeline.h", broad, diff_text, imap)
+        assert refined.rule == "sam3_public_prompted_segmentation_api"
+        assert "sam3" in refined.models
+        assert "sam-vit" in refined.models
+        assert "qwen3-0.6b" not in refined.models
+
+    def test_sam3_engine_builder_rule_refines_metadata_diff(self, imap):
+        """SAM3 bundle metadata plumbing does not select every builder model."""
+        diff_text = """
+diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
+@@ -1 +1 @@
++    "processor_config.json",
+-    if runtime_strategy not in (
++    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", False))
++    if requires_tokenizer or runtime_strategy not in (
+-                     "preprocessor_config.json"):
++                     "preprocessor_config.json", "processor_config.json"):
+"""
+        broad = test_impact.classify_file(
+            "python/tensorrt_model_connect/engine_builder.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "python/tensorrt_model_connect/engine_builder.py", broad, diff_text, imap)
+        assert refined.rule == "sam3_engine_builder_metadata"
+        assert refined.models == ["sam3"]
+
+    def test_sam3_cli_rules_refine_segment_sam_prompt_diff(self, imap):
+        """SAM3 text-prompt CLI plumbing is segmentation-scoped."""
+        args_diff = """
+diff --git a/src/cli/args.cpp b/src/cli/args.cpp
+@@ -1 +1 @@
+-           "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\\n"
++           "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\\n"
+"""
+        broad_args = test_impact.classify_file("src/cli/args.cpp", imap)
+        refined_args = test_impact.maybe_refine_match_with_diff(
+            "src/cli/args.cpp", broad_args, args_diff, imap)
+        assert refined_args.rule == "sam3_segment_sam_cli_usage"
+
+        main_diff = """
+diff --git a/src/cli/main.cpp b/src/cli/main.cpp
+@@ -1 +1 @@
++    trtmc::PromptedSegmentationResult result;
++    if (!args.prompt.empty()) {
++        result = pipeline->segment_prompted_text(image.pixels.data(), image.height, image.width,
++                                                 args.prompt);
++    } else {
++        result = pipeline->segment_prompted(image.pixels.data(), image.height, image.width,
++                                            args.point_x, args.point_y, args.is_foreground);
++    }
++        const auto box_offset = static_cast<std::size_t>(mask_idx) * 4U;
++        if (result.boxes.size() >= box_offset + 4U) {
++            std::ostringstream box_path;
++            box_path << out_dir << "/box_" << std::setw(3) << std::setfill('0') << mask_idx
++                     << ".txt";
++            std::ofstream box_out(box_path.str());
++            box_out << std::fixed << std::setprecision(6) << result.boxes[box_offset] << ' '
++                    << result.boxes[box_offset + 1U] << '\\n';
++        }
+"""
+        broad_main = test_impact.classify_file("src/cli/main.cpp", imap)
+        refined_main = test_impact.maybe_refine_match_with_diff(
+            "src/cli/main.cpp", broad_main, main_diff, imap)
+        assert refined_main.rule == "sam3_segment_sam_cli_runtime"
+        assert "sam3" in refined_main.models
+        assert "segformer-b0" in refined_main.models
+        assert "qwen3-0.6b" not in refined_main.models
+
+    def test_sam3_runtime_support_rules_refine_shared_cpp_diffs(self, imap):
+        """SAM3 config and BPE suffix support avoid all-model fallback."""
+        config_diff = """
+diff --git a/src/runtime/domains/perception/perception_types.h b/src/runtime/domains/perception/perception_types.h
+@@ -10 +10 @@ struct SamConfig {
+-    int32_t image_embedding_size{64};  // image_size / patch_size
++    int32_t image_embedding_size{64}; // image_size / patch_size
+@@ -12 +12 @@ struct SamConfig {
+-    int32_t num_mask_outputs{4};       // num_multimask + 1
++    int32_t num_mask_outputs{4}; // num_multimask + 1
+@@ -18,4 +18,4 @@ struct SamConfig {
+-    std::vector<float> point_embed_fg;           // foreground point [decoder_hidden_size]
+-    std::vector<float> point_embed_bg;           // background point [decoder_hidden_size]
+-    std::vector<float> not_a_point_embed;        // padding point [decoder_hidden_size]
+-    std::vector<float> shared_image_pe;          // [2, num_pos_feats] flattened
++    std::vector<float> point_embed_fg;    // foreground point [decoder_hidden_size]
++    std::vector<float> point_embed_bg;    // background point [decoder_hidden_size]
++    std::vector<float> not_a_point_embed; // padding point [decoder_hidden_size]
++    std::vector<float> shared_image_pe;   // [2, num_pos_feats] flattened
+@@ -25 +25 @@ struct SamResult {
+-    std::vector<float> masks;     // [num_masks, 256, 256]
++    std::vector<float> masks;      // [num_masks, 256, 256]
+@@ -31,0 +32,13 @@ struct SamResult {
++struct Sam3Config {
++    int32_t text_max_position_embeddings{32};
++    int32_t text_pad_token_id{1};
++    int32_t text_projection_dim{512};
++    int32_t image_size{1008};
++    int32_t low_res_mask_size{288};
++    int32_t num_queries{200};
++    float score_threshold{0.5F};
++    float mask_threshold{0.5F};
++    std::vector<float> image_mean{0.485F, 0.456F, 0.406F};
++    std::vector<float> image_std{0.229F, 0.224F, 0.225F};
++};
++
+@@ -43 +56 @@ struct SegmentationResult {
+-    std::vector<int32_t> class_map;  // [H, W] class indices
++    std::vector<int32_t> class_map; // [H, W] class indices
+"""
+        broad_config = test_impact.classify_file(
+            "src/runtime/domains/perception/perception_types.h", imap)
+        refined_config = test_impact.maybe_refine_match_with_diff(
+            "src/runtime/domains/perception/perception_types.h",
+            broad_config,
+            config_diff,
+            imap,
+        )
+        assert refined_config.rule == "sam3_perception_config"
+        assert "sam3" in refined_config.models
+        assert "qwen3-0.6b" not in refined_config.models
+
+        tokenizer_diff = """
+diff --git a/src/tokenizer/bpe_tokenizer.cpp b/src/tokenizer/bpe_tokenizer.cpp
+@@ -1 +1 @@
++            if (!chars.empty() && !mEndOfWordSuffix.empty()) {
++                chars.back() += mEndOfWordSuffix;
++            }
++        mEndOfWordSuffix = j["model"].value("end_of_word_suffix", "");
++    std::string mEndOfWordSuffix;
+"""
+        broad_tokenizer = test_impact.classify_file("src/tokenizer/bpe_tokenizer.cpp", imap)
+        refined_tokenizer = test_impact.maybe_refine_match_with_diff(
+            "src/tokenizer/bpe_tokenizer.cpp", broad_tokenizer, tokenizer_diff, imap)
+        assert refined_tokenizer.rule == "sam3_bpe_end_of_word_suffix"
+        assert refined_tokenizer.models == ["sam3"]
+
+    def test_sam3_harness_rules_refine_contract_and_reference_diffs(self, imap):
+        """SAM3 harness/reference additions stay scoped to the SAM3 model."""
+        contracts_diff = """
+diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
+@@ -1 +1 @@
++    PROMPTED_SEGMENTATION_SAM3 = "prompted_segmentation_sam3"
++    "sam3": ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value,
++    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: UserContract.PROMPTED_MASK.value,
++    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: ComparisonMode.MASK_OVERLAP.value,
+"""
+        broad_contracts = test_impact.classify_file("tests/e2e_harness/contracts.py", imap)
+        refined_contracts = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/contracts.py", broad_contracts, contracts_diff, imap)
+        assert refined_contracts.rule == "sam3_harness_contract"
+        assert refined_contracts.models == ["sam3"]
+
+        reference_diff = """
+diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+@@ -1 +1 @@
++        if case.reference_family == "prompted_segmentation_sam3" or case.family == "sam3":
++            return self._run_sam3_prompted_segmentation_ref(case, stage, ctx)
++    def _run_sam3_prompted_segmentation_ref(
++        output_path = str(Path(model_dir) / "hf_sam3.json")
++        masks_path = str(Path(model_dir) / "hf_sam3_masks.npy")
++        segmented_image_path = str(Path(model_dir) / "hf_sam3_segmented.png")
++        model_ref = _resolve_cached_model_ref(hf_id)
++        processor = Sam3Processor.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
++        model = Sam3Model.from_pretrained(model_ref, torch_dtype=torch.float32)
++        results = processor.post_process_instance_segmentation(outputs, threshold=0.5)
++        scores = results.get("scores", [])
++        boxes = results.get("boxes", [])
++        "reference_variant": "sam3_model_card_text_prompt",
++        return run_reference_subprocess(
++            command=[python, "-c", script],
++            output_readers=(
++                _json_output_reader(output_path),
++                _existing_path_reader(masks_path, "masks_path"),
++            ),
+"""
+        broad_reference = test_impact.classify_file(
+            "tests/e2e_harness/references/hf_transformers.py", imap)
+        refined_reference = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/references/hf_transformers.py",
+            broad_reference,
+            reference_diff,
+            imap,
+        )
+        assert refined_reference.rule == "harness_reference_sam3_prompted_segmentation"
+        assert refined_reference.models == ["sam3"]
 
     def test_harness_shared_fp8_scales_rule_refines_orchestrator_diff(self, imap):
         """Diff-only fp8_scales plumbing narrows orchestrator scope."""

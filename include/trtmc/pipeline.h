@@ -79,6 +79,7 @@ struct SegmentResult {
 struct PromptedSegmentationResult {
     std::vector<float> masks;      // [num_masks, H, W], logits after postprocess
     std::vector<float> iou_scores; // [num_masks]
+    std::vector<float> boxes;      // [num_masks, 4], xyxy absolute pixel coordinates
     int32_t num_masks{0};
     int32_t height{0};
     int32_t width{0};
@@ -306,6 +307,18 @@ class IPipeline {
         (void)is_foreground;
         throw std::runtime_error(std::string(pipeline_type()) +
                                  " does not support segment_prompted()");
+    }
+
+    virtual PromptedSegmentationResult segment_prompted_text(const float* image_pixels,
+                                                             int32_t image_height,
+                                                             int32_t image_width,
+                                                             const std::string& text_prompt) {
+        (void)image_pixels;
+        (void)image_height;
+        (void)image_width;
+        (void)text_prompt;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support segment_prompted_text()");
     }
 
     // -- Image classification --

@@ -75,6 +75,7 @@ _HF_ALLOW_PATTERNS = [
     "config.json",
     "generation_config.json",
     "preprocessor_config.json",
+    "processor_config.json",
     "model.safetensors",
     "model-*.safetensors",
     "model.safetensors-*.safetensors",
@@ -1207,7 +1208,8 @@ def build_bundle(
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     # Skip for non-text models (segmentation, audio) that don't use tokenizers.
     runtime_strategy = getattr(plugin, "runtime_strategy", "")
-    if runtime_strategy not in (
+    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", False))
+    if requires_tokenizer or runtime_strategy not in (
         "segmentation",
         "neural_operator",
         "object_detection",
@@ -1322,7 +1324,7 @@ def build_bundle(
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "chat_template.jinja", "vocab.json", "merges.txt",
                      "special_tokens_map.json", "tokenizer.model",
-                     "preprocessor_config.json"):
+                     "preprocessor_config.json", "processor_config.json"):
         file_path = model_dir_path / filename
         if file_path.exists():
             data = file_path.read_bytes()

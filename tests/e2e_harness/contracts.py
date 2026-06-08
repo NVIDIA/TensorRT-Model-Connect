@@ -115,6 +115,7 @@ class ReferenceFamily(enum.Enum):
     # --- Segmentation ---
     SEGMENTATION_SEGFORMER = "segmentation_segformer"
     PROMPTED_SEGMENTATION_SAM = "prompted_segmentation_sam"
+    PROMPTED_SEGMENTATION_SAM3 = "prompted_segmentation_sam3"
 
     # --- Image classification ---
     IMAGE_CLASSIFICATION = "image_classification"
@@ -826,6 +827,8 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "segformer-b0-ade": ReferenceFamily.SEGMENTATION_SEGFORMER.value,
     # 5.24 PROMPTED_SEGMENTATION_SAM
     "sam-vit-base": ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value,
+    # 5.24b PROMPTED_SEGMENTATION_SAM3
+    "sam3": ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value,
     # 5.24a IMAGE_CLASSIFICATION
     "timm-vit-base-p16-224-augreg-in21k-ft-in1k": ReferenceFamily.IMAGE_CLASSIFICATION.value,
     # 5.25 DIFFUSERS_IMAGE_GEN
@@ -890,6 +893,7 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.S2S_PERSONAPLEX.value: UserContract.SPEECH_RESPONSE.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: UserContract.SEGMENTATION_MASK.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
+    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: UserContract.PROMPTED_MASK.value,
     ReferenceFamily.IMAGE_CLASSIFICATION.value: UserContract.IMAGE_CLASSIFICATION.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: UserContract.DIFFUSION_IMAGE.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: UserContract.DIFFUSION_VIDEO.value,
@@ -929,6 +933,7 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.S2S_PERSONAPLEX.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
     ReferenceFamily.SEGMENTATION_SEGFORMER.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
+    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.IMAGE_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,

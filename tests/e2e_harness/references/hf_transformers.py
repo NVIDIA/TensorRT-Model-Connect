@@ -1959,6 +1959,9 @@ class HfTransformersReference:
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         """Run HF SAM model for prompted segmentation reference."""
+        if case.reference_family == "prompted_segmentation_sam3" or case.family == "sam3":
+            return self._run_sam3_prompted_segmentation_ref(case, stage, ctx)
+
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_sam.json")
@@ -2061,6 +2064,139 @@ class HfTransformersReference:
                 _existing_path_reader(segmented_image_path, "segmented_image_path"),
             ),
             failure_label="HF prompted segmentation",
+        )
+
+    def _run_sam3_prompted_segmentation_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF SAM3 model-card image PCS reference with a text prompt."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_sam3.json")
+        masks_path = str(Path(model_dir) / "hf_sam3_masks.npy")
+        segmented_image_path = str(Path(model_dir) / "hf_sam3_segmented.png")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        image_url = case.inputs.get("image_url", "")
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        prompt = (
+            case.inputs.get("text_prompt")
+            or case.inputs.get("prompt")
+            or case.metadata.get("text_prompt")
+            or "ear"
+        )
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import Sam3Model, Sam3Processor
+            from PIL import Image
+            import requests
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            image_path = {image_path!r}
+            image_url = {image_url!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+            masks_path = {masks_path!r}
+            segmented_image_path = {segmented_image_path!r}
+            prompt = {prompt!r}
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            processor = Sam3Processor.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            model = Sam3Model.from_pretrained(
+                model_ref, torch_dtype={torch_dtype_expr},
+                trust_remote_code=trust_remote_code).to(device)
+            model.eval()
+
+            if image_url:
+                image = Image.open(requests.get(image_url, stream=True).raw).convert("RGB")
+            else:
+                image = Image.open(image_path).convert("RGB")
+            w, h = image.size
+            inputs = processor(images=image, text=prompt, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            original_sizes = inputs.get("original_sizes")
+            if hasattr(original_sizes, "cpu"):
+                target_sizes = original_sizes.cpu().tolist()
+            else:
+                target_sizes = original_sizes
+            results = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                mask_threshold=0.5,
+                target_sizes=target_sizes,
+            )[0]
+
+            masks = results.get("masks")
+            if masks is None:
+                mask_np = np.zeros((0, h, w), dtype=np.uint8)
+            else:
+                mask_np = masks.cpu().numpy().astype(np.uint8)
+                if mask_np.ndim == 2:
+                    mask_np = mask_np[None, ...]
+            np.save(masks_path, mask_np)
+
+            scores = results.get("scores", [])
+            if hasattr(scores, "detach"):
+                scores = scores.detach().cpu().numpy().astype(float).tolist()
+            boxes = results.get("boxes", [])
+            if hasattr(boxes, "detach"):
+                boxes = boxes.detach().cpu().numpy().astype(float).tolist()
+
+            if mask_np.shape[0] > 0:
+                selected = int(np.argmax(scores)) if scores else 0
+                selected = min(selected, mask_np.shape[0] - 1)
+                overlay_mask = mask_np[selected].astype(bool)
+                image_arr = np.asarray(image, dtype=np.float32)
+                overlay = np.zeros_like(image_arr)
+                overlay[..., 0] = 255.0
+                overlay[..., 1] = 96.0
+                alpha = 0.55
+                image_arr[overlay_mask] = (
+                    image_arr[overlay_mask] * (1.0 - alpha)
+                    + overlay[overlay_mask] * alpha
+                )
+                Image.fromarray(np.clip(image_arr, 0, 255).astype(np.uint8)).save(
+                    segmented_image_path)
+
+            result = {{
+                "text_prompt": prompt,
+                "scores": scores,
+                "mask_scores": scores,
+                "boxes": boxes,
+                "num_masks": int(mask_np.shape[0]),
+                "mask_shape": list(mask_np.shape),
+                "segmented_image_path": segmented_image_path,
+                "reference_variant": "sam3_model_card_text_prompt",
+            }}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK sam3 prompt={{prompt!r}} masks={{mask_np.shape[0]}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=900,
+            label="hf_sam3_prompted_segmentation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(
+                _json_output_reader(output_path),
+                _existing_path_reader(masks_path, "masks_path"),
+                _existing_path_reader(segmented_image_path, "segmented_image_path"),
+            ),
+            failure_label="HF SAM3 prompted segmentation",
         )
 
 
