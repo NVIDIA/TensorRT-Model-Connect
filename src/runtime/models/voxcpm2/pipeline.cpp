@@ -103,6 +103,11 @@ OwnedStageTensor make_prompt_tensor(const std::string& prompt) {
     return tensor;
 }
 
+struct PreparedTextTokens {
+    OwnedStageTensor tensor;
+    std::size_t actual_count{0};
+};
+
 bool read_utf8_codepoint(const std::string& text, std::size_t& offset, uint32_t& codepoint,
                          std::string& bytes) {
     if (offset >= text.size())
@@ -210,7 +215,8 @@ int32_t resolve_voxcpm2_audio_start_token(const ITokenizer& tokenizer) {
     return token_id >= 0 ? token_id : kDefaultAudioStartToken;
 }
 
-OwnedStageTensor make_text_tokens_tensor(const std::string& prompt, const ITokenizer* tokenizer) {
+PreparedTextTokens make_text_tokens_tensor(const std::string& prompt, const ITokenizer* tokenizer,
+                                           int32_t max_text_steps) {
     if (tokenizer == nullptr) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: tokenizer.json is required to build text_tokens for TSLM");
@@ -221,19 +227,35 @@ OwnedStageTensor make_text_tokens_tensor(const std::string& prompt, const IToken
         throw std::runtime_error("VoxCPM2Pipeline: tokenizer returned no text tokens");
     }
 
-    OwnedStageTensor tensor;
-    tensor.shape = {static_cast<int64_t>(ids.size())};
-    tensor.dtype = DType::kInt32;
-    tensor.storage.resize(ids.size() * sizeof(int32_t));
-    std::memcpy(tensor.storage.data(), ids.data(), tensor.storage.size());
-    return tensor;
+    const auto requested_steps = static_cast<std::size_t>(std::max(max_text_steps, 0));
+    const auto padded_steps = requested_steps > 0 ? requested_steps : ids.size();
+    if (ids.size() > padded_steps) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: prompt token count " + std::to_string(ids.size()) +
+            " exceeds engine text step capacity " + std::to_string(padded_steps));
+    }
+
+    std::vector<int32_t> padded_ids(padded_steps, 0);
+    std::copy(ids.begin(), ids.end(), padded_ids.begin());
+
+    PreparedTextTokens prepared;
+    prepared.actual_count = ids.size();
+    prepared.tensor.shape = {static_cast<int64_t>(padded_steps)};
+    prepared.tensor.dtype = DType::kInt32;
+    prepared.tensor.storage.resize(padded_ids.size() * sizeof(int32_t));
+    std::memcpy(prepared.tensor.storage.data(), padded_ids.data(), prepared.tensor.storage.size());
+    return prepared;
 }
 
-OwnedStageTensor make_float_mask_tensor(std::size_t token_count, float value) {
+OwnedStageTensor make_float_mask_tensor(std::size_t token_count, std::size_t active_count,
+                                        float active_value) {
     OwnedStageTensor tensor;
     tensor.shape = {static_cast<int64_t>(token_count)};
     tensor.dtype = DType::kFloat32;
-    std::vector<float> values(token_count, value);
+    std::vector<float> values(token_count, 0.0F);
+    std::fill(values.begin(),
+              values.begin() + static_cast<std::ptrdiff_t>(std::min(token_count, active_count)),
+              active_value);
     tensor.storage.resize(values.size() * sizeof(float));
     if (!values.empty()) {
         std::memcpy(tensor.storage.data(), values.data(), tensor.storage.size());
@@ -488,11 +510,14 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const RuntimeScalarInputs controls(effective_plan.config);
     StageArtifacts artifacts;
     artifacts.emplace("text_utf8", make_prompt_tensor(prompt));
-    auto text_tokens = make_text_tokens_tensor(prompt, tokenizer_.get());
-    const auto text_token_count = static_cast<std::size_t>(text_tokens.shape.front());
-    artifacts.emplace("text_tokens", std::move(text_tokens));
-    artifacts.emplace("text_mask", make_float_mask_tensor(text_token_count, 1.0F));
-    artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0.0F));
+    auto text_tokens = make_text_tokens_tensor(prompt, tokenizer_.get(),
+                                               effective_plan.config.max_text_steps);
+    const auto text_token_count = static_cast<std::size_t>(text_tokens.tensor.shape.front());
+    const auto active_text_token_count = text_tokens.actual_count;
+    artifacts.emplace("text_tokens", std::move(text_tokens.tensor));
+    artifacts.emplace("text_mask", make_float_mask_tensor(text_token_count, active_text_token_count,
+                                                          1.0F));
+    artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
     artifacts.emplace("audio_feats",
                       make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
     OwnedStageTensor current = artifacts.at("audio_feats");

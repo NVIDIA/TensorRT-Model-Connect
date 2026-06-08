@@ -31,7 +31,8 @@ class VoxCPM2Plugin final : public IPipelinePlugin {
         auto components =
             runtime::builders::audio::load_voxcpm2_component_modules(ctx.backend, ctx.bundle, opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
-        const auto generation_cfg = make_voxcpm2_config(ctx.config_json, ctx.runtime_config);
+        const auto generation_cfg =
+            make_voxcpm2_config(ctx.config_json, ctx.runtime_config, ctx.config.max_cache_length);
         const auto generation_plan =
             runtime::builders::audio::make_voxcpm2_generation_plan(generation_cfg);
 

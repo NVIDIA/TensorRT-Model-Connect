@@ -42,11 +42,15 @@ float last_local_text_feature_value = 0.0F;
 float last_lm_hidden_value = 0.0F;
 float last_residual_hidden_value = 0.0F;
 int64_t last_text_token_count = 0;
+int64_t last_audio_feat_steps = 0;
 int32_t last_first_text_token = 0;
 int32_t last_second_text_token = 0;
 int32_t last_audio_start_token = 0;
 float last_text_mask_value = 0.0F;
 float last_audio_mask_value = 0.0F;
+std::vector<int32_t> last_text_tokens;
+std::vector<float> last_text_mask_values;
+std::vector<float> last_audio_mask_values;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
@@ -215,15 +219,28 @@ class FakeModule final : public trtmc::ITrtModule {
                     last_text_token_count =
                         token_it->second.shape.empty() ? 0 : token_it->second.shape.front();
                     const auto* token_data = static_cast<int32_t*>(token_it->second.data);
+                    last_text_tokens.assign(token_data, token_data + last_text_token_count);
                     if (last_text_token_count > 0) {
                         last_first_text_token = token_data[0];
                         last_audio_start_token = token_data[last_text_token_count - 1];
                     }
                     if (last_text_token_count > 1)
                         last_second_text_token = token_data[1];
-                    last_text_mask_value = *static_cast<float*>(text_mask_it->second.data);
-                    last_audio_mask_value = *static_cast<float*>(audio_mask_it->second.data);
+                    const auto* text_mask_data = static_cast<float*>(text_mask_it->second.data);
+                    const auto* audio_mask_data = static_cast<float*>(audio_mask_it->second.data);
+                    last_text_mask_values.assign(text_mask_data,
+                                                 text_mask_data + last_text_token_count);
+                    last_audio_mask_values.assign(audio_mask_data,
+                                                  audio_mask_data + last_text_token_count);
+                    last_text_mask_value = text_mask_data[0];
+                    last_audio_mask_value = audio_mask_data[0];
                 }
+            }
+        }
+        if (input_name_ == "audio_feats") {
+            if (const auto it = inputs.find("audio_feats"); it != inputs.end()) {
+                last_audio_feat_steps =
+                    it->second.shape.empty() ? 0 : it->second.shape.front();
             }
         }
         if (input_name_ != "local_text_features") {
@@ -397,11 +414,15 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_lm_hidden_value = 0.0F;
     last_residual_hidden_value = 0.0F;
     last_text_token_count = 0;
+    last_audio_feat_steps = 0;
     last_first_text_token = 0;
     last_second_text_token = 0;
     last_audio_start_token = 0;
     last_text_mask_value = 0.0F;
     last_audio_mask_value = 0.0F;
+    last_text_tokens.clear();
+    last_text_mask_values.clear();
+    last_audio_mask_values.clear();
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -461,6 +482,62 @@ void test_generate_audio_expands_voxcpm2_multichar_cjk_tokens() {
     check(last_second_text_token == 202, "voxcpm2 second CJK character id is preserved");
     check(last_audio_start_token == 101,
           "voxcpm2 resolves audio_start token through tokenizer");
+}
+
+void test_generate_audio_pads_text_tensors_to_engine_steps() {
+    trtmc::VoxCPM2Config cfg;
+    cfg.max_text_steps = 6;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    tslm_text_binding_hits = 0;
+    last_text_token_count = 0;
+    last_audio_feat_steps = 0;
+    last_text_tokens.clear();
+    last_text_mask_values.clear();
+    last_audio_mask_values.clear();
+
+    trtmc::GenerateConfig gen_cfg;
+    (void)pipeline.generate_audio("abc", gen_cfg);
+
+    check(tslm_text_binding_hits == 1, "voxcpm2 forwards padded text tensors to TSLM");
+    check(last_text_token_count == 6, "voxcpm2 pads text_tokens to engine text steps");
+    check(last_audio_feat_steps == 6, "voxcpm2 pads audio_feats to engine text steps");
+    check(last_text_tokens.size() == 6, "voxcpm2 captures padded token buffer");
+    check(last_text_tokens[0] == static_cast<int32_t>('a'),
+          "voxcpm2 preserves first prompt token before padding");
+    check(last_text_tokens[3] == 101, "voxcpm2 places audio_start before token padding");
+    check(last_text_tokens[4] == 0 && last_text_tokens[5] == 0,
+          "voxcpm2 zero-pads unused token slots");
+    check(last_text_mask_values.size() == 6, "voxcpm2 captures padded text mask");
+    check(last_text_mask_values[0] == 1.0F && last_text_mask_values[3] == 1.0F,
+          "voxcpm2 marks active prompt/audio_start tokens as text");
+    check(last_text_mask_values[4] == 0.0F && last_text_mask_values[5] == 0.0F,
+          "voxcpm2 clears padded text mask slots");
+    check(last_audio_mask_values.size() == 6, "voxcpm2 captures padded audio mask");
+    check(std::all_of(last_audio_mask_values.begin(), last_audio_mask_values.end(),
+                      [](float value) { return value == 0.0F; }),
+          "voxcpm2 zero-shot audio mask stays empty across padding");
+}
+
+void test_generate_audio_rejects_prompt_exceeding_engine_steps() {
+    trtmc::VoxCPM2Config cfg;
+    cfg.max_text_steps = 2;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(), plan, "openbmb/VoxCPM2",
+                                    make_fake_tokenizer());
+
+    try {
+        trtmc::GenerateConfig gen_cfg;
+        (void)pipeline.generate_audio("abc", gen_cfg);
+        check(false, "voxcpm2 rejects prompt longer than engine text steps");
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        check(message.find("prompt token count 4 exceeds engine text step capacity 2") !=
+                  std::string::npos,
+              "voxcpm2 reports prompt length and engine text capacity");
+    }
 }
 
 void test_construct_reports_missing_stage_binding() {
@@ -547,6 +624,8 @@ int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
     test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
+    test_generate_audio_pads_text_tensors_to_engine_steps();
+    test_generate_audio_rejects_prompt_exceeding_engine_steps();
     test_construct_reports_missing_stage_binding();
     test_construct_reports_missing_required_side_binding();
     test_generate_audio_rejects_stage_tensor_contract_mismatch();

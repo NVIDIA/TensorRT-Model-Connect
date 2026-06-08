@@ -13,6 +13,7 @@ namespace trtmc {
 struct VoxCPM2Config {
     int32_t sample_rate{48000};
     int32_t reference_sample_rate{16000};
+    int32_t max_text_steps{0};
     float cfg_value{2.0F};
     int32_t inference_timesteps{10};
     bool normalize{true};
@@ -30,6 +31,7 @@ inline VoxCPM2Config make_voxcpm2_config_from_json(const std::string& config_jso
     cfg.sample_rate = extract_json_int(config_json, "sample_rate", cfg.sample_rate);
     cfg.reference_sample_rate =
         extract_json_int(config_json, "reference_sample_rate", cfg.reference_sample_rate);
+    cfg.max_text_steps = extract_json_int(config_json, "voxcpm2_max_text_steps", cfg.max_text_steps);
     cfg.cfg_value = extract_json_float(config_json, "voxcpm2_cfg_value", cfg.cfg_value);
     cfg.inference_timesteps =
         extract_json_int(config_json, "voxcpm2_inference_timesteps", cfg.inference_timesteps);
@@ -72,8 +74,11 @@ inline void apply_voxcpm2_registry_overlay(VoxCPM2Config& voxcpm2_cfg,
 }
 
 inline VoxCPM2Config make_voxcpm2_config(const std::string& config_json,
-                                         const config::ConfigBundle* runtime_config) {
+                                         const config::ConfigBundle* runtime_config,
+                                         int32_t max_text_steps_override = 0) {
     auto cfg = make_voxcpm2_config_from_json(config_json);
+    if (max_text_steps_override > 0)
+        cfg.max_text_steps = max_text_steps_override;
     apply_voxcpm2_registry_overlay(cfg, runtime_config);
     return cfg;
 }
@@ -81,7 +86,8 @@ inline VoxCPM2Config make_voxcpm2_config(const std::string& config_json,
 inline std::string describe_voxcpm2_config(const VoxCPM2Config& cfg) {
     std::ostringstream os;
     os << "sample_rate=" << cfg.sample_rate
-       << ", reference_sample_rate=" << cfg.reference_sample_rate << ", cfg_value=" << cfg.cfg_value
+       << ", reference_sample_rate=" << cfg.reference_sample_rate
+       << ", max_text_steps=" << cfg.max_text_steps << ", cfg_value=" << cfg.cfg_value
        << ", inference_timesteps=" << cfg.inference_timesteps
        << ", normalize=" << (cfg.normalize ? "true" : "false")
        << ", denoise=" << (cfg.denoise ? "true" : "false")
