@@ -132,6 +132,7 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "flux_pipeline": ["diffusion_flux"],
     "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
+    "cosmos3_pipeline": ["diffusion_cosmos3"],
     "pixart_pipeline": ["diffusion_pixart"],
     "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
