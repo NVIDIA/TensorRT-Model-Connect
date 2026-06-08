@@ -274,6 +274,30 @@ def test_voxcpm2_raw_checkpoint_sources_are_recorded(tmp_path):
     assert sources["audiovae"].asset_files == ()
 
 
+def test_voxcpm2_raw_checkpoint_requires_tokenizer_json_for_tslm(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
+    (tmp_path / "tokenizer.json").unlink()
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    sources = weights["_voxcpm2_raw_component_sources"]
+
+    assert tuple(sources) == ("locenc", "ralm", "locdit", "audiovae")
+    assert "tslm" not in sources
+
+    with pytest.raises(NotImplementedError) as error:
+        plugin.build_engine(cfg, weights, max_cache_length=16)
+
+    message = str(error.value)
+    assert "missing artifacts for tslm" in message
+    assert "Raw checkpoint sources discovered: locenc" in message
+    assert "tslm(" not in message
+    assert (
+        "The TSLM raw source requires tokenizer.json so the native "
+        "VoxCPM2 runtime can tokenize the prompt."
+    ) in message
+
+
 def test_voxcpm2_component_specs_include_tensor_contracts():
     from tensorrt_model_connect.families.voxcpm2 import component_builders
 

@@ -79,6 +79,7 @@ _VOXCPM2_TOKENIZER_ASSET_FILES = (
     "special_tokens_map.json",
 )
 _VOXCPM2_TEXT_COMPONENTS = {"tslm"}
+_VOXCPM2_REQUIRED_TEXT_ASSET_FILES = ("tokenizer.json",)
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,11 @@ def _find_raw_component_sources(
         weight_files = audio_vae_files if component == "audiovae" else safetensors_files
         if not weight_files:
             continue
+        asset_files = tokenizer_assets if component in _VOXCPM2_TEXT_COMPONENTS else ()
+        if component in _VOXCPM2_TEXT_COMPONENTS and not all(
+            filename in asset_files for filename in _VOXCPM2_REQUIRED_TEXT_ASSET_FILES
+        ):
+            continue
 
         sources[component] = VoxCPM2RawComponentSource(
             config_keys=config_keys,
@@ -199,7 +205,7 @@ def _find_raw_component_sources(
             },
             weight_files=weight_files,
             state_dict_prefixes=_VOXCPM2_RAW_COMPONENT_STATE_PREFIXES[component],
-            asset_files=tokenizer_assets if component in _VOXCPM2_TEXT_COMPONENTS else (),
+            asset_files=asset_files,
         )
     return sources
 
@@ -305,11 +311,17 @@ class VoxCPM2Plugin:
             component
             for component in _VOXCPM2_COMPONENTS
             if component not in prebuilt_plans
+            and not (isinstance(raw_sources, dict) and component in raw_sources)
         ]
         expected = {
             component: list(_VOXCPM2_PREBUILT_ENGINE_FILENAMES[component])
             for component in missing
         }
+        raw_sources_desc = (
+            _format_raw_component_sources(raw_sources)
+            if isinstance(raw_sources, dict) and raw_sources
+            else "<none>"
+        )
         raise NotImplementedError(
             "VoxCPM2 TRT export is not implemented yet. Full support requires "
             "native component plans for LocEnc, TSLM, RALM, LocDiT, and "
@@ -318,7 +330,10 @@ class VoxCPM2Plugin:
             "component plans and can build LocEnc, TSLM, RALM, LocDiT, and AudioVAE from raw "
             "checkpoint sources, but is missing artifacts for "
             f"{', '.join(missing)} under {model_dir}. Expected filenames: "
-            f"{expected}."
+            f"{expected}. Raw checkpoint sources discovered: "
+            f"{raw_sources_desc}. "
+            "The TSLM raw source requires tokenizer.json so the native "
+            "VoxCPM2 runtime can tokenize the prompt."
         )
 
     def get_audio_config(self, config: ModelConfig) -> dict:
