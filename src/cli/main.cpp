@@ -963,6 +963,15 @@ int cmd_generate_audio(const CliArgs& args) {
     cfg.num_steps = args.num_steps;
     cfg.cfg_scale = args.cfg_scale;
     cfg.seed = args.seed;
+    if (!args.initial_latents_raw.empty()) {
+        std::string error;
+        auto latents = read_float32_raw_file(args.initial_latents_raw, error);
+        if (!latents) {
+            std::cerr << "Error: failed to read --initial-latents-raw: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.initial_latents = std::move(*latents);
+    }
 
     if (args.stream) {
         // Streaming mode: write raw PCM float32 to output file (or stdout

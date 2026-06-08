@@ -59,6 +59,7 @@ std::vector<int32_t> last_text_tokens;
 std::vector<float> last_text_mask_values;
 std::vector<float> last_audio_mask_values;
 std::vector<float> locdit_feat_cond_values;
+std::vector<float> locdit_noise_values;
 std::vector<float> locenc_audio_feat_values;
 std::vector<int64_t> tslm_text_token_counts;
 std::vector<int32_t> tslm_audio_start_values;
@@ -71,6 +72,7 @@ trtmc::DType last_text_mask_dtype = trtmc::DType::kFloat32;
 trtmc::DType last_audio_mask_dtype = trtmc::DType::kFloat32;
 trtmc::DType last_audio_feats_dtype = trtmc::DType::kFloat32;
 trtmc::DType last_feat_cond_dtype = trtmc::DType::kFloat32;
+trtmc::DType last_locdit_noise_dtype = trtmc::DType::kFloat32;
 std::string last_tokenizer_input;
 int tslm_cache_binding_hits = 0;
 int ralm_cache_binding_hits = 0;
@@ -381,6 +383,10 @@ class FakeModule final : public trtmc::ITrtModule {
                 }
             }
         }
+        if (const auto noise_it = inputs.find("locdit_noise"); noise_it != inputs.end()) {
+            last_locdit_noise_dtype = noise_it->second.dtype;
+            locdit_noise_values.push_back(tensor_float_at(noise_it->second, 0));
+        }
         if (input_name_ == "audio_vae_latents") {
             if (const auto it = inputs.find("audio_vae_latents"); it != inputs.end()) {
                 last_audio_vae_latent_rows =
@@ -509,7 +515,8 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
     std::size_t latent_patch_count = 2, bool cache_bound_lms = false,
     bool audio_vae_output0 = false, bool stop_logits_stop = false,
     bool padded_stop_logits = false,
-    trtmc::DType floating_input_dtype = trtmc::DType::kFloat32) {
+    trtmc::DType floating_input_dtype = trtmc::DType::kFloat32,
+    bool locdit_noise_input = false) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
@@ -537,6 +544,9 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
             audio_vae_output0 && i == 4 ? "output0" : stage.output_artifact;
         if (i == 1 || i == 2) {
             extra_inputs.push_back("position_id");
+        }
+        if (i == 3 && locdit_noise_input) {
+            extra_inputs.push_back("locdit_noise");
         }
         std::unordered_map<std::string, trtmc::DType> tensor_dtypes;
         if (floating_input_dtype != trtmc::DType::kFloat32) {
@@ -658,6 +668,7 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     last_audio_mask_values.clear();
     last_audio_vae_latent_values.clear();
     locdit_feat_cond_values.clear();
+    locdit_noise_values.clear();
     locenc_audio_feat_values.clear();
     tslm_text_token_counts.clear();
     tslm_audio_start_values.clear();
@@ -906,6 +917,49 @@ void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
           "voxcpm2 preserves generated-step audio mask value after dtype conversion");
 }
 
+void test_generate_audio_forwards_shared_locdit_noise_latents() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(
+        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16, true),
+        plan, "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    locdit_noise_values.clear();
+    last_locdit_noise_dtype = trtmc::DType::kFloat32;
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    gen_cfg.initial_latents.assign(2 * 4 * 64, 0.0F);
+    gen_cfg.initial_latents[0] = 0.125F;
+    gen_cfg.initial_latents[4 * 64] = -0.25F;
+
+    (void)pipeline.generate_audio("ab", gen_cfg);
+
+    check(last_locdit_noise_dtype == trtmc::DType::kBFloat16,
+          "voxcpm2 converts shared LocDiT noise to engine input dtype");
+    check(locdit_noise_values == std::vector<float>({0.125F, -0.25F}),
+          "voxcpm2 forwards one shared LocDiT noise patch per autoregressive step");
+}
+
+void test_generate_audio_requires_shared_locdit_noise_for_noise_bound_engine() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(2, false, false, false, false,
+                                                             trtmc::DType::kFloat32, true),
+                                    plan, "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    try {
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 1;
+        (void)pipeline.generate_audio("ab", gen_cfg);
+        check(false, "voxcpm2 requires explicit LocDiT noise for noise-bound engines");
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        check(message.find("--initial-latents-raw") != std::string::npos,
+              "voxcpm2 missing LocDiT noise error points to raw latent input");
+    }
+}
+
 void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
@@ -1146,6 +1200,8 @@ int main() {
     test_generate_audio_uses_current_row_for_padded_stop_logits();
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_converts_float_artifacts_to_engine_input_dtype();
+    test_generate_audio_forwards_shared_locdit_noise_latents();
+    test_generate_audio_requires_shared_locdit_noise_for_noise_bound_engine();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer();
     test_generate_audio_can_disable_voxcpm2_text_normalization();

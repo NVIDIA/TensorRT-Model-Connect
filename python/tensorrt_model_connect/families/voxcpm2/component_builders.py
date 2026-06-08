@@ -267,6 +267,12 @@ VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
         2,
         ("patch_size", "feat_dim"),
     ),
+    "locdit_noise": VoxCPM2TensorSpec(
+        "locdit_noise",
+        ("float32", "bfloat16"),
+        2,
+        ("patch_size", "feat_dim"),
+    ),
     "waveform_f32": VoxCPM2TensorSpec(
         "waveform_f32",
         ("float32",),
@@ -379,7 +385,14 @@ VOXCPM2_UPSTREAM_HANDOFF: Mapping[
                 ("lm_to_dit_proj.", "res_to_dit_proj."),
             ),
         ),
-        ("lm_hidden", "residual_hidden", "feat_cond", "cfg_value", "inference_timesteps"),
+        (
+            "lm_hidden",
+            "residual_hidden",
+            "feat_cond",
+            "locdit_noise",
+            "cfg_value",
+            "inference_timesteps",
+        ),
         ("audio_vae_latents",),
     ),
     "audiovae": (
@@ -804,17 +817,22 @@ def _patch_unified_cfm_for_onnx_export(torch_module: Any) -> None:
         n_timesteps: int,
         patch_size: int,
         cond: Any,
+        noise: Any | None = None,
         temperature: float = 1.0,
         cfg_value: Any = 1.0,
         sway_sampling_coef: float = 1.0,
         use_cfg_zero_star: bool = True,
     ) -> Any:
         batch, _ = mu.shape
-        noise = torch_module.randn(
-            (batch, self.in_channels, patch_size),
-            device=mu.device,
-            dtype=torch_module.float32,
-        ).to(dtype=mu.dtype)
+        if noise is None:
+            noise = torch_module.randn(
+                (batch, self.in_channels, patch_size),
+                device=mu.device,
+                dtype=torch_module.float32,
+            )
+        else:
+            noise = noise.to(device=mu.device, dtype=torch_module.float32)
+        noise = noise.to(dtype=mu.dtype)
         z = noise * mu.new_tensor(float(temperature))
 
         base_t = torch_module.linspace(
@@ -1253,6 +1271,7 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             residual_hidden: Any,
             lm_hidden: Any,
             feat_cond: Any,
+            locdit_noise: Any,
             cfg_value: Any,
             inference_timesteps: Any,
         ) -> Any:
@@ -1267,11 +1286,19 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             )
             cond = feat_cond.to(dtype=compute_dtype).transpose(0, 1).contiguous().unsqueeze(0)
             cond = cond.repeat(dit_hidden.size(0), 1, 1)
+            noise = (
+                locdit_noise.to(dtype=compute_dtype)
+                .transpose(0, 1)
+                .contiguous()
+                .unsqueeze(0)
+            )
+            noise = noise.repeat(dit_hidden.size(0), 1, 1)
             cfg = cfg_value.reshape(()) if getattr(cfg_value, "ndim", 0) else cfg_value
             latents = self.feat_decoder(
                 mu=dit_hidden,
                 patch_size=patch_size,
                 cond=cond,
+                noise=noise,
                 n_timesteps=self.default_inference_timesteps,
                 cfg_value=cfg,
             )
@@ -1290,6 +1317,7 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     example_args = (
         torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
         torch.zeros((text_steps, lm_hidden_size), dtype=compute_dtype),
+        torch.zeros((patch_size, feat_dim), dtype=compute_dtype),
         torch.zeros((patch_size, feat_dim), dtype=compute_dtype),
         torch.tensor([float(_raw_config_value(ctx, "cfg_value", 2.0))], dtype=torch.float32),
         torch.tensor([_locdit_export_timesteps(ctx)], dtype=torch.int32),
@@ -1483,6 +1511,7 @@ def _compile_voxcpm2_locdit_onnx(
             "residual_hidden",
             "lm_hidden",
             "feat_cond",
+            "locdit_noise",
             "cfg_value",
             "inference_timesteps",
         ],

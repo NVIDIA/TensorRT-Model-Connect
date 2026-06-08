@@ -441,6 +441,43 @@ OwnedStageTensor make_initial_feat_cond_tensor(const VoxCPM2Config& cfg) {
     return tensor;
 }
 
+OwnedStageTensor make_locdit_noise_tensor(const GenerateConfig& gen_cfg, std::size_t step,
+                                          const VoxCPM2Config& cfg) {
+    if (cfg.patch_size <= 0 || cfg.feat_dim <= 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: patch_size and feat_dim must be positive");
+    }
+    const auto patch_values =
+        static_cast<std::size_t>(cfg.patch_size) * static_cast<std::size_t>(cfg.feat_dim);
+    if (gen_cfg.initial_latents.empty()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: LocDiT engine requires explicit locdit_noise; pass "
+            "--initial-latents-raw with float32 values laid out as "
+            "[steps, patch_size, feat_dim]");
+    }
+    if (gen_cfg.initial_latents.size() % patch_values != 0) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: --initial-latents-raw element count " +
+            std::to_string(gen_cfg.initial_latents.size()) +
+            " is not divisible by one LocDiT noise patch (" +
+            std::to_string(patch_values) + " values)");
+    }
+    const auto available_steps = gen_cfg.initial_latents.size() / patch_values;
+    if (step >= available_steps) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: --initial-latents-raw provides " +
+            std::to_string(available_steps) + " LocDiT noise patch(es), but generation needs step " +
+            std::to_string(step));
+    }
+
+    OwnedStageTensor tensor;
+    tensor.shape = {cfg.patch_size, cfg.feat_dim};
+    tensor.dtype = DType::kFloat32;
+    tensor.storage.resize(patch_values * sizeof(float));
+    const auto* begin = gen_cfg.initial_latents.data() + step * patch_values;
+    std::memcpy(tensor.storage.data(), begin, tensor.storage.size());
+    return tensor;
+}
+
 OwnedStageTensor make_int32_scalar_tensor(int32_t value) {
     OwnedStageTensor tensor;
     tensor.shape = {1};
@@ -1321,11 +1358,16 @@ OwnedStageTensor run_locdit_autoregressive(
     const std::vector<audio::VoxCPM2LoadedComponent>& components,
     const audio::VoxCPM2GenerationPlan& plan, StageArtifacts& artifacts,
     const RuntimeScalarInputs& controls, std::size_t generation_steps,
-    std::size_t active_text_token_count, const VoxCPM2Config& cfg) {
+    std::size_t active_text_token_count, const VoxCPM2Config& cfg,
+    const GenerateConfig& gen_cfg) {
     OwnedStageTensor generated_latents;
     const auto& component = components[3];
     const auto& stage = plan.stages[3];
+    const bool locdit_noise_bound = component.module->has_input("locdit_noise");
     for (std::size_t step = 0; step < generation_steps; ++step) {
+        if (locdit_noise_bound) {
+            artifacts["locdit_noise"] = make_locdit_noise_tensor(gen_cfg, step, cfg);
+        }
         const auto locdit_output = run_stage(component, stage, artifacts, controls);
         auto generated_patch = extract_locdit_patch(locdit_output, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
@@ -1453,7 +1495,7 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
                              lm_cache_mode_enabled(components_));
     current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
                                         generation_steps, active_text_token_count,
-                                        effective_plan.config);
+                                        effective_plan.config, cfg);
     current = run_stage(components_[4], effective_plan.stages[4], artifacts, controls);
     current = trim_audio_vae_waveform_to_latents(std::move(current),
                                                  artifacts.at("audio_vae_latents"),

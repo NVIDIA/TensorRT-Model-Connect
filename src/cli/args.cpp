@@ -82,7 +82,7 @@ void print_usage() {
            "[--score-threshold F]\n"
            "  trtmc generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
            "[--max-new-tokens N] [--num-steps N] [--cfg-scale S] [--seed N] "
-           "[--hf-python PATH]\n"
+           "[--initial-latents-raw PATH] [--hf-python PATH]\n"
            "  trtmc serve-audio     <bundle.trtfb> [--chunk-frames N] [--max-new-tokens N] "
            "[--hf-python PATH]\n"
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "

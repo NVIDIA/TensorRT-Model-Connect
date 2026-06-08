@@ -92,6 +92,15 @@ class VoxCPMReference:
             from voxcpm import VoxCPM
 
             model = VoxCPM.from_pretrained(%(model_id)r)
+            if seed >= 0:
+                np.random.seed(seed)
+                try:
+                    import torch
+                    torch.manual_seed(seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(seed)
+                except Exception:
+                    pass
             wav = model.generate(
                 text=%(prompt)r,
                 prompt_wav_path=%(prompt_wav_path)r,
@@ -117,6 +126,7 @@ class VoxCPMReference:
                 "wav_path": %(wav_path)r,
                 "cfg_value": %(cfg_value)r,
                 "inference_timesteps": %(inference_timesteps)d,
+                "seed": seed,
             }
             with open(%(json_path)r, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, sort_keys=True)

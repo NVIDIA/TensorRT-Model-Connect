@@ -150,6 +150,12 @@ void test_inspect_and_config_flags() {
 }
 
 void test_audio_and_solve_flags() {
+    auto generate_audio =
+        parse({"trtmc", "generate-audio", "bundle.trtfb", "--prompt", "hello",
+               "--initial-latents-raw", "voxcpm2_noise.raw"});
+    check(generate_audio.initial_latents_raw == "voxcpm2_noise.raw",
+          "generate-audio shared latents");
+
     auto transcribe =
         parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "input.wav", "--stream",
                "--chunk-ms", "80", "--att-context-size", "5,2", "--pad-and-drop-preencoded"});

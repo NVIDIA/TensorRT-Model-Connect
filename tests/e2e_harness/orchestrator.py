@@ -875,6 +875,12 @@ def _build_repro_commands(
             seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed"))
             if seed is not None and int(seed) >= 0:
                 infer_parts.extend(["--seed", str(seed)])
+            if case.family == "voxcpm2" and seed is not None and int(seed) >= 0:
+                noise_path = (
+                    Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "locdit_noise.raw"
+                    if ctx.artifacts_dir else Path("/tmp/trtmc_voxcpm2_noise.raw")
+                )
+                infer_parts.extend(["--initial-latents-raw", str(noise_path)])
             if "max_new_tokens" in case.inputs and int(case.inputs["max_new_tokens"]) > 0:
                 infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
         elif task_strategy == "prompted_segmentation":
@@ -984,6 +990,8 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
     retry_badcase_ratio_threshold = float(
         case.inputs.get("retry_badcase_ratio_threshold", 6.0)
     )
+    seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed", -1))
+    seed = int(seed) if seed is not None else -1
 
     script = textwrap.dedent(
         f"""\
@@ -995,7 +1003,26 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
         import soundfile as sf
         from voxcpm import VoxCPM
 
+        seed = {seed}
+        if seed >= 0:
+            np.random.seed(seed)
+            try:
+                import torch
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+            except Exception:
+                pass
         model = VoxCPM.from_pretrained({case.hf_id!r})
+        if seed >= 0:
+            np.random.seed(seed)
+            try:
+                import torch
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+            except Exception:
+                pass
         wav = model.generate(
             text={prompt!r},
             prompt_wav_path={prompt_wav_path!r},
@@ -1023,6 +1050,7 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
             "num_samples": int(audio.size),
             "rms": rms,
             "sample_rate": sample_rate,
+            "seed": seed,
             "wav_path": str(wav_path),
         }}
         json_path = Path({str(json_path)!r})

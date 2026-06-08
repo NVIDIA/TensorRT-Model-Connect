@@ -24,7 +24,8 @@
     "denoise": true,
     "retry_badcase": true,
     "retry_badcase_max_times": 3,
-    "retry_badcase_ratio_threshold": 6.0
+    "retry_badcase_ratio_threshold": 6.0,
+    "seed": 42
   },
   "runtime_config": {
     "audio_voxcpm2": {
@@ -34,7 +35,8 @@
       "denoise": true,
       "retry_badcase": true,
       "retry_badcase_max_times": 3,
-      "retry_badcase_ratio_threshold": 6.0
+      "retry_badcase_ratio_threshold": 6.0,
+      "seed": 42
     }
   },
   "preflight_requirements": [

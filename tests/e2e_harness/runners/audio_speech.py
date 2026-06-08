@@ -19,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -141,6 +142,85 @@ def _read_wav_rms(path: str) -> float:
     if len(samples) == 0:
         return 0.0
     return float(np.sqrt(np.mean(samples ** 2)))
+
+
+def _voxcpm2_locdit_noise_path(case: E2ECase, ctx: RunContext) -> str:
+    if ctx.artifacts_dir:
+        base_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+    else:
+        base_dir = Path(tempfile.gettempdir()) / "trtmc_voxcpm2_noise" / case.name
+    return str(base_dir / "locdit_noise.raw")
+
+
+def _ensure_voxcpm2_locdit_noise(case: E2ECase, ctx: RunContext) -> str | None:
+    if case.family != "voxcpm2":
+        return None
+
+    output_path = _voxcpm2_locdit_noise_path(case, ctx)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.exists(output_path):
+        return output_path
+
+    seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed"))
+    if seed is None:
+        return None
+    seed = int(seed)
+    if seed < 0:
+        return None
+
+    max_tokens = int(case.inputs.get("max_new_tokens", 0) or 0)
+    noise_steps = int(case.inputs.get("locdit_noise_steps", max_tokens if max_tokens > 0 else 2000))
+    patch_size = int(case.inputs.get("voxcpm2_patch_size", 4))
+    feat_dim = int(case.inputs.get("voxcpm2_feat_dim", 64))
+    precision = str(case.metadata.get("precision", "bf16")).lower()
+    dtype_name = "bfloat16" if precision in {"bf16", "bfloat16"} else "float32"
+    if precision in {"fp16", "float16", "half"}:
+        dtype_name = "float16"
+
+    script = textwrap.dedent(
+        f"""\
+        from pathlib import Path
+        import numpy as np
+        import torch
+
+        seed = {seed}
+        steps = {noise_steps}
+        patch_size = {patch_size}
+        feat_dim = {feat_dim}
+        out = Path({output_path!r})
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.{dtype_name} if device == "cuda" else torch.float32
+        generator = torch.Generator(device=device).manual_seed(seed)
+        chunks = []
+        for _ in range(steps):
+            noise = torch.randn(
+                (1, feat_dim, patch_size),
+                generator=generator,
+                device=device,
+                dtype=dtype,
+            )
+            chunks.append(noise.transpose(1, 2).contiguous())
+        raw = torch.cat(chunks, dim=0).to(torch.float32).cpu().numpy().astype("<f4", copy=False)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        raw.tofile(out)
+        print(str(out))
+        """
+    )
+
+    python = ctx.runtime_python_path() or ctx.reference_python_path() or "python"
+    result = subprocess.run(
+        [python, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "LD_LIBRARY_PATH": _build_ld_library_path(ctx)},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "failed to create VoxCPM2 shared LocDiT noise: "
+            + (result.stderr or result.stdout or "").strip()
+        )
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +398,9 @@ class TextToAudioRunner:
             seed = runtime_config_get(case, "audio_voxcpm2.seed", case.inputs.get("seed"))
             if seed is not None and int(seed) >= 0:
                 cmd.extend(["--seed", str(seed)])
+            locdit_noise_raw = _ensure_voxcpm2_locdit_noise(case, ctx)
+            if locdit_noise_raw:
+                cmd.extend(["--initial-latents-raw", locdit_noise_raw])
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
             bark_seed = runtime_config_get(case, "audio_bark.seed")
             if case.family == "bark" and bark_seed is None:
@@ -359,6 +442,8 @@ class TextToAudioRunner:
             }
             if case.family == "bark" and bark_seed is not None:
                 data["trt_seed"] = str(bark_seed)
+            if locdit_noise_raw:
+                data["locdit_noise_raw"] = locdit_noise_raw
             if stderr_log:
                 data["stderr_log"] = stderr_log
 

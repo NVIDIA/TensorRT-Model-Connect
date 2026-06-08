@@ -368,6 +368,7 @@ def test_voxcpm2_component_specs_include_upstream_handoff_metadata():
         "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)",
     ]
     assert specs["locdit"].required_side_inputs == ("lm_hidden", "feat_cond")
+    assert "locdit_noise" in specs["locdit"].upstream_inputs
     assert specs["locdit"].required_control_inputs == ("cfg_value", "inference_timesteps")
     assert specs["audiovae"].upstream_inputs == ("audio_vae_latents",)
     assert specs["audiovae"].upstream_outputs == ("waveform_f32",)
@@ -407,7 +408,7 @@ def test_voxcpm2_raw_checkpoint_reports_native_builder_gap(tmp_path, monkeypatch
     assert "Upstream handoff:" in message
     assert "voxcpm.modules.locdit.UnifiedCFM(feat_decoder.)" in message
     assert "torch.nn.Linear(lm_to_dit_proj., res_to_dit_proj.)" in message
-    assert "runtime inputs: lm_hidden, residual_hidden, feat_cond" in message
+    assert "runtime inputs: lm_hidden, residual_hidden, feat_cond, locdit_noise" in message
     assert "runtime outputs: audio_vae_latents" in message
     assert "required_side=text_tokens,text_mask,audio_mask" in message
     assert "Runtime binding contract:" in message
@@ -789,13 +790,22 @@ def test_voxcpm2_locdit_builder_exports_named_trt_engine(tmp_path, monkeypatch):
 
     assert sections["locdit_engine_plan"] == b"LOCDIT-TRT"
     assert captured["verbose"] is True
-    residual_hidden, lm_hidden, feat_cond, cfg_value, inference_timesteps = captured["example_args"]
+    (
+        residual_hidden,
+        lm_hidden,
+        feat_cond,
+        locdit_noise,
+        cfg_value,
+        inference_timesteps,
+    ) = captured["example_args"]
     assert residual_hidden.shape == (1, 2048)
     assert residual_hidden.dtype == "bf16"
     assert lm_hidden.shape == (1, 2048)
     assert lm_hidden.dtype == "bf16"
     assert feat_cond.shape == (4, 64)
     assert feat_cond.dtype == "bf16"
+    assert locdit_noise.shape == (4, 64)
+    assert locdit_noise.dtype == "bf16"
     assert cfg_value.shape == (1,)
     assert cfg_value.dtype == "fp32"
     assert inference_timesteps.shape == (1,)
@@ -1423,6 +1433,7 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
         "lm_hidden",
         "residual_hidden",
         "feat_cond",
+        "locdit_noise",
         "cfg_value",
         "inference_timesteps",
     )
