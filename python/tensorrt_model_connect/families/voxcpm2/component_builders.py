@@ -8,6 +8,7 @@ next to the Python build surface.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -582,6 +583,8 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
         return
 
     attention_cls = getattr(minicpm_model, "MiniCPMAttention", None)
+    decoder_layer_cls = getattr(minicpm_model, "MiniCPMDecoderLayer", None)
+    model_cls = getattr(minicpm_model, "MiniCPMModel", None)
     apply_rotary_pos_emb = getattr(minicpm_model, "apply_rotary_pos_emb", None)
     if attention_cls is None or apply_rotary_pos_emb is None:
         return
@@ -674,13 +677,20 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
             )
 
         key_cache, value_cache = kv_cache
-        key_cache[:, :, position_id, :] = key_states
-        value_cache[:, :, position_id, :] = value_states
+
+        cache_positions = torch_module.arange(
+            key_cache.size(2), device=key_cache.device
+        ).view(1, 1, -1, 1)
+        write_mask = (
+            cache_positions == position_id.reshape(1, 1, 1, 1)
+        ).to(dtype=key_cache.dtype)
+        key_cache = key_cache * (1.0 - write_mask) + key_states * write_mask
+        value_cache = value_cache * (1.0 - write_mask) + value_states * write_mask
 
         attn_mask = (
-            torch_module.arange(key_cache.size(2), device=key_cache.device)
-            <= position_id
-        ).view(1, 1, 1, -1)
+            cache_positions.reshape(1, 1, 1, -1)
+            <= position_id.reshape(1, 1, 1, 1)
+        )
 
         query_states = query_states.contiguous()
         key_cache = key_cache.contiguous()
@@ -701,10 +711,77 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
-        return attn_output
+        return attn_output, (key_cache, value_cache)
+
+    def _decoder_forward_step(
+        self: Any,
+        hidden_states: Any,
+        position_emb: Any,
+        position_id: Any,
+        kv_cache: tuple[Any, Any],
+    ) -> Any:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, updated_cache = self.self_attn.forward_step(
+            hidden_states=hidden_states,
+            position_emb=position_emb,
+            position_id=position_id,
+            kv_cache=kv_cache,
+        )
+
+        if self.use_mup:
+            hidden_states = residual + hidden_states * (
+                self.scale_depth / math.sqrt(self.num_hidden_layers)
+            )
+        else:
+            hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        if self.use_mup:
+            hidden_states = residual + hidden_states * (
+                self.scale_depth / math.sqrt(self.num_hidden_layers)
+            )
+        else:
+            hidden_states = residual + hidden_states
+
+        return hidden_states, updated_cache
+
+    def _model_forward_step(self: Any, inputs_embeds: Any, position_id: Any) -> Any:
+        if self.rope_emb is not None:
+            position_emb = self.rope_emb(position_id)
+        else:
+            position_emb = None
+        hidden_states = inputs_embeds
+        updated_key_caches = []
+        updated_value_caches = []
+
+        for i, decoder_layer in enumerate(self.layers):
+            hidden_states, updated_cache = decoder_layer.forward_step(
+                hidden_states,
+                position_emb,
+                position_id,
+                self.kv_cache.get_layer_cache(i),
+            )
+            updated_key_caches.append(updated_cache[0])
+            updated_value_caches.append(updated_cache[1])
+
+        hidden_states = self.norm(hidden_states)
+        present_cache = torch_module.stack(
+            (
+                torch_module.stack(updated_key_caches, dim=0),
+                torch_module.stack(updated_value_caches, dim=0),
+            ),
+            dim=0,
+        )
+        return hidden_states, present_cache
 
     attention_cls.forward = _forward
     attention_cls.forward_step = _forward_step
+    if decoder_layer_cls is not None and model_cls is not None:
+        decoder_layer_cls.forward_step = _decoder_forward_step
+        model_cls.forward_step = _model_forward_step
     attention_cls._trtmc_explicit_gqa_patch = True
 
 
@@ -953,10 +1030,16 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             self.base_lm.kv_cache.kv_cache = tslm_past_kv_cache.to(
                 dtype=compute_dtype
             ).clone()
-            raw_hidden = self.base_lm.forward_step(
+            step_output = self.base_lm.forward_step(
                 combined_embed[:, 0, :],
                 position_id.to(dtype=torch.long),
-            ).to(dtype=compute_dtype)
+            )
+            if isinstance(step_output, tuple):
+                raw_hidden, present_cache = step_output
+            else:
+                raw_hidden = step_output
+                present_cache = self.base_lm.kv_cache.kv_cache
+            raw_hidden = raw_hidden.to(dtype=compute_dtype)
             semantic_lm_state = self.fsq_layer(raw_hidden) * a_mask.reshape(
                 -1, 1
             ) + raw_hidden * t_mask.reshape(-1, 1)
@@ -966,7 +1049,7 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
                 semantic_lm_state,
                 lm_hidden,
                 stop_logits,
-                self.base_lm.kv_cache.kv_cache,
+                present_cache,
             )
 
     scale_emb = float(lm_config.get("scale_emb", 1.0))
@@ -1056,11 +1139,17 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             self.residual_lm.kv_cache.kv_cache = ralm_past_kv_cache.to(
                 dtype=compute_dtype
             ).clone()
-            residual_hidden = self.residual_lm.forward_step(
+            step_output = self.residual_lm.forward_step(
                 residual_inputs,
                 position_id.to(dtype=torch.long),
-            ).to(dtype=compute_dtype)
-            return residual_hidden, self.residual_lm.kv_cache.kv_cache
+            )
+            if isinstance(step_output, tuple):
+                residual_hidden, present_cache = step_output
+            else:
+                residual_hidden = step_output
+                present_cache = self.residual_lm.kv_cache.kv_cache
+            residual_hidden = residual_hidden.to(dtype=compute_dtype)
+            return residual_hidden, present_cache
 
     wrapper = RALMWrapper(residual_lm, fusion_concat_proj)
     wrapper.eval()
@@ -1267,10 +1356,9 @@ def _lm_kv_cache_shape(lm_config: Mapping[str, Any], max_length: int) -> tuple[i
     return (2, num_layers, 1, num_key_value_heads, max(1, int(max_length)), head_dim)
 
 
-def _locdit_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
-    if ctx.max_cache_length > 0:
-        return max(1, int(ctx.max_cache_length))
-    return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
+def _locdit_export_text_steps(_ctx: VoxCPM2ComponentBuildContext) -> int:
+    # LocDiT is invoked for one autoregressive patch at a time; TSLM/RALM own cache length.
+    return 1
 
 
 def _locdit_export_timesteps(ctx: VoxCPM2ComponentBuildContext) -> int:
@@ -1430,11 +1518,9 @@ def _locenc_minicpm_config_values(prepared: VoxCPM2PreparedComponentInputs) -> d
     return values
 
 
-def _locenc_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
-    if ctx.max_cache_length > 0:
-        return max(1, int(ctx.max_cache_length))
-    raw_config = ctx.config.raw if isinstance(ctx.config.raw, dict) else {}
-    return max(1, int(raw_config.get("max_length", 8192)))
+def _locenc_export_text_steps(_ctx: VoxCPM2ComponentBuildContext) -> int:
+    # Text-only prefill uses masked zero local features; generated patches call LocEnc one at a time.
+    return 1
 
 
 def _compile_voxcpm2_locenc_onnx(

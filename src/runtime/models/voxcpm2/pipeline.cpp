@@ -6,7 +6,9 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -462,6 +464,30 @@ bool has_positive_shape(const std::vector<int64_t>& shape) {
     return std::all_of(shape.begin(), shape.end(), [](int64_t dim) { return dim > 0; });
 }
 
+std::size_t resolve_local_text_feature_width(const ITrtModule& locenc_module) {
+    constexpr std::size_t kDefaultLocalTextFeatureWidth = 2048;
+    auto shape = locenc_module.tensor_shape("local_text_features");
+    if (shape.size() >= 2 && shape[1] > 0)
+        return static_cast<std::size_t>(shape[1]);
+    for (const auto& info : locenc_module.output_info()) {
+        if (info.name == "local_text_features" && info.shape.size() >= 2 && info.shape[1] > 0)
+            return static_cast<std::size_t>(info.shape[1]);
+    }
+    return kDefaultLocalTextFeatureWidth;
+}
+
+OwnedStageTensor make_zero_local_text_features_tensor(std::size_t text_steps,
+                                                      const ITrtModule& locenc_module) {
+    const auto hidden_width = resolve_local_text_feature_width(locenc_module);
+    OwnedStageTensor tensor;
+    tensor.shape = {static_cast<int64_t>(std::max<std::size_t>(1, text_steps)),
+                    static_cast<int64_t>(hidden_width)};
+    tensor.dtype = locenc_module.tensor_dtype("local_text_features");
+    tensor.storage.resize(static_cast<std::size_t>(tensor.shape[0]) * hidden_width *
+                          dtype_size(tensor.dtype));
+    return tensor;
+}
+
 std::vector<int64_t> resolve_input_shape(const ITrtModule& module, const std::string& name) {
     auto shape = module.tensor_shape(name);
     if (has_positive_shape(shape))
@@ -670,6 +696,23 @@ bool stop_logits_predict_stop(const StageArtifacts& artifacts) {
            tensor_float_value(it->second, base, "stop_logits");
 }
 
+void trace_stop_logits(const StageArtifacts& artifacts, std::size_t step, bool predicted_stop) {
+    static const bool enabled = std::getenv("TRTMC_VOXCPM2_STOP_TRACE") != nullptr;
+    if (!enabled)
+        return;
+    const auto it = artifacts.find("stop_logits");
+    if (it == artifacts.end())
+        return;
+    const auto count = tensor_element_count(it->second, "stop_logits");
+    if (count < 2)
+        return;
+    const auto base = count - 2;
+    std::cerr << "[trtmc.voxcpm2.stop] step=" << step
+              << " logit0=" << tensor_float_value(it->second, base, "stop_logits")
+              << " logit1=" << tensor_float_value(it->second, base + 1, "stop_logits")
+              << " stop=" << (predicted_stop ? 1 : 0) << '\n';
+}
+
 std::size_t positive_first_dim(const std::vector<int64_t>& shape) {
     if (shape.empty() || shape.front() <= 0)
         return 0;
@@ -770,9 +813,10 @@ OwnedStageTensor extract_locdit_patch(const OwnedStageTensor& locdit_output,
     return slice_first_dim(locdit_output, 0, patch_rows, artifact_name);
 }
 
-OwnedStageTensor latest_hidden_row(const OwnedStageTensor& tensor,
-                                   std::size_t active_token_count,
-                                   const std::string& artifact_name) {
+OwnedStageTensor latest_sequence_row(const OwnedStageTensor& tensor,
+                                     std::size_t active_token_count,
+                                     bool current_step_output,
+                                     const std::string& artifact_name) {
     if (tensor.shape.empty()) {
         throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
                                  "' must have a sequence dimension");
@@ -783,13 +827,16 @@ OwnedStageTensor latest_hidden_row(const OwnedStageTensor& tensor,
                                  "' has no hidden rows");
     }
     auto row = rows - 1;
-    if (active_token_count > 0) {
+    if (current_step_output) {
+        row = 0;
+    } else if (active_token_count > 0) {
         row = std::min(active_token_count - 1, rows - 1);
     }
     return slice_first_dim(tensor, row, 1, artifact_name);
 }
 
-void keep_latest_hidden_artifacts(StageArtifacts& artifacts, std::size_t active_token_count) {
+void keep_latest_lm_artifacts(StageArtifacts& artifacts, std::size_t active_token_count,
+                              bool current_step_output) {
     const auto lm_it = artifacts.find("lm_hidden");
     if (lm_it == artifacts.end()) {
         throw std::runtime_error(
@@ -801,11 +848,18 @@ void keep_latest_hidden_artifacts(StageArtifacts& artifacts, std::size_t active_
             "VoxCPM2Pipeline: LocDiT loop requires prepared residual_hidden artifact");
     }
 
-    auto lm_hidden = latest_hidden_row(lm_it->second, active_token_count, "lm_hidden");
-    auto residual_hidden =
-        latest_hidden_row(residual_it->second, active_token_count, "residual_hidden");
+    auto lm_hidden = latest_sequence_row(lm_it->second, active_token_count, current_step_output,
+                                         "lm_hidden");
+    auto residual_hidden = latest_sequence_row(residual_it->second, active_token_count,
+                                               current_step_output, "residual_hidden");
     artifacts["lm_hidden"] = std::move(lm_hidden);
     artifacts["residual_hidden"] = std::move(residual_hidden);
+
+    const auto stop_it = artifacts.find("stop_logits");
+    if (stop_it != artifacts.end() && stop_it->second.shape.size() >= 2) {
+        artifacts["stop_logits"] = latest_sequence_row(stop_it->second, active_token_count,
+                                                       current_step_output, "stop_logits");
+    }
 }
 
 int32_t checked_position_id(std::size_t active_text_token_count, std::size_t generated_step) {
@@ -1097,7 +1151,7 @@ void refresh_autoregressive_hidden_state(
     for (std::size_t i = 0; i < 3; ++i) {
         (void)run_stage(components[i], plan.stages[i], artifacts, controls);
     }
-    keep_latest_hidden_artifacts(artifacts, 1);
+    keep_latest_lm_artifacts(artifacts, 1, true);
 }
 
 OwnedStageTensor run_locdit_autoregressive(
@@ -1113,7 +1167,9 @@ OwnedStageTensor run_locdit_autoregressive(
         auto generated_patch = extract_locdit_patch(locdit_output, cfg, stage.output_artifact);
         append_first_dim(generated_latents, generated_patch, stage.output_artifact);
         artifacts["feat_cond"] = generated_patch;
-        if (step > kVoxCPM2MinGenerationSteps && stop_logits_predict_stop(artifacts))
+        const auto predicted_stop = stop_logits_predict_stop(artifacts);
+        trace_stop_logits(artifacts, step, predicted_stop);
+        if (step > kVoxCPM2MinGenerationSteps && predicted_stop)
             break;
         if (step + 1 < generation_steps) {
             refresh_autoregressive_hidden_state(components, plan, artifacts, controls,
@@ -1212,9 +1268,11 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
     artifacts.emplace("audio_feats",
                       make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
+    artifacts.emplace("local_text_features",
+                      make_zero_local_text_features_tensor(text_token_count,
+                                                          *components_[0].module));
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
-    OwnedStageTensor current =
-        run_stage(components_[0], effective_plan.stages[0], artifacts, controls);
+    OwnedStageTensor current;
     if (lm_cache_mode_enabled(components_)) {
         current = run_cache_bound_lm_prefill(components_, effective_plan, artifacts, controls,
                                              active_text_token_count);
@@ -1227,7 +1285,8 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const auto generation_steps =
         resolve_latent_generation_steps(active_text_token_count, target_text_token_count, cfg,
                                         effective_plan.config);
-    keep_latest_hidden_artifacts(artifacts, active_text_token_count);
+    keep_latest_lm_artifacts(artifacts, active_text_token_count,
+                             lm_cache_mode_enabled(components_));
     current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
                                         generation_steps, active_text_token_count,
                                         effective_plan.config);

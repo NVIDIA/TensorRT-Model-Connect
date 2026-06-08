@@ -451,7 +451,8 @@ std::vector<float> repeated_values(std::size_t count, float value) {
 
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
     std::size_t latent_patch_count = 2, bool cache_bound_lms = false,
-    bool audio_vae_output0 = false, bool stop_logits_stop = false) {
+    bool audio_vae_output0 = false, bool stop_logits_stop = false,
+    bool padded_stop_logits = false) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
@@ -487,10 +488,20 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
             extra_outputs.push_back(
                 {"lm_hidden", trtmc::DType::kFloat32, repeated_values(1 * 2048, 8.0F),
                  {1, 2048}});
-            extra_outputs.push_back({"stop_logits", trtmc::DType::kFloat32,
-                                     stop_logits_stop ? std::vector<float>{0.0F, 1.0F}
-                                                      : std::vector<float>{1.0F, 0.0F},
-                                     {1, 2}});
+            if (padded_stop_logits) {
+                extra_outputs.push_back(
+                    {"stop_logits", trtmc::DType::kFloat32,
+                     stop_logits_stop ? std::vector<float>{0.0F, 1.0F, 1.0F, 0.0F, 1.0F,
+                                                           0.0F, 1.0F, 0.0F}
+                                      : std::vector<float>{1.0F, 0.0F, 0.0F, 1.0F, 0.0F,
+                                                           1.0F, 0.0F, 1.0F},
+                     {4, 2}});
+            } else {
+                extra_outputs.push_back({"stop_logits", trtmc::DType::kFloat32,
+                                         stop_logits_stop ? std::vector<float>{0.0F, 1.0F}
+                                                          : std::vector<float>{1.0F, 0.0F},
+                                         {1, 2}});
+            }
             if (cache_bound_lms) {
                 extra_outputs.push_back({"tslm_present_kv_cache", trtmc::DType::kFloat32,
                                          repeated_values(2 * 1 * 1 * 1 * 8 * 1, 9.0F),
@@ -617,10 +628,8 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
           "voxcpm2 generated-patch refresh clears one-step text mask");
     check(last_audio_mask_values.size() == 1 && last_audio_mask_values[0] == 1.0F,
           "voxcpm2 generated-patch refresh marks one-step audio mask");
-    check(locenc_audio_feat_values.size() == 2 && locenc_audio_feat_values[0] == 0.0F,
-          "voxcpm2 prefill LocEnc starts from zero-shot audio features");
-    check(locenc_audio_feat_values.size() == 2 && locenc_audio_feat_values[1] == 4.0F,
-          "voxcpm2 refresh LocEnc receives first generated latent patch");
+    check(locenc_audio_feat_values.size() == 1 && locenc_audio_feat_values[0] == 4.0F,
+          "voxcpm2 text-only prefill skips LocEnc and refresh encodes first generated patch");
     check(position_id_values.size() == 2 && position_id_values[0] > 0 &&
               position_id_values[0] == position_id_values[1],
           "voxcpm2 forwards generated-step position_id to TSLM and RALM refresh");
@@ -732,6 +741,24 @@ void test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len() {
           "voxcpm2 consumes TSLM stop_logits after upstream minimum generation length");
     check(last_audio_vae_latent_rows == 16,
           "voxcpm2 AudioVAE receives only generated latent patches before stop");
+}
+
+void test_generate_audio_uses_current_row_for_padded_stop_logits() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(8, true, false, true, true), plan,
+                                    "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    locdit_aux_binding_hits = 0;
+    last_audio_vae_latent_rows = 0;
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 8;
+    (void)pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
+
+    check(locdit_aux_binding_hits == 4,
+          "voxcpm2 stop logits use current one-step row instead of padded tail row");
+    check(last_audio_vae_latent_rows == 16,
+          "voxcpm2 padded stop logits stop after upstream minimum generation length");
 }
 
 void test_generate_audio_uses_cache_bound_lm_step_contract() {
@@ -888,7 +915,8 @@ void test_generate_audio_pads_text_tensors_to_engine_steps() {
 
     check(tslm_text_binding_hits == 1, "voxcpm2 forwards padded text tensors to TSLM");
     check(last_text_token_count == 6, "voxcpm2 pads text_tokens to engine text steps");
-    check(last_audio_feat_steps == 6, "voxcpm2 pads audio_feats to engine text steps");
+    check(last_audio_feat_steps == 0,
+          "voxcpm2 text-only prefill does not run LocEnc on padded zero audio_feats");
     check(last_text_tokens.size() == 6, "voxcpm2 captures padded token buffer");
     check(last_text_tokens[0] == static_cast<int32_t>('a'),
           "voxcpm2 preserves first prompt token before padding");
@@ -1012,6 +1040,7 @@ int main() {
     test_generate_audio_trims_audio_vae_max_profile_output_to_generated_latents();
     test_generate_audio_reads_first_locdit_patch_from_each_static_profile_invocation();
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
+    test_generate_audio_uses_current_row_for_padded_stop_logits();
     test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_normalizes_prompt_before_voxcpm2_text_tokenizer();

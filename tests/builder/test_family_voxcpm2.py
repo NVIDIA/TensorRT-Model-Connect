@@ -790,9 +790,9 @@ def test_voxcpm2_locdit_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     assert sections["locdit_engine_plan"] == b"LOCDIT-TRT"
     assert captured["verbose"] is True
     residual_hidden, lm_hidden, feat_cond, cfg_value, inference_timesteps = captured["example_args"]
-    assert residual_hidden.shape == (5, 2048)
+    assert residual_hidden.shape == (1, 2048)
     assert residual_hidden.dtype == "bf16"
-    assert lm_hidden.shape == (5, 2048)
+    assert lm_hidden.shape == (1, 2048)
     assert lm_hidden.dtype == "bf16"
     assert feat_cond.shape == (4, 64)
     assert feat_cond.dtype == "bf16"
@@ -1140,7 +1140,7 @@ def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     assert sections["locenc_engine_plan"] == b"LOCENC-TRT"
     assert captured["verbose"] is True
     example_audio_feats = captured["example_args"][0]
-    assert example_audio_feats.shape == (9, 4, 64)
+    assert example_audio_feats.shape == (1, 4, 64)
     assert example_audio_feats.dtype == "bf16"
 
     wrapper = captured["wrapper"]
@@ -1535,7 +1535,7 @@ def test_voxcpm2_minicpm_attention_patch_expands_gqa_without_enable_flag(monkeyp
     assert calls[0][2] == (1, 4, 3, 2)
     assert calls[0][3] == {"is_causal": False}
 
-    step_output = attention.forward_step(
+    step_output, updated_cache = attention.forward_step(
         torch.zeros(1, 8),
         None,
         torch.tensor([1]),
@@ -1543,6 +1543,8 @@ def test_voxcpm2_minicpm_attention_patch_expands_gqa_without_enable_flag(monkeyp
     )
 
     assert step_output.shape == (1, 8)
+    assert updated_cache[0].shape == (1, 2, 4, 2)
+    assert updated_cache[1].shape == (1, 2, 4, 2)
     assert calls[1][1] == (1, 4, 4, 2)
     assert calls[1][2] == (1, 4, 4, 2)
     assert calls[1][3]["attn_mask"].shape == (1, 1, 1, 4)
