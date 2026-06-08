@@ -606,6 +606,9 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     base_lm.to(dtype=compute_dtype)
     base_lm.eval()
 
+    text_steps = _tslm_export_text_steps(ctx)
+    base_lm.setup_cache(1, text_steps, "cpu", compute_dtype)
+
     fsq_layer = ScalarQuantizationLayer(
         hidden_size,
         hidden_size,
@@ -659,7 +662,9 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             text_tokens: Any,
             text_mask: Any,
             audio_mask: Any,
-        ) -> tuple[Any, Any, Any]:
+            position_id: Any,
+            tslm_past_kv_cache: Any,
+        ) -> tuple[Any, Any, Any, Any]:
             local_features = local_text_features.unsqueeze(0).to(dtype=compute_dtype)
             tokens = text_tokens.unsqueeze(0).to(dtype=torch.long)
             t_mask = text_mask.unsqueeze(0).to(dtype=compute_dtype)
@@ -668,17 +673,23 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             combined_embed = t_mask.unsqueeze(-1) * text_embed + a_mask.unsqueeze(
                 -1
             ) * local_features
-            enc_outputs, _ = self.base_lm(inputs_embeds=combined_embed, is_causal=True)
-            enc_outputs = enc_outputs.to(dtype=compute_dtype)
-            semantic_lm_states = self.fsq_layer(enc_outputs) * a_mask.unsqueeze(
-                -1
-            ) + enc_outputs * t_mask.unsqueeze(-1)
-            lm_hidden = semantic_lm_states[:, -1:, :]
+            self.base_lm.kv_cache.kv_cache = tslm_past_kv_cache.to(
+                dtype=compute_dtype
+            ).clone()
+            raw_hidden = self.base_lm.forward_step(
+                combined_embed[:, 0, :],
+                position_id.to(dtype=torch.long),
+            ).to(dtype=compute_dtype)
+            semantic_lm_state = self.fsq_layer(raw_hidden) * a_mask.reshape(
+                -1, 1
+            ) + raw_hidden * t_mask.reshape(-1, 1)
+            lm_hidden = semantic_lm_state
             stop_logits = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden)))
             return (
-                semantic_lm_states.squeeze(0),
-                lm_hidden.squeeze(0),
-                stop_logits.squeeze(0),
+                semantic_lm_state,
+                lm_hidden,
+                stop_logits,
+                self.base_lm.kv_cache.kv_cache,
             )
 
     scale_emb = float(lm_config.get("scale_emb", 1.0))
@@ -692,12 +703,13 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
         scale_emb=scale_emb,
     )
     wrapper.eval()
-    text_steps = _tslm_export_text_steps(ctx)
     example_args = (
-        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
-        torch.zeros((text_steps,), dtype=torch.int32),
-        torch.ones((text_steps,), dtype=compute_dtype),
-        torch.zeros((text_steps,), dtype=compute_dtype),
+        torch.zeros((1, hidden_size), dtype=compute_dtype),
+        torch.zeros((1,), dtype=torch.int32),
+        torch.ones((1,), dtype=compute_dtype),
+        torch.zeros((1,), dtype=compute_dtype),
+        torch.zeros((1,), dtype=torch.int32),
+        torch.zeros(_lm_kv_cache_shape(lm_config, text_steps), dtype=compute_dtype),
     )
     return _compile_voxcpm2_tslm_onnx(wrapper, example_args, verbose=ctx.verbose)
 
@@ -729,6 +741,8 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     )
     residual_lm.to(dtype=compute_dtype)
     residual_lm.eval()
+    text_steps = _ralm_export_text_steps(ctx)
+    residual_lm.setup_cache(1, text_steps, "cpu", compute_dtype)
 
     fusion_concat_proj = torch.nn.Linear(hidden_size * 2, hidden_size)
     fusion_concat_proj.load_state_dict(
@@ -749,30 +763,38 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             semantic_lm_states: Any,
             audio_mask: Any,
             local_text_features: Any,
-        ) -> Any:
-            semantic_states = semantic_lm_states.unsqueeze(0).to(dtype=compute_dtype)
-            a_mask = audio_mask.unsqueeze(0).to(dtype=compute_dtype)
-            local_features = local_text_features.unsqueeze(0).to(dtype=compute_dtype)
+            position_id: Any,
+            ralm_past_kv_cache: Any,
+        ) -> tuple[Any, Any]:
+            semantic_states = semantic_lm_states.to(dtype=compute_dtype)
+            a_mask = audio_mask.to(dtype=compute_dtype)
+            local_features = local_text_features.to(dtype=compute_dtype)
             residual_inputs = self.fusion_concat_proj(
                 torch.cat(
-                    (semantic_states, a_mask.unsqueeze(-1) * local_features),
+                    (semantic_states, a_mask.reshape(-1, 1) * local_features),
                     dim=-1,
                 )
             )
-            residual_outputs, _ = self.residual_lm(
-                inputs_embeds=residual_inputs,
-                is_causal=True,
-            )
-            residual_outputs = residual_outputs.to(dtype=compute_dtype)
-            return residual_outputs[:, -1:, :].squeeze(0)
+            self.residual_lm.kv_cache.kv_cache = ralm_past_kv_cache.to(
+                dtype=compute_dtype
+            ).clone()
+            residual_hidden = self.residual_lm.forward_step(
+                residual_inputs,
+                position_id.to(dtype=torch.long),
+            ).to(dtype=compute_dtype)
+            return residual_hidden, self.residual_lm.kv_cache.kv_cache
 
     wrapper = RALMWrapper(residual_lm, fusion_concat_proj)
     wrapper.eval()
-    text_steps = _ralm_export_text_steps(ctx)
     example_args = (
-        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
-        torch.zeros((text_steps,), dtype=compute_dtype),
-        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+        torch.zeros((1, hidden_size), dtype=compute_dtype),
+        torch.zeros((1,), dtype=compute_dtype),
+        torch.zeros((1, hidden_size), dtype=compute_dtype),
+        torch.zeros((1,), dtype=torch.int32),
+        torch.zeros(
+            _lm_kv_cache_shape(_residual_lm_config_values(ctx, prepared), text_steps),
+            dtype=compute_dtype,
+        ),
     )
     return _compile_voxcpm2_ralm_onnx(wrapper, example_args, verbose=ctx.verbose)
 
@@ -955,6 +977,16 @@ def _ralm_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
     return max(1, int(getattr(ctx.source, "config_values", {}).get("max_length", 8192)))
 
 
+def _lm_kv_cache_shape(lm_config: Mapping[str, Any], max_length: int) -> tuple[int, ...]:
+    hidden_size = int(lm_config.get("hidden_size", 2048))
+    num_layers = int(lm_config.get("num_hidden_layers", 1))
+    num_attention_heads = max(1, int(lm_config.get("num_attention_heads", 1)))
+    num_key_value_heads = int(lm_config.get("num_key_value_heads", num_attention_heads))
+    kv_channels = lm_config.get("kv_channels")
+    head_dim = int(kv_channels) if kv_channels is not None else hidden_size // num_attention_heads
+    return (2, num_layers, 1, num_key_value_heads, max(1, int(max_length)), head_dim)
+
+
 def _locdit_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
     if ctx.max_cache_length > 0:
         return max(1, int(ctx.max_cache_length))
@@ -1027,8 +1059,20 @@ def _compile_voxcpm2_tslm_onnx(
     return compile_model_via_onnx(
         wrapper,
         example_args,
-        input_names=["local_text_features", "text_tokens", "text_mask", "audio_mask"],
-        output_names=["semantic_lm_states", "lm_hidden", "stop_logits"],
+        input_names=[
+            "local_text_features",
+            "text_tokens",
+            "text_mask",
+            "audio_mask",
+            "position_id",
+            "tslm_past_kv_cache",
+        ],
+        output_names=[
+            "semantic_lm_states",
+            "lm_hidden",
+            "stop_logits",
+            "tslm_present_kv_cache",
+        ],
         verbose=verbose,
     )
 
@@ -1044,8 +1088,14 @@ def _compile_voxcpm2_ralm_onnx(
     return compile_model_via_onnx(
         wrapper,
         example_args,
-        input_names=["semantic_lm_states", "audio_mask", "local_text_features"],
-        output_names=["residual_hidden"],
+        input_names=[
+            "semantic_lm_states",
+            "audio_mask",
+            "local_text_features",
+            "position_id",
+            "ralm_past_kv_cache",
+        ],
+        output_names=["residual_hidden", "ralm_present_kv_cache"],
         verbose=verbose,
     )
 

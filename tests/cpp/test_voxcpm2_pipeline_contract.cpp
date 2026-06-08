@@ -63,6 +63,10 @@ std::vector<int32_t> tslm_audio_start_values;
 std::vector<int64_t> locdit_lm_hidden_rows;
 std::vector<int64_t> locdit_residual_hidden_rows;
 std::vector<int32_t> position_id_values;
+std::vector<int32_t> tslm_position_id_values;
+std::vector<int32_t> ralm_position_id_values;
+int tslm_cache_binding_hits = 0;
+int ralm_cache_binding_hits = 0;
 
 void check(bool condition, const char* test_name) {
     if (!condition) {
@@ -150,9 +154,10 @@ class FakeModule final : public trtmc::ITrtModule {
         if (output_name_.empty())
             return outputs;
 
+        const auto runtime_output = runtime_float_output(inputs);
         trtmc::Tensor tensor;
-        tensor.data = output_storage_.data();
-        tensor.shape = output_shape_;
+        tensor.data = runtime_output.first;
+        tensor.shape = runtime_output.second;
         tensor.dtype = output_dtype_;
         outputs.emplace(output_name_, tensor);
         for (auto& extra : extra_outputs_) {
@@ -187,9 +192,18 @@ class FakeModule final : public trtmc::ITrtModule {
                std::find(extra_input_names_.begin(), extra_input_names_.end(), name) !=
                    extra_input_names_.end();
     }
-    bool has_output(const std::string& name) const override { return name == output_name_; }
+    bool has_output(const std::string& name) const override {
+        if (name == output_name_)
+            return true;
+        return std::any_of(extra_outputs_.begin(), extra_outputs_.end(),
+                           [&](const ExtraOutput& output) { return output.name == name; });
+    }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
-    std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
+    std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        if (name == "tslm_past_kv_cache" || name == "ralm_past_kv_cache")
+            return {2, 1, 1, 1, 8, 1};
+        return {};
+    }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
         return {};
@@ -223,7 +237,20 @@ class FakeModule final : public trtmc::ITrtModule {
 
     void record_auxiliary_inputs(const trtmc::TensorMap& inputs) const {
         if (const auto pos_it = inputs.find("position_id"); pos_it != inputs.end()) {
-            position_id_values.push_back(*static_cast<int32_t*>(pos_it->second.data));
+            const auto position_id = *static_cast<int32_t*>(pos_it->second.data);
+            position_id_values.push_back(position_id);
+            if (input_name_ == "local_text_features")
+                tslm_position_id_values.push_back(position_id);
+            if (input_name_ == "semantic_lm_states")
+                ralm_position_id_values.push_back(position_id);
+        }
+        if (input_name_ == "local_text_features") {
+            if (inputs.find("tslm_past_kv_cache") != inputs.end())
+                ++tslm_cache_binding_hits;
+        }
+        if (input_name_ == "semantic_lm_states") {
+            if (inputs.find("ralm_past_kv_cache") != inputs.end())
+                ++ralm_cache_binding_hits;
         }
         if (const auto token_it = inputs.find("text_tokens"); token_it != inputs.end()) {
             if (const auto text_mask_it = inputs.find("text_mask");
@@ -302,6 +329,7 @@ class FakeModule final : public trtmc::ITrtModule {
     }
 
     void set_float_output(std::vector<float> values, std::vector<int64_t> shape) {
+        output_values_ = values;
         output_shape_ = shape.empty() ? std::vector<int64_t>{static_cast<int64_t>(values.size())}
                                       : std::move(shape);
         output_storage_.resize(values.size() * sizeof(float));
@@ -324,13 +352,40 @@ class FakeModule final : public trtmc::ITrtModule {
         extra_outputs_.push_back(std::move(output));
     }
 
+    std::pair<void*, std::vector<int64_t>> runtime_float_output(
+        const trtmc::TensorMap& inputs) {
+        if (output_shape_.empty() || output_shape_[0] != -1)
+            return {output_storage_.data(), output_shape_};
+        auto input_it = inputs.find(input_name_);
+        const int64_t first_dim = input_it == inputs.end() || input_it->second.shape.empty()
+                                      ? 1
+                                      : input_it->second.shape.front();
+        dynamic_output_shape_ = output_shape_;
+        dynamic_output_shape_[0] = first_dim;
+        std::size_t value_count = 1;
+        for (const auto dim : dynamic_output_shape_)
+            value_count *= static_cast<std::size_t>(dim);
+        std::vector<float> values(value_count, output_values_.empty() ? 0.0F : output_values_[0]);
+        for (std::size_t i = 0; i < value_count && !output_values_.empty(); ++i)
+            values[i] = output_values_[i % output_values_.size()];
+        dynamic_output_storage_.resize(values.size() * sizeof(float));
+        if (!values.empty()) {
+            std::memcpy(dynamic_output_storage_.data(), values.data(),
+                        dynamic_output_storage_.size());
+        }
+        return {dynamic_output_storage_.data(), dynamic_output_shape_};
+    }
+
     std::string input_name_;
     std::string output_name_;
     trtmc::DType output_dtype_;
     std::vector<std::string> extra_input_names_;
     std::vector<ExtraOutput> extra_outputs_;
+    std::vector<float> output_values_;
     std::vector<unsigned char> output_storage_;
+    std::vector<unsigned char> dynamic_output_storage_;
     std::vector<int64_t> output_shape_;
+    std::vector<int64_t> dynamic_output_shape_;
     trtmc::TensorMap last_inputs_;
 };
 
@@ -380,7 +435,7 @@ std::vector<float> repeated_values(std::size_t count, float value) {
 }
 
 std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
-    std::size_t latent_patch_count = 2) {
+    std::size_t latent_patch_count = 2, bool cache_bound_lms = false) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
@@ -394,9 +449,9 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
         {0.0F, 0.25F, -0.25F, 0.5F},
     };
     const std::vector<std::vector<int64_t>> stage_shapes = {
-        {2, 64},
-        {2, 2048},
-        {1, 512},
+        {cache_bound_lms ? -1 : 2, 64},
+        {cache_bound_lms ? -1 : 2, 2048},
+        {cache_bound_lms ? -1 : 1, 512},
         {static_cast<int64_t>(latent_patch_count * 4), 64},
         {4},
     };
@@ -409,9 +464,22 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
         }
         std::vector<FakeModule::ExtraOutputSpec> extra_outputs;
         if (i == 1) {
+            if (cache_bound_lms)
+                extra_inputs.push_back("tslm_past_kv_cache");
             extra_outputs.push_back(
                 {"lm_hidden", trtmc::DType::kFloat32, repeated_values(1 * 2048, 8.0F),
                  {1, 2048}});
+            if (cache_bound_lms) {
+                extra_outputs.push_back({"tslm_present_kv_cache", trtmc::DType::kFloat32,
+                                         repeated_values(2 * 1 * 1 * 1 * 8 * 1, 9.0F),
+                                         {2, 1, 1, 1, 8, 1}});
+            }
+        }
+        if (i == 2 && cache_bound_lms) {
+            extra_inputs.push_back("ralm_past_kv_cache");
+            extra_outputs.push_back({"ralm_present_kv_cache", trtmc::DType::kFloat32,
+                                     repeated_values(2 * 1 * 1 * 1 * 8 * 1, 10.0F),
+                                     {2, 1, 1, 1, 8, 1}});
         }
         std::unique_ptr<trtmc::ITrtModule> module = std::make_unique<FakeModule>(
             stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32, stage_outputs[i],
@@ -492,6 +560,10 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
     locdit_lm_hidden_rows.clear();
     locdit_residual_hidden_rows.clear();
     position_id_values.clear();
+    tslm_position_id_values.clear();
+    ralm_position_id_values.clear();
+    tslm_cache_binding_hits = 0;
+    ralm_cache_binding_hits = 0;
 
     const auto audio = pipeline.generate_audio("VoxCPM2 parity prompt", gen_cfg);
 
@@ -559,6 +631,48 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
 
     std::filesystem::current_path(original_cwd);
     std::filesystem::remove_all(temp_dir);
+}
+
+void test_generate_audio_uses_cache_bound_lm_step_contract() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(2, true), plan,
+                                    "openbmb/VoxCPM2", make_fake_tokenizer());
+
+    tslm_text_binding_hits = 0;
+    tslm_text_token_counts.clear();
+    tslm_audio_start_values.clear();
+    tslm_position_id_values.clear();
+    ralm_position_id_values.clear();
+    tslm_cache_binding_hits = 0;
+    ralm_cache_binding_hits = 0;
+    locdit_lm_hidden_rows.clear();
+    locdit_residual_hidden_rows.clear();
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    (void)pipeline.generate_audio("ab", gen_cfg);
+
+    check(tslm_text_binding_hits == 4,
+          "voxcpm2 cache-bound TSLM runs one prefill step per text token plus refresh");
+    check(tslm_cache_binding_hits == 4,
+          "voxcpm2 cache-bound TSLM receives a past KV cache on every step");
+    check(ralm_cache_binding_hits == 4,
+          "voxcpm2 cache-bound RALM receives a past KV cache on every step");
+    check(tslm_text_token_counts == std::vector<int64_t>({1, 1, 1, 1}),
+          "voxcpm2 cache-bound TSLM uses one-row token inputs");
+    check(tslm_audio_start_values.size() >= 3 && tslm_audio_start_values[2] == 101,
+          "voxcpm2 cache-bound prefill still appends audio_start token");
+    check(tslm_position_id_values == std::vector<int32_t>({0, 1, 2, 3}),
+          "voxcpm2 cache-bound TSLM advances position ids through prefill and refresh");
+    check(ralm_position_id_values == std::vector<int32_t>({0, 1, 2, 3}),
+          "voxcpm2 cache-bound RALM advances position ids through prefill and refresh");
+    check(locdit_lm_hidden_rows.size() == 2 && locdit_lm_hidden_rows[0] == 1 &&
+              locdit_lm_hidden_rows[1] == 1,
+          "voxcpm2 cache-bound LocDiT receives current TSLM hidden row");
+    check(locdit_residual_hidden_rows.size() == 2 && locdit_residual_hidden_rows[0] == 1 &&
+              locdit_residual_hidden_rows[1] == 1,
+          "voxcpm2 cache-bound LocDiT receives current RALM hidden row");
 }
 
 void test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero() {
@@ -752,6 +866,7 @@ void test_rejects_component_order_mismatch() {
 int main() {
     test_constructs_with_loaded_component_contract();
     test_generate_audio_returns_component_waveform_without_hidden_wav_write();
+    test_generate_audio_uses_cache_bound_lm_step_contract();
     test_generate_audio_derives_upstream_default_steps_when_max_new_tokens_is_zero();
     test_generate_audio_expands_voxcpm2_multichar_cjk_tokens();
     test_generate_audio_pads_text_tensors_to_engine_steps();

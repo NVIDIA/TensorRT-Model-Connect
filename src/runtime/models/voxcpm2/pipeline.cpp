@@ -35,6 +35,14 @@ struct OwnedStageTensor {
 
 using StageArtifacts = std::unordered_map<std::string, OwnedStageTensor>;
 
+struct KvCacheBinding {
+    const char* past;
+    const char* present;
+};
+
+constexpr KvCacheBinding kTslmKvCache{"tslm_past_kv_cache", "tslm_present_kv_cache"};
+constexpr KvCacheBinding kRalmKvCache{"ralm_past_kv_cache", "ralm_present_kv_cache"};
+
 const char* dtype_name(DType dtype) {
     switch (dtype) {
     case DType::kFloat32:
@@ -313,6 +321,48 @@ OwnedStageTensor make_single_step_mask_tensor(float value) {
 
 OwnedStageTensor make_single_step_text_tokens_tensor() {
     return make_int32_scalar_tensor(0);
+}
+
+bool has_positive_shape(const std::vector<int64_t>& shape) {
+    if (shape.empty())
+        return false;
+    return std::all_of(shape.begin(), shape.end(), [](int64_t dim) { return dim > 0; });
+}
+
+std::vector<int64_t> resolve_input_shape(const ITrtModule& module, const std::string& name) {
+    auto shape = module.tensor_shape(name);
+    if (has_positive_shape(shape))
+        return shape;
+
+    const int32_t profile_count = module.optimization_profile_count();
+    if (profile_count > 0) {
+        shape = module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kOpt);
+        if (has_positive_shape(shape))
+            return shape;
+        shape = module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMax);
+        if (has_positive_shape(shape))
+            return shape;
+    }
+
+    throw std::runtime_error("VoxCPM2Pipeline: cache input binding '" + name +
+                             "' does not expose a concrete allocation shape");
+}
+
+OwnedStageTensor make_zero_input_tensor(const ITrtModule& module, const std::string& name) {
+    OwnedStageTensor tensor;
+    tensor.shape = resolve_input_shape(module, name);
+    tensor.dtype = module.tensor_dtype(name);
+    std::size_t element_count = 1;
+    for (const auto dim : tensor.shape) {
+        if (element_count > std::numeric_limits<std::size_t>::max() /
+                                static_cast<std::size_t>(dim)) {
+            throw std::runtime_error("VoxCPM2Pipeline: cache input binding '" + name +
+                                     "' shape overflows byte-size calculation");
+        }
+        element_count *= static_cast<std::size_t>(dim);
+    }
+    tensor.storage.resize(element_count * dtype_size(tensor.dtype));
+    return tensor;
 }
 
 std::size_t checked_first_dim_stride(const OwnedStageTensor& tensor,
@@ -645,6 +695,61 @@ void add_declared_artifact_inputs(const ITrtModule& module, const StageArtifacts
     }
 }
 
+bool component_has_cache_binding(const audio::VoxCPM2LoadedComponent& component,
+                                 const KvCacheBinding& binding) {
+    return component.module->has_input(binding.past) && component.module->has_output(binding.present);
+}
+
+bool component_has_partial_cache_binding(const audio::VoxCPM2LoadedComponent& component,
+                                         const KvCacheBinding& binding) {
+    return component.module->has_input(binding.past) || component.module->has_output(binding.present);
+}
+
+bool lm_cache_mode_enabled(const std::vector<audio::VoxCPM2LoadedComponent>& components) {
+    return component_has_cache_binding(components[1], kTslmKvCache) &&
+           component_has_cache_binding(components[2], kRalmKvCache);
+}
+
+void validate_partial_cache_bindings(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components) {
+    const bool tslm_full = component_has_cache_binding(components[1], kTslmKvCache);
+    const bool ralm_full = component_has_cache_binding(components[2], kRalmKvCache);
+    const bool tslm_partial = component_has_partial_cache_binding(components[1], kTslmKvCache);
+    const bool ralm_partial = component_has_partial_cache_binding(components[2], kRalmKvCache);
+    if ((tslm_partial || ralm_partial) && !(tslm_full && ralm_full)) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: TSLM/RALM cache mode requires both complete cache bindings "
+            "tslm_past_kv_cache=>tslm_present_kv_cache and "
+            "ralm_past_kv_cache=>ralm_present_kv_cache");
+    }
+}
+
+void ensure_zero_cache_artifact(const audio::VoxCPM2LoadedComponent& component,
+                                StageArtifacts& artifacts, const KvCacheBinding& binding) {
+    if (!component_has_cache_binding(component, binding))
+        return;
+    if (artifacts.find(binding.past) != artifacts.end())
+        return;
+    artifacts[binding.past] = make_zero_input_tensor(*component.module, binding.past);
+}
+
+void roll_present_cache(StageArtifacts& artifacts, const KvCacheBinding& binding) {
+    auto present_it = artifacts.find(binding.present);
+    if (present_it == artifacts.end())
+        return;
+    artifacts[binding.past] = std::move(present_it->second);
+    artifacts.erase(present_it);
+}
+
+void roll_stage_cache_outputs(const audio::VoxCPM2GenerationStage& stage,
+                              StageArtifacts& artifacts) {
+    if (stage.kind == audio::VoxCPM2StageKind::kTslm) {
+        roll_present_cache(artifacts, kTslmKvCache);
+    } else if (stage.kind == audio::VoxCPM2StageKind::kRalm) {
+        roll_present_cache(artifacts, kRalmKvCache);
+    }
+}
+
 OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
                            const audio::VoxCPM2GenerationStage& stage, StageArtifacts& artifacts,
                            const RuntimeScalarInputs& controls) {
@@ -678,7 +783,43 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
             continue;
         artifacts[output.first] = copy_stage_tensor(output.second, output.first, component.name);
     }
+    roll_stage_cache_outputs(stage, artifacts);
     return artifacts.at(stage.output_artifact);
+}
+
+OwnedStageTensor run_cache_bound_lm_prefill(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components,
+    const audio::VoxCPM2GenerationPlan& plan, StageArtifacts& artifacts,
+    const RuntimeScalarInputs& controls, std::size_t active_text_token_count) {
+    ensure_zero_cache_artifact(components[1], artifacts, kTslmKvCache);
+    ensure_zero_cache_artifact(components[2], artifacts, kRalmKvCache);
+
+    const auto local_text_features = artifacts.at("local_text_features");
+    const auto text_tokens = artifacts.at("text_tokens");
+    const auto text_mask = artifacts.at("text_mask");
+    const auto audio_mask = artifacts.at("audio_mask");
+
+    if (active_text_token_count == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: cache prefill requires active text tokens");
+    }
+    if (static_cast<std::size_t>(local_text_features.shape.front()) < active_text_token_count) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: local_text_features has fewer rows than active text tokens");
+    }
+
+    OwnedStageTensor current;
+    for (std::size_t pos = 0; pos < active_text_token_count; ++pos) {
+        artifacts["local_text_features"] =
+            slice_first_dim(local_text_features, pos, 1, "local_text_features");
+        artifacts["text_tokens"] = slice_first_dim(text_tokens, pos, 1, "text_tokens");
+        artifacts["text_mask"] = slice_first_dim(text_mask, pos, 1, "text_mask");
+        artifacts["audio_mask"] = slice_first_dim(audio_mask, pos, 1, "audio_mask");
+        artifacts["position_id"] = make_int32_scalar_tensor(checked_position_id(pos, 0));
+
+        (void)run_stage(components[1], plan.stages[1], artifacts, controls);
+        current = run_stage(components[2], plan.stages[2], artifacts, controls);
+    }
+    return current;
 }
 
 void refresh_autoregressive_hidden_state(
@@ -717,8 +858,8 @@ OwnedStageTensor run_locdit_autoregressive(
         artifacts["feat_cond"] = generated_patch;
         if (step + 1 < generation_steps) {
             refresh_autoregressive_hidden_state(components, plan, artifacts, controls,
-                                                generated_patch, step + 1,
-                                                active_text_token_count, cfg);
+                                                generated_patch, step, active_text_token_count,
+                                                cfg);
         }
     }
     artifacts[stage.output_artifact] = generated_latents;
@@ -785,6 +926,7 @@ void VoxCPM2Pipeline::validate_components() const {
         }
         validate_stage_bindings(component, stage);
     }
+    validate_partial_cache_bindings(components_);
 }
 
 AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const GenerateConfig& cfg) {
@@ -811,9 +953,15 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     artifacts.emplace("audio_feats",
                       make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
-    OwnedStageTensor current = artifacts.at("audio_feats");
-    for (std::size_t i = 0; i < 3; ++i) {
-        current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
+    OwnedStageTensor current =
+        run_stage(components_[0], effective_plan.stages[0], artifacts, controls);
+    if (lm_cache_mode_enabled(components_)) {
+        current = run_cache_bound_lm_prefill(components_, effective_plan, artifacts, controls,
+                                             active_text_token_count);
+    } else {
+        for (std::size_t i = 1; i < 3; ++i) {
+            current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
+        }
     }
     validate_lm_state_ready(artifacts);
     const auto generation_steps =

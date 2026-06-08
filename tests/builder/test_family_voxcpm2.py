@@ -406,15 +406,23 @@ def test_voxcpm2_tslm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     class FakeMiniCPMModel(torch.nn.Module):
         def __init__(self, config):
             super().__init__()
+            self.config = config
             self.embed_tokens = torch.nn.Embedding(config.vocab_size, config.hidden_size)
+            self.kv_cache = None
 
         def load_state_dict(self, state_dict, strict=True):
             assert "dummy" in state_dict
             return torch.nn.modules.module._IncompatibleKeys([], [])
 
-        def forward(self, *, inputs_embeds, is_causal):
-            assert is_causal is True
-            return inputs_embeds + 1.0, ()
+        def setup_cache(self, batch_size, max_length, device, dtype):
+            self.kv_cache = types.SimpleNamespace(
+                kv_cache=torch.zeros((2, 1, batch_size, 1, max_length, 2), dtype=dtype)
+            )
+
+        def forward_step(self, inputs_embeds, position_id):
+            assert tuple(position_id.shape) == (1,)
+            self.kv_cache.kv_cache = self.kv_cache.kv_cache + 1.0
+            return inputs_embeds + 1.0
 
     class FakeScalarQuantizationLayer(torch.nn.Module):
         def __init__(self, *args):
@@ -500,9 +508,14 @@ def test_voxcpm2_tslm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
 
     assert plan == b"TSLM-PLAN"
     assert captured["verbose"] is True
-    assert captured["input_shapes"] == ((3, 2), (3,), (3,), (3,))
-    assert captured["output_shapes"] == ((3, 2), (1, 2), (1, 2))
-    assert captured["output_dtypes"] == (torch.float32, torch.float32, torch.float32)
+    assert captured["input_shapes"] == ((1, 2), (1,), (1,), (1,), (1,), (2, 1, 1, 1, 3, 2))
+    assert captured["output_shapes"] == ((1, 2), (1, 2), (1, 2), (2, 1, 1, 1, 3, 2))
+    assert captured["output_dtypes"] == (
+        torch.float32,
+        torch.float32,
+        torch.float32,
+        torch.float32,
+    )
 
 
 def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkeypatch):
@@ -517,14 +530,21 @@ def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
         def __init__(self, config):
             super().__init__()
             self.config = config
+            self.kv_cache = None
 
         def load_state_dict(self, state_dict, strict=True):
             assert "dummy" in state_dict
             return torch.nn.modules.module._IncompatibleKeys([], [])
 
-        def forward(self, *, inputs_embeds, is_causal):
-            assert is_causal is True
-            return inputs_embeds + 1.0, ()
+        def setup_cache(self, batch_size, max_length, device, dtype):
+            self.kv_cache = types.SimpleNamespace(
+                kv_cache=torch.zeros((2, 4, batch_size, 1, max_length, 2), dtype=dtype)
+            )
+
+        def forward_step(self, inputs_embeds, position_id):
+            assert tuple(position_id.shape) == (1,)
+            self.kv_cache.kv_cache = self.kv_cache.kv_cache + 1.0
+            return inputs_embeds + 1.0
 
     voxcpm_mod = types.ModuleType("voxcpm")
     voxcpm_modules_mod = types.ModuleType("voxcpm.modules")
@@ -569,11 +589,12 @@ def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
     captured = {}
 
     def fake_compile(wrapper, example_args, *, verbose):
-        output = wrapper(*example_args)
+        output, present_cache = wrapper(*example_args)
         captured["wrapper"] = wrapper
         captured["verbose"] = verbose
         captured["input_shapes"] = tuple(tuple(arg.shape) for arg in example_args)
         captured["output_shape"] = tuple(output.shape)
+        captured["present_cache_shape"] = tuple(present_cache.shape)
         captured["output_dtype"] = output.dtype
         return b"RALM-PLAN"
 
@@ -593,8 +614,9 @@ def test_voxcpm2_ralm_builder_wraps_upstream_modules_for_export(tmp_path, monkey
 
     assert plan == b"RALM-PLAN"
     assert captured["verbose"] is True
-    assert captured["input_shapes"] == ((3, 2), (3,), (3, 2))
+    assert captured["input_shapes"] == ((1, 2), (1,), (1, 2), (1,), (2, 4, 1, 1, 3, 2))
     assert captured["output_shape"] == (1, 2)
+    assert captured["present_cache_shape"] == (2, 4, 1, 1, 3, 2)
     assert captured["output_dtype"] == torch.float32
     residual_config = captured["wrapper"].residual_lm.config.kwargs
     assert residual_config["num_hidden_layers"] == 4
