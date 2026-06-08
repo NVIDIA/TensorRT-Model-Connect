@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock
 from types import SimpleNamespace
 
@@ -151,6 +152,79 @@ class TestPatchStaticCacheScatter:
         patch_static_cache_scatter()
         from transformers.cache_utils import StaticLayer
         assert getattr(StaticLayer.update, '_scatter_patched', False) is True
+
+
+@requires_torch
+def test_compile_model_via_onnx_uses_path_export_with_external_data(monkeypatch):
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    captured = {}
+
+    def fake_export(model, args, output, **kwargs):
+        captured["output"] = output
+        captured["kwargs"] = kwargs
+        Path(output).write_bytes(b"fake-onnx")
+
+    def fake_build_engine(onnx_path, **kwargs):
+        captured["parse_path_exists"] = Path(onnx_path).is_file()
+        captured["parse_kwargs"] = kwargs
+        return b"fake-plan"
+
+    monkeypatch.setattr(compiler.torch.onnx, "export", fake_export)
+    monkeypatch.setattr(compiler, "_build_engine_from_onnx_path", fake_build_engine)
+
+    result = compiler.compile_model_via_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(1),),
+        input_names=["input"],
+        output_names=["output"],
+        verbose=True,
+        workspace_size=1234,
+    )
+
+    assert result == b"fake-plan"
+    assert isinstance(captured["output"], str)
+    assert captured["kwargs"]["external_data"] is True
+    assert captured["kwargs"]["dynamo"] is False
+    assert captured["parse_path_exists"] is True
+    assert captured["parse_kwargs"]["verbose"] is True
+    assert captured["parse_kwargs"]["workspace_size"] == 1234
+
+
+@requires_torch
+def test_compile_model_via_onnx_can_disable_mkldnn_during_export(monkeypatch):
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    mkldnn_backend = getattr(compiler.torch.backends, "mkldnn", None)
+    if mkldnn_backend is None or not hasattr(mkldnn_backend, "enabled"):
+        pytest.skip("torch mkldnn backend flag is unavailable")
+
+    previous = mkldnn_backend.enabled
+    captured = {}
+
+    def fake_export(model, args, output, **kwargs):
+        del model, args, kwargs
+        captured["mkldnn_enabled_during_export"] = mkldnn_backend.enabled
+        Path(output).write_bytes(b"fake-onnx")
+
+    def fake_build_engine(onnx_path, **kwargs):
+        del onnx_path, kwargs
+        return b"fake-plan"
+
+    monkeypatch.setattr(compiler.torch.onnx, "export", fake_export)
+    monkeypatch.setattr(compiler, "_build_engine_from_onnx_path", fake_build_engine)
+
+    result = compiler.compile_model_via_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(1),),
+        input_names=["input"],
+        output_names=["output"],
+        disable_mkldnn=True,
+    )
+
+    assert result == b"fake-plan"
+    assert captured["mkldnn_enabled_during_export"] is False
+    assert mkldnn_backend.enabled is previous
 
 
 class TestBuildBundle:

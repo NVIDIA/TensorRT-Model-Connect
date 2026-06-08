@@ -1,8 +1,8 @@
 #pragma once
 
 #include "trtmc/config/config_bundle.h"
-#include "utils/json_helpers.h"
 
+#include <cctype>
 #include <cstdint>
 #include <exception>
 #include <sstream>
@@ -26,17 +26,138 @@ struct VoxCPM2Config {
     int32_t feat_dim{64};
 };
 
+namespace voxcpm2_detail {
+
+inline bool is_space(char c) {
+    return std::isspace(static_cast<unsigned char>(c)) != 0;
+}
+
+inline bool is_int_char(char c) {
+    return std::isdigit(static_cast<unsigned char>(c)) != 0 || c == '-';
+}
+
+inline bool is_float_char(char c) {
+    return std::isdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '+' || c == '.' ||
+           c == 'e' || c == 'E';
+}
+
+inline std::size_t skip_space(const std::string& text, std::size_t pos) {
+    while (pos < text.size() && is_space(text[pos])) {
+        ++pos;
+    }
+    return pos;
+}
+
+inline std::size_t scan_while(const std::string& text, std::size_t pos, bool (*allowed)(char)) {
+    std::size_t end = pos;
+    while (end < text.size() && allowed(text[end])) {
+        ++end;
+    }
+    return end;
+}
+
+inline bool key_matches_at(const std::string& text, std::size_t pos, const std::string& key) {
+    if (pos >= text.size() || text[pos] != '"') {
+        return false;
+    }
+    const std::size_t value_begin = pos + 1;
+    const std::size_t value_end = value_begin + key.size();
+    return value_end < text.size() && text.compare(value_begin, key.size(), key) == 0 &&
+           text[value_end] == '"';
+}
+
+inline bool find_top_level_key_colon(const std::string& text, const std::string& key,
+                                     std::size_t& colon) {
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            if (depth == 1 && key_matches_at(text, i, key)) {
+                const std::size_t after_key = i + key.size() + 2;
+                const std::size_t maybe_colon = skip_space(text, after_key);
+                if (maybe_colon < text.size() && text[maybe_colon] == ':') {
+                    colon = maybe_colon;
+                    return true;
+                }
+            }
+            in_string = true;
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}' && depth > 0) {
+            --depth;
+        }
+    }
+    return false;
+}
+
+inline int32_t extract_top_level_json_int(const std::string& text, const std::string& key,
+                                          int32_t fallback) {
+    std::size_t colon = 0;
+    if (!find_top_level_key_colon(text, key, colon)) {
+        return fallback;
+    }
+    const std::size_t pos = skip_space(text, colon + 1);
+    const std::size_t end = scan_while(text, pos, is_int_char);
+    if (end == pos) {
+        return fallback;
+    }
+    try {
+        return static_cast<int32_t>(std::stoi(text.substr(pos, end - pos)));
+    } catch (const std::exception&) {
+        return fallback;
+    }
+}
+
+inline float extract_top_level_json_float(const std::string& text, const std::string& key,
+                                          float fallback) {
+    std::size_t colon = 0;
+    if (!find_top_level_key_colon(text, key, colon)) {
+        return fallback;
+    }
+    const std::size_t pos = skip_space(text, colon + 1);
+    const std::size_t end = scan_while(text, pos, is_float_char);
+    if (end == pos) {
+        return fallback;
+    }
+    try {
+        return std::stof(text.substr(pos, end - pos));
+    } catch (const std::exception&) {
+        return fallback;
+    }
+}
+
+} // namespace voxcpm2_detail
+
 inline VoxCPM2Config make_voxcpm2_config_from_json(const std::string& config_json) {
     VoxCPM2Config cfg;
-    cfg.sample_rate = extract_json_int(config_json, "sample_rate", cfg.sample_rate);
-    cfg.reference_sample_rate =
-        extract_json_int(config_json, "reference_sample_rate", cfg.reference_sample_rate);
-    cfg.max_text_steps = extract_json_int(config_json, "voxcpm2_max_text_steps", cfg.max_text_steps);
-    cfg.cfg_value = extract_json_float(config_json, "voxcpm2_cfg_value", cfg.cfg_value);
-    cfg.inference_timesteps =
-        extract_json_int(config_json, "voxcpm2_inference_timesteps", cfg.inference_timesteps);
-    cfg.patch_size = extract_json_int(config_json, "voxcpm2_patch_size", cfg.patch_size);
-    cfg.feat_dim = extract_json_int(config_json, "voxcpm2_feat_dim", cfg.feat_dim);
+    cfg.sample_rate =
+        voxcpm2_detail::extract_top_level_json_int(config_json, "sample_rate", cfg.sample_rate);
+    cfg.reference_sample_rate = voxcpm2_detail::extract_top_level_json_int(
+        config_json, "reference_sample_rate", cfg.reference_sample_rate);
+    cfg.max_text_steps = voxcpm2_detail::extract_top_level_json_int(
+        config_json, "voxcpm2_max_text_steps", cfg.max_text_steps);
+    cfg.cfg_value = voxcpm2_detail::extract_top_level_json_float(
+        config_json, "voxcpm2_cfg_value", cfg.cfg_value);
+    cfg.inference_timesteps = voxcpm2_detail::extract_top_level_json_int(
+        config_json, "voxcpm2_inference_timesteps", cfg.inference_timesteps);
+    cfg.patch_size = voxcpm2_detail::extract_top_level_json_int(
+        config_json, "voxcpm2_patch_size", cfg.patch_size);
+    cfg.feat_dim =
+        voxcpm2_detail::extract_top_level_json_int(config_json, "voxcpm2_feat_dim", cfg.feat_dim);
     return cfg;
 }
 

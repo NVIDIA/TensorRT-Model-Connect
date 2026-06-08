@@ -59,6 +59,26 @@ void test_bundle_audio_metadata_overrides_defaults() {
     check(cfg.inference_timesteps == 12, "bundle inference_timesteps overrides default");
 }
 
+void test_bundle_audio_metadata_ignores_nested_sample_rates() {
+    const std::string config_json = R"json({
+      "audio_vae_config": {
+        "sample_rate": 16000,
+        "out_sample_rate": 16000,
+        "reference_sample_rate": 8000
+      },
+      "sample_rate": 48000,
+      "reference_sample_rate": 16000,
+      "voxcpm2_cfg_value": 2.0,
+      "voxcpm2_inference_timesteps": 10
+    })json";
+
+    const auto cfg = trtmc::make_voxcpm2_config_from_json(config_json);
+
+    check(cfg.sample_rate == 48000, "top-level sample_rate wins over nested AudioVAE metadata");
+    check(cfg.reference_sample_rate == 16000,
+          "top-level reference_sample_rate wins over nested AudioVAE metadata");
+}
+
 void test_config_description_includes_model_card_fields() {
     const auto cfg = trtmc::make_voxcpm2_config_from_json("{}");
     const auto description = trtmc::describe_voxcpm2_config(cfg);
@@ -177,6 +197,7 @@ void test_generation_plan_description_includes_stage_order_and_artifact() {
 int main() {
     test_model_card_defaults();
     test_bundle_audio_metadata_overrides_defaults();
+    test_bundle_audio_metadata_ignores_nested_sample_rates();
     test_config_description_includes_model_card_fields();
     test_generation_plan_matches_component_contract();
     test_generation_plan_preserves_acceptance_artifact_name();

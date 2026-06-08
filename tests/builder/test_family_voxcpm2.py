@@ -1239,7 +1239,7 @@ def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monk
 
     monkeypatch.setattr(
         component_builders,
-        "_compile_voxcpm2_audio_vae_onnx",
+        "_compile_voxcpm2_audio_vae_torch_trt",
         _fake_compile,
     )
 
@@ -1272,7 +1272,7 @@ def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monk
     assert captured["verbose"] is True
     example_latents = captured["example_args"][0]
     assert example_latents.shape == (28, 64)
-    assert example_latents.dtype == "bf16"
+    assert example_latents.dtype == "fp32"
 
     wrapper = captured["wrapper"]
     audio_vae = wrapper.module
@@ -1283,7 +1283,7 @@ def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monk
         np.array([1.0], dtype=np.float32),
     )
     assert audio_vae.strict is True
-    assert audio_vae.dtype == "bf16"
+    assert audio_vae.dtype == "fp32"
     assert audio_vae.eval_called is True
     assert wrapper.eval_called is True
 
@@ -1480,6 +1480,164 @@ def test_voxcpm2_component_preflight_resolves_stage_inputs(tmp_path, monkeypatch
         "quantizer.embedding.weight",
     )
     assert audiovae_inputs.config_values["audio_vae_config"]["out_sample_rate"] == 48000
+
+
+def test_voxcpm2_minicpm_attention_patch_expands_gqa_without_enable_flag(monkeypatch):
+    torch = pytest.importorskip("torch")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_modules = types.ModuleType("voxcpm.modules")
+    fake_minicpm4 = types.ModuleType("voxcpm.modules.minicpm4")
+    fake_model = types.ModuleType("voxcpm.modules.minicpm4.model")
+
+    class FakeAttention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_heads = 4
+            self.num_key_value_heads = 2
+            self.head_dim = 2
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 4, bias=False)
+            self.v_proj = torch.nn.Linear(8, 4, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    fake_model.MiniCPMAttention = FakeAttention
+    fake_model.apply_rotary_pos_emb = lambda q, k, cos, sin: (q, k)
+    fake_minicpm4.model = fake_model
+    fake_modules.minicpm4 = fake_minicpm4
+    fake_voxcpm.modules = fake_modules
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", fake_minicpm4)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4.model", fake_model)
+
+    calls = []
+
+    def fake_sdpa(query, key, value, **kwargs):
+        calls.append((query.shape, key.shape, value.shape, kwargs))
+        assert "enable_gqa" not in kwargs
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(
+        torch.nn.functional, "scaled_dot_product_attention", fake_sdpa
+    )
+
+    component_builders._patch_minicpm_attention_gqa_for_torch_trt(torch)
+
+    attention = FakeAttention()
+    output, past = attention.forward(torch.zeros(1, 3, 8), None, False)
+
+    assert output.shape == (1, 3, 8)
+    assert past[0].shape == (1, 2, 3, 2)
+    assert calls[0][1] == (1, 4, 3, 2)
+    assert calls[0][2] == (1, 4, 3, 2)
+    assert calls[0][3] == {"is_causal": False}
+
+    step_output = attention.forward_step(
+        torch.zeros(1, 8),
+        None,
+        torch.tensor([1]),
+        (torch.zeros(1, 2, 4, 2), torch.zeros(1, 2, 4, 2)),
+    )
+
+    assert step_output.shape == (1, 8)
+    assert calls[1][1] == (1, 4, 4, 2)
+    assert calls[1][2] == (1, 4, 4, 2)
+    assert calls[1][3]["attn_mask"].shape == (1, 1, 1, 4)
+
+
+def test_voxcpm2_unified_cfm_patch_keeps_traced_scalars_typed(monkeypatch, tmp_path):
+    torch = pytest.importorskip("torch")
+    onnx = pytest.importorskip("onnx")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_modules = types.ModuleType("voxcpm.modules")
+    fake_locdit = types.ModuleType("voxcpm.modules.locdit")
+    fake_unified_cfm = types.ModuleType("voxcpm.modules.locdit.unified_cfm")
+
+    class FakeEstimator(torch.nn.Module):
+        def forward(self, x, mu, t, cond, dt):
+            del mu
+            return x + t.reshape(-1, 1, 1) + dt.reshape(-1, 1, 1) + cond[:, :, : x.size(2)] * 0
+
+    class FakeUnifiedCFM(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_channels = 2
+            self.mean_mode = False
+            self.estimator = FakeEstimator()
+
+    fake_unified_cfm.UnifiedCFM = FakeUnifiedCFM
+    fake_locdit.unified_cfm = fake_unified_cfm
+    fake_modules.locdit = fake_locdit
+    fake_voxcpm.modules = fake_modules
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.locdit", fake_locdit)
+    monkeypatch.setitem(
+        sys.modules,
+        "voxcpm.modules.locdit.unified_cfm",
+        fake_unified_cfm,
+    )
+
+    component_builders._patch_unified_cfm_for_onnx_export(torch)
+
+    cfm = FakeUnifiedCFM().eval()
+    mu = torch.zeros(2, 4, dtype=torch.bfloat16)
+    cond = torch.zeros(2, 2, 3, dtype=torch.bfloat16)
+    cfg_value = torch.tensor(2.0, dtype=torch.float32)
+    out = cfm(mu, 3, 3, cond, cfg_value=cfg_value)
+
+    assert out.shape == (2, 2, 3)
+    assert out.dtype == torch.bfloat16
+    assert cfm.optimized_scale(
+        torch.ones(2, 4, dtype=torch.bfloat16),
+        torch.ones(2, 4, dtype=torch.bfloat16),
+    ).dtype == torch.bfloat16
+
+    class WrappedCFM(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, mu_arg, cond_arg, cfg_arg):
+            return self.module(mu_arg, 3, 3, cond_arg, cfg_value=cfg_arg)
+
+    traced = torch.jit.trace(
+        WrappedCFM(cfm),
+        (mu, cond, cfg_value),
+        check_trace=False,
+    )
+    graph = str(traced.graph)
+    assert "Complex" not in graph
+    assert "Double(" not in graph
+
+    onnx_path = tmp_path / "cfm.onnx"
+    torch.onnx.export(
+        WrappedCFM(cfm),
+        (mu, cond, cfg_value),
+        str(onnx_path),
+        opset_version=20,
+        input_names=["mu", "cond", "cfg_value"],
+        output_names=["latents"],
+        dynamo=False,
+    )
+    model = onnx.load(str(onnx_path))
+    random_nodes = [
+        node for node in model.graph.node if node.op_type == "RandomNormalLike"
+    ]
+    assert random_nodes
+    random_dtypes = {
+        onnx.helper.get_attribute_value(attr)
+        for node in random_nodes
+        for attr in node.attribute
+        if attr.name == "dtype"
+    }
+    assert random_dtypes == {onnx.TensorProto.FLOAT}
 
 
 def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):

@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import contextlib
 import gc
-import io
 import json
 import logging
 import re
 import sys
+import tempfile
 import time
 import warnings
 from datetime import datetime, timezone
@@ -331,6 +331,57 @@ def _build_engine_from_onnx_bytes(
     return bytes(plan)
 
 
+def _build_engine_from_onnx_path(
+    onnx_path: Path,
+    *,
+    verbose: bool = False,
+    workspace_size: int = 1 << 30,
+) -> bytes:
+    """Build a TRT engine from an ONNX file, including external data files."""
+    from tensorrt_model_connect import trt_compat
+    trt = trt_compat.get_trt()
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
+    )
+    parser = trt.OnnxParser(network, logger)
+
+    if not parser.parse_from_file(str(onnx_path)):
+        errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+        raise RuntimeError("ONNX parsing failed:\n" + "\n".join(errors))
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size)
+    if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
+        config.clear_flag(trt.BuilderFlag.TF32)
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TensorRT engine build from ONNX failed")
+    return bytes(plan)
+
+
+@contextlib.contextmanager
+def _maybe_disable_mkldnn(disable: bool):
+    """Temporarily disable MKLDNN for CPU tracing paths that hit JIT bugs."""
+    mkldnn_backend = getattr(getattr(torch, "backends", None), "mkldnn", None)
+    if not disable or mkldnn_backend is None or not hasattr(mkldnn_backend, "enabled"):
+        yield
+        return
+
+    previous = mkldnn_backend.enabled
+    mkldnn_backend.enabled = False
+    try:
+        yield
+    finally:
+        mkldnn_backend.enabled = previous
+
+
 def compile_model_via_onnx(
     wrapper: nn.Module,
     example_args: tuple,
@@ -339,29 +390,39 @@ def compile_model_via_onnx(
     output_names: list[str],
     opset_version: int = 18,
     verbose: bool = False,
+    disable_mkldnn: bool = False,
+    workspace_size: int = 1 << 30,
 ) -> bytes:
     """Export a wrapped model to ONNX, then build a TRT engine via ONNX parser."""
     if verbose:
         print("[onnx-trt] Exporting to ONNX ...", file=sys.stderr)
 
-    onnx_buffer = io.BytesIO()
-    with torch.no_grad(), _math_sdpa_only():
-        torch.onnx.export(
-            wrapper,
-            example_args,
-            onnx_buffer,
-            opset_version=opset_version,
-            dynamo=False,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=None,
-        )
-    onnx_bytes = onnx_buffer.getvalue()
-    if verbose:
-        print(f"[onnx-trt] ONNX export complete "
-              f"({len(onnx_bytes) / (1024 * 1024):.1f} MB)", file=sys.stderr)
+    with tempfile.TemporaryDirectory(prefix="trtmc_onnx_") as tmpdir:
+        onnx_path = Path(tmpdir) / "model.onnx"
+        with torch.no_grad(), _math_sdpa_only(), _maybe_disable_mkldnn(disable_mkldnn):
+            torch.onnx.export(
+                wrapper,
+                example_args,
+                str(onnx_path),
+                opset_version=opset_version,
+                dynamo=False,
+                external_data=True,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=None,
+            )
+        if verbose:
+            print(
+                f"[onnx-trt] ONNX export complete "
+                f"({onnx_path.stat().st_size / (1024 * 1024):.1f} MB)",
+                file=sys.stderr,
+            )
 
-    return _build_engine_from_onnx_bytes(onnx_bytes, verbose=verbose)
+        return _build_engine_from_onnx_path(
+            onnx_path,
+            verbose=verbose,
+            workspace_size=workspace_size,
+        )
 
 
 def _inspect_engine(engine_bytes: bytes) -> dict:

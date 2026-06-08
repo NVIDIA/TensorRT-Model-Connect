@@ -645,7 +645,14 @@ void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
             "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
             ") is missing required input binding '" + stage.input_artifact + "'");
     }
-    if (!component.module->has_output(stage.output_artifact)) {
+
+    const char* output_binding = stage.output_artifact;
+    if (!component.module->has_output(output_binding) &&
+        stage.kind == audio::VoxCPM2StageKind::kAudioVae &&
+        component.module->has_output("output0")) {
+        output_binding = "output0";
+    }
+    if (!component.module->has_output(output_binding)) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
             ") is missing required output binding '" + stage.output_artifact + "'");
@@ -768,7 +775,12 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     add_declared_artifact_inputs(*component.module, artifacts, inputs);
     controls.add_to(*component.module, inputs);
     auto outputs = component.module->forward(inputs);
-    const auto output_it = outputs.find(stage.output_artifact);
+    const char* output_binding = stage.output_artifact;
+    if (outputs.find(output_binding) == outputs.end() &&
+        stage.kind == audio::VoxCPM2StageKind::kAudioVae) {
+        output_binding = "output0";
+    }
+    const auto output_it = outputs.find(output_binding);
     if (output_it == outputs.end()) {
         throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name +
                                  " did not return output artifact '" + stage.output_artifact + "'");
@@ -779,7 +791,7 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     artifacts[stage.output_artifact] =
         copy_stage_tensor(output_it->second, stage.output_artifact, component.name);
     for (const auto& output : outputs) {
-        if (output.first == stage.output_artifact)
+        if (output.first == stage.output_artifact || output.first == output_binding)
             continue;
         artifacts[output.first] = copy_stage_tensor(output.second, output.first, component.name);
     }

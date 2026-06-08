@@ -574,6 +574,282 @@ def _raise_native_builder_gap(
     )
 
 
+def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
+    """Avoid exporting SDPA with enable_gqa=True for upstream MiniCPM blocks."""
+    try:
+        from voxcpm.modules.minicpm4 import model as minicpm_model
+    except ImportError:
+        return
+
+    attention_cls = getattr(minicpm_model, "MiniCPMAttention", None)
+    apply_rotary_pos_emb = getattr(minicpm_model, "apply_rotary_pos_emb", None)
+    if attention_cls is None or apply_rotary_pos_emb is None:
+        return
+    if getattr(attention_cls, "_trtmc_explicit_gqa_patch", False):
+        return
+
+    def _expand_kv_for_gqa(tensor: Any, num_heads: int, num_key_value_heads: int) -> Any:
+        if num_heads == num_key_value_heads:
+            return tensor
+        if num_key_value_heads <= 0 or num_heads % num_key_value_heads != 0:
+            raise ValueError(
+                "VoxCPM2 MiniCPM attention requires num_attention_heads to be "
+                "divisible by num_key_value_heads"
+            )
+        return tensor.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+
+    def _forward(self: Any, hidden_states: Any, position_emb: Any, is_causal: bool) -> Any:
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+
+        if position_emb is not None:
+            cos, sin = position_emb
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
+
+        query_states = query_states.contiguous()
+        key_states = key_states.contiguous()
+        value_states = value_states.contiguous()
+        expanded_key_states = _expand_kv_for_gqa(
+            key_states, self.num_heads, self.num_key_value_heads
+        )
+        expanded_value_states = _expand_kv_for_gqa(
+            value_states, self.num_heads, self.num_key_value_heads
+        )
+        attn_output = torch_module.nn.functional.scaled_dot_product_attention(
+            query_states,
+            expanded_key_states,
+            expanded_value_states,
+            is_causal=is_causal,
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
+        attn_output = self.o_proj(attn_output)
+
+        past_key_value = (key_states, value_states)
+        return attn_output, past_key_value
+
+    def _forward_step(
+        self: Any,
+        hidden_states: Any,
+        position_emb: Any,
+        position_id: Any,
+        kv_cache: tuple[Any, Any],
+    ) -> Any:
+        bsz, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(
+            bsz, 1, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, 1, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, 1, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+
+        if position_emb is not None:
+            cos, sin = position_emb
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
+
+        key_cache, value_cache = kv_cache
+        key_cache[:, :, position_id, :] = key_states
+        value_cache[:, :, position_id, :] = value_states
+
+        attn_mask = (
+            torch_module.arange(key_cache.size(2), device=key_cache.device)
+            <= position_id
+        ).view(1, 1, 1, -1)
+
+        query_states = query_states.contiguous()
+        key_cache = key_cache.contiguous()
+        value_cache = value_cache.contiguous()
+        expanded_key_cache = _expand_kv_for_gqa(
+            key_cache, self.num_heads, self.num_key_value_heads
+        )
+        expanded_value_cache = _expand_kv_for_gqa(
+            value_cache, self.num_heads, self.num_key_value_heads
+        )
+        attn_output = torch_module.nn.functional.scaled_dot_product_attention(
+            query_states,
+            expanded_key_cache,
+            expanded_value_cache,
+            attn_mask=attn_mask,
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, self.num_heads * self.head_dim)
+        attn_output = self.o_proj(attn_output)
+        return attn_output
+
+    attention_cls.forward = _forward
+    attention_cls.forward_step = _forward_step
+    attention_cls._trtmc_explicit_gqa_patch = True
+
+
+def _patch_unified_cfm_for_onnx_export(torch_module: Any) -> None:
+    """Keep upstream UnifiedCFM numerics while avoiding ONNX scalar promotion."""
+    try:
+        from voxcpm.modules.locdit import unified_cfm
+    except ImportError:
+        return
+
+    unified_cfm_cls = getattr(unified_cfm, "UnifiedCFM", None)
+    if unified_cfm_cls is None:
+        return
+    if getattr(unified_cfm_cls, "_trtmc_onnx_scalar_patch", False):
+        return
+
+    def _forward(
+        self: Any,
+        mu: Any,
+        n_timesteps: int,
+        patch_size: int,
+        cond: Any,
+        temperature: float = 1.0,
+        cfg_value: Any = 1.0,
+        sway_sampling_coef: float = 1.0,
+        use_cfg_zero_star: bool = True,
+    ) -> Any:
+        batch, _ = mu.shape
+        noise = torch_module.randn(
+            (batch, self.in_channels, patch_size),
+            device=mu.device,
+            dtype=torch_module.float32,
+        ).to(dtype=mu.dtype)
+        z = noise * mu.new_tensor(float(temperature))
+
+        base_t = torch_module.linspace(
+            1.0,
+            0.0,
+            int(n_timesteps) + 1,
+            device=mu.device,
+            dtype=torch_module.float32,
+        )
+        half_pi = base_t.new_tensor(1.5707963267948966)
+        one = base_t.new_tensor(1.0)
+        sway = base_t + base_t.new_tensor(float(sway_sampling_coef)) * (
+            torch_module.cos(half_pi * base_t) - one + base_t
+        )
+        t_span = sway.to(dtype=mu.dtype)
+
+        return self.solve_euler(
+            x=z,
+            t_span=t_span,
+            mu=mu,
+            cond=cond,
+            cfg_value=cfg_value,
+            use_cfg_zero_star=use_cfg_zero_star,
+        )
+
+    def _optimized_scale(self: Any, positive_flat: Any, negative_flat: Any) -> Any:
+        dot_product = torch_module.sum(
+            positive_flat * negative_flat,
+            dim=1,
+            keepdim=True,
+        )
+        squared_norm = torch_module.sum(
+            negative_flat * negative_flat,
+            dim=1,
+            keepdim=True,
+        ) + negative_flat.new_tensor(1e-8)
+        return dot_product / squared_norm
+
+    def _solve_euler(
+        self: Any,
+        x: Any,
+        t_span: Any,
+        mu: Any,
+        cond: Any,
+        cfg_value: Any = 1.0,
+        use_cfg_zero_star: bool = True,
+    ) -> Any:
+        t = t_span[0]
+        dt = t_span[0] - t_span[1]
+        num_steps = int(t_span.shape[0])
+        zero_init_steps = max(1, int(num_steps * 0.04))
+
+        sol = []
+        for step in range(1, num_steps):
+            if use_cfg_zero_star and step <= zero_init_steps:
+                dphi_dt = torch_module.zeros_like(x)
+            else:
+                batch = x.size(0)
+                x_in = x.new_zeros((2 * batch, self.in_channels, x.size(2)))
+                mu_in = mu.new_zeros((2 * batch, mu.size(1)))
+                t_in = x.new_zeros((2 * batch,))
+                dt_in = x.new_zeros((2 * batch,))
+                cond_in = cond.new_zeros((2 * batch, self.in_channels, cond.size(2)))
+                x_in[:batch], x_in[batch:] = x, x
+                mu_in[:batch] = mu
+                t_in[:batch], t_in[batch:] = t.unsqueeze(0), t.unsqueeze(0)
+                dt_in[:batch], dt_in[batch:] = dt.unsqueeze(0), dt.unsqueeze(0)
+                if not self.mean_mode:
+                    dt_in = torch_module.zeros_like(dt_in)
+                cond_in[:batch], cond_in[batch:] = cond, cond
+
+                dphi_dt = self.estimator(x_in, mu_in, t_in, cond_in, dt_in)
+                dphi_dt, cfg_dphi_dt = torch_module.split(
+                    dphi_dt,
+                    [x.size(0), x.size(0)],
+                    dim=0,
+                )
+
+                if use_cfg_zero_star:
+                    positive_flat = dphi_dt.view(batch, -1)
+                    negative_flat = cfg_dphi_dt.view(batch, -1)
+                    st_star = self.optimized_scale(positive_flat, negative_flat)
+                    st_star = st_star.view(
+                        batch,
+                        *([1] * (len(dphi_dt.shape) - 1)),
+                    )
+                else:
+                    st_star = x.new_tensor(1.0)
+
+                cfg = torch_module.as_tensor(
+                    cfg_value,
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+                dphi_dt = cfg_dphi_dt * st_star + cfg * (
+                    dphi_dt - cfg_dphi_dt * st_star
+                )
+
+            x = x - dt.to(dtype=x.dtype) * dphi_dt
+            t = t - dt
+            sol.append(x)
+            if step < num_steps - 1:
+                dt = t - t_span[step + 1]
+
+        return sol[-1]
+
+    unified_cfm_cls.forward = _forward
+    unified_cfm_cls.optimized_scale = _optimized_scale
+    unified_cfm_cls.solve_euler = _solve_euler
+    unified_cfm_cls._trtmc_onnx_scalar_patch = True
+
+
 def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     prepared = prepare_component_inputs(ctx)
     try:
@@ -586,6 +862,7 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             "upstream voxcpm package"
         ) from exc
 
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
     compute_dtype = _torch_dtype(torch, ctx.precision)
     lm_config = prepared.config_values.get("lm_config")
     if not isinstance(lm_config, Mapping):
@@ -725,6 +1002,7 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             "upstream voxcpm package"
         ) from exc
 
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
     compute_dtype = _torch_dtype(torch, ctx.precision)
     lm_config = prepared.config_values.get("lm_config")
     if not isinstance(lm_config, Mapping):
@@ -811,6 +1089,8 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             "upstream voxcpm package"
         ) from exc
 
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
+    _patch_unified_cfm_for_onnx_export(torch)
     compute_dtype = _torch_dtype(torch, ctx.precision)
     lm_config = prepared.config_values.get("lm_config")
     dit_config = prepared.config_values.get("dit_config")
@@ -908,7 +1188,7 @@ def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             )
             latents = latents.transpose(1, 2).contiguous().reshape(-1, feat_dim)
             step_dependency = inference_timesteps.to(dtype=latents.dtype).reshape(())
-            return latents + (step_dependency * 0.0)
+            return (latents + (step_dependency * 0.0)).to(dtype=torch.float32)
 
     wrapper = LocDiTWrapper(
         feat_decoder,
@@ -1186,6 +1466,7 @@ def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             "upstream voxcpm package"
         ) from exc
 
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
     compute_dtype = _torch_dtype(torch, ctx.precision)
     lm_config = prepared.config_values.get("lm_config")
     encoder_config = prepared.config_values.get("encoder_config")
@@ -1248,19 +1529,18 @@ def _audio_vae_export_frames(ctx: VoxCPM2ComponentBuildContext) -> int:
     return max(1, int(raw_config.get("max_length", 8192))) * patch_size
 
 
-def _compile_voxcpm2_audio_vae_onnx(
+def _compile_voxcpm2_audio_vae_torch_trt(
     wrapper: Any,
     example_args: tuple[Any, ...],
     *,
     verbose: bool,
 ) -> bytes:
-    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+    from ...engine_defs.torch_trt.compiler import compile_model
 
-    return compile_model_via_onnx(
+    return compile_model(
         wrapper,
         example_args,
-        input_names=["audio_vae_latents"],
-        output_names=["waveform_f32"],
+        workspace_size=8 << 30,
         verbose=verbose,
     )
 
@@ -1283,11 +1563,18 @@ def build_audiovae_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
             "component config values"
         )
 
-    compute_dtype = _torch_dtype(torch, ctx.precision)
     audio_vae = AudioVAEV2(AudioVAEConfigV2(**audio_vae_config))
     state_dict = ctx.load_torch_checkpoint()
     audio_vae.load_state_dict(state_dict, strict=True)
-    audio_vae.to(dtype=compute_dtype)
+    use_cuda = bool(
+        hasattr(torch, "cuda")
+        and hasattr(torch.cuda, "is_available")
+        and torch.cuda.is_available()
+    )
+    if use_cuda:
+        audio_vae.to(device="cuda", dtype=torch.float32)
+    else:
+        audio_vae.to(dtype=torch.float32)
     audio_vae.eval()
 
     class AudioVAEDecodeWrapper(torch.nn.Module):
@@ -1297,17 +1584,20 @@ def build_audiovae_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
 
         def forward(self, audio_vae_latents: Any) -> Any:
             latents = audio_vae_latents.transpose(0, 1).unsqueeze(0)
-            waveform = self.module.decode(latents.float())
+            waveform = self.module.decode(latents)
             return waveform.squeeze(0).squeeze(0)
 
     wrapper = AudioVAEDecodeWrapper(audio_vae)
     wrapper.eval()
     latent_dim = int(audio_vae_config.get("latent_dim", 64))
     audio_frames = _audio_vae_export_frames(ctx)
+    example_kwargs = {"dtype": torch.float32}
+    if use_cuda:
+        example_kwargs["device"] = "cuda"
     example_args = (
-        torch.zeros((audio_frames, latent_dim), dtype=compute_dtype),
+        torch.zeros((audio_frames, latent_dim), **example_kwargs),
     )
-    return _compile_voxcpm2_audio_vae_onnx(
+    return _compile_voxcpm2_audio_vae_torch_trt(
         wrapper,
         example_args,
         verbose=ctx.verbose,
