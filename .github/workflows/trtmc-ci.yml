@@ -60,7 +60,7 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           github.event_name == 'pull_request' &&
-          contains(fromJSON('["run-e2e", "run-full-ci"]'), github.event.label.name)
+          github.event.label.name == 'run-ci'
         )
       }}
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
@@ -241,7 +241,7 @@ jobs:
           ${{
             always() &&
             github.event_name == 'pull_request' &&
-            contains(fromJSON('["run-e2e", "run-full-ci"]'), github.event.label.name)
+            github.event.label.name == 'run-ci'
           }}
         continue-on-error: true
         uses: actions/github-script@v7

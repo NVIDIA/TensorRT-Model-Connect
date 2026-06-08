@@ -122,7 +122,9 @@ def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
     assert "issues: write" in text
     assert "pull-requests: read" in text
     assert "github.event_name == 'workflow_dispatch'" in text
-    assert 'contains(fromJSON(\'["run-e2e", "run-full-ci"]\'), github.event.label.name)' in text
+    assert "github.event.label.name == 'run-ci'" in text
+    assert "run-e2e" not in text
+    assert "run-full-ci" not in text
     assert "Remove trigger label" in text
     assert "continue-on-error: true" in text
     assert "actions/github-script@v7" in text
