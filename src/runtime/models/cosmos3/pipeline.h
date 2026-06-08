@@ -41,35 +41,33 @@ struct Cosmos3Config {
     int32_t num_reasoner_kv_heads; // 8  / 2
     int32_t reasoner_head_dim;     // 128
     int32_t max_cache_length;
-    int32_t num_dm_layers;         // shares reasoner depth in Super
+    int32_t num_dm_layers; // shares reasoner depth in Super
     int32_t dm_hidden_size;
-    int32_t latent_channel;        // 48
-    int32_t latent_patch_size;     // 2
-    int32_t patch_latent_dim;      // 192 = 48 * 2 * 2
-    int32_t vae_spatial_scale;     // 16
-    int32_t vae_temporal_scale;    // 4
-    int32_t num_inference_steps;   // 30 (L0) / 50 (full)
+    int32_t latent_channel;      // 48
+    int32_t latent_patch_size;   // 2
+    int32_t patch_latent_dim;    // 192 = 48 * 2 * 2
+    int32_t vae_spatial_scale;   // 16
+    int32_t vae_temporal_scale;  // 4
+    int32_t num_inference_steps; // 30 (L0) / 50 (full)
     int32_t video_num_frames;
     int32_t video_height;
     int32_t video_width;
-    float   timestep_scale;        // 0.001
-    int32_t mrope_section[3];      // {24, 20, 20}
-    int64_t rope_theta;            // 5e6
-    bool    qk_norm;
-    bool    fps_modulation;
-    int32_t base_fps;              // 24
-    std::string precision;         // "bf16"
+    float timestep_scale;     // 0.001
+    int32_t mrope_section[3]; // {24, 20, 20}
+    int64_t rope_theta;       // 5e6
+    bool qk_norm;
+    bool fps_modulation;
+    int32_t base_fps;      // 24
+    std::string precision; // "bf16"
 };
 
 class Cosmos3Pipeline final : public IPipeline {
   public:
     Cosmos3Pipeline(std::unique_ptr<TrtModule> reasoner,
                     std::unique_ptr<IInferenceState> reasoner_state,
-                    std::unique_ptr<TrtModule> dm_generator,
-                    std::unique_ptr<TrtModule> vae_decoder,
-                    std::unique_ptr<TrtModule> vit_encoder,
-                    Cosmos3Config config, cudaStream_t stream,
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                    std::unique_ptr<TrtModule> dm_generator, std::unique_ptr<TrtModule> vae_decoder,
+                    std::unique_ptr<TrtModule> vit_encoder, Cosmos3Config config,
+                    cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                     std::string model_id_str = "");
 
     ~Cosmos3Pipeline() override;
@@ -89,24 +87,22 @@ class Cosmos3Pipeline final : public IPipeline {
     // Run one denoising step. Reads the latent noise tensor, the timestep,
     // and (via reasoner_state_) the prefilled AR KV cache. Writes the
     // denoised latent prediction back into latent_out.
-    void denoise_step(const float* latent_in, float timestep,
-                      float* latent_out);
+    void denoise_step(const float* latent_in, float timestep, float* latent_out);
 
     // VAE: decode the final latent (T_lat, 48, H_lat, W_lat) into pixels
     // (T, 3, H, W) suitable for MP4 muxing.
-    std::vector<uint8_t> decode_video(const float* latent_final,
-                                      int32_t latent_t, int32_t latent_h,
+    std::vector<uint8_t> decode_video(const float* latent_final, int32_t latent_t, int32_t latent_h,
                                       int32_t latent_w);
 
-    std::unique_ptr<TrtModule>       reasoner_;
+    std::unique_ptr<TrtModule> reasoner_;
     std::unique_ptr<IInferenceState> reasoner_state_;
-    std::unique_ptr<TrtModule>       dm_generator_;
-    std::unique_ptr<TrtModule>       vae_decoder_;
-    std::unique_ptr<TrtModule>       vit_encoder_;
-    Cosmos3Config                    config_;
-    cudaStream_t                     stream_;
-    std::shared_ptr<ITokenizer>      tokenizer_;
-    std::string                      model_id_;
+    std::unique_ptr<TrtModule> dm_generator_;
+    std::unique_ptr<TrtModule> vae_decoder_;
+    std::unique_ptr<TrtModule> vit_encoder_;
+    Cosmos3Config config_;
+    cudaStream_t stream_;
+    std::shared_ptr<ITokenizer> tokenizer_;
+    std::string model_id_;
 };
 
 } // namespace trtmc

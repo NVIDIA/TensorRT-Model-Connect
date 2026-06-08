@@ -20,11 +20,10 @@ class Cosmos3Plugin final : public IPipelinePlugin {
         // be filled in once the DM generator TRT graph builder (Phase 4)
         // produces concrete engine artifacts that the pipeline can
         // consume.
-        throw std::runtime_error(
-            "Cosmos3Plugin::create is a scaffold — full pipeline wiring "
-            "follows once the DM generator TRT graph builder is "
-            "implemented (Phase 4) and a working bundle layout for "
-            "Cosmos 3 is defined.");
+        throw std::runtime_error("Cosmos3Plugin::create is a scaffold — full pipeline wiring "
+                                 "follows once the DM generator TRT graph builder is "
+                                 "implemented (Phase 4) and a working bundle layout for "
+                                 "Cosmos 3 is defined.");
     }
 };
 
