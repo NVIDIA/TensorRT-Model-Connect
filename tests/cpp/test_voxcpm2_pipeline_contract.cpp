@@ -1134,6 +1134,12 @@ void test_generate_audio_dumps_locdit_tensor_io_for_parity_debug() {
           "voxcpm2 tensor dump manifest records TSLM prefill phase");
     check(manifest.find("\"phase\":\"ralm_prefill\"") != std::string::npos,
           "voxcpm2 tensor dump manifest records RALM prefill phase");
+    check(manifest.find("\"engine_section\":\"tslm_prefill_engine_plan\"") !=
+              std::string::npos,
+          "voxcpm2 tensor dump attributes full TSLM prefill rows to the prefill engine");
+    check(manifest.find("\"engine_section\":\"ralm_prefill_engine_plan\"") !=
+              std::string::npos,
+          "voxcpm2 tensor dump attributes full RALM prefill rows to the prefill engine");
     check(manifest.find("\"phase\":\"locenc_refresh\"") != std::string::npos,
           "voxcpm2 tensor dump manifest records LocEnc refresh phase");
     check(manifest.find("\"phase\":\"tslm_refresh\"") != std::string::npos,

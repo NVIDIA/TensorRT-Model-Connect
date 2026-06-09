@@ -1101,7 +1101,8 @@ void append_tensor_metadata_summary(std::ostream& os, const Tensor& tensor,
 void dump_stage_tensors_if_requested(const char* phase, std::size_t step,
                                      const char* direction,
                                      const audio::VoxCPM2GenerationStage& stage,
-                                     const TensorMap& tensors) {
+                                     const TensorMap& tensors,
+                                     const std::string* engine_section_override = nullptr) {
     const char* dump_root = std::getenv("TRTMC_VOXCPM2_TENSOR_DUMP_DIR");
     if (dump_root == nullptr || dump_root[0] == '\0' || phase == nullptr)
         return;
@@ -1142,8 +1143,10 @@ void dump_stage_tensors_if_requested(const char* phase, std::size_t step,
                                      raw_path.string() + "'");
         }
 
+        const auto& engine_section =
+            engine_section_override != nullptr ? *engine_section_override : stage.engine_section;
         manifest << "{\"stage\":\"" << json_escape(stage.name) << "\",\"engine_section\":\""
-                 << json_escape(stage.engine_section) << "\",\"phase\":\""
+                 << json_escape(engine_section) << "\",\"phase\":\""
                  << json_escape(phase) << "\",\"step\":" << step << ",\"direction\":\""
                  << json_escape(direction) << "\",\"name\":\"" << json_escape(name)
                  << "\",\"dtype\":\"" << dtype_name(tensor.dtype) << "\",\"shape\":"
@@ -1172,7 +1175,8 @@ void dump_locenc_prefill_table_tensors_if_requested(
 void dump_lm_prefill_input_rows_if_requested(const ITrtModule& module, const char* phase,
                                              const audio::VoxCPM2GenerationStage& stage,
                                              const StageArtifacts& artifacts,
-                                             std::size_t active_text_token_count) {
+                                             std::size_t active_text_token_count,
+                                             const std::string& engine_section) {
     for (std::size_t pos = 0; pos < active_text_token_count; ++pos) {
         std::vector<OwnedStageTensor> row_tensors;
         row_tensors.reserve(1 + stage.required_side_input_count + 1);
@@ -1209,14 +1213,16 @@ void dump_lm_prefill_input_rows_if_requested(const ITrtModule& module, const cha
                                                    converted_inputs));
         }
 
-        dump_stage_tensors_if_requested(phase, pos, "input", stage, inputs);
+        dump_stage_tensors_if_requested(phase, pos, "input", stage, inputs,
+                                        &engine_section);
     }
 }
 
 void dump_lm_prefill_output_rows_if_requested(const char* phase,
                                               const audio::VoxCPM2GenerationStage& stage,
                                               const StageArtifacts& artifacts,
-                                              std::size_t active_text_token_count) {
+                                              std::size_t active_text_token_count,
+                                              const std::string& engine_section) {
     for (std::size_t pos = 0; pos < active_text_token_count; ++pos) {
         std::vector<OwnedStageTensor> row_tensors;
         row_tensors.reserve(3);
@@ -1237,7 +1243,8 @@ void dump_lm_prefill_output_rows_if_requested(const char* phase,
             }
         }
 
-        dump_stage_tensors_if_requested(phase, pos, "output", stage, outputs);
+        dump_stage_tensors_if_requested(phase, pos, "output", stage, outputs,
+                                        &engine_section);
     }
 }
 
@@ -1707,12 +1714,14 @@ OwnedStageTensor run_full_sequence_lm_prefill(
 
     dump_lm_prefill_input_rows_if_requested(*components[1].prefill_module, "tslm_prefill",
                                             plan.stages[1], artifacts,
-                                            active_text_token_count);
+                                            active_text_token_count,
+                                            components[1].prefill_engine_section);
     (void)run_stage_with_module(*components[1].prefill_module, components[1].name,
                                 components[1].prefill_engine_section, plan.stages[1], artifacts,
                                 controls);
     dump_lm_prefill_output_rows_if_requested("tslm_prefill", plan.stages[1], artifacts,
-                                             active_text_token_count);
+                                             active_text_token_count,
+                                             components[1].prefill_engine_section);
     if (artifacts.find(kTslmKvCache.past) == artifacts.end()) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: TSLM full-sequence prefill did not produce a usable KV cache");
@@ -1720,12 +1729,14 @@ OwnedStageTensor run_full_sequence_lm_prefill(
 
     dump_lm_prefill_input_rows_if_requested(*components[2].prefill_module, "ralm_prefill",
                                             plan.stages[2], artifacts,
-                                            active_text_token_count);
+                                            active_text_token_count,
+                                            components[2].prefill_engine_section);
     auto current = run_stage_with_module(*components[2].prefill_module, components[2].name,
                                          components[2].prefill_engine_section, plan.stages[2],
                                          artifacts, controls);
     dump_lm_prefill_output_rows_if_requested("ralm_prefill", plan.stages[2], artifacts,
-                                             active_text_token_count);
+                                             active_text_token_count,
+                                             components[2].prefill_engine_section);
     if (artifacts.find(kRalmKvCache.past) == artifacts.end()) {
         throw std::runtime_error(
             "VoxCPM2Pipeline: RALM full-sequence prefill did not produce a usable KV cache");
