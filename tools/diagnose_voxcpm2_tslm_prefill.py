@@ -14,6 +14,7 @@ import gc
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,292 @@ def _run_trt_prefill_plan(
         }
     )
     return mismatch
+
+
+def _tactic_label(tactic_sources: tuple[str, ...]) -> str:
+    if not tactic_sources:
+        return "default"
+    return "+".join(tactic_sources).lower()
+
+
+def _parse_tactic_source_sets(values: list[str] | None) -> list[tuple[str, ...]]:
+    source_sets: list[tuple[str, ...]] = []
+    for value in values or []:
+        sources = tuple(
+            part.strip().upper() for part in value.split(",") if part.strip()
+        )
+        if sources:
+            source_sets.append(sources)
+    return source_sets
+
+
+def _set_tactic_sources(
+    config: Any,
+    trt_module: Any,
+    tactic_sources: tuple[str, ...],
+) -> None:
+    if not tactic_sources:
+        return
+    if not hasattr(config, "set_tactic_sources"):
+        raise RuntimeError("TensorRT builder config does not support tactic sources")
+    tactic_source = getattr(trt_module, "TacticSource", None)
+    if tactic_source is None:
+        raise RuntimeError("TensorRT module does not expose TacticSource")
+    mask = 0
+    for source in tactic_sources:
+        if not hasattr(tactic_source, source):
+            raise ValueError(f"Unsupported TensorRT tactic source {source!r}")
+        mask |= 1 << int(getattr(tactic_source, source))
+    config.set_tactic_sources(mask)
+
+
+def _run_trt_linear_projection(
+    *,
+    linear_module: Any,
+    input_tensor: Any,
+    expected: Any,
+    device: str,
+    label: str,
+    tactic_sources: tuple[str, ...],
+) -> dict[str, Any]:
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("TensorRT down-proj diagnostic requires CUDA")
+
+    from tensorrt_model_connect import trt_compat
+
+    class LinearProjectionWrapper(torch.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.module = module
+
+        def forward(self, down_proj_input: Any) -> Any:
+            return self.module(down_proj_input)
+
+    wrapper = LinearProjectionWrapper(linear_module).eval()
+    cuda_device = torch.device(device if str(device).startswith("cuda") else "cuda")
+    trt = trt_compat.get_trt()
+    logger = trt.Logger(trt.Logger.WARNING)
+
+    with tempfile.TemporaryDirectory(prefix="trtmc_down_proj_") as tmpdir:
+        onnx_path = Path(tmpdir) / "model.onnx"
+        with torch.no_grad():
+            torch.onnx.export(
+                wrapper,
+                (input_tensor,),
+                str(onnx_path),
+                opset_version=18,
+                dynamo=False,
+                external_data=True,
+                input_names=["down_proj_input"],
+                output_names=["down_proj_output"],
+                dynamic_axes=None,
+            )
+
+        builder = trt.Builder(logger)
+        network = builder.create_network(
+            trt_compat.network_creation_flags(
+                explicit_batch=True,
+                strongly_typed=True,
+            )
+        )
+        parser = trt.OnnxParser(network, logger)
+        if not parser.parse_from_file(str(onnx_path)):
+            errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+            raise RuntimeError("ONNX parsing failed:\n" + "\n".join(errors))
+
+        config = builder.create_builder_config()
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
+            config.clear_flag(trt.BuilderFlag.TF32)
+        _set_tactic_sources(config, trt, tactic_sources)
+
+        plan = builder.build_serialized_network(network, config)
+        if plan is None:
+            raise RuntimeError("TensorRT down-proj engine build failed")
+        plan_bytes = bytes(plan)
+
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan_bytes)
+    if engine is None:
+        raise RuntimeError("Failed to deserialize TensorRT down-proj engine")
+    context = engine.create_execution_context()
+
+    io_records: list[dict[str, Any]] = []
+    buffers: dict[str, Any] = {}
+    for index in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(index)
+        dtype = engine.get_tensor_dtype(name)
+        shape = tuple(int(dim) for dim in engine.get_tensor_shape(name))
+        mode = engine.get_tensor_mode(name)
+        mode_name = "input" if mode == trt.TensorIOMode.INPUT else "output"
+        io_records.append(
+            {
+                "name": name,
+                "dtype": str(dtype),
+                "shape": [int(dim) for dim in shape],
+                "mode": mode_name,
+            }
+        )
+        torch_dtype = _trt_dtype_to_torch(dtype, torch)
+        if mode_name == "input":
+            buffers[name] = input_tensor.to(
+                device=cuda_device,
+                dtype=torch_dtype,
+            ).contiguous()
+        else:
+            buffers[name] = torch.empty(
+                shape,
+                device=cuda_device,
+                dtype=torch_dtype,
+            )
+        context.set_tensor_address(name, buffers[name].data_ptr())
+
+    stream = torch.cuda.Stream(device=cuda_device)
+    with torch.cuda.stream(stream):
+        ok = context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    if not ok:
+        raise RuntimeError("TensorRT down-proj plan execution failed")
+
+    actual = next(
+        buffers[record["name"]]
+        for record in io_records
+        if record["mode"] == "output"
+    ).detach().cpu()
+    if actual.ndim == 3 and int(actual.shape[0]) == 1:
+        actual = actual.squeeze(0)
+    actual = actual.to(dtype=expected.dtype).contiguous()
+    mismatch = _first_mismatch(expected, actual)
+    mismatch.update(
+        {
+            "label": label,
+            "prefill_mode": "trt_down_proj",
+            "tactic_sources": list(tactic_sources),
+            "engine_io": io_records,
+            "plan_bytes": len(plan_bytes),
+            "row0_expected_first8": _row_prefix(expected),
+            "row0_actual_first8": _row_prefix(actual),
+        }
+    )
+    return mismatch
+
+
+def _run_down_proj_trt_probe(
+    *,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    inputs: dict[str, Any],
+    device: str,
+    layer_index: int,
+    tactic_source_sets: list[tuple[str, ...]] | None = None,
+) -> list[dict[str, Any]]:
+    import torch
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from voxcpm.modules.layers import ScalarQuantizationLayer
+    from voxcpm.modules.minicpm4 import MiniCPM4Config, MiniCPMModel
+
+    component_builders._patch_minicpm_attention_gqa_for_torch_trt(torch)
+
+    lm_config = dict(config["lm_config"])
+    hidden_size = int(lm_config["hidden_size"])
+    compute_dtype = torch.bfloat16
+
+    base_lm = MiniCPMModel(MiniCPM4Config(**lm_config))
+    base_lm.load_state_dict(
+        _prefixed_state(state, "base_lm.", dtype=compute_dtype),
+        strict=True,
+    )
+    base_lm.to(device=device, dtype=compute_dtype).eval()
+
+    fsq_layer = ScalarQuantizationLayer(
+        hidden_size,
+        hidden_size,
+        int(config.get("scalar_quantization_latent_dim", 512)),
+        int(config.get("scalar_quantization_scale", 9)),
+    )
+    fsq_layer.load_state_dict(
+        _prefixed_state(state, "fsq_layer.", dtype=compute_dtype),
+        strict=True,
+    )
+    fsq_layer.to(device=device, dtype=compute_dtype).eval()
+
+    if layer_index < 0 or layer_index >= len(base_lm.layers):
+        raise ValueError(
+            f"VoxCPM2 TSLM layer index {layer_index} is outside "
+            f"0..{len(base_lm.layers) - 1}"
+        )
+
+    scale_emb = float(lm_config.get("scale_emb", 1.0))
+    if not bool(lm_config.get("use_mup", False)):
+        scale_emb = 1.0
+
+    with torch.inference_mode():
+        local_text_features = inputs["local_text_features"].to(
+            device=device,
+            dtype=compute_dtype,
+        )
+        text_tokens = inputs["text_tokens"].to(device=device, dtype=torch.long)
+        text_mask = inputs["text_mask"].to(device=device, dtype=compute_dtype)
+        audio_mask = inputs["audio_mask"].to(device=device, dtype=compute_dtype)
+
+        text_embed = base_lm.embed_tokens(text_tokens.unsqueeze(0)) * scale_emb
+        combined_embed = text_mask.unsqueeze(0).unsqueeze(-1) * text_embed
+        combined_embed = combined_embed + (
+            audio_mask.unsqueeze(0).unsqueeze(-1)
+            * local_text_features.unsqueeze(0)
+        )
+        _, traces = _run_full_prefill(
+            base_lm=base_lm,
+            fsq_layer=fsq_layer,
+            combined_embed=combined_embed,
+            text_mask=text_mask,
+            audio_mask=audio_mask,
+            compute_dtype=compute_dtype,
+            include_layer_traces=True,
+            trace_layer_index=layer_index,
+        )
+
+    input_stage = _trace_layer_stage(layer_index, "mlp.down_proj_input")
+    output_stage = _trace_layer_stage(layer_index, "mlp.down_proj")
+    down_proj_input = traces[input_stage].to(
+        device=device,
+        dtype=compute_dtype,
+    ).contiguous().clone()
+    expected = traces[output_stage].to(
+        device="cpu",
+        dtype=compute_dtype,
+    ).contiguous().clone()
+
+    source_sets = [()]
+    for sources in tactic_source_sets or []:
+        if sources not in source_sets:
+            source_sets.append(sources)
+
+    results = []
+    linear_module = base_lm.layers[layer_index].mlp.down_proj
+    for tactic_sources in source_sets:
+        label = (
+            f"layer_{layer_index:02d}.mlp.down_proj."
+            f"trt_{_tactic_label(tactic_sources)}"
+        )
+        result = _run_trt_linear_projection(
+            linear_module=linear_module,
+            input_tensor=down_proj_input,
+            expected=expected,
+            device=device,
+            label=label,
+            tactic_sources=tactic_sources,
+        )
+        result["layer_index"] = layer_index
+        results.append(result)
+
+    del base_lm, fsq_layer, traces, down_proj_input, expected
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    gc.collect()
+    return results
 
 
 def _record_trace_matrix(
@@ -1120,6 +1407,8 @@ def diagnose(
     include_layer_traces: bool = False,
     trace_layer_index: int | None = None,
     trt_prefill_plan: Path | None = None,
+    trt_down_proj_layer: int | None = None,
+    trt_down_proj_tactic_source_sets: list[tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -1145,8 +1434,17 @@ def diagnose(
     )
 
     results = []
-    if include_upstream or include_patched:
+    needs_tslm_state = (
+        include_upstream or include_patched or trt_down_proj_layer is not None
+    )
+    config: dict[str, Any] | None = None
+    state: dict[str, Any] | None = None
+    if needs_tslm_state:
         config, state = _load_tslm_state(model_dir)
+
+    if include_upstream or include_patched:
+        if config is None or state is None:
+            raise RuntimeError("VoxCPM2 TSLM state was not loaded")
         for label, apply_export_patch, prefill_mode in _selected_variant_runs(
             include_upstream=include_upstream,
             include_patched=include_patched,
@@ -1173,6 +1471,19 @@ def diagnose(
                 inputs=inputs,
                 expected=expected,
                 device=device,
+            )
+        )
+    if trt_down_proj_layer is not None:
+        if config is None or state is None:
+            raise RuntimeError("VoxCPM2 TSLM state was not loaded")
+        results.extend(
+            _run_down_proj_trt_probe(
+                config=config,
+                state=state,
+                inputs=inputs,
+                device=device,
+                layer_index=trt_down_proj_layer,
+                tactic_source_sets=trt_down_proj_tactic_source_sets,
             )
         )
 
@@ -1235,6 +1546,26 @@ def main() -> int:
             "the stacked HF prefill rows."
         ),
     )
+    parser.add_argument(
+        "--trt-down-proj-layer",
+        type=int,
+        metavar="LAYER_INDEX",
+        help=(
+            "Build and run an isolated TensorRT plan for the traced "
+            "layer_N.mlp.down_proj projection from the HF full-prefill rows."
+        ),
+    )
+    parser.add_argument(
+        "--trt-down-proj-tactic-sources",
+        action="append",
+        default=[],
+        metavar="SOURCE[,SOURCE...]",
+        help=(
+            "Optional TensorRT tactic-source set for the isolated down-proj "
+            "probe, e.g. CUBLAS_LT or CUBLAS,CUBLAS_LT. Can be repeated. "
+            "The default no-source-restriction probe always runs too."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -1247,6 +1578,10 @@ def main() -> int:
         include_layer_traces=args.include_layer_traces,
         trace_layer_index=args.trace_layer_substeps,
         trt_prefill_plan=args.trt_prefill_plan,
+        trt_down_proj_layer=args.trt_down_proj_layer,
+        trt_down_proj_tactic_source_sets=_parse_tactic_source_sets(
+            args.trt_down_proj_tactic_sources
+        ),
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:

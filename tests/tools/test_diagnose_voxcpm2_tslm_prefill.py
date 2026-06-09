@@ -444,6 +444,17 @@ def test_voxcpm2_tslm_prefill_trt_output_selection_handles_normalized_names() ->
     ) == "semantic_lm_states"
 
 
+def test_voxcpm2_tslm_prefill_parses_down_proj_tactic_source_sets() -> None:
+    tool = _load_tool()
+
+    assert tool._parse_tactic_source_sets(
+        ["cublas_lt", "CUBLAS, cublas_lt", "  "]
+    ) == [
+        ("CUBLAS_LT",),
+        ("CUBLAS", "CUBLAS_LT"),
+    ]
+
+
 def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,7 +462,12 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
     tool = _load_tool()
     manifest = tmp_path / "manifest.jsonl"
     for name, dtype, shape, raw in (
-        ("local_text_features", "bfloat16", [1, 2], struct.pack("<HH", 0x3F80, 0x4000)),
+        (
+            "local_text_features",
+            "bfloat16",
+            [1, 2],
+            struct.pack("<HH", 0x3F80, 0x4000),
+        ),
         ("text_tokens", "int32", [1], struct.pack("<i", 101)),
         ("text_mask", "bfloat16", [1], struct.pack("<H", 0x3F80)),
         ("audio_mask", "bfloat16", [1], struct.pack("<H", 0x0000)),
@@ -504,4 +520,85 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
         }
     ]
     assert calls[0]["plan_path"] == tmp_path / "tslm.plan"
+    assert calls[0]["inputs"]["text_tokens"].tolist() == [101]
+
+
+def test_voxcpm2_tslm_prefill_diagnose_can_run_down_proj_probe_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _load_tool()
+    manifest = tmp_path / "manifest.jsonl"
+    for name, dtype, shape, raw in (
+        ("local_text_features", "bfloat16", [1, 2], struct.pack("<HH", 0x3F80, 0x4000)),
+        ("text_tokens", "int32", [1], struct.pack("<i", 101)),
+        ("text_mask", "bfloat16", [1], struct.pack("<H", 0x3F80)),
+        ("audio_mask", "bfloat16", [1], struct.pack("<H", 0x0000)),
+    ):
+        _write_record(
+            tmp_path,
+            manifest,
+            step=0,
+            direction="input",
+            name=name,
+            dtype=dtype,
+            shape=shape,
+            raw=raw,
+        )
+    _write_record(
+        tmp_path,
+        manifest,
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1, 2],
+        raw=struct.pack("<HH", 0x3F80, 0x4000),
+    )
+    calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        tool,
+        "_load_tslm_state",
+        lambda model_dir: (
+            {"lm_config": {"hidden_size": 2}},
+            {"base_lm.dummy": object()},
+        ),
+    )
+
+    def fake_run_down_proj_trt_probe(**kwargs: Any) -> list[dict[str, Any]]:
+        calls.append(kwargs)
+        return [
+            {
+                "label": "layer_00.mlp.down_proj.trt_default",
+                "matched": False,
+                "first_different_element": 3,
+            }
+        ]
+
+    monkeypatch.setattr(
+        tool,
+        "_run_down_proj_trt_probe",
+        fake_run_down_proj_trt_probe,
+    )
+
+    result = tool.diagnose(
+        model_dir=tmp_path,
+        hf_dump_dir=tmp_path,
+        device="cuda",
+        include_upstream=False,
+        include_patched=False,
+        trt_down_proj_layer=0,
+        trt_down_proj_tactic_source_sets=[("CUBLAS_LT",)],
+    )
+
+    assert result["results"] == [
+        {
+            "label": "layer_00.mlp.down_proj.trt_default",
+            "matched": False,
+            "first_different_element": 3,
+        }
+    ]
+    assert calls[0]["layer_index"] == 0
+    assert calls[0]["tactic_source_sets"] == [("CUBLAS_LT",)]
     assert calls[0]["inputs"]["text_tokens"].tolist() == [101]
