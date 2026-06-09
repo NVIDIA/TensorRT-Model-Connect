@@ -13,6 +13,7 @@ import argparse
 import gc
 import json
 import math
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -40,6 +41,12 @@ _DOWN_PROJ_VARIANTS = (
     "manual_matmul_bf16",
     "fp32_accum_to_bf16",
     "fp32_output",
+    "split_k_1024_bf16_accum",
+    "split_k_1024_fp32_accum_to_bf16",
+)
+_SPLIT_K_VARIANT_RE = re.compile(
+    r"^split_k_(?P<chunk>[1-9][0-9]*)_"
+    r"(?P<mode>bf16_accum|fp32_accum_to_bf16)$"
 )
 
 
@@ -149,14 +156,21 @@ def _first_mismatch(expected: Any, actual: Any) -> dict[str, Any]:
             "matched": True,
             "shape": [int(dim) for dim in expected.shape],
             "first_different_element": None,
+            "different_elements": 0,
+            "total_elements": int(expected.numel()),
+            "max_abs_diff": 0.0,
         }
     first = int(diff.flatten().nonzero()[0].item())
     expected_flat = expected.flatten()
     actual_flat = actual.flatten()
+    abs_diff = (expected.float() - actual.float()).abs()
     return {
         "matched": False,
         "shape": [int(dim) for dim in expected.shape],
         "first_different_element": first,
+        "different_elements": int(diff.sum().item()),
+        "total_elements": int(expected.numel()),
+        "max_abs_diff": float(abs_diff.max().item()),
         "expected_value": float(expected_flat[first].float().item()),
         "actual_value": float(actual_flat[first].float().item()),
         "expected_bits": _tensor_bits(expected_flat[first]),
@@ -372,15 +386,27 @@ def _parse_down_proj_variants(values: list[str] | None) -> list[str]:
                     if candidate not in variants:
                         variants.append(candidate)
                 continue
-            if variant not in _DOWN_PROJ_VARIANTS:
+            if not _is_supported_down_proj_variant(variant):
                 valid = ", ".join((*_DOWN_PROJ_VARIANTS, "all"))
                 raise ValueError(
                     f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
-                    f"valid values: {valid}"
+                    f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
+                    "split_k_<chunk>_fp32_accum_to_bf16"
                 )
             if variant not in variants:
                 variants.append(variant)
     return variants or [_DEFAULT_DOWN_PROJ_VARIANT]
+
+
+def _is_supported_down_proj_variant(variant: str) -> bool:
+    return variant in _DOWN_PROJ_VARIANTS or _SPLIT_K_VARIANT_RE.match(variant) is not None
+
+
+def _split_k_variant_config(variant: str) -> tuple[int, str] | None:
+    match = _SPLIT_K_VARIANT_RE.match(variant)
+    if match is None:
+        return None
+    return int(match.group("chunk")), match.group("mode")
 
 
 def _set_tactic_sources(
@@ -411,11 +437,13 @@ def _make_down_proj_variant_module(
     if variant == _DEFAULT_DOWN_PROJ_VARIANT:
         return linear_module
 
-    if variant not in _DOWN_PROJ_VARIANTS:
+    split_k_config = _split_k_variant_config(variant)
+    if not _is_supported_down_proj_variant(variant):
         valid = ", ".join(_DOWN_PROJ_VARIANTS)
         raise ValueError(
             f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
-            f"valid values: {valid}"
+            f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
+            "split_k_<chunk>_fp32_accum_to_bf16"
         )
 
     class ManualMatmul(torch_module.nn.Module):
@@ -459,12 +487,53 @@ def _make_down_proj_variant_module(
                 output = output.to(dtype=torch_module.bfloat16)
             return output
 
+    class SplitKMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any, *, chunk_size: int, mode: str) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+            self.chunk_size = chunk_size
+            self.mode = mode
+
+        def forward(self, down_proj_input: Any) -> Any:
+            partials = []
+            in_features = self.weight.shape[1]
+            for start in range(0, in_features, self.chunk_size):
+                end = min(start + self.chunk_size, in_features)
+                partials.append(
+                    torch_module.matmul(
+                        down_proj_input[..., start:end],
+                        self.weight[:, start:end].transpose(0, 1),
+                    )
+                )
+            if self.mode == "fp32_accum_to_bf16":
+                output = partials[0].float()
+                for partial in partials[1:]:
+                    output = output + partial.float()
+                if self.bias is not None:
+                    output = output + self.bias.float()
+                return output.to(dtype=torch_module.bfloat16)
+
+            output = partials[0]
+            for partial in partials[1:]:
+                output = (output + partial).to(dtype=torch_module.bfloat16)
+            if self.bias is not None:
+                output = (output + self.bias).to(dtype=torch_module.bfloat16)
+            return output
+
     if variant == "manual_matmul_bf16":
         return ManualMatmul(linear_module)
     if variant == "fp32_accum_to_bf16":
         return Fp32Matmul(linear_module, cast_to_bf16=True)
     if variant == "fp32_output":
         return Fp32Matmul(linear_module, cast_to_bf16=False)
+    if split_k_config is not None:
+        chunk_size, mode = split_k_config
+        return SplitKMatmul(linear_module, chunk_size=chunk_size, mode=mode)
 
     raise AssertionError(f"Unhandled VoxCPM2 down-proj variant {variant!r}")
 
@@ -497,6 +566,9 @@ def _eager_projection_mismatch(
         "eager_output_dtype": str(eager.dtype),
         "eager_matched": bool(mismatch.get("matched")),
         "eager_first_different_element": mismatch.get("first_different_element"),
+        "eager_different_elements": mismatch.get("different_elements"),
+        "eager_total_elements": mismatch.get("total_elements"),
+        "eager_max_abs_diff": mismatch.get("max_abs_diff"),
         "eager_expected_bits": mismatch.get("expected_bits"),
         "eager_actual_bits": mismatch.get("actual_bits"),
         "eager_expected_value": mismatch.get("expected_value"),
@@ -1724,7 +1796,11 @@ def main() -> int:
         help=(
             "Projection lowering variant for --trt-down-proj-layer. Valid "
             "values: linear, manual_matmul_bf16, fp32_accum_to_bf16, "
-            "fp32_output, or all. Can be repeated. Defaults to linear."
+            "fp32_output, split_k_1024_bf16_accum, "
+            "split_k_1024_fp32_accum_to_bf16, all, or dynamic "
+            "split_k_<chunk>_bf16_accum / "
+            "split_k_<chunk>_fp32_accum_to_bf16. Can be repeated. "
+            "Defaults to linear."
         ),
     )
     args = parser.parse_args()

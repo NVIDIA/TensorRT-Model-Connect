@@ -114,6 +114,9 @@ def test_voxcpm2_tslm_prefill_probe_reports_first_bf16_mismatch() -> None:
 
     assert mismatch["matched"] is False
     assert mismatch["first_different_element"] == 1
+    assert mismatch["different_elements"] == 1
+    assert mismatch["total_elements"] == 2
+    assert mismatch["max_abs_diff"] == 2.0
     assert mismatch["expected_value"] == 2.0
     assert mismatch["actual_value"] == 4.0
     assert mismatch["expected_bits"] == "0x4000"
@@ -467,10 +470,18 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
         "manual_matmul_bf16",
         "fp32_accum_to_bf16",
         "fp32_output",
+        "split_k_1024_bf16_accum",
+        "split_k_1024_fp32_accum_to_bf16",
     ]
+    assert tool._parse_down_proj_variants(
+        ["split_k_512_bf16_accum", "split_k_2048_fp32_accum_to_bf16"]
+    ) == ["split_k_512_bf16_accum", "split_k_2048_fp32_accum_to_bf16"]
 
     with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
         tool._parse_down_proj_variants(["unknown"])
+
+    with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
+        tool._parse_down_proj_variants(["split_k_0_bf16_accum"])
 
 
 def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
@@ -503,11 +514,23 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
         linear,
         "fp32_output",
     )
+    split_k_bf16 = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "split_k_2_bf16_accum",
+    )
+    split_k_fp32 = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "split_k_2_fp32_accum_to_bf16",
+    )
 
     assert manual(x).dtype == torch.bfloat16
     assert torch.equal(manual(x), linear(x))
     assert fp32_to_bf16(x).dtype == torch.bfloat16
     assert fp32_output(x).dtype == torch.float32
+    assert split_k_bf16(x).dtype == torch.bfloat16
+    assert split_k_fp32(x).dtype == torch.bfloat16
 
 
 def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
