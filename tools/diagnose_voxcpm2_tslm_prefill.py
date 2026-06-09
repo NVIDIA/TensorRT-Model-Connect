@@ -34,6 +34,13 @@ _PREFILL_INPUTS = (
 
 _FULL_PREFILL_MODE = "full_prefill"
 _STEP_LOOP_MODE = "step_loop"
+_DEFAULT_DOWN_PROJ_VARIANT = "linear"
+_DOWN_PROJ_VARIANTS = (
+    _DEFAULT_DOWN_PROJ_VARIANT,
+    "manual_matmul_bf16",
+    "fp32_accum_to_bf16",
+    "fp32_output",
+)
 
 
 def _load_manifest(dump_dir: Path) -> list[dict[str, Any]]:
@@ -353,6 +360,29 @@ def _parse_tactic_source_sets(values: list[str] | None) -> list[tuple[str, ...]]
     return source_sets
 
 
+def _parse_down_proj_variants(values: list[str] | None) -> list[str]:
+    variants: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            variant = part.strip().lower()
+            if not variant:
+                continue
+            if variant == "all":
+                for candidate in _DOWN_PROJ_VARIANTS:
+                    if candidate not in variants:
+                        variants.append(candidate)
+                continue
+            if variant not in _DOWN_PROJ_VARIANTS:
+                valid = ", ".join((*_DOWN_PROJ_VARIANTS, "all"))
+                raise ValueError(
+                    f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
+                    f"valid values: {valid}"
+                )
+            if variant not in variants:
+                variants.append(variant)
+    return variants or [_DEFAULT_DOWN_PROJ_VARIANT]
+
+
 def _set_tactic_sources(
     config: Any,
     trt_module: Any,
@@ -373,6 +403,107 @@ def _set_tactic_sources(
     config.set_tactic_sources(mask)
 
 
+def _make_down_proj_variant_module(
+    torch_module: Any,
+    linear_module: Any,
+    variant: str,
+) -> Any:
+    if variant == _DEFAULT_DOWN_PROJ_VARIANT:
+        return linear_module
+
+    if variant not in _DOWN_PROJ_VARIANTS:
+        valid = ", ".join(_DOWN_PROJ_VARIANTS)
+        raise ValueError(
+            f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
+            f"valid values: {valid}"
+        )
+
+    class ManualMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            output = torch_module.matmul(
+                down_proj_input,
+                self.weight.transpose(0, 1),
+            )
+            if self.bias is not None:
+                output = output + self.bias
+            return output
+
+    class Fp32Matmul(torch_module.nn.Module):
+        def __init__(self, module: Any, *, cast_to_bf16: bool) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().float().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().float().clone(),
+            )
+            self.cast_to_bf16 = cast_to_bf16
+
+        def forward(self, down_proj_input: Any) -> Any:
+            output = torch_module.matmul(
+                down_proj_input.float(),
+                self.weight.transpose(0, 1),
+            )
+            if self.bias is not None:
+                output = output + self.bias
+            if self.cast_to_bf16:
+                output = output.to(dtype=torch_module.bfloat16)
+            return output
+
+    if variant == "manual_matmul_bf16":
+        return ManualMatmul(linear_module)
+    if variant == "fp32_accum_to_bf16":
+        return Fp32Matmul(linear_module, cast_to_bf16=True)
+    if variant == "fp32_output":
+        return Fp32Matmul(linear_module, cast_to_bf16=False)
+
+    raise AssertionError(f"Unhandled VoxCPM2 down-proj variant {variant!r}")
+
+
+def _down_proj_label(
+    *,
+    layer_index: int,
+    variant: str,
+    tactic_sources: tuple[str, ...],
+) -> str:
+    base = f"layer_{layer_index:02d}.mlp.down_proj"
+    if variant != _DEFAULT_DOWN_PROJ_VARIANT:
+        base += f".{variant}"
+    return f"{base}.trt_{_tactic_label(tactic_sources)}"
+
+
+def _eager_projection_mismatch(
+    *,
+    projection_module: Any,
+    input_tensor: Any,
+    expected: Any,
+) -> dict[str, Any]:
+    import torch
+
+    with torch.inference_mode():
+        eager = projection_module(input_tensor).detach().cpu()
+    eager_compared = eager.to(dtype=expected.dtype).contiguous()
+    mismatch = _first_mismatch(expected, eager_compared)
+    return {
+        "eager_output_dtype": str(eager.dtype),
+        "eager_matched": bool(mismatch.get("matched")),
+        "eager_first_different_element": mismatch.get("first_different_element"),
+        "eager_expected_bits": mismatch.get("expected_bits"),
+        "eager_actual_bits": mismatch.get("actual_bits"),
+        "eager_expected_value": mismatch.get("expected_value"),
+        "eager_actual_value": mismatch.get("actual_value"),
+    }
+
+
 def _run_trt_linear_projection(
     *,
     linear_module: Any,
@@ -380,6 +511,7 @@ def _run_trt_linear_projection(
     expected: Any,
     device: str,
     label: str,
+    variant: str,
     tactic_sources: tuple[str, ...],
 ) -> dict[str, Any]:
     import torch
@@ -398,6 +530,11 @@ def _run_trt_linear_projection(
             return self.module(down_proj_input)
 
     wrapper = LinearProjectionWrapper(linear_module).eval()
+    eager_summary = _eager_projection_mismatch(
+        projection_module=linear_module,
+        input_tensor=input_tensor,
+        expected=expected,
+    )
     cuda_device = torch.device(device if str(device).startswith("cuda") else "cuda")
     trt = trt_compat.get_trt()
     logger = trt.Logger(trt.Logger.WARNING)
@@ -496,11 +633,13 @@ def _run_trt_linear_projection(
         {
             "label": label,
             "prefill_mode": "trt_down_proj",
+            "projection_variant": variant,
             "tactic_sources": list(tactic_sources),
             "engine_io": io_records,
             "plan_bytes": len(plan_bytes),
             "row0_expected_first8": _row_prefix(expected),
             "row0_actual_first8": _row_prefix(actual),
+            **eager_summary,
         }
     )
     return mismatch
@@ -514,6 +653,7 @@ def _run_down_proj_trt_probe(
     device: str,
     layer_index: int,
     tactic_source_sets: list[tuple[str, ...]] | None = None,
+    variants: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     import torch
     from tensorrt_model_connect.families.voxcpm2 import component_builders
@@ -599,21 +739,29 @@ def _run_down_proj_trt_probe(
 
     results = []
     linear_module = base_lm.layers[layer_index].mlp.down_proj
-    for tactic_sources in source_sets:
-        label = (
-            f"layer_{layer_index:02d}.mlp.down_proj."
-            f"trt_{_tactic_label(tactic_sources)}"
+    for variant in variants or [_DEFAULT_DOWN_PROJ_VARIANT]:
+        projection_module = _make_down_proj_variant_module(
+            torch,
+            linear_module,
+            variant,
         )
-        result = _run_trt_linear_projection(
-            linear_module=linear_module,
-            input_tensor=down_proj_input,
-            expected=expected,
-            device=device,
-            label=label,
-            tactic_sources=tactic_sources,
-        )
-        result["layer_index"] = layer_index
-        results.append(result)
+        projection_module.to(device=device).eval()
+        for tactic_sources in source_sets:
+            result = _run_trt_linear_projection(
+                linear_module=projection_module,
+                input_tensor=down_proj_input,
+                expected=expected,
+                device=device,
+                label=_down_proj_label(
+                    layer_index=layer_index,
+                    variant=variant,
+                    tactic_sources=tactic_sources,
+                ),
+                variant=variant,
+                tactic_sources=tactic_sources,
+            )
+            result["layer_index"] = layer_index
+            results.append(result)
 
     del base_lm, fsq_layer, traces, down_proj_input, expected
     if device.startswith("cuda"):
@@ -1409,6 +1557,7 @@ def diagnose(
     trt_prefill_plan: Path | None = None,
     trt_down_proj_layer: int | None = None,
     trt_down_proj_tactic_source_sets: list[tuple[str, ...]] | None = None,
+    trt_down_proj_variants: list[str] | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -1484,6 +1633,7 @@ def diagnose(
                 device=device,
                 layer_index=trt_down_proj_layer,
                 tactic_source_sets=trt_down_proj_tactic_source_sets,
+                variants=trt_down_proj_variants,
             )
         )
 
@@ -1566,6 +1716,17 @@ def main() -> int:
             "The default no-source-restriction probe always runs too."
         ),
     )
+    parser.add_argument(
+        "--trt-down-proj-variant",
+        action="append",
+        default=[],
+        metavar="VARIANT[,VARIANT...]",
+        help=(
+            "Projection lowering variant for --trt-down-proj-layer. Valid "
+            "values: linear, manual_matmul_bf16, fp32_accum_to_bf16, "
+            "fp32_output, or all. Can be repeated. Defaults to linear."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -1581,6 +1742,9 @@ def main() -> int:
         trt_down_proj_layer=args.trt_down_proj_layer,
         trt_down_proj_tactic_source_sets=_parse_tactic_source_sets(
             args.trt_down_proj_tactic_sources
+        ),
+        trt_down_proj_variants=_parse_down_proj_variants(
+            args.trt_down_proj_variant
         ),
     )
     text = json.dumps(result, indent=2, sort_keys=True)

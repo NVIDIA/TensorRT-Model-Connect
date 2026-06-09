@@ -455,6 +455,61 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_tactic_source_sets() -> None:
     ]
 
 
+def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
+    tool = _load_tool()
+
+    assert tool._parse_down_proj_variants(None) == ["linear"]
+    assert tool._parse_down_proj_variants(
+        ["manual_matmul_bf16, fp32_output", "linear", "manual_matmul_bf16"]
+    ) == ["manual_matmul_bf16", "fp32_output", "linear"]
+    assert tool._parse_down_proj_variants(["all"]) == [
+        "linear",
+        "manual_matmul_bf16",
+        "fp32_accum_to_bf16",
+        "fp32_output",
+    ]
+
+    with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
+        tool._parse_down_proj_variants(["unknown"])
+
+
+def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
+    tool = _load_tool()
+
+    linear = torch.nn.Linear(3, 2, bias=True).to(dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.copy_(
+            torch.tensor(
+                [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                dtype=torch.bfloat16,
+            )
+        )
+        linear.bias.copy_(torch.tensor([0.25, -0.5], dtype=torch.bfloat16))
+    x = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
+
+    assert tool._make_down_proj_variant_module(torch, linear, "linear") is linear
+    manual = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "manual_matmul_bf16",
+    )
+    fp32_to_bf16 = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "fp32_accum_to_bf16",
+    )
+    fp32_output = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "fp32_output",
+    )
+
+    assert manual(x).dtype == torch.bfloat16
+    assert torch.equal(manual(x), linear(x))
+    assert fp32_to_bf16(x).dtype == torch.bfloat16
+    assert fp32_output(x).dtype == torch.float32
+
+
 def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -590,6 +645,7 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_down_proj_probe_only(
         include_patched=False,
         trt_down_proj_layer=0,
         trt_down_proj_tactic_source_sets=[("CUBLAS_LT",)],
+        trt_down_proj_variants=["manual_matmul_bf16", "fp32_output"],
     )
 
     assert result["results"] == [
@@ -601,4 +657,5 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_down_proj_probe_only(
     ]
     assert calls[0]["layer_index"] == 0
     assert calls[0]["tactic_source_sets"] == [("CUBLAS_LT",)]
+    assert calls[0]["variants"] == ["manual_matmul_bf16", "fp32_output"]
     assert calls[0]["inputs"]["text_tokens"].tolist() == [101]
