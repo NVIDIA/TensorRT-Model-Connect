@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 import math
+import os
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -204,6 +206,12 @@ class VoxCPM2PreparedComponentInputs:
 
 
 VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
+
+VOXCPM2_ZERO_PREFILL_FEATURES_SECTION = (
+    "voxcpm2_zero_prefill_local_text_features_bf16"
+)
+_VOXCPM2_ZERO_PREFILL_FEATURES_VERSION = 1
+_VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
 
 
 VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
@@ -1548,9 +1556,9 @@ def _locenc_minicpm_config_values(prepared: VoxCPM2PreparedComponentInputs) -> d
 
 
 def _locenc_export_text_steps(_ctx: VoxCPM2ComponentBuildContext) -> int:
-    # The upstream zero-audio prefill rows are identical, so one exported LocEnc
-    # row can be repeated by the native runtime. Generated patches also call
-    # LocEnc one at a time.
+    # Generated patches call LocEnc one at a time. Zero-audio prefill rows are
+    # repeated from the optional CUDA-computed prefill table when available,
+    # because upstream BF16 numerics depend on the active text-step batch size.
     return 1
 
 
@@ -1571,7 +1579,19 @@ def _compile_voxcpm2_locenc_onnx(
     )
 
 
-def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+@dataclass(frozen=True)
+class _LocEncBuildArtifacts:
+    torch: Any
+    wrapper: Any
+    compute_dtype: Any
+    patch_size: int
+    feat_dim: int
+    hidden_size: int
+
+
+def _make_locenc_build_artifacts(
+    ctx: VoxCPM2ComponentBuildContext,
+) -> _LocEncBuildArtifacts:
     prepared = prepare_component_inputs(ctx)
     try:
         import torch
@@ -1628,14 +1648,91 @@ def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
 
     wrapper = LocEncWrapper(feat_encoder, enc_to_lm_proj)
     wrapper.eval()
-    patch_size = int(prepared.config_values.get("patch_size", 4))
+    return _LocEncBuildArtifacts(
+        torch=torch,
+        wrapper=wrapper,
+        compute_dtype=compute_dtype,
+        patch_size=int(prepared.config_values.get("patch_size", 4)),
+        feat_dim=feat_dim,
+        hidden_size=lm_hidden_size,
+    )
+
+
+def build_locenc_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+    artifacts = _make_locenc_build_artifacts(ctx)
     example_args = (
-        torch.zeros(
-            (_locenc_export_text_steps(ctx), patch_size, feat_dim),
-            dtype=compute_dtype,
+        artifacts.torch.zeros(
+            (_locenc_export_text_steps(ctx), artifacts.patch_size, artifacts.feat_dim),
+            dtype=artifacts.compute_dtype,
         ),
     )
-    return _compile_voxcpm2_locenc_onnx(wrapper, example_args, verbose=ctx.verbose)
+    return _compile_voxcpm2_locenc_onnx(
+        artifacts.wrapper, example_args, verbose=ctx.verbose
+    )
+
+
+def _zero_prefill_table_max_steps() -> int:
+    raw = os.environ.get("TRTMC_VOXCPM2_ZERO_PREFILL_TABLE_MAX_STEPS")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS
+    return _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS
+
+
+def build_locenc_zero_prefill_feature_table(
+    ctx: VoxCPM2ComponentBuildContext,
+) -> bytes:
+    artifacts = _make_locenc_build_artifacts(ctx)
+    torch = artifacts.torch
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not callable(getattr(cuda, "is_available", None)):
+        return b""
+    if not cuda.is_available():
+        return b""
+
+    max_steps = _zero_prefill_table_max_steps()
+    if max_steps <= 0:
+        return b""
+
+    device = torch.device("cuda")
+    wrapper = artifacts.wrapper.to(device=device)
+    rows: list[tuple[int, bytes]] = []
+    with torch.no_grad():
+        for text_steps in range(1, max_steps + 1):
+            audio_feats = torch.zeros(
+                (text_steps, artifacts.patch_size, artifacts.feat_dim),
+                dtype=artifacts.compute_dtype,
+                device=device,
+            )
+            local_text_features = wrapper(audio_feats)
+            row = (
+                local_text_features[0]
+                .detach()
+                .to(device="cpu", dtype=torch.bfloat16)
+                .contiguous()
+            )
+            rows.append((text_steps, row.view(torch.uint8).numpy().tobytes()))
+
+    header = struct.pack(
+        "<III",
+        _VOXCPM2_ZERO_PREFILL_FEATURES_VERSION,
+        len(rows),
+        artifacts.hidden_size,
+    )
+    body = bytearray()
+    expected_row_bytes = artifacts.hidden_size * 2
+    for text_steps, row_bytes in rows:
+        if len(row_bytes) != expected_row_bytes:
+            raise ValueError(
+                "VoxCPM2 LocEnc zero-prefill row for "
+                f"{text_steps} text steps has {len(row_bytes)} bytes, "
+                f"expected {expected_row_bytes}"
+            )
+        body.extend(struct.pack("<I", text_steps))
+        body.extend(row_bytes)
+    return header + bytes(body)
 
 
 def _audio_vae_export_frames(ctx: VoxCPM2ComponentBuildContext) -> int:
@@ -1747,6 +1844,8 @@ def build_voxcpm2_component_plans(
     sections: dict[str, bytes] = {}
     for spec in VOXCPM2_COMPONENT_SPECS:
         prebuilt_path = selected_prebuilt_plans.get(spec.name)
+        component_ctx: VoxCPM2ComponentBuildContext | None = None
+        builder: VoxCPM2ComponentBuilder | None = None
         if prebuilt_path is not None:
             _require_existing_paths(
                 (prebuilt_path,),
@@ -1765,8 +1864,9 @@ def build_voxcpm2_component_plans(
                     "VoxCPM2 native TRT builder registry is missing component "
                     f"{spec.name!r}"
                 )
+            builder = selected_builders[spec.name]
 
-            ctx = VoxCPM2ComponentBuildContext(
+            component_ctx = VoxCPM2ComponentBuildContext(
                 spec=spec,
                 model_dir=model_dir,
                 config=config,
@@ -1775,7 +1875,7 @@ def build_voxcpm2_component_plans(
                 verbose=verbose,
                 max_cache_length=max_cache_length,
             )
-            plan = selected_builders[spec.name](ctx)
+            plan = builder(component_ctx)
         if not isinstance(plan, (bytes, bytearray, memoryview)):
             raise TypeError(
                 "VoxCPM2 native TRT builder for component "
@@ -1788,4 +1888,12 @@ def build_voxcpm2_component_plans(
                 f"{spec.name!r} produced an empty plan"
             )
         sections[spec.engine_section] = plan_bytes
+        if (
+            spec.name == "locenc"
+            and component_ctx is not None
+            and builder is build_locenc_engine
+        ):
+            prefill_table = build_locenc_zero_prefill_feature_table(component_ctx)
+            if prefill_table:
+                sections[VOXCPM2_ZERO_PREFILL_FEATURES_SECTION] = prefill_table
     return sections

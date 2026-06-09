@@ -674,6 +674,52 @@ OwnedStageTensor repeat_first_dim(const OwnedStageTensor& row, std::size_t count
     return repeated;
 }
 
+const VoxCPM2ZeroPrefillFeatureRow* find_zero_prefill_feature_row(
+    const VoxCPM2ZeroPrefillFeatureTable& table, std::size_t active_text_token_count) {
+    if (active_text_token_count > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()))
+        return nullptr;
+    const auto requested = static_cast<int32_t>(active_text_token_count);
+    for (const auto& row : table.rows) {
+        if (row.text_steps == requested)
+            return &row;
+    }
+    return nullptr;
+}
+
+bool make_zero_prefill_features_from_table(
+    const VoxCPM2ZeroPrefillFeatureTable& table, std::size_t active_text_token_count,
+    std::size_t output_rows, OwnedStageTensor& out) {
+    const auto* row = find_zero_prefill_feature_row(table, active_text_token_count);
+    if (row == nullptr)
+        return false;
+    if (table.hidden_size <= 0) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: zero-prefill feature table has invalid hidden size");
+    }
+    const auto hidden_size = static_cast<std::size_t>(table.hidden_size);
+    const auto row_bytes = hidden_size * dtype_size(DType::kBFloat16);
+    if (row->local_text_features_bf16.size() != row_bytes) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: zero-prefill feature row for " +
+            std::to_string(active_text_token_count) + " text steps has " +
+            std::to_string(row->local_text_features_bf16.size()) + " bytes, expected " +
+            std::to_string(row_bytes));
+    }
+    if (output_rows == 0) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: cannot materialize zero-prefill features with zero rows");
+    }
+
+    out.shape = {static_cast<int64_t>(output_rows), table.hidden_size};
+    out.dtype = DType::kBFloat16;
+    out.storage.resize(row_bytes * output_rows);
+    for (std::size_t i = 0; i < output_rows; ++i) {
+        std::memcpy(out.storage.data() + i * row_bytes,
+                    row->local_text_features_bf16.data(), row_bytes);
+    }
+    return true;
+}
+
 half_bits_t fp32_to_fp16(float v) {
     uint32_t bits = 0;
     std::memcpy(&bits, &v, sizeof(bits));
@@ -1106,6 +1152,21 @@ void dump_stage_tensors_if_requested(const char* phase, std::size_t step,
         append_tensor_metadata_summary(manifest, tensor, name);
         manifest << "}\n";
     }
+}
+
+void dump_locenc_prefill_table_tensors_if_requested(
+    const audio::VoxCPM2GenerationStage& stage, const StageArtifacts& artifacts,
+    const OwnedStageTensor& local_text_features) {
+    const auto input_it = artifacts.find(stage.input_artifact);
+    if (input_it == artifacts.end())
+        return;
+    TensorMap inputs;
+    inputs.emplace(stage.input_artifact, input_it->second.as_tensor());
+    dump_stage_tensors_if_requested("locenc_prefill", 0, "input", stage, inputs);
+
+    TensorMap outputs;
+    outputs.emplace(stage.output_artifact, local_text_features.as_tensor());
+    dump_stage_tensors_if_requested("locenc_prefill", 0, "output", stage, outputs);
 }
 
 std::size_t positive_first_dim(const std::vector<int64_t>& shape) {
@@ -1638,9 +1699,11 @@ AudioResult make_audio_result(const OwnedStageTensor& waveform,
 
 VoxCPM2Pipeline::VoxCPM2Pipeline(std::vector<audio::VoxCPM2LoadedComponent> components,
                                  audio::VoxCPM2GenerationPlan plan, std::string model_id_str,
-                                 std::shared_ptr<ITokenizer> tokenizer)
+                                 std::shared_ptr<ITokenizer> tokenizer,
+                                 VoxCPM2ZeroPrefillFeatureTable zero_prefill_features)
     : components_(std::move(components)), plan_(std::move(plan)),
-      model_id_(std::move(model_id_str)), tokenizer_(std::move(tokenizer)) {
+      model_id_(std::move(model_id_str)), tokenizer_(std::move(tokenizer)),
+      zero_prefill_features_(std::move(zero_prefill_features)) {
     validate_components();
 }
 
@@ -1695,14 +1758,26 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     artifacts.emplace("text_mask", make_float_mask_tensor(text_token_count, active_text_token_count,
                                                           1.0F));
     artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
-    artifacts.emplace("audio_feats",
-                      make_zero_audio_feats_tensor(1, effective_plan.config));
-    auto initial_local_text_features =
-        run_stage(components_[0], effective_plan.stages[0], artifacts, controls,
-                  "locenc_prefill", 0);
-    artifacts["local_text_features"] =
-        repeat_first_dim(initial_local_text_features, text_token_count,
-                         "local_text_features");
+    OwnedStageTensor initial_local_text_features;
+    if (make_zero_prefill_features_from_table(zero_prefill_features_, active_text_token_count,
+                                              text_token_count,
+                                              initial_local_text_features)) {
+        artifacts.emplace("audio_feats",
+                          make_zero_audio_feats_tensor(active_text_token_count,
+                                                       effective_plan.config));
+        dump_locenc_prefill_table_tensors_if_requested(effective_plan.stages[0], artifacts,
+                                                       initial_local_text_features);
+        artifacts["local_text_features"] = std::move(initial_local_text_features);
+    } else {
+        artifacts.emplace("audio_feats",
+                          make_zero_audio_feats_tensor(1, effective_plan.config));
+        initial_local_text_features =
+            run_stage(components_[0], effective_plan.stages[0], artifacts, controls,
+                      "locenc_prefill", 0);
+        artifacts["local_text_features"] =
+            repeat_first_dim(initial_local_text_features, text_token_count,
+                             "local_text_features");
+    }
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
     OwnedStageTensor current;
     if (lm_cache_mode_enabled(components_)) {

@@ -64,6 +64,7 @@ std::vector<float> last_audio_mask_values;
 std::vector<float> locdit_feat_cond_values;
 std::vector<float> locdit_noise_values;
 std::vector<float> locenc_audio_feat_values;
+std::vector<float> local_text_feature_values;
 std::vector<int64_t> tslm_text_token_counts;
 std::vector<int32_t> tslm_audio_start_values;
 std::vector<int64_t> locdit_lm_hidden_rows;
@@ -144,6 +145,12 @@ float bf16_to_fp32(half_bits_t h) {
     float out = 0.0F;
     std::memcpy(&out, &bits, sizeof(out));
     return out;
+}
+
+half_bits_t fp32_to_bf16(float v) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return static_cast<half_bits_t>(bits >> 16U);
 }
 
 float tensor_float_at(const trtmc::Tensor& tensor, std::size_t index) {
@@ -393,6 +400,7 @@ class FakeModule final : public trtmc::ITrtModule {
             if (const auto it = inputs.find("local_text_features"); it != inputs.end()) {
                 ++local_text_feature_binding_hits;
                 last_local_text_feature_value = *static_cast<float*>(it->second.data);
+                local_text_feature_values.push_back(last_local_text_feature_value);
             }
         }
         if (const auto lm_it = inputs.find("lm_hidden"); lm_it != inputs.end()) {
@@ -647,6 +655,25 @@ std::vector<audio::VoxCPM2LoadedComponent> make_components_with_bad_locenc_outpu
         stage.input_artifact, stage.output_artifact, trtmc::DType::kFloat32,
         std::vector<float>{1.0F, 2.0F}, std::vector<int64_t>{2});
     return components;
+}
+
+trtmc::VoxCPM2ZeroPrefillFeatureTable make_zero_prefill_table(int32_t text_steps,
+                                                              float value,
+                                                              int32_t hidden_size = 2048) {
+    trtmc::VoxCPM2ZeroPrefillFeatureTable table;
+    table.hidden_size = hidden_size;
+    trtmc::VoxCPM2ZeroPrefillFeatureRow row;
+    row.text_steps = text_steps;
+    row.local_text_features_bf16.resize(
+        static_cast<std::size_t>(hidden_size) * sizeof(half_bits_t));
+    const auto encoded = fp32_to_bf16(value);
+    for (int32_t i = 0; i < hidden_size; ++i) {
+        std::memcpy(row.local_text_features_bf16.data() +
+                        static_cast<std::size_t>(i) * sizeof(encoded),
+                    &encoded, sizeof(encoded));
+    }
+    table.rows.push_back(std::move(row));
+    return table;
 }
 
 void test_constructs_with_loaded_component_contract() {
@@ -921,6 +948,29 @@ void test_generate_audio_uses_cache_bound_lm_step_contract() {
     check(locdit_residual_hidden_rows.size() == 2 && locdit_residual_hidden_rows[0] == 1 &&
               locdit_residual_hidden_rows[1] == 1,
           "voxcpm2 cache-bound LocDiT receives current RALM hidden row");
+}
+
+void test_generate_audio_uses_matching_zero_prefill_feature_table() {
+    trtmc::VoxCPM2Config cfg;
+    auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    trtmc::VoxCPM2Pipeline pipeline(
+        make_scripted_components(2, true), plan, "openbmb/VoxCPM2", make_fake_tokenizer(),
+        make_zero_prefill_table(/*text_steps=*/3, /*value=*/7.0F));
+
+    locenc_audio_feat_values.clear();
+    local_text_feature_values.clear();
+    tslm_text_binding_hits = 0;
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    (void)pipeline.generate_audio("ab", gen_cfg);
+
+    check(tslm_text_binding_hits == 4,
+          "voxcpm2 zero-prefill table preserves cache-bound LM step count");
+    check(!local_text_feature_values.empty() && local_text_feature_values.front() == 7.0F,
+          "voxcpm2 zero-prefill table supplies initial local_text_features");
+    check(locenc_audio_feat_values.size() == 1 && locenc_audio_feat_values[0] == 4.0F,
+          "voxcpm2 zero-prefill table skips only initial zero LocEnc prefill");
 }
 
 void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
@@ -1323,6 +1373,7 @@ int main() {
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_current_row_for_padded_stop_logits();
     test_generate_audio_uses_cache_bound_lm_step_contract();
+    test_generate_audio_uses_matching_zero_prefill_feature_table();
     test_generate_audio_converts_float_artifacts_to_engine_input_dtype();
     test_generate_audio_forwards_shared_locdit_noise_latents();
     test_generate_audio_dumps_locdit_tensor_io_for_parity_debug();

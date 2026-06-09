@@ -12,18 +12,30 @@
 #include "trtmc/pipeline.h"
 #include "trtmc/tokenizer.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace trtmc {
 
+struct VoxCPM2ZeroPrefillFeatureRow {
+    int32_t text_steps{0};
+    std::vector<unsigned char> local_text_features_bf16;
+};
+
+struct VoxCPM2ZeroPrefillFeatureTable {
+    int32_t hidden_size{0};
+    std::vector<VoxCPM2ZeroPrefillFeatureRow> rows;
+};
+
 class VoxCPM2Pipeline final : public IPipeline {
   public:
     VoxCPM2Pipeline(std::vector<runtime::builders::audio::VoxCPM2LoadedComponent> components,
                     runtime::builders::audio::VoxCPM2GenerationPlan plan,
                     std::string model_id_str = "",
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr);
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                    VoxCPM2ZeroPrefillFeatureTable zero_prefill_features = {});
 
     AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -37,6 +49,7 @@ class VoxCPM2Pipeline final : public IPipeline {
     runtime::builders::audio::VoxCPM2GenerationPlan plan_;
     std::string model_id_;
     std::shared_ptr<ITokenizer> tokenizer_;
+    VoxCPM2ZeroPrefillFeatureTable zero_prefill_features_;
 };
 
 } // namespace trtmc
