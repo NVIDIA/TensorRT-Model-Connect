@@ -38,6 +38,8 @@ _STEP_LOOP_MODE = "step_loop"
 _DEFAULT_DOWN_PROJ_VARIANT = "linear"
 _DOWN_PROJ_VARIANTS = (
     _DEFAULT_DOWN_PROJ_VARIANT,
+    "functional_linear",
+    "einsum",
     "manual_matmul_bf16",
     "fp32_accum_to_bf16",
     "fp32_output",
@@ -465,6 +467,43 @@ def _make_down_proj_variant_module(
                 output = output + self.bias
             return output
 
+    class FunctionalLinear(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            return torch_module.nn.functional.linear(
+                down_proj_input,
+                self.weight,
+                self.bias,
+            )
+
+    class EinsumMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            output = torch_module.einsum(
+                "...i,oi->...o",
+                down_proj_input,
+                self.weight,
+            )
+            if self.bias is not None:
+                output = output + self.bias
+            return output
+
     class Fp32Matmul(torch_module.nn.Module):
         def __init__(self, module: Any, *, cast_to_bf16: bool) -> None:
             super().__init__()
@@ -527,6 +566,10 @@ def _make_down_proj_variant_module(
 
     if variant == "manual_matmul_bf16":
         return ManualMatmul(linear_module)
+    if variant == "functional_linear":
+        return FunctionalLinear(linear_module)
+    if variant == "einsum":
+        return EinsumMatmul(linear_module)
     if variant == "fp32_accum_to_bf16":
         return Fp32Matmul(linear_module, cast_to_bf16=True)
     if variant == "fp32_output":
@@ -1795,8 +1838,8 @@ def main() -> int:
         metavar="VARIANT[,VARIANT...]",
         help=(
             "Projection lowering variant for --trt-down-proj-layer. Valid "
-            "values: linear, manual_matmul_bf16, fp32_accum_to_bf16, "
-            "fp32_output, split_k_1024_bf16_accum, "
+            "values: linear, functional_linear, einsum, manual_matmul_bf16, "
+            "fp32_accum_to_bf16, fp32_output, split_k_1024_bf16_accum, "
             "split_k_1024_fp32_accum_to_bf16, all, or dynamic "
             "split_k_<chunk>_bf16_accum / "
             "split_k_<chunk>_fp32_accum_to_bf16. Can be repeated. "

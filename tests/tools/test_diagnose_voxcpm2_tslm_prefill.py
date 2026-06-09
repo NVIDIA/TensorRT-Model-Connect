@@ -467,6 +467,8 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
     ) == ["manual_matmul_bf16", "fp32_output", "linear"]
     assert tool._parse_down_proj_variants(["all"]) == [
         "linear",
+        "functional_linear",
+        "einsum",
         "manual_matmul_bf16",
         "fp32_accum_to_bf16",
         "fp32_output",
@@ -499,6 +501,16 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
     x = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
 
     assert tool._make_down_proj_variant_module(torch, linear, "linear") is linear
+    functional = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "functional_linear",
+    )
+    einsum = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "einsum",
+    )
     manual = tool._make_down_proj_variant_module(
         torch,
         linear,
@@ -525,8 +537,12 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
         "split_k_2_fp32_accum_to_bf16",
     )
 
+    assert functional(x).dtype == torch.bfloat16
+    assert torch.equal(functional(x), linear(x))
+    assert einsum(x).dtype == torch.bfloat16
     assert manual(x).dtype == torch.bfloat16
     assert torch.equal(manual(x), linear(x))
+    assert torch.equal(einsum(x), linear(x))
     assert fp32_to_bf16(x).dtype == torch.bfloat16
     assert fp32_output(x).dtype == torch.float32
     assert split_k_bf16(x).dtype == torch.bfloat16
