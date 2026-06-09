@@ -169,6 +169,70 @@ def _row_prefix(tensor: Any, count: int = 8) -> list[float]:
     return [float(value) for value in tensor[0, :count].float().detach().cpu()]
 
 
+def _record_trace_matrix(
+    traces: dict[str, Any],
+    *,
+    stage: str,
+    tensor: Any,
+    dtype: Any,
+) -> None:
+    if tensor.ndim == 3 and int(tensor.shape[0]) == 1:
+        tensor = tensor.squeeze(0)
+    traces[stage] = tensor.to(dtype=dtype).detach().cpu().contiguous()
+
+
+def _record_trace_row(
+    trace_rows: dict[str, list[Any]],
+    *,
+    stage: str,
+    tensor: Any,
+    dtype: Any,
+) -> None:
+    if tensor.ndim == 2 and int(tensor.shape[0]) == 1:
+        tensor = tensor.squeeze(0)
+    trace_rows.setdefault(stage, []).append(
+        tensor.to(dtype=dtype).detach().cpu().contiguous()
+    )
+
+
+def _trace_summary(
+    expected_traces: dict[str, Any],
+    actual_traces: dict[str, Any],
+) -> dict[str, Any]:
+    stages = []
+    first_divergent_stage = None
+    for stage, expected in expected_traces.items():
+        actual = actual_traces.get(stage)
+        if actual is None:
+            mismatch = {
+                "stage": stage,
+                "matched": False,
+                "missing_actual_stage": True,
+            }
+        else:
+            mismatch = _first_mismatch(expected, actual)
+            mismatch["stage"] = stage
+        if first_divergent_stage is None and not bool(mismatch.get("matched")):
+            first_divergent_stage = stage
+        stages.append(mismatch)
+
+    for stage in actual_traces:
+        if stage not in expected_traces:
+            mismatch = {
+                "stage": stage,
+                "matched": False,
+                "extra_actual_stage": True,
+            }
+            if first_divergent_stage is None:
+                first_divergent_stage = stage
+            stages.append(mismatch)
+
+    return {
+        "first_divergent_stage": first_divergent_stage,
+        "stages": stages,
+    }
+
+
 def _load_tslm_state(model_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     from safetensors.torch import load_file
 
@@ -208,6 +272,172 @@ def _prefixed_state(
     }
 
 
+def _store_layer_cache(
+    base_lm: Any,
+    layer_index: int,
+    updated_cache: tuple[Any, Any],
+) -> None:
+    kv_cache_obj = getattr(base_lm, "kv_cache", None)
+    cache_tensor = getattr(kv_cache_obj, "kv_cache", None)
+    if cache_tensor is None:
+        return
+    key_cache, value_cache = updated_cache
+    cache_tensor[0, layer_index].copy_(key_cache)
+    cache_tensor[1, layer_index].copy_(value_cache)
+
+
+def _run_full_prefill(
+    *,
+    base_lm: Any,
+    fsq_layer: Any,
+    combined_embed: Any,
+    text_mask: Any,
+    audio_mask: Any,
+    compute_dtype: Any,
+    include_layer_traces: bool,
+) -> tuple[Any, dict[str, Any]]:
+    import torch
+
+    traces: dict[str, Any] = {}
+    if base_lm.rope_emb is not None:
+        position_ids = torch.arange(
+            0,
+            combined_embed.size(1),
+            dtype=torch.long,
+            device=combined_embed.device,
+        )
+        position_emb = base_lm.rope_emb(position_ids)
+    else:
+        position_emb = None
+
+    hidden_states = combined_embed
+    if include_layer_traces:
+        _record_trace_matrix(
+            traces,
+            stage="embedding",
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    for layer_index, decoder_layer in enumerate(base_lm.layers):
+        layer_output = decoder_layer(hidden_states, position_emb, True)
+        if isinstance(layer_output, tuple):
+            hidden_states = layer_output[0]
+        else:
+            hidden_states = layer_output
+        hidden_states = hidden_states.to(dtype=compute_dtype)
+        if include_layer_traces:
+            _record_trace_matrix(
+                traces,
+                stage=f"layer_{layer_index:02d}",
+                tensor=hidden_states,
+                dtype=compute_dtype,
+            )
+
+    raw_hidden = base_lm.norm(hidden_states).to(dtype=compute_dtype)
+    if include_layer_traces:
+        _record_trace_matrix(
+            traces,
+            stage="final_norm",
+            tensor=raw_hidden,
+            dtype=compute_dtype,
+        )
+
+    semantic = fsq_layer(raw_hidden) * audio_mask.unsqueeze(0).unsqueeze(-1)
+    semantic = semantic + raw_hidden * text_mask.unsqueeze(0).unsqueeze(-1)
+    semantic = semantic.squeeze(0).to(dtype=compute_dtype).detach().cpu().contiguous()
+    if include_layer_traces:
+        traces["semantic"] = semantic
+    return semantic, traces
+
+
+def _run_step_loop(
+    *,
+    base_lm: Any,
+    fsq_layer: Any,
+    combined_embed: Any,
+    text_mask: Any,
+    audio_mask: Any,
+    device: str,
+    compute_dtype: Any,
+    include_layer_traces: bool,
+) -> tuple[Any, dict[str, Any]]:
+    import torch
+
+    base_lm.setup_cache(1, int(combined_embed.shape[1]), device, compute_dtype)
+    trace_rows: dict[str, list[Any]] = {}
+    rows = []
+    for position in range(int(combined_embed.shape[1])):
+        position_id = torch.tensor(
+            [position],
+            dtype=torch.long,
+            device=device,
+        )
+        if base_lm.rope_emb is not None:
+            position_emb = base_lm.rope_emb(position_id)
+        else:
+            position_emb = None
+
+        hidden_states = combined_embed[:, position, :]
+        if include_layer_traces:
+            _record_trace_row(
+                trace_rows,
+                stage="embedding",
+                tensor=hidden_states,
+                dtype=compute_dtype,
+            )
+
+        for layer_index, decoder_layer in enumerate(base_lm.layers):
+            layer_cache = base_lm.kv_cache.get_layer_cache(layer_index)
+            layer_output = decoder_layer.forward_step(
+                hidden_states,
+                position_emb,
+                position_id,
+                layer_cache,
+            )
+            if isinstance(layer_output, tuple):
+                hidden_states, updated_cache = layer_output
+                _store_layer_cache(base_lm, layer_index, updated_cache)
+            else:
+                hidden_states = layer_output
+            hidden_states = hidden_states.to(dtype=compute_dtype)
+            if include_layer_traces:
+                _record_trace_row(
+                    trace_rows,
+                    stage=f"layer_{layer_index:02d}",
+                    tensor=hidden_states,
+                    dtype=compute_dtype,
+                )
+
+        raw_hidden = base_lm.norm(hidden_states).to(dtype=compute_dtype)
+        if include_layer_traces:
+            _record_trace_row(
+                trace_rows,
+                stage="final_norm",
+                tensor=raw_hidden,
+                dtype=compute_dtype,
+            )
+
+        semantic_row = fsq_layer(raw_hidden) * audio_mask[position].reshape(1, 1)
+        semantic_row = semantic_row + raw_hidden * text_mask[position].reshape(1, 1)
+        semantic_row = semantic_row.to(dtype=compute_dtype)
+        if include_layer_traces:
+            _record_trace_row(
+                trace_rows,
+                stage="semantic",
+                tensor=semantic_row,
+                dtype=compute_dtype,
+            )
+        rows.append(semantic_row.squeeze(0).to(dtype=compute_dtype))
+
+    semantic = torch.stack(rows, dim=0).detach().cpu().contiguous()
+    traces = {
+        stage: torch.stack(stage_rows, dim=0).contiguous()
+        for stage, stage_rows in trace_rows.items()
+    }
+    return semantic, traces
+
+
 def _run_variant(
     *,
     label: str,
@@ -218,6 +448,7 @@ def _run_variant(
     inputs: dict[str, Any],
     expected: Any,
     device: str,
+    include_layer_traces: bool,
 ) -> dict[str, Any]:
     import torch
     from tensorrt_model_connect.families.voxcpm2 import component_builders
@@ -270,50 +501,37 @@ def _run_variant(
             * local_text_features.unsqueeze(0)
         )
         if prefill_mode == _FULL_PREFILL_MODE:
-            raw_hidden, _ = base_lm(inputs_embeds=combined_embed, is_causal=True)
-            raw_hidden = raw_hidden.to(dtype=compute_dtype)
-            semantic = fsq_layer(raw_hidden) * audio_mask.unsqueeze(0).unsqueeze(-1)
-            semantic = semantic + raw_hidden * text_mask.unsqueeze(0).unsqueeze(-1)
-            semantic = (
-                semantic.squeeze(0)
-                .to(dtype=compute_dtype)
-                .detach()
-                .cpu()
-                .contiguous()
+            semantic, _ = _run_full_prefill(
+                base_lm=base_lm,
+                fsq_layer=fsq_layer,
+                combined_embed=combined_embed,
+                text_mask=text_mask,
+                audio_mask=audio_mask,
+                compute_dtype=compute_dtype,
+                include_layer_traces=False,
             )
         elif prefill_mode == _STEP_LOOP_MODE:
-            base_lm.setup_cache(
-                1,
-                int(combined_embed.shape[1]),
-                device,
-                compute_dtype,
+            full_traces: dict[str, Any] = {}
+            if include_layer_traces:
+                _, full_traces = _run_full_prefill(
+                    base_lm=base_lm,
+                    fsq_layer=fsq_layer,
+                    combined_embed=combined_embed,
+                    text_mask=text_mask,
+                    audio_mask=audio_mask,
+                    compute_dtype=compute_dtype,
+                    include_layer_traces=True,
+                )
+            semantic, step_traces = _run_step_loop(
+                base_lm=base_lm,
+                fsq_layer=fsq_layer,
+                combined_embed=combined_embed,
+                text_mask=text_mask,
+                audio_mask=audio_mask,
+                device=device,
+                compute_dtype=compute_dtype,
+                include_layer_traces=include_layer_traces,
             )
-            rows = []
-            for position in range(int(combined_embed.shape[1])):
-                position_id = torch.tensor(
-                    [position],
-                    dtype=torch.long,
-                    device=device,
-                )
-                step_output = base_lm.forward_step(
-                    combined_embed[:, position, :],
-                    position_id,
-                )
-                if isinstance(step_output, tuple):
-                    raw_hidden = step_output[0]
-                else:
-                    raw_hidden = step_output
-                raw_hidden = raw_hidden.to(dtype=compute_dtype)
-                semantic_row = fsq_layer(raw_hidden) * audio_mask[position].reshape(
-                    1,
-                    1,
-                )
-                semantic_row = semantic_row + raw_hidden * text_mask[position].reshape(
-                    1,
-                    1,
-                )
-                rows.append(semantic_row.squeeze(0).to(dtype=compute_dtype))
-            semantic = torch.stack(rows, dim=0).detach().cpu().contiguous()
         else:
             raise ValueError(f"Unsupported VoxCPM2 TSLM prefill mode {prefill_mode!r}")
 
@@ -326,6 +544,8 @@ def _run_variant(
             "row0_actual_first8": _row_prefix(semantic),
         }
     )
+    if prefill_mode == _STEP_LOOP_MODE and include_layer_traces:
+        mismatch["full_vs_step_trace"] = _trace_summary(full_traces, step_traces)
 
     del base_lm, fsq_layer, semantic
     if device.startswith("cuda"):
@@ -342,6 +562,7 @@ def diagnose(
     include_upstream: bool = True,
     include_patched: bool = True,
     include_step_loop: bool = False,
+    include_layer_traces: bool = False,
 ) -> dict[str, Any]:
     import torch
 
@@ -383,6 +604,7 @@ def diagnose(
                 inputs=inputs,
                 expected=expected,
                 device=device,
+                include_layer_traces=include_layer_traces,
             )
         )
 
@@ -391,6 +613,7 @@ def diagnose(
         "hf_dump_dir": str(hf_dump_dir),
         "device": device,
         "text_steps": len(steps),
+        "include_layer_traces": include_layer_traces,
         "results": results,
     }
 
@@ -418,6 +641,14 @@ def main() -> int:
             "refresh-path drift can be distinguished from full-prefill drift."
         ),
     )
+    parser.add_argument(
+        "--include-layer-traces",
+        action="store_true",
+        help=(
+            "For step-loop variants, also compare MiniCPM layer-boundary "
+            "hidden states against the full-prefill replay."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -427,6 +658,7 @@ def main() -> int:
         include_upstream=args.variant in {"both", "upstream"},
         include_patched=args.variant in {"both", "patched"},
         include_step_loop=args.include_step_loop,
+        include_layer_traces=args.include_layer_traces,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:

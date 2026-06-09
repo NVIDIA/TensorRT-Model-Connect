@@ -119,6 +119,30 @@ def test_voxcpm2_tslm_prefill_probe_reports_first_bf16_mismatch() -> None:
     assert mismatch["actual_bits"] == "0x4080"
 
 
+def test_voxcpm2_tslm_prefill_trace_summary_reports_first_stage() -> None:
+    tool = _load_tool()
+    expected = {
+        "embedding": torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16),
+        "layer_00": torch.tensor([[3.0, 4.0]], dtype=torch.bfloat16),
+        "final_norm": torch.tensor([[5.0, 6.0]], dtype=torch.bfloat16),
+    }
+    actual = {
+        "embedding": torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16),
+        "layer_00": torch.tensor([[3.0, 8.0]], dtype=torch.bfloat16),
+        "final_norm": torch.tensor([[5.0, 9.0]], dtype=torch.bfloat16),
+    }
+
+    summary = tool._trace_summary(expected, actual)
+
+    assert summary["first_divergent_stage"] == "layer_00"
+    by_stage = {entry["stage"]: entry for entry in summary["stages"]}
+    assert by_stage["embedding"]["matched"] is True
+    assert by_stage["layer_00"]["matched"] is False
+    assert by_stage["layer_00"]["first_different_element"] == 1
+    assert by_stage["layer_00"]["expected_bits"] == "0x4080"
+    assert by_stage["layer_00"]["actual_bits"] == "0x4100"
+
+
 def test_voxcpm2_tslm_prefill_probe_schedules_step_loop_variants() -> None:
     tool = _load_tool()
 
