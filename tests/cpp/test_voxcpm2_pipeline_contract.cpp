@@ -16,6 +16,7 @@
 #include "runtime/models/voxcpm2/pipeline.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -150,7 +151,9 @@ float bf16_to_fp32(half_bits_t h) {
 half_bits_t fp32_to_bf16(float v) {
     uint32_t bits = 0;
     std::memcpy(&bits, &v, sizeof(bits));
-    return static_cast<half_bits_t>(bits >> 16U);
+    const uint32_t lsb = (bits >> 16U) & 1U;
+    const uint32_t rounding_bias = 0x7FFFU + lsb;
+    return static_cast<half_bits_t>((bits + rounding_bias) >> 16U);
 }
 
 float tensor_float_at(const trtmc::Tensor& tensor, std::size_t index) {
@@ -562,12 +565,14 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
     bool audio_vae_output0 = false, bool stop_logits_stop = false,
     bool padded_stop_logits = false,
     trtmc::DType floating_input_dtype = trtmc::DType::kFloat32,
-    bool locdit_noise_input = false, bool full_prefill_lms = false) {
+    bool locdit_noise_input = false, bool full_prefill_lms = false,
+    float first_locdit_patch_value = 4.0F) {
     std::vector<audio::VoxCPM2LoadedComponent> components;
     components.reserve(audio::kVoxCPM2ComponentSpecs.size());
     std::vector<float> locdit_latents;
     for (std::size_t patch = 0; patch < latent_patch_count; ++patch) {
-        auto values = repeated_values(4 * 64, 4.0F + static_cast<float>(patch));
+        auto values =
+            repeated_values(4 * 64, first_locdit_patch_value + static_cast<float>(patch));
         locdit_latents.insert(locdit_latents.end(), values.begin(), values.end());
     }
     const std::vector<std::vector<float>> stage_outputs = {
@@ -1046,9 +1051,11 @@ void test_generate_audio_uses_matching_zero_prefill_feature_table() {
 void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
+    constexpr float kLocditPatchValueThatRoundsUpToBf16 = 1.007F;
     trtmc::VoxCPM2Pipeline pipeline(
-        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16), plan,
-        "openbmb/VoxCPM2", make_fake_tokenizer());
+        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16,
+                                 false, false, kLocditPatchValueThatRoundsUpToBf16),
+        plan, "openbmb/VoxCPM2", make_fake_tokenizer());
 
     last_text_mask_dtype = trtmc::DType::kFloat32;
     last_audio_mask_dtype = trtmc::DType::kFloat32;
@@ -1057,6 +1064,7 @@ void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
     last_text_mask_values.clear();
     last_audio_mask_values.clear();
     locenc_audio_feat_values.clear();
+    locdit_feat_cond_values.clear();
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 2;
@@ -1074,6 +1082,9 @@ void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
           "voxcpm2 preserves generated-step text mask value after dtype conversion");
     check(!last_audio_mask_values.empty() && last_audio_mask_values[0] == 1.0F,
           "voxcpm2 preserves generated-step audio mask value after dtype conversion");
+    check(locdit_feat_cond_values.size() == 2 &&
+              std::abs(locdit_feat_cond_values[1] - 1.0078125F) < 0.000001F,
+          "voxcpm2 rounds float32 recurrent feat_cond to bfloat16 like PyTorch");
 }
 
 void test_generate_audio_forwards_shared_locdit_noise_latents() {

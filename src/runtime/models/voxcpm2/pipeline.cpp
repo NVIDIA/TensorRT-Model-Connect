@@ -737,7 +737,9 @@ half_bits_t fp32_to_fp16(float v) {
 half_bits_t fp32_to_bf16(float v) {
     uint32_t bits = 0;
     std::memcpy(&bits, &v, sizeof(bits));
-    return static_cast<half_bits_t>(bits >> 16U);
+    const uint32_t lsb = (bits >> 16U) & 1U;
+    const uint32_t rounding_bias = 0x7FFFU + lsb;
+    return static_cast<half_bits_t>((bits + rounding_bias) >> 16U);
 }
 
 float fp16_to_fp32(half_bits_t h) {
