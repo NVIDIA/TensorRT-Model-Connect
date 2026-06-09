@@ -1112,7 +1112,7 @@ void test_generate_audio_dumps_locdit_tensor_io_for_parity_debug() {
         auto plan = audio::make_voxcpm2_generation_plan(cfg);
         trtmc::VoxCPM2Pipeline pipeline(
             make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16,
-                                     true),
+                                     true, true),
             plan, "openbmb/VoxCPM2", make_fake_tokenizer());
 
         trtmc::GenerateConfig gen_cfg;
