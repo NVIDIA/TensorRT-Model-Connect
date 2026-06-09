@@ -39,6 +39,7 @@ _DEFAULT_DOWN_PROJ_VARIANT = "linear"
 _DOWN_PROJ_VARIANTS = (
     _DEFAULT_DOWN_PROJ_VARIANT,
     "functional_linear",
+    "addmm_zero",
     "einsum",
     "batched_bmm",
     "manual_matmul_bf16",
@@ -723,6 +724,33 @@ def _make_down_proj_variant_module(
                 output = output + self.bias
             return output
 
+    class AddmmZeroMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            original_shape = down_proj_input.shape[:-1]
+            flat_input = down_proj_input.reshape(-1, down_proj_input.shape[-1])
+            if self.bias is None:
+                base = flat_input.new_zeros((flat_input.shape[0], self.weight.shape[0]))
+            else:
+                base = self.bias.unsqueeze(0).expand(
+                    flat_input.shape[0],
+                    self.bias.shape[0],
+                )
+            output = torch_module.addmm(
+                base,
+                flat_input,
+                self.weight.transpose(0, 1),
+            )
+            return output.reshape(*original_shape, self.weight.shape[0])
+
     class BatchedBmmMatmul(torch_module.nn.Module):
         def __init__(self, module: Any) -> None:
             super().__init__()
@@ -840,6 +868,8 @@ def _make_down_proj_variant_module(
         return ManualMatmul(linear_module)
     if variant == "functional_linear":
         return FunctionalLinear(linear_module)
+    if variant == "addmm_zero":
+        return AddmmZeroMatmul(linear_module)
     if variant == "einsum":
         return EinsumMatmul(linear_module)
     if variant == "batched_bmm":
