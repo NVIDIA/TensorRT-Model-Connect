@@ -954,6 +954,18 @@ def _eager_projection_mismatch(
     }
 
 
+def _materialize_export_tensor(tensor: Any) -> Any:
+    """Return a normal detached tensor usable by ONNX export."""
+    if not hasattr(tensor, "detach"):
+        return tensor
+    materialized = tensor.detach().clone()
+    if hasattr(materialized, "requires_grad_"):
+        materialized.requires_grad_(False)
+    if hasattr(materialized, "contiguous"):
+        materialized = materialized.contiguous()
+    return materialized
+
+
 def _run_trt_linear_projection(
     *,
     linear_module: Any,
@@ -981,9 +993,10 @@ def _run_trt_linear_projection(
             return self.module(down_proj_input)
 
     wrapper = LinearProjectionWrapper(linear_module).eval()
+    export_input = _materialize_export_tensor(input_tensor)
     eager_summary = _eager_projection_mismatch(
         projection_module=linear_module,
-        input_tensor=input_tensor,
+        input_tensor=export_input,
         expected=expected,
     )
     cuda_device = torch.device(device if str(device).startswith("cuda") else "cuda")
@@ -995,7 +1008,7 @@ def _run_trt_linear_projection(
         with torch.no_grad():
             torch.onnx.export(
                 wrapper,
-                (input_tensor,),
+                (export_input,),
                 str(onnx_path),
                 opset_version=18,
                 dynamo=False,
@@ -1056,7 +1069,7 @@ def _run_trt_linear_projection(
         )
         torch_dtype = _trt_dtype_to_torch(dtype, torch)
         if mode_name == "input":
-            buffers[name] = input_tensor.to(
+            buffers[name] = export_input.to(
                 device=cuda_device,
                 dtype=torch_dtype,
             ).contiguous()

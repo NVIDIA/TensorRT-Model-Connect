@@ -813,6 +813,24 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
     assert torch.equal(split_out(x), linear(x))
 
 
+def test_voxcpm2_tslm_prefill_materializes_inference_tensor_for_export() -> None:
+    tool = _load_tool()
+
+    with torch.inference_mode():
+        inference_tensor = torch.ones((2, 3), dtype=torch.bfloat16)
+
+    assert inference_tensor.is_inference()
+
+    materialized = tool._materialize_export_tensor(inference_tensor)
+
+    assert materialized.dtype == torch.bfloat16
+    assert materialized.shape == (2, 3)
+    assert materialized.is_contiguous()
+    assert not materialized.requires_grad
+    assert not materialized.is_inference()
+    assert torch.equal(materialized, inference_tensor)
+
+
 def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
