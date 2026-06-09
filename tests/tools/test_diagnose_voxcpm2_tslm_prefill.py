@@ -554,6 +554,100 @@ def test_voxcpm2_tslm_prefill_sets_builder_flags() -> None:
         tool._set_builder_flags(fake_config, fake_trt, ("UNKNOWN",))
 
 
+def test_voxcpm2_tslm_prefill_summarizes_trt_network_layers() -> None:
+    tool = _load_tool()
+
+    class FakeTensor:
+        def __init__(self, name: str, dtype: str, shape: tuple[int, ...]) -> None:
+            self.name = name
+            self.dtype = dtype
+            self.shape = shape
+
+    class FakeLayer:
+        name = "down_proj/Gemm"
+        type = "LayerType.MATRIX_MULTIPLY"
+        num_inputs = 2
+        num_outputs = 1
+
+        def get_input(self, index: int) -> Any:
+            return (
+                FakeTensor("down_proj_input", "DataType.BF16", (20, 6144))
+                if index == 0
+                else FakeTensor("down_proj_weight", "DataType.BF16", (6144, 2048))
+            )
+
+        def get_output(self, _index: int) -> Any:
+            return FakeTensor("down_proj_output", "DataType.BF16", (20, 2048))
+
+    class FakeNetwork:
+        num_layers = 1
+
+        def get_layer(self, _index: int) -> Any:
+            return FakeLayer()
+
+    assert tool._trt_network_layer_summary(FakeNetwork()) == [
+        {
+            "index": 0,
+            "name": "down_proj/Gemm",
+            "type": "LayerType.MATRIX_MULTIPLY",
+            "inputs": [
+                {
+                    "name": "down_proj_input",
+                    "dtype": "DataType.BF16",
+                    "shape": [20, 6144],
+                },
+                {
+                    "name": "down_proj_weight",
+                    "dtype": "DataType.BF16",
+                    "shape": [6144, 2048],
+                },
+            ],
+            "outputs": [
+                {
+                    "name": "down_proj_output",
+                    "dtype": "DataType.BF16",
+                    "shape": [20, 2048],
+                }
+            ],
+        }
+    ]
+
+
+def test_voxcpm2_tslm_prefill_reads_engine_inspector_json() -> None:
+    tool = _load_tool()
+
+    class FakeInspector:
+        def get_engine_information(self, fmt: str) -> str:
+            assert fmt == "json"
+            return json.dumps({"Layers": [{"Name": "down_proj/Gemm"}]})
+
+    class FakeEngine:
+        def create_engine_inspector(self) -> FakeInspector:
+            return FakeInspector()
+
+    fake_trt = SimpleNamespace(LayerInformationFormat=SimpleNamespace(JSON="json"))
+
+    assert tool._trt_engine_inspector_summary(FakeEngine(), fake_trt) == {
+        "Layers": [{"Name": "down_proj/Gemm"}]
+    }
+
+
+def test_voxcpm2_tslm_prefill_sets_detailed_profiling_when_available() -> None:
+    tool = _load_tool()
+
+    class FakeConfig:
+        profiling_verbosity = None
+
+    fake_config = FakeConfig()
+    fake_trt = SimpleNamespace(
+        ProfilingVerbosity=SimpleNamespace(DETAILED="detailed")
+    )
+
+    tool._set_detailed_profiling_verbosity(fake_config, fake_trt)
+
+    assert fake_config.profiling_verbosity == "detailed"
+
+
 def test_voxcpm2_tslm_prefill_down_proj_label_includes_kernel_controls() -> None:
     tool = _load_tool()
 

@@ -306,6 +306,84 @@ def _trt_dtype_to_torch(trt_dtype: Any, torch_module: Any) -> Any:
     raise TypeError(f"Unsupported TensorRT dtype {dtype_text!r}")
 
 
+def _trt_shape(shape: Any) -> list[int]:
+    return [int(dim) for dim in shape]
+
+
+def _trt_tensor_metadata(tensor: Any) -> dict[str, Any] | None:
+    if tensor is None:
+        return None
+    return {
+        "name": str(getattr(tensor, "name", "")),
+        "dtype": str(getattr(tensor, "dtype", "")),
+        "shape": _trt_shape(getattr(tensor, "shape", ())),
+    }
+
+
+def _trt_layer_tensor_list(
+    layer: Any,
+    *,
+    count_attr: str,
+    getter_name: str,
+) -> list[dict[str, Any] | None]:
+    count = int(getattr(layer, count_attr, 0))
+    getter = getattr(layer, getter_name)
+    return [_trt_tensor_metadata(getter(index)) for index in range(count)]
+
+
+def _trt_network_layer_summary(network: Any) -> list[dict[str, Any]]:
+    layers = []
+    for index in range(int(getattr(network, "num_layers", 0))):
+        layer = network.get_layer(index)
+        layers.append(
+            {
+                "index": index,
+                "name": str(getattr(layer, "name", "")),
+                "type": str(getattr(layer, "type", "")),
+                "inputs": _trt_layer_tensor_list(
+                    layer,
+                    count_attr="num_inputs",
+                    getter_name="get_input",
+                ),
+                "outputs": _trt_layer_tensor_list(
+                    layer,
+                    count_attr="num_outputs",
+                    getter_name="get_output",
+                ),
+            }
+        )
+    return layers
+
+
+def _set_detailed_profiling_verbosity(config: Any, trt_module: Any) -> None:
+    profiling_verbosity = getattr(trt_module, "ProfilingVerbosity", None)
+    detailed = getattr(profiling_verbosity, "DETAILED", None)
+    if detailed is None or not hasattr(config, "profiling_verbosity"):
+        return
+    config.profiling_verbosity = detailed
+
+
+def _trt_engine_inspector_summary(engine: Any, trt_module: Any) -> Any:
+    if not hasattr(engine, "create_engine_inspector"):
+        return None
+    layer_information_format = getattr(trt_module, "LayerInformationFormat", None)
+    json_format = getattr(layer_information_format, "JSON", None)
+    if json_format is None:
+        return None
+    inspector = engine.create_engine_inspector()
+    try:
+        raw = inspector.get_engine_information(json_format)
+    except TypeError:
+        raw = inspector.get_engine_information()
+    if raw is None:
+        return None
+    text = str(raw)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def _pad_first_dim_to_shape(
     tensor: Any,
     shape: tuple[int, ...],
@@ -889,10 +967,12 @@ def _run_trt_linear_projection(
 
         config = builder.create_builder_config()
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        _set_detailed_profiling_verbosity(config, trt)
         if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
             config.clear_flag(trt.BuilderFlag.TF32)
         _set_tactic_sources(config, trt, tactic_sources)
         _set_builder_flags(config, trt, builder_flags)
+        network_layers = _trt_network_layer_summary(network)
 
         plan = builder.build_serialized_network(network, config)
         if plan is None:
@@ -903,6 +983,7 @@ def _run_trt_linear_projection(
     engine = runtime.deserialize_cuda_engine(plan_bytes)
     if engine is None:
         raise RuntimeError("Failed to deserialize TensorRT down-proj engine")
+    engine_inspector = _trt_engine_inspector_summary(engine, trt)
     context = engine.create_execution_context()
 
     io_records: list[dict[str, Any]] = []
@@ -959,6 +1040,8 @@ def _run_trt_linear_projection(
             "tactic_sources": list(tactic_sources),
             "builder_flags": list(builder_flags),
             "engine_io": io_records,
+            "network_layers": network_layers,
+            "engine_inspector": engine_inspector,
             "plan_bytes": len(plan_bytes),
             "row0_expected_first8": _row_prefix(expected),
             "row0_actual_first8": _row_prefix(actual),
