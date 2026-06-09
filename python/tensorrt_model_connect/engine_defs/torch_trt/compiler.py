@@ -21,7 +21,9 @@ import contextlib
 import gc
 import json
 import logging
+import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -382,6 +384,36 @@ def _maybe_disable_mkldnn(disable: bool):
         mkldnn_backend.enabled = previous
 
 
+def _maybe_preserve_onnx_export(
+    tmpdir: Path,
+    wrapper: nn.Module,
+    *,
+    verbose: bool = False,
+) -> Path | None:
+    export_root = os.environ.get("TRTMC_ONNX_EXPORT_DIR")
+    if not export_root:
+        return None
+
+    wrapper_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", wrapper.__class__.__name__)
+    wrapper_name = wrapper_name.strip("_") or "model"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    export_dir = Path(export_root).expanduser() / (
+        f"{timestamp}_{os.getpid()}_{wrapper_name}"
+    )
+    export_dir.mkdir(parents=True, exist_ok=False)
+
+    for child in tmpdir.iterdir():
+        destination = export_dir / child.name
+        if child.is_dir():
+            shutil.copytree(child, destination)
+        else:
+            shutil.copy2(child, destination)
+
+    if verbose:
+        print(f"[onnx-trt] Preserved ONNX export: {export_dir}", file=sys.stderr)
+    return export_dir
+
+
 def compile_model_via_onnx(
     wrapper: nn.Module,
     example_args: tuple,
@@ -411,6 +443,7 @@ def compile_model_via_onnx(
                 output_names=output_names,
                 dynamic_axes=None,
             )
+        _maybe_preserve_onnx_export(Path(tmpdir), wrapper, verbose=verbose)
         if verbose:
             print(
                 f"[onnx-trt] ONNX export complete "

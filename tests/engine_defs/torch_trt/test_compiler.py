@@ -192,6 +192,43 @@ def test_compile_model_via_onnx_uses_path_export_with_external_data(monkeypatch)
 
 
 @requires_torch
+def test_compile_model_via_onnx_preserves_export_when_requested(monkeypatch, tmp_path):
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    preserve_root = tmp_path / "preserved"
+
+    def fake_export(model, args, output, **kwargs):
+        del model, args, kwargs
+        onnx_path = Path(output)
+        onnx_path.write_bytes(b"fake-onnx")
+        (onnx_path.parent / "model.onnx.data").write_bytes(b"fake-external-data")
+
+    def fake_build_engine(onnx_path, **kwargs):
+        del kwargs
+        assert Path(onnx_path).is_file()
+        return b"fake-plan"
+
+    monkeypatch.setenv("TRTMC_ONNX_EXPORT_DIR", str(preserve_root))
+    monkeypatch.setattr(compiler.torch.onnx, "export", fake_export)
+    monkeypatch.setattr(compiler, "_build_engine_from_onnx_path", fake_build_engine)
+
+    result = compiler.compile_model_via_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(1),),
+        input_names=["input"],
+        output_names=["output"],
+    )
+
+    preserved_dirs = list(preserve_root.iterdir())
+    assert result == b"fake-plan"
+    assert len(preserved_dirs) == 1
+    assert (preserved_dirs[0] / "model.onnx").read_bytes() == b"fake-onnx"
+    assert (
+        preserved_dirs[0] / "model.onnx.data"
+    ).read_bytes() == b"fake-external-data"
+
+
+@requires_torch
 def test_compile_model_via_onnx_can_disable_mkldnn_during_export(monkeypatch):
     from tensorrt_model_connect.engine_defs.torch_trt import compiler
 
