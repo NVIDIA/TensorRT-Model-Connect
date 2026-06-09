@@ -225,6 +225,7 @@ def compare_tensor_dumps(
     trt_manifest: Path,
     *,
     strict_extra: bool = False,
+    max_mismatches: int = 5,
 ) -> dict[str, Any]:
     hf_records = _load_manifest(hf_manifest)
     trt_records = _load_manifest(trt_manifest)
@@ -248,14 +249,25 @@ def compare_tensor_dumps(
     ]
 
     first_mismatch = None
+    first_mismatches: list[dict[str, Any]] = []
+    mismatch_counts_by_phase: dict[str, int] = {}
+    mismatch_counts_by_trt_engine_section: dict[str, int] = {}
     mismatch_count = 0
     for key in common_keys:
         mismatch = _tensor_mismatch(hf_by_key[key], trt_by_key[key], key)
         if mismatch is None:
             continue
         mismatch_count += 1
+        phase = key[0]
+        trt_engine_section = str(mismatch.get("trt_engine_section", ""))
+        mismatch_counts_by_phase[phase] = mismatch_counts_by_phase.get(phase, 0) + 1
+        mismatch_counts_by_trt_engine_section[trt_engine_section] = (
+            mismatch_counts_by_trt_engine_section.get(trt_engine_section, 0) + 1
+        )
         if first_mismatch is None:
             first_mismatch = mismatch
+        if len(first_mismatches) < max(0, max_mismatches):
+            first_mismatches.append(mismatch)
 
     passed = (
         not missing_from_trt
@@ -277,6 +289,9 @@ def compare_tensor_dumps(
         "first_missing_from_trt": [list(key) for key in missing_from_trt[:5]],
         "first_extra_trt": [list(key) for key in extra_trt[:5]],
         "first_common_mismatch": first_mismatch,
+        "first_common_mismatches": first_mismatches,
+        "mismatch_counts_by_phase": mismatch_counts_by_phase,
+        "mismatch_counts_by_trt_engine_section": mismatch_counts_by_trt_engine_section,
         "strict_extra": strict_extra,
     }
 
@@ -295,12 +310,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="write the comparison result JSON to this path as well as stdout",
     )
+    parser.add_argument(
+        "--max-mismatches",
+        type=int,
+        default=5,
+        help="number of early common tensor mismatches to preserve in result JSON",
+    )
     args = parser.parse_args(argv)
 
     result = compare_tensor_dumps(
         args.hf_manifest,
         args.trt_manifest,
         strict_extra=args.strict_extra,
+        max_mismatches=args.max_mismatches,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:

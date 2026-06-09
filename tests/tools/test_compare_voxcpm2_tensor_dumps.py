@@ -33,12 +33,13 @@ def _write_record(
     dtype: str,
     shape: list[int],
     raw: bytes,
+    engine_section: str = "test",
 ) -> None:
     raw_path = root / f"{phase}_{step:06d}_{direction}_{name}.raw"
     raw_path.write_bytes(raw)
     record = {
         "stage": phase.split("_", 1)[0],
-        "engine_section": "test",
+        "engine_section": engine_section,
         "phase": phase,
         "step": step,
         "direction": direction,
@@ -150,6 +151,81 @@ def test_compare_voxcpm2_tensor_dumps_reports_first_common_mismatch(tmp_path: Pa
     assert mismatch["first_different_element"] == 1
     assert mismatch["hf_value"] == 2.0
     assert mismatch["trt_value"] == 4.0
+
+
+def test_compare_voxcpm2_tensor_dumps_reports_mismatch_list_and_counts(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool()
+    hf_dir = tmp_path / "hf"
+    trt_dir = tmp_path / "trt"
+    hf_dir.mkdir()
+    trt_dir.mkdir()
+    hf_manifest = hf_dir / "manifest.jsonl"
+    trt_manifest = trt_dir / "manifest.jsonl"
+
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x3F80),
+        engine_section="hf_reference",
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x4000),
+        engine_section="tslm_prefill_engine_plan",
+    )
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="ralm_prefill",
+        step=0,
+        direction="output",
+        name="residual_hidden",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x4000),
+        engine_section="hf_reference",
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="ralm_prefill",
+        step=0,
+        direction="output",
+        name="residual_hidden",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x4080),
+        engine_section="ralm_prefill_engine_plan",
+    )
+
+    result = tool.compare_tensor_dumps(hf_manifest, trt_manifest, max_mismatches=1)
+
+    assert result["record_counts"]["common_mismatches"] == 2
+    assert len(result["first_common_mismatches"]) == 1
+    assert result["first_common_mismatches"][0] == result["first_common_mismatch"]
+    assert result["mismatch_counts_by_phase"] == {
+        "ralm_prefill": 1,
+        "tslm_prefill": 1,
+    }
+    assert result["mismatch_counts_by_trt_engine_section"] == {
+        "ralm_prefill_engine_plan": 1,
+        "tslm_prefill_engine_plan": 1,
+    }
 
 
 def test_compare_voxcpm2_tensor_dumps_compares_matching_float_values_across_dtypes(
@@ -286,6 +362,8 @@ def test_compare_voxcpm2_tensor_dumps_main_writes_output_json(
             [
                 str(hf_manifest),
                 str(trt_manifest),
+                "--max-mismatches",
+                "1",
                 "--output-json",
                 str(output_json),
             ]
@@ -296,3 +374,4 @@ def test_compare_voxcpm2_tensor_dumps_main_writes_output_json(
     printed = json.loads(stdout.getvalue())
     assert written == printed
     assert written["first_common_mismatch"]["trt_engine_section"] == "test"
+    assert len(written["first_common_mismatches"]) == 1
