@@ -1858,6 +1858,84 @@ def test_voxcpm2_minicpm_patch_preserves_bf16_cast_barriers(monkeypatch):
     assert norm_output.dtype == torch.bfloat16
 
 
+def test_voxcpm2_tslm_down_proj_variant_env_validates(monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    monkeypatch.delenv("TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT", raising=False)
+    assert component_builders._selected_tslm_down_proj_variant() == "linear"
+
+    monkeypatch.setenv(
+        "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT",
+        " Split_K_2_BF16_ACCUM ",
+    )
+    assert component_builders._selected_tslm_down_proj_variant() == (
+        "split_k_2_bf16_accum"
+    )
+
+    monkeypatch.setenv("TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT", "unknown")
+    with pytest.raises(ValueError, match="Unsupported VoxCPM2 TSLM down-proj"):
+        component_builders._selected_tslm_down_proj_variant()
+
+
+def test_voxcpm2_tslm_down_proj_variant_replaces_layer_modules():
+    torch = pytest.importorskip("torch")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mlp = torch.nn.Module()
+            self.mlp.down_proj = torch.nn.Linear(3, 2, bias=True).to(
+                dtype=torch.bfloat16
+            )
+            with torch.no_grad():
+                self.mlp.down_proj.weight.copy_(
+                    torch.tensor(
+                        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                        dtype=torch.bfloat16,
+                    )
+                )
+                self.mlp.down_proj.bias.copy_(
+                    torch.tensor([0.25, -0.5], dtype=torch.bfloat16)
+                )
+
+    base_lm = torch.nn.Module()
+    base_lm.layers = torch.nn.ModuleList([FakeLayer()])
+    original = base_lm.layers[0].mlp.down_proj
+
+    assert (
+        component_builders._patch_tslm_down_proj_modules_for_export(
+            torch,
+            base_lm,
+            "linear",
+        )
+        == 0
+    )
+    assert base_lm.layers[0].mlp.down_proj is original
+
+    replaced = component_builders._patch_tslm_down_proj_modules_for_export(
+        torch,
+        base_lm,
+        "fp32_output",
+    )
+
+    assert replaced == 1
+    assert base_lm.layers[0].mlp.down_proj is not original
+    x = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
+    out = base_lm.layers[0].mlp.down_proj(x)
+    assert out.dtype == torch.float32
+    expected = torch.nn.functional.linear(
+        x.float(),
+        original.weight.float(),
+        original.bias.float(),
+    )
+    torch.testing.assert_close(
+        out,
+        expected,
+    )
+
+
 def test_voxcpm2_unified_cfm_patch_keeps_traced_scalars_typed(monkeypatch, tmp_path):
     torch = pytest.importorskip("torch")
     onnx = pytest.importorskip("onnx")

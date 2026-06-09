@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,6 +216,29 @@ VOXCPM2_RALM_PREFILL_ENGINE_SECTION = "ralm_prefill_engine_plan"
 _VOXCPM2_ZERO_PREFILL_FEATURES_VERSION = 1
 _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
 _VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS = 1024
+_VOXCPM2_TSLM_DOWN_PROJ_VARIANT_ENV = "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT"
+_VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT = "linear"
+_VOXCPM2_DOWN_PROJ_VARIANTS = (
+    _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT,
+    "functional_linear",
+    "addmm_zero",
+    "einsum",
+    "batched_bmm",
+    "manual_matmul_bf16",
+    "pretransposed_matmul_bf16",
+    "fp32_accum_to_bf16",
+    "fp32_output",
+    "split_k_1024_bf16_accum",
+    "split_k_1024_fp32_accum_to_bf16",
+    "split_out_256_bf16",
+)
+_VOXCPM2_SPLIT_K_DOWN_PROJ_VARIANT_RE = re.compile(
+    r"^split_k_(?P<chunk>[1-9][0-9]*)_"
+    r"(?P<mode>bf16_accum|fp32_accum_to_bf16)$"
+)
+_VOXCPM2_SPLIT_OUT_DOWN_PROJ_VARIANT_RE = re.compile(
+    r"^split_out_(?P<chunk>[1-9][0-9]*)_bf16$"
+)
 
 
 VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
@@ -921,6 +945,218 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
     attention_cls._trtmc_explicit_gqa_patch = True
 
 
+def _is_supported_down_proj_variant(variant: str) -> bool:
+    return (
+        variant in _VOXCPM2_DOWN_PROJ_VARIANTS
+        or _VOXCPM2_SPLIT_K_DOWN_PROJ_VARIANT_RE.match(variant) is not None
+        or _VOXCPM2_SPLIT_OUT_DOWN_PROJ_VARIANT_RE.match(variant) is not None
+    )
+
+
+def _split_k_down_proj_variant_config(variant: str) -> tuple[int, str] | None:
+    match = _VOXCPM2_SPLIT_K_DOWN_PROJ_VARIANT_RE.match(variant)
+    if match is None:
+        return None
+    return int(match.group("chunk")), match.group("mode")
+
+
+def _split_out_down_proj_variant_config(variant: str) -> int | None:
+    match = _VOXCPM2_SPLIT_OUT_DOWN_PROJ_VARIANT_RE.match(variant)
+    if match is None:
+        return None
+    return int(match.group("chunk"))
+
+
+def _validate_down_proj_variant(variant: str) -> str:
+    normalized = variant.strip().lower()
+    if _is_supported_down_proj_variant(normalized):
+        return normalized
+    valid = ", ".join(_VOXCPM2_DOWN_PROJ_VARIANTS)
+    raise ValueError(
+        f"Unsupported VoxCPM2 TSLM down-proj export variant {variant!r}; "
+        f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
+        "split_k_<chunk>_fp32_accum_to_bf16, split_out_<chunk>_bf16"
+    )
+
+
+def _selected_tslm_down_proj_variant() -> str:
+    raw = os.environ.get(_VOXCPM2_TSLM_DOWN_PROJ_VARIANT_ENV, "")
+    if not raw.strip():
+        return _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT
+    return _validate_down_proj_variant(raw)
+
+
+def _make_down_proj_variant_module(
+    torch_module: Any,
+    linear_module: Any,
+    variant: str,
+) -> Any:
+    variant = _validate_down_proj_variant(variant)
+    if variant == _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT:
+        return linear_module
+
+    split_k_config = _split_k_down_proj_variant_config(variant)
+    split_out_chunk_size = _split_out_down_proj_variant_config(variant)
+
+    class DownProjVariant(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.variant = variant
+            self.split_k_config = split_k_config
+            self.split_out_chunk_size = split_out_chunk_size
+            weight = module.weight.detach()
+            bias = getattr(module, "bias", None)
+            if variant in {"fp32_accum_to_bf16", "fp32_output"}:
+                weight = weight.float()
+                bias = None if bias is None else bias.detach().float()
+            elif bias is not None:
+                bias = bias.detach()
+
+            if variant == "pretransposed_matmul_bf16":
+                self.register_buffer(
+                    "weight_t",
+                    weight.transpose(0, 1).contiguous().clone(),
+                )
+            else:
+                self.register_buffer("weight", weight.clone())
+            self.register_buffer("bias", None if bias is None else bias.clone())
+
+        def _add_bias(self, output: Any, bias: Any | None = None) -> Any:
+            selected_bias = self.bias if bias is None else bias
+            if selected_bias is not None:
+                output = output + selected_bias
+            return output
+
+        def _matmul_with_weight(self, down_proj_input: Any) -> Any:
+            return torch_module.matmul(
+                down_proj_input,
+                self.weight.transpose(0, 1),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            if self.variant == "functional_linear":
+                return torch_module.nn.functional.linear(
+                    down_proj_input,
+                    self.weight,
+                    self.bias,
+                )
+            if self.variant == "pretransposed_matmul_bf16":
+                return self._add_bias(
+                    torch_module.matmul(down_proj_input, self.weight_t)
+                )
+            if self.variant == "addmm_zero":
+                original_shape = down_proj_input.shape[:-1]
+                flat_input = down_proj_input.reshape(-1, down_proj_input.shape[-1])
+                if self.bias is None:
+                    base = flat_input.new_zeros(
+                        (flat_input.shape[0], self.weight.shape[0])
+                    )
+                else:
+                    base = self.bias.unsqueeze(0).expand(
+                        flat_input.shape[0],
+                        self.bias.shape[0],
+                    )
+                output = torch_module.addmm(
+                    base,
+                    flat_input,
+                    self.weight.transpose(0, 1),
+                )
+                return output.reshape(*original_shape, self.weight.shape[0])
+            if self.variant == "einsum":
+                return self._add_bias(
+                    torch_module.einsum("...i,oi->...o", down_proj_input, self.weight)
+                )
+            if self.variant == "batched_bmm":
+                squeezed = down_proj_input.ndim == 2
+                batched_input = (
+                    down_proj_input.unsqueeze(0) if squeezed else down_proj_input
+                )
+                transposed = self.weight.transpose(0, 1)
+                batched_weight = transposed.unsqueeze(0).expand(
+                    batched_input.shape[0],
+                    transposed.shape[0],
+                    transposed.shape[1],
+                )
+                output = torch_module.bmm(batched_input, batched_weight)
+                if squeezed:
+                    output = output.squeeze(0)
+                return self._add_bias(output)
+            if self.variant in {"fp32_accum_to_bf16", "fp32_output"}:
+                output = torch_module.matmul(
+                    down_proj_input.float(),
+                    self.weight.transpose(0, 1),
+                )
+                output = self._add_bias(output)
+                if self.variant == "fp32_accum_to_bf16":
+                    output = output.to(dtype=torch_module.bfloat16)
+                return output
+            if self.split_k_config is not None:
+                chunk_size, mode = self.split_k_config
+                partials = []
+                in_features = self.weight.shape[1]
+                for start in range(0, in_features, chunk_size):
+                    end = min(start + chunk_size, in_features)
+                    partials.append(
+                        torch_module.matmul(
+                            down_proj_input[..., start:end],
+                            self.weight[:, start:end].transpose(0, 1),
+                        )
+                    )
+                if mode == "fp32_accum_to_bf16":
+                    output = partials[0].float()
+                    for partial in partials[1:]:
+                        output = output + partial.float()
+                    bias = None if self.bias is None else self.bias.float()
+                    return self._add_bias(output, bias).to(
+                        dtype=torch_module.bfloat16
+                    )
+
+                output = partials[0]
+                for partial in partials[1:]:
+                    output = (output + partial).to(dtype=torch_module.bfloat16)
+                return self._add_bias(output).to(dtype=torch_module.bfloat16)
+            if self.split_out_chunk_size is not None:
+                partials = []
+                out_features = self.weight.shape[0]
+                for start in range(0, out_features, self.split_out_chunk_size):
+                    end = min(start + self.split_out_chunk_size, out_features)
+                    output = torch_module.matmul(
+                        down_proj_input,
+                        self.weight[start:end].transpose(0, 1),
+                    )
+                    bias = None if self.bias is None else self.bias[start:end]
+                    partials.append(self._add_bias(output, bias))
+                return torch_module.cat(partials, dim=-1)
+            return self._add_bias(self._matmul_with_weight(down_proj_input))
+
+    return DownProjVariant(linear_module)
+
+
+def _patch_tslm_down_proj_modules_for_export(
+    torch_module: Any,
+    base_lm: Any,
+    variant: str | None = None,
+) -> int:
+    selected = _selected_tslm_down_proj_variant() if variant is None else variant
+    selected = _validate_down_proj_variant(selected)
+    if selected == _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT:
+        return 0
+
+    replaced = 0
+    for layer in getattr(base_lm, "layers", ()):
+        mlp = getattr(layer, "mlp", None)
+        down_proj = getattr(mlp, "down_proj", None)
+        if down_proj is None:
+            continue
+        setattr(
+            mlp,
+            "down_proj",
+            _make_down_proj_variant_module(torch_module, down_proj, selected),
+        )
+        replaced += 1
+    return replaced
+
+
 def _patch_unified_cfm_for_onnx_export(torch_module: Any) -> None:
     """Keep upstream UnifiedCFM numerics while avoiding ONNX scalar promotion."""
     try:
@@ -1100,6 +1336,7 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     )
     base_lm.to(dtype=compute_dtype)
     base_lm.eval()
+    _patch_tslm_down_proj_modules_for_export(torch, base_lm)
 
     text_steps = _tslm_export_text_steps(ctx)
     base_lm.setup_cache(1, text_steps, "cpu", compute_dtype)
@@ -1247,6 +1484,7 @@ def build_tslm_prefill_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     )
     base_lm.to(dtype=compute_dtype)
     base_lm.eval()
+    _patch_tslm_down_proj_modules_for_export(torch, base_lm)
 
     fsq_layer = ScalarQuantizationLayer(
         hidden_size,
