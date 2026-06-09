@@ -38,6 +38,27 @@ _VOXCPM2_PREBUILT_ENGINE_FILENAMES = {
     )
     for component in _VOXCPM2_COMPONENTS
 }
+_VOXCPM2_PREBUILT_AUXILIARY_SECTION_FILENAMES = {
+    voxcpm2_component_builders.VOXCPM2_TSLM_PREFILL_ENGINE_SECTION: (
+        "tslm_prefill_engine_plan",
+        "tslm_prefill_engine_plan.plan",
+        "tslm_prefill.plan",
+        "tslm_prefill.engine",
+        "tslm_prefill.trtplan",
+    ),
+    voxcpm2_component_builders.VOXCPM2_RALM_PREFILL_ENGINE_SECTION: (
+        "ralm_prefill_engine_plan",
+        "ralm_prefill_engine_plan.plan",
+        "ralm_prefill.plan",
+        "ralm_prefill.engine",
+        "ralm_prefill.trtplan",
+    ),
+    voxcpm2_component_builders.VOXCPM2_ZERO_PREFILL_FEATURES_SECTION: (
+        voxcpm2_component_builders.VOXCPM2_ZERO_PREFILL_FEATURES_SECTION,
+        f"{voxcpm2_component_builders.VOXCPM2_ZERO_PREFILL_FEATURES_SECTION}.bin",
+        "locenc_zero_prefill_features.bin",
+    ),
+}
 _VOXCPM2_RAW_COMPONENT_CONFIG_KEYS = {
     "locenc": ("lm_config", "encoder_config", "patch_size", "feat_dim"),
     "tslm": (
@@ -140,6 +161,30 @@ def _find_prebuilt_component_plans(model_dir: Path) -> dict[str, Path]:
                 plans[component] = path
                 break
     return plans
+
+
+def _find_prebuilt_auxiliary_sections(model_dir: Path) -> dict[str, Path]:
+    sections: dict[str, Path] = {}
+    for section, candidates in _VOXCPM2_PREBUILT_AUXILIARY_SECTION_FILENAMES.items():
+        for filename in candidates:
+            path = model_dir / filename
+            if path.is_file():
+                sections[section] = path
+                break
+    return sections
+
+
+def _read_prebuilt_auxiliary_sections(paths: dict[str, Path]) -> dict[str, bytes]:
+    sections: dict[str, bytes] = {}
+    for section, path in paths.items():
+        data = path.read_bytes()
+        if not data:
+            raise ValueError(
+                "VoxCPM2 prebuilt auxiliary section "
+                f"{section!r} is empty: {path}"
+            )
+        sections[section] = data
+    return sections
 
 
 def _find_safetensors_files(model_dir: Path) -> tuple[str, ...]:
@@ -268,11 +313,16 @@ class VoxCPM2Plugin:
     ) -> bytes | dict[str, bytes]:
         model_dir = Path(str(weights.get("_model_dir", "")))
         prebuilt_plans = _find_prebuilt_component_plans(model_dir)
+        prebuilt_auxiliary_sections = _read_prebuilt_auxiliary_sections(
+            _find_prebuilt_auxiliary_sections(model_dir)
+        )
         if len(prebuilt_plans) == len(_VOXCPM2_COMPONENTS):
-            return {
+            sections = {
                 f"{component}_engine_plan": prebuilt_plans[component].read_bytes()
                 for component in _VOXCPM2_COMPONENTS
             }
+            sections.update(prebuilt_auxiliary_sections)
+            return sections
 
         raw_sources = weights.get("_voxcpm2_raw_component_sources", {})
         missing_prebuilt_components = tuple(
@@ -284,7 +334,7 @@ class VoxCPM2Plugin:
             component in raw_sources for component in missing_prebuilt_components
         ):
             try:
-                return voxcpm2_component_builders.build_voxcpm2_component_plans(
+                sections = voxcpm2_component_builders.build_voxcpm2_component_plans(
                     model_dir,
                     config,
                     raw_sources,
@@ -294,6 +344,9 @@ class VoxCPM2Plugin:
                     builders=self.component_builders,
                     prebuilt_plans=prebuilt_plans,
                 )
+                for section, payload in prebuilt_auxiliary_sections.items():
+                    sections.setdefault(section, payload)
+                return sections
             except NotImplementedError as exc:
                 raise NotImplementedError(
                     "VoxCPM2 raw checkpoint sources are present for "

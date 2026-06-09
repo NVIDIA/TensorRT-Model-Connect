@@ -995,6 +995,8 @@ def test_voxcpm2_raw_checkpoint_reuses_partial_prebuilt_plans(tmp_path, monkeypa
     weights = plugin.load_weights(str(tmp_path), cfg)
     (tmp_path / "locenc.plan").write_bytes(b"LOCENC-PREBUILT")
     (tmp_path / "tslm.engine").write_bytes(b"TSLM-PREBUILT")
+    (tmp_path / "tslm_prefill.engine").write_bytes(b"TSLM-PREFILL-PREBUILT")
+    (tmp_path / "ralm_prefill.trtplan").write_bytes(b"RALM-PREFILL-PREBUILT")
     calls = []
 
     def _builder(ctx):
@@ -1017,7 +1019,9 @@ def test_voxcpm2_raw_checkpoint_reuses_partial_prebuilt_plans(tmp_path, monkeypa
     assert sections == {
         "locenc_engine_plan": b"LOCENC-PREBUILT",
         "tslm_engine_plan": b"TSLM-PREBUILT",
+        "tslm_prefill_engine_plan": b"TSLM-PREFILL-PREBUILT",
         "ralm_engine_plan": b"BUILT-ralm",
+        "ralm_prefill_engine_plan": b"RALM-PREFILL-PREBUILT",
         "locdit_engine_plan": b"BUILT-locdit",
         "audiovae_engine_plan": b"BUILT-audiovae",
     }
@@ -2170,6 +2174,35 @@ def test_voxcpm2_build_engine_packages_prebuilt_component_plans(tmp_path):
         "locdit_engine_plan": b"LOCDIT",
         "audiovae_engine_plan": b"AUDIOVAE",
     }
+
+
+def test_voxcpm2_build_engine_preserves_prebuilt_auxiliary_sections(tmp_path):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+    from tensorrt_model_connect.families.voxcpm2.plugin import plugin
+
+    cfg = _voxcpm2_config(tmp_path)
+    weights = plugin.load_weights(str(tmp_path), cfg)
+    plans = {
+        "locenc.plan": b"LOCENC",
+        "tslm.engine": b"TSLM",
+        "ralm.trtplan": b"RALM",
+        "locdit_engine_plan.plan": b"LOCDIT",
+        "audiovae_engine_plan": b"AUDIOVAE",
+        "tslm_prefill_engine_plan.plan": b"TSLM-PREFILL",
+        "ralm_prefill.trtplan": b"RALM-PREFILL",
+        "locenc_zero_prefill_features.bin": b"ZERO-PREFILL",
+    }
+    for filename, data in plans.items():
+        (tmp_path / filename).write_bytes(data)
+
+    sections = plugin.build_engine(cfg, weights, max_cache_length=16)
+
+    assert sections["tslm_prefill_engine_plan"] == b"TSLM-PREFILL"
+    assert sections["ralm_prefill_engine_plan"] == b"RALM-PREFILL"
+    assert (
+        sections[component_builders.VOXCPM2_ZERO_PREFILL_FEATURES_SECTION]
+        == b"ZERO-PREFILL"
+    )
 
 
 def test_voxcpm2_build_engine_reports_partial_prebuilt_plan_set(tmp_path):
