@@ -190,6 +190,17 @@ def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
         def forward(self, value):
             return value
 
+    class IdentityLM:
+        def forward(self, *, inputs_embeds, is_causal=True):
+            return inputs_embeds + 1.0, []
+
+        def forward_step(self, inputs_embeds, position_id):
+            return inputs_embeds + position_id.reshape(1, 1).to(inputs_embeds.dtype)
+
+    class FsqLayer:
+        def forward(self, hidden):
+            return hidden + 2.0
+
     class Decoder:
         in_channels = 3
 
@@ -201,9 +212,52 @@ def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
         feat_dim = 3
 
         def __init__(self):
+            self.enc_to_lm_proj = Projection()
+            self.base_lm = IdentityLM()
+            self.fsq_layer = FsqLayer()
+            self.fusion_concat_proj = Projection()
+            self.residual_lm = IdentityLM()
             self.lm_to_dit_proj = Projection()
             self.res_to_dit_proj = Projection()
             self.feat_decoder = Decoder()
+
+        def _dtype(self):
+            return torch.bfloat16
+
+        def _inference(self, text, text_mask, feat, feat_mask, **_kwargs):
+            local = self.enc_to_lm_proj.forward(
+                torch.ones((1, 2, 5), dtype=torch.bfloat16)
+            )
+            enc_outputs, _ = self.base_lm.forward(
+                inputs_embeds=local, is_causal=True
+            )
+            semantic = self.fsq_layer.forward(enc_outputs) * feat_mask.unsqueeze(
+                -1
+            ).to(torch.bfloat16) + enc_outputs * text_mask.unsqueeze(-1).to(
+                torch.bfloat16
+            )
+            residual_inputs = self.fusion_concat_proj.forward(
+                torch.cat((semantic, feat_mask.unsqueeze(-1).to(torch.bfloat16) * local), dim=-1)
+            )
+            residual_outputs, _ = self.residual_lm.forward(
+                inputs_embeds=residual_inputs, is_causal=True
+            )
+            curr = self.enc_to_lm_proj.forward(
+                torch.ones((1, 1, 5), dtype=torch.bfloat16)
+            )
+            lm_step = self.base_lm.forward_step(
+                curr[:, 0, :], torch.tensor([2], dtype=torch.int32)
+            )
+            lm_step = self.fsq_layer.forward(lm_step)
+            residual_step_input = self.fusion_concat_proj.forward(
+                torch.cat((lm_step, curr[:, 0, :]), dim=-1)
+            )
+            self.residual_lm.forward_step(
+                residual_step_input, torch.tensor([2], dtype=torch.int32)
+            )
+            self.lm_to_dit_proj.forward(semantic[:, -1, :])
+            self.res_to_dit_proj.forward(residual_outputs[:, -1, :])
+            yield torch.zeros((1,), dtype=torch.float32), None, None
 
     class Model:
         def __init__(self):
@@ -218,6 +272,14 @@ def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
     model = Model()
     assert install_voxcpm2_tensor_dump(model) is True
     tts = model.tts_model
+    list(
+        tts._inference(
+            torch.tensor([[11, 101]], dtype=torch.int64),
+            torch.tensor([[1, 1]], dtype=torch.int32),
+            torch.zeros((1, 2, 4, 3), dtype=torch.bfloat16),
+            torch.tensor([[0, 0]], dtype=torch.int32),
+        )
+    )
     tts.lm_to_dit_proj.forward(
         torch.arange(5, dtype=torch.float32).reshape(1, 5).to(torch.bfloat16)
     )
@@ -237,23 +299,36 @@ def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
         json.loads(line)
         for line in (dump_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert [(record["direction"], record["name"]) for record in records] == [
-        ("input", "inference_timesteps"),
-        ("input", "cfg_value"),
-        ("input", "lm_hidden"),
-        ("input", "residual_hidden"),
-        ("input", "feat_cond"),
-        ("input", "locdit_noise"),
-        ("output", "audio_vae_latents"),
+    record_keys = [
+        (record["phase"], record["step"], record["direction"], record["name"])
+        for record in records
     ]
+    assert ("tslm_prefill", 0, "input", "text_tokens") in record_keys
+    assert ("tslm_prefill", 1, "output", "semantic_lm_states") in record_keys
+    assert ("ralm_prefill", 1, "input", "semantic_lm_states") in record_keys
+    assert ("ralm_prefill", 1, "output", "residual_hidden") in record_keys
+    assert ("tslm_refresh", 0, "input", "local_text_features") in record_keys
+    assert ("tslm_refresh", 0, "output", "lm_hidden") in record_keys
+    assert ("ralm_refresh", 0, "input", "local_text_features") in record_keys
+    assert ("ralm_refresh", 0, "output", "residual_hidden") in record_keys
+    assert ("locdit", 0, "input", "locdit_noise") in record_keys
+    assert ("locdit", 0, "output", "audio_vae_latents") in record_keys
 
-    by_name = {(record["direction"], record["name"]): record for record in records}
-    assert by_name[("input", "locdit_noise")]["dtype"] == "bfloat16"
-    assert by_name[("input", "locdit_noise")]["shape"] == [4, 3]
-    assert by_name[("input", "locdit_noise")]["nbytes"] == 24
-    assert by_name[("input", "lm_hidden")]["shape"] == [1, 5]
-    assert by_name[("output", "audio_vae_latents")]["dtype"] == "float32"
-    assert by_name[("output", "audio_vae_latents")]["shape"] == [4, 3]
+    by_name = {
+        (record["phase"], record["step"], record["direction"], record["name"]): record
+        for record in records
+    }
+    assert by_name[("tslm_prefill", 0, "input", "text_tokens")]["dtype"] == "int32"
+    assert by_name[("tslm_prefill", 0, "input", "text_tokens")]["shape"] == [1]
+    assert by_name[("tslm_prefill", 0, "input", "local_text_features")]["dtype"] == "bfloat16"
+    assert by_name[("tslm_prefill", 0, "input", "local_text_features")]["shape"] == [1, 5]
+    assert by_name[("ralm_prefill", 1, "output", "residual_hidden")]["shape"] == [1, 10]
+    assert by_name[("locdit", 0, "input", "locdit_noise")]["dtype"] == "bfloat16"
+    assert by_name[("locdit", 0, "input", "locdit_noise")]["shape"] == [4, 3]
+    assert by_name[("locdit", 0, "input", "locdit_noise")]["nbytes"] == 24
+    assert by_name[("locdit", 0, "input", "lm_hidden")]["shape"] == [1, 5]
+    assert by_name[("locdit", 0, "output", "audio_vae_latents")]["dtype"] == "float32"
+    assert by_name[("locdit", 0, "output", "audio_vae_latents")]["shape"] == [4, 3]
     for record in records:
         assert Path(record["path"]).is_file()
 

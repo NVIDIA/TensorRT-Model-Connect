@@ -1065,9 +1065,13 @@ void dump_stage_tensors_if_requested(const char* phase, std::size_t step,
                                  manifest_path.string() + "'");
     }
 
+    const bool include_cache =
+        std::getenv("TRTMC_VOXCPM2_TENSOR_DUMP_INCLUDE_CACHE") != nullptr;
     for (const auto& entry : tensors) {
         const auto& name = entry.first;
         const auto& tensor = entry.second;
+        if (!include_cache && name.find("kv_cache") != std::string::npos)
+            continue;
         if (tensor.data == nullptr && tensor.nbytes() > 0) {
             throw std::runtime_error("VoxCPM2Pipeline: cannot dump null tensor data for '" +
                                      name + "'");
@@ -1532,8 +1536,10 @@ OwnedStageTensor run_cache_bound_lm_prefill(
         artifacts["audio_mask"] = slice_first_dim(audio_mask, pos, 1, "audio_mask");
         artifacts["position_id"] = make_int32_scalar_tensor(checked_position_id(pos, 0));
 
-        (void)run_stage(components[1], plan.stages[1], artifacts, controls);
-        current = run_stage(components[2], plan.stages[2], artifacts, controls);
+        (void)run_stage(components[1], plan.stages[1], artifacts, controls, "tslm_prefill",
+                        pos);
+        current = run_stage(components[2], plan.stages[2], artifacts, controls, "ralm_prefill",
+                            pos);
         trace_lm_state("prefill", pos, artifacts);
     }
     return current;
@@ -1555,7 +1561,10 @@ void refresh_autoregressive_hidden_state(
                                                      completed_generation_step));
 
     for (std::size_t i = 0; i < 3; ++i) {
-        (void)run_stage(components[i], plan.stages[i], artifacts, controls);
+        const char* dump_phase =
+            i == 0 ? "locenc_refresh" : (i == 1 ? "tslm_refresh" : "ralm_refresh");
+        (void)run_stage(components[i], plan.stages[i], artifacts, controls, dump_phase,
+                        completed_generation_step);
         if (i == 0)
             trace_lm_state("refresh_locenc", completed_generation_step, artifacts);
     }
@@ -1694,7 +1703,9 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
                                              active_text_token_count);
     } else {
         for (std::size_t i = 1; i < 3; ++i) {
-            current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls);
+            const char* dump_phase = i == 1 ? "tslm_prefill" : "ralm_prefill";
+            current = run_stage(components_[i], effective_plan.stages[i], artifacts, controls,
+                                dump_phase, 0);
         }
     }
     validate_lm_state_ready(artifacts);

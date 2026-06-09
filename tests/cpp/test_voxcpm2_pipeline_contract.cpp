@@ -1007,29 +1007,57 @@ void test_generate_audio_dumps_locdit_tensor_io_for_parity_debug() {
     const auto manifest = read_text_file(manifest_path);
     check(manifest.find("\"phase\":\"locdit\"") != std::string::npos,
           "voxcpm2 tensor dump manifest records LocDiT phase");
+    check(manifest.find("\"phase\":\"tslm_prefill\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records TSLM prefill phase");
+    check(manifest.find("\"phase\":\"ralm_prefill\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records RALM prefill phase");
+    check(manifest.find("\"phase\":\"locenc_refresh\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records LocEnc refresh phase");
+    check(manifest.find("\"phase\":\"tslm_refresh\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records TSLM refresh phase");
+    check(manifest.find("\"phase\":\"ralm_refresh\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records RALM refresh phase");
     check(manifest.find("\"direction\":\"input\"") != std::string::npos,
-          "voxcpm2 tensor dump manifest records LocDiT inputs");
+          "voxcpm2 tensor dump manifest records stage inputs");
     check(manifest.find("\"direction\":\"output\"") != std::string::npos,
-          "voxcpm2 tensor dump manifest records LocDiT outputs");
+          "voxcpm2 tensor dump manifest records stage outputs");
+    check(manifest.find("\"name\":\"semantic_lm_states\"") != std::string::npos,
+          "voxcpm2 tensor dump includes TSLM semantic states");
+    check(manifest.find("\"name\":\"residual_hidden\"") != std::string::npos,
+          "voxcpm2 tensor dump includes RALM residual hidden states");
     check(manifest.find("\"name\":\"locdit_noise\"") != std::string::npos,
           "voxcpm2 tensor dump includes shared LocDiT noise");
     check(manifest.find("\"name\":\"audio_vae_latents\"") != std::string::npos,
           "voxcpm2 tensor dump includes LocDiT output latents");
     check(manifest.find("\"dtype\":\"bfloat16\"") != std::string::npos,
           "voxcpm2 tensor dump records engine-converted input dtype");
+    check(manifest.find("kv_cache") == std::string::npos,
+          "voxcpm2 tensor dump omits LM KV cache tensors by default");
 
     const auto noise_path = temp_dir / "locdit_000000_input_locdit_noise.raw";
     const auto output_path = temp_dir / "locdit_000000_output_audio_vae_latents.raw";
+    const auto tslm_path = temp_dir / "tslm_prefill_000000_input_text_tokens.raw";
+    const auto ralm_path = temp_dir / "ralm_prefill_000000_output_residual_hidden.raw";
     const auto noise_exists = std::filesystem::exists(noise_path);
     const auto output_exists = std::filesystem::exists(output_path);
     check(std::filesystem::exists(noise_path),
           "voxcpm2 tensor dump writes first-step LocDiT noise bytes");
     check(output_exists,
           "voxcpm2 tensor dump writes first-step LocDiT output bytes");
+    check(std::filesystem::exists(tslm_path),
+          "voxcpm2 tensor dump writes first TSLM prefill input bytes");
+    check(std::filesystem::exists(ralm_path),
+          "voxcpm2 tensor dump writes first RALM prefill output bytes");
     check(noise_exists && std::filesystem::file_size(noise_path) == 4 * 64 * sizeof(uint16_t),
           "voxcpm2 tensor dump preserves converted BF16 noise byte size");
     check(output_exists && std::filesystem::file_size(output_path) == 8 * 64 * sizeof(float),
           "voxcpm2 tensor dump preserves LocDiT output byte size");
+    check(std::filesystem::exists(tslm_path) &&
+              std::filesystem::file_size(tslm_path) == sizeof(int32_t),
+          "voxcpm2 tensor dump preserves one-token TSLM prefill byte size");
+    check(std::filesystem::exists(ralm_path) &&
+              std::filesystem::file_size(ralm_path) == 1 * 512 * sizeof(float),
+          "voxcpm2 tensor dump preserves one-row RALM output byte size");
 
     std::filesystem::remove_all(temp_dir);
 }
