@@ -43,6 +43,7 @@ _DOWN_PROJ_VARIANTS = (
     "einsum",
     "batched_bmm",
     "manual_matmul_bf16",
+    "pretransposed_matmul_bf16",
     "fp32_accum_to_bf16",
     "fp32_output",
     "split_k_1024_bf16_accum",
@@ -687,6 +688,25 @@ def _make_down_proj_variant_module(
                 output = output + self.bias
             return output
 
+    class PretransposedMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer(
+                "weight_t",
+                module.weight.detach().transpose(0, 1).contiguous().clone(),
+            )
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            output = torch_module.matmul(down_proj_input, self.weight_t)
+            if self.bias is not None:
+                output = output + self.bias
+            return output
+
     class FunctionalLinear(torch_module.nn.Module):
         def __init__(self, module: Any) -> None:
             super().__init__()
@@ -866,6 +886,8 @@ def _make_down_proj_variant_module(
 
     if variant == "manual_matmul_bf16":
         return ManualMatmul(linear_module)
+    if variant == "pretransposed_matmul_bf16":
+        return PretransposedMatmul(linear_module)
     if variant == "functional_linear":
         return FunctionalLinear(linear_module)
     if variant == "addmm_zero":
@@ -2195,7 +2217,8 @@ def main() -> int:
         help=(
             "Projection lowering variant for --trt-down-proj-layer. Valid "
             "values: linear, functional_linear, einsum, manual_matmul_bf16, "
-            "fp32_accum_to_bf16, fp32_output, split_k_1024_bf16_accum, "
+            "pretransposed_matmul_bf16, fp32_accum_to_bf16, fp32_output, "
+            "split_k_1024_bf16_accum, "
             "split_k_1024_fp32_accum_to_bf16, split_out_256_bf16, all, "
             "or dynamic "
             "split_k_<chunk>_bf16_accum / "
