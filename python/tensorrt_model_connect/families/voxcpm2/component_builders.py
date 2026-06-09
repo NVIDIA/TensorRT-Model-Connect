@@ -210,6 +210,8 @@ VoxCPM2ComponentBuilder = Callable[[VoxCPM2ComponentBuildContext], bytes]
 VOXCPM2_ZERO_PREFILL_FEATURES_SECTION = (
     "voxcpm2_zero_prefill_local_text_features_bf16"
 )
+VOXCPM2_TSLM_PREFILL_ENGINE_SECTION = "tslm_prefill_engine_plan"
+VOXCPM2_RALM_PREFILL_ENGINE_SECTION = "ralm_prefill_engine_plan"
 _VOXCPM2_ZERO_PREFILL_FEATURES_VERSION = 1
 _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
 
@@ -1100,6 +1102,140 @@ def build_tslm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     return _compile_voxcpm2_tslm_onnx(wrapper, example_args, verbose=ctx.verbose)
 
 
+def build_tslm_prefill_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.layers import ScalarQuantizationLayer
+        from voxcpm.modules.minicpm4 import MiniCPM4Config, MiniCPMModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 TSLM prefill TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    lm_config = prepared.config_values.get("lm_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 TSLM prefill builder expected lm_config")
+
+    hidden_size = int(lm_config.get("hidden_size", 2048))
+    quant_latent_dim = int(prepared.config_values.get("scalar_quantization_latent_dim", 512))
+    quant_scale = int(prepared.config_values.get("scalar_quantization_scale", 9))
+
+    state = ctx.load_safetensor_group(
+        ("base_lm.", "fsq_layer.", "stop_proj.", "stop_head.")
+    )
+    base_lm = MiniCPMModel(MiniCPM4Config(**copy.deepcopy(dict(lm_config))))
+    base_lm.load_state_dict(
+        _to_torch_state_dict(torch, state, "base_lm.", dtype=compute_dtype),
+        strict=True,
+    )
+    base_lm.to(dtype=compute_dtype)
+    base_lm.eval()
+
+    fsq_layer = ScalarQuantizationLayer(
+        hidden_size,
+        hidden_size,
+        quant_latent_dim,
+        quant_scale,
+    )
+    fsq_layer.load_state_dict(
+        _to_torch_state_dict(torch, state, "fsq_layer.", dtype=compute_dtype),
+        strict=True,
+    )
+    fsq_layer.to(dtype=compute_dtype)
+    fsq_layer.eval()
+
+    stop_proj = torch.nn.Linear(hidden_size, hidden_size)
+    stop_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "stop_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    stop_proj.to(dtype=compute_dtype)
+    stop_proj.eval()
+
+    stop_head = torch.nn.Linear(hidden_size, 2, bias=False)
+    stop_head.load_state_dict(
+        _to_torch_state_dict(torch, state, "stop_head.", dtype=compute_dtype),
+        strict=True,
+    )
+    stop_head.to(dtype=compute_dtype)
+    stop_head.eval()
+
+    class TSLMPrefillWrapper(torch.nn.Module):
+        def __init__(
+            self,
+            base_lm_module: Any,
+            fsq_module: Any,
+            stop_proj_module: Any,
+            stop_head_module: Any,
+            *,
+            scale_emb: float,
+        ) -> None:
+            super().__init__()
+            self.base_lm = base_lm_module
+            self.fsq_layer = fsq_module
+            self.stop_proj = stop_proj_module
+            self.stop_actn = torch.nn.SiLU()
+            self.stop_head = stop_head_module
+            self.scale_emb = scale_emb
+
+        def forward(
+            self,
+            local_text_features: Any,
+            text_tokens: Any,
+            text_mask: Any,
+            audio_mask: Any,
+        ) -> tuple[Any, Any, Any, Any]:
+            local_features = local_text_features.unsqueeze(0).to(dtype=compute_dtype)
+            tokens = text_tokens.unsqueeze(0).to(dtype=torch.long)
+            t_mask = text_mask.unsqueeze(0).to(dtype=compute_dtype)
+            a_mask = audio_mask.unsqueeze(0).to(dtype=compute_dtype)
+            text_embed = self.base_lm.embed_tokens(tokens) * self.scale_emb
+            combined_embed = t_mask.unsqueeze(-1) * text_embed + a_mask.unsqueeze(
+                -1
+            ) * local_features
+            raw_hidden, next_cache = self.base_lm(
+                inputs_embeds=combined_embed,
+                is_causal=True,
+            )
+            raw_hidden = raw_hidden.to(dtype=compute_dtype)
+            semantic_lm_states = self.fsq_layer(raw_hidden) * a_mask.unsqueeze(
+                -1
+            ) + raw_hidden * t_mask.unsqueeze(-1)
+            semantic_lm_states = semantic_lm_states.squeeze(0)
+            lm_hidden = semantic_lm_states
+            stop_logits = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden)))
+            present_cache = _stack_minicpm_present_cache(torch, next_cache).to(
+                dtype=compute_dtype
+            )
+            return semantic_lm_states, lm_hidden, stop_logits, present_cache
+
+    scale_emb = float(lm_config.get("scale_emb", 1.0))
+    if not bool(lm_config.get("use_mup", False)):
+        scale_emb = 1.0
+    wrapper = TSLMPrefillWrapper(
+        base_lm,
+        fsq_layer,
+        stop_proj,
+        stop_head,
+        scale_emb=scale_emb,
+    )
+    wrapper.eval()
+    text_steps = _tslm_export_text_steps(ctx)
+    example_args = (
+        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+        torch.zeros((text_steps,), dtype=torch.int32),
+        torch.ones((text_steps,), dtype=compute_dtype),
+        torch.zeros((text_steps,), dtype=compute_dtype),
+    )
+    return _compile_voxcpm2_tslm_prefill_onnx(
+        wrapper, example_args, verbose=ctx.verbose
+    )
+
+
 def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
     prepared = prepare_component_inputs(ctx)
     try:
@@ -1190,6 +1326,87 @@ def build_ralm_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
         ),
     )
     return _compile_voxcpm2_ralm_onnx(wrapper, example_args, verbose=ctx.verbose)
+
+
+def build_ralm_prefill_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
+    prepared = prepare_component_inputs(ctx)
+    try:
+        import torch
+        from voxcpm.modules.minicpm4 import MiniCPM4Config, MiniCPMModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "VoxCPM2 RALM prefill TRT builder requires torch and the "
+            "upstream voxcpm package"
+        ) from exc
+
+    _patch_minicpm_attention_gqa_for_torch_trt(torch)
+    compute_dtype = _torch_dtype(torch, ctx.precision)
+    lm_config = prepared.config_values.get("lm_config")
+    if not isinstance(lm_config, Mapping):
+        raise ValueError("VoxCPM2 RALM prefill builder expected lm_config")
+
+    hidden_size = int(lm_config.get("hidden_size", 2048))
+    state = ctx.load_safetensor_group(("fusion_concat_proj.", "residual_lm."))
+    residual_lm = MiniCPMModel(
+        MiniCPM4Config(**_residual_lm_config_values(ctx, prepared))
+    )
+    residual_lm.load_state_dict(
+        _to_torch_state_dict(torch, state, "residual_lm.", dtype=compute_dtype),
+        strict=True,
+    )
+    residual_lm.to(dtype=compute_dtype)
+    residual_lm.eval()
+
+    fusion_concat_proj = torch.nn.Linear(hidden_size * 2, hidden_size)
+    fusion_concat_proj.load_state_dict(
+        _to_torch_state_dict(torch, state, "fusion_concat_proj.", dtype=compute_dtype),
+        strict=True,
+    )
+    fusion_concat_proj.to(dtype=compute_dtype)
+    fusion_concat_proj.eval()
+
+    class RALMPrefillWrapper(torch.nn.Module):
+        def __init__(self, residual_lm_module: Any, fusion_module: Any) -> None:
+            super().__init__()
+            self.residual_lm = residual_lm_module
+            self.fusion_concat_proj = fusion_module
+
+        def forward(
+            self,
+            semantic_lm_states: Any,
+            audio_mask: Any,
+            local_text_features: Any,
+        ) -> tuple[Any, Any]:
+            semantic_states = semantic_lm_states.to(dtype=compute_dtype)
+            a_mask = audio_mask.to(dtype=compute_dtype)
+            local_features = local_text_features.to(dtype=compute_dtype)
+            residual_inputs = self.fusion_concat_proj(
+                torch.cat(
+                    (semantic_states, a_mask.reshape(-1, 1) * local_features),
+                    dim=-1,
+                )
+            )
+            residual_hidden, next_cache = self.residual_lm(
+                inputs_embeds=residual_inputs.unsqueeze(0),
+                is_causal=True,
+            )
+            residual_hidden = residual_hidden.squeeze(0).to(dtype=compute_dtype)
+            present_cache = _stack_minicpm_present_cache(torch, next_cache).to(
+                dtype=compute_dtype
+            )
+            return residual_hidden, present_cache
+
+    wrapper = RALMPrefillWrapper(residual_lm, fusion_concat_proj)
+    wrapper.eval()
+    text_steps = _ralm_export_text_steps(ctx)
+    example_args = (
+        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+        torch.zeros((text_steps,), dtype=compute_dtype),
+        torch.zeros((text_steps, hidden_size), dtype=compute_dtype),
+    )
+    return _compile_voxcpm2_ralm_prefill_onnx(
+        wrapper, example_args, verbose=ctx.verbose
+    )
 
 
 def build_locdit_engine(ctx: VoxCPM2ComponentBuildContext) -> bytes:
@@ -1370,6 +1587,21 @@ def _to_torch_state_dict(
     return converted
 
 
+def _stack_minicpm_present_cache(torch_module: Any, next_cache: Any) -> Any:
+    key_caches = []
+    value_caches = []
+    for key_cache, value_cache in next_cache:
+        key_caches.append(key_cache)
+        value_caches.append(value_cache)
+    return torch_module.stack(
+        (
+            torch_module.stack(key_caches, dim=0),
+            torch_module.stack(value_caches, dim=0),
+        ),
+        dim=0,
+    )
+
+
 def _tslm_export_text_steps(ctx: VoxCPM2ComponentBuildContext) -> int:
     if ctx.max_cache_length > 0:
         return max(1, int(ctx.max_cache_length))
@@ -1481,6 +1713,33 @@ def _compile_voxcpm2_tslm_onnx(
     )
 
 
+def _compile_voxcpm2_tslm_prefill_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=[
+            "local_text_features",
+            "text_tokens",
+            "text_mask",
+            "audio_mask",
+        ],
+        output_names=[
+            "semantic_lm_states",
+            "lm_hidden",
+            "stop_logits",
+            "tslm_present_kv_cache",
+        ],
+        verbose=verbose,
+    )
+
+
 def _compile_voxcpm2_ralm_onnx(
     wrapper: Any,
     example_args: tuple[Any, ...],
@@ -1498,6 +1757,27 @@ def _compile_voxcpm2_ralm_onnx(
             "local_text_features",
             "position_id",
             "ralm_past_kv_cache",
+        ],
+        output_names=["residual_hidden", "ralm_present_kv_cache"],
+        verbose=verbose,
+    )
+
+
+def _compile_voxcpm2_ralm_prefill_onnx(
+    wrapper: Any,
+    example_args: tuple[Any, ...],
+    *,
+    verbose: bool,
+) -> bytes:
+    from ...engine_defs.torch_trt.compiler import compile_model_via_onnx
+
+    return compile_model_via_onnx(
+        wrapper,
+        example_args,
+        input_names=[
+            "semantic_lm_states",
+            "audio_mask",
+            "local_text_features",
         ],
         output_names=["residual_hidden", "ralm_present_kv_cache"],
         verbose=verbose,
@@ -1888,6 +2168,22 @@ def build_voxcpm2_component_plans(
                 f"{spec.name!r} produced an empty plan"
             )
         sections[spec.engine_section] = plan_bytes
+        if (
+            spec.name == "tslm"
+            and component_ctx is not None
+            and builder is build_tslm_engine
+        ):
+            sections[VOXCPM2_TSLM_PREFILL_ENGINE_SECTION] = build_tslm_prefill_engine(
+                component_ctx
+            )
+        if (
+            spec.name == "ralm"
+            and component_ctx is not None
+            and builder is build_ralm_engine
+        ):
+            sections[VOXCPM2_RALM_PREFILL_ENGINE_SECTION] = build_ralm_prefill_engine(
+                component_ctx
+            )
         if (
             spec.name == "locenc"
             and component_ctx is not None

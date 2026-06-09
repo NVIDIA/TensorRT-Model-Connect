@@ -95,12 +95,41 @@ def _element_size(dtype: str) -> int:
     return 1
 
 
+def _is_float_dtype(dtype: str) -> bool:
+    return dtype in {"bfloat16", "float16", "float32"}
+
+
+def _element_count(shape: list[int]) -> int:
+    count = 1
+    for dim in shape:
+        count *= dim
+    return count
+
+
 def _first_byte_difference(left: bytes, right: bytes) -> int | None:
     for index, (a, b) in enumerate(zip(left, right)):
         if a != b:
             return index
     if len(left) != len(right):
         return min(len(left), len(right))
+    return None
+
+
+def _first_value_difference(
+    hf_raw: bytes,
+    hf_dtype: str,
+    trt_raw: bytes,
+    trt_dtype: str,
+    count: int,
+) -> int | None:
+    for index in range(count):
+        hf_value = _decode_element(hf_raw, hf_dtype, index)
+        trt_value = _decode_element(trt_raw, trt_dtype, index)
+        if isinstance(hf_value, float) and isinstance(trt_value, float):
+            if math.isnan(hf_value) and math.isnan(trt_value):
+                continue
+        if hf_value != trt_value:
+            return index
     return None
 
 
@@ -117,11 +146,18 @@ def _tensor_mismatch(
     hf_nbytes = int(hf_record.get("nbytes", -1))
     trt_nbytes = int(trt_record.get("nbytes", -1))
 
-    if hf_dtype != trt_dtype:
+    compatible_float_dtype_mismatch = (
+        hf_dtype != trt_dtype
+        and _is_float_dtype(hf_dtype)
+        and _is_float_dtype(trt_dtype)
+        and hf_shape == trt_shape
+    )
+
+    if hf_dtype != trt_dtype and not compatible_float_dtype_mismatch:
         metadata_differences.append({"field": "dtype", "hf": hf_dtype, "trt": trt_dtype})
     if hf_shape != trt_shape:
         metadata_differences.append({"field": "shape", "hf": hf_shape, "trt": trt_shape})
-    if hf_nbytes != trt_nbytes:
+    if hf_nbytes != trt_nbytes and not compatible_float_dtype_mismatch:
         metadata_differences.append({"field": "nbytes", "hf": hf_nbytes, "trt": trt_nbytes})
 
     if metadata_differences:
@@ -134,6 +170,28 @@ def _tensor_mismatch(
 
     hf_raw = _read_raw(hf_record)
     trt_raw = _read_raw(trt_record)
+    if compatible_float_dtype_mismatch:
+        element_index = _first_value_difference(
+            hf_raw,
+            hf_dtype,
+            trt_raw,
+            trt_dtype,
+            _element_count(hf_shape),
+        )
+        if element_index is None:
+            return None
+        return {
+            "key": list(key),
+            "hf_line": hf_record["_line"],
+            "trt_line": trt_record["_line"],
+            "hf_dtype": hf_dtype,
+            "trt_dtype": trt_dtype,
+            "shape": hf_shape,
+            "first_different_element": element_index,
+            "hf_value": _decode_element(hf_raw, hf_dtype, element_index),
+            "trt_value": _decode_element(trt_raw, trt_dtype, element_index),
+        }
+
     if hf_raw == trt_raw:
         return None
 

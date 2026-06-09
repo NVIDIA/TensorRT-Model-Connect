@@ -1169,6 +1169,78 @@ void dump_locenc_prefill_table_tensors_if_requested(
     dump_stage_tensors_if_requested("locenc_prefill", 0, "output", stage, outputs);
 }
 
+void dump_lm_prefill_input_rows_if_requested(const ITrtModule& module, const char* phase,
+                                             const audio::VoxCPM2GenerationStage& stage,
+                                             const StageArtifacts& artifacts,
+                                             std::size_t active_text_token_count) {
+    for (std::size_t pos = 0; pos < active_text_token_count; ++pos) {
+        std::vector<OwnedStageTensor> row_tensors;
+        row_tensors.reserve(1 + stage.required_side_input_count + 1);
+        std::vector<OwnedStageTensor> converted_inputs;
+        converted_inputs.reserve(1 + stage.required_side_input_count);
+        TensorMap inputs;
+
+        if (pos > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error(
+                "VoxCPM2Pipeline: prefill tensor dump position exceeds int32 range");
+        }
+        row_tensors.push_back(make_int32_scalar_tensor(static_cast<int32_t>(pos)));
+        inputs.emplace("position_id", row_tensors.back().as_tensor());
+
+        const auto input_it = artifacts.find(stage.input_artifact);
+        if (input_it != artifacts.end()) {
+            row_tensors.push_back(
+                slice_first_dim(input_it->second, pos, 1, stage.input_artifact));
+            inputs.emplace(stage.input_artifact,
+                           tensor_for_module_input(module, stage.input_artifact,
+                                                   row_tensors.back(), converted_inputs));
+        }
+
+        for (std::size_t i = 0; i < stage.required_side_input_count; ++i) {
+            const auto* name = stage.required_side_inputs[i];
+            if (inputs.find(name) != inputs.end())
+                continue;
+            const auto artifact_it = artifacts.find(name);
+            if (artifact_it == artifacts.end())
+                continue;
+            row_tensors.push_back(slice_first_dim(artifact_it->second, pos, 1, name));
+            inputs.emplace(name,
+                           tensor_for_module_input(module, name, row_tensors.back(),
+                                                   converted_inputs));
+        }
+
+        dump_stage_tensors_if_requested(phase, pos, "input", stage, inputs);
+    }
+}
+
+void dump_lm_prefill_output_rows_if_requested(const char* phase,
+                                              const audio::VoxCPM2GenerationStage& stage,
+                                              const StageArtifacts& artifacts,
+                                              std::size_t active_text_token_count) {
+    for (std::size_t pos = 0; pos < active_text_token_count; ++pos) {
+        std::vector<OwnedStageTensor> row_tensors;
+        row_tensors.reserve(3);
+        TensorMap outputs;
+
+        const auto output_it = artifacts.find(stage.output_artifact);
+        if (output_it != artifacts.end()) {
+            row_tensors.push_back(
+                slice_first_dim(output_it->second, pos, 1, stage.output_artifact));
+            outputs.emplace(stage.output_artifact, row_tensors.back().as_tensor());
+        }
+
+        if (stage.kind == audio::VoxCPM2StageKind::kTslm) {
+            const auto lm_it = artifacts.find("lm_hidden");
+            if (lm_it != artifacts.end()) {
+                row_tensors.push_back(slice_first_dim(lm_it->second, pos, 1, "lm_hidden"));
+                outputs.emplace("lm_hidden", row_tensors.back().as_tensor());
+            }
+        }
+
+        dump_stage_tensors_if_requested(phase, pos, "output", stage, outputs);
+    }
+}
+
 std::size_t positive_first_dim(const std::vector<int64_t>& shape) {
     if (shape.empty() || shape.front() <= 0)
         return 0;
@@ -1393,41 +1465,48 @@ struct RuntimeScalarInputs {
     }
 };
 
-void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
-                             const audio::VoxCPM2GenerationStage& stage) {
-    if (!component.module->has_input(stage.input_artifact)) {
+void validate_stage_bindings_for_module(const ITrtModule& module, const std::string& component_name,
+                                        const std::string& engine_section,
+                                        const audio::VoxCPM2GenerationStage& stage) {
+    if (!module.has_input(stage.input_artifact)) {
         throw std::runtime_error(
-            "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
+            "VoxCPM2Pipeline: stage " + component_name + " (" + engine_section +
             ") is missing required input binding '" + stage.input_artifact + "'");
     }
 
     const char* output_binding = stage.output_artifact;
-    if (!component.module->has_output(output_binding) &&
+    if (!module.has_output(output_binding) &&
         stage.kind == audio::VoxCPM2StageKind::kAudioVae &&
-        component.module->has_output("output0")) {
+        module.has_output("output0")) {
         output_binding = "output0";
     }
-    if (!component.module->has_output(output_binding)) {
+    if (!module.has_output(output_binding)) {
         throw std::runtime_error(
-            "VoxCPM2Pipeline: stage " + component.name + " (" + component.engine_section +
+            "VoxCPM2Pipeline: stage " + component_name + " (" + engine_section +
             ") is missing required output binding '" + stage.output_artifact + "'");
     }
     for (std::size_t i = 0; i < stage.required_side_input_count; ++i) {
         const auto* name = stage.required_side_inputs[i];
-        if (!component.module->has_input(name)) {
-            throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name + " (" +
-                                     component.engine_section +
+        if (!module.has_input(name)) {
+            throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name + " (" +
+                                     engine_section +
                                      ") is missing required side input binding '" + name + "'");
         }
     }
     for (std::size_t i = 0; i < stage.required_control_input_count; ++i) {
         const auto* name = stage.required_control_inputs[i];
-        if (!component.module->has_input(name)) {
-            throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name + " (" +
-                                     component.engine_section +
+        if (!module.has_input(name)) {
+            throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name + " (" +
+                                     engine_section +
                                      ") is missing required control input binding '" + name + "'");
         }
     }
+}
+
+void validate_stage_bindings(const audio::VoxCPM2LoadedComponent& component,
+                             const audio::VoxCPM2GenerationStage& stage) {
+    validate_stage_bindings_for_module(*component.module, component.name, component.engine_section,
+                                       stage);
 }
 
 void add_required_artifact_inputs(const ITrtModule& module,
@@ -1479,6 +1558,26 @@ bool lm_cache_mode_enabled(const std::vector<audio::VoxCPM2LoadedComponent>& com
            component_has_cache_binding(components[2], kRalmKvCache);
 }
 
+bool component_has_prefill_module(const audio::VoxCPM2LoadedComponent& component) {
+    return component.prefill_module != nullptr && component.prefill_module->ok();
+}
+
+bool lm_full_prefill_enabled(const std::vector<audio::VoxCPM2LoadedComponent>& components) {
+    return lm_cache_mode_enabled(components) && component_has_prefill_module(components[1]) &&
+           component_has_prefill_module(components[2]);
+}
+
+bool lm_partial_prefill_modules_present(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components) {
+    return component_has_prefill_module(components[1]) || component_has_prefill_module(components[2]);
+}
+
+bool prefill_module_has_cache_output(const audio::VoxCPM2LoadedComponent& component,
+                                     const KvCacheBinding& binding) {
+    return component_has_prefill_module(component) &&
+           component.prefill_module->has_output(binding.present);
+}
+
 void validate_partial_cache_bindings(
     const std::vector<audio::VoxCPM2LoadedComponent>& components) {
     const bool tslm_full = component_has_cache_binding(components[1], kTslmKvCache);
@@ -1490,6 +1589,21 @@ void validate_partial_cache_bindings(
             "VoxCPM2Pipeline: TSLM/RALM cache mode requires both complete cache bindings "
             "tslm_past_kv_cache=>tslm_present_kv_cache and "
             "ralm_past_kv_cache=>ralm_present_kv_cache");
+    }
+
+    if (lm_partial_prefill_modules_present(components)) {
+        if (!lm_full_prefill_enabled(components)) {
+            throw std::runtime_error(
+                "VoxCPM2Pipeline: full-sequence LM prefill requires both "
+                "tslm_prefill_engine_plan and ralm_prefill_engine_plan plus cache-bound "
+                "TSLM/RALM step engines");
+        }
+        if (!prefill_module_has_cache_output(components[1], kTslmKvCache) ||
+            !prefill_module_has_cache_output(components[2], kRalmKvCache)) {
+            throw std::runtime_error(
+                "VoxCPM2Pipeline: full-sequence LM prefill engines must emit "
+                "tslm_present_kv_cache and ralm_present_kv_cache");
+        }
     }
 }
 
@@ -1519,33 +1633,35 @@ void roll_stage_cache_outputs(const audio::VoxCPM2GenerationStage& stage,
     }
 }
 
-OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
-                           const audio::VoxCPM2GenerationStage& stage, StageArtifacts& artifacts,
-                           const RuntimeScalarInputs& controls,
-                           const char* tensor_dump_phase = nullptr,
-                           std::size_t tensor_dump_step = 0) {
-    validate_stage_bindings(component, stage);
+OwnedStageTensor run_stage_with_module(ITrtModule& module, const std::string& component_name,
+                                       const std::string& engine_section,
+                                       const audio::VoxCPM2GenerationStage& stage,
+                                       StageArtifacts& artifacts,
+                                       const RuntimeScalarInputs& controls,
+                                       const char* tensor_dump_phase = nullptr,
+                                       std::size_t tensor_dump_step = 0) {
+    validate_stage_bindings_for_module(module, component_name, engine_section, stage);
     const auto input_it = artifacts.find(stage.input_artifact);
     if (input_it == artifacts.end()) {
-        throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name +
+        throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name +
                                  " is missing prepared input artifact '" + stage.input_artifact +
                                  "'");
     }
     const auto& input = input_it->second;
-    validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component.name, "input");
+    validate_tensor_contract(input.as_tensor(), stage.input_tensor, stage, component_name, "input");
     TensorMap inputs;
     std::vector<OwnedStageTensor> converted_inputs;
     converted_inputs.reserve(8);
     inputs.emplace(stage.input_artifact,
-                   tensor_for_module_input(*component.module, stage.input_artifact, input,
+                   tensor_for_module_input(module, stage.input_artifact, input,
                                            converted_inputs));
-    add_required_artifact_inputs(*component.module, stage, artifacts, inputs, converted_inputs,
-                                 component.name);
-    add_declared_artifact_inputs(*component.module, artifacts, inputs, converted_inputs);
-    controls.add_to(*component.module, inputs);
+    add_required_artifact_inputs(module, stage, artifacts, inputs, converted_inputs,
+                                 component_name);
+    add_declared_artifact_inputs(module, artifacts, inputs, converted_inputs);
+    controls.add_to(module, inputs);
     dump_stage_tensors_if_requested(tensor_dump_phase, tensor_dump_step, "input", stage,
                                     inputs);
-    auto outputs = component.module->forward(inputs);
+    auto outputs = module.forward(inputs);
     dump_stage_tensors_if_requested(tensor_dump_phase, tensor_dump_step, "output", stage,
                                     outputs);
     const char* output_binding = stage.output_artifact;
@@ -1555,21 +1671,67 @@ OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
     }
     const auto output_it = outputs.find(output_binding);
     if (output_it == outputs.end()) {
-        throw std::runtime_error("VoxCPM2Pipeline: stage " + component.name +
+        throw std::runtime_error("VoxCPM2Pipeline: stage " + component_name +
                                  " did not return output artifact '" + stage.output_artifact + "'");
     }
 
-    validate_tensor_contract(output_it->second, stage.output_tensor, stage, component.name,
+    validate_tensor_contract(output_it->second, stage.output_tensor, stage, component_name,
                              "output");
     artifacts[stage.output_artifact] =
-        copy_stage_tensor(output_it->second, stage.output_artifact, component.name);
+        copy_stage_tensor(output_it->second, stage.output_artifact, component_name);
     for (const auto& output : outputs) {
         if (output.first == stage.output_artifact || output.first == output_binding)
             continue;
-        artifacts[output.first] = copy_stage_tensor(output.second, output.first, component.name);
+        artifacts[output.first] = copy_stage_tensor(output.second, output.first, component_name);
     }
     roll_stage_cache_outputs(stage, artifacts);
     return artifacts.at(stage.output_artifact);
+}
+
+OwnedStageTensor run_stage(const audio::VoxCPM2LoadedComponent& component,
+                           const audio::VoxCPM2GenerationStage& stage, StageArtifacts& artifacts,
+                           const RuntimeScalarInputs& controls,
+                           const char* tensor_dump_phase = nullptr,
+                           std::size_t tensor_dump_step = 0) {
+    return run_stage_with_module(*component.module, component.name, component.engine_section, stage,
+                                 artifacts, controls, tensor_dump_phase, tensor_dump_step);
+}
+
+OwnedStageTensor run_full_sequence_lm_prefill(
+    const std::vector<audio::VoxCPM2LoadedComponent>& components,
+    const audio::VoxCPM2GenerationPlan& plan, StageArtifacts& artifacts,
+    const RuntimeScalarInputs& controls, std::size_t active_text_token_count) {
+    if (active_text_token_count == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: full-sequence prefill requires active text tokens");
+    }
+
+    dump_lm_prefill_input_rows_if_requested(*components[1].prefill_module, "tslm_prefill",
+                                            plan.stages[1], artifacts,
+                                            active_text_token_count);
+    (void)run_stage_with_module(*components[1].prefill_module, components[1].name,
+                                components[1].prefill_engine_section, plan.stages[1], artifacts,
+                                controls);
+    dump_lm_prefill_output_rows_if_requested("tslm_prefill", plan.stages[1], artifacts,
+                                             active_text_token_count);
+    if (artifacts.find(kTslmKvCache.past) == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: TSLM full-sequence prefill did not produce a usable KV cache");
+    }
+
+    dump_lm_prefill_input_rows_if_requested(*components[2].prefill_module, "ralm_prefill",
+                                            plan.stages[2], artifacts,
+                                            active_text_token_count);
+    auto current = run_stage_with_module(*components[2].prefill_module, components[2].name,
+                                         components[2].prefill_engine_section, plan.stages[2],
+                                         artifacts, controls);
+    dump_lm_prefill_output_rows_if_requested("ralm_prefill", plan.stages[2], artifacts,
+                                             active_text_token_count);
+    if (artifacts.find(kRalmKvCache.past) == artifacts.end()) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: RALM full-sequence prefill did not produce a usable KV cache");
+    }
+    trace_lm_state("prefill_full", active_text_token_count - 1, artifacts);
+    return current;
 }
 
 OwnedStageTensor run_cache_bound_lm_prefill(
@@ -1732,6 +1894,10 @@ void VoxCPM2Pipeline::validate_components() const {
                                      component.name);
         }
         validate_stage_bindings(component, stage);
+        if (component_has_prefill_module(component)) {
+            validate_stage_bindings_for_module(*component.prefill_module, component.name,
+                                               component.prefill_engine_section, stage);
+        }
     }
     validate_partial_cache_bindings(components_);
 }
@@ -1780,7 +1946,12 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     }
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
     OwnedStageTensor current;
-    if (lm_cache_mode_enabled(components_)) {
+    const bool full_prefill = lm_full_prefill_enabled(components_);
+    const bool cache_mode = lm_cache_mode_enabled(components_);
+    if (full_prefill) {
+        current = run_full_sequence_lm_prefill(components_, effective_plan, artifacts, controls,
+                                               active_text_token_count);
+    } else if (cache_mode) {
         current = run_cache_bound_lm_prefill(components_, effective_plan, artifacts, controls,
                                              active_text_token_count);
     } else {
@@ -1794,8 +1965,7 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
     const auto generation_steps =
         resolve_latent_generation_steps(active_text_token_count, target_text_token_count, cfg,
                                         effective_plan.config);
-    keep_latest_lm_artifacts(artifacts, active_text_token_count,
-                             lm_cache_mode_enabled(components_));
+    keep_latest_lm_artifacts(artifacts, active_text_token_count, cache_mode);
     current = run_locdit_autoregressive(components_, effective_plan, artifacts, controls,
                                         generation_steps, active_text_token_count,
                                         effective_plan.config, cfg);

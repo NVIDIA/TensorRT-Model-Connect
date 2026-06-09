@@ -1024,6 +1024,71 @@ def test_voxcpm2_raw_checkpoint_reuses_partial_prebuilt_plans(tmp_path, monkeypa
     assert calls == ["ralm", "locdit", "audiovae"]
 
 
+def test_voxcpm2_raw_checkpoint_packages_full_prefill_lm_sections(tmp_path, monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    cfg = _voxcpm2_config(tmp_path)
+    sources = {
+        spec.name: types.SimpleNamespace(config_values={}, weight_files=(), asset_files=())
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    calls = []
+
+    def _builder(name, payload):
+        def _inner(ctx):
+            calls.append(ctx.spec.name if name == ctx.spec.name else name)
+            return payload
+
+        return _inner
+
+    fake_tslm = _builder("tslm", b"TSLM")
+    fake_ralm = _builder("ralm", b"RALM")
+    monkeypatch.setattr(component_builders, "build_tslm_engine", fake_tslm)
+    monkeypatch.setattr(component_builders, "build_ralm_engine", fake_ralm)
+    monkeypatch.setattr(
+        component_builders,
+        "build_tslm_prefill_engine",
+        _builder("tslm_prefill", b"TSLM-PREFILL"),
+    )
+    monkeypatch.setattr(
+        component_builders,
+        "build_ralm_prefill_engine",
+        _builder("ralm_prefill", b"RALM-PREFILL"),
+    )
+
+    builders = {
+        "locenc": _builder("locenc", b"LOCENC"),
+        "tslm": component_builders.build_tslm_engine,
+        "ralm": component_builders.build_ralm_engine,
+        "locdit": _builder("locdit", b"LOCDIT"),
+        "audiovae": _builder("audiovae", b"AUDIOVAE"),
+    }
+
+    sections = component_builders.build_voxcpm2_component_plans(
+        tmp_path,
+        cfg,
+        sources,
+        max_cache_length=16,
+        precision="bf16",
+        verbose=False,
+        builders=builders,
+    )
+
+    assert sections["tslm_engine_plan"] == b"TSLM"
+    assert sections["ralm_engine_plan"] == b"RALM"
+    assert sections["tslm_prefill_engine_plan"] == b"TSLM-PREFILL"
+    assert sections["ralm_prefill_engine_plan"] == b"RALM-PREFILL"
+    assert calls == [
+        "locenc",
+        "tslm",
+        "tslm_prefill",
+        "ralm",
+        "ralm_prefill",
+        "locdit",
+        "audiovae",
+    ]
+
+
 def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     from tensorrt_model_connect import checkpoint_mapper
     from tensorrt_model_connect.families.voxcpm2 import component_builders

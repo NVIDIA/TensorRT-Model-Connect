@@ -146,3 +146,94 @@ def test_compare_voxcpm2_tensor_dumps_reports_first_common_mismatch(tmp_path: Pa
     assert mismatch["first_different_element"] == 1
     assert mismatch["hf_value"] == 2.0
     assert mismatch["trt_value"] == 4.0
+
+
+def test_compare_voxcpm2_tensor_dumps_compares_matching_float_values_across_dtypes(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool()
+    hf_dir = tmp_path / "hf"
+    trt_dir = tmp_path / "trt"
+    hf_dir.mkdir()
+    trt_dir.mkdir()
+    hf_manifest = hf_dir / "manifest.jsonl"
+    trt_manifest = trt_dir / "manifest.jsonl"
+
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="input",
+        name="text_mask",
+        dtype="bfloat16",
+        shape=[2],
+        raw=struct.pack("<HH", 0x3F80, 0x0000),
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="input",
+        name="text_mask",
+        dtype="float32",
+        shape=[2],
+        raw=struct.pack("<ff", 1.0, 0.0),
+    )
+
+    result = tool.compare_tensor_dumps(hf_manifest, trt_manifest)
+
+    assert result["passed"] is True
+    assert result["record_counts"]["common_mismatches"] == 0
+
+
+def test_compare_voxcpm2_tensor_dumps_reports_float_value_mismatch_across_dtypes(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool()
+    hf_dir = tmp_path / "hf"
+    trt_dir = tmp_path / "trt"
+    hf_dir.mkdir()
+    trt_dir.mkdir()
+    hf_manifest = hf_dir / "manifest.jsonl"
+    trt_manifest = trt_dir / "manifest.jsonl"
+
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="input",
+        name="local_text_features",
+        dtype="bfloat16",
+        shape=[2],
+        raw=struct.pack("<HH", 0x3F80, 0x4000),
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="input",
+        name="local_text_features",
+        dtype="float32",
+        shape=[2],
+        raw=struct.pack("<ff", 1.0, 4.0),
+    )
+
+    result = tool.compare_tensor_dumps(hf_manifest, trt_manifest)
+
+    assert result["passed"] is False
+    mismatch = result["first_common_mismatch"]
+    assert mismatch["key"] == [
+        "tslm_prefill",
+        0,
+        "input",
+        "local_text_features",
+    ]
+    assert mismatch["hf_dtype"] == "bfloat16"
+    assert mismatch["trt_dtype"] == "float32"
+    assert mismatch["first_different_element"] == 1
+    assert mismatch["hf_value"] == 2.0
+    assert mismatch["trt_value"] == 4.0
