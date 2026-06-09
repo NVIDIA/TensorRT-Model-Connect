@@ -1262,6 +1262,91 @@ def _run_down_proj_trt_probe(
     return results
 
 
+def _unique_ordered(values: list[Any]) -> list[Any]:
+    unique: list[Any] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return unique
+
+
+def _summarize_down_proj_probe(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    probe_results = [
+        result
+        for result in results
+        if result.get("prefill_mode") == "trt_down_proj"
+    ]
+    if not probe_results:
+        return None
+
+    executable = [result for result in probe_results if "error" not in result]
+    exact_matches = [
+        result for result in executable if bool(result.get("matched")) is True
+    ]
+    trt_mismatches = [
+        result for result in executable if bool(result.get("matched")) is False
+    ]
+    build_errors = [result for result in probe_results if "error" in result]
+    eager_exact_mismatches = [
+        result
+        for result in trt_mismatches
+        if bool(result.get("eager_matched")) is True
+    ]
+
+    summary: dict[str, Any] = {
+        "probe_count": len(probe_results),
+        "executable_probe_count": len(executable),
+        "build_error_count": len(build_errors),
+        "exact_trt_match_count": len(exact_matches),
+        "trt_mismatch_count": len(trt_mismatches),
+        "eager_exact_mismatch_count": len(eager_exact_mismatches),
+        "variants_tested": _unique_ordered(
+            [str(result.get("projection_variant", "")) for result in probe_results]
+        ),
+        "tactic_source_sets_tested": _unique_ordered(
+            [list(result.get("tactic_sources", [])) for result in probe_results]
+        ),
+        "builder_flag_sets_tested": _unique_ordered(
+            [list(result.get("builder_flags", [])) for result in probe_results]
+        ),
+        "exact_trt_match_labels": [
+            str(result.get("label", "")) for result in exact_matches
+        ],
+        "trt_mismatch_labels": [
+            str(result.get("label", "")) for result in trt_mismatches
+        ],
+        "build_error_labels": [
+            str(result.get("label", "")) for result in build_errors
+        ],
+    }
+
+    if eager_exact_mismatches and not exact_matches:
+        first = eager_exact_mismatches[0]
+        summary.update(
+            {
+                "requires_native_exact_bf16_projection": True,
+                "reason": (
+                    "Eager BF16 down_proj matches the HF tensor dump, but every "
+                    "executable TensorRT down_proj probe mismatched. Builder "
+                    "variants/tactics are not acceptance proof; replace this "
+                    "BF16 GEMM lowering with a native exact projection path."
+                ),
+                "first_eager_exact_trt_mismatch_label": str(
+                    first.get("label", "")
+                ),
+                "first_eager_exact_trt_mismatch_element": first.get(
+                    "first_different_element"
+                ),
+                "first_eager_exact_trt_expected_bits": first.get("expected_bits"),
+                "first_eager_exact_trt_actual_bits": first.get("actual_bits"),
+            }
+        )
+    else:
+        summary["requires_native_exact_bf16_projection"] = False
+
+    return summary
+
+
 def _record_trace_matrix(
     traces: dict[str, Any],
     *,
@@ -2131,7 +2216,7 @@ def diagnose(
             )
         )
 
-    return {
+    payload: dict[str, Any] = {
         "model_dir": str(model_dir),
         "hf_dump_dir": str(hf_dump_dir),
         "device": device,
@@ -2140,6 +2225,10 @@ def diagnose(
         "trace_layer_index": trace_layer_index,
         "results": results,
     }
+    down_proj_summary = _summarize_down_proj_probe(results)
+    if down_proj_summary is not None:
+        payload["down_proj_exactness"] = down_proj_summary
+    return payload
 
 
 def main() -> int:

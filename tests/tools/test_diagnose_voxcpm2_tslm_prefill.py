@@ -668,6 +668,80 @@ def test_voxcpm2_tslm_prefill_down_proj_label_includes_kernel_controls() -> None
     )
 
 
+def test_voxcpm2_tslm_prefill_summarizes_down_proj_native_gap() -> None:
+    tool = _load_tool()
+
+    summary = tool._summarize_down_proj_probe(
+        [
+            {
+                "label": "layer_00.mlp.down_proj.trt_default",
+                "prefill_mode": "trt_down_proj",
+                "projection_variant": "linear",
+                "tactic_sources": [],
+                "builder_flags": [],
+                "matched": False,
+                "eager_matched": True,
+                "first_different_element": 229,
+                "expected_bits": "0x3b25",
+                "actual_bits": "0x3b26",
+            },
+            {
+                "label": "layer_00.mlp.down_proj.trt_bf16",
+                "prefill_mode": "trt_down_proj",
+                "projection_variant": "linear",
+                "tactic_sources": [],
+                "builder_flags": ["BF16"],
+                "error": "RuntimeError: TensorRT down-proj engine build failed",
+            },
+        ]
+    )
+
+    assert summary is not None
+    assert summary["requires_native_exact_bf16_projection"] is True
+    assert summary["probe_count"] == 2
+    assert summary["executable_probe_count"] == 1
+    assert summary["build_error_count"] == 1
+    assert summary["exact_trt_match_count"] == 0
+    assert summary["trt_mismatch_count"] == 1
+    assert summary["eager_exact_mismatch_count"] == 1
+    assert summary["variants_tested"] == ["linear"]
+    assert summary["builder_flag_sets_tested"] == [[], ["BF16"]]
+    assert summary["first_eager_exact_trt_mismatch_element"] == 229
+    assert summary["first_eager_exact_trt_expected_bits"] == "0x3b25"
+    assert summary["first_eager_exact_trt_actual_bits"] == "0x3b26"
+
+
+def test_voxcpm2_tslm_prefill_down_proj_summary_accepts_exact_trt_match() -> None:
+    tool = _load_tool()
+
+    summary = tool._summarize_down_proj_probe(
+        [
+            {
+                "label": "layer_00.mlp.down_proj.trt_plugin",
+                "prefill_mode": "trt_down_proj",
+                "projection_variant": "exact_bf16_plugin",
+                "tactic_sources": [],
+                "builder_flags": [],
+                "matched": True,
+                "eager_matched": True,
+            },
+            {
+                "label": "upstream_full_prefill",
+                "prefill_mode": "full_prefill",
+                "matched": True,
+            },
+        ]
+    )
+
+    assert summary is not None
+    assert summary["requires_native_exact_bf16_projection"] is False
+    assert summary["exact_trt_match_count"] == 1
+    assert summary["trt_mismatch_count"] == 0
+    assert summary["exact_trt_match_labels"] == [
+        "layer_00.mlp.down_proj.trt_plugin"
+    ]
+
+
 def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
     tool = _load_tool()
 
