@@ -1089,7 +1089,7 @@ def test_voxcpm2_raw_checkpoint_packages_full_prefill_lm_sections(tmp_path, monk
     ]
 
 
-def test_voxcpm2_raw_checkpoint_omits_above_gate_full_prefill_sections(
+def test_voxcpm2_raw_checkpoint_requires_full_prefill_within_gate(
     tmp_path, monkeypatch
 ):
     from tensorrt_model_connect.families.voxcpm2 import component_builders
@@ -1139,20 +1139,54 @@ def test_voxcpm2_raw_checkpoint_omits_above_gate_full_prefill_sections(
     builders["tslm"] = component_builders.build_tslm_engine
     builders["ralm"] = component_builders.build_ralm_engine
 
-    sections = component_builders.build_voxcpm2_component_plans(
-        tmp_path,
-        cfg,
-        sources,
-        max_cache_length=2048,
-        precision="bf16",
-        verbose=False,
-        builders=builders,
-    )
+    with pytest.raises(ValueError, match="full-sequence LM prefill is required"):
+        component_builders.build_voxcpm2_component_plans(
+            tmp_path,
+            cfg,
+            sources,
+            max_cache_length=2048,
+            precision="bf16",
+            verbose=False,
+            builders=builders,
+        )
 
-    assert "tslm_prefill_engine_plan" not in sections
-    assert "ralm_prefill_engine_plan" not in sections
     assert "tslm_prefill" not in calls
     assert "ralm_prefill" not in calls
+
+
+def test_voxcpm2_raw_checkpoint_rejects_disabled_full_prefill(
+    tmp_path, monkeypatch
+):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    cfg = _voxcpm2_config(tmp_path)
+    sources = {
+        spec.name: types.SimpleNamespace(config_values={}, weight_files=(), asset_files=())
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+
+    def _builder(_ctx):
+        return b"PLAN"
+
+    monkeypatch.setattr(component_builders, "build_tslm_engine", _builder)
+    monkeypatch.setenv("TRTMC_VOXCPM2_FULL_PREFILL_MAX_STEPS", "0")
+
+    with pytest.raises(ValueError, match="must be positive"):
+        component_builders.build_voxcpm2_component_plans(
+            tmp_path,
+            cfg,
+            sources,
+            max_cache_length=1024,
+            precision="bf16",
+            verbose=False,
+            builders={
+                "locenc": _builder,
+                "tslm": component_builders.build_tslm_engine,
+                "ralm": _builder,
+                "locdit": _builder,
+                "audiovae": _builder,
+            },
+        )
 
 
 def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):

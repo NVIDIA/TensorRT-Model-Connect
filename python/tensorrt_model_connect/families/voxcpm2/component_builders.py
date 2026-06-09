@@ -2089,7 +2089,19 @@ def _full_prefill_max_steps() -> int:
 
 def _should_package_full_prefill(ctx: VoxCPM2ComponentBuildContext) -> bool:
     max_steps = _full_prefill_max_steps()
-    return max_steps > 0 and _tslm_export_text_steps(ctx) <= max_steps
+    text_steps = _tslm_export_text_steps(ctx)
+    if max_steps <= 0:
+        raise ValueError(
+            "VoxCPM2 full-sequence LM prefill is required for Hugging Face "
+            "parity; TRTMC_VOXCPM2_FULL_PREFILL_MAX_STEPS must be positive."
+        )
+    if text_steps > max_steps:
+        raise ValueError(
+            "VoxCPM2 full-sequence LM prefill is required for Hugging Face "
+            f"parity, but export text steps {text_steps} exceed "
+            f"TRTMC_VOXCPM2_FULL_PREFILL_MAX_STEPS={max_steps}."
+        )
+    return True
 
 
 def build_locenc_zero_prefill_feature_table(

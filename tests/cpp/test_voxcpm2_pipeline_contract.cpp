@@ -651,14 +651,17 @@ std::vector<audio::VoxCPM2LoadedComponent> make_scripted_components(
         audio::VoxCPM2LoadedComponent component{spec.name, spec.engine_section,
                                                 std::move(module), "", nullptr};
         if (full_prefill_lms && (i == 1 || i == 2)) {
+            constexpr int64_t kPrefillFixtureRows = 64;
             std::vector<std::string> prefill_inputs = required_inputs_for_stage(stage);
             std::vector<FakeModule::ExtraOutputSpec> prefill_outputs;
             if (i == 1) {
                 prefill_outputs.push_back(
                     {"lm_hidden", trtmc::DType::kFloat32,
-                     repeated_values(3 * 2048, 8.0F), {3, 2048}});
+                     repeated_values(kPrefillFixtureRows * 2048, 8.0F),
+                     {kPrefillFixtureRows, 2048}});
                 prefill_outputs.push_back({"stop_logits", trtmc::DType::kFloat32,
-                                           repeated_values(3 * 2, 0.0F), {3, 2}});
+                                           repeated_values(kPrefillFixtureRows * 2, 0.0F),
+                                           {kPrefillFixtureRows, 2}});
                 prefill_outputs.push_back({"tslm_present_kv_cache", trtmc::DType::kFloat32,
                                            repeated_values(2 * 1 * 1 * 1 * 8 * 1, 9.0F),
                                            {2, 1, 1, 1, 8, 1}});
@@ -924,8 +927,10 @@ void test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len() {
 void test_generate_audio_uses_current_row_for_padded_stop_logits() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
-    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(8, true, false, true, true), plan,
-                                    "openbmb/VoxCPM2", make_fake_tokenizer());
+    trtmc::VoxCPM2Pipeline pipeline(
+        make_scripted_components(8, true, false, true, true, trtmc::DType::kFloat32,
+                                 false, true),
+        plan, "openbmb/VoxCPM2", make_fake_tokenizer());
 
     locdit_aux_binding_hits = 0;
     last_audio_vae_latent_rows = 0;
@@ -939,46 +944,21 @@ void test_generate_audio_uses_current_row_for_padded_stop_logits() {
           "voxcpm2 padded stop logits stop after upstream minimum generation length");
 }
 
-void test_generate_audio_uses_cache_bound_lm_step_contract() {
+void test_generate_audio_rejects_cache_bound_lm_without_full_prefill() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
-    trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(2, true), plan,
-                                    "openbmb/VoxCPM2", make_fake_tokenizer());
 
-    tslm_text_binding_hits = 0;
-    tslm_text_token_counts.clear();
-    tslm_audio_start_values.clear();
-    tslm_position_id_values.clear();
-    ralm_position_id_values.clear();
-    tslm_cache_binding_hits = 0;
-    ralm_cache_binding_hits = 0;
-    locdit_lm_hidden_rows.clear();
-    locdit_residual_hidden_rows.clear();
-
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 2;
-    (void)pipeline.generate_audio("ab", gen_cfg);
-
-    check(tslm_text_binding_hits == 4,
-          "voxcpm2 cache-bound TSLM runs one prefill step per text token plus refresh");
-    check(tslm_cache_binding_hits == 4,
-          "voxcpm2 cache-bound TSLM receives a past KV cache on every step");
-    check(ralm_cache_binding_hits == 4,
-          "voxcpm2 cache-bound RALM receives a past KV cache on every step");
-    check(tslm_text_token_counts == std::vector<int64_t>({1, 1, 1, 1}),
-          "voxcpm2 cache-bound TSLM uses one-row token inputs");
-    check(tslm_audio_start_values.size() >= 3 && tslm_audio_start_values[2] == 101,
-          "voxcpm2 cache-bound prefill still appends audio_start token");
-    check(tslm_position_id_values == std::vector<int32_t>({0, 1, 2, 3}),
-          "voxcpm2 cache-bound TSLM advances position ids through prefill and refresh");
-    check(ralm_position_id_values == std::vector<int32_t>({0, 1, 2, 3}),
-          "voxcpm2 cache-bound RALM advances position ids through prefill and refresh");
-    check(locdit_lm_hidden_rows.size() == 2 && locdit_lm_hidden_rows[0] == 1 &&
-              locdit_lm_hidden_rows[1] == 1,
-          "voxcpm2 cache-bound LocDiT receives current TSLM hidden row");
-    check(locdit_residual_hidden_rows.size() == 2 && locdit_residual_hidden_rows[0] == 1 &&
-              locdit_residual_hidden_rows[1] == 1,
-          "voxcpm2 cache-bound LocDiT receives current RALM hidden row");
+    try {
+        trtmc::VoxCPM2Pipeline pipeline(make_scripted_components(2, true), plan,
+                                        "openbmb/VoxCPM2", make_fake_tokenizer());
+        check(false, "voxcpm2 rejects cache-bound LM bundles without full prefill");
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        check(message.find("tslm_prefill_engine_plan") != std::string::npos,
+              "voxcpm2 cache-bound rejection names missing TSLM prefill plan");
+        check(message.find("ralm_prefill_engine_plan") != std::string::npos,
+              "voxcpm2 cache-bound rejection names missing RALM prefill plan");
+    }
 }
 
 void test_generate_audio_uses_full_sequence_lm_prefill_when_available() {
@@ -1029,7 +1009,9 @@ void test_generate_audio_uses_matching_zero_prefill_feature_table() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
     trtmc::VoxCPM2Pipeline pipeline(
-        make_scripted_components(2, true), plan, "openbmb/VoxCPM2", make_fake_tokenizer(),
+        make_scripted_components(2, true, false, false, false, trtmc::DType::kFloat32,
+                                 false, true),
+        plan, "openbmb/VoxCPM2", make_fake_tokenizer(),
         make_zero_prefill_table(/*text_steps=*/3, /*value=*/7.0F));
 
     locenc_audio_feat_values.clear();
@@ -1040,8 +1022,8 @@ void test_generate_audio_uses_matching_zero_prefill_feature_table() {
     gen_cfg.max_new_tokens = 2;
     (void)pipeline.generate_audio("ab", gen_cfg);
 
-    check(tslm_text_binding_hits == 4,
-          "voxcpm2 zero-prefill table preserves cache-bound LM step count");
+    check(tslm_text_binding_hits == 2,
+          "voxcpm2 zero-prefill table preserves full-prefill plus refresh TSLM calls");
     check(!local_text_feature_values.empty() && local_text_feature_values.front() == 7.0F,
           "voxcpm2 zero-prefill table supplies initial local_text_features");
     check(locenc_audio_feat_values.size() == 1 && locenc_audio_feat_values[0] == 4.0F,
@@ -1054,7 +1036,7 @@ void test_generate_audio_converts_float_artifacts_to_engine_input_dtype() {
     constexpr float kLocditPatchValueThatRoundsUpToBf16 = 1.007F;
     trtmc::VoxCPM2Pipeline pipeline(
         make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16,
-                                 false, false, kLocditPatchValueThatRoundsUpToBf16),
+                                 false, true, kLocditPatchValueThatRoundsUpToBf16),
         plan, "openbmb/VoxCPM2", make_fake_tokenizer());
 
     last_text_mask_dtype = trtmc::DType::kFloat32;
@@ -1091,7 +1073,8 @@ void test_generate_audio_forwards_shared_locdit_noise_latents() {
     trtmc::VoxCPM2Config cfg;
     auto plan = audio::make_voxcpm2_generation_plan(cfg);
     trtmc::VoxCPM2Pipeline pipeline(
-        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16, true),
+        make_scripted_components(2, true, false, false, false, trtmc::DType::kBFloat16,
+                                 true, true),
         plan, "openbmb/VoxCPM2", make_fake_tokenizer());
 
     locdit_noise_values.clear();
@@ -1459,7 +1442,7 @@ int main() {
     test_generate_audio_reads_first_locdit_patch_from_each_static_profile_invocation();
     test_generate_audio_uses_tslm_stop_logits_after_upstream_min_len();
     test_generate_audio_uses_current_row_for_padded_stop_logits();
-    test_generate_audio_uses_cache_bound_lm_step_contract();
+    test_generate_audio_rejects_cache_bound_lm_without_full_prefill();
     test_generate_audio_uses_full_sequence_lm_prefill_when_available();
     test_generate_audio_uses_matching_zero_prefill_feature_table();
     test_generate_audio_converts_float_artifacts_to_engine_input_dtype();

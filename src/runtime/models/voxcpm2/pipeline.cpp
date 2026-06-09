@@ -1600,6 +1600,12 @@ void validate_partial_cache_bindings(
             "ralm_past_kv_cache=>ralm_present_kv_cache");
     }
 
+    if (lm_cache_mode_enabled(components) && !lm_full_prefill_enabled(components)) {
+        throw std::runtime_error(
+            "VoxCPM2Pipeline: cache-bound TSLM/RALM step engines require "
+            "tslm_prefill_engine_plan and ralm_prefill_engine_plan for Hugging Face parity");
+    }
+
     if (lm_partial_prefill_modules_present(components)) {
         if (!lm_full_prefill_enabled(components)) {
             throw std::runtime_error(
