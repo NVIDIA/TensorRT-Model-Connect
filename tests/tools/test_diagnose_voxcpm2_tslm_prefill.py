@@ -4,6 +4,7 @@ import importlib.util
 import json
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -519,6 +520,60 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_tactic_source_sets() -> None:
     ]
 
 
+def test_voxcpm2_tslm_prefill_parses_down_proj_builder_flag_sets() -> None:
+    tool = _load_tool()
+
+    assert tool._parse_builder_flag_sets(
+        ["bf16", "BF16, prefer_precision_constraints", "  "]
+    ) == [
+        ("BF16",),
+        ("BF16", "PREFER_PRECISION_CONSTRAINTS"),
+    ]
+
+
+def test_voxcpm2_tslm_prefill_sets_builder_flags() -> None:
+    tool = _load_tool()
+
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.flags: list[int] = []
+
+        def set_flag(self, flag: int) -> None:
+            self.flags.append(flag)
+
+    fake_config = FakeConfig()
+    fake_trt = SimpleNamespace(
+        BuilderFlag=SimpleNamespace(BF16=7, STRICT_NANS=11)
+    )
+
+    tool._set_builder_flags(fake_config, fake_trt, ("BF16", "STRICT_NANS"))
+
+    assert fake_config.flags == [7, 11]
+
+    with pytest.raises(ValueError, match="Unsupported TensorRT builder flag"):
+        tool._set_builder_flags(fake_config, fake_trt, ("UNKNOWN",))
+
+
+def test_voxcpm2_tslm_prefill_down_proj_label_includes_kernel_controls() -> None:
+    tool = _load_tool()
+
+    assert tool._down_proj_label(
+        layer_index=0,
+        variant="linear",
+        tactic_sources=(),
+        builder_flags=(),
+    ) == "layer_00.mlp.down_proj.trt_default"
+    assert tool._down_proj_label(
+        layer_index=1,
+        variant="manual_matmul_bf16",
+        tactic_sources=("CUBLAS", "CUBLAS_LT"),
+        builder_flags=("BF16", "PREFER_PRECISION_CONSTRAINTS"),
+    ) == (
+        "layer_01.mlp.down_proj.manual_matmul_bf16."
+        "trt_cublas+cublas_lt_bf16+prefer_precision_constraints"
+    )
+
+
 def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
     tool = _load_tool()
 
@@ -773,6 +828,7 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_down_proj_probe_only(
         include_patched=False,
         trt_down_proj_layer=0,
         trt_down_proj_tactic_source_sets=[("CUBLAS_LT",)],
+        trt_down_proj_builder_flag_sets=[("BF16",)],
         trt_down_proj_variants=["manual_matmul_bf16", "fp32_output"],
     )
 
@@ -785,5 +841,6 @@ def test_voxcpm2_tslm_prefill_diagnose_can_run_down_proj_probe_only(
     ]
     assert calls[0]["layer_index"] == 0
     assert calls[0]["tactic_source_sets"] == [("CUBLAS_LT",)]
+    assert calls[0]["builder_flag_sets"] == [("BF16",)]
     assert calls[0]["variants"] == ["manual_matmul_bf16", "fp32_output"]
     assert calls[0]["inputs"]["text_tokens"].tolist() == [101]

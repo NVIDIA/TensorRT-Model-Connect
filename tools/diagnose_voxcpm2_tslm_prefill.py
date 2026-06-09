@@ -475,6 +475,17 @@ def _parse_tactic_source_sets(values: list[str] | None) -> list[tuple[str, ...]]
     return source_sets
 
 
+def _parse_builder_flag_sets(values: list[str] | None) -> list[tuple[str, ...]]:
+    flag_sets: list[tuple[str, ...]] = []
+    for value in values or []:
+        flags = tuple(
+            part.strip().upper() for part in value.split(",") if part.strip()
+        )
+        if flags:
+            flag_sets.append(flags)
+    return flag_sets
+
+
 def _parse_down_proj_variants(values: list[str] | None) -> list[str]:
     variants: list[str] = []
     for value in values or []:
@@ -540,6 +551,24 @@ def _set_tactic_sources(
             raise ValueError(f"Unsupported TensorRT tactic source {source!r}")
         mask |= 1 << int(getattr(tactic_source, source))
     config.set_tactic_sources(mask)
+
+
+def _set_builder_flags(
+    config: Any,
+    trt_module: Any,
+    builder_flags: tuple[str, ...],
+) -> None:
+    if not builder_flags:
+        return
+    if not hasattr(config, "set_flag"):
+        raise RuntimeError("TensorRT builder config does not support builder flags")
+    flag_enum = getattr(trt_module, "BuilderFlag", None)
+    if flag_enum is None:
+        raise RuntimeError("TensorRT module does not expose BuilderFlag")
+    for flag in builder_flags:
+        if not hasattr(flag_enum, flag):
+            raise ValueError(f"Unsupported TensorRT builder flag {flag!r}")
+        config.set_flag(getattr(flag_enum, flag))
 
 
 def _make_down_proj_variant_module(
@@ -755,11 +784,18 @@ def _down_proj_label(
     layer_index: int,
     variant: str,
     tactic_sources: tuple[str, ...],
+    builder_flags: tuple[str, ...],
 ) -> str:
     base = f"layer_{layer_index:02d}.mlp.down_proj"
     if variant != _DEFAULT_DOWN_PROJ_VARIANT:
         base += f".{variant}"
-    return f"{base}.trt_{_tactic_label(tactic_sources)}"
+    label_parts = []
+    if tactic_sources:
+        label_parts.append(_tactic_label(tactic_sources))
+    if builder_flags:
+        label_parts.append("+".join(flag.lower() for flag in builder_flags))
+    label = "_".join(label_parts) if label_parts else "default"
+    return f"{base}.trt_{label}"
 
 
 def _eager_projection_mismatch(
@@ -797,6 +833,7 @@ def _run_trt_linear_projection(
     label: str,
     variant: str,
     tactic_sources: tuple[str, ...],
+    builder_flags: tuple[str, ...],
 ) -> dict[str, Any]:
     import torch
 
@@ -855,6 +892,7 @@ def _run_trt_linear_projection(
         if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
             config.clear_flag(trt.BuilderFlag.TF32)
         _set_tactic_sources(config, trt, tactic_sources)
+        _set_builder_flags(config, trt, builder_flags)
 
         plan = builder.build_serialized_network(network, config)
         if plan is None:
@@ -919,6 +957,7 @@ def _run_trt_linear_projection(
             "prefill_mode": "trt_down_proj",
             "projection_variant": variant,
             "tactic_sources": list(tactic_sources),
+            "builder_flags": list(builder_flags),
             "engine_io": io_records,
             "plan_bytes": len(plan_bytes),
             "row0_expected_first8": _row_prefix(expected),
@@ -937,6 +976,7 @@ def _run_down_proj_trt_probe(
     device: str,
     layer_index: int,
     tactic_source_sets: list[tuple[str, ...]] | None = None,
+    builder_flag_sets: list[tuple[str, ...]] | None = None,
     variants: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     import torch
@@ -1021,6 +1061,11 @@ def _run_down_proj_trt_probe(
         if sources not in source_sets:
             source_sets.append(sources)
 
+    flag_sets = [()]
+    for flags in builder_flag_sets or []:
+        if flags not in flag_sets:
+            flag_sets.append(flags)
+
     results = []
     linear_module = base_lm.layers[layer_index].mlp.down_proj
     for variant in variants or [_DEFAULT_DOWN_PROJ_VARIANT]:
@@ -1031,21 +1076,36 @@ def _run_down_proj_trt_probe(
         )
         projection_module.to(device=device).eval()
         for tactic_sources in source_sets:
-            result = _run_trt_linear_projection(
-                linear_module=projection_module,
-                input_tensor=down_proj_input,
-                expected=expected,
-                device=device,
-                label=_down_proj_label(
+            for builder_flags in flag_sets:
+                label = _down_proj_label(
                     layer_index=layer_index,
                     variant=variant,
                     tactic_sources=tactic_sources,
-                ),
-                variant=variant,
-                tactic_sources=tactic_sources,
-            )
-            result["layer_index"] = layer_index
-            results.append(result)
+                    builder_flags=builder_flags,
+                )
+                try:
+                    result = _run_trt_linear_projection(
+                        linear_module=projection_module,
+                        input_tensor=down_proj_input,
+                        expected=expected,
+                        device=device,
+                        label=label,
+                        variant=variant,
+                        tactic_sources=tactic_sources,
+                        builder_flags=builder_flags,
+                    )
+                except Exception as exc:
+                    result = {
+                        "label": label,
+                        "prefill_mode": "trt_down_proj",
+                        "projection_variant": variant,
+                        "layer_index": layer_index,
+                        "tactic_sources": list(tactic_sources),
+                        "builder_flags": list(builder_flags),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                result["layer_index"] = layer_index
+                results.append(result)
 
     del base_lm, fsq_layer, traces, down_proj_input, expected
     if device.startswith("cuda"):
@@ -1841,6 +1901,7 @@ def diagnose(
     trt_prefill_plan: Path | None = None,
     trt_down_proj_layer: int | None = None,
     trt_down_proj_tactic_source_sets: list[tuple[str, ...]] | None = None,
+    trt_down_proj_builder_flag_sets: list[tuple[str, ...]] | None = None,
     trt_down_proj_variants: list[str] | None = None,
 ) -> dict[str, Any]:
     import torch
@@ -1917,6 +1978,7 @@ def diagnose(
                 device=device,
                 layer_index=trt_down_proj_layer,
                 tactic_source_sets=trt_down_proj_tactic_source_sets,
+                builder_flag_sets=trt_down_proj_builder_flag_sets,
                 variants=trt_down_proj_variants,
             )
         )
@@ -2001,6 +2063,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--trt-down-proj-builder-flags",
+        action="append",
+        default=[],
+        metavar="FLAG[,FLAG...]",
+        help=(
+            "Optional TensorRT builder-flag set for the isolated down-proj "
+            "probe, e.g. BF16,PREFER_PRECISION_CONSTRAINTS or "
+            "BF16,OBEY_PRECISION_CONSTRAINTS. Can be repeated. The default "
+            "no-extra-flags probe always runs too."
+        ),
+    )
+    parser.add_argument(
         "--trt-down-proj-variant",
         action="append",
         default=[],
@@ -2032,6 +2106,9 @@ def main() -> int:
         trt_down_proj_layer=args.trt_down_proj_layer,
         trt_down_proj_tactic_source_sets=_parse_tactic_source_sets(
             args.trt_down_proj_tactic_sources
+        ),
+        trt_down_proj_builder_flag_sets=_parse_builder_flag_sets(
+            args.trt_down_proj_builder_flags
         ),
         trt_down_proj_variants=_parse_down_proj_variants(
             args.trt_down_proj_variant
