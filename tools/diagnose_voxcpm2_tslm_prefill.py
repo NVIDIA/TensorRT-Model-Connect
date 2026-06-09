@@ -178,8 +178,53 @@ def _first_mismatch(expected: Any, actual: Any) -> dict[str, Any]:
         "expected_bits": _tensor_bits(expected_flat[first]),
         "actual_bits": _tensor_bits(actual_flat[first]),
     }
+    mismatch.update(_mismatch_location_summary(diff, first))
     mismatch.update(_bf16_mismatch_summary(expected, actual, diff))
     return mismatch
+
+
+def _mismatch_location_summary(diff: Any, first_flat_index: int) -> dict[str, Any]:
+    shape = [int(dim) for dim in diff.shape]
+    summary: dict[str, Any] = {
+        "first_different_coordinate": _unravel_index(first_flat_index, shape),
+    }
+    if len(shape) < 2:
+        return summary
+
+    width = shape[-1]
+    flat_rows = diff.reshape(-1, width).detach().cpu()
+    row_counts = flat_rows.sum(dim=1)
+    col_counts = flat_rows.sum(dim=0)
+    summary.update(
+        {
+            "mismatch_rows_with_differences": int((row_counts > 0).sum().item()),
+            "mismatch_cols_with_differences": int((col_counts > 0).sum().item()),
+            "top_mismatch_rows": _top_mismatch_counts(row_counts, "row"),
+            "top_mismatch_cols": _top_mismatch_counts(col_counts, "column"),
+        }
+    )
+    return summary
+
+
+def _unravel_index(flat_index: int, shape: list[int]) -> list[int]:
+    if not shape:
+        return []
+    index = int(flat_index)
+    coords = []
+    for dim in reversed(shape):
+        coords.append(index % dim)
+        index //= dim
+    return list(reversed(coords))
+
+
+def _top_mismatch_counts(counts: Any, key: str, *, limit: int = 8) -> list[dict[str, int]]:
+    ranked = [
+        (int(index), int(count))
+        for index, count in enumerate(counts.tolist())
+        if int(count) > 0
+    ]
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return [{key: index, "count": count} for index, count in ranked[:limit]]
 
 
 def _bf16_mismatch_summary(expected: Any, actual: Any, diff: Any) -> dict[str, Any]:

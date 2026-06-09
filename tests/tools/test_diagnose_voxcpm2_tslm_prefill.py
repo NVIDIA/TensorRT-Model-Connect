@@ -160,6 +160,30 @@ def test_voxcpm2_tslm_prefill_probe_reports_bf16_ulp_summary() -> None:
     }
 
 
+def test_voxcpm2_tslm_prefill_probe_reports_mismatch_location_summary() -> None:
+    tool = _load_tool()
+    expected = torch.zeros((3, 4), dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[0, 1] = 1.0
+    actual[0, 3] = 1.0
+    actual[2, 3] = 2.0
+
+    mismatch = tool._first_mismatch(expected, actual)
+
+    assert mismatch["first_different_element"] == 1
+    assert mismatch["first_different_coordinate"] == [0, 1]
+    assert mismatch["mismatch_rows_with_differences"] == 2
+    assert mismatch["mismatch_cols_with_differences"] == 2
+    assert mismatch["top_mismatch_rows"] == [
+        {"row": 0, "count": 2},
+        {"row": 2, "count": 1},
+    ]
+    assert mismatch["top_mismatch_cols"] == [
+        {"column": 3, "count": 2},
+        {"column": 1, "count": 1},
+    ]
+
+
 def test_voxcpm2_tslm_prefill_trace_summary_reports_first_stage() -> None:
     tool = _load_tool()
     expected = {
