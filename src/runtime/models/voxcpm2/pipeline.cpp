@@ -509,30 +509,6 @@ bool has_positive_shape(const std::vector<int64_t>& shape) {
     return std::all_of(shape.begin(), shape.end(), [](int64_t dim) { return dim > 0; });
 }
 
-std::size_t resolve_local_text_feature_width(const ITrtModule& locenc_module) {
-    constexpr std::size_t kDefaultLocalTextFeatureWidth = 2048;
-    auto shape = locenc_module.tensor_shape("local_text_features");
-    if (shape.size() >= 2 && shape[1] > 0)
-        return static_cast<std::size_t>(shape[1]);
-    for (const auto& info : locenc_module.output_info()) {
-        if (info.name == "local_text_features" && info.shape.size() >= 2 && info.shape[1] > 0)
-            return static_cast<std::size_t>(info.shape[1]);
-    }
-    return kDefaultLocalTextFeatureWidth;
-}
-
-OwnedStageTensor make_zero_local_text_features_tensor(std::size_t text_steps,
-                                                      const ITrtModule& locenc_module) {
-    const auto hidden_width = resolve_local_text_feature_width(locenc_module);
-    OwnedStageTensor tensor;
-    tensor.shape = {static_cast<int64_t>(std::max<std::size_t>(1, text_steps)),
-                    static_cast<int64_t>(hidden_width)};
-    tensor.dtype = locenc_module.tensor_dtype("local_text_features");
-    tensor.storage.resize(static_cast<std::size_t>(tensor.shape[0]) * hidden_width *
-                          dtype_size(tensor.dtype));
-    return tensor;
-}
-
 std::vector<int64_t> resolve_input_shape(const ITrtModule& module, const std::string& name) {
     auto shape = module.tensor_shape(name);
     if (has_positive_shape(shape))
@@ -668,6 +644,34 @@ void append_first_dim(OwnedStageTensor& target, const OwnedStageTensor& chunk,
     }
     target.storage.insert(target.storage.end(), chunk.storage.begin(), chunk.storage.end());
     target.shape[0] += chunk.shape[0];
+}
+
+OwnedStageTensor repeat_first_dim(const OwnedStageTensor& row, std::size_t count,
+                                  const std::string& artifact_name) {
+    if (count == 0) {
+        throw std::runtime_error("VoxCPM2Pipeline: cannot repeat zero rows for artifact '" +
+                                 artifact_name + "'");
+    }
+    if (row.shape.empty() || row.shape.front() < 1) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' must have at least one row before prefill repeat");
+    }
+    const auto row_stride = checked_first_dim_stride(row, artifact_name);
+    const auto row_bytes = row_stride * dtype_size(row.dtype);
+    if (row.storage.size() < row_bytes) {
+        throw std::runtime_error("VoxCPM2Pipeline: artifact '" + artifact_name +
+                                 "' storage is too small for prefill repeat");
+    }
+
+    OwnedStageTensor repeated;
+    repeated.shape = row.shape;
+    repeated.shape[0] = static_cast<int64_t>(count);
+    repeated.dtype = row.dtype;
+    repeated.storage.resize(row_bytes * count);
+    for (std::size_t i = 0; i < count; ++i) {
+        std::memcpy(repeated.storage.data() + i * row_bytes, row.storage.data(), row_bytes);
+    }
+    return repeated;
 }
 
 half_bits_t fp32_to_fp16(float v) {
@@ -1692,10 +1696,13 @@ AudioResult VoxCPM2Pipeline::generate_audio(const std::string& prompt, const Gen
                                                           1.0F));
     artifacts.emplace("audio_mask", make_float_mask_tensor(text_token_count, 0, 1.0F));
     artifacts.emplace("audio_feats",
-                      make_zero_audio_feats_tensor(text_token_count, effective_plan.config));
-    artifacts.emplace("local_text_features",
-                      make_zero_local_text_features_tensor(text_token_count,
-                                                          *components_[0].module));
+                      make_zero_audio_feats_tensor(1, effective_plan.config));
+    auto initial_local_text_features =
+        run_stage(components_[0], effective_plan.stages[0], artifacts, controls,
+                  "locenc_prefill", 0);
+    artifacts["local_text_features"] =
+        repeat_first_dim(initial_local_text_features, text_token_count,
+                         "local_text_features");
     artifacts.emplace("feat_cond", make_initial_feat_cond_tensor(effective_plan.config));
     OwnedStageTensor current;
     if (lm_cache_mode_enabled(components_)) {

@@ -110,6 +110,39 @@ class _FakeComparator:
         )
 
 
+class _FakeContractPlugin:
+    def __init__(self, result: CompareResult | None = None) -> None:
+        self._result = result
+        self.calls = 0
+
+    def configure_reference(self, case: E2ECase) -> dict[str, Any]:
+        return {}
+
+    def verify(
+        self,
+        trt: StageOutput,
+        ref: StageOutput,
+        case: E2ECase,
+        threshold: Any,
+    ) -> CompareResult:
+        self.calls += 1
+        if self._result is not None:
+            return self._result
+        return CompareResult(
+            stage_name=trt.stage_name,
+            status=StageStatus.PASSED.value,
+            metrics={
+                "contract_ok": MetricResult(
+                    value=1.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=True,
+                ),
+            },
+            message="contract passed",
+        )
+
+
 @pytest.fixture(autouse=True)
 def _stable_env_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -345,6 +378,51 @@ def test_run_classifies_comparison_failure(
     assert result.stages["generate"].status == StageStatus.FAILED.value
     data = _read_result_json(ctx, case)
     assert data["stages"]["generate"]["metrics"]["value_match"]["passed"] is False
+
+
+def test_waveform_exact_stage_is_not_masked_by_contract_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("exact-audio")
+    case.reference_family = "tts_voxcpm2"
+    case.stages = [
+        StageSpec(
+            name="generate",
+            artifact_type="waveform",
+            comparison_mode="waveform_exact",
+        )
+    ]
+    ctx = _make_ctx(tmp_path, case)
+    _patch_bundle_success(monkeypatch, tmp_path)
+    failed_compare = CompareResult(
+        stage_name="generate",
+        status=StageStatus.FAILED.value,
+        metrics={
+            "waveform_exact_match": MetricResult(
+                value=0.0,
+                threshold=1.0,
+                operator="==",
+                passed=False,
+            )
+        },
+        message="exact WAV mismatch",
+    )
+    comparator = _FakeComparator(result=failed_compare)
+    contract = _FakeContractPlugin()
+    monkeypatch.setattr(orchestrator, "get_runner", lambda name: _FakeRunner())
+    monkeypatch.setattr(orchestrator, "get_reference", lambda name: _FakeReference())
+    monkeypatch.setattr(orchestrator, "get_comparator", lambda name: comparator)
+    monkeypatch.setattr(orchestrator, "get_contract_plugin", lambda name: contract)
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.FAIL.value
+    assert result.failure_type == FailureType.COMPARE_FAIL.value
+    assert result.stages["generate"].message == "exact WAV mismatch"
+    assert result.stages["generate"].metrics["waveform_exact_match"].passed is False
+    assert comparator.calls == 1
+    assert contract.calls == 0
 
 
 def test_run_classifies_determinism_failure(

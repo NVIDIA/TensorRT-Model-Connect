@@ -1803,11 +1803,18 @@ class E2EOrchestrator:
                 state.all_stages_pass = False
             return
 
-        compare_result = self._contract_comparison(
-            state, stage, trt_output, ref_output)
-        if compare_result is None:
+        if stage.artifact_type == "waveform" and stage.comparison_mode == "waveform_exact":
             compare_result = self._numeric_comparison(
                 state, stage, trt_output, ref_output)
+            if compare_result is None:
+                compare_result = self._contract_comparison(
+                    state, stage, trt_output, ref_output)
+        else:
+            compare_result = self._contract_comparison(
+                state, stage, trt_output, ref_output)
+            if compare_result is None:
+                compare_result = self._numeric_comparison(
+                    state, stage, trt_output, ref_output)
 
         if compare_result is None:
             compare_result = CompareResult(

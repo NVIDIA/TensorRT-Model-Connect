@@ -1548,7 +1548,9 @@ def _locenc_minicpm_config_values(prepared: VoxCPM2PreparedComponentInputs) -> d
 
 
 def _locenc_export_text_steps(_ctx: VoxCPM2ComponentBuildContext) -> int:
-    # Text-only prefill uses masked zero local features; generated patches call LocEnc one at a time.
+    # The upstream zero-audio prefill rows are identical, so one exported LocEnc
+    # row can be repeated by the native runtime. Generated patches also call
+    # LocEnc one at a time.
     return 1
 
 

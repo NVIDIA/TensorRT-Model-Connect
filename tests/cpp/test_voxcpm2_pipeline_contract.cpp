@@ -747,8 +747,9 @@ void test_generate_audio_returns_component_waveform_without_hidden_wav_write() {
           "voxcpm2 generated-patch refresh clears one-step text mask");
     check(last_audio_mask_values.size() == 1 && last_audio_mask_values[0] == 1.0F,
           "voxcpm2 generated-patch refresh marks one-step audio mask");
-    check(locenc_audio_feat_values.size() == 1 && locenc_audio_feat_values[0] == 4.0F,
-          "voxcpm2 text-only prefill skips LocEnc and refresh encodes first generated patch");
+    check(locenc_audio_feat_values.size() == 2 && locenc_audio_feat_values[0] == 0.0F &&
+              locenc_audio_feat_values[1] == 4.0F,
+          "voxcpm2 prefill encodes one zero-audio feature row before generated patch refresh");
     check(position_id_values.size() == 2 && position_id_values[0] > 0 &&
               position_id_values[0] == position_id_values[1],
           "voxcpm2 forwards generated-step position_id to TSLM and RALM refresh");
@@ -1005,6 +1006,8 @@ void test_generate_audio_dumps_locdit_tensor_io_for_parity_debug() {
 
     const auto manifest_path = temp_dir / "manifest.jsonl";
     const auto manifest = read_text_file(manifest_path);
+    check(manifest.find("\"phase\":\"locenc_prefill\"") != std::string::npos,
+          "voxcpm2 tensor dump manifest records LocEnc prefill phase");
     check(manifest.find("\"phase\":\"locdit\"") != std::string::npos,
           "voxcpm2 tensor dump manifest records LocDiT phase");
     check(manifest.find("\"phase\":\"tslm_prefill\"") != std::string::npos,
@@ -1193,8 +1196,8 @@ void test_generate_audio_pads_text_tensors_to_engine_steps() {
 
     check(tslm_text_binding_hits == 1, "voxcpm2 forwards padded text tensors to TSLM");
     check(last_text_token_count == 6, "voxcpm2 pads text_tokens to engine text steps");
-    check(last_audio_feat_steps == 0,
-          "voxcpm2 text-only prefill does not run LocEnc on padded zero audio_feats");
+    check(last_audio_feat_steps == 1,
+          "voxcpm2 text-only prefill runs one-row LocEnc instead of padded zero audio_feats");
     check(last_text_tokens.size() == 6, "voxcpm2 captures padded token buffer");
     check(last_text_tokens[0] == static_cast<int32_t>('a'),
           "voxcpm2 preserves first prompt token before padding");
