@@ -536,16 +536,28 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
         "fp32_output",
         "split_k_1024_bf16_accum",
         "split_k_1024_fp32_accum_to_bf16",
+        "split_out_256_bf16",
     ]
     assert tool._parse_down_proj_variants(
-        ["split_k_512_bf16_accum", "split_k_2048_fp32_accum_to_bf16"]
-    ) == ["split_k_512_bf16_accum", "split_k_2048_fp32_accum_to_bf16"]
+        [
+            "split_k_512_bf16_accum",
+            "split_k_2048_fp32_accum_to_bf16",
+            "split_out_128_bf16",
+        ]
+    ) == [
+        "split_k_512_bf16_accum",
+        "split_k_2048_fp32_accum_to_bf16",
+        "split_out_128_bf16",
+    ]
 
     with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
         tool._parse_down_proj_variants(["unknown"])
 
     with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
         tool._parse_down_proj_variants(["split_k_0_bf16_accum"])
+
+    with pytest.raises(ValueError, match="Unsupported VoxCPM2 down-proj variant"):
+        tool._parse_down_proj_variants(["split_out_0_bf16"])
 
 
 def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
@@ -603,6 +615,11 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
         linear,
         "split_k_2_fp32_accum_to_bf16",
     )
+    split_out = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "split_out_1_bf16",
+    )
 
     assert functional(x).dtype == torch.bfloat16
     assert torch.equal(functional(x), linear(x))
@@ -617,6 +634,8 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
     assert fp32_output(x).dtype == torch.float32
     assert split_k_bf16(x).dtype == torch.bfloat16
     assert split_k_fp32(x).dtype == torch.bfloat16
+    assert split_out(x).dtype == torch.bfloat16
+    assert torch.equal(split_out(x), linear(x))
 
 
 def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(

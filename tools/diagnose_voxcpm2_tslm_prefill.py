@@ -46,10 +46,14 @@ _DOWN_PROJ_VARIANTS = (
     "fp32_output",
     "split_k_1024_bf16_accum",
     "split_k_1024_fp32_accum_to_bf16",
+    "split_out_256_bf16",
 )
 _SPLIT_K_VARIANT_RE = re.compile(
     r"^split_k_(?P<chunk>[1-9][0-9]*)_"
     r"(?P<mode>bf16_accum|fp32_accum_to_bf16)$"
+)
+_SPLIT_OUT_VARIANT_RE = re.compile(
+    r"^split_out_(?P<chunk>[1-9][0-9]*)_bf16$"
 )
 
 
@@ -488,7 +492,8 @@ def _parse_down_proj_variants(values: list[str] | None) -> list[str]:
                 raise ValueError(
                     f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
                     f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
-                    "split_k_<chunk>_fp32_accum_to_bf16"
+                    "split_k_<chunk>_fp32_accum_to_bf16, "
+                    "split_out_<chunk>_bf16"
                 )
             if variant not in variants:
                 variants.append(variant)
@@ -496,7 +501,11 @@ def _parse_down_proj_variants(values: list[str] | None) -> list[str]:
 
 
 def _is_supported_down_proj_variant(variant: str) -> bool:
-    return variant in _DOWN_PROJ_VARIANTS or _SPLIT_K_VARIANT_RE.match(variant) is not None
+    return (
+        variant in _DOWN_PROJ_VARIANTS
+        or _SPLIT_K_VARIANT_RE.match(variant) is not None
+        or _SPLIT_OUT_VARIANT_RE.match(variant) is not None
+    )
 
 
 def _split_k_variant_config(variant: str) -> tuple[int, str] | None:
@@ -504,6 +513,13 @@ def _split_k_variant_config(variant: str) -> tuple[int, str] | None:
     if match is None:
         return None
     return int(match.group("chunk")), match.group("mode")
+
+
+def _split_out_variant_config(variant: str) -> int | None:
+    match = _SPLIT_OUT_VARIANT_RE.match(variant)
+    if match is None:
+        return None
+    return int(match.group("chunk"))
 
 
 def _set_tactic_sources(
@@ -535,12 +551,13 @@ def _make_down_proj_variant_module(
         return linear_module
 
     split_k_config = _split_k_variant_config(variant)
+    split_out_chunk_size = _split_out_variant_config(variant)
     if not _is_supported_down_proj_variant(variant):
         valid = ", ".join(_DOWN_PROJ_VARIANTS)
         raise ValueError(
             f"Unsupported VoxCPM2 down-proj variant {variant!r}; "
             f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
-            "split_k_<chunk>_fp32_accum_to_bf16"
+            "split_k_<chunk>_fp32_accum_to_bf16, split_out_<chunk>_bf16"
         )
 
     class ManualMatmul(torch_module.nn.Module):
@@ -687,6 +704,31 @@ def _make_down_proj_variant_module(
                 output = (output + self.bias).to(dtype=torch_module.bfloat16)
             return output
 
+    class SplitOutMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any, *, chunk_size: int) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+            self.chunk_size = chunk_size
+
+        def forward(self, down_proj_input: Any) -> Any:
+            partials = []
+            out_features = self.weight.shape[0]
+            for start in range(0, out_features, self.chunk_size):
+                end = min(start + self.chunk_size, out_features)
+                output = torch_module.matmul(
+                    down_proj_input,
+                    self.weight[start:end].transpose(0, 1),
+                )
+                if self.bias is not None:
+                    output = output + self.bias[start:end]
+                partials.append(output)
+            return torch_module.cat(partials, dim=-1)
+
     if variant == "manual_matmul_bf16":
         return ManualMatmul(linear_module)
     if variant == "functional_linear":
@@ -702,6 +744,8 @@ def _make_down_proj_variant_module(
     if split_k_config is not None:
         chunk_size, mode = split_k_config
         return SplitKMatmul(linear_module, chunk_size=chunk_size, mode=mode)
+    if split_out_chunk_size is not None:
+        return SplitOutMatmul(linear_module, chunk_size=split_out_chunk_size)
 
     raise AssertionError(f"Unhandled VoxCPM2 down-proj variant {variant!r}")
 
@@ -1965,9 +2009,11 @@ def main() -> int:
             "Projection lowering variant for --trt-down-proj-layer. Valid "
             "values: linear, functional_linear, einsum, manual_matmul_bf16, "
             "fp32_accum_to_bf16, fp32_output, split_k_1024_bf16_accum, "
-            "split_k_1024_fp32_accum_to_bf16, all, or dynamic "
+            "split_k_1024_fp32_accum_to_bf16, split_out_256_bf16, all, "
+            "or dynamic "
             "split_k_<chunk>_bf16_accum / "
-            "split_k_<chunk>_fp32_accum_to_bf16. Can be repeated. "
+            "split_k_<chunk>_fp32_accum_to_bf16 / split_out_<chunk>_bf16. "
+            "Can be repeated. "
             "Defaults to linear."
         ),
     )
