@@ -57,6 +57,7 @@ from .registry import get_comparator, get_contract_plugin, get_reference, get_ru
 from .runtime_config import runtime_config_get, runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _TRTMC_TIMING_RE = re.compile(
     r"^\[trtmc\.timing\]\s+"
@@ -997,7 +998,9 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
         f"""\
         import json
         import math
+        import os
         from pathlib import Path
+        import sys
 
         import numpy as np
         import soundfile as sf
@@ -1014,6 +1017,10 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
             except Exception:
                 pass
         model = VoxCPM.from_pretrained({case.hf_id!r})
+        if os.environ.get("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"):
+            sys.path.insert(0, {str(REPO_ROOT)!r})
+            from tests.e2e_harness.references.voxcpm_debug import install_voxcpm2_tensor_dump
+            install_voxcpm2_tensor_dump(model)
         if seed >= 0:
             np.random.seed(seed)
             try:

@@ -9,6 +9,7 @@ import struct
 import wave
 from pathlib import Path
 
+import pytest
 import tools.compare_wav_exact as compare_wav_exact
 from tests.e2e_harness.comparators.text_to_audio import TextToAudioComparator
 from tests.e2e_harness.contracts import (
@@ -168,11 +169,93 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
     assert 'getattr(model, "tts_model", model)' in script
     assert '"sample_rate", 48000' in script
     assert 'subtype="FLOAT"' in script
+    assert "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR" in script
+    assert "install_voxcpm2_tensor_dump(model)" in script
     assert out.data["returncode"] == 0
     assert out.data["sample_rate"] == 48000
     assert out.data["result_json_path"] == str(
         tmp_path / "voxcpm2" / "hf_reference_result.json"
     )
+
+
+def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
+    monkeypatch, tmp_path
+):
+    torch = pytest.importorskip("torch")
+    from tests.e2e_harness.references.voxcpm_debug import (
+        install_voxcpm2_tensor_dump,
+    )
+
+    class Projection:
+        def forward(self, value):
+            return value
+
+    class Decoder:
+        in_channels = 3
+
+        def solve_euler(self, *, x, **_kwargs):
+            return x + 1.0
+
+    class TTSModel:
+        patch_size = 4
+        feat_dim = 3
+
+        def __init__(self):
+            self.lm_to_dit_proj = Projection()
+            self.res_to_dit_proj = Projection()
+            self.feat_decoder = Decoder()
+
+    class Model:
+        def __init__(self):
+            self.tts_model = TTSModel()
+
+    dump_dir = tmp_path / "hf_dump"
+    noise_path = tmp_path / "noise.raw"
+    noise_path.write_bytes(struct.pack("<12f", *[float(i) for i in range(12)]))
+    monkeypatch.setenv("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR", str(dump_dir))
+    monkeypatch.setenv("TRTMC_VOXCPM2_HF_NOISE_RAW", str(noise_path))
+
+    model = Model()
+    assert install_voxcpm2_tensor_dump(model) is True
+    tts = model.tts_model
+    tts.lm_to_dit_proj.forward(
+        torch.arange(5, dtype=torch.float32).reshape(1, 5).to(torch.bfloat16)
+    )
+    tts.res_to_dit_proj.forward(
+        torch.arange(5, 10, dtype=torch.float32).reshape(1, 5).to(torch.bfloat16)
+    )
+    out = tts.feat_decoder.forward(
+        mu=torch.zeros((1, 6), dtype=torch.bfloat16),
+        n_timesteps=10,
+        patch_size=4,
+        cond=torch.zeros((1, 3, 4), dtype=torch.bfloat16),
+        cfg_value=2.0,
+    )
+
+    assert tuple(out.shape) == (1, 3, 4)
+    records = [
+        json.loads(line)
+        for line in (dump_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(record["direction"], record["name"]) for record in records] == [
+        ("input", "inference_timesteps"),
+        ("input", "cfg_value"),
+        ("input", "lm_hidden"),
+        ("input", "residual_hidden"),
+        ("input", "feat_cond"),
+        ("input", "locdit_noise"),
+        ("output", "audio_vae_latents"),
+    ]
+
+    by_name = {(record["direction"], record["name"]): record for record in records}
+    assert by_name[("input", "locdit_noise")]["dtype"] == "bfloat16"
+    assert by_name[("input", "locdit_noise")]["shape"] == [4, 3]
+    assert by_name[("input", "locdit_noise")]["nbytes"] == 24
+    assert by_name[("input", "lm_hidden")]["shape"] == [1, 5]
+    assert by_name[("output", "audio_vae_latents")]["dtype"] == "float32"
+    assert by_name[("output", "audio_vae_latents")]["shape"] == [4, 3]
+    for record in records:
+        assert Path(record["path"]).is_file()
 
 
 def test_exact_waveform_mode_passes_identical_wavs(tmp_path):
@@ -421,6 +504,8 @@ def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_p
     assert "VoxCPM.from_pretrained('openbmb/VoxCPM2')" in hf_reference
     assert "cfg_value=2.0" in hf_reference
     assert "inference_timesteps=10" in hf_reference
+    assert "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR" in hf_reference
+    assert "install_voxcpm2_tensor_dump(model)" in hf_reference
     assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference.wav") in hf_reference
     assert (
         str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference_result.json")

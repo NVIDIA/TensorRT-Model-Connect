@@ -20,6 +20,7 @@ from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _input_bool(case: E2ECase, name: str, default: bool) -> bool:
@@ -74,6 +75,8 @@ class VoxCPMReference:
             """\
             import json
             import math
+            import os
+            import sys
 
             import numpy as np
             import soundfile as sf
@@ -92,6 +95,10 @@ class VoxCPMReference:
             from voxcpm import VoxCPM
 
             model = VoxCPM.from_pretrained(%(model_id)r)
+            if os.environ.get("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"):
+                sys.path.insert(0, %(repo_root)r)
+                from tests.e2e_harness.references.voxcpm_debug import install_voxcpm2_tensor_dump
+                install_voxcpm2_tensor_dump(model)
             if seed >= 0:
                 np.random.seed(seed)
                 try:
@@ -147,6 +154,7 @@ class VoxCPMReference:
                 "retry_badcase_ratio_threshold": retry_badcase_ratio_threshold,
                 "wav_path": wav_path,
                 "json_path": json_path,
+                "repo_root": str(REPO_ROOT),
             }
         )
 
