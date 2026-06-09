@@ -1089,6 +1089,72 @@ def test_voxcpm2_raw_checkpoint_packages_full_prefill_lm_sections(tmp_path, monk
     ]
 
 
+def test_voxcpm2_raw_checkpoint_omits_long_full_prefill_sections(
+    tmp_path, monkeypatch
+):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    cfg = _voxcpm2_config(tmp_path)
+    sources = {
+        spec.name: types.SimpleNamespace(config_values={}, weight_files=(), asset_files=())
+        for spec in component_builders.VOXCPM2_COMPONENT_SPECS
+    }
+    calls = []
+
+    def _builder(name, payload):
+        def _inner(ctx):
+            calls.append(name)
+            return payload
+
+        return _inner
+
+    monkeypatch.setattr(
+        component_builders,
+        "build_tslm_prefill_engine",
+        _builder("tslm_prefill", b"TSLM-PREFILL"),
+    )
+    monkeypatch.setattr(
+        component_builders,
+        "build_ralm_prefill_engine",
+        _builder("ralm_prefill", b"RALM-PREFILL"),
+    )
+
+    builders = {
+        "locenc": _builder("locenc", b"LOCENC"),
+        "tslm": component_builders.build_tslm_engine,
+        "ralm": component_builders.build_ralm_engine,
+        "locdit": _builder("locdit", b"LOCDIT"),
+        "audiovae": _builder("audiovae", b"AUDIOVAE"),
+    }
+    monkeypatch.setattr(
+        component_builders,
+        "build_tslm_engine",
+        _builder("tslm", b"TSLM"),
+    )
+    monkeypatch.setattr(
+        component_builders,
+        "build_ralm_engine",
+        _builder("ralm", b"RALM"),
+    )
+    builders["tslm"] = component_builders.build_tslm_engine
+    builders["ralm"] = component_builders.build_ralm_engine
+
+    sections = component_builders.build_voxcpm2_component_plans(
+        tmp_path,
+        cfg,
+        sources,
+        max_cache_length=1024,
+        precision="bf16",
+        verbose=False,
+        builders=builders,
+    )
+
+    assert "tslm_prefill_engine_plan" not in sections
+    assert "ralm_prefill_engine_plan" not in sections
+    assert "tslm_prefill" not in calls
+    assert "ralm_prefill" not in calls
+
+
 def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     from tensorrt_model_connect import checkpoint_mapper
     from tensorrt_model_connect.families.voxcpm2 import component_builders

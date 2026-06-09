@@ -214,6 +214,7 @@ VOXCPM2_TSLM_PREFILL_ENGINE_SECTION = "tslm_prefill_engine_plan"
 VOXCPM2_RALM_PREFILL_ENGINE_SECTION = "ralm_prefill_engine_plan"
 _VOXCPM2_ZERO_PREFILL_FEATURES_VERSION = 1
 _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
+_VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS = 64
 
 
 VOXCPM2_TENSOR_SPECS: Mapping[str, VoxCPM2TensorSpec] = {
@@ -1961,6 +1962,21 @@ def _zero_prefill_table_max_steps() -> int:
     return _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS
 
 
+def _full_prefill_max_steps() -> int:
+    raw = os.environ.get("TRTMC_VOXCPM2_FULL_PREFILL_MAX_STEPS")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return _VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS
+    return _VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS
+
+
+def _should_package_full_prefill(ctx: VoxCPM2ComponentBuildContext) -> bool:
+    max_steps = _full_prefill_max_steps()
+    return max_steps > 0 and _tslm_export_text_steps(ctx) <= max_steps
+
+
 def build_locenc_zero_prefill_feature_table(
     ctx: VoxCPM2ComponentBuildContext,
 ) -> bytes:
@@ -2172,6 +2188,7 @@ def build_voxcpm2_component_plans(
             spec.name == "tslm"
             and component_ctx is not None
             and builder is build_tslm_engine
+            and _should_package_full_prefill(component_ctx)
         ):
             sections[VOXCPM2_TSLM_PREFILL_ENGINE_SECTION] = build_tslm_prefill_engine(
                 component_ctx
@@ -2180,6 +2197,7 @@ def build_voxcpm2_component_plans(
             spec.name == "ralm"
             and component_ctx is not None
             and builder is build_ralm_engine
+            and _should_package_full_prefill(component_ctx)
         ):
             sections[VOXCPM2_RALM_PREFILL_ENGINE_SECTION] = build_ralm_prefill_engine(
                 component_ctx
