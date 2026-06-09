@@ -30,6 +30,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Suppress known harmless third-party warnings emitted during torch_tensorrt import:
 #
@@ -303,6 +304,7 @@ def _build_engine_from_onnx_bytes(
     *,
     verbose: bool = False,
     workspace_size: int = 1 << 30,
+    diagnostic_label: str | None = None,
 ) -> bytes:
     """Build a TRT engine from serialized ONNX bytes with TF32 disabled."""
     from tensorrt_model_connect import trt_compat
@@ -327,10 +329,18 @@ def _build_engine_from_onnx_bytes(
     if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
         config.clear_flag(trt.BuilderFlag.TF32)
 
+    network_layers = _trt_network_layer_summary(network)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TensorRT engine build from ONNX failed")
-    return bytes(plan)
+    plan_bytes = bytes(plan)
+    _maybe_write_onnx_trt_diagnostics(
+        diagnostic_label=diagnostic_label,
+        trt_module=trt,
+        plan_bytes=plan_bytes,
+        network_layers=network_layers,
+    )
+    return plan_bytes
 
 
 def _build_engine_from_onnx_path(
@@ -338,6 +348,7 @@ def _build_engine_from_onnx_path(
     *,
     verbose: bool = False,
     workspace_size: int = 1 << 30,
+    diagnostic_label: str | None = None,
 ) -> bytes:
     """Build a TRT engine from an ONNX file, including external data files."""
     from tensorrt_model_connect import trt_compat
@@ -362,10 +373,127 @@ def _build_engine_from_onnx_path(
     if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
         config.clear_flag(trt.BuilderFlag.TF32)
 
+    network_layers = _trt_network_layer_summary(network)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TensorRT engine build from ONNX failed")
-    return bytes(plan)
+    plan_bytes = bytes(plan)
+    _maybe_write_onnx_trt_diagnostics(
+        diagnostic_label=diagnostic_label,
+        trt_module=trt,
+        plan_bytes=plan_bytes,
+        network_layers=network_layers,
+    )
+    return plan_bytes
+
+
+def _trt_shape(shape: Any) -> list[int]:
+    return [int(dim) for dim in shape]
+
+
+def _trt_tensor_metadata(tensor: Any) -> dict[str, Any] | None:
+    if tensor is None:
+        return None
+    return {
+        "name": str(getattr(tensor, "name", "")),
+        "dtype": str(getattr(tensor, "dtype", "")),
+        "shape": _trt_shape(getattr(tensor, "shape", ())),
+    }
+
+
+def _trt_layer_tensor_list(
+    layer: Any,
+    *,
+    count_attr: str,
+    getter_name: str,
+) -> list[dict[str, Any] | None]:
+    count = int(getattr(layer, count_attr, 0))
+    getter = getattr(layer, getter_name)
+    return [_trt_tensor_metadata(getter(index)) for index in range(count)]
+
+
+def _trt_network_layer_summary(network: Any) -> list[dict[str, Any]]:
+    layers = []
+    for index in range(int(getattr(network, "num_layers", 0))):
+        layer = network.get_layer(index)
+        layers.append(
+            {
+                "index": index,
+                "name": str(getattr(layer, "name", "")),
+                "type": str(getattr(layer, "type", "")),
+                "inputs": _trt_layer_tensor_list(
+                    layer,
+                    count_attr="num_inputs",
+                    getter_name="get_input",
+                ),
+                "outputs": _trt_layer_tensor_list(
+                    layer,
+                    count_attr="num_outputs",
+                    getter_name="get_output",
+                ),
+            }
+        )
+    return layers
+
+
+def _trt_engine_inspector_summary(plan_bytes: bytes, trt_module: Any) -> Any:
+    if not plan_bytes:
+        return None
+    layer_information_format = getattr(trt_module, "LayerInformationFormat", None)
+    json_format = getattr(layer_information_format, "JSON", None)
+    if json_format is None:
+        return None
+    runtime = trt_module.Runtime(trt_module.Logger(trt_module.Logger.WARNING))
+    engine = runtime.deserialize_cuda_engine(plan_bytes)
+    if engine is None or not hasattr(engine, "create_engine_inspector"):
+        return None
+    inspector = engine.create_engine_inspector()
+    try:
+        raw = inspector.get_engine_information(json_format)
+    except TypeError:
+        raw = inspector.get_engine_information()
+    if raw is None:
+        return None
+    text = str(raw)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _diagnostic_output_path(root: Path, label: str | None) -> Path:
+    raw_label = label or "onnx_trt_engine"
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_label).strip("_")
+    if not sanitized:
+        sanitized = "onnx_trt_engine"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return root / f"{timestamp}_{os.getpid()}_{sanitized}.json"
+
+
+def _maybe_write_onnx_trt_diagnostics(
+    *,
+    diagnostic_label: str | None,
+    trt_module: Any,
+    plan_bytes: bytes,
+    network_layers: list[dict[str, Any]],
+) -> Path | None:
+    diagnostics_root = os.environ.get("TRTMC_ONNX_TRT_DIAGNOSTICS_DIR")
+    if not diagnostics_root:
+        return None
+    output_root = Path(diagnostics_root).expanduser()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = _diagnostic_output_path(output_root, diagnostic_label)
+    payload = {
+        "label": diagnostic_label,
+        "plan_bytes": len(plan_bytes),
+        "network_layers": network_layers,
+        "engine_inspector": _trt_engine_inspector_summary(plan_bytes, trt_module),
+    }
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return output_path
 
 
 @contextlib.contextmanager
@@ -424,6 +552,7 @@ def compile_model_via_onnx(
     verbose: bool = False,
     disable_mkldnn: bool = False,
     workspace_size: int = 1 << 30,
+    diagnostic_label: str | None = None,
 ) -> bytes:
     """Export a wrapped model to ONNX, then build a TRT engine via ONNX parser."""
     if verbose:
@@ -455,6 +584,7 @@ def compile_model_via_onnx(
             onnx_path,
             verbose=verbose,
             workspace_size=workspace_size,
+            diagnostic_label=diagnostic_label,
         )
 
 

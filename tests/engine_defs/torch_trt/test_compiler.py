@@ -189,6 +189,140 @@ def test_compile_model_via_onnx_uses_path_export_with_external_data(monkeypatch)
     assert captured["parse_path_exists"] is True
     assert captured["parse_kwargs"]["verbose"] is True
     assert captured["parse_kwargs"]["workspace_size"] == 1234
+    assert captured["parse_kwargs"]["diagnostic_label"] is None
+
+
+@requires_torch
+def test_compile_model_via_onnx_forwards_diagnostic_label(monkeypatch):
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    captured = {}
+
+    def fake_export(model, args, output, **kwargs):
+        del model, args, kwargs
+        Path(output).write_bytes(b"fake-onnx")
+
+    def fake_build_engine(onnx_path, **kwargs):
+        del onnx_path
+        captured["parse_kwargs"] = kwargs
+        return b"fake-plan"
+
+    monkeypatch.setattr(compiler.torch.onnx, "export", fake_export)
+    monkeypatch.setattr(compiler, "_build_engine_from_onnx_path", fake_build_engine)
+
+    result = compiler.compile_model_via_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(1),),
+        input_names=["input"],
+        output_names=["output"],
+        diagnostic_label="voxcpm2_tslm_prefill",
+    )
+
+    assert result == b"fake-plan"
+    assert captured["parse_kwargs"]["diagnostic_label"] == "voxcpm2_tslm_prefill"
+
+
+def test_onnx_trt_network_layer_summary() -> None:
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    class FakeTensor:
+        def __init__(self, name: str, dtype: str, shape: tuple[int, ...]) -> None:
+            self.name = name
+            self.dtype = dtype
+            self.shape = shape
+
+    class FakeLayer:
+        name = "/module/MatMul"
+        type = "LayerType.MATRIX_MULTIPLY"
+        num_inputs = 2
+        num_outputs = 1
+
+        def get_input(self, index: int):
+            if index == 0:
+                return FakeTensor("down_proj_input", "DataType.BF16", (20, 6144))
+            return FakeTensor("down_proj_weight", "DataType.BF16", (6144, 2048))
+
+        def get_output(self, _index: int):
+            return FakeTensor("down_proj_output", "DataType.BF16", (20, 2048))
+
+    class FakeNetwork:
+        num_layers = 1
+
+        def get_layer(self, _index: int):
+            return FakeLayer()
+
+    assert compiler._trt_network_layer_summary(FakeNetwork()) == [
+        {
+            "index": 0,
+            "name": "/module/MatMul",
+            "type": "LayerType.MATRIX_MULTIPLY",
+            "inputs": [
+                {
+                    "name": "down_proj_input",
+                    "dtype": "DataType.BF16",
+                    "shape": [20, 6144],
+                },
+                {
+                    "name": "down_proj_weight",
+                    "dtype": "DataType.BF16",
+                    "shape": [6144, 2048],
+                },
+            ],
+            "outputs": [
+                {
+                    "name": "down_proj_output",
+                    "dtype": "DataType.BF16",
+                    "shape": [20, 2048],
+                }
+            ],
+        }
+    ]
+
+
+def test_onnx_trt_diagnostics_are_opt_in(monkeypatch, tmp_path) -> None:
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    monkeypatch.delenv("TRTMC_ONNX_TRT_DIAGNOSTICS_DIR", raising=False)
+    assert (
+        compiler._maybe_write_onnx_trt_diagnostics(
+            diagnostic_label="voxcpm2_tslm_prefill",
+            trt_module=object(),
+            plan_bytes=b"plan",
+            network_layers=[],
+        )
+        is None
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_onnx_trt_diagnostics_write_network_and_inspector(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from tensorrt_model_connect.engine_defs.torch_trt import compiler
+
+    monkeypatch.setenv("TRTMC_ONNX_TRT_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        compiler,
+        "_trt_engine_inspector_summary",
+        lambda plan_bytes, trt_module: {"Layers": [{"Name": "down_proj"}]},
+    )
+
+    output_path = compiler._maybe_write_onnx_trt_diagnostics(
+        diagnostic_label="voxcpm2_tslm_prefill",
+        trt_module=object(),
+        plan_bytes=b"fake-plan",
+        network_layers=[{"name": "/module/MatMul"}],
+    )
+
+    assert output_path is not None
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "label": "voxcpm2_tslm_prefill",
+        "plan_bytes": len(b"fake-plan"),
+        "network_layers": [{"name": "/module/MatMul"}],
+        "engine_inspector": {"Layers": [{"Name": "down_proj"}]},
+    }
 
 
 @requires_torch

@@ -1823,6 +1823,7 @@ def _compile_voxcpm2_tslm_onnx(
             "tslm_present_kv_cache",
         ],
         verbose=verbose,
+        diagnostic_label="voxcpm2_tslm_decode",
     )
 
 
@@ -1850,6 +1851,7 @@ def _compile_voxcpm2_tslm_prefill_onnx(
             "tslm_present_kv_cache",
         ],
         verbose=verbose,
+        diagnostic_label="voxcpm2_tslm_prefill",
     )
 
 
