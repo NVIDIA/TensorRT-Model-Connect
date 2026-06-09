@@ -6,6 +6,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+import pytest
 import torch
 
 
@@ -396,3 +397,111 @@ def test_voxcpm2_tslm_prefill_probe_keeps_default_variants_full_prefill_only() -
         ("upstream_full_prefill", False, "full_prefill"),
         ("patched_export_full_prefill", True, "full_prefill"),
     ]
+
+
+def test_voxcpm2_tslm_prefill_trt_input_padding_preserves_rows() -> None:
+    tool = _load_tool()
+    tensor = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
+
+    padded = tool._pad_first_dim_to_shape(
+        tensor,
+        (3, 2),
+        torch_module=torch,
+        name="local_text_features",
+    )
+
+    assert padded.shape == (3, 2)
+    assert padded.dtype == torch.bfloat16
+    torch.testing.assert_close(padded[0].float(), torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(padded[1:].float(), torch.zeros((2, 2)))
+
+    with pytest.raises(ValueError, match="engine accepts 1"):
+        tool._pad_first_dim_to_shape(
+            torch.zeros((2, 2), dtype=torch.bfloat16),
+            (1, 2),
+            torch_module=torch,
+            name="local_text_features",
+        )
+
+
+def test_voxcpm2_tslm_prefill_trt_output_selection_handles_normalized_names() -> None:
+    tool = _load_tool()
+
+    assert tool._select_semantic_output_name(
+        [
+            {"name": "output0", "mode": "output", "shape": [20, 2048]},
+            {"name": "output2", "mode": "output", "shape": [20, 2]},
+        ],
+        (20, 2048),
+    ) == "output0"
+
+    assert tool._select_semantic_output_name(
+        [
+            {"name": "output0", "mode": "output", "shape": [20, 2048]},
+            {"name": "semantic_lm_states", "mode": "output", "shape": [1024, 2048]},
+        ],
+        (20, 2048),
+    ) == "semantic_lm_states"
+
+
+def test_voxcpm2_tslm_prefill_diagnose_can_run_trt_plan_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _load_tool()
+    manifest = tmp_path / "manifest.jsonl"
+    for name, dtype, shape, raw in (
+        ("local_text_features", "bfloat16", [1, 2], struct.pack("<HH", 0x3F80, 0x4000)),
+        ("text_tokens", "int32", [1], struct.pack("<i", 101)),
+        ("text_mask", "bfloat16", [1], struct.pack("<H", 0x3F80)),
+        ("audio_mask", "bfloat16", [1], struct.pack("<H", 0x0000)),
+    ):
+        _write_record(
+            tmp_path,
+            manifest,
+            step=0,
+            direction="input",
+            name=name,
+            dtype=dtype,
+            shape=shape,
+            raw=raw,
+        )
+    _write_record(
+        tmp_path,
+        manifest,
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1, 2],
+        raw=struct.pack("<HH", 0x3F80, 0x4000),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_trt_prefill_plan(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "label": "trt_prefill_plan",
+            "matched": True,
+            "first_different_element": None,
+        }
+
+    monkeypatch.setattr(tool, "_run_trt_prefill_plan", fake_run_trt_prefill_plan)
+    result = tool.diagnose(
+        model_dir=tmp_path,
+        hf_dump_dir=tmp_path,
+        device="cuda",
+        include_upstream=False,
+        include_patched=False,
+        trt_prefill_plan=tmp_path / "tslm.plan",
+    )
+
+    assert result["results"] == [
+        {
+            "label": "trt_prefill_plan",
+            "matched": True,
+            "first_different_element": None,
+        }
+    ]
+    assert calls[0]["plan_path"] == tmp_path / "tslm.plan"
+    assert calls[0]["inputs"]["text_tokens"].tolist() == [101]

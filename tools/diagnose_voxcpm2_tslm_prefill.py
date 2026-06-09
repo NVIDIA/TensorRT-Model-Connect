@@ -170,6 +170,171 @@ def _row_prefix(tensor: Any, count: int = 8) -> list[float]:
     return [float(value) for value in tensor[0, :count].float().detach().cpu()]
 
 
+def _trt_dtype_to_torch(trt_dtype: Any, torch_module: Any) -> Any:
+    dtype_text = str(trt_dtype)
+    if "BF16" in dtype_text or "bfloat16" in dtype_text:
+        return torch_module.bfloat16
+    if "FLOAT" in dtype_text or "float32" in dtype_text:
+        return torch_module.float32
+    if "HALF" in dtype_text or "float16" in dtype_text:
+        return torch_module.float16
+    if "INT32" in dtype_text or "int32" in dtype_text:
+        return torch_module.int32
+    raise TypeError(f"Unsupported TensorRT dtype {dtype_text!r}")
+
+
+def _pad_first_dim_to_shape(
+    tensor: Any,
+    shape: tuple[int, ...],
+    *,
+    torch_module: Any,
+    name: str,
+) -> Any:
+    if any(dim < 0 for dim in shape):
+        raise ValueError(f"TensorRT input {name!r} has dynamic shape {shape}")
+    if tuple(int(dim) for dim in tensor.shape) == shape:
+        return tensor.contiguous()
+    if tensor.ndim != len(shape):
+        raise ValueError(
+            f"TensorRT input {name!r} rank {tensor.ndim} does not match "
+            f"engine shape {shape}"
+        )
+    if tuple(int(dim) for dim in tensor.shape[1:]) != shape[1:]:
+        raise ValueError(
+            f"TensorRT input {name!r} trailing shape "
+            f"{tuple(int(dim) for dim in tensor.shape[1:])} does not match "
+            f"engine shape {shape}"
+        )
+    rows = int(tensor.shape[0])
+    if rows > shape[0]:
+        raise ValueError(
+            f"TensorRT input {name!r} has {rows} rows, engine accepts {shape[0]}"
+        )
+    padded = torch_module.zeros(
+        shape,
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    padded[:rows] = tensor
+    return padded.contiguous()
+
+
+def _select_semantic_output_name(
+    io_records: list[dict[str, Any]],
+    expected_shape: tuple[int, ...],
+) -> str:
+    outputs = [record for record in io_records if record["mode"] == "output"]
+    for record in outputs:
+        if record["name"] == "semantic_lm_states":
+            return str(record["name"])
+
+    exact = [
+        record
+        for record in outputs
+        if tuple(int(dim) for dim in record["shape"]) == expected_shape
+    ]
+    if len(exact) == 1:
+        return str(exact[0]["name"])
+
+    compatible = [
+        record
+        for record in outputs
+        if len(record["shape"]) == len(expected_shape)
+        and int(record["shape"][0]) >= expected_shape[0]
+        and tuple(int(dim) for dim in record["shape"][1:]) == expected_shape[1:]
+    ]
+    if len(compatible) == 1:
+        return str(compatible[0]["name"])
+
+    raise ValueError(
+        "Could not identify TensorRT semantic_lm_states output from "
+        f"{[record['name'] for record in outputs]}"
+    )
+
+
+def _run_trt_prefill_plan(
+    *,
+    plan_path: Path,
+    inputs: dict[str, Any],
+    expected: Any,
+    device: str,
+) -> dict[str, Any]:
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("TensorRT prefill-plan diagnostic requires CUDA")
+
+    from tensorrt_model_connect import trt_compat
+
+    trt = trt_compat.get_trt()
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan_path.read_bytes())
+    if engine is None:
+        raise RuntimeError(f"Failed to deserialize TensorRT plan {plan_path}")
+    context = engine.create_execution_context()
+
+    io_records: list[dict[str, Any]] = []
+    buffers: dict[str, Any] = {}
+    cuda_device = torch.device(device if str(device).startswith("cuda") else "cuda")
+    for index in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(index)
+        dtype = engine.get_tensor_dtype(name)
+        shape = tuple(int(dim) for dim in engine.get_tensor_shape(name))
+        mode = engine.get_tensor_mode(name)
+        mode_name = "input" if mode == trt.TensorIOMode.INPUT else "output"
+        io_records.append(
+            {
+                "name": name,
+                "dtype": str(dtype),
+                "shape": [int(dim) for dim in shape],
+                "mode": mode_name,
+            }
+        )
+        torch_dtype = _trt_dtype_to_torch(dtype, torch)
+        if mode_name == "input":
+            if name not in inputs:
+                raise KeyError(f"TensorRT plan input {name!r} is not in HF dump")
+            source = inputs[name].to(device=cuda_device, dtype=torch_dtype)
+            buffers[name] = _pad_first_dim_to_shape(
+                source,
+                shape,
+                torch_module=torch,
+                name=name,
+            )
+        else:
+            buffers[name] = torch.empty(shape, device=cuda_device, dtype=torch_dtype)
+        context.set_tensor_address(name, buffers[name].data_ptr())
+
+    stream = torch.cuda.Stream(device=cuda_device)
+    with torch.cuda.stream(stream):
+        ok = context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    if not ok:
+        raise RuntimeError(f"TensorRT plan execution failed for {plan_path}")
+
+    expected_shape = tuple(int(dim) for dim in expected.shape)
+    semantic_output_name = _select_semantic_output_name(io_records, expected_shape)
+    actual = buffers[semantic_output_name].detach().cpu()
+    if tuple(int(dim) for dim in actual.shape) != expected_shape:
+        actual = actual[: expected_shape[0]]
+    actual = actual.to(dtype=expected.dtype).contiguous()
+    mismatch = _first_mismatch(expected, actual)
+    mismatch.update(
+        {
+            "label": "trt_prefill_plan",
+            "prefill_mode": "trt_plan",
+            "plan_path": str(plan_path),
+            "semantic_output_name": semantic_output_name,
+            "engine_io": io_records,
+            "compared_rows": expected_shape[0],
+            "row0_expected_first8": _row_prefix(expected),
+            "row0_actual_first8": _row_prefix(actual),
+        }
+    )
+    return mismatch
+
+
 def _record_trace_matrix(
     traces: dict[str, Any],
     *,
@@ -954,6 +1119,7 @@ def diagnose(
     include_step_loop: bool = False,
     include_layer_traces: bool = False,
     trace_layer_index: int | None = None,
+    trt_prefill_plan: Path | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -978,25 +1144,35 @@ def diagnose(
         torch_module=torch,
     )
 
-    config, state = _load_tslm_state(model_dir)
     results = []
-    for label, apply_export_patch, prefill_mode in _selected_variant_runs(
-        include_upstream=include_upstream,
-        include_patched=include_patched,
-        include_step_loop=include_step_loop,
-    ):
+    if include_upstream or include_patched:
+        config, state = _load_tslm_state(model_dir)
+        for label, apply_export_patch, prefill_mode in _selected_variant_runs(
+            include_upstream=include_upstream,
+            include_patched=include_patched,
+            include_step_loop=include_step_loop,
+        ):
+            results.append(
+                _run_variant(
+                    label=label,
+                    apply_export_patch=apply_export_patch,
+                    prefill_mode=prefill_mode,
+                    config=config,
+                    state=state,
+                    inputs=inputs,
+                    expected=expected,
+                    device=device,
+                    include_layer_traces=include_layer_traces,
+                    trace_layer_index=trace_layer_index,
+                )
+            )
+    if trt_prefill_plan is not None:
         results.append(
-            _run_variant(
-                label=label,
-                apply_export_patch=apply_export_patch,
-                prefill_mode=prefill_mode,
-                config=config,
-                state=state,
+            _run_trt_prefill_plan(
+                plan_path=trt_prefill_plan,
                 inputs=inputs,
                 expected=expected,
                 device=device,
-                include_layer_traces=include_layer_traces,
-                trace_layer_index=trace_layer_index,
             )
         )
 
@@ -1019,11 +1195,11 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--variant",
-        choices=("both", "upstream", "patched"),
+        choices=("both", "upstream", "patched", "none"),
         default="both",
         help=(
             "Eager variant to run. 'both' must run upstream before applying "
-            "the export patch."
+            "the export patch; 'none' runs only the TensorRT plan diagnostic."
         ),
     )
     parser.add_argument(
@@ -1051,6 +1227,14 @@ def main() -> int:
             "MLP substeps inside this MiniCPM layer. Implies layer tracing."
         ),
     )
+    parser.add_argument(
+        "--trt-prefill-plan",
+        type=Path,
+        help=(
+            "Optional serialized TensorRT TSLM prefill plan to run against "
+            "the stacked HF prefill rows."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -1062,6 +1246,7 @@ def main() -> int:
         include_step_loop=args.include_step_loop,
         include_layer_traces=args.include_layer_traces,
         trace_layer_index=args.trace_layer_substeps,
+        trt_prefill_plan=args.trt_prefill_plan,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:
