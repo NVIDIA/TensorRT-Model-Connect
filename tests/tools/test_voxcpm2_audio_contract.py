@@ -467,6 +467,31 @@ def test_voxcpm_reference_result_json_is_registered_as_report_artifact(tmp_path)
     assert sink.artifacts["ref_result_json"] == "voxcpm2/hf_reference_result.json"
 
 
+def test_voxcpm2_locdit_noise_raw_is_registered_as_report_artifact(tmp_path):
+    noise_path = tmp_path / "voxcpm2" / "locdit_noise.raw"
+    noise_path.parent.mkdir()
+    noise_path.write_bytes(b"noise")
+
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    out = StageOutput(
+        stage_name="full_generation",
+        data={"locdit_noise_raw": str(noise_path)},
+    )
+
+    _auto_register_artifacts(sink, out, "trt")
+
+    assert sink.artifacts["trt_locdit_noise_raw"] == "voxcpm2/locdit_noise.raw"
+
+
 def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):
     trt_wav = tmp_path / "trt_output.wav"
     ref_wav = tmp_path / "hf_reference.wav"
