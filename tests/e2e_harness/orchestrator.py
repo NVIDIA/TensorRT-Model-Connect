@@ -978,6 +978,8 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
     case_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
     wav_path = case_dir / "hf_reference.wav"
     json_path = case_dir / "hf_reference_result.json"
+    tensor_dump_dir = case_dir / "hf_tensor_dump"
+    locdit_noise_raw = case_dir / "locdit_noise.raw"
     python = ctx.reference_python_path() or ctx.hf_python or "python"
 
     prompt = case.inputs.get("prompt", "Hello, this is a test.")
@@ -1006,6 +1008,13 @@ def _voxcpm_reference_repro_command(case: E2ECase, ctx: RunContext) -> str:
         import numpy as np
         import soundfile as sf
         from voxcpm import VoxCPM
+
+        os.environ.setdefault(
+            "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR", {str(tensor_dump_dir)!r}
+        )
+        locdit_noise_raw = Path({str(locdit_noise_raw)!r})
+        if locdit_noise_raw.is_file():
+            os.environ.setdefault("TRTMC_VOXCPM2_HF_NOISE_RAW", str(locdit_noise_raw))
 
         seed = {seed}
         if seed >= 0:

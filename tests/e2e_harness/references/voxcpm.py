@@ -30,6 +30,13 @@ def _input_bool(case: E2ECase, name: str, default: bool) -> bool:
     return bool(value)
 
 
+def _shared_locdit_noise_path(case: E2ECase, ctx: RunContext) -> Path | None:
+    if case.family != "voxcpm2" or not ctx.artifacts_dir:
+        return None
+    path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "locdit_noise.raw"
+    return path if path.is_file() else None
+
+
 class VoxCPMReference:
     """Reference backend for VoxCPM2 via the official ``voxcpm`` library."""
 
@@ -161,6 +168,9 @@ class VoxCPMReference:
         env = os.environ.copy()
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        shared_noise_path = _shared_locdit_noise_path(case, ctx)
+        if shared_noise_path is not None and env.get("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"):
+            env["TRTMC_VOXCPM2_HF_NOISE_RAW"] = str(shared_noise_path)
 
         t0 = time.monotonic()
         try:
@@ -188,6 +198,8 @@ class VoxCPMReference:
             "stderr_truncated": stderr_truncated,
             "result_json_path": json_path,
         }
+        if shared_noise_path is not None and env.get("TRTMC_VOXCPM2_HF_NOISE_RAW"):
+            data["locdit_noise_raw"] = str(shared_noise_path)
         if stderr_log:
             data["stderr_log"] = stderr_log
 

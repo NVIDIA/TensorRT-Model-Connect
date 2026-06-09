@@ -178,6 +178,62 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
     )
 
 
+def test_voxcpm_reference_forwards_shared_locdit_noise_when_dumping(
+    monkeypatch, tmp_path
+):
+    captured: dict[str, dict[str, str]] = {}
+    noise_path = tmp_path / "voxcpm2" / "locdit_noise.raw"
+    noise_path.parent.mkdir(parents=True)
+    noise_path.write_bytes(struct.pack("<12f", *[float(i) for i in range(12)]))
+    monkeypatch.setenv(
+        "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR", str(tmp_path / "hf_tensor_dump")
+    )
+
+    def _fake_run(cmd, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {
+                    "cfg_value": 2.0,
+                    "duration_s": 0.1,
+                    "inference_timesteps": 10,
+                    "num_samples": 4800,
+                    "rms": 0.1,
+                    "sample_rate": 48000,
+                    "wav_path": str(tmp_path / "voxcpm2" / "hf_reference.wav"),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(voxcpm_reference.subprocess, "run", _fake_run)
+
+    case = E2ECase(
+        name="voxcpm2",
+        hf_id="openbmb/VoxCPM2",
+        family="voxcpm2",
+        runtime_strategy="text_to_audio_voxcpm2",
+        reference_backend="voxcpm",
+        inputs={
+            "prompt": "Hello, this is the VoxCPM2 TensorRT Model Connect parity test.",
+            "cfg_value": 2.0,
+            "inference_timesteps": 10,
+        },
+    )
+    ctx = RunContext(case=case, artifacts_dir=str(tmp_path), reference_python="/opt/ref-python")
+
+    out = voxcpm_reference.VoxCPMReference().run_stage(
+        case, StageSpec(name="full_generation"), ctx
+    )
+
+    assert captured["env"]["TRTMC_VOXCPM2_HF_NOISE_RAW"] == str(noise_path)
+    assert out.data["locdit_noise_raw"] == str(noise_path)
+
+
 def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
     monkeypatch, tmp_path
 ):
@@ -605,6 +661,9 @@ def test_voxcpm2_repro_commands_preserve_audio_artifacts_and_exact_compare(tmp_p
     assert "cfg_value=2.0" in hf_reference
     assert "inference_timesteps=10" in hf_reference
     assert "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR" in hf_reference
+    assert "TRTMC_VOXCPM2_HF_NOISE_RAW" in hf_reference
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_tensor_dump") in hf_reference
+    assert str(tmp_path / "artifacts" / "voxcpm2" / "locdit_noise.raw") in hf_reference
     assert "install_voxcpm2_tensor_dump(model)" in hf_reference
     assert str(tmp_path / "artifacts" / "voxcpm2" / "hf_reference.wav") in hf_reference
     assert (
