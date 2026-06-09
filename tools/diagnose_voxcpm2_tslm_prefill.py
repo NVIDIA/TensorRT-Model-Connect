@@ -30,6 +30,9 @@ _PREFILL_INPUTS = (
     "audio_mask",
 )
 
+_FULL_PREFILL_MODE = "full_prefill"
+_STEP_LOOP_MODE = "step_loop"
+
 
 def _load_manifest(dump_dir: Path) -> list[dict[str, Any]]:
     manifest_path = dump_dir / "manifest.jsonl"
@@ -174,6 +177,24 @@ def _load_tslm_state(model_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return config, state
 
 
+def _selected_variant_runs(
+    *,
+    include_upstream: bool,
+    include_patched: bool,
+    include_step_loop: bool,
+) -> list[tuple[str, bool, str]]:
+    runs: list[tuple[str, bool, str]] = []
+    if include_upstream:
+        runs.append(("upstream_full_prefill", False, _FULL_PREFILL_MODE))
+        if include_step_loop:
+            runs.append(("upstream_step_loop", False, _STEP_LOOP_MODE))
+    if include_patched:
+        runs.append(("patched_export_full_prefill", True, _FULL_PREFILL_MODE))
+        if include_step_loop:
+            runs.append(("patched_export_step_loop", True, _STEP_LOOP_MODE))
+    return runs
+
+
 def _prefixed_state(
     state: dict[str, Any],
     prefix: str,
@@ -191,6 +212,7 @@ def _run_variant(
     *,
     label: str,
     apply_export_patch: bool,
+    prefill_mode: str,
     config: dict[str, Any],
     state: dict[str, Any],
     inputs: dict[str, Any],
@@ -247,22 +269,59 @@ def _run_variant(
             audio_mask.unsqueeze(0).unsqueeze(-1)
             * local_text_features.unsqueeze(0)
         )
-        raw_hidden, _ = base_lm(inputs_embeds=combined_embed, is_causal=True)
-        raw_hidden = raw_hidden.to(dtype=compute_dtype)
-        semantic = fsq_layer(raw_hidden) * audio_mask.unsqueeze(0).unsqueeze(-1)
-        semantic = semantic + raw_hidden * text_mask.unsqueeze(0).unsqueeze(-1)
-        semantic = (
-            semantic.squeeze(0)
-            .to(dtype=compute_dtype)
-            .detach()
-            .cpu()
-            .contiguous()
-        )
+        if prefill_mode == _FULL_PREFILL_MODE:
+            raw_hidden, _ = base_lm(inputs_embeds=combined_embed, is_causal=True)
+            raw_hidden = raw_hidden.to(dtype=compute_dtype)
+            semantic = fsq_layer(raw_hidden) * audio_mask.unsqueeze(0).unsqueeze(-1)
+            semantic = semantic + raw_hidden * text_mask.unsqueeze(0).unsqueeze(-1)
+            semantic = (
+                semantic.squeeze(0)
+                .to(dtype=compute_dtype)
+                .detach()
+                .cpu()
+                .contiguous()
+            )
+        elif prefill_mode == _STEP_LOOP_MODE:
+            base_lm.setup_cache(
+                1,
+                int(combined_embed.shape[1]),
+                device,
+                compute_dtype,
+            )
+            rows = []
+            for position in range(int(combined_embed.shape[1])):
+                position_id = torch.tensor(
+                    [position],
+                    dtype=torch.long,
+                    device=device,
+                )
+                step_output = base_lm.forward_step(
+                    combined_embed[:, position, :],
+                    position_id,
+                )
+                if isinstance(step_output, tuple):
+                    raw_hidden = step_output[0]
+                else:
+                    raw_hidden = step_output
+                raw_hidden = raw_hidden.to(dtype=compute_dtype)
+                semantic_row = fsq_layer(raw_hidden) * audio_mask[position].reshape(
+                    1,
+                    1,
+                )
+                semantic_row = semantic_row + raw_hidden * text_mask[position].reshape(
+                    1,
+                    1,
+                )
+                rows.append(semantic_row.squeeze(0).to(dtype=compute_dtype))
+            semantic = torch.stack(rows, dim=0).detach().cpu().contiguous()
+        else:
+            raise ValueError(f"Unsupported VoxCPM2 TSLM prefill mode {prefill_mode!r}")
 
     mismatch = _first_mismatch(expected, semantic)
     mismatch.update(
         {
             "label": label,
+            "prefill_mode": prefill_mode,
             "row0_expected_first8": _row_prefix(expected),
             "row0_actual_first8": _row_prefix(semantic),
         }
@@ -282,6 +341,7 @@ def diagnose(
     device: str,
     include_upstream: bool = True,
     include_patched: bool = True,
+    include_step_loop: bool = False,
 ) -> dict[str, Any]:
     import torch
 
@@ -308,23 +368,16 @@ def diagnose(
 
     config, state = _load_tslm_state(model_dir)
     results = []
-    if include_upstream:
+    for label, apply_export_patch, prefill_mode in _selected_variant_runs(
+        include_upstream=include_upstream,
+        include_patched=include_patched,
+        include_step_loop=include_step_loop,
+    ):
         results.append(
             _run_variant(
-                label="upstream_full_prefill",
-                apply_export_patch=False,
-                config=config,
-                state=state,
-                inputs=inputs,
-                expected=expected,
-                device=device,
-            )
-        )
-    if include_patched:
-        results.append(
-            _run_variant(
-                label="patched_export_full_prefill",
-                apply_export_patch=True,
+                label=label,
+                apply_export_patch=apply_export_patch,
+                prefill_mode=prefill_mode,
                 config=config,
                 state=state,
                 inputs=inputs,
@@ -357,6 +410,14 @@ def main() -> int:
             "the export patch."
         ),
     )
+    parser.add_argument(
+        "--include-step-loop",
+        action="store_true",
+        help=(
+            "Also replay the same rows through MiniCPM forward_step so TSLM "
+            "refresh-path drift can be distinguished from full-prefill drift."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -365,6 +426,7 @@ def main() -> int:
         device=args.device,
         include_upstream=args.variant in {"both", "upstream"},
         include_patched=args.variant in {"both", "patched"},
+        include_step_loop=args.include_step_loop,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:

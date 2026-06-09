@@ -117,3 +117,35 @@ def test_voxcpm2_tslm_prefill_probe_reports_first_bf16_mismatch() -> None:
     assert mismatch["actual_value"] == 4.0
     assert mismatch["expected_bits"] == "0x4000"
     assert mismatch["actual_bits"] == "0x4080"
+
+
+def test_voxcpm2_tslm_prefill_probe_schedules_step_loop_variants() -> None:
+    tool = _load_tool()
+
+    runs = tool._selected_variant_runs(
+        include_upstream=True,
+        include_patched=True,
+        include_step_loop=True,
+    )
+
+    assert runs == [
+        ("upstream_full_prefill", False, "full_prefill"),
+        ("upstream_step_loop", False, "step_loop"),
+        ("patched_export_full_prefill", True, "full_prefill"),
+        ("patched_export_step_loop", True, "step_loop"),
+    ]
+
+
+def test_voxcpm2_tslm_prefill_probe_keeps_default_variants_full_prefill_only() -> None:
+    tool = _load_tool()
+
+    runs = tool._selected_variant_runs(
+        include_upstream=True,
+        include_patched=True,
+        include_step_loop=False,
+    )
+
+    assert runs == [
+        ("upstream_full_prefill", False, "full_prefill"),
+        ("patched_export_full_prefill", True, "full_prefill"),
+    ]
