@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import subprocess
@@ -421,6 +422,10 @@ def test_exact_waveform_mode_passes_identical_wavs(tmp_path):
         str(ref_wav),
     ]
     assert payload["result"]["metrics"]["waveform_exact_match"] is True
+    assert (
+        payload["result"]["trt"]["data_sha256"]
+        == payload["result"]["ref"]["data_sha256"]
+    )
     assert result.metrics["waveform_exact_match"].note == (
         f"exact_compare_result={sidecar}"
     )
@@ -461,6 +466,11 @@ def test_compare_wav_exact_cli_payload_matches_comparator_contract(tmp_path):
     assert result["passed"] is True
     assert result["metrics"]["sample_rate_exact"] is True
     assert result["metrics"]["waveform_exact_match"] is True
+    expected_digest = hashlib.sha256(
+        compare_wav_exact.read_wav_payload(trt_wav)["data"]
+    ).hexdigest()
+    assert result["trt"]["data_sha256"] == expected_digest
+    assert result["trt"]["data_sha256"] == result["ref"]["data_sha256"]
 
 
 def test_exact_compare_sidecar_is_registered_as_report_artifact(tmp_path):
@@ -559,6 +569,7 @@ def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):
     assert result["passed"] is False
     assert result["metrics"]["sample_rate_exact"] is True
     assert result["metrics"]["waveform_exact_match"] is False
+    assert result["trt"]["data_sha256"] != result["ref"]["data_sha256"]
 
 
 def test_compare_wav_exact_cli_reports_json_and_status(tmp_path):

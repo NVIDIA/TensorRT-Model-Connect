@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import struct
 from pathlib import Path
@@ -89,6 +90,7 @@ def compare_wavs(trt_wav: Path, ref_wav: Path) -> dict[str, Any]:
             "audio_format": trt["audio_format"],
             "bits_per_sample": trt["bits_per_sample"],
             "data_bytes": len(trt["data"]),
+            "data_sha256": hashlib.sha256(trt["data"]).hexdigest(),
         },
         "ref": {
             "sample_rate": ref["sample_rate"],
@@ -96,6 +98,7 @@ def compare_wavs(trt_wav: Path, ref_wav: Path) -> dict[str, Any]:
             "audio_format": ref["audio_format"],
             "bits_per_sample": ref["bits_per_sample"],
             "data_bytes": len(ref["data"]),
+            "data_sha256": hashlib.sha256(ref["data"]).hexdigest(),
         },
     }
 
