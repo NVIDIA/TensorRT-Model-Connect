@@ -178,6 +178,7 @@ def test_compile_model_via_onnx_uses_path_export_with_external_data(monkeypatch)
         (torch.zeros(1),),
         input_names=["input"],
         output_names=["output"],
+        custom_opsets={"trtmc": 1},
         verbose=True,
         workspace_size=1234,
     )
@@ -186,6 +187,7 @@ def test_compile_model_via_onnx_uses_path_export_with_external_data(monkeypatch)
     assert isinstance(captured["output"], str)
     assert captured["kwargs"]["external_data"] is True
     assert captured["kwargs"]["dynamo"] is False
+    assert captured["kwargs"]["custom_opsets"] == {"trtmc": 1}
     assert captured["parse_path_exists"] is True
     assert captured["parse_kwargs"]["verbose"] is True
     assert captured["parse_kwargs"]["workspace_size"] == 1234

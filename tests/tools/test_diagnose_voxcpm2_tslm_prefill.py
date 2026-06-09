@@ -771,6 +771,7 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
         "split_k_1024_bf16_accum",
         "split_k_1024_fp32_accum_to_bf16",
         "split_out_256_bf16",
+        "native_exact_bf16_plugin",
     ]
     assert tool._parse_down_proj_variants(
         [
@@ -864,6 +865,11 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
         linear,
         "split_out_1_bf16",
     )
+    native_plugin = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "native_exact_bf16_plugin",
+    )
 
     assert functional(x).dtype == torch.bfloat16
     assert torch.equal(functional(x), linear(x))
@@ -885,6 +891,8 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
     assert split_k_fp32(x).dtype == torch.bfloat16
     assert split_out(x).dtype == torch.bfloat16
     assert torch.equal(split_out(x), linear(x))
+    assert native_plugin(x).dtype == torch.bfloat16
+    assert torch.equal(native_plugin(x), linear(x))
 
 
 def test_voxcpm2_tslm_prefill_materializes_inference_tensor_for_export() -> None:

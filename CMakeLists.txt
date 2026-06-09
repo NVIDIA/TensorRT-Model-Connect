@@ -434,6 +434,38 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
+set(TRTMC_VOXCPM2_TRT_PLUGIN_SOURCES)
+if(CMAKE_CUDA_COMPILER)
+  set(TRTMC_VOXCPM2_TRT_PLUGIN_SOURCES
+    src/plugins/voxcpm2_bf16_down_proj_plugin.cpp
+    src/plugins/voxcpm2_bf16_down_proj_kernel.cu
+  )
+  set_source_files_properties(
+    src/plugins/voxcpm2_bf16_down_proj_kernel.cu
+    PROPERTIES LANGUAGE CUDA
+  )
+endif()
+
+# Build the VoxCPM2 TensorRT plugins as a standalone shared library so Python
+# ONNX-to-TRT builds can load the plugin creator before parsing custom nodes.
+if(_trtmc_can_build_trt_backend AND CMAKE_CUDA_COMPILER)
+  add_library(trtmc_voxcpm2_plugins SHARED
+    ${TRTMC_VOXCPM2_TRT_PLUGIN_SOURCES}
+  )
+  target_include_directories(trtmc_voxcpm2_plugins PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(trtmc_voxcpm2_plugins SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(trtmc_voxcpm2_plugins PRIVATE
+    ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>)
+  target_compile_definitions(trtmc_voxcpm2_plugins PRIVATE TRTMC_HAS_TRT=1)
+  target_compile_options(trtmc_voxcpm2_plugins PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  )
+  message(STATUS "VoxCPM2 TRT plugin shared library: trtmc_voxcpm2_plugins.so")
+endif()
+
 # --- Backend DSO: standard TRT ---
 if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   add_library(trtmc_backend_trt SHARED
@@ -452,6 +484,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   target_link_libraries(trtmc_backend_trt PRIVATE
     trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS}
+    $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>
   )
   if(_trtmc_has_tvm_ffi)
     target_sources(trtmc_backend_trt PRIVATE
@@ -461,7 +494,13 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     target_include_directories(trtmc_backend_trt SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtmc_backend_trt PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
   endif()
-  target_compile_options(trtmc_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
+  if(CMAKE_CUDA_COMPILER)
+    target_sources(trtmc_backend_trt PRIVATE ${TRTMC_VOXCPM2_TRT_PLUGIN_SOURCES})
+  endif()
+  target_compile_options(trtmc_backend_trt PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  )
   target_compile_definitions(trtmc_backend_trt PRIVATE
     TRTMC_HAS_TRT=1
     TRTMC_HAS_TVM_FFI=$<BOOL:${_trtmc_has_tvm_ffi}>
@@ -515,6 +554,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
     )
     target_link_libraries(trtmc_backend_rtx PRIVATE
       trtmc_core ${TENSORRT_RTX_LIB} ${TRTMC_CUDART_LIBRARY}
+      $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>
     )
     if(_trtmc_has_tvm_ffi)
       target_sources(trtmc_backend_rtx PRIVATE
@@ -524,7 +564,13 @@ if(TRTMC_BUILD_BACKEND_RTX)
       target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
       target_link_libraries(trtmc_backend_rtx PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
     endif()
-    target_compile_options(trtmc_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
+    if(CMAKE_CUDA_COMPILER)
+      target_sources(trtmc_backend_rtx PRIVATE ${TRTMC_VOXCPM2_TRT_PLUGIN_SOURCES})
+    endif()
+    target_compile_options(trtmc_backend_rtx PRIVATE
+      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+      "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+    )
     target_compile_definitions(trtmc_backend_rtx PRIVATE
       TRTMC_HAS_TRT=1
       TRTMC_HAS_TVM_FFI=$<BOOL:${_trtmc_has_tvm_ffi}>

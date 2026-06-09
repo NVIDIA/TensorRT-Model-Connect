@@ -36,6 +36,7 @@ _PREFILL_INPUTS = (
 _FULL_PREFILL_MODE = "full_prefill"
 _STEP_LOOP_MODE = "step_loop"
 _DEFAULT_DOWN_PROJ_VARIANT = "linear"
+_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT = "native_exact_bf16_plugin"
 _DOWN_PROJ_VARIANTS = (
     _DEFAULT_DOWN_PROJ_VARIANT,
     "functional_linear",
@@ -49,7 +50,9 @@ _DOWN_PROJ_VARIANTS = (
     "split_k_1024_bf16_accum",
     "split_k_1024_fp32_accum_to_bf16",
     "split_out_256_bf16",
+    _NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT,
 )
+_TRTMC_ONNX_CUSTOM_OPSETS = {"trtmc": 1}
 _SPLIT_K_VARIANT_RE = re.compile(
     r"^split_k_(?P<chunk>[1-9][0-9]*)_"
     r"(?P<mode>bf16_accum|fp32_accum_to_bf16)$"
@@ -668,6 +671,14 @@ def _make_down_proj_variant_module(
             f"valid values: {valid}, split_k_<chunk>_bf16_accum, "
             "split_k_<chunk>_fp32_accum_to_bf16, split_out_<chunk>_bf16"
         )
+    if variant == _NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT:
+        from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+        return component_builders._make_down_proj_variant_module(
+            torch_module,
+            linear_module,
+            variant,
+        )
 
     class ManualMatmul(torch_module.nn.Module):
         def __init__(self, module: Any) -> None:
@@ -983,6 +994,7 @@ def _run_trt_linear_projection(
         raise RuntimeError("TensorRT down-proj diagnostic requires CUDA")
 
     from tensorrt_model_connect import trt_compat
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
 
     class LinearProjectionWrapper(torch.nn.Module):
         def __init__(self, module: Any) -> None:
@@ -1002,6 +1014,10 @@ def _run_trt_linear_projection(
     cuda_device = torch.device(device if str(device).startswith("cuda") else "cuda")
     trt = trt_compat.get_trt()
     logger = trt.Logger(trt.Logger.WARNING)
+    custom_opsets = None
+    if variant == _NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT:
+        component_builders._ensure_voxcpm2_bf16_down_proj_plugin_registered()
+        custom_opsets = _TRTMC_ONNX_CUSTOM_OPSETS
 
     with tempfile.TemporaryDirectory(prefix="trtmc_down_proj_") as tmpdir:
         onnx_path = Path(tmpdir) / "model.onnx"
@@ -1015,6 +1031,7 @@ def _run_trt_linear_projection(
                 external_data=True,
                 input_names=["down_proj_input"],
                 output_names=["down_proj_output"],
+                custom_opsets=custom_opsets,
                 dynamic_axes=None,
             )
 
@@ -2318,10 +2335,12 @@ def main() -> int:
         metavar="VARIANT[,VARIANT...]",
         help=(
             "Projection lowering variant for --trt-down-proj-layer. Valid "
-            "values: linear, functional_linear, einsum, manual_matmul_bf16, "
-            "pretransposed_matmul_bf16, fp32_accum_to_bf16, fp32_output, "
+            "values: linear, functional_linear, addmm_zero, einsum, "
+            "batched_bmm, manual_matmul_bf16, pretransposed_matmul_bf16, "
+            "fp32_accum_to_bf16, fp32_output, "
             "split_k_1024_bf16_accum, "
-            "split_k_1024_fp32_accum_to_bf16, split_out_256_bf16, all, "
+            "split_k_1024_fp32_accum_to_bf16, split_out_256_bf16, "
+            "native_exact_bf16_plugin, all, "
             "or dynamic "
             "split_k_<chunk>_bf16_accum / "
             "split_k_<chunk>_fp32_accum_to_bf16 / split_out_<chunk>_bf16. "

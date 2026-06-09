@@ -8,6 +8,7 @@ next to the Python build surface.
 from __future__ import annotations
 
 import copy
+import ctypes
 import math
 import os
 import re
@@ -217,8 +218,15 @@ _VOXCPM2_ZERO_PREFILL_FEATURES_VERSION = 1
 _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
 _VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS = 1024
 _VOXCPM2_TSLM_DOWN_PROJ_VARIANT_ENV = "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT"
+_VOXCPM2_PLUGIN_LIBRARY_ENV = "TRTMC_VOXCPM2_PLUGIN_LIBRARY"
 _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT = "linear"
 _VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT = "native_exact_bf16_plugin"
+_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_NAME = "VoxCPM2Bf16DownProj"
+_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_VERSION = "1"
+_VOXCPM2_BF16_DOWN_PROJ_ONNX_DOMAIN = "trtmc"
+_VOXCPM2_BF16_DOWN_PROJ_ONNX_OPSET = 1
+_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_LIBRARY = "libtrtmc_voxcpm2_plugins.so"
+_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_HANDLES: list[Any] = []
 _VOXCPM2_DOWN_PROJ_VARIANTS = (
     _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT,
     "functional_linear",
@@ -988,6 +996,91 @@ def _selected_tslm_down_proj_variant() -> str:
     return _validate_down_proj_variant(raw)
 
 
+def _trt_plugin_creator(trt_module: Any, plugin_name: str, plugin_version: str) -> Any | None:
+    registry = trt_module.get_plugin_registry()
+    get_plugin_creator = getattr(registry, "get_plugin_creator", None)
+    if get_plugin_creator is not None:
+        creator = get_plugin_creator(plugin_name, plugin_version, "")
+        if creator is not None:
+            return creator
+    get_creator = getattr(registry, "get_creator", None)
+    if get_creator is not None:
+        return get_creator(plugin_name, plugin_version, "")
+    return None
+
+
+def _voxcpm2_plugin_library_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    env_path = os.environ.get(_VOXCPM2_PLUGIN_LIBRARY_ENV, "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    source_root = Path(__file__).resolve().parents[4]
+    for root in (Path.cwd(), source_root):
+        candidates.extend(
+            (
+                root / "build" / _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_LIBRARY,
+                root / _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_LIBRARY,
+            )
+        )
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            deduped.append(candidate)
+            seen.add(key)
+    return tuple(deduped)
+
+
+def _ensure_voxcpm2_bf16_down_proj_plugin_registered() -> None:
+    from ... import trt_compat
+
+    trt = trt_compat.get_trt()
+    if _trt_plugin_creator(
+        trt,
+        _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_NAME,
+        _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_VERSION,
+    ) is not None:
+        return
+
+    attempted: list[str] = []
+    for candidate in _voxcpm2_plugin_library_candidates():
+        attempted.append(str(candidate))
+        if not candidate.exists():
+            continue
+        handle = ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
+        force_link = getattr(handle, "voxcpm2_bf16_down_proj_plugin_force_link", None)
+        if force_link is not None:
+            force_link()
+        _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_HANDLES.append(handle)
+        if _trt_plugin_creator(
+            trt,
+            _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_NAME,
+            _VOXCPM2_BF16_DOWN_PROJ_PLUGIN_VERSION,
+        ) is not None:
+            return
+
+    searched = ", ".join(attempted) or "<none>"
+    raise RuntimeError(
+        "VoxCPM2 TSLM down-proj variant 'native_exact_bf16_plugin' "
+        "requires the TensorRT plugin "
+        f"{_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_NAME} version "
+        f"{_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_VERSION}. Build "
+        f"{_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_LIBRARY} or set "
+        f"{_VOXCPM2_PLUGIN_LIBRARY_ENV}; searched: {searched}"
+    )
+
+
+def _voxcpm2_tslm_custom_opsets() -> Mapping[str, int] | None:
+    if _selected_tslm_down_proj_variant() != _VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT:
+        return None
+    _ensure_voxcpm2_bf16_down_proj_plugin_registered()
+    return {
+        _VOXCPM2_BF16_DOWN_PROJ_ONNX_DOMAIN: _VOXCPM2_BF16_DOWN_PROJ_ONNX_OPSET
+    }
+
+
 def _make_down_proj_variant_module(
     torch_module: Any,
     linear_module: Any,
@@ -995,14 +1088,44 @@ def _make_down_proj_variant_module(
 ) -> Any:
     variant = _validate_down_proj_variant(variant)
     if variant == _VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT:
-        raise NotImplementedError(
-            "VoxCPM2 TSLM down-proj variant 'native_exact_bf16_plugin' "
-            "requires a registered TensorRT plugin that preserves PyTorch "
-            "BF16 matmul accumulation and rounding semantics. Existing ONNX "
-            "GEMM/MatMul lowerings are known to drift for this layer, so this "
-            "mode is reserved until the native plugin is implemented and "
-            "validated against the HF tensor dump."
-        )
+        class NativeExactBf16DownProjFunction(torch_module.autograd.Function):
+            @staticmethod
+            def forward(ctx: Any, down_proj_input: Any, weight: Any, bias: Any | None = None) -> Any:
+                del ctx
+                output = torch_module.nn.functional.linear(
+                    down_proj_input,
+                    weight,
+                    bias,
+                )
+                return output.to(dtype=down_proj_input.dtype)
+
+            @staticmethod
+            def symbolic(g: Any, down_proj_input: Any, weight: Any, bias: Any | None = None) -> Any:
+                inputs = [down_proj_input, weight]
+                if bias is not None:
+                    inputs.append(bias)
+                return g.op(
+                    f"{_VOXCPM2_BF16_DOWN_PROJ_ONNX_DOMAIN}::"
+                    f"{_VOXCPM2_BF16_DOWN_PROJ_PLUGIN_NAME}",
+                    *inputs,
+                )
+
+        class NativeExactBf16DownProj(torch_module.nn.Module):
+            def __init__(self, module: Any) -> None:
+                super().__init__()
+                self.variant = variant
+                self.register_buffer("weight", module.weight.detach().clone())
+                bias = getattr(module, "bias", None)
+                self.register_buffer("bias", None if bias is None else bias.detach().clone())
+
+            def forward(self, down_proj_input: Any) -> Any:
+                return NativeExactBf16DownProjFunction.apply(
+                    down_proj_input,
+                    self.weight,
+                    self.bias,
+                )
+
+        return NativeExactBf16DownProj(linear_module)
     if variant == _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT:
         return linear_module
 
@@ -2071,6 +2194,7 @@ def _compile_voxcpm2_tslm_onnx(
             "stop_logits",
             "tslm_present_kv_cache",
         ],
+        custom_opsets=_voxcpm2_tslm_custom_opsets(),
         verbose=verbose,
         diagnostic_label="voxcpm2_tslm_decode",
     )
@@ -2099,6 +2223,7 @@ def _compile_voxcpm2_tslm_prefill_onnx(
             "stop_logits",
             "tslm_present_kv_cache",
         ],
+        custom_opsets=_voxcpm2_tslm_custom_opsets(),
         verbose=verbose,
         diagnostic_label="voxcpm2_tslm_prefill",
     )

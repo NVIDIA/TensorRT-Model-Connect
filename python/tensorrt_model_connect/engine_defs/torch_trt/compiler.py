@@ -548,6 +548,7 @@ def compile_model_via_onnx(
     *,
     input_names: list[str],
     output_names: list[str],
+    custom_opsets: dict[str, int] | None = None,
     opset_version: int = 18,
     verbose: bool = False,
     disable_mkldnn: bool = False,
@@ -570,6 +571,7 @@ def compile_model_via_onnx(
                 external_data=True,
                 input_names=input_names,
                 output_names=output_names,
+                custom_opsets=custom_opsets,
                 dynamic_axes=None,
             )
         _maybe_preserve_onnx_export(Path(tmpdir), wrapper, verbose=verbose)

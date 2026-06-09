@@ -1945,21 +1945,75 @@ def test_voxcpm2_tslm_down_proj_variant_replaces_layer_modules():
     )
 
 
-def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_is_not_silent():
+def test_voxcpm2_tslm_native_exact_custom_opset_requires_plugin(monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    called = {"ensure": False}
+
+    def fake_ensure():
+        called["ensure"] = True
+
+    monkeypatch.setenv(
+        "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT",
+        "native_exact_bf16_plugin",
+    )
+    monkeypatch.setattr(
+        component_builders,
+        "_ensure_voxcpm2_bf16_down_proj_plugin_registered",
+        fake_ensure,
+    )
+
+    assert component_builders._voxcpm2_tslm_custom_opsets() == {"trtmc": 1}
+    assert called["ensure"] is True
+
+
+def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_wraps_linear():
     torch = pytest.importorskip("torch")
 
     from tensorrt_model_connect.families.voxcpm2 import component_builders
 
     linear = torch.nn.Linear(3, 2, bias=False).to(dtype=torch.bfloat16)
-    with pytest.raises(
-        NotImplementedError,
-        match="native_exact_bf16_plugin.*registered TensorRT plugin",
-    ):
-        component_builders._make_down_proj_variant_module(
-            torch,
-            linear,
-            "native_exact_bf16_plugin",
-        )
+    module = component_builders._make_down_proj_variant_module(
+        torch,
+        linear,
+        "native_exact_bf16_plugin",
+    )
+
+    assert module is not linear
+    assert module.variant == "native_exact_bf16_plugin"
+    x = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
+    torch.testing.assert_close(module(x), linear(x).to(dtype=torch.bfloat16))
+
+
+def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_exports_custom_node(tmp_path):
+    torch = pytest.importorskip("torch")
+    onnx = pytest.importorskip("onnx")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    linear = torch.nn.Linear(3, 2, bias=False).to(dtype=torch.bfloat16)
+    module = component_builders._make_down_proj_variant_module(
+        torch,
+        linear,
+        "native_exact_bf16_plugin",
+    )
+    output_path = tmp_path / "down_proj.onnx"
+    torch.onnx.export(
+        module,
+        (torch.zeros((1, 3), dtype=torch.bfloat16),),
+        str(output_path),
+        opset_version=18,
+        dynamo=False,
+        input_names=["down_proj_input"],
+        output_names=["down_proj_output"],
+        custom_opsets={"trtmc": 1},
+    )
+
+    model = onnx.load(str(output_path))
+    assert any(
+        node.domain == "trtmc" and node.op_type == "VoxCPM2Bf16DownProj"
+        for node in model.graph.node
+    )
 
 
 def test_voxcpm2_unified_cfm_patch_keeps_traced_scalars_typed(monkeypatch, tmp_path):
