@@ -133,6 +133,111 @@ def _first_value_difference(
     return None
 
 
+def _coordinate_from_flat_index(element_index: int, shape: list[int]) -> list[int]:
+    coordinate: list[int] = []
+    remaining = element_index
+    for dim in reversed(shape):
+        if dim <= 0:
+            return []
+        coordinate.append(remaining % dim)
+        remaining //= dim
+    return list(reversed(coordinate))
+
+
+def _top_counts(counts: dict[int, int], key_name: str, *, limit: int = 8) -> list[dict[str, int]]:
+    return [
+        {key_name: key, "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _bf16_bits(raw: bytes, element_index: int) -> int:
+    return struct.unpack_from("<H", raw, element_index * 2)[0]
+
+
+def _values_equal(left: int | float | None, right: int | float | None) -> bool:
+    if isinstance(left, float) and isinstance(right, float):
+        if math.isnan(left) and math.isnan(right):
+            return True
+    return left == right
+
+
+def _value_mismatch_summary(
+    hf_raw: bytes,
+    hf_dtype: str,
+    trt_raw: bytes,
+    trt_dtype: str,
+    shape: list[int],
+) -> dict[str, Any]:
+    total_elements = _element_count(shape)
+    different_elements = 0
+    max_abs_diff = 0.0
+    first_coordinate: list[int] | None = None
+    row_counts: dict[int, int] = {}
+    col_counts: dict[int, int] = {}
+    bf16_adjacent_ulp_mismatches = 0
+    bf16_delta_counts: dict[str, int] = {}
+    bf16_examples: list[dict[str, Any]] = []
+    include_bf16_summary = hf_dtype == "bfloat16" and trt_dtype == "bfloat16"
+
+    for index in range(total_elements):
+        hf_value = _decode_element(hf_raw, hf_dtype, index)
+        trt_value = _decode_element(trt_raw, trt_dtype, index)
+        if _values_equal(hf_value, trt_value):
+            continue
+
+        different_elements += 1
+        if isinstance(hf_value, float) and isinstance(trt_value, float):
+            max_abs_diff = max(max_abs_diff, abs(hf_value - trt_value))
+
+        coordinate = _coordinate_from_flat_index(index, shape)
+        if first_coordinate is None:
+            first_coordinate = coordinate
+        if len(coordinate) >= 2:
+            row = coordinate[-2]
+            col = coordinate[-1]
+            row_counts[row] = row_counts.get(row, 0) + 1
+            col_counts[col] = col_counts.get(col, 0) + 1
+
+        if include_bf16_summary:
+            hf_bits = _bf16_bits(hf_raw, index)
+            trt_bits = _bf16_bits(trt_raw, index)
+            delta = trt_bits - hf_bits
+            if abs(delta) == 1:
+                bf16_adjacent_ulp_mismatches += 1
+            key = f"{delta:+d}"
+            bf16_delta_counts[key] = bf16_delta_counts.get(key, 0) + 1
+            if len(bf16_examples) < 8:
+                bf16_examples.append(
+                    {
+                        "element": index,
+                        "bit_delta": delta,
+                        "expected_bits": f"0x{hf_bits:04x}",
+                        "actual_bits": f"0x{trt_bits:04x}",
+                        "expected_value": hf_value,
+                        "actual_value": trt_value,
+                    }
+                )
+
+    summary: dict[str, Any] = {
+        "total_elements": total_elements,
+        "different_elements": different_elements,
+        "max_abs_diff": max_abs_diff,
+    }
+    if first_coordinate is not None:
+        summary["first_different_coordinate"] = first_coordinate
+    if row_counts:
+        summary["mismatch_rows_with_differences"] = len(row_counts)
+        summary["mismatch_cols_with_differences"] = len(col_counts)
+        summary["top_mismatch_rows"] = _top_counts(row_counts, "row")
+        summary["top_mismatch_cols"] = _top_counts(col_counts, "column")
+    if include_bf16_summary:
+        summary["bf16_adjacent_ulp_mismatches"] = bf16_adjacent_ulp_mismatches
+        summary["bf16_bit_delta_counts"] = dict(sorted(bf16_delta_counts.items()))
+        summary["bf16_mismatch_examples"] = bf16_examples
+    return summary
+
+
 def _tensor_mismatch(
     hf_record: dict[str, Any],
     trt_record: dict[str, Any],
@@ -182,7 +287,7 @@ def _tensor_mismatch(
         )
         if element_index is None:
             return None
-        return {
+        mismatch = {
             "key": list(key),
             "hf_line": hf_record["_line"],
             "trt_line": trt_record["_line"],
@@ -195,6 +300,10 @@ def _tensor_mismatch(
             "hf_value": _decode_element(hf_raw, hf_dtype, element_index),
             "trt_value": _decode_element(trt_raw, trt_dtype, element_index),
         }
+        mismatch.update(
+            _value_mismatch_summary(hf_raw, hf_dtype, trt_raw, trt_dtype, hf_shape)
+        )
+        return mismatch
 
     if hf_raw == trt_raw:
         return None
@@ -217,6 +326,9 @@ def _tensor_mismatch(
     if element_index is not None:
         mismatch["hf_value"] = _decode_element(hf_raw, hf_dtype, element_index)
         mismatch["trt_value"] = _decode_element(trt_raw, hf_dtype, element_index)
+    mismatch.update(
+        _value_mismatch_summary(hf_raw, hf_dtype, trt_raw, trt_dtype, hf_shape)
+    )
     return mismatch
 
 

@@ -149,8 +149,23 @@ def test_compare_voxcpm2_tensor_dumps_reports_first_common_mismatch(tmp_path: Pa
     assert mismatch["hf_engine_section"] == "test"
     assert mismatch["trt_engine_section"] == "test"
     assert mismatch["first_different_element"] == 1
+    assert mismatch["first_different_coordinate"] == [0, 1]
+    assert mismatch["different_elements"] == 1
+    assert mismatch["total_elements"] == 2
+    assert mismatch["max_abs_diff"] == 2.0
     assert mismatch["hf_value"] == 2.0
     assert mismatch["trt_value"] == 4.0
+    assert mismatch["bf16_bit_delta_counts"] == {"+128": 1}
+    assert mismatch["bf16_mismatch_examples"] == [
+        {
+            "element": 1,
+            "bit_delta": 128,
+            "expected_bits": "0x4000",
+            "actual_bits": "0x4080",
+            "expected_value": 2.0,
+            "actual_value": 4.0,
+        }
+    ]
 
 
 def test_compare_voxcpm2_tensor_dumps_reports_mismatch_list_and_counts(
@@ -226,6 +241,90 @@ def test_compare_voxcpm2_tensor_dumps_reports_mismatch_list_and_counts(
         "ralm_prefill_engine_plan": 1,
         "tslm_prefill_engine_plan": 1,
     }
+
+
+def test_compare_voxcpm2_tensor_dumps_reports_bf16_location_summary(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool()
+    hf_dir = tmp_path / "hf"
+    trt_dir = tmp_path / "trt"
+    hf_dir.mkdir()
+    trt_dir.mkdir()
+    hf_manifest = hf_dir / "manifest.jsonl"
+    trt_manifest = trt_dir / "manifest.jsonl"
+
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[3, 4],
+        raw=struct.pack(
+            "<" + "H" * 12,
+            0x3F80,
+            0x4000,
+            0x4080,
+            0x4100,
+            0x3F80,
+            0x4000,
+            0x4080,
+            0x4100,
+            0x3F80,
+            0x4000,
+            0x4080,
+            0x4100,
+        ),
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[3, 4],
+        raw=struct.pack(
+            "<" + "H" * 12,
+            0x3F80,
+            0x4001,
+            0x4080,
+            0x4100,
+            0x3F80,
+            0x4000,
+            0x407F,
+            0x4100,
+            0x3F80,
+            0x4002,
+            0x4080,
+            0x4100,
+        ),
+    )
+
+    result = tool.compare_tensor_dumps(hf_manifest, trt_manifest)
+
+    mismatch = result["first_common_mismatch"]
+    assert mismatch["first_different_element"] == 1
+    assert mismatch["first_different_coordinate"] == [0, 1]
+    assert mismatch["different_elements"] == 3
+    assert mismatch["total_elements"] == 12
+    assert mismatch["bf16_adjacent_ulp_mismatches"] == 2
+    assert mismatch["bf16_bit_delta_counts"] == {"+1": 1, "+2": 1, "-1": 1}
+    assert mismatch["mismatch_rows_with_differences"] == 3
+    assert mismatch["mismatch_cols_with_differences"] == 2
+    assert mismatch["top_mismatch_rows"] == [
+        {"row": 0, "count": 1},
+        {"row": 1, "count": 1},
+        {"row": 2, "count": 1},
+    ]
+    assert mismatch["top_mismatch_cols"] == [
+        {"column": 1, "count": 2},
+        {"column": 2, "count": 1},
+    ]
 
 
 def test_compare_voxcpm2_tensor_dumps_compares_matching_float_values_across_dtypes(
