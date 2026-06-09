@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,281 @@ def _trace_summary(
     }
 
 
+def _trace_layer_stage(layer_index: int, stage: str) -> str:
+    return f"layer_{layer_index:02d}.{stage}"
+
+
+def _apply_layer_residual(
+    decoder_layer: Any,
+    residual: Any,
+    hidden_states: Any,
+) -> Any:
+    if bool(getattr(decoder_layer, "use_mup", False)):
+        return residual + hidden_states * (
+            decoder_layer.scale_depth / math.sqrt(decoder_layer.num_hidden_layers)
+        )
+    return residual + hidden_states
+
+
+def _copy_layer_cache(
+    layer_cache: tuple[Any, Any],
+    updated_cache: tuple[Any, Any],
+) -> None:
+    layer_cache[0].copy_(updated_cache[0])
+    layer_cache[1].copy_(updated_cache[1])
+
+
+def _uses_explicit_trtmc_casts(decoder_layer: Any) -> bool:
+    return bool(
+        getattr(
+            getattr(decoder_layer.self_attn, "__class__", object),
+            "_trtmc_explicit_gqa_patch",
+            False,
+        )
+    )
+
+
+def _maybe_cast(tensor: Any, *, dtype: Any, enabled: bool) -> Any:
+    if enabled:
+        return tensor.to(dtype=dtype)
+    return tensor
+
+
+def _run_full_decoder_layer(
+    *,
+    decoder_layer: Any,
+    hidden_states: Any,
+    position_emb: Any,
+    is_causal: bool,
+    layer_index: int,
+    trace_layer_index: int | None,
+    traces: dict[str, Any],
+    compute_dtype: Any,
+) -> tuple[Any, Any]:
+    should_trace = trace_layer_index == layer_index
+    explicit_casts = _uses_explicit_trtmc_casts(decoder_layer)
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "input"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    residual = hidden_states
+    hidden_states = decoder_layer.input_layernorm(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "input_norm"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states, present_key_value = decoder_layer.self_attn(
+        hidden_states=hidden_states,
+        position_emb=position_emb,
+        is_causal=is_causal,
+    )
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "attention"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = _apply_layer_residual(decoder_layer, residual, hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "attention_residual"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    residual = hidden_states
+    hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "post_attention_norm"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = decoder_layer.mlp(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "mlp"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = _apply_layer_residual(decoder_layer, residual, hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_matrix(
+            traces,
+            stage=_trace_layer_stage(layer_index, "output"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    return hidden_states, present_key_value
+
+
+def _run_step_decoder_layer(
+    *,
+    decoder_layer: Any,
+    hidden_states: Any,
+    position_emb: Any,
+    position_id: Any,
+    layer_cache: tuple[Any, Any],
+    layer_index: int,
+    trace_layer_index: int | None,
+    trace_rows: dict[str, list[Any]],
+    compute_dtype: Any,
+) -> Any:
+    should_trace = trace_layer_index == layer_index
+    explicit_casts = _uses_explicit_trtmc_casts(decoder_layer)
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "input"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    residual = hidden_states
+    hidden_states = decoder_layer.input_layernorm(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "input_norm"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    attention_output = decoder_layer.self_attn.forward_step(
+        hidden_states=hidden_states,
+        position_emb=position_emb,
+        position_id=position_id,
+        kv_cache=layer_cache,
+    )
+    if isinstance(attention_output, tuple):
+        hidden_states, updated_cache = attention_output
+        _copy_layer_cache(layer_cache, updated_cache)
+    else:
+        hidden_states = attention_output
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "attention"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = _apply_layer_residual(decoder_layer, residual, hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "attention_residual"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    residual = hidden_states
+    hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "post_attention_norm"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = decoder_layer.mlp(hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "mlp"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    hidden_states = _apply_layer_residual(decoder_layer, residual, hidden_states)
+    hidden_states = _maybe_cast(
+        hidden_states,
+        dtype=compute_dtype,
+        enabled=explicit_casts,
+    )
+    if should_trace:
+        _record_trace_row(
+            trace_rows,
+            stage=_trace_layer_stage(layer_index, "output"),
+            tensor=hidden_states,
+            dtype=compute_dtype,
+        )
+
+    return hidden_states
+
+
 def _load_tslm_state(model_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     from safetensors.torch import load_file
 
@@ -295,6 +571,7 @@ def _run_full_prefill(
     audio_mask: Any,
     compute_dtype: Any,
     include_layer_traces: bool,
+    trace_layer_index: int | None,
 ) -> tuple[Any, dict[str, Any]]:
     import torch
 
@@ -320,11 +597,23 @@ def _run_full_prefill(
         )
 
     for layer_index, decoder_layer in enumerate(base_lm.layers):
-        layer_output = decoder_layer(hidden_states, position_emb, True)
-        if isinstance(layer_output, tuple):
-            hidden_states = layer_output[0]
+        if trace_layer_index == layer_index:
+            hidden_states, _ = _run_full_decoder_layer(
+                decoder_layer=decoder_layer,
+                hidden_states=hidden_states,
+                position_emb=position_emb,
+                is_causal=True,
+                layer_index=layer_index,
+                trace_layer_index=trace_layer_index,
+                traces=traces,
+                compute_dtype=compute_dtype,
+            )
         else:
-            hidden_states = layer_output
+            layer_output = decoder_layer(hidden_states, position_emb, True)
+            if isinstance(layer_output, tuple):
+                hidden_states = layer_output[0]
+            else:
+                hidden_states = layer_output
         hidden_states = hidden_states.to(dtype=compute_dtype)
         if include_layer_traces:
             _record_trace_matrix(
@@ -361,6 +650,7 @@ def _run_step_loop(
     device: str,
     compute_dtype: Any,
     include_layer_traces: bool,
+    trace_layer_index: int | None,
 ) -> tuple[Any, dict[str, Any]]:
     import torch
 
@@ -389,17 +679,30 @@ def _run_step_loop(
 
         for layer_index, decoder_layer in enumerate(base_lm.layers):
             layer_cache = base_lm.kv_cache.get_layer_cache(layer_index)
-            layer_output = decoder_layer.forward_step(
-                hidden_states,
-                position_emb,
-                position_id,
-                layer_cache,
-            )
-            if isinstance(layer_output, tuple):
-                hidden_states, updated_cache = layer_output
-                _store_layer_cache(base_lm, layer_index, updated_cache)
+            if trace_layer_index == layer_index:
+                hidden_states = _run_step_decoder_layer(
+                    decoder_layer=decoder_layer,
+                    hidden_states=hidden_states,
+                    position_emb=position_emb,
+                    position_id=position_id,
+                    layer_cache=layer_cache,
+                    layer_index=layer_index,
+                    trace_layer_index=trace_layer_index,
+                    trace_rows=trace_rows,
+                    compute_dtype=compute_dtype,
+                )
             else:
-                hidden_states = layer_output
+                layer_output = decoder_layer.forward_step(
+                    hidden_states,
+                    position_emb,
+                    position_id,
+                    layer_cache,
+                )
+                if isinstance(layer_output, tuple):
+                    hidden_states, updated_cache = layer_output
+                    _store_layer_cache(base_lm, layer_index, updated_cache)
+                else:
+                    hidden_states = layer_output
             hidden_states = hidden_states.to(dtype=compute_dtype)
             if include_layer_traces:
                 _record_trace_row(
@@ -449,6 +752,7 @@ def _run_variant(
     expected: Any,
     device: str,
     include_layer_traces: bool,
+    trace_layer_index: int | None,
 ) -> dict[str, Any]:
     import torch
     from tensorrt_model_connect.families.voxcpm2 import component_builders
@@ -500,6 +804,7 @@ def _run_variant(
             audio_mask.unsqueeze(0).unsqueeze(-1)
             * local_text_features.unsqueeze(0)
         )
+        record_traces = include_layer_traces or trace_layer_index is not None
         if prefill_mode == _FULL_PREFILL_MODE:
             semantic, _ = _run_full_prefill(
                 base_lm=base_lm,
@@ -509,10 +814,11 @@ def _run_variant(
                 audio_mask=audio_mask,
                 compute_dtype=compute_dtype,
                 include_layer_traces=False,
+                trace_layer_index=None,
             )
         elif prefill_mode == _STEP_LOOP_MODE:
             full_traces: dict[str, Any] = {}
-            if include_layer_traces:
+            if record_traces:
                 _, full_traces = _run_full_prefill(
                     base_lm=base_lm,
                     fsq_layer=fsq_layer,
@@ -520,7 +826,8 @@ def _run_variant(
                     text_mask=text_mask,
                     audio_mask=audio_mask,
                     compute_dtype=compute_dtype,
-                    include_layer_traces=True,
+                    include_layer_traces=record_traces,
+                    trace_layer_index=trace_layer_index,
                 )
             semantic, step_traces = _run_step_loop(
                 base_lm=base_lm,
@@ -530,7 +837,8 @@ def _run_variant(
                 audio_mask=audio_mask,
                 device=device,
                 compute_dtype=compute_dtype,
-                include_layer_traces=include_layer_traces,
+                include_layer_traces=record_traces,
+                trace_layer_index=trace_layer_index,
             )
         else:
             raise ValueError(f"Unsupported VoxCPM2 TSLM prefill mode {prefill_mode!r}")
@@ -544,7 +852,7 @@ def _run_variant(
             "row0_actual_first8": _row_prefix(semantic),
         }
     )
-    if prefill_mode == _STEP_LOOP_MODE and include_layer_traces:
+    if prefill_mode == _STEP_LOOP_MODE and record_traces:
         mismatch["full_vs_step_trace"] = _trace_summary(full_traces, step_traces)
 
     del base_lm, fsq_layer, semantic
@@ -563,6 +871,7 @@ def diagnose(
     include_patched: bool = True,
     include_step_loop: bool = False,
     include_layer_traces: bool = False,
+    trace_layer_index: int | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -605,6 +914,7 @@ def diagnose(
                 expected=expected,
                 device=device,
                 include_layer_traces=include_layer_traces,
+                trace_layer_index=trace_layer_index,
             )
         )
 
@@ -614,6 +924,7 @@ def diagnose(
         "device": device,
         "text_steps": len(steps),
         "include_layer_traces": include_layer_traces,
+        "trace_layer_index": trace_layer_index,
         "results": results,
     }
 
@@ -649,6 +960,15 @@ def main() -> int:
             "hidden states against the full-prefill replay."
         ),
     )
+    parser.add_argument(
+        "--trace-layer-substeps",
+        type=int,
+        metavar="LAYER_INDEX",
+        help=(
+            "For step-loop variants, trace RMSNorm, attention, residual, and "
+            "MLP substeps inside this MiniCPM layer. Implies layer tracing."
+        ),
+    )
     args = parser.parse_args()
 
     result = diagnose(
@@ -659,6 +979,7 @@ def main() -> int:
         include_patched=args.variant in {"both", "patched"},
         include_step_loop=args.include_step_loop,
         include_layer_traces=args.include_layer_traces,
+        trace_layer_index=args.trace_layer_substeps,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
     if args.output_json:

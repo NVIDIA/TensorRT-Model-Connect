@@ -143,6 +143,148 @@ def test_voxcpm2_tslm_prefill_trace_summary_reports_first_stage() -> None:
     assert by_stage["layer_00"]["actual_bits"] == "0x4100"
 
 
+class _AddModule(torch.nn.Module):
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self.value = value
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor + self.value
+
+
+class _AddAttention:
+    def __init__(self, value: float, *, tuple_step: bool = False) -> None:
+        self.value = value
+        self.tuple_step = tuple_step
+
+    def __call__(self, *, hidden_states: torch.Tensor, **_: Any) -> Any:
+        return hidden_states + self.value, ("key", "value")
+
+    def forward_step(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        **_: Any,
+    ) -> Any:
+        output = hidden_states + self.value
+        if not self.tuple_step:
+            return output
+        key_cache, value_cache = kv_cache
+        return output, (
+            torch.ones_like(key_cache) * 7.0,
+            torch.ones_like(value_cache) * 8.0,
+        )
+
+
+class _DummyLayer:
+    use_mup = False
+
+    def __init__(self, *, tuple_step: bool = False) -> None:
+        self.input_layernorm = _AddModule(1.0)
+        self.self_attn = _AddAttention(2.0, tuple_step=tuple_step)
+        self.post_attention_layernorm = _AddModule(3.0)
+        self.mlp = _AddModule(4.0)
+
+
+def test_voxcpm2_tslm_prefill_full_layer_subtrace_records_substeps() -> None:
+    tool = _load_tool()
+    traces: dict[str, Any] = {}
+    layer = _DummyLayer()
+
+    output, cache = tool._run_full_decoder_layer(
+        decoder_layer=layer,
+        hidden_states=torch.tensor([[[1.0, 2.0]]]),
+        position_emb=None,
+        is_causal=True,
+        layer_index=0,
+        trace_layer_index=0,
+        traces=traces,
+        compute_dtype=torch.float32,
+    )
+
+    assert cache == ("key", "value")
+    torch.testing.assert_close(output, torch.tensor([[[17.0, 21.0]]]))
+    assert list(traces) == [
+        "layer_00.input",
+        "layer_00.input_norm",
+        "layer_00.attention",
+        "layer_00.attention_residual",
+        "layer_00.post_attention_norm",
+        "layer_00.mlp",
+        "layer_00.output",
+    ]
+    torch.testing.assert_close(
+        traces["layer_00.attention"],
+        torch.tensor([[4.0, 5.0]]),
+    )
+    torch.testing.assert_close(
+        traces["layer_00.output"],
+        torch.tensor([[17.0, 21.0]]),
+    )
+
+
+def test_voxcpm2_tslm_prefill_step_layer_subtrace_records_substeps() -> None:
+    tool = _load_tool()
+    trace_rows: dict[str, list[Any]] = {}
+    layer = _DummyLayer()
+
+    output = tool._run_step_decoder_layer(
+        decoder_layer=layer,
+        hidden_states=torch.tensor([[1.0, 2.0]]),
+        position_emb=None,
+        position_id=torch.tensor([0]),
+        layer_cache=(torch.empty(1), torch.empty(1)),
+        layer_index=0,
+        trace_layer_index=0,
+        trace_rows=trace_rows,
+        compute_dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(output, torch.tensor([[17.0, 21.0]]))
+    assert list(trace_rows) == [
+        "layer_00.input",
+        "layer_00.input_norm",
+        "layer_00.attention",
+        "layer_00.attention_residual",
+        "layer_00.post_attention_norm",
+        "layer_00.mlp",
+        "layer_00.output",
+    ]
+    torch.testing.assert_close(
+        trace_rows["layer_00.attention"][0],
+        torch.tensor([4.0, 5.0]),
+    )
+    torch.testing.assert_close(
+        trace_rows["layer_00.output"][0],
+        torch.tensor([17.0, 21.0]),
+    )
+
+
+def test_voxcpm2_tslm_prefill_step_layer_subtrace_copies_tuple_cache() -> None:
+    tool = _load_tool()
+    trace_rows: dict[str, list[Any]] = {}
+    layer = _DummyLayer(tuple_step=True)
+    key_cache = torch.zeros(2)
+    value_cache = torch.zeros(2)
+
+    output = tool._run_step_decoder_layer(
+        decoder_layer=layer,
+        hidden_states=torch.tensor([[1.0, 2.0]]),
+        position_emb=None,
+        position_id=torch.tensor([0]),
+        layer_cache=(key_cache, value_cache),
+        layer_index=0,
+        trace_layer_index=0,
+        trace_rows=trace_rows,
+        compute_dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(output, torch.tensor([[17.0, 21.0]]))
+    torch.testing.assert_close(key_cache, torch.tensor([7.0, 7.0]))
+    torch.testing.assert_close(value_cache, torch.tensor([8.0, 8.0]))
+
+
 def test_voxcpm2_tslm_prefill_probe_schedules_step_loop_variants() -> None:
     tool = _load_tool()
 
