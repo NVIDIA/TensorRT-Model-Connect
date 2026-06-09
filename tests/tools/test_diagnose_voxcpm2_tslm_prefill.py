@@ -121,6 +121,43 @@ def test_voxcpm2_tslm_prefill_probe_reports_first_bf16_mismatch() -> None:
     assert mismatch["actual_value"] == 4.0
     assert mismatch["expected_bits"] == "0x4000"
     assert mismatch["actual_bits"] == "0x4080"
+    assert mismatch["bf16_adjacent_ulp_mismatches"] == 0
+    assert mismatch["bf16_bit_delta_counts"] == {"+128": 1}
+    assert mismatch["bf16_mismatch_examples"] == [
+        {
+            "element": 1,
+            "expected_value": 2.0,
+            "actual_value": 4.0,
+            "expected_bits": "0x4000",
+            "actual_bits": "0x4080",
+            "bit_delta": 128,
+        }
+    ]
+
+
+def test_voxcpm2_tslm_prefill_probe_reports_bf16_ulp_summary() -> None:
+    tool = _load_tool()
+    expected = torch.tensor([0x3B25, 0x3F80, 0xBDB5], dtype=torch.uint16).view(
+        torch.bfloat16
+    )
+    actual = torch.tensor([0x3B26, 0x3F80, 0xBDB3], dtype=torch.uint16).view(
+        torch.bfloat16
+    )
+
+    mismatch = tool._first_mismatch(expected, actual)
+
+    assert mismatch["matched"] is False
+    assert mismatch["different_elements"] == 2
+    assert mismatch["bf16_adjacent_ulp_mismatches"] == 1
+    assert mismatch["bf16_bit_delta_counts"] == {"+1": 1, "-2": 1}
+    assert mismatch["bf16_mismatch_examples"][0] == {
+        "element": 0,
+        "expected_value": 0.0025177001953125,
+        "actual_value": 0.002532958984375,
+        "expected_bits": "0x3b25",
+        "actual_bits": "0x3b26",
+        "bit_delta": 1,
+    }
 
 
 def test_voxcpm2_tslm_prefill_trace_summary_reports_first_stage() -> None:

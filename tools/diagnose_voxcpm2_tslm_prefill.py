@@ -166,7 +166,7 @@ def _first_mismatch(expected: Any, actual: Any) -> dict[str, Any]:
     expected_flat = expected.flatten()
     actual_flat = actual.flatten()
     abs_diff = (expected.float() - actual.float()).abs()
-    return {
+    mismatch = {
         "matched": False,
         "shape": [int(dim) for dim in expected.shape],
         "first_different_element": first,
@@ -177,6 +177,55 @@ def _first_mismatch(expected: Any, actual: Any) -> dict[str, Any]:
         "actual_value": float(actual_flat[first].float().item()),
         "expected_bits": _tensor_bits(expected_flat[first]),
         "actual_bits": _tensor_bits(actual_flat[first]),
+    }
+    mismatch.update(_bf16_mismatch_summary(expected, actual, diff))
+    return mismatch
+
+
+def _bf16_mismatch_summary(expected: Any, actual: Any, diff: Any) -> dict[str, Any]:
+    import torch
+
+    if expected.dtype != torch.bfloat16 or actual.dtype != torch.bfloat16:
+        return {}
+
+    mismatch_indices = diff.flatten().nonzero().flatten().detach().cpu()
+    if int(mismatch_indices.numel()) == 0:
+        return {}
+
+    expected_bits = (
+        expected.detach().cpu().contiguous().view(torch.uint16).flatten()
+    )
+    actual_bits = actual.detach().cpu().contiguous().view(torch.uint16).flatten()
+    delta_counts: dict[str, int] = {}
+    examples: list[dict[str, Any]] = []
+    adjacent_count = 0
+    for raw_index in mismatch_indices:
+        index = int(raw_index.item())
+        expected_bit = int(expected_bits[index].item())
+        actual_bit = int(actual_bits[index].item())
+        delta = actual_bit - expected_bit
+        delta_key = f"{delta:+d}"
+        delta_counts[delta_key] = delta_counts.get(delta_key, 0) + 1
+        if abs(delta) == 1:
+            adjacent_count += 1
+        if len(examples) < 8:
+            examples.append(
+                {
+                    "element": index,
+                    "expected_value": float(
+                        expected.flatten()[index].float().item()
+                    ),
+                    "actual_value": float(actual.flatten()[index].float().item()),
+                    "expected_bits": hex(expected_bit),
+                    "actual_bits": hex(actual_bit),
+                    "bit_delta": delta,
+                }
+            )
+
+    return {
+        "bf16_adjacent_ulp_mismatches": adjacent_count,
+        "bf16_bit_delta_counts": dict(sorted(delta_counts.items())),
+        "bf16_mismatch_examples": examples,
     }
 
 
