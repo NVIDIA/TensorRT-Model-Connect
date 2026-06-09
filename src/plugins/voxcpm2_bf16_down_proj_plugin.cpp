@@ -81,10 +81,10 @@ VoxCPM2Bf16DownProjPlugin* VoxCPM2Bf16DownProjPlugin::clone() const noexcept {
 nvinfer1::DimsExprs
 VoxCPM2Bf16DownProjPlugin::getOutputDimensions(int32_t, nvinfer1::DimsExprs const* inputs,
                                                int32_t, nvinfer1::IExprBuilder&) noexcept {
-    nvinfer1::DimsExprs output{};
-    output.nbDims = 2;
-    output.d[0] = inputs[0].d[0];
-    output.d[1] = inputs[1].d[0];
+    nvinfer1::DimsExprs output = inputs[0];
+    if (output.nbDims > 0) {
+        output.d[output.nbDims - 1] = inputs[1].d[0];
+    }
     return output;
 }
 
@@ -120,9 +120,24 @@ int32_t VoxCPM2Bf16DownProjPlugin::enqueue(nvinfer1::PluginTensorDesc const* inp
         return -1;
     }
 
-    const auto rows = static_cast<int64_t>(inputDesc[0].dims.d[0]);
-    const auto in_features = static_cast<int64_t>(inputDesc[0].dims.d[1]);
+    const auto& input_dims = inputDesc[0].dims;
+    const auto& weight_dims = inputDesc[1].dims;
+    if (input_dims.nbDims < 2 || weight_dims.nbDims < 2) {
+        return -1;
+    }
+
+    int64_t rows = 1;
+    for (int32_t dim = 0; dim < input_dims.nbDims - 1; ++dim) {
+        if (input_dims.d[dim] < 0) {
+            return -1;
+        }
+        rows *= static_cast<int64_t>(input_dims.d[dim]);
+    }
+    const auto in_features = static_cast<int64_t>(input_dims.d[input_dims.nbDims - 1]);
     const auto out_features = static_cast<int64_t>(inputDesc[1].dims.d[0]);
+    if (in_features <= 0 || out_features <= 0) {
+        return -1;
+    }
     const auto* input = static_cast<const __nv_bfloat16*>(inputs[0]);
     const auto* weight = static_cast<const __nv_bfloat16*>(inputs[1]);
     const auto* bias =

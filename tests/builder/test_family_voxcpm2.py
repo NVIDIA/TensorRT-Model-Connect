@@ -1983,6 +1983,11 @@ def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_wraps_linear():
     assert module.variant == "native_exact_bf16_plugin"
     x = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
     torch.testing.assert_close(module(x), linear(x).to(dtype=torch.bfloat16))
+    x_rank3 = torch.tensor(
+        [[[1.0, -2.0, 0.5], [0.25, 1.5, -1.0]]],
+        dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(module(x_rank3), linear(x_rank3).to(dtype=torch.bfloat16))
 
 
 def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_exports_custom_node(tmp_path):
@@ -2001,6 +2006,39 @@ def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_exports_custom_node(tmp
     torch.onnx.export(
         module,
         (torch.zeros((1, 3), dtype=torch.bfloat16),),
+        str(output_path),
+        opset_version=18,
+        dynamo=False,
+        input_names=["down_proj_input"],
+        output_names=["down_proj_output"],
+        custom_opsets={"trtmc": 1},
+    )
+
+    model = onnx.load(str(output_path))
+    assert any(
+        node.domain == "trtmc" and node.op_type == "VoxCPM2Bf16DownProj"
+        for node in model.graph.node
+    )
+
+
+def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_exports_rank3_custom_node(
+    tmp_path,
+):
+    torch = pytest.importorskip("torch")
+    onnx = pytest.importorskip("onnx")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    linear = torch.nn.Linear(3, 2, bias=False).to(dtype=torch.bfloat16)
+    module = component_builders._make_down_proj_variant_module(
+        torch,
+        linear,
+        "native_exact_bf16_plugin",
+    )
+    output_path = tmp_path / "down_proj_rank3.onnx"
+    torch.onnx.export(
+        module,
+        (torch.zeros((1, 2, 3), dtype=torch.bfloat16),),
         str(output_path),
         opset_version=18,
         dynamo=False,
