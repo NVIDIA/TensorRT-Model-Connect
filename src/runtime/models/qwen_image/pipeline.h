@@ -55,6 +55,19 @@ class QwenImagePipeline final : public IPipeline {
                                int32_t image_height, int32_t image_width,
                                const GenerateConfig& cfg = {}) override;
 
+    // Batched generation override per Decisions B/D/E (RFC 2026-05-11):
+    //  * Decision B: TWO denoiser forwards per step (cond + uncond) combined
+    //    by the existing per-token L2 renormalization helper.
+    //  * Decision D: chunk against ``config_.max_batch_size.dit``.
+    //  * Decision E: VAE always slices at B=1.
+    //
+    // ``generate_image()`` delegates to this override (Edit mode keeps the
+    // existing single-sample path — Edit batching is out of scope for PR 2).
+    std::vector<ImageResult>
+    generate_image_batch(const std::vector<std::string>& prompts,
+                         const std::vector<std::uint32_t>& per_sample_seeds,
+                         const GenerateConfig& cfg = {}) override;
+
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "QwenImagePipeline"; }
 
@@ -160,6 +173,22 @@ class QwenImagePipeline final : public IPipeline {
                           const EncodedPrompt& neg, int n_img, int num_steps, float cfg_scale,
                           const std::vector<float>& condition_latents_packed = {},
                           int n_condition_img = 0) const;
+
+    // Public static combiner — exposed for unit testing the per-token L2
+    // renorm under batch (PR 2 of diffusion batch-inference). The
+    // implementation reduces strictly over the channel axis of each token, so
+    // a caller that passes a packed ``[n_tokens, channels]`` buffer gets
+    // independent renormalization per token — no cross-sample leakage when
+    // ``n_tokens = B * n_img``. The previous anonymous-namespace version
+    // hard-coded the single-sample ``n_img`` count; promoting to a static
+    // method also lets the C++ test target exercise it without an engine.
+    //
+    // ``noise_pos`` / ``noise_neg`` are flat ``[n_tokens * channels]`` row-major
+    // fp32, written into ``out`` (resized to match if needed).
+    static void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
+                                        const std::vector<float>& noise_neg, float cfg_scale,
+                                        int n_tokens, std::size_t channels,
+                                        std::vector<float>& out);
 
     // -------------------------------------------------------------------------
     // VAE decode. Unpatchify packed latents back to [1, C, 1, h_lat, w_lat],

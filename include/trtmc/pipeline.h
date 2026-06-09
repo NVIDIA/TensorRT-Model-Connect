@@ -204,6 +204,34 @@ class IPipeline {
                                  " does not support generate_image(TextEmbedding)");
     }
 
+    // -- Image batch generation (diffusion) --
+    //
+    // ``prompts.size() == per_sample_seeds.size()`` is the total per-call batch.
+    // Implementations may chunk internally if the engine cap is below that
+    // size — see the diffusion batch-inference RFC (Decisions A/D).
+    //
+    // Default implementation is a sequential ``generate_image`` loop with
+    // ``cfg.seed`` overridden per sample. Pipelines that can actually batch
+    // (FLUX, Z-Image, Qwen Image, …) override this for the speed win;
+    // pipelines that can't get correctness for free without an override.
+    virtual std::vector<ImageResult>
+    generate_image_batch(const std::vector<std::string>& prompts,
+                         const std::vector<std::uint32_t>& per_sample_seeds,
+                         const GenerateConfig& cfg = {}) {
+        if (prompts.size() != per_sample_seeds.size()) {
+            throw std::invalid_argument(
+                "generate_image_batch: prompts.size() must equal per_sample_seeds.size()");
+        }
+        std::vector<ImageResult> out;
+        out.reserve(prompts.size());
+        GenerateConfig per_sample_cfg = cfg;
+        for (std::size_t i = 0; i < prompts.size(); ++i) {
+            per_sample_cfg.seed = static_cast<int32_t>(per_sample_seeds[i]);
+            out.push_back(generate_image(prompts[i], per_sample_cfg));
+        }
+        return out;
+    }
+
     // -- Audio generation (bark, magpie) --
     virtual AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) {
         (void)prompt;

@@ -706,6 +706,10 @@ trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
 trtmc_add_test(test_diffusion_batch_utils)
+# PR 2 of diffusion batch-inference: bundle-free combiner-level unit that
+# proves combine_cfg_with_renorm reduces per-token (no cross-sample leak).
+# Full batch-vs-sequential parity lands as E2E tests in PR 3.
+trtmc_add_test(test_qwen_image_cfg_renorm)
 trtmc_add_test(test_ltx_video_pipeline)
 
 # Recurrent (Mamba / RWKV)

@@ -51,6 +51,10 @@ class _Layer:
     def get_output(self, _idx: int = 0):
         return self._out
 
+    def set_input(self, _idx: int, _tensor):
+        # Used by dynamic-batch slice ops to bind a runtime-resolved shape.
+        pass
+
     def __setattr__(self, name: str, value):
         object.__setattr__(self, name, value)
 
@@ -122,6 +126,10 @@ class _FakeTRT(types.SimpleNamespace):
     float32 = _Dtype("float32")
     Builder = _Builder
 
+    @staticmethod
+    def Permutation(perm):
+        return tuple(perm)
+
     class Logger:
         def __init__(self, *_a, **_kw):
             pass
@@ -166,7 +174,9 @@ def _patch_graph_ops(monkeypatch):
         "add_matmul_rhs_constant",
         "add_bias_sum",
         "add_rms_norm",
+        "add_rms_norm_last_dim",
         "add_rms_norm_per_head",
+        "add_rms_norm_per_head_batched",
         "add_apply_rope_native",
         "add_apply_rope_native_sequence",
         "add_apply_rope_native_from_full_cache",
@@ -290,21 +300,16 @@ def _call_builder(monkeypatch, *, max_batch_size: int = 1, opt_batch_size=None):
 # ---------------------------------------------------------------------------
 
 
-def test_dynamic_batch_adds_leading_minus_one_to_batched_inputs_only(
+def test_dynamic_batch_adds_leading_minus_one_to_all_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``max_batch_size > 1`` makes ``hidden_states`` / ``encoder_hidden_states``
-    / ``timestep_embedding`` dynamic but leaves RoPE caches unchanged, and
+    """``max_batch_size > 1`` makes every engine input dynamic-batched and
     attaches exactly one dynamic-batch profile.
 
-    Preconditions: builder called with ``max_batch_size=4`` and the default
-    ``opt_batch_size=None`` (should resolve to 4 — design Decision C kOPT).
-    Postconditions:
-        * Batched inputs have leading ``-1``.
-        * RoPE caches stay 2-D.
-        * ``add_dynamic_batch_profile`` is invoked exactly once with the
-          three batched inputs, ``max_batch=4``, ``opt_batch=4``, and
-          ``static_shape`` entries matching the un-batched shapes.
+    Z-Image's per-sample RoPE depends on the caption's padded length, so the
+    runtime supplies a distinct RoPE per sample stacked along the batch
+    axis — ``rotary_cos`` / ``rotary_sin`` grow a leading ``-1`` alongside
+    ``hidden_states`` / ``encoder_hidden_states`` / ``timestep_embedding``.
     """
     network, profile_calls = _call_builder(monkeypatch, max_batch_size=4)
 
@@ -312,20 +317,20 @@ def test_dynamic_batch_adds_leading_minus_one_to_batched_inputs_only(
     assert inputs["hidden_states"] == (-1, 12, 8)
     assert inputs["encoder_hidden_states"] == (-1, 5, 8)
     assert inputs["timestep_embedding"] == (-1, 6)
-    # RoPE inputs are explicitly NOT batched.
-    assert inputs["rotary_cos"] == (17, 2)
-    assert inputs["rotary_sin"] == (17, 2)
+    assert inputs["rotary_cos"] == (-1, 17, 2)
+    assert inputs["rotary_sin"] == (-1, 17, 2)
 
     assert len(profile_calls) == 1
     call = profile_calls[0]
     assert sorted(call["input_names"]) == [
-        "encoder_hidden_states", "hidden_states", "timestep_embedding"]
+        "encoder_hidden_states", "hidden_states", "rotary_cos",
+        "rotary_sin", "timestep_embedding"]
     assert call["max_batch"] == 4
     assert call["opt_batch"] == 4
     assert call["static_shape"] == {
         "hidden_states": (12, 8),
         "encoder_hidden_states": (5, 8),
-        # ``timestep_embedding`` drops its prior singleton leading dim;
-        # the batch dim becomes the leading dim under the dynamic profile.
         "timestep_embedding": (6,),
+        "rotary_cos": (17, 2),
+        "rotary_sin": (17, 2),
     }

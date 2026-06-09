@@ -7,18 +7,21 @@
 
 #include "runtime/models/qwen_image/pipeline.h"
 
+#include "runtime/domains/diffusion/batch_utils.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "trtmc/runtime/scheduler.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace trtmc {
 
@@ -278,40 +281,19 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt,
             "call generate_image(prompt, image_pixels, image_height, image_width, cfg)");
     }
 
-    validate_generate_image_engines(text_engine_ != nullptr, denoiser_engine_ != nullptr,
-                                    vae_decoder_engine_ != nullptr);
-
-    const GenerateKnobs k = resolve_generate_knobs(cfg, config_);
-    auto pos = encode_text(prompt);
-    auto neg = encode_text(k.negative);
-
-    auto shape = compute_latent_shape(k.height, k.width);
-    validate_generate_image_shape(shape.latent_h, shape.latent_w, shape.n_img_tokens);
-
-    // cfg.initial_latents lets the E2E harness share fp32 noise bytes with the
-    // HF subprocess so std::mt19937 vs torch.Generator drift doesn't show up
-    // in the comparison. Layout is the UNPACKED [1, C, h_lat, w_lat] that
-    // matches diffusers' randn_tensor reshape; patchify it like the seeded path.
-    validate_caller_initial_latents(cfg.initial_latents, config_.vae.latent_channels,
-                                    shape.latent_h, shape.latent_w);
-    std::vector<float> latents = cfg.initial_latents.empty()
-                                     ? prepare_initial_latents(shape.latent_h, shape.latent_w,
-                                                               config_.vae.latent_channels, k.seed)
-                                     : cfg.initial_latents;
-    auto latents_packed = patchify_latents(latents, config_.vae.latent_channels, shape.latent_h,
-                                           shape.latent_w, config_.denoiser.patch_size);
-
-    auto denoised = denoise_loop_with_cfg(std::move(latents_packed), pos, neg, shape.n_img_tokens,
-                                          k.num_steps, k.cfg_scale);
-    auto image = vae_decode(denoised, shape.n_img_tokens, shape.latent_h, shape.latent_w);
-
-    ImageResult result;
-    result.height = image.height;
-    result.width = image.width;
-    result.channels = 3;
-    result.num_frames = 1;
-    result.pixels = std::move(image.pixels);
-    return result;
+    // Preserve legacy default-seed behaviour: when ``cfg.seed`` is unset
+    // (``< 0``), pass the historical default (42) verbatim instead of routing
+    // through ``derive_per_sample_seeds``. That way default-seed golden
+    // images are bit-identical to pre-PR-2. The single-sample call is
+    // delegated to ``generate_image_batch`` so the single-prompt and batched
+    // codepaths can never drift (Decision D).
+    const std::uint32_t per_sample_seed =
+        (cfg.seed >= 0) ? static_cast<std::uint32_t>(cfg.seed) : 42U;
+    auto batch = generate_image_batch({prompt}, {per_sample_seed}, cfg);
+    if (batch.empty()) {
+        return ImageResult{};
+    }
+    return std::move(batch.front());
 }
 
 ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const float* image_pixels,
@@ -361,6 +343,309 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const f
     result.num_frames = 1;
     result.pixels = std::move(image.pixels);
     return result;
+}
+
+// ===========================================================================
+// generate_image_batch — Decisions B/D/E (RFC 2026-05-11)
+//
+// Decision B: TWO denoiser forwards per step (cond + uncond), combined by
+//             the existing per-token L2-renorm helper. No fusion in Phase 1.
+// Decision D: silently chunk against ``config_.max_batch_size.dit`` via
+//             ``trtmc::diffusion::plan_chunks``.
+// Decision E: VAE always slices at B=1 — one sequential decode per sample.
+//
+// Per-sample seeds: the caller hands us one ``per_sample_seeds`` entry per
+// prompt. We never broadcast a single RNG stream across samples (lesson #174
+// from AnimateDiff: shared noise leads to mode collapse). The hot-path
+// within a chunk seeds each sample independently via
+// ``prepare_initial_latents``.
+//
+// Encoder: PR-2 keeps the encoder sequential — the Qwen2.5-VL encoder
+// builder remains static-batch in PR-1. The DiT batched path stacks the
+// per-sample encoded prompts into one contiguous [B, max_text, D] blob just
+// before the denoise loop. Batched-encoder upgrade is a Phase 1.5 follow-up.
+//
+// Edit mode: out of scope for PR 2.
+// ===========================================================================
+
+namespace {
+
+// Stack per-sample encoded prompt hidden_states into one contiguous
+// [B * max_text_tokens * text_embed_dim] buffer. The DiT engine (when built
+// with max_batch_size > 1) reads this as [B, max_text_tokens, text_embed_dim].
+std::vector<float>
+stack_encoded_prompts(const std::vector<QwenImagePipeline::EncodedPrompt>& encoded,
+                      int max_text_tokens, int text_embed_dim) {
+    const std::size_t per_sample =
+        static_cast<std::size_t>(max_text_tokens) * static_cast<std::size_t>(text_embed_dim);
+    std::vector<float> out(encoded.size() * per_sample);
+    for (std::size_t i = 0; i < encoded.size(); ++i) {
+        if (encoded[i].hidden_states.size() != per_sample) {
+            throw std::runtime_error(
+                "QwenImagePipeline::generate_image_batch: per-sample hidden_states size "
+                "does not match max_text_tokens * text_embed_dim");
+        }
+        std::memcpy(out.data() + i * per_sample, encoded[i].hidden_states.data(),
+                    per_sample * sizeof(float));
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<ImageResult>
+QwenImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
+                                        const std::vector<std::uint32_t>& per_sample_seeds,
+                                        const GenerateConfig& cfg) {
+    if (prompts.size() != per_sample_seeds.size()) {
+        throw std::invalid_argument(
+            "QwenImagePipeline::generate_image_batch: prompts.size() must equal "
+            "per_sample_seeds.size()");
+    }
+    if (prompts.empty()) {
+        return {};
+    }
+
+    if (config_.task_mode == QwenImageTaskMode::Edit) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image_batch: Edit bundles require an input image; "
+            "batched Edit generation is not supported in PR 2");
+    }
+
+    validate_generate_image_engines(text_engine_ != nullptr, denoiser_engine_ != nullptr,
+                                    vae_decoder_engine_ != nullptr);
+
+    const GenerateKnobs k_template = resolve_generate_knobs(cfg, config_);
+    auto shape = compute_latent_shape(k_template.height, k_template.width);
+    validate_generate_image_shape(shape.latent_h, shape.latent_w, shape.n_img_tokens);
+
+    // ``cfg.initial_latents`` is reserved for the single-prompt
+    // golden-parity harness (one buffer, [1, C, h_lat, w_lat]). Reject if
+    // present alongside a multi-sample call — shared-noise batches are a
+    // Phase 1.5 follow-up.
+    if (!cfg.initial_latents.empty() && prompts.size() > 1) {
+        throw std::runtime_error(
+            "QwenImagePipeline::generate_image_batch: cfg.initial_latents is only supported "
+            "for single-sample calls (PR 2 scope)");
+    }
+
+    const int32_t total = static_cast<int32_t>(prompts.size());
+    const int32_t cap = std::max(1, config_.max_batch_size.dit);
+    const auto chunks = trtmc::diffusion::plan_chunks(total, cap);
+
+    std::vector<ImageResult> results;
+    results.reserve(prompts.size());
+
+    std::size_t cursor = 0;
+    for (int chunk_size : chunks) {
+        const std::size_t chunk_begin = cursor;
+        const std::size_t chunk_end = cursor + static_cast<std::size_t>(chunk_size);
+
+        if (chunk_size == 1) {
+            // Single-sample fast path — preserves the legacy byte-for-byte
+            // behavior. Seed flows through ``cfg.seed`` override so the
+            // existing helpers route it into prepare_initial_latents.
+            GenerateConfig per_cfg = cfg;
+            per_cfg.seed = static_cast<int32_t>(per_sample_seeds[chunk_begin]);
+
+            auto pos = encode_text(prompts[chunk_begin]);
+            auto neg = encode_text(k_template.negative);
+
+            validate_caller_initial_latents(per_cfg.initial_latents, config_.vae.latent_channels,
+                                            shape.latent_h, shape.latent_w);
+            std::vector<float> latents =
+                per_cfg.initial_latents.empty()
+                    ? prepare_initial_latents(
+                          shape.latent_h, shape.latent_w, config_.vae.latent_channels,
+                          static_cast<std::uint64_t>(per_sample_seeds[chunk_begin]))
+                    : per_cfg.initial_latents;
+            auto latents_packed =
+                patchify_latents(latents, config_.vae.latent_channels, shape.latent_h,
+                                 shape.latent_w, config_.denoiser.patch_size);
+
+            auto denoised =
+                denoise_loop_with_cfg(std::move(latents_packed), pos, neg, shape.n_img_tokens,
+                                      k_template.num_steps, k_template.cfg_scale);
+            auto image = vae_decode(denoised, shape.n_img_tokens, shape.latent_h, shape.latent_w);
+
+            ImageResult one;
+            one.height = image.height;
+            one.width = image.width;
+            one.channels = 3;
+            one.num_frames = 1;
+            one.pixels = std::move(image.pixels);
+            results.push_back(std::move(one));
+            cursor += static_cast<std::size_t>(chunk_size);
+            continue;
+        }
+
+        // ----------------- Batched path (chunk_size > 1) -----------------
+        //
+        // Requires denoiser_engine_ built with max_batch_size > 1 (PR-1
+        // builder path via add_dynamic_batch_profile).
+        const int B = chunk_size;
+        const int n_img = shape.n_img_tokens;
+        const int max_text = config_.denoiser.max_text_tokens;
+        const int txt_d = config_.denoiser.text_embed_dim;
+        const int in_ch = config_.denoiser.in_channels;
+        const int out_ch_packed = config_.denoiser.out_channels * config_.denoiser.patch_size *
+                                  config_.denoiser.patch_size;
+
+        std::vector<EncodedPrompt> pos_encoded;
+        pos_encoded.reserve(static_cast<std::size_t>(B));
+        for (std::size_t i = chunk_begin; i < chunk_end; ++i) {
+            pos_encoded.push_back(encode_text(prompts[i]));
+        }
+        // Single negative prompt tiled B-times (matches existing
+        // pipeline.cpp behavior — ``encode_text(k.negative)`` once).
+        const EncodedPrompt neg_template = encode_text(k_template.negative);
+        std::vector<EncodedPrompt> neg_encoded(static_cast<std::size_t>(B), neg_template);
+
+        std::vector<float> pos_hidden_batch = stack_encoded_prompts(pos_encoded, max_text, txt_d);
+        std::vector<float> neg_hidden_batch = stack_encoded_prompts(neg_encoded, max_text, txt_d);
+
+        // Per-sample initial latents (per-sample RNG).
+        const std::size_t per_sample_packed =
+            static_cast<std::size_t>(n_img) * static_cast<std::size_t>(in_ch);
+        std::vector<float> latents_packed_batch(static_cast<std::size_t>(B) * per_sample_packed,
+                                                0.0F);
+        for (int b = 0; b < B; ++b) {
+            auto one_unpacked = prepare_initial_latents(
+                shape.latent_h, shape.latent_w, config_.vae.latent_channels,
+                static_cast<std::uint64_t>(
+                    per_sample_seeds[chunk_begin + static_cast<std::size_t>(b)]));
+            auto one_packed =
+                patchify_latents(one_unpacked, config_.vae.latent_channels, shape.latent_h,
+                                 shape.latent_w, config_.denoiser.patch_size);
+            if (one_packed.size() != per_sample_packed) {
+                throw std::runtime_error(
+                    "QwenImagePipeline::generate_image_batch: patchify produced unexpected "
+                    "per-sample size");
+            }
+            std::memcpy(latents_packed_batch.data() +
+                            static_cast<std::size_t>(b) * per_sample_packed,
+                        one_packed.data(), per_sample_packed * sizeof(float));
+        }
+
+        // Scheduler state: timesteps are batch-invariant (read-only after
+        // set_timesteps), so one scheduler stepped on per-sample views is
+        // sufficient.
+        FlowMatchEulerConfig sc_cfg;
+        sc_cfg.num_train_timesteps = config_.diffusion.num_train_timesteps;
+        sc_cfg.shift = config_.diffusion.shift;
+        sc_cfg.use_dynamic_shifting = config_.diffusion.use_dynamic_shifting;
+        sc_cfg.base_shift = config_.diffusion.base_shift;
+        sc_cfg.max_shift = config_.diffusion.max_shift;
+        sc_cfg.base_image_seq_len = config_.diffusion.base_image_seq_len;
+        sc_cfg.max_image_seq_len = config_.diffusion.max_image_seq_len;
+        sc_cfg.shift_terminal = config_.diffusion.shift_terminal;
+        sc_cfg.time_shift_type = config_.diffusion.time_shift_type;
+        FlowMatchEulerScheduler flow_scheduler(sc_cfg);
+        flow_scheduler.set_timesteps(k_template.num_steps, n_img);
+
+        const float cfg_scale = k_template.cfg_scale;
+        const bool do_cfg = (cfg_scale > 1.0F);
+        const std::size_t batched_numel = static_cast<std::size_t>(B) *
+                                          static_cast<std::size_t>(n_img) *
+                                          static_cast<std::size_t>(out_ch_packed);
+
+        std::vector<float> noise_pos_buf(batched_numel);
+        std::vector<float> noise_neg_buf;
+        std::vector<float> noise_pred_buf;
+        if (do_cfg) {
+            noise_neg_buf.resize(batched_numel);
+            noise_pred_buf.resize(batched_numel);
+        }
+
+        std::vector<float> timestep_buf(static_cast<std::size_t>(B));
+        const auto& timesteps = flow_scheduler.timesteps();
+        for (int step = 0; step < k_template.num_steps; ++step) {
+            const float t = timesteps[static_cast<std::size_t>(step)];
+            const float norm_t = normalize_timestep(t);
+            std::fill(timestep_buf.begin(), timestep_buf.end(), norm_t);
+
+            // -- Positive (cond) forward at [B, n_img, in_ch].
+            TensorMap inputs;
+            inputs["img_patched"] = Tensor{
+                latents_packed_batch.data(),
+                {static_cast<int64_t>(B), static_cast<int64_t>(n_img), static_cast<int64_t>(in_ch)},
+                DType::kFloat32};
+            inputs["txt_hidden"] = Tensor{pos_hidden_batch.data(),
+                                          {static_cast<int64_t>(B), static_cast<int64_t>(max_text),
+                                           static_cast<int64_t>(txt_d)},
+                                          DType::kFloat32};
+            inputs["timestep"] =
+                Tensor{timestep_buf.data(), {static_cast<int64_t>(B)}, DType::kFloat32};
+            auto outputs_pos = denoiser_engine_->forward(inputs);
+            const auto& noise_p = outputs_pos.at("noise_patched");
+            if (noise_p.numel() != batched_numel) {
+                throw std::runtime_error(
+                    "QwenImagePipeline::generate_image_batch: positive denoiser output size " +
+                    std::to_string(noise_p.numel()) +
+                    " != B*n_img*out_ch_packed = " + std::to_string(batched_numel));
+            }
+            std::memcpy(noise_pos_buf.data(), noise_p.data, batched_numel * sizeof(float));
+
+            const float* noise_for_scheduler = noise_pos_buf.data();
+            if (do_cfg) {
+                // -- Negative (uncond) forward at [B, n_img, in_ch].
+                inputs["txt_hidden"] =
+                    Tensor{neg_hidden_batch.data(),
+                           {static_cast<int64_t>(B), static_cast<int64_t>(max_text),
+                            static_cast<int64_t>(txt_d)},
+                           DType::kFloat32};
+                auto outputs_neg = denoiser_engine_->forward(inputs);
+                const auto& noise_n = outputs_neg.at("noise_patched");
+                if (noise_n.numel() != batched_numel) {
+                    throw std::runtime_error(
+                        "QwenImagePipeline::generate_image_batch: negative denoiser output size " +
+                        std::to_string(noise_n.numel()) + " != B*n_img*out_ch_packed");
+                }
+                std::memcpy(noise_neg_buf.data(), noise_n.data, batched_numel * sizeof(float));
+
+                // Per-token L2 renorm — reduction is strictly per-token over
+                // the channel axis (see ``combine_cfg_with_renorm`` audit
+                // comment). Passing ``B * n_img`` as ``n_tokens`` gives one
+                // independent renorm per (sample, token), so sample i never
+                // pulls signal from sample j.
+                combine_cfg_with_renorm(noise_pos_buf, noise_neg_buf, cfg_scale, B * n_img,
+                                        static_cast<std::size_t>(out_ch_packed), noise_pred_buf);
+                noise_for_scheduler = noise_pred_buf.data();
+            }
+
+            // Per-sample Euler step. The scheduler is shape-agnostic and
+            // takes a flat per-sample buffer + matching noise.
+            for (int b = 0; b < B; ++b) {
+                float* per_latents =
+                    latents_packed_batch.data() + static_cast<std::size_t>(b) * per_sample_packed;
+                const float* per_noise =
+                    noise_for_scheduler + static_cast<std::size_t>(b) * per_sample_packed;
+                flow_scheduler.step(per_latents, per_noise, static_cast<int32_t>(per_sample_packed),
+                                    step);
+            }
+        }
+
+        // VAE always slices at B=1 (Decision E).
+        for (int b = 0; b < B; ++b) {
+            std::vector<float> one_packed(per_sample_packed);
+            std::memcpy(one_packed.data(),
+                        latents_packed_batch.data() +
+                            static_cast<std::size_t>(b) * per_sample_packed,
+                        per_sample_packed * sizeof(float));
+            auto image = vae_decode(one_packed, shape.n_img_tokens, shape.latent_h, shape.latent_w);
+            ImageResult one;
+            one.height = image.height;
+            one.width = image.width;
+            one.channels = 3;
+            one.num_frames = 1;
+            one.pixels = std::move(image.pixels);
+            results.push_back(std::move(one));
+        }
+
+        cursor += static_cast<std::size_t>(chunk_size);
+    }
+
+    return results;
 }
 
 // -----------------------------------------------------------------------------
@@ -1058,19 +1343,34 @@ FlowMatchEulerScheduler build_scheduler(const QwenImageDiffusionConfig& dc, int 
     return scheduler;
 }
 
+} // namespace
+
 // Combine pos + neg noise predictions via true-CFG and apply Qwen-Image's
 // per-token L2 renormalization. Matches debug_runner.py exactly:
 //   comb = neg + cfg*(pos - neg)
 //   noise = comb * (||pos|| / max(||comb||, 1e-8))   per-token
-// Writes the result into `out`.
-void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
-                             const std::vector<float>& noise_neg, float cfg_scale, int n_img,
-                             std::size_t channels, std::vector<float>& out) {
+//
+// Per-sample-correctness audit (PR 2 of diffusion batch-inference):
+//   - Reduction axis: ``channels`` only (inner loop ``c < channels``).
+//   - Outer loop walks ``n_tokens`` independently — NO cross-token pooling.
+//   - Caller passes ``n_tokens = B * n_img`` for a batched buffer that lays
+//     out samples contiguously (sample 0 tokens, then sample 1 tokens, ...).
+//   - Because reductions never sum across the outer loop, sample i's output
+//     cannot depend on sample j's values — the renorm is strictly per-token,
+//     which is also per-sample. See tests/cpp/test_qwen_image_cfg_renorm.cpp.
+void QwenImagePipeline::combine_cfg_with_renorm(const std::vector<float>& noise_pos,
+                                                const std::vector<float>& noise_neg,
+                                                float cfg_scale, int n_tokens, std::size_t channels,
+                                                std::vector<float>& out) {
     // Per-token L2 norms over `channels` (=64) fp32 values stay well below
     // 1e4, so a float accumulator is numerically fine and lets the compiler
     // SIMD-vectorize the reductions.
     constexpr float kCfgRenormFloorF = static_cast<float>(kCfgRenormFloor);
-    for (int tok = 0; tok < n_img; ++tok) {
+    const std::size_t required = static_cast<std::size_t>(n_tokens) * channels;
+    if (out.size() != required) {
+        out.resize(required);
+    }
+    for (int tok = 0; tok < n_tokens; ++tok) {
         const std::size_t base = static_cast<std::size_t>(tok) * channels;
         float pos_sq = 0.0F;
         float comb_sq = 0.0F;
@@ -1088,8 +1388,6 @@ void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
         }
     }
 }
-
-} // namespace
 
 std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
     std::vector<float> latents_packed, const EncodedPrompt& pos, const EncodedPrompt& neg,
@@ -1153,8 +1451,8 @@ std::vector<float> QwenImagePipeline::denoise_loop_with_cfg(
             run_denoiser_into(*model_latents, norm_t, neg.hidden_states, noise_neg_buf);
             // combine_cfg_with_renorm only touches the first n_img tokens, so
             // the trailing condition portion of the buffers is ignored.
-            combine_cfg_with_renorm(noise_pos_buf, noise_neg_buf, cfg_scale, n_img, channels,
-                                    noise_pred_buf);
+            QwenImagePipeline::combine_cfg_with_renorm(noise_pos_buf, noise_neg_buf, cfg_scale,
+                                                       n_img, channels, noise_pred_buf);
             noise_for_scheduler = noise_pred_buf.data();
         }
 
