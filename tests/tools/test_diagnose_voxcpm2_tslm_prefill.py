@@ -530,6 +530,7 @@ def test_voxcpm2_tslm_prefill_parses_down_proj_variants() -> None:
         "linear",
         "functional_linear",
         "einsum",
+        "batched_bmm",
         "manual_matmul_bf16",
         "fp32_accum_to_bf16",
         "fp32_output",
@@ -572,6 +573,11 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
         linear,
         "einsum",
     )
+    batched_bmm = tool._make_down_proj_variant_module(
+        torch,
+        linear,
+        "batched_bmm",
+    )
     manual = tool._make_down_proj_variant_module(
         torch,
         linear,
@@ -601,9 +607,12 @@ def test_voxcpm2_tslm_prefill_down_proj_variant_modules() -> None:
     assert functional(x).dtype == torch.bfloat16
     assert torch.equal(functional(x), linear(x))
     assert einsum(x).dtype == torch.bfloat16
+    assert batched_bmm(x).dtype == torch.bfloat16
     assert manual(x).dtype == torch.bfloat16
     assert torch.equal(manual(x), linear(x))
     assert torch.equal(einsum(x), linear(x))
+    assert torch.equal(batched_bmm(x), linear(x))
+    assert torch.equal(batched_bmm(x.unsqueeze(0)), linear(x.unsqueeze(0)))
     assert fp32_to_bf16(x).dtype == torch.bfloat16
     assert fp32_output(x).dtype == torch.float32
     assert split_k_bf16(x).dtype == torch.bfloat16

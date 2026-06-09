@@ -40,6 +40,7 @@ _DOWN_PROJ_VARIANTS = (
     _DEFAULT_DOWN_PROJ_VARIANT,
     "functional_linear",
     "einsum",
+    "batched_bmm",
     "manual_matmul_bf16",
     "fp32_accum_to_bf16",
     "fp32_output",
@@ -598,6 +599,34 @@ def _make_down_proj_variant_module(
                 output = output + self.bias
             return output
 
+    class BatchedBmmMatmul(torch_module.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.register_buffer("weight", module.weight.detach().clone())
+            bias = getattr(module, "bias", None)
+            self.register_buffer(
+                "bias",
+                None if bias is None else bias.detach().clone(),
+            )
+
+        def forward(self, down_proj_input: Any) -> Any:
+            squeezed = down_proj_input.ndim == 2
+            batched_input = (
+                down_proj_input.unsqueeze(0) if squeezed else down_proj_input
+            )
+            transposed = self.weight.transpose(0, 1)
+            batched_weight = transposed.unsqueeze(0).expand(
+                batched_input.shape[0],
+                transposed.shape[0],
+                transposed.shape[1],
+            )
+            output = torch_module.bmm(batched_input, batched_weight)
+            if squeezed:
+                output = output.squeeze(0)
+            if self.bias is not None:
+                output = output + self.bias
+            return output
+
     class Fp32Matmul(torch_module.nn.Module):
         def __init__(self, module: Any, *, cast_to_bf16: bool) -> None:
             super().__init__()
@@ -664,6 +693,8 @@ def _make_down_proj_variant_module(
         return FunctionalLinear(linear_module)
     if variant == "einsum":
         return EinsumMatmul(linear_module)
+    if variant == "batched_bmm":
+        return BatchedBmmMatmul(linear_module)
     if variant == "fp32_accum_to_bf16":
         return Fp32Matmul(linear_module, cast_to_bf16=True)
     if variant == "fp32_output":
