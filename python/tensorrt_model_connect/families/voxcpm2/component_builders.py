@@ -1984,6 +1984,8 @@ class _LocEncBuildArtifacts:
 
 def _make_locenc_build_artifacts(
     ctx: VoxCPM2ComponentBuildContext,
+    *,
+    patch_for_export: bool = True,
 ) -> _LocEncBuildArtifacts:
     prepared = prepare_component_inputs(ctx)
     try:
@@ -1996,7 +1998,8 @@ def _make_locenc_build_artifacts(
             "upstream voxcpm package"
         ) from exc
 
-    _patch_minicpm_attention_gqa_for_torch_trt(torch)
+    if patch_for_export:
+        _patch_minicpm_attention_gqa_for_torch_trt(torch)
     compute_dtype = _torch_dtype(torch, ctx.precision)
     lm_config = prepared.config_values.get("lm_config")
     encoder_config = prepared.config_values.get("encoder_config")
@@ -2092,7 +2095,10 @@ def _should_package_full_prefill(ctx: VoxCPM2ComponentBuildContext) -> bool:
 def build_locenc_zero_prefill_feature_table(
     ctx: VoxCPM2ComponentBuildContext,
 ) -> bytes:
-    artifacts = _make_locenc_build_artifacts(ctx)
+    # The table is a serialized HF-reference tensor, not an export graph. Keep
+    # it on the upstream eager LocEnc path because the TensorRT export patch can
+    # shift BF16 rows by one ULP before the first TSLM token is generated.
+    artifacts = _make_locenc_build_artifacts(ctx, patch_for_export=False)
     torch = artifacts.torch
     cuda = getattr(torch, "cuda", None)
     if cuda is None or not callable(getattr(cuda, "is_available", None)):
@@ -2283,6 +2289,9 @@ def build_voxcpm2_component_plans(
                 verbose=verbose,
                 max_cache_length=max_cache_length,
             )
+            prefill_table = b""
+            if spec.name == "locenc" and builder is build_locenc_engine:
+                prefill_table = build_locenc_zero_prefill_feature_table(component_ctx)
             plan = builder(component_ctx)
         if not isinstance(plan, (bytes, bytearray, memoryview)):
             raise TypeError(
@@ -2318,8 +2327,7 @@ def build_voxcpm2_component_plans(
             spec.name == "locenc"
             and component_ctx is not None
             and builder is build_locenc_engine
+            and prefill_table
         ):
-            prefill_table = build_locenc_zero_prefill_feature_table(component_ctx)
-            if prefill_table:
-                sections[VOXCPM2_ZERO_PREFILL_FEATURES_SECTION] = prefill_table
+            sections[VOXCPM2_ZERO_PREFILL_FEATURES_SECTION] = prefill_table
     return sections

@@ -1229,8 +1229,10 @@ def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     monkeypatch.setattr(checkpoint_mapper, "_detect_framework", lambda: "numpy")
 
     captured = {}
+    build_order = []
 
     def _fake_compile(wrapper, example_args, *, verbose):
+        build_order.append("locenc_engine")
         captured["wrapper"] = wrapper
         captured["example_args"] = example_args
         captured["verbose"] = verbose
@@ -1240,6 +1242,17 @@ def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
         component_builders,
         "_compile_voxcpm2_locenc_onnx",
         _fake_compile,
+    )
+
+    def _fake_prefill_table(ctx):
+        assert ctx.max_cache_length == 9
+        build_order.append("zero_prefill_table")
+        return b"ZERO-PREFILL"
+
+    monkeypatch.setattr(
+        component_builders,
+        "build_locenc_zero_prefill_feature_table",
+        _fake_prefill_table,
     )
 
     cfg = _write_raw_voxcpm2_checkpoint(tmp_path)
@@ -1279,6 +1292,10 @@ def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     )
 
     assert sections["locenc_engine_plan"] == b"LOCENC-TRT"
+    assert sections[component_builders.VOXCPM2_ZERO_PREFILL_FEATURES_SECTION] == (
+        b"ZERO-PREFILL"
+    )
+    assert build_order[:2] == ["zero_prefill_table", "locenc_engine"]
     assert captured["verbose"] is True
     example_audio_feats = captured["example_args"][0]
     assert example_audio_feats.shape == (1, 4, 64)
@@ -1307,6 +1324,36 @@ def test_voxcpm2_locenc_builder_exports_named_trt_engine(tmp_path, monkeypatch):
     assert projection.dtype == "bf16"
     assert projection.eval_called is True
     assert wrapper.eval_called is True
+
+
+def test_voxcpm2_zero_prefill_table_uses_unpatched_locenc_artifacts(monkeypatch):
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    captured = {}
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    fake_artifacts = types.SimpleNamespace(
+        torch=types.SimpleNamespace(cuda=FakeCuda),
+    )
+
+    def _fake_make_locenc_build_artifacts(ctx, *, patch_for_export=True):
+        captured["ctx"] = ctx
+        captured["patch_for_export"] = patch_for_export
+        return fake_artifacts
+
+    ctx = object()
+    monkeypatch.setattr(
+        component_builders,
+        "_make_locenc_build_artifacts",
+        _fake_make_locenc_build_artifacts,
+    )
+
+    assert component_builders.build_locenc_zero_prefill_feature_table(ctx) == b""
+    assert captured == {"ctx": ctx, "patch_for_export": False}
 
 
 def test_voxcpm2_audiovae_builder_exports_named_trt_decode_engine(tmp_path, monkeypatch):
