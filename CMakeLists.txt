@@ -51,6 +51,20 @@ if(DEFINED ENV{CUDA_HOME})
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/lib64")
 endif()
 
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_EXECUTABLE)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(next(iter(s.submodule_search_locations), '')) if s and s.submodule_search_locations else None"
+    OUTPUT_VARIABLE _trtmc_python_tensorrt_libs_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_trtmc_python_tensorrt_libs_dir AND IS_DIRECTORY "${_trtmc_python_tensorrt_libs_dir}")
+    list(APPEND _trtmc_default_search_paths "${_trtmc_python_tensorrt_libs_dir}")
+  endif()
+endif()
+
 find_path(TRTMC_TRT_INCLUDE_DIR NvInferRuntime.h
   PATHS ${_trtmc_default_search_paths}
   PATH_SUFFIXES "" include include/zapped_headers
