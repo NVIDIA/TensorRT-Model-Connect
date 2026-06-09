@@ -608,6 +608,8 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
 
     attention_cls = getattr(minicpm_model, "MiniCPMAttention", None)
     decoder_layer_cls = getattr(minicpm_model, "MiniCPMDecoderLayer", None)
+    mlp_cls = getattr(minicpm_model, "MiniCPMMLP", None)
+    norm_cls = getattr(minicpm_model, "MiniCPMRMSNorm", None)
     model_cls = getattr(minicpm_model, "MiniCPMModel", None)
     apply_rotary_pos_emb = getattr(minicpm_model, "apply_rotary_pos_emb", None)
     if attention_cls is None or apply_rotary_pos_emb is None:
@@ -627,10 +629,11 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
 
     def _forward(self: Any, hidden_states: Any, position_emb: Any, is_causal: bool) -> Any:
         bsz, q_len, _ = hidden_states.size()
+        compute_dtype = hidden_states.dtype
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states = self.q_proj(hidden_states).to(dtype=compute_dtype)
+        key_states = self.k_proj(hidden_states).to(dtype=compute_dtype)
+        value_states = self.v_proj(hidden_states).to(dtype=compute_dtype)
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -647,6 +650,8 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
             query_states, key_states = apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
             )
+            query_states = query_states.to(dtype=compute_dtype)
+            key_states = key_states.to(dtype=compute_dtype)
 
         query_states = query_states.contiguous()
         key_states = key_states.contiguous()
@@ -662,11 +667,11 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
             expanded_key_states,
             expanded_value_states,
             is_causal=is_causal,
-        )
+        ).to(dtype=compute_dtype)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output).to(dtype=compute_dtype)
 
         past_key_value = (key_states, value_states)
         return attn_output, past_key_value
@@ -679,10 +684,11 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
         kv_cache: tuple[Any, Any],
     ) -> Any:
         bsz, _ = hidden_states.size()
+        compute_dtype = hidden_states.dtype
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states = self.q_proj(hidden_states).to(dtype=compute_dtype)
+        key_states = self.k_proj(hidden_states).to(dtype=compute_dtype)
+        value_states = self.v_proj(hidden_states).to(dtype=compute_dtype)
 
         query_states = query_states.view(
             bsz, 1, self.num_heads, self.head_dim
@@ -699,6 +705,8 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
             query_states, key_states = apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
             )
+            query_states = query_states.to(dtype=compute_dtype)
+            key_states = key_states.to(dtype=compute_dtype)
 
         key_cache, value_cache = kv_cache
 
@@ -730,12 +738,53 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
             expanded_key_cache,
             expanded_value_cache,
             attn_mask=attn_mask,
-        )
+        ).to(dtype=compute_dtype)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output).to(dtype=compute_dtype)
         return attn_output, (key_cache, value_cache)
+
+    def _decoder_forward(
+        self: Any,
+        hidden_states: Any,
+        position_emb: Any,
+        is_causal: bool,
+    ) -> Any:
+        compute_dtype = hidden_states.dtype
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states).to(dtype=compute_dtype)
+        hidden_states, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            position_emb=position_emb,
+            is_causal=is_causal,
+        )
+        hidden_states = hidden_states.to(dtype=compute_dtype)
+
+        if self.use_mup:
+            scaled_hidden_states = (hidden_states * (
+                self.scale_depth / math.sqrt(self.num_hidden_layers)
+            )).to(dtype=compute_dtype)
+            hidden_states = residual + scaled_hidden_states
+        else:
+            hidden_states = residual + hidden_states
+        hidden_states = hidden_states.to(dtype=compute_dtype)
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states).to(
+            dtype=compute_dtype
+        )
+        hidden_states = self.mlp(hidden_states).to(dtype=compute_dtype)
+        if self.use_mup:
+            scaled_hidden_states = (hidden_states * (
+                self.scale_depth / math.sqrt(self.num_hidden_layers)
+            )).to(dtype=compute_dtype)
+            hidden_states = residual + scaled_hidden_states
+        else:
+            hidden_states = residual + hidden_states
+        hidden_states = hidden_states.to(dtype=compute_dtype)
+
+        return hidden_states, present_key_value
 
     def _decoder_forward_step(
         self: Any,
@@ -744,35 +793,91 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
         position_id: Any,
         kv_cache: tuple[Any, Any],
     ) -> Any:
+        compute_dtype = hidden_states.dtype
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states).to(dtype=compute_dtype)
         hidden_states, updated_cache = self.self_attn.forward_step(
             hidden_states=hidden_states,
             position_emb=position_emb,
             position_id=position_id,
             kv_cache=kv_cache,
         )
+        hidden_states = hidden_states.to(dtype=compute_dtype)
 
         if self.use_mup:
-            hidden_states = residual + hidden_states * (
+            scaled_hidden_states = (hidden_states * (
                 self.scale_depth / math.sqrt(self.num_hidden_layers)
-            )
+            )).to(dtype=compute_dtype)
+            hidden_states = residual + scaled_hidden_states
         else:
             hidden_states = residual + hidden_states
+        hidden_states = hidden_states.to(dtype=compute_dtype)
 
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states).to(
+            dtype=compute_dtype
+        )
+        hidden_states = self.mlp(hidden_states).to(dtype=compute_dtype)
         if self.use_mup:
-            hidden_states = residual + hidden_states * (
+            scaled_hidden_states = (hidden_states * (
                 self.scale_depth / math.sqrt(self.num_hidden_layers)
-            )
+            )).to(dtype=compute_dtype)
+            hidden_states = residual + scaled_hidden_states
         else:
             hidden_states = residual + hidden_states
+        hidden_states = hidden_states.to(dtype=compute_dtype)
 
         return hidden_states, updated_cache
 
+    def _mlp_forward(self: Any, x: Any) -> Any:
+        compute_dtype = x.dtype
+        gate = self.gate_proj(x).to(dtype=compute_dtype)
+        up = self.up_proj(x).to(dtype=compute_dtype)
+        hidden = (self.act_fn(gate).to(dtype=compute_dtype) * up).to(
+            dtype=compute_dtype
+        )
+        return self.down_proj(hidden).to(dtype=compute_dtype)
+
+    def _norm_forward(self: Any, hidden_states: Any) -> Any:
+        compute_dtype = hidden_states.dtype
+        variance = hidden_states.to(torch_module.float32).pow(2).mean(
+            dim=-1,
+            keepdim=True,
+        )
+        hidden_states = (
+            hidden_states * torch_module.rsqrt(variance + self.variance_epsilon)
+        ).to(dtype=compute_dtype)
+        weight = self.weight.to(dtype=compute_dtype)
+        return (hidden_states * weight).to(dtype=compute_dtype)
+
+    def _model_forward(self: Any, inputs_embeds: Any, is_causal: bool = True) -> Any:
+        compute_dtype = inputs_embeds.dtype
+        if self.rope_emb is not None:
+            position_ids = torch_module.arange(
+                0,
+                inputs_embeds.size(1),
+                dtype=torch_module.long,
+                device=inputs_embeds.device,
+            )
+            position_emb = self.rope_emb(position_ids)
+        else:
+            position_emb = None
+        hidden_states = inputs_embeds
+
+        next_decoder_cache = []
+        for decoder_layer in self.layers:
+            hidden_states, this_cache = decoder_layer(
+                hidden_states,
+                position_emb,
+                is_causal,
+            )
+            hidden_states = hidden_states.to(dtype=compute_dtype)
+            next_decoder_cache.append(this_cache)
+        hidden_states = self.norm(hidden_states).to(dtype=compute_dtype)
+        return hidden_states, next_decoder_cache
+
     def _model_forward_step(self: Any, inputs_embeds: Any, position_id: Any) -> Any:
+        compute_dtype = inputs_embeds.dtype
         if self.rope_emb is not None:
             position_emb = self.rope_emb(position_id)
         else:
@@ -788,10 +893,11 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
                 position_id,
                 self.kv_cache.get_layer_cache(i),
             )
+            hidden_states = hidden_states.to(dtype=compute_dtype)
             updated_key_caches.append(updated_cache[0])
             updated_value_caches.append(updated_cache[1])
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states).to(dtype=compute_dtype)
         present_cache = torch_module.stack(
             (
                 torch_module.stack(updated_key_caches, dim=0),
@@ -803,8 +909,14 @@ def _patch_minicpm_attention_gqa_for_torch_trt(torch_module: Any) -> None:
 
     attention_cls.forward = _forward
     attention_cls.forward_step = _forward_step
+    if mlp_cls is not None:
+        mlp_cls.forward = _mlp_forward
+    if norm_cls is not None:
+        norm_cls.forward = _norm_forward
     if decoder_layer_cls is not None and model_cls is not None:
+        decoder_layer_cls.forward = _decoder_forward
         decoder_layer_cls.forward_step = _decoder_forward_step
+        model_cls.forward = _model_forward
         model_cls.forward_step = _model_forward_step
     attention_cls._trtmc_explicit_gqa_patch = True
 

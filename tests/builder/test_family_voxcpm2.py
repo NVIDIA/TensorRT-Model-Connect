@@ -1692,6 +1692,91 @@ def test_voxcpm2_minicpm_attention_patch_expands_gqa_without_enable_flag(monkeyp
     assert calls[1][3]["attn_mask"].shape == (1, 1, 1, 4)
 
 
+def test_voxcpm2_minicpm_patch_preserves_bf16_cast_barriers(monkeypatch):
+    torch = pytest.importorskip("torch")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    fake_voxcpm = types.ModuleType("voxcpm")
+    fake_modules = types.ModuleType("voxcpm.modules")
+    fake_minicpm4 = types.ModuleType("voxcpm.modules.minicpm4")
+    fake_model = types.ModuleType("voxcpm.modules.minicpm4.model")
+
+    class FakeProjection(torch.nn.Module):
+        def __init__(self, out_features: int, *, upcast: bool = False) -> None:
+            super().__init__()
+            self.out_features = out_features
+            self.upcast = upcast
+            self.seen: list[torch.dtype] = []
+
+        def forward(self, x):
+            self.seen.append(x.dtype)
+            shape = (*x.shape[:-1], self.out_features)
+            dtype = torch.float32 if self.upcast else x.dtype
+            return torch.zeros(shape, dtype=dtype, device=x.device)
+
+    class FakeAttention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_heads = 4
+            self.num_key_value_heads = 2
+            self.head_dim = 2
+            self.q_proj = FakeProjection(8)
+            self.k_proj = FakeProjection(4)
+            self.v_proj = FakeProjection(4)
+            self.o_proj = FakeProjection(8)
+
+    class FakeMLP(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate_proj = FakeProjection(8, upcast=True)
+            self.up_proj = FakeProjection(8, upcast=True)
+            self.down_proj = FakeProjection(8)
+            self.act_fn = torch.nn.Identity()
+
+    class FakeNorm(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(8, dtype=torch.bfloat16))
+            self.variance_epsilon = 1e-6
+
+    fake_model.MiniCPMAttention = FakeAttention
+    fake_model.MiniCPMMLP = FakeMLP
+    fake_model.MiniCPMRMSNorm = FakeNorm
+    fake_model.apply_rotary_pos_emb = lambda q, k, cos, sin: (q.float(), k.float())
+    fake_minicpm4.model = fake_model
+    fake_modules.minicpm4 = fake_minicpm4
+    fake_voxcpm.modules = fake_modules
+    monkeypatch.setitem(sys.modules, "voxcpm", fake_voxcpm)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules", fake_modules)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4", fake_minicpm4)
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4.model", fake_model)
+
+    def fake_sdpa(query, key, value, **kwargs):
+        del key, value, kwargs
+        return torch.zeros_like(query, dtype=torch.float32)
+
+    monkeypatch.setattr(
+        torch.nn.functional, "scaled_dot_product_attention", fake_sdpa
+    )
+
+    component_builders._patch_minicpm_attention_gqa_for_torch_trt(torch)
+
+    attention = FakeAttention()
+    output, _ = attention.forward(torch.zeros(1, 3, 8, dtype=torch.bfloat16), None, False)
+    assert output.dtype == torch.bfloat16
+    assert attention.o_proj.seen == [torch.bfloat16]
+
+    mlp = FakeMLP()
+    mlp_output = mlp(torch.zeros(1, 3, 8, dtype=torch.bfloat16))
+    assert mlp_output.dtype == torch.bfloat16
+    assert mlp.down_proj.seen == [torch.bfloat16]
+
+    norm = FakeNorm()
+    norm_output = norm(torch.ones(1, 3, 8, dtype=torch.bfloat16))
+    assert norm_output.dtype == torch.bfloat16
+
+
 def test_voxcpm2_unified_cfm_patch_keeps_traced_scalars_typed(monkeypatch, tmp_path):
     torch = pytest.importorskip("torch")
     onnx = pytest.importorskip("onnx")
