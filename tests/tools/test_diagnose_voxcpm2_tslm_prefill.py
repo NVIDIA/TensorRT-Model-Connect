@@ -187,6 +187,22 @@ class _DummyLayer:
         self.mlp = _AddModule(4.0)
 
 
+class _TraceableMlp(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(2, 2, bias=False)
+        self.up_proj = torch.nn.Linear(2, 2, bias=False)
+        self.down_proj = torch.nn.Linear(2, 2, bias=False)
+        with torch.no_grad():
+            self.gate_proj.weight.copy_(torch.eye(2))
+            self.up_proj.weight.copy_(torch.tensor([[2.0, 0.0], [0.0, 3.0]]))
+            self.down_proj.weight.copy_(torch.eye(2))
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        hidden = self.gate_proj(values) * self.up_proj(values)
+        return self.down_proj(hidden)
+
+
 def test_voxcpm2_tslm_prefill_full_layer_subtrace_records_substeps() -> None:
     tool = _load_tool()
     traces: dict[str, Any] = {}
@@ -224,6 +240,38 @@ def test_voxcpm2_tslm_prefill_full_layer_subtrace_records_substeps() -> None:
     )
 
 
+def test_voxcpm2_tslm_prefill_full_subtrace_records_mlp_projections() -> None:
+    tool = _load_tool()
+    traces: dict[str, Any] = {}
+    layer = _DummyLayer()
+    layer.mlp = _TraceableMlp()
+
+    output, _cache = tool._run_full_decoder_layer(
+        decoder_layer=layer,
+        hidden_states=torch.tensor([[[1.0, 2.0]]]),
+        position_emb=None,
+        is_causal=True,
+        layer_index=0,
+        trace_layer_index=0,
+        traces=traces,
+        compute_dtype=torch.float32,
+    )
+
+    assert "layer_00.mlp.gate_proj" in traces
+    assert "layer_00.mlp.up_proj" in traces
+    assert "layer_00.mlp.down_proj_input" in traces
+    assert "layer_00.mlp.down_proj" in traces
+    torch.testing.assert_close(
+        traces["layer_00.mlp.gate_proj"],
+        torch.tensor([[8.0, 10.0]]),
+    )
+    torch.testing.assert_close(
+        traces["layer_00.mlp.down_proj_input"],
+        torch.tensor([[128.0, 300.0]]),
+    )
+    torch.testing.assert_close(output, torch.tensor([[[133.0, 307.0]]]))
+
+
 def test_voxcpm2_tslm_prefill_step_layer_subtrace_records_substeps() -> None:
     tool = _load_tool()
     trace_rows: dict[str, list[Any]] = {}
@@ -259,6 +307,39 @@ def test_voxcpm2_tslm_prefill_step_layer_subtrace_records_substeps() -> None:
         trace_rows["layer_00.output"][0],
         torch.tensor([17.0, 21.0]),
     )
+
+
+def test_voxcpm2_tslm_prefill_step_subtrace_records_mlp_projection_rows() -> None:
+    tool = _load_tool()
+    trace_rows: dict[str, list[Any]] = {}
+    layer = _DummyLayer()
+    layer.mlp = _TraceableMlp()
+
+    output = tool._run_step_decoder_layer(
+        decoder_layer=layer,
+        hidden_states=torch.tensor([[1.0, 2.0]]),
+        position_emb=None,
+        position_id=torch.tensor([0]),
+        layer_cache=(torch.empty(1), torch.empty(1)),
+        layer_index=0,
+        trace_layer_index=0,
+        trace_rows=trace_rows,
+        compute_dtype=torch.float32,
+    )
+
+    assert "layer_00.mlp.gate_proj" in trace_rows
+    assert "layer_00.mlp.up_proj" in trace_rows
+    assert "layer_00.mlp.down_proj_input" in trace_rows
+    assert "layer_00.mlp.down_proj" in trace_rows
+    torch.testing.assert_close(
+        trace_rows["layer_00.mlp.gate_proj"][0],
+        torch.tensor([8.0, 10.0]),
+    )
+    torch.testing.assert_close(
+        trace_rows["layer_00.mlp.down_proj_input"][0],
+        torch.tensor([128.0, 300.0]),
+    )
+    torch.testing.assert_close(output, torch.tensor([[133.0, 307.0]]))
 
 
 def test_voxcpm2_tslm_prefill_step_layer_subtrace_copies_tuple_cache() -> None:

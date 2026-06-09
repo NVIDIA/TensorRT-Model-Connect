@@ -196,6 +196,74 @@ def _record_trace_row(
     )
 
 
+def _run_mlp_with_optional_traces(
+    *,
+    mlp: Any,
+    hidden_states: Any,
+    layer_index: int,
+    should_trace: bool,
+    compute_dtype: Any,
+    traces: dict[str, Any] | None = None,
+    trace_rows: dict[str, list[Any]] | None = None,
+) -> Any:
+    if not should_trace:
+        return mlp(hidden_states)
+
+    handles = []
+
+    def record(stage_suffix: str, tensor: Any) -> None:
+        if not hasattr(tensor, "detach"):
+            return
+        stage = _trace_layer_stage(layer_index, stage_suffix)
+        if trace_rows is not None:
+            _record_trace_row(
+                trace_rows,
+                stage=stage,
+                tensor=tensor,
+                dtype=compute_dtype,
+            )
+            return
+        if traces is not None:
+            _record_trace_matrix(
+                traces,
+                stage=stage,
+                tensor=tensor,
+                dtype=compute_dtype,
+            )
+
+    def add_forward_hook(module_name: str, stage_suffix: str) -> None:
+        module = getattr(mlp, module_name, None)
+        if not hasattr(module, "register_forward_hook"):
+            return
+
+        def hook(_module: Any, _inputs: Any, output: Any) -> None:
+            if isinstance(output, (tuple, list)) and output:
+                record(stage_suffix, output[0])
+            else:
+                record(stage_suffix, output)
+
+        handles.append(module.register_forward_hook(hook))
+
+    down_proj = getattr(mlp, "down_proj", None)
+    if hasattr(down_proj, "register_forward_pre_hook"):
+
+        def down_input_hook(_module: Any, inputs: Any) -> None:
+            if inputs:
+                record("mlp.down_proj_input", inputs[0])
+
+        handles.append(down_proj.register_forward_pre_hook(down_input_hook))
+
+    add_forward_hook("gate_proj", "mlp.gate_proj")
+    add_forward_hook("up_proj", "mlp.up_proj")
+    add_forward_hook("down_proj", "mlp.down_proj")
+
+    try:
+        return mlp(hidden_states)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 def _trace_summary(
     expected_traces: dict[str, Any],
     actual_traces: dict[str, Any],
@@ -357,7 +425,14 @@ def _run_full_decoder_layer(
             dtype=compute_dtype,
         )
 
-    hidden_states = decoder_layer.mlp(hidden_states)
+    hidden_states = _run_mlp_with_optional_traces(
+        mlp=decoder_layer.mlp,
+        hidden_states=hidden_states,
+        layer_index=layer_index,
+        should_trace=should_trace,
+        compute_dtype=compute_dtype,
+        traces=traces,
+    )
     hidden_states = _maybe_cast(
         hidden_states,
         dtype=compute_dtype,
@@ -478,7 +553,14 @@ def _run_step_decoder_layer(
             dtype=compute_dtype,
         )
 
-    hidden_states = decoder_layer.mlp(hidden_states)
+    hidden_states = _run_mlp_with_optional_traces(
+        mlp=decoder_layer.mlp,
+        hidden_states=hidden_states,
+        layer_index=layer_index,
+        should_trace=should_trace,
+        compute_dtype=compute_dtype,
+        trace_rows=trace_rows,
+    )
     hidden_states = _maybe_cast(
         hidden_states,
         dtype=compute_dtype,
