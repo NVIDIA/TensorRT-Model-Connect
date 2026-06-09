@@ -1068,7 +1068,7 @@ def test_voxcpm2_raw_checkpoint_packages_full_prefill_lm_sections(tmp_path, monk
         tmp_path,
         cfg,
         sources,
-        max_cache_length=16,
+        max_cache_length=1024,
         precision="bf16",
         verbose=False,
         builders=builders,
@@ -1089,7 +1089,7 @@ def test_voxcpm2_raw_checkpoint_packages_full_prefill_lm_sections(tmp_path, monk
     ]
 
 
-def test_voxcpm2_raw_checkpoint_omits_long_full_prefill_sections(
+def test_voxcpm2_raw_checkpoint_omits_above_gate_full_prefill_sections(
     tmp_path, monkeypatch
 ):
     from tensorrt_model_connect.families.voxcpm2 import component_builders
@@ -1143,7 +1143,7 @@ def test_voxcpm2_raw_checkpoint_omits_long_full_prefill_sections(
         tmp_path,
         cfg,
         sources,
-        max_cache_length=1024,
+        max_cache_length=2048,
         precision="bf16",
         verbose=False,
         builders=builders,
