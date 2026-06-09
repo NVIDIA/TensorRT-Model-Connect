@@ -119,6 +119,10 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
 
     def _fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        Path(kwargs["env"]["TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"]).mkdir(
+            parents=True, exist_ok=True
+        )
         return subprocess.CompletedProcess(
             cmd,
             0,
@@ -172,10 +176,16 @@ def test_voxcpm_reference_uses_model_card_params_and_float_wav(monkeypatch, tmp_
     assert 'subtype="FLOAT"' in script
     assert "TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR" in script
     assert "install_voxcpm2_tensor_dump(model)" in script
+    assert captured["env"]["TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"] == str(
+        tmp_path / "voxcpm2" / "hf_tensor_dump"
+    )
     assert out.data["returncode"] == 0
     assert out.data["sample_rate"] == 48000
     assert out.data["result_json_path"] == str(
         tmp_path / "voxcpm2" / "hf_reference_result.json"
+    )
+    assert out.data["tensor_dump_dir"] == str(
+        tmp_path / "voxcpm2" / "hf_tensor_dump"
     )
 
 
@@ -192,6 +202,9 @@ def test_voxcpm_reference_forwards_shared_locdit_noise_when_dumping(
 
     def _fake_run(cmd, **kwargs):
         captured["env"] = kwargs["env"]
+        Path(kwargs["env"]["TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"]).mkdir(
+            parents=True, exist_ok=True
+        )
         return subprocess.CompletedProcess(
             cmd,
             0,
@@ -233,6 +246,7 @@ def test_voxcpm_reference_forwards_shared_locdit_noise_when_dumping(
 
     assert captured["env"]["TRTMC_VOXCPM2_HF_NOISE_RAW"] == str(noise_path)
     assert out.data["locdit_noise_raw"] == str(noise_path)
+    assert out.data["tensor_dump_dir"] == str(tmp_path / "hf_tensor_dump")
 
 
 def test_voxcpm_reference_tensor_dump_hook_writes_trt_compatible_manifest(
@@ -556,6 +570,30 @@ def test_voxcpm2_locdit_noise_raw_is_registered_as_report_artifact(tmp_path):
     _auto_register_artifacts(sink, out, "trt")
 
     assert sink.artifacts["trt_locdit_noise_raw"] == "voxcpm2/locdit_noise.raw"
+
+
+def test_voxcpm2_hf_tensor_dump_dir_is_registered_as_report_artifact(tmp_path):
+    dump_dir = tmp_path / "voxcpm2" / "hf_tensor_dump"
+    dump_dir.mkdir(parents=True)
+
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    out = StageOutput(
+        stage_name="full_generation",
+        data={"tensor_dump_dir": str(dump_dir)},
+    )
+
+    _auto_register_artifacts(sink, out, "ref")
+
+    assert sink.artifacts["ref_tensor_dump"] == "voxcpm2/hf_tensor_dump"
 
 
 def test_compare_wav_exact_cli_payload_fails_sample_mismatch(tmp_path):

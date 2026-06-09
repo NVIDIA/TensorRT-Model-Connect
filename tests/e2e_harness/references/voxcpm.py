@@ -1,7 +1,9 @@
 """VoxCPM reference backend for openbmb/VoxCPM2.
 
 Runs the official ``voxcpm`` library in a subprocess and preserves the model
-card TTS output as a WAV artifact for exact TRT comparison.
+card TTS output as a WAV artifact for exact TRT comparison. When artifact
+capture is available, VoxCPM2 also enables the opt-in tensor/noise hook so the
+real E2E path uses the same debuggable HF artifacts as the repro command.
 """
 
 from __future__ import annotations
@@ -35,6 +37,12 @@ def _shared_locdit_noise_path(case: E2ECase, ctx: RunContext) -> Path | None:
         return None
     path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "locdit_noise.raw"
     return path if path.is_file() else None
+
+
+def _hf_tensor_dump_dir(case: E2ECase, ctx: RunContext) -> Path | None:
+    if case.family != "voxcpm2" or not ctx.artifacts_dir:
+        return None
+    return Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "hf_tensor_dump"
 
 
 class VoxCPMReference:
@@ -168,6 +176,9 @@ class VoxCPMReference:
         env = os.environ.copy()
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        tensor_dump_dir = _hf_tensor_dump_dir(case, ctx)
+        if tensor_dump_dir is not None:
+            env.setdefault("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR", str(tensor_dump_dir))
         shared_noise_path = _shared_locdit_noise_path(case, ctx)
         if shared_noise_path is not None and env.get("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR"):
             env["TRTMC_VOXCPM2_HF_NOISE_RAW"] = str(shared_noise_path)
@@ -200,6 +211,9 @@ class VoxCPMReference:
         }
         if shared_noise_path is not None and env.get("TRTMC_VOXCPM2_HF_NOISE_RAW"):
             data["locdit_noise_raw"] = str(shared_noise_path)
+        active_tensor_dump = env.get("TRTMC_VOXCPM2_HF_TENSOR_DUMP_DIR", "")
+        if active_tensor_dump and Path(active_tensor_dump).is_dir():
+            data["tensor_dump_dir"] = active_tensor_dump
         if stderr_log:
             data["stderr_log"] = stderr_log
 
