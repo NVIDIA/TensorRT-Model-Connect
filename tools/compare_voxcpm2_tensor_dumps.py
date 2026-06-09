@@ -165,6 +165,8 @@ def _tensor_mismatch(
             "key": list(key),
             "hf_line": hf_record["_line"],
             "trt_line": trt_record["_line"],
+            "hf_engine_section": str(hf_record.get("engine_section", "")),
+            "trt_engine_section": str(trt_record.get("engine_section", "")),
             "metadata_differences": metadata_differences,
         }
 
@@ -184,6 +186,8 @@ def _tensor_mismatch(
             "key": list(key),
             "hf_line": hf_record["_line"],
             "trt_line": trt_record["_line"],
+            "hf_engine_section": str(hf_record.get("engine_section", "")),
+            "trt_engine_section": str(trt_record.get("engine_section", "")),
             "hf_dtype": hf_dtype,
             "trt_dtype": trt_dtype,
             "shape": hf_shape,
@@ -202,6 +206,8 @@ def _tensor_mismatch(
         "key": list(key),
         "hf_line": hf_record["_line"],
         "trt_line": trt_record["_line"],
+        "hf_engine_section": str(hf_record.get("engine_section", "")),
+        "trt_engine_section": str(trt_record.get("engine_section", "")),
         "dtype": hf_dtype,
         "shape": hf_shape,
         "nbytes": hf_nbytes,
@@ -284,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fail if TRT emits records that are not present in the HF manifest",
     )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        help="write the comparison result JSON to this path as well as stdout",
+    )
     args = parser.parse_args(argv)
 
     result = compare_tensor_dumps(
@@ -291,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         args.trt_manifest,
         strict_extra=args.strict_extra,
     )
-    print(json.dumps(result, indent=2, sort_keys=True))
+    text = json.dumps(result, indent=2, sort_keys=True)
+    if args.output_json:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.output_json.write_text(text + "\n", encoding="utf-8")
+    print(text)
     return 0 if result["passed"] else 1
 
 

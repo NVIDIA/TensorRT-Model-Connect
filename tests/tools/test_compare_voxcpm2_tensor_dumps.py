@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import struct
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +145,8 @@ def test_compare_voxcpm2_tensor_dumps_reports_first_common_mismatch(tmp_path: Pa
         "output",
         "semantic_lm_states",
     ]
+    assert mismatch["hf_engine_section"] == "test"
+    assert mismatch["trt_engine_section"] == "test"
     assert mismatch["first_different_element"] == 1
     assert mismatch["hf_value"] == 2.0
     assert mismatch["trt_value"] == 4.0
@@ -232,8 +236,63 @@ def test_compare_voxcpm2_tensor_dumps_reports_float_value_mismatch_across_dtypes
         "input",
         "local_text_features",
     ]
+    assert mismatch["hf_engine_section"] == "test"
+    assert mismatch["trt_engine_section"] == "test"
     assert mismatch["hf_dtype"] == "bfloat16"
     assert mismatch["trt_dtype"] == "float32"
     assert mismatch["first_different_element"] == 1
     assert mismatch["hf_value"] == 2.0
     assert mismatch["trt_value"] == 4.0
+
+
+def test_compare_voxcpm2_tensor_dumps_main_writes_output_json(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool()
+    hf_dir = tmp_path / "hf"
+    trt_dir = tmp_path / "trt"
+    hf_dir.mkdir()
+    trt_dir.mkdir()
+    hf_manifest = hf_dir / "manifest.jsonl"
+    trt_manifest = trt_dir / "manifest.jsonl"
+    output_json = tmp_path / "compare.json"
+
+    _write_record(
+        hf_dir,
+        hf_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x3F80),
+    )
+    _write_record(
+        trt_dir,
+        trt_manifest,
+        phase="tslm_prefill",
+        step=0,
+        direction="output",
+        name="semantic_lm_states",
+        dtype="bfloat16",
+        shape=[1],
+        raw=struct.pack("<H", 0x4000),
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        rc = tool.main(
+            [
+                str(hf_manifest),
+                str(trt_manifest),
+                "--output-json",
+                str(output_json),
+            ]
+        )
+
+    assert rc == 1
+    written = json.loads(output_json.read_text(encoding="utf-8"))
+    printed = json.loads(stdout.getvalue())
+    assert written == printed
+    assert written["first_common_mismatch"]["trt_engine_section"] == "test"
