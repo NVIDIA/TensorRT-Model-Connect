@@ -218,6 +218,7 @@ _VOXCPM2_ZERO_PREFILL_TABLE_DEFAULT_MAX_STEPS = 64
 _VOXCPM2_FULL_PREFILL_DEFAULT_MAX_STEPS = 1024
 _VOXCPM2_TSLM_DOWN_PROJ_VARIANT_ENV = "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT"
 _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT = "linear"
+_VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT = "native_exact_bf16_plugin"
 _VOXCPM2_DOWN_PROJ_VARIANTS = (
     _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT,
     "functional_linear",
@@ -231,6 +232,7 @@ _VOXCPM2_DOWN_PROJ_VARIANTS = (
     "split_k_1024_bf16_accum",
     "split_k_1024_fp32_accum_to_bf16",
     "split_out_256_bf16",
+    _VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT,
 )
 _VOXCPM2_SPLIT_K_DOWN_PROJ_VARIANT_RE = re.compile(
     r"^split_k_(?P<chunk>[1-9][0-9]*)_"
@@ -992,6 +994,15 @@ def _make_down_proj_variant_module(
     variant: str,
 ) -> Any:
     variant = _validate_down_proj_variant(variant)
+    if variant == _VOXCPM2_NATIVE_EXACT_BF16_DOWN_PROJ_VARIANT:
+        raise NotImplementedError(
+            "VoxCPM2 TSLM down-proj variant 'native_exact_bf16_plugin' "
+            "requires a registered TensorRT plugin that preserves PyTorch "
+            "BF16 matmul accumulation and rounding semantics. Existing ONNX "
+            "GEMM/MatMul lowerings are known to drift for this layer, so this "
+            "mode is reserved until the native plugin is implemented and "
+            "validated against the HF tensor dump."
+        )
     if variant == _VOXCPM2_DEFAULT_DOWN_PROJ_VARIANT:
         return linear_module
 

@@ -1872,6 +1872,15 @@ def test_voxcpm2_tslm_down_proj_variant_env_validates(monkeypatch):
         "split_k_2_bf16_accum"
     )
 
+    monkeypatch.setenv(
+        "TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT",
+        " Native_Exact_BF16_Plugin ",
+    )
+    assert (
+        component_builders._selected_tslm_down_proj_variant()
+        == "native_exact_bf16_plugin"
+    )
+
     monkeypatch.setenv("TRTMC_VOXCPM2_TSLM_DOWN_PROJ_VARIANT", "unknown")
     with pytest.raises(ValueError, match="Unsupported VoxCPM2 TSLM down-proj"):
         component_builders._selected_tslm_down_proj_variant()
@@ -1934,6 +1943,23 @@ def test_voxcpm2_tslm_down_proj_variant_replaces_layer_modules():
         out,
         expected,
     )
+
+
+def test_voxcpm2_tslm_down_proj_native_exact_plugin_mode_is_not_silent():
+    torch = pytest.importorskip("torch")
+
+    from tensorrt_model_connect.families.voxcpm2 import component_builders
+
+    linear = torch.nn.Linear(3, 2, bias=False).to(dtype=torch.bfloat16)
+    with pytest.raises(
+        NotImplementedError,
+        match="native_exact_bf16_plugin.*registered TensorRT plugin",
+    ):
+        component_builders._make_down_proj_variant_module(
+            torch,
+            linear,
+            "native_exact_bf16_plugin",
+        )
 
 
 def test_voxcpm2_unified_cfm_patch_keeps_traced_scalars_typed(monkeypatch, tmp_path):
