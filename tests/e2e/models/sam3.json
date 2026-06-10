@@ -9,12 +9,12 @@
   "reference_family": "prompted_segmentation_sam3",
   "precision": "fp32",
   "max_cache_length": 1,
-  "prompt": "ear",
+  "prompt": "car",
   "trust_remote_code": false,
   "gated": true,
   "inputs": {
-    "image_url": "http://images.cocodataset.org/val2017/000000077595.jpg",
-    "prompt": "ear"
+    "image": "data/test_img.jpeg",
+    "prompt": "car"
   },
   "threshold_overrides": {
     "num_masks_consistency": 1.0,

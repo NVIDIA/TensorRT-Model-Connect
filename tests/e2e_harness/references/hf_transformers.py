@@ -2090,8 +2090,8 @@ class HfTransformersReference:
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
-            import json, torch, numpy as np
-            from transformers import Sam3Model, Sam3Processor
+            import json, os, torch, numpy as np
+            from transformers import AutoTokenizer, Sam3ImageProcessorFast, Sam3Model, Sam3Processor
             from PIL import Image
             import requests
 
@@ -2105,9 +2105,50 @@ class HfTransformersReference:
             segmented_image_path = {segmented_image_path!r}
             prompt = {prompt!r}
 
+            def _load_sam3_processor(model_ref, trust_remote_code):
+                try:
+                    return Sam3Processor.from_pretrained(
+                        model_ref, trust_remote_code=trust_remote_code)
+                except Exception as processor_error:
+                    if not os.path.isdir(model_ref):
+                        raise processor_error
+                    processor_config_path = os.path.join(model_ref, "processor_config.json")
+                    if os.path.isfile(processor_config_path):
+                        with open(processor_config_path, encoding="utf-8") as f:
+                            processor_config = json.load(f)
+                    else:
+                        processor_config = {{
+                            "target_size": 1008,
+                            "image_processor": {{
+                                "do_convert_rgb": True,
+                                "do_normalize": True,
+                                "do_rescale": True,
+                                "do_resize": True,
+                                "image_mean": [0.5, 0.5, 0.5],
+                                "image_std": [0.5, 0.5, 0.5],
+                                "mask_size": {{"height": 288, "width": 288}},
+                                "resample": 2,
+                                "rescale_factor": 1.0 / 255.0,
+                                "size": {{"height": 1008, "width": 1008}},
+                            }},
+                        }}
+                    image_processor_kwargs = processor_config.get("image_processor")
+                    if not isinstance(image_processor_kwargs, dict):
+                        raise processor_error
+                    image_processor_kwargs = dict(image_processor_kwargs)
+                    image_processor_kwargs.pop("image_processor_type", None)
+                    image_processor_kwargs.pop("processor_class", None)
+                    image_processor = Sam3ImageProcessorFast(**image_processor_kwargs)
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_ref, trust_remote_code=trust_remote_code)
+                    return Sam3Processor(
+                        image_processor,
+                        tokenizer,
+                        target_size=processor_config.get("target_size"),
+                    )
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            processor = Sam3Processor.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+            processor = _load_sam3_processor(model_ref, trust_remote_code)
             model = Sam3Model.from_pretrained(
                 model_ref, torch_dtype={torch_dtype_expr},
                 trust_remote_code=trust_remote_code).to(device)

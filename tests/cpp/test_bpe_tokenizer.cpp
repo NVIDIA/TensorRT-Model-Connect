@@ -125,6 +125,26 @@ static const char* kClipEndOfWordJson = R"({
   }
 })";
 
+// HF BPE tokenizers commonly serialize a present-but-null end_of_word_suffix.
+static const char* kNullEndOfWordSuffixJson = R"({
+  "model": {
+    "type": "BPE",
+    "end_of_word_suffix": null,
+    "vocab": {
+      "h": 0, "e": 1, "l": 2, "o": 3,
+      "he": 4, "ll": 5
+    },
+    "merges": [
+      "h e",
+      "l l"
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": false
+  }
+})";
+
 // ─── GPT-2 style pre_tokenizer config (ByteLevel) ───
 static const char* kGpt2StyleJson = R"({
   "model": {
@@ -414,6 +434,18 @@ int main() {
         auto ids = tok->encode("ear");
         check(ids.size() == 3 && ids[0] == 10 && ids[1] == 5 && ids[2] == 11,
               "clip_end_of_word_suffix_encode");
+    }
+
+    // === 7c. Null end-of-word suffix ===
+    {
+        std::cerr << "\n=== Null End-of-Word Suffix ===\n";
+
+        std::string null_suffix_json(kNullEndOfWordSuffixJson);
+        auto tok =
+            trtmc::CreateBpeTokenizer(null_suffix_json.data(), null_suffix_json.size(), false);
+        check(tok != nullptr, "null_end_of_word_suffix_create");
+        auto ids = tok->encode("hello");
+        check(!ids.empty(), "null_end_of_word_suffix_encode");
     }
 
     // === 8. STRING merge format (GPT-2 / LLaMA style) ===

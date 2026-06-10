@@ -1132,7 +1132,15 @@ diff --git a/src/tokenizer/bpe_tokenizer.cpp b/src/tokenizer/bpe_tokenizer.cpp
 +            if (!chars.empty() && !mEndOfWordSuffix.empty()) {
 +                chars.back() += mEndOfWordSuffix;
 +            }
-+        mEndOfWordSuffix = j["model"].value("end_of_word_suffix", "");
++    static std::string optional_model_string(const nlohmann::json& model, const char* key) {
++        auto it = model.find(key);
++        if (it != model.end() && it->is_string())
++            return it->get<std::string>();
++        return {};
++    }
+-        mByteFallback = j["model"].value("byte_fallback", false);
++        mByteFallback = model.value("byte_fallback", false);
++        mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
 +    std::string mEndOfWordSuffix;
 """
         broad_tokenizer = test_impact.classify_file("src/tokenizer/bpe_tokenizer.cpp", imap)
@@ -1167,7 +1175,44 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
 +        masks_path = str(Path(model_dir) / "hf_sam3_masks.npy")
 +        segmented_image_path = str(Path(model_dir) / "hf_sam3_segmented.png")
 +        model_ref = _resolve_cached_model_ref(hf_id)
-+        processor = Sam3Processor.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
++            import json, os, torch, numpy as np
++            from transformers import AutoTokenizer, Sam3ImageProcessorFast, Sam3Model, Sam3Processor
++            def _load_sam3_processor(model_ref, trust_remote_code):
++                try:
++                    return Sam3Processor.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
++                except Exception as processor_error:
++                    if not os.path.isdir(model_ref):
++                        raise processor_error
++                    processor_config_path = os.path.join(model_ref, "processor_config.json")
++                    if os.path.isfile(processor_config_path):
++                        with open(processor_config_path, encoding="utf-8") as f:
++                            processor_config = json.load(f)
++                    else:
++                        processor_config = {
++                            "target_size": 1008,
++                            "image_processor": {
++                                "do_convert_rgb": True,
++                                "do_normalize": True,
++                                "do_rescale": True,
++                                "do_resize": True,
++                                "image_mean": [0.5, 0.5, 0.5],
++                                "image_std": [0.5, 0.5, 0.5],
++                                "mask_size": {"height": 288, "width": 288},
++                                "resample": 2,
++                                "rescale_factor": 1.0 / 255.0,
++                                "size": {"height": 1008, "width": 1008},
++                            },
++                        }
++                    image_processor_kwargs = processor_config.get("image_processor")
++                    if not isinstance(image_processor_kwargs, dict):
++                        raise processor_error
++                    image_processor_kwargs = dict(image_processor_kwargs)
++                    image_processor_kwargs.pop("image_processor_type", None)
++                    image_processor_kwargs.pop("processor_class", None)
++                    image_processor = Sam3ImageProcessorFast(**image_processor_kwargs)
++                    tokenizer = AutoTokenizer.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
++                    return Sam3Processor(image_processor, tokenizer, target_size=processor_config.get("target_size"))
++        processor = _load_sam3_processor(model_ref, trust_remote_code)
 +        model = Sam3Model.from_pretrained(model_ref, torch_dtype=torch.float32)
 +        results = processor.post_process_instance_segmentation(outputs, threshold=0.5)
 +        scores = results.get("scores", [])

@@ -1266,6 +1266,13 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
+    static std::string optional_model_string(const nlohmann::json& model, const char* key) {
+        auto it = model.find(key);
+        if (it != model.end() && it->is_string())
+            return it->get<std::string>();
+        return {};
+    }
+
     void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
         nlohmann::json j;
         try {
@@ -1290,8 +1297,8 @@ class BpeTokenizer final : public ITokenizer {
         if (!model.contains("vocab"))
             throw std::runtime_error("Invalid tokenizer.json: missing model.vocab");
 
-        mByteFallback = j["model"].value("byte_fallback", false);
-        mEndOfWordSuffix = j["model"].value("end_of_word_suffix", "");
+        mByteFallback = model.value("byte_fallback", false);
+        mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
         parse_vocab(j);
         parse_merges(j);
         parse_added_tokens(j);

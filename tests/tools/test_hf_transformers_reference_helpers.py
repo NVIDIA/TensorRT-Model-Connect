@@ -286,7 +286,7 @@ def test_sam3_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
         runtime_strategy="prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam3",
-        inputs={"image_url": "https://example.com/sam3.jpg", "prompt": "ear"},
+        inputs={"image": "data/test_img.jpeg", "prompt": "ear"},
         metadata={"trust_remote_code": False, "precision": "fp32"},
     )
     ctx = RunContext(
@@ -303,7 +303,13 @@ def test_sam3_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     assert cmd[:2] == ["/ref/python", "-c"]
     script = cmd[2]
     assert "model_ref = '/cached/sam3'" in script
+    assert "def _load_sam3_processor(" in script
     assert "Sam3Processor.from_pretrained(" in script
+    assert "except Exception as processor_error:" in script
+    assert '"target_size": 1008' in script
+    assert "Sam3ImageProcessorFast(**image_processor_kwargs)" in script
+    assert "AutoTokenizer.from_pretrained(" in script
+    assert "processor = _load_sam3_processor(model_ref, trust_remote_code)" in script
     assert "model_ref, trust_remote_code=trust_remote_code" in script
     assert "Sam3Model.from_pretrained(" in script
     assert "model_ref, torch_dtype=torch.float32" in script

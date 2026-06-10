@@ -361,8 +361,8 @@ def test_manifest_loader_keeps_sam3_text_prompt_contract(tmp_path) -> None:
                 "test_type": "prompted_segmentation",
                 "reference_family": "prompted_segmentation_sam3",
                 "inputs": {
-                    "image_url": "http://images.cocodataset.org/val2017/000000077595.jpg",
-                    "prompt": "ear",
+                    "image": "data/test_img.jpeg",
+                    "prompt": "car",
                 },
                 "threshold_overrides": {
                     "box_iou_mean": 0.95,
@@ -377,7 +377,7 @@ def test_manifest_loader_keeps_sam3_text_prompt_contract(tmp_path) -> None:
 
     assert case.reference_family == "prompted_segmentation_sam3"
     assert case.user_contract == "prompted_mask"
-    assert case.inputs["prompt"] == "ear"
+    assert case.inputs["prompt"] == "car"
     assert case.threshold_overrides["box_iou_mean"] == 0.95
     assert case.threshold_overrides["score_abs_error_mean"] == 0.05
-    assert "000000077595.jpg" in case.inputs["image_url"]
+    assert case.inputs["image"] == "data/test_img.jpeg"
