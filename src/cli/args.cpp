@@ -2,11 +2,61 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 
 namespace trtmc::cli {
+
+namespace {
+
+bool has_ascii_space(const char* text) {
+    if (!text)
+        return false;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        if (std::isspace(*p))
+            return true;
+    }
+    return false;
+}
+
+bool parse_strict_int(const char* text, int& out) {
+    if (!text || *text == '\0' || has_ascii_space(text))
+        return false;
+
+    errno = 0;
+    char* end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' ||
+        value < static_cast<long>(std::numeric_limits<int>::min()) ||
+        value > static_cast<long>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    out = static_cast<int>(value);
+    return true;
+}
+
+bool parse_strict_float(const char* text, float& out) {
+    if (!text || *text == '\0' || has_ascii_space(text))
+        return false;
+
+    errno = 0;
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !std::isfinite(value) ||
+        value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+        value > static_cast<double>(std::numeric_limits<float>::max())) {
+        return false;
+    }
+
+    out = static_cast<float>(value);
+    return true;
+}
+
+} // namespace
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     if (text.empty())
@@ -163,12 +213,38 @@ CliArgs parse_args(int argc, char** argv) {
             return true;
         };
 
+        auto parse_int_value = [&](const std::string& name, const std::string& expectation) {
+            int value = 0;
+            if (!parse_strict_int(argv[++i], value)) {
+                args.parse_error = true;
+                args.error_message = name + " expects " + expectation;
+                return std::optional<int>{};
+            }
+            return std::optional<int>{value};
+        };
+
+        auto parse_float_value = [&](const std::string& name, const std::string& expectation) {
+            float value = 0.0F;
+            if (!parse_strict_float(argv[++i], value)) {
+                args.parse_error = true;
+                args.error_message = name + " expects " + expectation;
+                return std::optional<float>{};
+            }
+            return std::optional<float>{value};
+        };
+
         if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
             args.prompt = argv[++i];
             continue;
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
-            args.max_new_tokens = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.max_new_tokens = *value;
             continue;
         }
         if (arg == "--block-length" && need_value(arg)) {
@@ -188,19 +264,43 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--temperature" && need_value(arg)) {
-            args.temperature = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+            args.temperature = *value;
             continue;
         }
         if (arg == "--top-p" && need_value(arg)) {
-            args.top_p = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number in [0, 1]");
+            if (!value || *value < 0.0F || *value > 1.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number in [0, 1]";
+                return args;
+            }
+            args.top_p = *value;
             continue;
         }
         if (arg == "--min-p" && need_value(arg)) {
-            args.min_p = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number in [0, 1]");
+            if (!value || *value < 0.0F || *value > 1.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number in [0, 1]";
+                return args;
+            }
+            args.min_p = *value;
             continue;
         }
         if (arg == "--top-k" && need_value(arg)) {
-            args.top_k = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer >= 0");
+            if (!value || *value < 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer >= 0";
+                return args;
+            }
+            args.top_k = *value;
             continue;
         }
         if (arg == "--seed" && need_value(arg)) {
