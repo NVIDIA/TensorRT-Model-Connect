@@ -73,7 +73,7 @@ def _classify_tier(path: str) -> Optional[str]:
 
 def _direct_python_test_tier(path: str) -> Optional[str]:
     """Return the tier for Python test files that pytest can run directly."""
-    if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
+    if path.startswith("tests/builder/"):
         return "builder"
     if path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
         return "tools"

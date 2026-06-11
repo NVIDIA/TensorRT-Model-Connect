@@ -1,5 +1,5 @@
 ---
-title: Intermediate Tutorial - Diffusion and Time-Series
+title: Intermediate Tutorial - Diffusion and Vision Pipelines
 ---
 
 This tutorial covers pipelines that do not return generated text.
@@ -10,7 +10,6 @@ These pipelines still use `IPipeline`, but their task methods and internal loops
 flowchart LR
   TextTask["Text generation"] --> TokenLoop["token loop"]
   DiffTask["Diffusion"] --> DenoiseLoop["denoising loop"]
-  ForecastTask["Time-series"] --> Numeric["numeric forecast"]
   SegmentTask["Segmentation/detection"] --> VisionPost["vision postprocess"]
 ```
 
@@ -72,31 +71,6 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 Diffusion bundles often have multiple engine sections: text encoder, denoiser, and VAE decoder.
 
 Video generation adds temporal dimensions. The output is still `ImageResult`, but `num_frames` is greater than one and the latent tensor includes time.
-
-## Time-series point forecast
-
-```bash
-./build/trtmc solve /tmp/timesfm.trtfb \
-  --branch-input "0.05,0.15,0.30,0.50,0.65,0.80,0.95,1.10,1.18,1.24,1.28,1.31" \
-  --trunk-input "2"
-```
-
-The TimesFM E2E manifest uses `runtime_strategy=timesfm_torchtrt`, `context_length=2048`, and a short univariate sample input. Treat this as a latency and correctness smoke input, not a dataset evaluation.
-
-```mermaid
-flowchart LR
-  Context["Historical values"] --> Prepare["Prepare context tensor"]
-  Horizon["Forecast horizon"] --> Prepare
-  Prepare --> Engine["Torch-TRT time-series engine"]
-  Engine --> Output["Forecast tensor"]
-  Output --> Text["CLI formatted values"]
-```
-
-Time-series support is useful because it shows that TensorRT-Model-Connect is not only an LLM runner. The same bundle/runtime model works for numeric models when the task contract is represented clearly.
-
-## PatchTST and PatchTSMixer
-
-PatchTST and PatchTSMixer route through `patchtst_torchtrt` and `patchtsmixer_torchtrt`. Use their manifests in `tests/e2e/models/` for canonical inputs and thresholds.
 
 ## Segmentation and detection mental model
 

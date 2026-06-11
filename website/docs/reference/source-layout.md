@@ -22,7 +22,6 @@ title: Source Layout
 | `src/tokenizer/` | Native tokenizers. |
 | `python/tensorrt_model_connect/` | Python builder package. |
 | `python/tensorrt_model_connect/families/` | Raw TRT family plugins. |
-| `python/tensorrt_model_connect/engine_defs/torch_trt/` | Torch-TRT engine definition path. |
 | `tests/builder/` | Python builder tests. |
 | `tests/cpp/` | C++ unit tests. |
 | `tests/e2e/` | E2E tests and model manifests. |

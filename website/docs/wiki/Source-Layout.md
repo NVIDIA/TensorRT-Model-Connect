@@ -133,8 +133,7 @@ strategy family in one place.
 | `flux/` | `diffusion_flux` | `FluxPipeline` |
 | `wan/` | `diffusion_wan`, `diffusion_pixart` | `WanPipeline` |
 | `z_image/` | `diffusion_zimage` | `ZImagePipeline` |
-| `patchtst/`, `patchtsmixer/`, `timesfm/`, `chronos_bolt/` | time-series strategies | family-specific pipelines |
-| `pixart/`, `pixart_torchtrt/`, `ltx_video/` | image/video diffusion strategies | family-specific pipelines |
+| `pixart/`, `ltx_video/` | image/video diffusion strategies | family-specific pipelines |
 
 Shared helpers remain in `src/runtime/plugins/shared/`: `plugin_helpers.h/cpp`
 (ITrtModule loading via backend, tokenizer creation, KV-dim),

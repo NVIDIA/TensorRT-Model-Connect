@@ -1,2 +1,0 @@
-runtime_strategies = ["chronos_bolt_torchtrt"]
-task_strategy = "neural_operator"

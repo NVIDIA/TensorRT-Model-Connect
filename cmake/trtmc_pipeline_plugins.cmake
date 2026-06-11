@@ -14,10 +14,6 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/recurrent/rwkv_plugin.cpp|register_rwkv_plugin"
   "models/recurrent/hybrid_plugin.cpp|register_hybrid_plugin"
   "models/encoder/plugin.cpp|register_encoder_plugin"
-  "models/patchtst/plugin.cpp|register_patchtst_plugin"
-  "models/patchtsmixer/plugin.cpp|register_patchtsmixer_plugin"
-  "models/timesfm/plugin.cpp|register_timesfm_plugin"
-  "models/chronos_bolt/plugin.cpp|register_chronos_bolt_plugin"
   "models/elf_flow/plugin.cpp|register_elf_flow_plugin"
   "models/segmentation/plugin.cpp|register_segmentation_plugin"
   "models/timm_vit/plugin.cpp|register_timm_vit_plugin"
@@ -38,7 +34,6 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/marian/plugin.cpp|register_marian_plugin"
   "models/seq2seq/plugin.cpp|register_seq2seq_plugin"
   "models/pixart/plugin.cpp|register_pixart_plugin"
-  "models/pixart_torchtrt/plugin.cpp|register_pixart_torchtrt_plugin"
 )
 
 set(TRTMC_PIPELINE_PLUGIN_REGISTRATION_SOURCE

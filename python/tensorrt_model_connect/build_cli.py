@@ -39,8 +39,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     build_model_ref = args.model
 
-    # Backend dispatch: default to auto-selection that prefers raw TRT and
-    # falls back to Torch-TRT when raw support is unavailable.
+    # Backend dispatch: default to auto-selection of the native TRT backend.
     method_name = getattr(args, 'method', 'auto')
     if method_name == 'auto':
         try:
@@ -82,31 +81,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if tp_size > 1
         else None
     )
-
-    if method_name != 'trt':
-        from .engine_defs import get_engine_def
-        engine_def = get_engine_def(method_name)
-        if engine_def is None:
-            print(f"Error: method '{method_name}' is not available. "
-                  f"Install its dependencies (e.g., pip install torch_tensorrt).",
-                  file=sys.stderr)
-            return 1
-        try:
-            engine_def.build(
-                build_model_ref,
-                args.output,
-                max_cache_length=args.max_cache_length,
-                precision=args.precision,
-                verbose=args.verbose,
-                parallel_config=parallel_config,
-            )
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if args.verbose:
-                import traceback
-                traceback.print_exc()
-            return 1
 
     # RTX selection MUST happen before any TensorRT API is touched.
     if getattr(args, 'rtx', False):
@@ -220,18 +194,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
 def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
     """Return (resolved_model_ref, family_name) for the selected build backend."""
+    del method_name
     from .config import ModelConfig
     from .engine_builder import _resolve_model, find_diffusion_plugin, find_plugin
 
     resolved_model_ref = _resolve_model(model_ref)
     model_dir = Path(resolved_model_ref)
-
-    if method_name != "trt":
-        from .engine_defs.torch_trt.compiler import _parse_model_config
-        from .engine_defs.torch_trt.families import find_plugin as find_torchtrt_plugin
-
-        plugin = find_torchtrt_plugin(_parse_model_config(model_dir))
-        return resolved_model_ref, getattr(plugin, "name", "")
 
     if (model_dir / "model_index.json").exists():
         model_index = json.loads((model_dir / "model_index.json").read_text())
@@ -294,21 +262,14 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
     """Return (method_name, resolved_model_ref) for the best available backend.
 
     The selection rule is:
-      1. Prefer the raw TensorRT Network API backend when a native family plugin
+      1. Use the raw TensorRT Network API backend when a native family plugin
          exists for the model.
-      2. Fall back to the Torch-TRT backend when no raw plugin exists but a
-         Torch-TRT family plugin does.
     """
     from .config import ModelConfig
     from .engine_builder import _resolve_model, find_plugin, find_diffusion_plugin
-    from .engine_defs import get_engine_def
 
     resolved_model_ref = _resolve_model(model_ref)
     model_dir = Path(resolved_model_ref)
-
-    torchtrt_backend = get_engine_def("torchtrt")
-    torchtrt_available = torchtrt_backend is not None
-    torchtrt_supported = False
 
     if (model_dir / "model_index.json").exists():
         model_index = json.loads((model_dir / "model_index.json").read_text())
@@ -321,56 +282,16 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
         config = ModelConfig.from_dir(model_dir)
         raw_plugin = find_plugin(config.model_type)
         raw_supported = raw_plugin is not None
-        if torchtrt_available:
-            from .engine_defs.torch_trt.families import find_plugin as find_torchtrt_plugin
-
-            torchtrt_plugin = find_torchtrt_plugin(config)
-            torchtrt_supported = torchtrt_plugin is not None
-
-            # Prefer a config-aware Torch-TRT family over a generic raw
-            # model_type match. This avoids routing specialized checkpoints
-            # like Chronos-Bolt through a generic T5 raw builder.
-            matches_config = getattr(torchtrt_plugin, "matches_config", None)
-            raw_matches_config = getattr(raw_plugin, "matches_config", None)
-            if (
-                raw_supported
-                and torchtrt_supported
-                and callable(matches_config)
-                and matches_config(config)
-                and not (callable(raw_matches_config) and raw_matches_config(config))
-            ):
-                raw_supported = False
 
     if raw_supported:
         print("[trtmc build] Auto-selected backend: trt", file=sys.stderr)
         return "trt", resolved_model_ref
 
-    if torchtrt_available and not torchtrt_supported and (model_dir / "model_index.json").exists():
-        from .engine_defs.torch_trt.compiler import _parse_model_config
-        from .engine_defs.torch_trt.families import find_plugin as find_torchtrt_plugin
+    raise RuntimeError(
+        "No native TRT family plugin matched this model. "
+        "Choose a model with native TRT support."
+    )
 
-        torchtrt_supported = find_torchtrt_plugin(_parse_model_config(model_dir)) is not None
-
-    if torchtrt_supported:
-        print("[trtmc build] Auto-selected backend: torchtrt", file=sys.stderr)
-        return "torchtrt", resolved_model_ref
-
-    if not raw_supported and not torchtrt_available:
-        raise RuntimeError(
-            "No raw TRT family plugin matched this model, and the Torch-TRT "
-            "backend is not available. Install torch_tensorrt or choose a "
-            "model with native TRT support."
-        )
-
-    if not raw_supported and not torchtrt_supported:
-        raise RuntimeError(
-            "No supported build backend matched this model. "
-            "It is not implemented on the raw TRT path, and no Torch-TRT "
-            "family plugin matched it either."
-        )
-
-    print("[trtmc build] Auto-selected backend: trt", file=sys.stderr)
-    return "trt", resolved_model_ref
 
 
 def _parse_profile_rows(value: str) -> list[int]:
@@ -624,9 +545,8 @@ def main() -> None:
                          type=int, default=512,
                          help="Number of calibration samples for PTQ (default: 512)")
     build_p.add_argument("--method", type=str, default="auto",
-                         choices=["auto", "trt", "torchtrt"],
-                         help="Engine definition method: auto (default, prefer raw TRT and "
-                              "fall back to torchtrt), trt, or torchtrt")
+                         choices=["auto", "trt"],
+                         help="Engine definition method: auto (default, native TRT) or trt")
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",

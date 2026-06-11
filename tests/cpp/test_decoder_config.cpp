@@ -1,5 +1,5 @@
 // =============================================================================
-// test_torchtrt_decoder.cpp -- Unit tests for decoder config parsing
+// test_decoder_config.cpp -- Unit tests for decoder config parsing
 // =============================================================================
 //
 // Purpose:

@@ -52,7 +52,6 @@ def mock_repo(tmp_path):
     families_dir.mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "text_generation").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "vision_language").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "flux").mkdir(parents=True)
@@ -110,9 +109,6 @@ def mock_repo(tmp_path):
         {"name": "nemotron-labs-diffusion-8b", "family": "nemotron_labs_diffusion",
          "runtime_strategy": "nemotron_labs_diffusion",
          "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B"},
-        {"name": "chronos-bolt-small", "family": "chronos_bolt",
-         "runtime_strategy": "chronos_bolt_torchtrt",
-         "hf_id": "amazon/chronos-bolt-small", "core": True},
         {"name": "convbert-base", "family": "convbert", "runtime_strategy": "encoder_only",
          "hf_id": "YituTech/conv-bert-base"},
     ]
@@ -204,7 +200,6 @@ def mock_repo(tmp_path):
     (python_package_dir / "config.py").write_text("")
     (python_package_dir / "checkpoint_mapper.py").write_text("")
     (python_package_dir / "graph_ops.py").write_text("")
-    (python_package_dir / "engine_defs" / "torch_trt" / "strategies").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "text_generation" / "MODEL.toml").write_text(
         'runtime_strategies = ["decoder_kv_cache", "decoder_moe", "nemotron_labs_diffusion"]\n',
         encoding="utf-8",
@@ -228,19 +223,6 @@ def mock_repo(tmp_path):
     )
     (tmp_path / "src" / "runtime" / "models" / "pixart" / "pipeline.cpp").write_text(
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "MODEL.toml").write_text(
-        'runtime_strategies = ["chronos_bolt_torchtrt"]\n'
-        'task_strategy = "neural_operator"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "plugin.cpp").write_text(
-        '#include "runtime/models/chronos_bolt/pipeline.h"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "chronos_bolt" / "pipeline.cpp").write_text(
-        '#include "runtime/models/chronos_bolt/pipeline.h"\n',
         encoding="utf-8",
     )
     (tmp_path / "tests" / "e2e" / "data" / "flux2-fp8-scales.json").write_text(
@@ -288,13 +270,8 @@ class TestDeclarativeClassificationRules:
             ),
             (
                 "python/tensorrt_model_connect/"
-                "engine_defs/torch_trt/families/base.py",
-                "torchtrt_family_base",
-            ),
-            (
-                "python/tensorrt_model_connect/"
-                "engine_defs/torch_trt/strategies/custom.py",
-                "torchtrt_strategy_unknown",
+                "families/base.py",
+                "family_base",
             ),
             ("src/runtime/models/custom_backend/plugin.cpp", "cpp_runtime_model_unknown"),
             ("src/runtime/plugins/flux_plugin.cpp", "cpp_plugin_flux_runtime"),
@@ -427,27 +404,6 @@ class TestFamilyPlugin:
             "python/tensorrt_model_connect/families/convbert/plugin.py", imap)
         assert match.rule == "family_package"
         assert match.models == ["convbert-base"]
-
-    def test_torchtrt_family_only_change(self, mock_repo):
-        """Torch-TRT family plugin change maps only to that family's manifests."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
-        _write_json(
-            models_dir / "patchtst-granite-official.json",
-            {
-                "name": "patchtst-granite-official",
-                "family": "patchtst",
-                "runtime_strategy": "patchtst_torchtrt",
-                "hf_id": "ibm-granite/granite-timeseries-patchtst",
-            },
-        )
-        imap = test_impact.build_impact_map(mock_repo)
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/engine_defs/torch_trt/families/patchtst.py",
-            imap,
-        )
-        assert match.rule == "torchtrt_family_plugin"
-        assert match.models == ["patchtst-granite-official"]
-
 
 # ---------------------------------------------------------------------------
 # Shared module tests (broad impact)
@@ -625,17 +581,17 @@ class TestCppScope:
     def test_cpp_runtime_model_scope(self, imap):
         """src/runtime/models/<strategy> files are scoped by MODEL.toml."""
         match = test_impact.classify_file(
-            "src/runtime/models/chronos_bolt/plugin.cpp", imap)
+            "src/runtime/models/flux/plugin.cpp", imap)
         assert match.rule == "cpp_runtime_model"
         assert match.rebuild_cpp is True
-        assert match.models == ["chronos-bolt-small"]
+        assert sorted(match.models) == ["flux-2-dev", "flux-schnell"]
 
     def test_cpp_runtime_model_manifest_scope(self, imap):
         """MODEL.toml itself is model-runtime scoped."""
         match = test_impact.classify_file(
-            "src/runtime/models/chronos_bolt/MODEL.toml", imap)
+            "src/runtime/models/flux/MODEL.toml", imap)
         assert match.rule == "cpp_runtime_model"
-        assert match.models == ["chronos-bolt-small"]
+        assert sorted(match.models) == ["flux-2-dev", "flux-schnell"]
 
     def test_scoped_cpp_helper_gpu_matmul(self, imap):
         """gpu_matmul.cpp -> only the pipelines that reference it."""
@@ -838,14 +794,6 @@ class TestUnitTiers:
             assert match.models == []
             assert match.unit_tiers == ["tools"]
 
-    def test_unit_tier_torchtrt_engine_defs(self, imap):
-        """Torch-TRT engine-def tests run as builder tests without E2E."""
-        match = test_impact.classify_file(
-            "tests/engine_defs/torch_trt/test_config.py", imap)
-        assert match.rule == "unit_torchtrt_builder"
-        assert match.models == []
-        assert "builder" in match.unit_tiers
-
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
         match = test_impact.classify_file(
@@ -909,15 +857,6 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
-    def test_torchtrt_diffusion_strategy(self, imap):
-        """Torch-TRT diffusion strategy changes should stay scoped to diffusion."""
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/engine_defs/torch_trt/strategies/diffusion.py",
-            imap)
-        assert match.rule == "torchtrt_strategy"
-        assert "flux-schnell" in match.models
-        assert "qwen3-0.6b" not in match.models
-
     def test_harness_shared(self, imap):
         """e2e_harness/orchestrator.py -> ALL models."""
         match = test_impact.classify_file(
@@ -934,15 +873,15 @@ class TestHarness:
         assert match.unit_tiers == ["tools"]
 
     def test_torch_reference_includes_neural_operator_models(self, mock_repo):
-        """torch_reference.py includes neural_operator-backed time-series manifests."""
+        """torch_reference.py includes neural_operator-backed manifests."""
         models_dir = mock_repo / "tests" / "e2e" / "models"
         _write_json(
-            models_dir / "patchtst-granite-official.json",
+            models_dir / "neural-op-case.json",
             {
-                "name": "patchtst-granite-official",
-                "family": "patchtst",
-                "runtime_strategy": "patchtst_torchtrt",
-                "hf_id": "ibm-granite/granite-timeseries-patchtst",
+                "name": "neural-op-case",
+                "family": "neural_operator",
+                "runtime_strategy": "neural_operator",
+                "hf_id": "example/neural-operator",
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
@@ -951,7 +890,7 @@ class TestHarness:
             imap,
         )
         assert match.rule == "harness_reference"
-        assert "patchtst-granite-official" in match.models
+        assert "neural-op-case" in match.models
 
     def test_test_e2e_entrypoint(self, imap):
         """tests/test_e2e.py -> ALL models."""
@@ -982,7 +921,6 @@ class TestHarness:
             "shared_builder_fp8_scales_cli",
             "shared_builder_fp8_scales_engine",
             "shared_builder_diffusion_tokenizer",
-            "torchtrt_compiler_tokenizer",
             "harness_manifest_diffusion_thresholds",
             "harness_reference_dpr_context_encoder",
             "harness_reference_vl_generated_only_decode",
@@ -1465,57 +1403,6 @@ diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_m
         assert refined.rule == "shared_builder_diffusion_tokenizer"
         assert "flux-schnell" in refined.models
         assert "qwen3-0.6b" not in refined.models
-
-    def test_torchtrt_compiler_tokenizer_rule_refines_compiler_tokenizer_diff(self, mock_repo):
-        """Torch-TRT tokenizer metadata changes narrow to Torch-TRT tokenizer users."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
-        _write_json(
-            models_dir / "qwen2.5-0.5b-torchtrt.json",
-            {
-                "name": "qwen2.5-0.5b-torchtrt",
-                "family": "qwen",
-                "runtime_strategy": "torchtrt_decoder",
-                "hf_id": "Q/Qwen2.5",
-            },
-        )
-        _write_json(
-            models_dir / "pixart-sigma-1024-torchtrt.json",
-            {
-                "name": "pixart-sigma-1024-torchtrt",
-                "family": "pixart",
-                "runtime_strategy": "diffusion_pixart_torchtrt",
-                "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-            },
-        )
-        imap = test_impact.build_impact_map(mock_repo)
-        diff_text = """
-diff --git a/python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py b/python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py
-@@ -1 +1 @@
-+        from transformers import AutoTokenizer
-+        ids_default = tok.encode("hello")
-+        ids_without = tok.encode("hello", add_special_tokens=False)
-+        return ids_default != ids_without
-+            if bool(tok_cfg.get("add_eos_token", False)):
-+                return True
-+def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
-+    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(model_dir_path)
-"""
-        broad = test_impact.classify_file(
-            "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
-            imap,
-        )
-        refined = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
-            broad,
-            diff_text,
-            imap,
-        )
-        assert refined.rule == "torchtrt_compiler_tokenizer"
-        assert set(refined.models) == {
-            "pixart-sigma-1024-torchtrt",
-            "qwen2.5-0.5b-torchtrt",
-        }
-
 
 # ---------------------------------------------------------------------------
 # Aggregation / cap tests

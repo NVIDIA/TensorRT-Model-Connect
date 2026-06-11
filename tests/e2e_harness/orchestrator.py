@@ -95,10 +95,6 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "speech_to_speech",
     "omni_multimodal",
     "diffusion",
-    "patchtst_torchtrt",
-    "patchtsmixer_torchtrt",
-    "timesfm_torchtrt",
-    "chronos_bolt_torchtrt",
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
@@ -924,8 +920,6 @@ def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
     Returning None means "use the CLI default", which is now auto-selection.
     """
     backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
-    if backend in {"torchtrt", "torch_trt"} or build_args.get("torch_trt", False):
-        return "torchtrt"
     if backend == "trt":
         return "trt"
     if backend == "auto":

@@ -100,12 +100,10 @@ $TRTMC detect /tmp/detector.trtfb \
   --output-json /tmp/detections.json
 ```
 
-## Time-series and neural-operator style solve
+## Neural-operator style solve
 
 ```bash
-$TRTMC solve /tmp/timesfm.trtfb \
+$TRTMC solve /tmp/operator.trtfb \
   --branch-input "0.05,0.15,0.30,0.50,0.65,0.80,0.95,1.10,1.18,1.24,1.28,1.31" \
   --trunk-input "2"
 ```
-
-The current time-series manifests exercise TimesFM, PatchTST, PatchTSMixer, and Chronos-Bolt through runtime strategies backed by Torch-TRT engine definitions.

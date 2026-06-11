@@ -205,10 +205,6 @@ add_library(trtmc_core
   src/runtime/models/text_generation/pipeline.cpp
   src/runtime/models/recurrent/pipeline.cpp
   src/runtime/models/encoder/pipeline.cpp
-  src/runtime/models/patchtst/pipeline.cpp
-  src/runtime/models/patchtsmixer/pipeline.cpp
-  src/runtime/models/timesfm/pipeline.cpp
-  src/runtime/models/chronos_bolt/pipeline.cpp
   src/runtime/models/elf_flow/pipeline.cpp
   src/runtime/models/segmentation/segment_pipeline.cpp
   src/runtime/models/segmentation/sam_pipeline.cpp
@@ -227,7 +223,6 @@ add_library(trtmc_core
   src/runtime/models/speech/pipeline.cpp
   src/runtime/models/omni/pipeline.cpp
   src/runtime/models/pixart/pipeline.cpp
-  src/runtime/models/pixart_torchtrt/pipeline.cpp
 )
 
 # Keep warning policy strict for project code, but avoid CI log spam from
@@ -758,8 +753,8 @@ trtmc_add_test(test_wan_generation_conditioning)
 # IoMap tensor name mapping
 trtmc_add_test(test_io_map)
 
-# Decoder config parsing (legacy name: test_torchtrt_decoder)
-trtmc_add_test(test_torchtrt_decoder)
+# Decoder config parsing
+trtmc_add_test(test_decoder_config)
 
 # TVM-FFI plugin
 trtmc_add_test(test_tvm_ffi_plugin REQUIRES_TRT)

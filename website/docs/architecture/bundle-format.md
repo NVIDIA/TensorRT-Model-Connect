@@ -50,7 +50,6 @@ Different strategies expect different section sets:
 | Diffusion | Text encoder plans, `denoiser_plan`, `vae_decoder_plan`, scheduler and latent config. |
 | Speech-to-text | Encoder/decoder or RNNT plans, mel/filterbank metadata, tokenizer assets. |
 | Text-to-audio | Semantic/acoustic/codec plans, tokenizer or phoneme assets, audio generation metadata. |
-| Torch-TRT time-series | Torch-TRT engine plan plus model-specific context and horizon configuration. |
 
 The public bundle inspection API is in `include/trtmc/bundle.h`:
 

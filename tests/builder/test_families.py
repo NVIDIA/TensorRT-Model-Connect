@@ -44,7 +44,6 @@ def _discover_plugin_names_from_filesystem() -> set[str]:
     )
     plugin_dirs = [
         repo_root / "families",
-        repo_root / "engine_defs" / "torch_trt" / "families",
     ]
 
     for families_dir in plugin_dirs:

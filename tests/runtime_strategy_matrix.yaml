@@ -69,38 +69,6 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['neural_operator']."
     },
-    "patchtst_torchtrt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtst_torchtrt']."
-    },
-    "patchtsmixer_torchtrt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtsmixer_torchtrt']."
-    },
-    "timesfm_torchtrt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timesfm_torchtrt']."
-    },
-    "chronos_bolt_torchtrt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_torchtrt']."
-    },
     "elf_flow": {
       "task_strategy": "diffusion_text_generation",
       "cli_commands": ["run", "solve"],

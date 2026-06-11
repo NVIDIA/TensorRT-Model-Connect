@@ -1,6 +1,3 @@
-# Removed LibTorch/Torch-TRT C++ runtime (root-owned files may linger)
-/src/torchtrt/
-
 # Build outputs
 /build/
 **/build/
@@ -94,9 +91,6 @@ models/hf/baichuan-inc__*/
 models/hf/hf-internal-testing__*/
 models/hf/trl-internal-testing__*/
 models/hf/*/.cache/
-
-# Torch-TRT E2E model manifests (machine-specific, not committed)
-tests/torchtrt_e2e/models/*.json
 
 .*
 !.github/

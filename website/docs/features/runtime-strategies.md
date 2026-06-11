@@ -14,9 +14,8 @@ A runtime strategy is the C++ dispatch key stored in bundle `config.json`.
 | Seq2seq | `text_to_text`, `marian_translation`, `seq2seq_encoder_decoder` |
 | Vision and multimodal | `vision_language`, `omni_multimodal` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` |
-| Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart`, `diffusion_pixart_torchtrt` |
+| Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` |
 | Perception | `segmentation`, `prompted_segmentation`, `object_detection` |
-| Time-series | `timesfm_torchtrt`, `patchtst_torchtrt`, `patchtsmixer_torchtrt`, `chronos_bolt_torchtrt` |
 
 ## Why strategies are separate from families
 

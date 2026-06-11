@@ -55,17 +55,17 @@ The plugin should parse only the fields and sections it owns. If a new strategy 
 
 ## Registered strategy keys
 
-The current runtime registers 31 strategy keys:
+The current runtime registers these strategy keys:
 
 ```text
-chronos_bolt_torchtrt, decoder_kv_cache, decoder_moe, diffusion_flux,
-diffusion_pixart, diffusion_pixart_torchtrt, diffusion_wan, diffusion_zimage,
-embedding, encoder_only, hybrid_mamba_attention, marian_translation,
-neural_operator, object_detection, omni_multimodal, patchtsmixer_torchtrt,
-patchtst_torchtrt, prompted_segmentation, reranking, rwkv_recurrent,
+decoder_kv_cache, decoder_moe, diffusion_flux, diffusion_ltx,
+diffusion_pixart, diffusion_qwen_image, diffusion_wan, diffusion_zimage,
+elf_flow, embedding, encoder_only, hybrid_mamba_attention,
+image_classification, marian_translation, neural_operator, object_detection,
+omni_multimodal, prompted_segmentation, reranking, rwkv_recurrent,
 segmentation, seq2seq_encoder_decoder, speech_to_speech, speech_to_text,
-speech_to_text_rnnt, ssm_recurrent, text_to_audio_bark,
-text_to_audio_magpie, text_to_text, timesfm_torchtrt, vision_language
+speech_to_text_rnnt, ssm_recurrent, text_to_audio_bark, text_to_audio_magpie,
+text_to_text, vision_language
 ```
 
 ## Strategy groups
@@ -78,8 +78,7 @@ text_to_audio_magpie, text_to_text, timesfm_torchtrt, vision_language
 | Seq2seq and translation | `seq2seq_encoder_decoder`, `text_to_text`, `marian_translation` | Run encoder-decoder generation rather than decoder-only generation. |
 | Vision and perception | `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection` | Preprocess pixels, run vision components, postprocess text/masks/boxes. |
 | Audio | `speech_to_text`, `speech_to_text_rnnt`, `speech_to_speech`, `text_to_audio_bark`, `text_to_audio_magpie` | Convert between waveforms, acoustic features, tokens, and text/audio output. |
-| Diffusion | `diffusion_flux`, `diffusion_pixart`, `diffusion_pixart_torchtrt`, `diffusion_wan`, `diffusion_zimage` | Encode prompt, iterate denoiser steps, decode latent images or video frames. |
-| Time-series | `timesfm_torchtrt`, `chronos_bolt_torchtrt`, `patchtst_torchtrt`, `patchtsmixer_torchtrt` | Run compiled forecast models over numeric context windows. |
+| Diffusion | `diffusion_flux`, `diffusion_pixart`, `diffusion_wan`, `diffusion_zimage`, `diffusion_qwen_image`, `diffusion_ltx` | Encode prompt, iterate denoiser steps, decode latent images or video frames. |
 
 ## Manifest registration
 

@@ -174,7 +174,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": "org/m",
             "family": "qwen",
-            "execution_profiles": "chronos",
+            "execution_profiles": "internlm",
         }
         with pytest.raises(TypeError, match="execution_profiles"):
             _validate_manifest(data, "test.json")
@@ -184,7 +184,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": "org/m",
             "family": "qwen",
-            "execution_profiles": {"build": "chronos", "verify": "chronos"},
+            "execution_profiles": {"build": "internlm", "verify": "internlm"},
         }
         with pytest.raises(ValueError, match="unsupported phase"):
             _validate_manifest(data, "test.json")
@@ -193,34 +193,34 @@ class TestManifestValidation:
         path = self._write_manifest(
             tmp_path,
             {
-                "name": "chronos-case",
-                "hf_id": "amazon/chronos-bolt-tiny",
-                "family": "chronos_bolt",
-                "runtime_strategy": "chronos_bolt_torchtrt",
+                "name": "internlm-case",
+                "hf_id": "internlm/internlm-test",
+                "family": "internlm",
+                "runtime_strategy": "decoder_kv_cache",
                 "reference_backend": "torch_reference",
             },
         )
         case = load_manifest(path)
-        assert case.execution_profiles["build"] == "chronos"
-        assert case.execution_profiles["runtime"] == "base"
-        assert case.execution_profiles["reference"] == "chronos"
+        assert case.execution_profiles["build"] == "internlm"
+        assert case.execution_profiles["runtime"] == "internlm"
+        assert case.execution_profiles["reference"] == "internlm"
 
     def test_load_manifest_preserves_execution_profile_overrides(self, tmp_path):
         path = self._write_manifest(
             tmp_path,
             {
-                "name": "chronos-case",
-                "hf_id": "amazon/chronos-bolt-tiny",
-                "family": "chronos_bolt",
-                "runtime_strategy": "chronos_bolt_torchtrt",
+                "name": "internlm-case",
+                "hf_id": "internlm/internlm-test",
+                "family": "internlm",
+                "runtime_strategy": "decoder_kv_cache",
                 "reference_backend": "torch_reference",
                 "execution_profiles": {"runtime": "custom-runtime"},
             },
         )
         case = load_manifest(path)
-        assert case.execution_profiles["build"] == "chronos"
+        assert case.execution_profiles["build"] == "internlm"
         assert case.execution_profiles["runtime"] == "custom-runtime"
-        assert case.execution_profiles["reference"] == "chronos"
+        assert case.execution_profiles["reference"] == "internlm"
 
     def test_nemotron_labs_diffusion_manifests_cover_model_card_modes(self):
         """The 8B model-card generation surfaces should all have nightly cases."""

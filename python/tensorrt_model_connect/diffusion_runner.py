@@ -229,14 +229,11 @@ class DiffusionRunner:
             embeddings = results[output_names[0]]
 
         # Wan-style diffusion paths have no text attention mask in the DiT and
-        # benefit from zeroing padding rows. PixArt passes an explicit
-        # encoder_attention_mask to the denoiser, so keep the raw T5 outputs to
-        # match the C++ pixart_torchtrt pipeline and HF reference.
-        if self.config.get("runtime_strategy") != "diffusion_pixart_torchtrt":
-            out_seq_len = embeddings.shape[1]
-            valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
-            valid_mask = valid_mask.reshape(1, out_seq_len, 1)
-            embeddings = embeddings * valid_mask
+        # benefit from zeroing padding rows.
+        out_seq_len = embeddings.shape[1]
+        valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
+        valid_mask = valid_mask.reshape(1, out_seq_len, 1)
+        embeddings = embeddings * valid_mask
 
         # Truncate to actual content length + padding matching HF's convention.
         # HF WanPipeline uses max_sequence_length=226 by default.

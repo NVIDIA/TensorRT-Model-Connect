@@ -123,7 +123,7 @@ Examples:
 | `whisper` | `speech_to_text` | Audio features to transcript. |
 | `qwen_vl`, `internvl` | `vision_language` | Image encoder plus text decoder. |
 | `flux`, `wan_t2v`, `z_image` | Diffusion strategy keys | Text prompt to image/video via denoising pipeline. |
-| `timesfm` | `timesfm_torchtrt` | Numeric time-series forecast. |
+| `pixart` | `diffusion_pixart` | Image diffusion generation. |
 
 :::tip Progress check
 You understand this section when you can explain why two different families can use the same runtime strategy, and why one family may need a new strategy when request-time behavior changes.

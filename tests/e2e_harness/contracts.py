@@ -842,14 +842,6 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "elf-b-owt-l0": ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value,
     "elf-b-xsum-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
     "elf-b-de-en-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
-    # 5.28 TIME_SERIES_POINT_FORECAST
-    "patchtst-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    "patchtsmixer-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    "timesfm-2.0-500m-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    # 5.29 TIME_SERIES_QUANTILE_FORECAST
-    "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
-    # 5.30 TIME_SERIES_REGRESSION
-    "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
     # 5.31 NEMOTRON_LABS_DIFFUSION_MODEL_CARD
     "nemotron-labs-diffusion-8b-ar": ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value,
     "nemotron-labs-diffusion-8b-diffusion": (
@@ -967,10 +959,6 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
-    "patchtst_torchtrt": "neural_operator",
-    "patchtsmixer_torchtrt": "neural_operator",
-    "timesfm_torchtrt": "neural_operator",
-    "chronos_bolt_torchtrt": "neural_operator",
     "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",      # legacy alias
     "diffusion_flux": "diffusion_media_generation",
@@ -979,11 +967,8 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
-    "torchtrt_diffusion": "torchtrt_diffusion",
-    "diffusion_pixart_torchtrt": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",
     "marian_translation": "text_generation_causal",
     "seq2seq_encoder_decoder": "text_generation_causal",
-    "torchtrt_decoder": "text_generation_causal",
 }

@@ -48,10 +48,6 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
-    "patchtst_torchtrt": "neural_operator",
-    "patchtsmixer_torchtrt": "neural_operator",
-    "timesfm_torchtrt": "neural_operator",
-    "chronos_bolt_torchtrt": "neural_operator",
     "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
@@ -60,9 +56,6 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
-    "torchtrt_decoder": "text_generation_causal",
-    "torchtrt_diffusion": "diffusion_media_generation",
-    "diffusion_pixart_torchtrt": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",
     "marian_translation": "text_generation_causal",
@@ -82,10 +75,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "magpie_plugin": ["text_to_audio_magpie"],
     "speech_plugin": ["speech_to_speech"],
     "encoder_plugin": ["encoder_only", "embedding", "reranking", "neural_operator"],
-    "patchtst_plugin": ["patchtst_torchtrt"],
-    "patchtsmixer_plugin": ["patchtsmixer_torchtrt"],
-    "timesfm_plugin": ["timesfm_torchtrt"],
-    "chronos_bolt_plugin": ["chronos_bolt_torchtrt"],
     "elf_flow_plugin": ["elf_flow"],
     "segmentation_plugin": ["segmentation", "prompted_segmentation"],
     "object_detection_plugin": ["object_detection"],
@@ -94,7 +83,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "ltx_video_plugin": ["diffusion_ltx"],
     "wan_plugin": ["diffusion_wan"],
     "pixart_plugin": ["diffusion_pixart"],
-    "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
     "zimage_plugin": ["diffusion_zimage"],
     "qwen_image_plugin": ["diffusion_qwen_image"],
     "t5_plugin": ["text_to_text"],
@@ -122,21 +110,16 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
         "encoder_only", "embedding", "reranking", "neural_operator",
         "object_detection",
     ],
-    "patchtst_pipeline": ["patchtst_torchtrt"],
-    "patchtsmixer_pipeline": ["patchtsmixer_torchtrt"],
-    "timesfm_pipeline": ["timesfm_torchtrt"],
-    "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
     "elf_flow_pipeline": ["elf_flow"],
     "flux_pipeline": ["diffusion_flux"],
     "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
     "pixart_pipeline": ["diffusion_pixart"],
-    "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
     "qwen_image_pipeline": ["diffusion_qwen_image"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage", "diffusion_qwen_image", "diffusion_pixart_torchtrt",
+        "diffusion_zimage", "diffusion_qwen_image",
     ],
 }
 
@@ -201,7 +184,6 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
 # E2E threshold profile filename (stem) -> task_strategies
 THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_media_generation": ["diffusion_media_generation"],
-    "torchtrt_diffusion": ["diffusion_media_generation"],
     "vision_language_generation": ["vision_language_generation"],
     "omni_multimodal": ["omni_multimodal"],
     "segmentation": ["segmentation"],
@@ -603,9 +585,7 @@ def _infer_unit_tiers(path: str) -> List[str]:
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
         tiers.append("cpp")
-    if (path.startswith("tests/builder/")
-            or path.startswith("tests/torchtrt_builder/")
-            or path.startswith("tests/engine_defs/torch_trt/")):
+    if path.startswith("tests/builder/"):
         tiers.append("builder")
     if path.startswith("tests/cpp/"):
         tiers.append("cpp")
@@ -979,50 +959,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=50,
-            name="torchtrt_family_plugin",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/families/(\w+)\.py$",
-                lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
-            ),
-            resolver=_match_result("torchtrt_family_plugin", _family_models),
-            covered_by=("TestFamilyPlugin.test_torchtrt_family_only_change",),
-        ),
-        ClassificationRule(
-            priority=60,
-            name="torchtrt_family_base",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/families/((__init__|base)\.py)$"
-            ),
-            resolver=_match_result("torchtrt_family_base", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=70,
-            name="torchtrt_strategy",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/strategies/(diffusion)\.py$"
-            ),
-            resolver=_match_result(
-                "torchtrt_strategy",
-                _task_strategy_models(["diffusion_media_generation"]),
-            ),
-            covered_by=("TestHarness.test_torchtrt_diffusion_strategy",),
-        ),
-        ClassificationRule(
-            priority=80,
-            name="torchtrt_strategy_unknown",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/strategies/(\w+)\.py$"
-            ),
-            resolver=_match_result("torchtrt_strategy_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
             priority=90,
             name="specialized_builder",
             matcher=_regex_rule(
@@ -1387,16 +1323,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_unit_tier_tools",),
         ),
         ClassificationRule(
-            priority=450,
-            name="unit_torchtrt_builder",
-            matcher=_path_startswith_any((
-                "tests/torchtrt_builder/",
-                "tests/engine_defs/torch_trt/",
-            )),
-            resolver=_match_result("unit_torchtrt_builder", _no_models),
-            covered_by=("TestUnitTiers.test_unit_tier_torchtrt_engine_defs",),
-        ),
-        ClassificationRule(
             priority=460,
             name="cmake",
             matcher=lambda path, _imap: (
@@ -1484,7 +1410,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
         path = raw_path.replace("\\", "/").strip("/")
         if not path.endswith(".py"):
             continue
-        if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
+        if path.startswith("tests/builder/"):
             builder_tests.add(path)
         elif path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
             tools_tests.add(path)
@@ -1690,11 +1616,6 @@ def _fp8_scale_models(imap: ImpactMap) -> List[str]:
 
 def _diffusion_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(["diffusion_media_generation"], imap)
-
-
-def _torchtrt_tokenizer_models(imap: ImpactMap) -> List[str]:
-    return _models_for_runtime_strategies(
-        ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap)
 
 
 def _sam3_models(imap: ImpactMap) -> List[str]:
@@ -2289,39 +2210,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         _diffusion_task_models,
     ),
     TokenDiffRefinementRule(
-        "torchtrt_compiler_tokenizer",
-        "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
-        (
-            "detect_tokenizer_add_special_tokens",
-            "detect_diffusion_tokenizer_add_special_tokens",
-            "detect_add_special",
-            "diffusion",
-            "tokenizer_add_special_tokens",
-            "tokenizer_config_json",
-            "tokenizer_2",
-            "autotokenizer",
-            "ids_default",
-            "ids_without",
-            "add_special_tokens",
-            "add_bos_token",
-            "add_eos_token",
-            "tok_config_path",
-            "tok_cfg",
-            "tok_subdir",
-            "tok_dir",
-            "tok_=",
-            "if_tok_dir",
-            "model_dir_path",
-            "except_exception",
-            "try:",
-            "pass",
-            "return_bool",
-            "return_true",
-            "return_detect_tokenizer_add_special_tokens",
-        ),
-        _torchtrt_tokenizer_models,
-    ),
-    TokenDiffRefinementRule(
         "harness_manifest_diffusion_thresholds",
         "tests/e2e_harness/manifest_loader.py",
         (
@@ -2516,21 +2404,11 @@ def validate_map(
     errors: List[str] = []
     warnings: List[str] = []
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
-    torchtrt_families_dir = (
-        repo_root
-        / "python"
-        / "tensorrt_model_connect"
-        / "engine_defs"
-        / "torch_trt"
-        / "families"
-    )
 
     def _family_plugin_exists(family: str) -> bool:
         return any((
             (families_dir / f"{family}.py").exists(),
             (families_dir / family / "__init__.py").exists(),
-            (torchtrt_families_dir / f"{family}.py").exists(),
-            (torchtrt_families_dir / family / "__init__.py").exists(),
         ))
 
     # 1. Every family in a manifest has a corresponding plugin module/package
@@ -2538,7 +2416,7 @@ def validate_map(
         if not _family_plugin_exists(family):
             errors.append(
                 f"Family '{family}' in manifests has no plugin module or package under "
-                f"{families_dir} or {torchtrt_families_dir}"
+                f"{families_dir}"
             )
 
     # 2. Every family plugin module/package has at least one manifest (warn only)

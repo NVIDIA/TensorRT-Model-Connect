@@ -33,9 +33,9 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 | Seq2seq and translation | `text_to_text`, `marian_translation`, `seq2seq_encoder_decoder` | `t5`, `marian`, `bart`, `m2m_100` |
 | Vision-language and OCR | `vision_language`, `omni_multimodal` | `qwen_vl`, `internvl`, `phi4_multimodal`, `deepseek_ocr`, `qwen3_omni` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` | `whisper`, `canary`, `nemotron_speech_streaming`, `bark`, `magpie_tts`, `personaplex` |
-| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart`, `diffusion_pixart_torchtrt` | `flux`, `wan_t2v`, `z_image`, `pixart` |
+| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `z_image`, `pixart` |
 | Segmentation and detection | `segmentation`, `prompted_segmentation`, `object_detection` | `segformer`, `sam` |
-| Time-series and operators | `timesfm_torchtrt`, `patchtst_torchtrt`, `patchtsmixer_torchtrt`, `chronos_bolt_torchtrt`, `neural_operator` | `timesfm`, `patchtst`, `patchtsmixer`, `chronos_bolt` |
+| Operators | `neural_operator` | family-specific numeric operator bundles |
 
 ## Family plugin inventory
 
@@ -55,9 +55,7 @@ z_image
 
 ## How support is resolved
 
-For raw TRT builds, `python/tensorrt_model_connect/families/__init__.py` scans every non-private family module and registers its module-level `plugin` object. Standard models use `find_plugin(model_type)`. Diffusion models use `find_diffusion_plugin(pipeline_class)`.
-
-For Torch-TRT engine definitions, `python/tensorrt_model_connect/engine_defs/torch_trt/families/` provides a smaller plugin set for families such as Qwen, BERT, PixArt, TimesFM, PatchTST, PatchTSMixer, and Chronos-Bolt.
+For native TRT builds, `python/tensorrt_model_connect/families/__init__.py` scans every non-private family module and registers its module-level `plugin` object. Standard models use `find_plugin(model_type)`. Diffusion models use `find_diffusion_plugin(pipeline_class)`.
 
 For runtime, the bundle's `runtime_strategy` selects a C++ `IPipelinePlugin` registered through `cmake/trtmc_pipeline_plugins.cmake`.
 

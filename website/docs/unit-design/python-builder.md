@@ -88,11 +88,9 @@ classDiagram
 
 The design goal is to avoid repeating TensorRT layer wiring in every family plugin. A family plugin should describe what is family-specific: weight naming, architecture variations, optional components, and config metadata.
 
-## Torch-TRT engine definitions
+## Native TRT build path
 
-`python/tensorrt_model_connect/engine_defs/torch_trt/` owns Torch export and Torch-TRT compilation flows. These bundles still run through the same C++ runtime.
-
-Torch-TRT engine definitions are useful when the fastest path to support is compiling a PyTorch module shape rather than hand-writing a TensorRT graph. The runtime still sees a bundle with a `runtime_strategy`.
+`trtmc build` now uses the native TRT family plugins under `python/tensorrt_model_connect/families/`. The builder emits TensorRT plans and a bundle `runtime_strategy` consumed by the C++ runtime.
 
 ## Runtime config
 

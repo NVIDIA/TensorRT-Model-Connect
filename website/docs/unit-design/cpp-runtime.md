@@ -53,7 +53,7 @@ Examples:
 - `decoder_plugin.cpp` handles `decoder_kv_cache` and `decoder_moe`.
 - `encoder_plugin.cpp` handles encoder, embedding, reranking, and neural operator strategies.
 - `rnnt_plugin.cpp` handles cache-aware streaming ASR.
-- `pixart_torchtrt_plugin.cpp` handles Torch-TRT PixArt bundles.
+- `pixart/plugin.cpp` handles native TRT PixArt bundles.
 
 Plugin construction typically follows this sequence:
 
