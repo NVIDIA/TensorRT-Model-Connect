@@ -104,6 +104,16 @@ RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__" && \
     python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
+# Upgrade NeMo to a main-branch SHA that ships
+# `nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt`,
+# required to load `nvidia/nemotron-3.5-asr-streaming-0.6b` as the HF/NeMo
+# reference backend in E2E. PyPI's latest (2.7.3) doesn't ship this module yet;
+# bump the SHA when 2.7.4+ lands the class. --no-deps keeps the rest of the
+# dependency graph pinned to what 2.7.0 set up.
+RUN pip install --no-deps \
+        "git+https://github.com/NVIDIA/NeMo.git@c9040511b" && \
+    python3 -c "from nemo.collections.asr.models.rnnt_bpe_models_prompt import EncDecRNNTBPEModelWithPrompt; print('NeMo prompt RNN-T class loaded')"
+
 # NeMo may adjust the torch stack through transitive dependencies. Reinstall the
 # exact CUDA 13 stack that this image is meant to test.
 RUN pip install --force-reinstall \

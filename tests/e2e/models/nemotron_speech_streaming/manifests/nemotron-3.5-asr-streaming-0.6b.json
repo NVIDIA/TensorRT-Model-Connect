@@ -12,16 +12,10 @@
   "logit_atol": 0.01,
   "layer_atol": 0.1,
   "trust_remote_code": false,
-  "test_input_audio": "data/nemotron_es_sample.wav",
-  "language": "es-ES",
-  "reference_transcript_file": "data/nemotron_es_sample.txt",
+  "test_input_audio": "data/Recording.wav",
+  "language": "en-US",
   "threshold_overrides": {
-    "wer": 1.0,
-    "cer": 1.0
-  },
-  "metadata": {
-    "notes": "Smoke test for the multilingual nemotron-3.5 variant (prompt_kernel + es-ES routing). Audio is a synthesized 3 s placeholder tone (not real Spanish speech) checked in alongside this manifest until a CC0 Spanish utterance can be sourced. WER/CER are pinned to 1.0 so the comparator does not gate on transcription quality; this case verifies plumbing (audio decode -> prompt_kernel -> decoder) end-to-end, not ASR accuracy. Replace data/nemotron_es_sample.{wav,txt} with a real CC0 sample (e.g. Mozilla Common Voice es) and tighten thresholds (suggested wer=0.40, cer=0.30) once available.",
-    "audio_source": "synthesized_placeholder",
-    "audio_duration_s": 3.0
+    "wer": 0.35,
+    "cer": 0.25
   }
 }
