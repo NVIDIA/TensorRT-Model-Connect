@@ -637,6 +637,8 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
     if (model_dir / "tokenizer.json").exists():
         return
 
+    slow_tokenizer_error: str | None = None
+
     # --- Attempt 1: standard HF slow → fast conversion ---
     try:
         from transformers import AutoTokenizer
@@ -646,8 +648,9 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
             print("[trtmc build] Generated tokenizer.json from slow tokenizer",
                   file=sys.stderr)
             return
-    except Exception:
-        pass
+        slow_tokenizer_error = "slow tokenizer conversion did not create tokenizer.json"
+    except Exception as e:
+        slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
     # --- Attempt 2: build from SentencePiece model + optional vocab.json ---
     # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
@@ -705,8 +708,15 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
                   f"({len(vocab)} tokens)", file=sys.stderr)
             return
         except Exception as e:
-            print(f"[trtmc build] Warning: SentencePiece conversion failed: {e}",
-                  file=sys.stderr)
+            detail = (
+                f"{slow_tokenizer_error}; SentencePiece conversion failed: {e}"
+                if slow_tokenizer_error
+                else f"SentencePiece conversion failed: {e}"
+            )
+            raise RuntimeError(
+                f"could not generate tokenizer.json for {model_dir}; {detail}. "
+                "Install sentencepiece for SentencePiece tokenizers or provide tokenizer.json."
+            ) from e
 
     print("[trtmc build] Warning: could not generate tokenizer.json "
           "(C++ runtime may fail to create tokenizer)", file=sys.stderr)

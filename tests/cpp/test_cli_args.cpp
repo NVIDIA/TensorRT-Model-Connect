@@ -99,6 +99,7 @@ void test_run_parses_common_flags() {
                        "--cuda-graphs"});
     check(args.command == "run", "run command");
     check(args.bundle_path == "bundle.trtfb", "run bundle");
+    check(args.prompt_provided, "run prompt provided");
     check(args.prompt == "hello", "run prompt");
     check(args.max_new_tokens == 8, "run max tokens");
     check(args.generation_mode == "diffusion", "run generation mode");
@@ -184,6 +185,19 @@ void test_missing_value_fails() {
     check(args.error_message == "--prompt requires a value", "missing value message");
 }
 
+void test_missing_prompt_is_distinct_from_empty_prompt() {
+    auto missing = parse({"trtmc", "run", "bundle.trtfb", "--max-new-tokens", "8"});
+    check(missing.parse_error, "missing prompt parse error");
+    check(missing.error_message == "run requires bundle + --prompt", "missing prompt message");
+    check(!missing.prompt_provided, "missing prompt not provided");
+    check(missing.prompt.empty(), "missing prompt text empty");
+
+    auto empty = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "", "--max-new-tokens", "8"});
+    check(empty.prompt_provided, "empty prompt provided");
+    check(empty.prompt.empty(), "empty prompt text empty");
+    check(!empty.parse_error, "empty prompt parse ok");
+}
+
 void test_bad_kv_cache_size_fails() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size=abc"});
     check(args.parse_error, "bad kv cache parse error");
@@ -212,6 +226,7 @@ int main() {
     test_unknown_command_fails();
     test_unknown_flag_fails();
     test_missing_value_fails();
+    test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();
     test_unexpected_positional_fails();
 

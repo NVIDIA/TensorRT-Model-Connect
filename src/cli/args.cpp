@@ -165,6 +165,7 @@ CliArgs parse_args(int argc, char** argv) {
 
         if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
             args.prompt = argv[++i];
+            args.prompt_provided = true;
             continue;
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
@@ -427,6 +428,11 @@ CliArgs parse_args(int argc, char** argv) {
             args.error_message = "Unexpected positional argument: " + arg;
             return args;
         }
+    }
+
+    if (args.command == "run" && !args.bundle_path.empty() && !args.prompt_provided) {
+        args.parse_error = true;
+        args.error_message = "run requires bundle + --prompt";
     }
 
     return args;

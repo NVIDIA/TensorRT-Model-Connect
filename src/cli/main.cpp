@@ -291,6 +291,10 @@ int cmd_run(const CliArgs& args) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
         return EXIT_FAILURE;
     }
+    if (!args.prompt_provided) {
+        std::cerr << "Error: run requires bundle + --prompt\n";
+        return EXIT_FAILURE;
+    }
 
     auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
     if (!pipeline) {
@@ -299,8 +303,7 @@ int cmd_run(const CliArgs& args) {
     }
 
     const std::string ptype = pipeline->pipeline_type();
-    const std::string prompt =
-        args.prompt.empty() && ptype != "ElfFlowPipeline" ? "Hello" : args.prompt;
+    const std::string prompt = args.prompt;
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens =
         args.max_new_tokens > 0 ? args.max_new_tokens : (ptype == "ElfFlowPipeline" ? 0 : 20);

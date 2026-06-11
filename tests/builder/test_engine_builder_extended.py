@@ -221,6 +221,14 @@ class TestEnsureTokenizerJson:
 
         assert not (tmp_path / "tokenizer.json").exists()
 
+    def test_sentencepiece_model_conversion_failure_raises(self, tmp_path):
+        """SentencePiece-only tokenizers fail fast instead of producing bad bundles."""
+        (tmp_path / "spiece.model").write_bytes(b"not a real sentencepiece model")
+
+        with patch.dict("sys.modules", {"transformers": None, "sentencepiece": None}):
+            with pytest.raises(RuntimeError, match="SentencePiece conversion failed"):
+                _ensure_tokenizer_json(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # build_bundle orchestration

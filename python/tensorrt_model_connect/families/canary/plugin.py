@@ -121,8 +121,11 @@ def _extract_tokenizer_from_nemo(nemo_path: str, dest_dir: Path) -> None:
                             "add_prefix_space": True},
             }
             tok_json_path.write_text(json.dumps(tok_json))
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(
+                f"Canary tokenizer.json generation failed for {tok_model_path}: {e}. "
+                "Install sentencepiece or provide tokenizer.json."
+            ) from e
 
     tok_cfg = dest_dir / "tokenizer_config.json"
     if not tok_cfg.exists():
