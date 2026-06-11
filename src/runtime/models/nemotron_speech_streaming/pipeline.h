@@ -31,12 +31,18 @@ class RnntPipeline final : public IPipeline {
   public:
     RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> predictor,
                  std::unique_ptr<TrtModule> joint,
+                 std::unique_ptr<TrtModule> prompt_kernel, // may be nullptr
                  std::map<int32_t, std::string> streaming_encoder_sections, IBackend* backend,
                  ModuleCreateOptions module_options,
                  std::map<int32_t, std::string> streaming_first_encoder_sections,
                  std::string bundle_path, RnntConfig config, MelFilterbank mel_fb,
                  cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                  std::string model_id_str = "");
+
+    // Resolve a language tag (e.g. "en-US") into a prompt one-hot index using
+    // the bundle's prompt_dictionary. Returns 0 when the bundle has no
+    // prompt_kernel or when `tag` is empty. Throws on unknown tags.
+    int32_t resolve_prompt_index(const std::string& tag) const;
 
     ~RnntPipeline() override;
 
@@ -66,6 +72,7 @@ class RnntPipeline final : public IPipeline {
     std::vector<float> run_predictor(int32_t token_id, std::vector<float>& state_h,
                                      std::vector<float>& state_c);
     std::vector<float> run_joint(const float* encoder_frame, const float* pred_output);
+    std::vector<float> run_prompt_kernel(const float* encoder_frame);
     void decode_encoder_frames(const std::vector<float>& encoder_output, int32_t frame_count,
                                int32_t token_limit, std::vector<float>& pred_output,
                                std::vector<float>& state_h, std::vector<float>& state_c,
@@ -74,6 +81,9 @@ class RnntPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> predictor_;
     std::unique_ptr<TrtModule> joint_;
+    std::unique_ptr<TrtModule> prompt_kernel_;
+    std::vector<float> prompt_onehot_;
+    int32_t prompt_index_{-1};
     std::map<int32_t, std::string> streaming_encoder_sections_;
     std::map<int32_t, std::string> streaming_first_encoder_sections_;
     std::map<int32_t, std::unique_ptr<TrtModule>> streaming_encoders_;

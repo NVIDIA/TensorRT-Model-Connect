@@ -373,6 +373,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
 
 RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> predictor,
                            std::unique_ptr<TrtModule> joint,
+                           std::unique_ptr<TrtModule> prompt_kernel,
                            std::map<int32_t, std::string> streaming_encoder_sections,
                            IBackend* backend, ModuleCreateOptions module_options,
                            std::map<int32_t, std::string> streaming_first_encoder_sections,
@@ -380,6 +381,7 @@ RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<T
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
                            std::string model_id_str)
     : encoder_(std::move(encoder)), predictor_(std::move(predictor)), joint_(std::move(joint)),
+      prompt_kernel_(std::move(prompt_kernel)),
       streaming_encoder_sections_(std::move(streaming_encoder_sections)),
       streaming_first_encoder_sections_(std::move(streaming_first_encoder_sections)),
       backend_(backend), module_options_(module_options), bundle_path_(std::move(bundle_path)),
@@ -392,6 +394,46 @@ RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<T
     validate_rnnt_streaming_config(
         config_, has_streaming_encoder_sections(streaming_encoder_sections_,
                                                 streaming_first_encoder_sections_));
+    if (config_.has_prompt_kernel) {
+        if (!prompt_kernel_ || !prompt_kernel_->ok())
+            throw std::runtime_error(
+                "RnntPipeline: prompt_kernel module required when has_prompt_kernel=true");
+        if (config_.num_prompts <= 0)
+            throw std::runtime_error(
+                "RnntPipeline: invalid num_prompts for prompt_kernel variant");
+    }
+}
+
+int32_t RnntPipeline::resolve_prompt_index(const std::string& tag) const {
+    if (!config_.has_prompt_kernel)
+        return 0;
+    if (tag.empty())
+        return 0;
+    auto it = config_.prompt_dictionary.find(tag);
+    if (it == config_.prompt_dictionary.end())
+        throw std::invalid_argument("Unsupported language tag '" + tag + "'");
+    return it->second;
+}
+
+std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
+    if (!prompt_kernel_)
+        throw std::runtime_error("RnntPipeline: run_prompt_kernel called without engine");
+    const int32_t enc_dim = config_.encoder_hidden_size;
+    const int32_t num_p = config_.num_prompts;
+
+    TensorMap inputs;
+    inputs["encoder_frame"] =
+        make_tensor(const_cast<float*>(encoder_frame), {1, enc_dim}, DType::kFloat32);
+    inputs["prompt_onehot"] =
+        make_tensor(prompt_onehot_.data(), {1, num_p}, DType::kFloat32);
+
+    auto outputs = prompt_kernel_->forward(inputs);
+    auto it = outputs.find("prompt_kernel_output");
+    if (it == outputs.end())
+        throw std::runtime_error("RnntPipeline: prompt_kernel missing 'prompt_kernel_output'");
+    const auto* src = static_cast<const float*>(it->second.data);
+    const auto count = static_cast<std::size_t>(it->second.numel());
+    return std::vector<float>(src, src + count);
 }
 
 RnntPipeline::~RnntPipeline() = default;
@@ -401,6 +443,16 @@ RnntPipeline::create_transcription_stream(const TranscriptionStreamConfig& cfg) 
     (void)make_nemotron_streaming_schedule(cfg.att_context_left, cfg.att_context_right,
                                            cfg.input_sample_rate, config_.mel_hop_length,
                                            config_.subsampling_factor);
+
+    if (config_.has_prompt_kernel) {
+        prompt_index_ = resolve_prompt_index(cfg.language);
+        prompt_onehot_.assign(static_cast<std::size_t>(config_.num_prompts), 0.0F);
+        if (prompt_index_ >= 0 && prompt_index_ < config_.num_prompts)
+            prompt_onehot_[static_cast<std::size_t>(prompt_index_)] = 1.0F;
+    } else {
+        prompt_onehot_.clear();
+        prompt_index_ = -1;
+    }
 
     if (cfg.online_normalization)
         throw std::runtime_error("RNNT streaming transcription does not support "
@@ -621,8 +673,16 @@ void RnntPipeline::decode_encoder_frames(const std::vector<float>& encoder_outpu
                                          std::vector<int32_t>& emitted) {
     for (int32_t frame = 0;
          frame < frame_count && static_cast<int32_t>(emitted.size()) < token_limit; ++frame) {
-        const float* enc_frame =
+        const float* enc_ptr =
             encoder_output.data() + static_cast<std::size_t>(frame) * config_.encoder_hidden_size;
+        // Multilingual variant: replace the encoder frame with the prompt_kernel
+        // MLP output (Linear 1152 -> 2048 -> ReLU -> 1024) before the joint.
+        std::vector<float> projected;
+        const float* enc_frame = enc_ptr;
+        if (config_.has_prompt_kernel) {
+            projected = run_prompt_kernel(enc_ptr);
+            enc_frame = projected.data();
+        }
         int32_t symbols_this_frame = 0;
         while (static_cast<int32_t>(emitted.size()) < token_limit) {
             auto logits = run_joint(enc_frame, pred_output.data());
