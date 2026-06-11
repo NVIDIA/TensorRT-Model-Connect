@@ -159,6 +159,10 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
 
     for name, tensor in trt_outputs.items():
         tensor.name = name
+        if tensor.dtype != trt.float32:
+            raise TypeError(
+                f"Expected TRT graph output {name!r} to be float32, got {tensor.dtype}"
+            )
         network.mark_output(tensor)
         # In newer TRT (10.x), `ITensor.dtype` is read-only after the layer
         # graph is built; output dtype is inferred from the producing layer
