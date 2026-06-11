@@ -907,17 +907,19 @@ def test_flux2_mha_forwards_fp8_attention_scales(
     fake_trt.DataType = types.SimpleNamespace(FP8=object())
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     sys.modules.pop("tensorrt_model_connect.graph_ops", None)
-    sys.modules.pop("tensorrt_model_connect.flux2_dit_builder", None)
+    sys.modules.pop(
+        "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
 
     def _cleanup_trt_imports() -> None:
         import tensorrt_model_connect.trt_compat as trt_compat
         trt_compat._module = None
         sys.modules.pop("tensorrt_model_connect.graph_ops", None)
-        sys.modules.pop("tensorrt_model_connect.flux2_dit_builder", None)
+        sys.modules.pop(
+            "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
 
     request.addfinalizer(_cleanup_trt_imports)
 
-    import tensorrt_model_connect.flux2_dit_builder as flux2_builder
+    import tensorrt_model_connect.families.flux.flux2_dit_builder as flux2_builder
 
     calls: dict[str, object] = {}
 
