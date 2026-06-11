@@ -107,6 +107,7 @@ no_impact scripts/reporting/__init__.py # developer utility script; no CI test i
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
 no_impact scripts/sdpa_nan_repro.py # developer utility script; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
+no_impact scripts/validate_clip_metrics_local.py # developer utility script for local CLIP metric validation; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_torchtrt_family.sh # developer utility script; no CI test impact is intentional
 no_impact tools/__init__.py # developer utility script; no CI test impact is intentional
