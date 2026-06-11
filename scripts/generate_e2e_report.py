@@ -1347,6 +1347,7 @@ def render_segmentation_model(
     cc = result.get("case_config", {})
     inputs = cc.get("inputs") or {}
     image_rel = inputs.get("image", "")
+    prompt = inputs.get("prompt", "")
 
     parts = []
 
@@ -1359,6 +1360,9 @@ def render_segmentation_model(
                 f'<p><strong>Input Image:</strong></p>'
                 f'<img src="{uri}" class="preview-img" />'
             )
+
+    if prompt:
+        parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
 
     segmented_image = artifacts.get("trt_segmented_image", "")
     if segmented_image:

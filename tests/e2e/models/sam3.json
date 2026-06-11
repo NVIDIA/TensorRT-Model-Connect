@@ -22,5 +22,6 @@
     "box_iou_mean": 0.95,
     "score_abs_error_mean": 0.05
   },
-  "core": false
+  "core": false,
+  "notes": "SAM3 PR L0 proof uses the checked-in image asset and text prompt `car`; the CI report should show the prompt and SAM3 text-prompt repro command."
 }

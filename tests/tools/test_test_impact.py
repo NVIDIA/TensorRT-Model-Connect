@@ -977,6 +977,7 @@ class TestHarness:
             "sam3_bpe_end_of_word_suffix",
             "sam3_harness_contract",
             "harness_reference_sam3_prompted_segmentation",
+            "sam3_harness_repro_prompt",
             "e2e_warm_hf_cache_diffusers_components",
             "shared_builder_fp8_scales_cli",
             "shared_builder_fp8_scales_engine",
@@ -1254,6 +1255,39 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
             "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
+
+    def test_sam3_harness_repro_prompt_rule_refines_orchestrator_diff(self, imap):
+        """SAM3 repro-command prompt display does not select every E2E model."""
+        diff_text = """
+diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.py
+@@ -1 +1 @@
++            is_sam3 = (
++                case.family == "sam3"
++                or case.reference_family == "prompted_segmentation_sam3"
++            )
+-                "--point-x", str(case.inputs.get("point_x", 0.5)),
+-                "--point-y", str(case.inputs.get("point_y", 0.5)),
+-            if not case.inputs.get("is_foreground", True):
++            if is_sam3:
++                prompt = (
++                    case.inputs.get("prompt")
++                    or case.inputs.get("text_prompt")
++                    or case.metadata.get("text_prompt")
++                    or ""
++                )
++                infer_parts.extend(["--prompt", _shell_quote(str(prompt))])
++            else:
++                infer_parts.extend([
++                    "--point-x", str(case.inputs.get("point_x", 0.5)),
++                    "--point-y", str(case.inputs.get("point_y", 0.5)),
++                ])
++            if not is_sam3 and not case.inputs.get("is_foreground", True):
+"""
+        broad = test_impact.classify_file("tests/e2e_harness/orchestrator.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
+        assert refined.rule == "sam3_harness_repro_prompt"
+        assert refined.models == ["sam3"]
 
     def test_e2e_warm_hf_cache_diffusers_components_rule_refines_component_diff(self, imap):
         """Diffusers component-cache validation narrows to FP8 Diffusers coverage."""
