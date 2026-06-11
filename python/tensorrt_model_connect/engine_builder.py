@@ -311,6 +311,25 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
+def _is_routable_flat_model(path: Path) -> bool:
+    """True if path is a flat model the builder can route on its own.
+
+    A diffusers ``model_index.json`` or a ``config.json`` that declares a
+    ``model_type`` is routable. A bare ``config.json`` with no ``model_type``
+    (e.g. the stub top-level config bytedance-research/Lance now ships) is not,
+    so callers should try repo-specific staging before treating it as flat HF.
+    """
+    if (path / "model_index.json").exists():
+        return True
+    cfg = path / "config.json"
+    if not cfg.exists():
+        return False
+    try:
+        return bool(json.loads(cfg.read_text()).get("model_type"))
+    except (OSError, ValueError):
+        return False
+
+
 def _is_elf_model_dir(path: Path) -> bool:
     """Return True for the official ELF YAML + checkpoint directory layout."""
     if not path.is_dir():
@@ -384,8 +403,21 @@ def _resolve_model(model_id_or_path: str) -> str:
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)
 
-    # Prefer HF config when both HF files and .nemo are present.
     dl_path = Path(local_dir)
+
+    # A Lance repo ships nested Lance_3B/ + Qwen2.5-VL-ViT/ plus a stub top-level
+    # config.json with no model_type. That bare config would satisfy
+    # _is_hf_model_dir below and short-circuit to an unbuildable raw snapshot, so
+    # stage the Lance repo first whenever the download is not a routable flat
+    # model. Returns None cheaply for anything that isn't Lance.
+    if not _is_routable_flat_model(dl_path):
+        from .families.lance.staging import resolve_and_stage_lance
+        staged = resolve_and_stage_lance(model_id_or_path)
+        if staged is not None:
+            print(f"[trtmc build] Staged Lance repo from {model_id_or_path}", file=sys.stderr)
+            return staged
+
+    # Prefer HF config when both HF files and .nemo are present.
     if _is_hf_model_dir(dl_path):
         print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
         return local_dir
@@ -394,14 +426,6 @@ def _resolve_model(model_id_or_path: str) -> str:
     nemo_files = sorted(dl_path.glob("*.nemo"))
     if nemo_files:
         return _resolve_nemo_archive(nemo_files[0])
-
-    # Non-flat repo: probe + stage the Lance repo if its file list matches.
-    # Returns None cheaply for anything that isn't Lance.
-    from .families.lance.staging import resolve_and_stage_lance
-    staged = resolve_and_stage_lance(model_id_or_path)
-    if staged is not None:
-        print(f"[trtmc build] Staged Lance repo from {model_id_or_path}", file=sys.stderr)
-        return staged
 
     print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
     return local_dir
