@@ -12,9 +12,11 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,64 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+// Best-effort JSON object parser: pulls "key": <int> pairs out of the object
+// stored under `key` in `json`. Returns an empty map if the key is missing or
+// the value is not an object. Sufficient for the small prompt_dictionary
+// objects emitted by the Python builder.
+std::unordered_map<std::string, int32_t>
+extract_string_int_map(const std::string& json, const std::string& key) {
+    std::unordered_map<std::string, int32_t> out;
+    const std::string needle = "\"" + key + "\":";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos)
+        return out;
+    pos = json.find('{', pos);
+    if (pos == std::string::npos)
+        return out;
+    int depth = 1;
+    auto end = pos + 1;
+    while (end < json.size() && depth > 0) {
+        if (json[end] == '{')
+            ++depth;
+        else if (json[end] == '}')
+            --depth;
+        ++end;
+    }
+    if (depth != 0)
+        return out;
+    auto i = pos + 1;
+    while (i < end - 1) {
+        i = json.find('"', i);
+        if (i == std::string::npos || i >= end - 1)
+            break;
+        auto ke = json.find('"', i + 1);
+        if (ke == std::string::npos || ke >= end - 1)
+            break;
+        std::string k_str = json.substr(i + 1, ke - i - 1);
+        auto colon = json.find(':', ke + 1);
+        if (colon == std::string::npos || colon >= end - 1)
+            break;
+        auto j = colon + 1;
+        while (j < end - 1 && std::isspace(static_cast<unsigned char>(json[j])))
+            ++j;
+        std::string num;
+        while (j < end - 1 &&
+               (std::isdigit(static_cast<unsigned char>(json[j])) || json[j] == '-')) {
+            num.push_back(json[j]);
+            ++j;
+        }
+        if (!num.empty()) {
+            try {
+                out.emplace(std::move(k_str), std::stoi(num));
+            } catch (...) {
+                // ignore unparseable entry
+            }
+        }
+        i = j;
+    }
+    return out;
 }
 
 } // namespace
@@ -67,9 +127,26 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, pred_section), "rnnt predictor", pred_opts);
         auto joint_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "joint_engine_plan"), "rnnt joint", opts);
+        std::unique_ptr<TrtModule> prompt_kernel_module;
+        const bool has_prompt_kernel =
+            ctx.config_json.find("\"rnnt_has_prompt_kernel\": true") != std::string::npos ||
+            ctx.config_json.find("\"rnnt_has_prompt_kernel\":true") != std::string::npos;
+        if (has_prompt_kernel) {
+            const auto* pk_plan = find_section(ctx.bundle, "prompt_kernel_plan");
+            if (!pk_plan)
+                throw std::runtime_error(
+                    "rnnt_has_prompt_kernel=true but bundle missing prompt_kernel_plan section");
+            auto pk_loaded =
+                load_trt_module_from_plan(ctx.backend, pk_plan, "rnnt prompt_kernel", opts);
+            prompt_kernel_module = std::move(pk_loaded.module);
+        }
         std::map<int32_t, std::string> streaming_encoder_sections;
         std::map<int32_t, std::string> streaming_first_encoder_sections;
-        for (int32_t right_context : {13, 6, 1, 0}) {
+        auto right_contexts =
+            extract_json_int_array(ctx.config_json, "rnnt_streaming_right_contexts");
+        if (right_contexts.empty())
+            right_contexts = {13, 6, 1, 0};
+        for (int32_t right_context : right_contexts) {
             const std::string section_name =
                 "streaming_encoder_plan_ctx" + std::to_string(right_context);
             const auto* plan = find_section(ctx.bundle, section_name);
@@ -112,6 +189,10 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
             extract_json_int(json, "rnnt_streaming_drop_pre_encoded", 2);
         cfg.causal_downsampling =
             json.find("\"rnnt_causal_downsampling\": true") != std::string::npos;
+        cfg.has_prompt_kernel = has_prompt_kernel;
+        cfg.num_prompts = extract_json_int(json, "rnnt_num_prompts", 0);
+        cfg.prompt_dictionary = extract_string_int_map(json, "rnnt_prompt_dictionary");
+        cfg.supported_right_contexts = right_contexts;
 
         auto mel_fb = load_mel_filterbank(ctx.bundle);
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
@@ -119,8 +200,9 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
 
         return std::make_unique<RnntPipeline>(
             std::move(enc_loaded.module), std::move(pred_loaded.module),
-            std::move(joint_loaded.module), std::move(streaming_encoder_sections), ctx.backend,
-            opts, std::move(streaming_first_encoder_sections), ctx.bundle_path, std::move(cfg),
+            std::move(joint_loaded.module), std::move(prompt_kernel_module),
+            std::move(streaming_encoder_sections), ctx.backend, opts,
+            std::move(streaming_first_encoder_sections), ctx.bundle_path, std::move(cfg),
             std::move(mel_fb), stream, std::move(tok), ctx.bundle.info.model_id);
     }
 };
