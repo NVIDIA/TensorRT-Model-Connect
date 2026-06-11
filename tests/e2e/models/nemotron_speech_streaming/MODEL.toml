@@ -6,6 +6,7 @@ plugin = "nemotron_speech_streaming"
 test_manifests = [
   "manifests/nemotron-speech-streaming-en-0.6b-tp4.json",
   "manifests/nemotron-speech-streaming-en-0.6b.json",
+  "manifests/nemotron-3.5-asr-streaming-0.6b.json",
 ]
 
 [e2e_defaults.speech_to_text]

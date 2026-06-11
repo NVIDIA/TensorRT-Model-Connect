@@ -595,6 +595,8 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         "speech_min_token_match",
         "speech_min_frame_exact",
         "speech_min_rms",
+        "language",
+        "reference_transcript_file",
         "point_x",
         "point_y",
         "num_expected_masks",
@@ -666,6 +668,15 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         meta["build_cli_args"] = defaults["build_cli_args"]
     if "build_cli_args" in manifest:
         meta["build_cli_args"] = manifest["build_cli_args"]
+
+    # Speech-to-text multilingual: language tag (e.g. "es-ES") routes the
+    # nemotron-3.5 prompt_kernel via case.metadata["language"]. Reference
+    # transcript file path lets ASR comparators load a checked-in golden when
+    # no live reference backend produces a transcript.
+    if "language" in manifest:
+        meta["language"] = manifest["language"]
+    if "reference_transcript_file" in manifest:
+        meta["reference_transcript_file"] = manifest["reference_transcript_file"]
 
     return meta
 

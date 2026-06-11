@@ -132,4 +132,5 @@ engines
 *.ttrtb
 results.json
 !**/Recording.wav
+!**/nemotron_es_sample.wav
 worktrees/
