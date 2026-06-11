@@ -583,6 +583,8 @@ class DiffusionMediaRunner:
                 "frame_paths": frame_paths,
                 "stdout": stdout_text,
                 "stderr": stderr_truncated,
+                # Passed through to the comparator for CLIP semantic metrics.
+                "prompt": case.inputs.get("prompt") or case.inputs.get("test_prompt"),
             }
             if stderr_log:
                 e2e_data["stderr_log"] = stderr_log

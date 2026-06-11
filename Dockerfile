@@ -88,6 +88,11 @@ RUN pip install \
     sentencepiece \
     ftfy
 
+# CLIP semantic metrics for diffusion E2E comparator (clip_metrics.py).
+# open-clip-torch must be pinned to a CPU-compatible version; it will use
+# the torch installation already present in this image for GPU inference.
+RUN pip install "open-clip-torch>=2.20"
+
 # NeMo currently declares transformers~=4.57; force the runtime pin we need.
 RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     pip install --upgrade "transformers==5.2.0" && \

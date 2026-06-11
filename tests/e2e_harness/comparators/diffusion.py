@@ -281,6 +281,73 @@ class DiffusionComparator:
                 if not ssim_ok:
                     all_pass = False
 
+            # --- CLIP semantic metrics (image models only; video excluded) ---
+            # Works without shared initial latents: measures semantic parity in
+            # CLIP embedding space rather than pixel space.
+            # Gates: (a) prompt_clipscore_delta and (c) hf_prompt_clipscore are
+            # hard gates at their default values; (b) trt_hf_image_clip_cosine
+            # is report-only (threshold=None) until per-model calibration.
+            from .clip_metrics import compute_clip_metrics
+
+            prompt = trt.data.get("prompt")
+            clip = (
+                compute_clip_metrics(frames_dir, ref_frames_dir, prompt)
+                if trt.data.get("num_frames", 1) <= 1
+                else None
+            )
+            if clip is not None:
+                # (a) One-sided: TRT prompt fidelity must not drop below HF by > eps.
+                #     Positive delta (TRT > HF) is always a pass.
+                eps = thresholds.get("max_prompt_clipscore_drop", 3.0)
+                delta_ok = clip.prompt_clipscore_delta >= -eps
+                metrics["prompt_clipscore_delta"] = MetricResult(
+                    value=clip.prompt_clipscore_delta,
+                    threshold=-eps,
+                    operator=">=",
+                    passed=delta_ok,
+                    note=(
+                        f"trt={clip.trt_prompt_clipscore:.2f}, "
+                        f"hf={clip.hf_prompt_clipscore:.2f}"
+                        + (" [prompt truncated]" if clip.prompt_truncated else "")
+                    ),
+                )
+                if not delta_ok:
+                    all_pass = False
+
+                # (b) Image-image semantic similarity.
+                #     Default 0.0 = report-only until calibration sets per-model override.
+                img_thr = thresholds.get("min_trt_hf_image_clip_cosine", 0.0)
+                img_ok = img_thr <= 0.0 or clip.trt_hf_image_clip_cosine >= img_thr
+                metrics["trt_hf_image_clip_cosine"] = MetricResult(
+                    value=clip.trt_hf_image_clip_cosine,
+                    threshold=img_thr if img_thr > 0.0 else None,
+                    operator=">=",
+                    passed=img_ok,
+                )
+                if not img_ok:
+                    all_pass = False
+
+                # (c) Reference self-check: HF output must itself be semantically valid.
+                #     Catches cases where the reference pipeline produced a blank/broken image.
+                hf_floor = thresholds.get("min_hf_prompt_clipscore", 20.0)
+                hf_ok = clip.hf_prompt_clipscore >= hf_floor
+                metrics["hf_prompt_clipscore"] = MetricResult(
+                    value=clip.hf_prompt_clipscore,
+                    threshold=hf_floor,
+                    operator=">=",
+                    passed=hf_ok,
+                )
+                if not hf_ok:
+                    all_pass = False
+
+                # Diagnostic-only (not gated): raw TRT clipscore for logging.
+                metrics["trt_prompt_clipscore"] = MetricResult(
+                    value=clip.trt_prompt_clipscore,
+                    threshold=None,
+                    operator="info",
+                    passed=True,
+                )
+
         n_gated = sum(1 for m in metrics.values() if m.threshold is not None)
         n_passed = sum(1 for m in metrics.values() if m.threshold is not None and m.passed)
         return CompareResult(
