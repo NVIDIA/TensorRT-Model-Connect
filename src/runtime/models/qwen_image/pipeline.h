@@ -238,6 +238,33 @@ class QwenImagePipeline final : public IPipeline {
     std::vector<float> vision_encode_edit_condition(const EditInputTensors& edit_inputs) const;
     std::vector<float> vae_encode_edit_condition(const EditInputTensors& edit_inputs) const;
 
+    // -------------------------------------------------------------------------
+    // generate_image_batch helpers (PR 2 — diffusion batch inference).
+    // Extracted to keep `generate_image_batch` itself at CCN <= 10. None of
+    // these change observable behaviour; the public batch entry point routes
+    // each planned chunk to one of the two ``_chunk`` overloads.
+    // -------------------------------------------------------------------------
+
+    // Single-sample chunk (chunk_size == 1) — byte-for-byte preserves the
+    // legacy pre-batch behaviour. ``seed`` is the per-sample seed for this
+    // single slot; ``cfg`` is the caller-supplied config (forwarded so the
+    // optional ``cfg.initial_latents`` override flows through).
+    ImageResult generate_image_batch_single_sample_chunk(const std::string& prompt,
+                                                         std::uint32_t seed,
+                                                         const GenerateConfig& cfg,
+                                                         const LatentShape& shape, int num_steps,
+                                                         float cfg_scale,
+                                                         const std::string& negative_prompt);
+
+    // Batched chunk (chunk_size > 1) — runs the two-pass CFG denoise on a
+    // packed ``[B, n_img, in_ch]`` buffer, then VAE-decodes each sample at
+    // B=1 (Decision E).
+    std::vector<ImageResult>
+    generate_image_batch_chunk(const std::vector<std::string>& prompts, std::size_t chunk_begin,
+                               int chunk_size, const std::vector<std::uint32_t>& per_sample_seeds,
+                               const LatentShape& shape, int num_steps, float cfg_scale,
+                               const std::string& negative_prompt);
+
     // Patchify a 4D latent tensor [1, C, H, W] (row-major C, H, W) into the
     // packed denoiser-input layout [1, n_img, C * patch_size * patch_size],
     // mirroring diffusers' QwenImagePipeline._pack_latents.

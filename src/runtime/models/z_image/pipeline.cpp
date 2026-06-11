@@ -41,23 +41,10 @@ constexpr int32_t kRopeDimH = 48;
 constexpr int32_t kRopeDimW = 48;
 
 // ---------------------------------------------------------------------------
-// Layout helper
+// Layout helper (``ZImageLayout`` is declared in pipeline.h so private
+// member helpers introduced by the PR2 refactor can reference it without
+// dragging the full pipeline body into the header).
 // ---------------------------------------------------------------------------
-
-struct ZImageLayout {
-    int32_t dit_dim{0};
-    int32_t text_seq{0};
-    int32_t z_dim{0};
-    int32_t h_lat{0};
-    int32_t w_lat{0};
-    int32_t ph{2};
-    int32_t pw{2};
-    int32_t nh{0};
-    int32_t nw{0};
-    int32_t num_patches{0};
-    int32_t patch_dim{0};
-    int32_t head_dim{0};
-};
 
 ZImageLayout make_layout(const DiffusionConfig& config) {
     ZImageLayout layout;
@@ -740,23 +727,175 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
         return {};
     }
 
-    int32_t cap = std::max(config_.max_batch_size.dit, 1);
     const bool engine_is_batched = denoiser_ && denoiser_->input_rank("hidden_states") == 3;
-    if (engine_is_batched) {
-        const auto profile_max = denoiser_->input_profile_shape(
-            "hidden_states", denoiser_->profile_idx(), ProfileShapeSelector::kMax);
-        if (!profile_max.empty() && profile_max[0] > 0) {
-            cap = std::min(cap, static_cast<int32_t>(profile_max[0]));
-        }
-    } else {
-        cap = 1;
-    }
-    cap = std::max(cap, 1);
-
+    const int32_t cap = resolve_batch_cap(engine_is_batched);
     const auto chunks = diffusion::plan_chunks(static_cast<int>(prompts.size()), cap);
+
     std::vector<ImageResult> results;
     results.reserve(prompts.size());
 
+    std::size_t prompt_offset = 0;
+    for (int32_t chunk_size : chunks) {
+        std::cerr << "[z-image] Chunk B=" << chunk_size << "/" << cap << ", prompts ["
+                  << prompt_offset << ".."
+                  << (prompt_offset + static_cast<std::size_t>(chunk_size) - 1U) << "]\n";
+
+        auto chunk_results = generate_image_batch_chunk(prompts, resolved_seeds, prompt_offset,
+                                                        chunk_size, layout, num_inference_steps,
+                                                        config_.freq_dim, engine_is_batched, cap);
+        if (chunk_results.empty()) {
+            // Fail-fast: any per-chunk failure (encoder / DiT) zeroes the
+            // chunk result and we surface an empty batch result, matching
+            // the pre-refactor semantics.
+            return {};
+        }
+        for (auto& r : chunk_results) {
+            results.push_back(std::move(r));
+        }
+
+        prompt_offset += static_cast<std::size_t>(chunk_size);
+    }
+
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// generate_image_batch helpers (PR2 refactor — pure mechanical extraction).
+// ---------------------------------------------------------------------------
+
+int32_t ZImagePipeline::resolve_batch_cap(bool engine_is_batched) const {
+    int32_t cap = std::max(config_.max_batch_size.dit, 1);
+    if (!engine_is_batched) {
+        return 1;
+    }
+    const auto profile_max = denoiser_->input_profile_shape(
+        "hidden_states", denoiser_->profile_idx(), ProfileShapeSelector::kMax);
+    if (!profile_max.empty() && profile_max[0] > 0) {
+        cap = std::min(cap, static_cast<int32_t>(profile_max[0]));
+    }
+    return std::max(cap, 1);
+}
+
+std::vector<ImageResult> ZImagePipeline::generate_image_batch_chunk(
+    const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
+    std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
+    int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched, int32_t /*cap*/) {
+    const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
+                             static_cast<std::size_t>(layout.h_lat) *
+                             static_cast<std::size_t>(layout.w_lat);
+    const auto caption_size =
+        static_cast<std::size_t>(layout.text_seq) * static_cast<std::size_t>(layout.dit_dim);
+    const int32_t total_seq = layout.num_patches + layout.text_seq;
+    const auto rope_size =
+        static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(layout.head_dim);
+
+    std::vector<float> caption_projected_b(static_cast<std::size_t>(batch) * caption_size);
+    std::vector<float> rope_cos_b(static_cast<std::size_t>(batch) * rope_size);
+    std::vector<float> rope_sin_b(static_cast<std::size_t>(batch) * rope_size);
+    std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
+
+    if (!run_qwen3_encoder_for_chunk(prompts, resolved_seeds, prompt_offset, batch, layout,
+                                     caption_projected_b, rope_cos_b, rope_sin_b, latents)) {
+        return {};
+    }
+
+    if (!run_denoise_loop_for_chunk(batch, num_inference_steps, freq_dim, engine_is_batched,
+                                    prompt_offset, layout, caption_projected_b, rope_cos_b,
+                                    rope_sin_b, latents)) {
+        return {};
+    }
+
+    std::vector<ImageResult> out;
+    out.reserve(static_cast<std::size_t>(batch));
+    decode_chunk_vae_per_sample(batch, layout, latents, out);
+    return out;
+}
+
+bool ZImagePipeline::run_qwen3_encoder_for_chunk(
+    const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
+    std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
+    std::vector<float>& caption_projected_b, std::vector<float>& rope_cos_b,
+    std::vector<float>& rope_sin_b, std::vector<float>& latents) {
+    const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
+                             static_cast<std::size_t>(layout.h_lat) *
+                             static_cast<std::size_t>(layout.w_lat);
+    const auto caption_size =
+        static_cast<std::size_t>(layout.text_seq) * static_cast<std::size_t>(layout.dit_dim);
+    const int32_t total_seq = layout.num_patches + layout.text_seq;
+    const auto rope_size =
+        static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(layout.head_dim);
+
+    for (int32_t b = 0; b < batch; ++b) {
+        const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
+        const std::string prepared = apply_chat_template(prompts[sample_idx]);
+        const std::vector<int32_t> input_ids = tokenizer_->encode(prepared);
+
+        std::vector<float> text_embeddings;
+        if (!run_text_encoder(input_ids, text_embeddings)) {
+            std::cerr << "[z-image] Text encoder failed for sample " << sample_idx << "\n";
+            return false;
+        }
+
+        const int32_t cap_ori_len = count_non_pad_tokens(input_ids);
+        const int32_t cap_padded_len = pad_to_next_multiple(cap_ori_len, kSeqMultipleOf);
+
+        std::vector<float> caption_projected;
+        project_caption(text_embeddings, cap_ori_len, cap_padded_len, caption_projected);
+        std::copy(caption_projected.begin(), caption_projected.end(),
+                  caption_projected_b.begin() +
+                      static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(caption_size));
+
+        std::vector<float> rope_cos_one, rope_sin_one;
+        compute_3d_rope(cap_padded_len, layout.num_patches, layout.nh, layout.nw, rope_cos_one,
+                        rope_sin_one);
+        std::copy(rope_cos_one.begin(), rope_cos_one.end(),
+                  rope_cos_b.begin() +
+                      static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
+        std::copy(rope_sin_one.begin(), rope_sin_one.end(),
+                  rope_sin_b.begin() +
+                      static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
+
+        initialize_latents_data(latents.data() + static_cast<std::size_t>(b) * latent_size,
+                                latent_size, resolved_seeds[sample_idx]);
+    }
+    return true;
+}
+
+bool ZImagePipeline::run_denoiser_unbatched_step(
+    int32_t batch, int32_t step, std::size_t prompt_offset, std::size_t hidden_size,
+    std::size_t caption_size, std::size_t rope_size, std::size_t patch_size,
+    const std::vector<float>& hidden_b, const std::vector<float>& caption_projected_b,
+    const std::vector<float>& temb_one, const std::vector<float>& rope_cos_b,
+    const std::vector<float>& rope_sin_b, std::vector<float>& denoiser_output) {
+    denoiser_output.resize(static_cast<std::size_t>(batch) * patch_size);
+    for (int32_t b = 0; b < batch; ++b) {
+        const auto* h_ptr = hidden_b.data() + static_cast<std::size_t>(b) * hidden_size;
+        const auto* cap_ptr =
+            caption_projected_b.data() + static_cast<std::size_t>(b) * caption_size;
+        const auto* cos_ptr = rope_cos_b.data() + static_cast<std::size_t>(b) * rope_size;
+        const auto* sin_ptr = rope_sin_b.data() + static_cast<std::size_t>(b) * rope_size;
+        std::vector<float> hidden_one(h_ptr, h_ptr + hidden_size);
+        std::vector<float> cap_one(cap_ptr, cap_ptr + caption_size);
+        std::vector<float> cos_one(cos_ptr, cos_ptr + rope_size);
+        std::vector<float> sin_one(sin_ptr, sin_ptr + rope_size);
+        std::vector<float> out_one;
+        if (!run_denoiser(hidden_one, cap_one, temb_one, cos_one, sin_one, out_one)) {
+            std::cerr << "[z-image] DiT failed at step " << step << " sample "
+                      << (prompt_offset + static_cast<std::size_t>(b)) << "\n";
+            return false;
+        }
+        std::copy(out_one.begin(), out_one.end(),
+                  denoiser_output.begin() +
+                      static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(patch_size));
+    }
+    return true;
+}
+
+bool ZImagePipeline::run_denoise_loop_for_chunk(
+    int32_t batch, int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched,
+    std::size_t prompt_offset, const ZImageLayout& layout,
+    const std::vector<float>& caption_projected_b, const std::vector<float>& rope_cos_b,
+    const std::vector<float>& rope_sin_b, std::vector<float>& latents) {
     const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
@@ -769,162 +908,98 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
     const int32_t total_seq = layout.num_patches + layout.text_seq;
     const auto rope_size =
         static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(layout.head_dim);
-    const int32_t freq_dim = config_.freq_dim;
 
-    std::size_t prompt_offset = 0;
-    for (int32_t chunk_size : chunks) {
-        const int32_t batch = chunk_size;
-        std::cerr << "[z-image] Chunk B=" << batch << "/" << cap << ", prompts [" << prompt_offset
-                  << ".." << (prompt_offset + static_cast<std::size_t>(batch) - 1U) << "]\n";
+    // FlowMatchEuler is stateless per-sample, so one scheduler suffices.
+    FlowMatchEulerState scheduler;
+    scheduler.shift = config_.flow_shift;
+    scheduler.use_zero_sigma_min = true;
+    scheduler.set_timesteps(num_inference_steps);
 
-        std::vector<float> caption_projected_b(static_cast<std::size_t>(batch) * caption_size);
-        std::vector<float> rope_cos_b(static_cast<std::size_t>(batch) * rope_size);
-        std::vector<float> rope_sin_b(static_cast<std::size_t>(batch) * rope_size);
-        std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
+    std::vector<float> temb_one;
+    std::vector<float> temb_b(static_cast<std::size_t>(batch) * static_cast<std::size_t>(freq_dim));
+    std::vector<float> sample_latents;
+    std::vector<float> patches;
+    std::vector<float> hidden_b(static_cast<std::size_t>(batch) * hidden_size);
+    std::vector<float> denoiser_output;
+    std::vector<float> sample_noise_pred;
+    std::vector<float> noise_pred(static_cast<std::size_t>(batch) * latent_size);
 
+    for (int32_t step = 0; step < num_inference_steps; ++step) {
+        const float raw_timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
+
+        compute_timestep_embedding(z_weights_, freq_dim, raw_timestep, temb_one);
         for (int32_t b = 0; b < batch; ++b) {
-            const std::size_t sample_idx = prompt_offset + static_cast<std::size_t>(b);
-            const std::string prepared = apply_chat_template(prompts[sample_idx]);
-            const std::vector<int32_t> input_ids = tokenizer_->encode(prepared);
-
-            std::vector<float> text_embeddings;
-            if (!run_text_encoder(input_ids, text_embeddings)) {
-                std::cerr << "[z-image] Text encoder failed for sample " << sample_idx << "\n";
-                return {};
-            }
-
-            const int32_t cap_ori_len = count_non_pad_tokens(input_ids);
-            const int32_t cap_padded_len = pad_to_next_multiple(cap_ori_len, kSeqMultipleOf);
-
-            std::vector<float> caption_projected;
-            project_caption(text_embeddings, cap_ori_len, cap_padded_len, caption_projected);
-            std::copy(caption_projected.begin(), caption_projected.end(),
-                      caption_projected_b.begin() + static_cast<std::ptrdiff_t>(b) *
-                                                        static_cast<std::ptrdiff_t>(caption_size));
-
-            std::vector<float> rope_cos_one, rope_sin_one;
-            compute_3d_rope(cap_padded_len, layout.num_patches, layout.nh, layout.nw, rope_cos_one,
-                            rope_sin_one);
-            std::copy(rope_cos_one.begin(), rope_cos_one.end(),
-                      rope_cos_b.begin() +
-                          static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
-            std::copy(rope_sin_one.begin(), rope_sin_one.end(),
-                      rope_sin_b.begin() +
-                          static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
-
-            initialize_latents_data(latents.data() + static_cast<std::size_t>(b) * latent_size,
-                                    latent_size, resolved_seeds[sample_idx]);
+            std::copy(temb_one.begin(), temb_one.end(),
+                      temb_b.begin() +
+                          static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(freq_dim));
         }
 
-        // FlowMatchEuler is stateless per-sample, so one scheduler suffices.
-        FlowMatchEulerState scheduler;
-        scheduler.shift = config_.flow_shift;
-        scheduler.use_zero_sigma_min = true;
-        scheduler.set_timesteps(num_inference_steps);
-
-        std::vector<float> temb_one;
-        std::vector<float> temb_b(static_cast<std::size_t>(batch) *
-                                  static_cast<std::size_t>(freq_dim));
-        std::vector<float> sample_latents;
-        std::vector<float> patches;
-        std::vector<float> hidden_b(static_cast<std::size_t>(batch) * hidden_size);
-        std::vector<float> hidden_one;
-        std::vector<float> denoiser_output;
-        std::vector<float> sample_noise_pred;
-        std::vector<float> noise_pred(static_cast<std::size_t>(batch) * latent_size);
-
-        for (int32_t step = 0; step < num_inference_steps; ++step) {
-            const float raw_timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
-
-            compute_timestep_embedding(z_weights_, freq_dim, raw_timestep, temb_one);
-            for (int32_t b = 0; b < batch; ++b) {
-                std::copy(temb_one.begin(), temb_one.end(),
-                          temb_b.begin() + static_cast<std::ptrdiff_t>(b) *
-                                               static_cast<std::ptrdiff_t>(freq_dim));
-            }
-
-            for (int32_t b = 0; b < batch; ++b) {
-                const auto* sample_latents_ptr =
-                    latents.data() + static_cast<std::size_t>(b) * latent_size;
-                sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
-                patchify_2d(sample_latents, layout.z_dim, layout.h_lat, layout.w_lat, patches);
-                cpu_matmul_bias(patches.data(), z_weights_.x_embed_weight.data(),
-                                z_weights_.x_embed_bias.data(),
-                                hidden_b.data() + static_cast<std::size_t>(b) * hidden_size,
-                                layout.num_patches, layout.patch_dim, layout.dit_dim);
-            }
-
-            if (engine_is_batched) {
-                if (!run_denoiser_batched(hidden_b, caption_projected_b, temb_b, rope_cos_b,
-                                          rope_sin_b, batch, layout.num_patches, layout.dit_dim,
-                                          layout.text_seq, freq_dim, total_seq, layout.head_dim,
-                                          layout.patch_dim, denoiser_output)) {
-                    std::cerr << "[z-image] Batched DiT failed at step " << step << "\n";
-                    return {};
-                }
-            } else {
-                denoiser_output.resize(static_cast<std::size_t>(batch) * patch_size);
-                for (int32_t b = 0; b < batch; ++b) {
-                    const auto* h_ptr = hidden_b.data() + static_cast<std::size_t>(b) * hidden_size;
-                    const auto* cap_ptr =
-                        caption_projected_b.data() + static_cast<std::size_t>(b) * caption_size;
-                    const auto* cos_ptr =
-                        rope_cos_b.data() + static_cast<std::size_t>(b) * rope_size;
-                    const auto* sin_ptr =
-                        rope_sin_b.data() + static_cast<std::size_t>(b) * rope_size;
-                    hidden_one.assign(h_ptr, h_ptr + hidden_size);
-                    std::vector<float> cap_one(cap_ptr, cap_ptr + caption_size);
-                    std::vector<float> cos_one(cos_ptr, cos_ptr + rope_size);
-                    std::vector<float> sin_one(sin_ptr, sin_ptr + rope_size);
-                    std::vector<float> out_one;
-                    if (!run_denoiser(hidden_one, cap_one, temb_one, cos_one, sin_one, out_one)) {
-                        std::cerr << "[z-image] DiT failed at step " << step << " sample "
-                                  << (prompt_offset + static_cast<std::size_t>(b)) << "\n";
-                        return {};
-                    }
-                    std::copy(out_one.begin(), out_one.end(),
-                              denoiser_output.begin() +
-                                  static_cast<std::ptrdiff_t>(b) *
-                                      static_cast<std::ptrdiff_t>(patch_size));
-                }
-            }
-
-            for (int32_t b = 0; b < batch; ++b) {
-                const auto* sample_patches_ptr =
-                    denoiser_output.data() + static_cast<std::size_t>(b) * patch_size;
-                std::vector<float> sample_patches(sample_patches_ptr,
-                                                  sample_patches_ptr + patch_size);
-                unpatchify_2d(sample_patches, layout.z_dim, layout.h_lat, layout.w_lat,
-                              sample_noise_pred);
-                std::copy(sample_noise_pred.begin(), sample_noise_pred.end(),
-                          noise_pred.begin() + static_cast<std::ptrdiff_t>(b) *
-                                                   static_cast<std::ptrdiff_t>(latent_size));
-            }
-            negate_inplace(noise_pred);
-            scheduler.step(noise_pred.data(), latents.data(), latents.data(), latents.size(), step);
-            log_step_stats(step, num_inference_steps, raw_timestep, latents);
-        }
-
-        // VAE decode — per Decision E, always B=1. Route through
-        // decode_z_image_result so non-rank-0 ranks return empty results.
         for (int32_t b = 0; b < batch; ++b) {
             const auto* sample_latents_ptr =
                 latents.data() + static_cast<std::size_t>(b) * latent_size;
             sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
-
-            ImageResult slot;
-            slot.height = config_.video_height;
-            slot.width = config_.video_width;
-            slot.channels = 3;
-            slot.num_frames = 1;
-            results.push_back(decode_z_image_result(layout.z_dim, layout.h_lat, layout.w_lat,
-                                                    sample_latents, slot));
+            patchify_2d(sample_latents, layout.z_dim, layout.h_lat, layout.w_lat, patches);
+            cpu_matmul_bias(patches.data(), z_weights_.x_embed_weight.data(),
+                            z_weights_.x_embed_bias.data(),
+                            hidden_b.data() + static_cast<std::size_t>(b) * hidden_size,
+                            layout.num_patches, layout.patch_dim, layout.dit_dim);
         }
 
-        prompt_offset += static_cast<std::size_t>(batch);
-    }
+        if (engine_is_batched) {
+            if (!run_denoiser_batched(hidden_b, caption_projected_b, temb_b, rope_cos_b, rope_sin_b,
+                                      batch, layout.num_patches, layout.dit_dim, layout.text_seq,
+                                      freq_dim, total_seq, layout.head_dim, layout.patch_dim,
+                                      denoiser_output)) {
+                std::cerr << "[z-image] Batched DiT failed at step " << step << "\n";
+                return false;
+            }
+        } else {
+            if (!run_denoiser_unbatched_step(batch, step, prompt_offset, hidden_size, caption_size,
+                                             rope_size, patch_size, hidden_b, caption_projected_b,
+                                             temb_one, rope_cos_b, rope_sin_b, denoiser_output)) {
+                return false;
+            }
+        }
 
-    return results;
+        for (int32_t b = 0; b < batch; ++b) {
+            const auto* sample_patches_ptr =
+                denoiser_output.data() + static_cast<std::size_t>(b) * patch_size;
+            std::vector<float> sample_patches(sample_patches_ptr, sample_patches_ptr + patch_size);
+            unpatchify_2d(sample_patches, layout.z_dim, layout.h_lat, layout.w_lat,
+                          sample_noise_pred);
+            std::copy(sample_noise_pred.begin(), sample_noise_pred.end(),
+                      noise_pred.begin() + static_cast<std::ptrdiff_t>(b) *
+                                               static_cast<std::ptrdiff_t>(latent_size));
+        }
+        negate_inplace(noise_pred);
+        scheduler.step(noise_pred.data(), latents.data(), latents.data(), latents.size(), step);
+        log_step_stats(step, num_inference_steps, raw_timestep, latents);
+    }
+    return true;
+}
+
+void ZImagePipeline::decode_chunk_vae_per_sample(int32_t batch, const ZImageLayout& layout,
+                                                 const std::vector<float>& latents,
+                                                 std::vector<ImageResult>& out) {
+    const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
+                             static_cast<std::size_t>(layout.h_lat) *
+                             static_cast<std::size_t>(layout.w_lat);
+
+    // VAE decode — per Decision E, always B=1. Route through
+    // decode_z_image_result so non-rank-0 ranks return empty results.
+    std::vector<float> sample_latents;
+    for (int32_t b = 0; b < batch; ++b) {
+        const auto* sample_latents_ptr = latents.data() + static_cast<std::size_t>(b) * latent_size;
+        sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
+
+        ImageResult slot;
+        slot.height = config_.video_height;
+        slot.width = config_.video_width;
+        slot.channels = 3;
+        slot.num_frames = 1;
+        out.push_back(
+            decode_z_image_result(layout.z_dim, layout.h_lat, layout.w_lat, sample_latents, slot));
+    }
 }
 
 } // namespace trtmc
