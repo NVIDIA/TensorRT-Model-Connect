@@ -152,13 +152,20 @@ class FluxPlugin:
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
         fp8_scales: dict | None = None, build_timing: dict | None = None,
-        parallel_config=None,
+        parallel_config=None, max_batch_size: int = 1,
     ) -> dict:
         """Build all component engines.
 
         Detects FLUX.1 vs FLUX.2 from the transformer config and dispatches
         to the appropriate builders.
         """
+        # TP + batch>1 is out of scope for the diffusion-batch series.
+        if max_batch_size > 1 and parallel_config is not None and getattr(
+                parallel_config, "enabled", False):
+            raise NotImplementedError(
+                "FLUX tensor-parallel + max_batch_size > 1 is not supported "
+                "in this release; build with either TP=1 or max_batch_size=1."
+            )
 
         weights["_transformer_dir"]
         weights["_vae_dir"]
@@ -171,18 +178,21 @@ class FluxPlugin:
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
                 fp8_scales=fp8_scales, precision=precision,
-                build_timing=build_timing, parallel_config=parallel_config)
+                build_timing=build_timing, parallel_config=parallel_config,
+                max_batch_size=max_batch_size)
 
         return self._build_flux1_components(
             model_dir, config, weights, tc=tc, verbose=verbose,
             precision=precision, build_timing=build_timing,
-            parallel_config=parallel_config)
+            parallel_config=parallel_config,
+            max_batch_size=max_batch_size)
 
     def _build_flux1_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, tc: dict, precision: str = "fp32", verbose: bool = False,
         build_timing: dict | None = None,
         parallel_config=None,
+        max_batch_size: int = 1,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -201,6 +211,16 @@ class FluxPlugin:
         parallel = normalize_parallel_config(parallel_config)
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="Flux tensor-parallel builds")
+
+        # Per-component batch policy (design Decision C / E):
+        # - DiT honours max_batch_size with opt = min(N, 4).
+        # - Text encoder builds wider (min(2N, 8)) since it is cheap to batch.
+        # - VAE always builds at B=1; pipeline slices at runtime.
+        dit_mbs = int(max_batch_size)
+        dit_opt = min(dit_mbs, 4)
+        te_mbs = min(dit_mbs * 2, 8)
+        te_opt = min(te_mbs, 4)
+        vae_mbs = 1
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -288,6 +308,8 @@ class FluxPlugin:
                             vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
                             max_seq_len=self._T5_MAX_SEQ_LEN,
                             verbose=verbose,
+                            max_batch_size=te_mbs,
+                            opt_batch_size=te_opt,
                         )
                     text_encoders.append(("t5", t5_plan))
 
@@ -329,6 +351,8 @@ class FluxPlugin:
                     vocab_size=t5_vocab_size,
                     max_seq_len=self._T5_MAX_SEQ_LEN,
                     verbose=verbose,
+                    max_batch_size=te_mbs,
+                    opt_batch_size=te_opt,
                 )
             text_encoders.append(("t5", t5_plan))
 
@@ -372,9 +396,12 @@ class FluxPlugin:
                     num_img_tokens=num_img_tokens,
                     text_seq_len=self._T5_MAX_SEQ_LEN,
                     verbose=verbose,
+                    max_batch_size=dit_mbs,
+                    opt_batch_size=dit_opt,
                 )
 
         # 4. VAE decoder - native TRT engine
+        # VAE always builds B=1 per Decision E (pipeline slices at runtime).
         from .flux_vae_builder import build_flux_vae_decoder_engine
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
@@ -400,6 +427,12 @@ class FluxPlugin:
             out["denoiser_ranks"] = dit_rank_plans or {}
         else:
             out["denoiser"] = dit_plan
+        if max_batch_size > 1:
+            out["max_batch_size_envelope"] = {
+                "dit": dit_mbs,
+                "text_encoder": te_mbs,
+                "vae": vae_mbs,
+            }
         return out
 
     def _build_flux2_components(
@@ -408,8 +441,16 @@ class FluxPlugin:
         fp8_scales: dict | None = None,
         build_timing: dict | None = None,
         parallel_config=None,
+        max_batch_size: int = 1,
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
+        # Component batch policy (Decisions C / E). FLUX.2 DiT and Mistral
+        # builders don't yet honour batch envelopes; only the VAE is
+        # routed through the batchified flux_vae_builder. The envelope is
+        # still reported on the bundle for runtime visibility.
+        dit_mbs = int(max_batch_size)
+        te_mbs = min(dit_mbs * 2, 8)
+        vae_mbs = 1
         from ...build_timing import timed_trt_compile, timed_weight_loading
         from .mistral_encoder_builder import (
             build_mistral_encoder_engine, load_mistral_encoder_weights)
@@ -709,6 +750,12 @@ class FluxPlugin:
             out["denoiser_ranks"] = denoiser_ranks or {}
         else:
             out["denoiser"] = dit_plan
+        if max_batch_size > 1:
+            out["max_batch_size_envelope"] = {
+                "dit": dit_mbs,
+                "text_encoder": te_mbs,
+                "vae": vae_mbs,
+            }
         return out
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:

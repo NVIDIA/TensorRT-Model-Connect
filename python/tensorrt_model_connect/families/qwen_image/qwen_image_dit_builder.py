@@ -947,7 +947,13 @@ def _add_layernorm_no_affine_3d(network, x, hidden_size: int, eps: float):
     )
     norm = network.add_normalization(x_c, ones, zeros, axesMask=1 << 2)
     norm.epsilon = float(eps)
-    norm.compute_precision = trt.float32
+    # TensorRT 11 removed the Python INormalizationLayer.compute_precision
+    # setter; TRT 10 emitted a "setComputePrecision ignored for strongly
+    # typed network" warning when set on a strongly-typed network. Guard
+    # both behaviours so this builder works across 10/11. (Matches the
+    # hasattr guard in graph_ops.add_layer_norm_native.)
+    if hasattr(norm, "compute_precision"):
+        norm.compute_precision = trt.float32
     return norm.get_output(0)
 
 

@@ -21,6 +21,7 @@
 //   trtmc version
 
 #include "cli/args.h"
+#include "runtime/domains/diffusion/batch_utils.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -56,6 +57,25 @@ namespace {
 using trtmc::cli::CliArgs;
 using trtmc::cli::parse_args;
 using trtmc::cli::print_usage;
+
+// Build a per-sample output path. For ``total == 1`` the prefix is used as-is
+// so single-image runs keep their historical filename. Otherwise an
+// ``_<index>`` suffix is inserted before the extension (e.g. ``out.png`` ->
+// ``out_0.png``); prefixes with no extension simply gain ``_<index>`` at the
+// end.
+std::string format_output_path(const std::string& prefix, int index, int total) {
+    if (total <= 1)
+        return prefix;
+    const auto dot = prefix.find_last_of('.');
+    const auto slash = prefix.find_last_of('/');
+    const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+    std::ostringstream out;
+    if (has_ext)
+        out << prefix.substr(0, dot) << '_' << index << prefix.substr(dot);
+    else
+        out << prefix << '_' << index;
+    return out.str();
+}
 
 trtmc::LoadOptions make_load_options(const CliArgs& args) {
     trtmc::LoadOptions options;
@@ -432,46 +452,123 @@ int cmd_run(const CliArgs& args) {
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
     } else if (is_diffusion) {
-        trtmc::ImageResult result;
+        // Image-conditioned diffusion (img2img) keeps the single-image path —
+        // batched img2img is out of scope for the PR-3 CLI wiring.
         if (!args.image_path.empty()) {
             auto image = trtmc::io::read_image(args.image_path);
             if (image.pixels.empty()) {
                 std::cerr << "Error: failed to load image: " << args.image_path << '\n';
                 return EXIT_FAILURE;
             }
-            result = pipeline->generate_image(prompt, image.pixels.data(), image.height,
-                                              image.width, cfg);
-        } else {
-            result = pipeline->generate_image(prompt, cfg);
-        }
-        if (result.pixels.empty()) {
-            std::cerr << "Error: image generation failed\n";
-            return EXIT_FAILURE;
-        }
+            trtmc::ImageResult result = pipeline->generate_image(prompt, image.pixels.data(),
+                                                                 image.height, image.width, cfg);
+            if (result.pixels.empty()) {
+                std::cerr << "Error: image generation failed\n";
+                return EXIT_FAILURE;
+            }
 
-        // Save as PNG. If -o ends with .png, use as file path; otherwise
-        // treat as directory and write output.png inside it.
-        std::string out_path;
-        if (!args.output_dir.empty() && args.output_dir.size() > 4 &&
-            args.output_dir.substr(args.output_dir.size() - 4) == ".png") {
-            out_path = args.output_dir;
-            auto parent = std::filesystem::path(out_path).parent_path();
-            if (!parent.empty())
-                std::filesystem::create_directories(parent);
-        } else {
-            const std::string out_dir =
-                args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
-            std::filesystem::create_directories(out_dir);
-            out_path = out_dir + "/output.png";
-        }
+            std::string out_path;
+            if (!args.output_dir.empty() && args.output_dir.size() > 4 &&
+                args.output_dir.substr(args.output_dir.size() - 4) == ".png") {
+                out_path = args.output_dir;
+                auto parent = std::filesystem::path(out_path).parent_path();
+                if (!parent.empty())
+                    std::filesystem::create_directories(parent);
+            } else {
+                const std::string out_dir =
+                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
+                std::filesystem::create_directories(out_dir);
+                out_path = out_dir + "/output.png";
+            }
 
-        try {
-            trtmc::io::save_png(result, out_path);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << '\n';
-            return EXIT_FAILURE;
+            try {
+                trtmc::io::save_png(result, out_path);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << '\n';
+                return EXIT_FAILURE;
+            }
+            std::cout << "Saved " << out_path << " (" << result.width << "x" << result.height
+                      << ")\n";
+        } else {
+            // Text-to-image batch path. Build the prompt list from either
+            // --prompts-file (one prompt per line) or `num_images` copies of
+            // --prompt, then dispatch through generate_image_batch.
+            std::vector<std::string> prompts;
+            if (!args.prompts_file.empty()) {
+                std::string error;
+                prompts = trtmc::cli::read_prompts_file(args.prompts_file, error);
+                if (prompts.empty()) {
+                    std::cerr << "Error: " << error << '\n';
+                    return EXIT_FAILURE;
+                }
+            } else {
+                prompts.assign(static_cast<std::size_t>(std::max(1, args.num_images)), prompt);
+            }
+            const int total = static_cast<int>(prompts.size());
+
+            // Resolve per-sample seeds: explicit CSV when --seed s0,s1,... is
+            // given, else derive deterministic seeds from the scalar seed.
+            std::vector<std::uint32_t> per_sample_seeds;
+            try {
+                if (!args.seed_list.empty()) {
+                    if (static_cast<int>(args.seed_list.size()) != total) {
+                        std::cerr << "Error: --seed CSV length (" << args.seed_list.size()
+                                  << ") must equal the total batch count (" << total << ")\n";
+                        return EXIT_FAILURE;
+                    }
+                    per_sample_seeds =
+                        trtmc::diffusion::derive_per_sample_seeds(args.seed_list, total);
+                } else {
+                    const std::uint64_t global_seed =
+                        args.seed >= 0 ? static_cast<std::uint64_t>(args.seed) : 0ULL;
+                    per_sample_seeds =
+                        trtmc::diffusion::derive_per_sample_seeds(global_seed, total);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << '\n';
+                return EXIT_FAILURE;
+            }
+
+            auto results = pipeline->generate_image_batch(prompts, per_sample_seeds, cfg);
+            if (results.empty()) {
+                std::cerr << "Error: image generation failed\n";
+                return EXIT_FAILURE;
+            }
+
+            // Resolve the output prefix. ``-o foo.png`` puts files alongside
+            // ``foo.png``; otherwise treat ``-o`` as a directory containing
+            // ``output.png`` style outputs.
+            std::string out_prefix;
+            if (!args.output_dir.empty() && args.output_dir.size() > 4 &&
+                args.output_dir.substr(args.output_dir.size() - 4) == ".png") {
+                out_prefix = args.output_dir;
+                auto parent = std::filesystem::path(out_prefix).parent_path();
+                if (!parent.empty())
+                    std::filesystem::create_directories(parent);
+            } else {
+                const std::string out_dir =
+                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
+                std::filesystem::create_directories(out_dir);
+                out_prefix = out_dir + "/output.png";
+            }
+
+            for (std::size_t i = 0; i < results.size(); ++i) {
+                const auto& r = results[i];
+                if (r.pixels.empty()) {
+                    std::cerr << "Error: image generation failed for sample " << i << '\n';
+                    return EXIT_FAILURE;
+                }
+                const std::string out_path =
+                    format_output_path(out_prefix, static_cast<int>(i), total);
+                try {
+                    trtmc::io::save_png(r, out_path);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: " << e.what() << '\n';
+                    return EXIT_FAILURE;
+                }
+                std::cout << "Saved " << out_path << " (" << r.width << "x" << r.height << ")\n";
+            }
         }
-        std::cout << "Saved " << out_path << " (" << result.width << "x" << result.height << ")\n";
     } else if (!args.image_path.empty()) {
         // Load image using trtmc_io
         auto image = trtmc::io::read_image(args.image_path);
@@ -1283,6 +1380,14 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "Max cache length:   " << info.max_cache_length << '\n';
         if (!info.runtime_strategy.empty())
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
+        // Diffusion batch envelope (PR 1 added the field to BundleInfo;
+        // defaults are 1/1/1 for legacy bundles). VAE is always sliced --
+        // see Decision E in the diffusion batch-inference RFC.
+        std::cout << "Max batch size:\n";
+        std::cout << "  dit:          " << info.max_batch_size.dit << '\n';
+        std::cout << "  text_encoder: " << info.max_batch_size.text_encoder << '\n';
+        std::cout << "  vae:          " << info.max_batch_size.vae
+                  << "  (always sliced -- Decision E)\n";
         if (!info.sections.empty()) {
             std::cout << "Sections:\n";
             for (const auto& section : info.sections) {

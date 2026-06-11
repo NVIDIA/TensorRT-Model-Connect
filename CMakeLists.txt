@@ -607,6 +607,7 @@ trtmc_add_test(test_trt_version)
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
+trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)

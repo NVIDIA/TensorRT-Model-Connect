@@ -160,7 +160,10 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
     for name, tensor in trt_outputs.items():
         tensor.name = name
         network.mark_output(tensor)
-        tensor.dtype = trt.float32
+        # In newer TRT (10.x), `ITensor.dtype` is read-only after the layer
+        # graph is built; output dtype is inferred from the producing layer
+        # (here fp32 because inputs + weights are fp32). The explicit set
+        # was a no-op on older TRT and broke on newer.
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:

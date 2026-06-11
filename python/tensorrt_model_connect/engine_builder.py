@@ -754,6 +754,7 @@ def build_bundle(
     parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
+    max_batch_size: int = 1,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -802,7 +803,8 @@ def build_bundle(
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
             build_timing=build_timing,
-            parallel_config=parallel)
+            parallel_config=parallel,
+            max_batch_size=max_batch_size)
         return
 
     # 1. Parse config
@@ -1386,6 +1388,7 @@ def _build_diffusion_bundle(
     diffusion_overrides: dict | None = None,
     build_timing: dict | None = None,
     parallel_config: ParallelConfig | None = None,
+    max_batch_size: int = 1,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
     if build_timing is None:
@@ -1495,6 +1498,10 @@ def _build_diffusion_bundle(
         elif parallel.enabled:
             raise NotImplementedError(
                 f"Plugin {plugin.name} does not accept parallel_config for diffusion TP")
+        # Only forward max_batch_size to plugins that opted in. Plugins that
+        # don't accept it (older or non-batchified ones) silently stay on B=1.
+        if _call_supports_kwarg(build_components, "max_batch_size"):
+            build_components_kwargs["max_batch_size"] = max_batch_size
         components = build_components(
             str(model_dir_path), config, weights, **build_components_kwargs)
     finally:
@@ -1682,6 +1689,20 @@ def _build_diffusion_bundle(
             if file_path.exists():
                 sections.append(BundleSection(dst_name, file_path.read_bytes()))
 
+    # Resolve per-component batch envelope. Plugins that batchified record
+    # the envelope on components["max_batch_size_envelope"]. When absent
+    # (older plugins, or N=1), the BundleInfo field stays None and the
+    # JSON header simply omits the block — back-compat with PR 1 readers.
+    mbs_envelope = components.get("max_batch_size_envelope")
+    if mbs_envelope is None and max_batch_size > 1:
+        # Plugin didn't expose an envelope but caller asked for >1 — fall
+        # back to a sane default derived from CLI policy (see Decision C).
+        mbs_envelope = {
+            "dit": int(max_batch_size),
+            "text_encoder": min(int(max_batch_size) * 2, 8),
+            "vae": 1,
+        }
+
     # Write bundle
     info = BundleInfo(
         model_id=model_dir_path.name,
@@ -1695,6 +1716,7 @@ def _build_diffusion_bundle(
         precision=precision,
         max_cache_length=max_cache_length,
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
+        max_batch_size=mbs_envelope,
     )
 
     write_t0 = time.monotonic()
@@ -1736,6 +1758,7 @@ def build(
     parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
+    max_batch_size: int = 1,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1778,4 +1801,5 @@ def build(
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
                  parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
-                 build_timing_path=build_timing_path)
+                 build_timing_path=build_timing_path,
+                 max_batch_size=max_batch_size)

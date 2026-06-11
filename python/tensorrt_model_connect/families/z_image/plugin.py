@@ -104,7 +104,7 @@ class ZImagePlugin:
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
-        parallel_config=None, **_kwargs,
+        parallel_config=None, max_batch_size: int = 1, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
@@ -122,8 +122,21 @@ class ZImagePlugin:
         )
         build_timing = _kwargs.get("build_timing")
         parallel = normalize_parallel_config(parallel_config)
+        # TP + batch>1 is out of scope for this PR series.
+        if max_batch_size > 1 and parallel.enabled:
+            raise NotImplementedError(
+                "Z-Image tensor-parallel + max_batch_size > 1 is not supported "
+                "in this release; build with either TP=1 or max_batch_size=1."
+            )
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="Z-Image tensor-parallel builds")
+
+        # Per-component batch policy (Decisions C / E).
+        dit_mbs = int(max_batch_size)
+        dit_opt = min(dit_mbs, 4)
+        te_mbs = min(dit_mbs * 2, 8)
+        te_opt = min(te_mbs, 4)
+        vae_mbs = 1
         if parallel.enabled:
             validate_dit_tp(
                 dim=self._DIT_DIM,
@@ -179,6 +192,8 @@ class ZImagePlugin:
                 rope_theta=self._TEXT_ROPE_THETA,
                 output_layer=self._TEXT_OUTPUT_LAYER,
                 verbose=verbose,
+                max_batch_size=te_mbs,
+                opt_batch_size=te_opt,
             )
 
         # 2. Z-Image DiT denoiser
@@ -229,6 +244,8 @@ class ZImagePlugin:
                     head_dim=self._DIT_HEAD_DIM,
                     adaln_embed_dim=self._ADALN_EMBED_DIM,
                     verbose=verbose,
+                    max_batch_size=dit_mbs,
+                    opt_batch_size=dit_opt,
                 )
 
         # 3. VAE decoder
@@ -257,6 +274,12 @@ class ZImagePlugin:
             out["denoiser_ranks"] = dit_rank_plans or {}
         else:
             out["denoiser"] = dit_plan
+        if max_batch_size > 1:
+            out["max_batch_size_envelope"] = {
+                "dit": dit_mbs,
+                "text_encoder": te_mbs,
+                "vae": vae_mbs,
+            }
         return out
 
     def get_diffusion_config(self, config: ModelConfig) -> dict:
