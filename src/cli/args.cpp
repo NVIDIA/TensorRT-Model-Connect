@@ -219,7 +219,7 @@ void print_usage() {
            "[--hf-python PATH]\n"
            "  trtmc solve           <bundle.trtfb> --field-input CSV\n"
            "  trtmc solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
-           "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
+           "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--language TAG] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
@@ -579,6 +579,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--audio" && need_value(arg)) {
             args.audio_in = argv[++i];
+            continue;
+        }
+        if (arg == "--language" && need_value(arg)) {
+            args.language = argv[++i];
             continue;
         }
         if (arg == "--point-x" && need_value(arg)) {

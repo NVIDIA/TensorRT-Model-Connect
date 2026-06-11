@@ -1313,6 +1313,7 @@ int cmd_transcribe(const CliArgs& args) {
         cfg.use_cache = true;
         cfg.use_feature_cache = true;
         cfg.pad_and_drop_preencoded = args.pad_and_drop_preencoded;
+        cfg.language = args.language;
 
         auto stream = pipeline->create_transcription_stream(cfg);
         const int32_t chunk_ms = args.chunk_ms > 0 ? args.chunk_ms : 160;
