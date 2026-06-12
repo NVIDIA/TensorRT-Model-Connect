@@ -159,6 +159,11 @@ class WanT2VPlugin:
     _T5_VOCAB_SIZE = 256384
     _T5_MAX_SEQ_LEN = 226
 
+    # Wan 2.1 DiT default dim (12 heads * 128 head_dim); retained as a class
+    # attribute for backward compatibility with tests that reference it.
+    # Wan 2.2 derives dim from the per-model vae_params at build time.
+    _DIT_DIM = 1536
+
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("wan", "wan2.1", "wan2.2", "wan_t2v", "wan_ti2v")
