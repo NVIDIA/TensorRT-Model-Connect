@@ -14,8 +14,10 @@ WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
     "_diffusers_missing_weight_components",
+    "_is_hf_file_cached",
     "_is_diffusers_component_enabled",
     "_is_cached",
+    "_manifest_needs_clip_metrics",
     "_snapshot_has_required_files",
 }
 
@@ -67,6 +69,33 @@ def test_nemotron_labs_diffusion_lora_files_are_warmed() -> None:
     assert '"linear_spec_lora/**"' in text
     assert '"linear_spec_lora/adapter_config.json"' in text
     assert '"linear_spec_lora/adapter_model.safetensors"' in text
+
+
+def test_clip_metric_comparator_weights_are_warmed() -> None:
+    text = WARM_HF_CACHE.read_text()
+    assert "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" in text
+    assert "open_clip_pytorch_model.bin" in text
+    assert "Warming comparator assets" in text
+
+
+def test_clip_metric_assets_only_needed_for_image_diffusion() -> None:
+    helpers = _load_cache_helpers()
+    needs_clip = helpers["_manifest_needs_clip_metrics"]
+
+    assert needs_clip({
+        "runtime_strategy": "diffusion_qwen_image",
+        "video_num_frames": 1,
+    })
+    assert needs_clip({
+        "task_strategy": "diffusion_media_generation",
+    })
+    assert not needs_clip({
+        "runtime_strategy": "diffusion_wan",
+        "video_num_frames": 16,
+    })
+    assert not needs_clip({
+        "runtime_strategy": "decoder_kv_cache",
+    })
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
@@ -178,3 +207,34 @@ def test_cache_skip_rejects_unresolvable_local_revision() -> None:
     helpers["snapshot_download"] = fake_snapshot_download
 
     assert not helpers["_is_cached"]("org/model")
+
+
+def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:
+    helpers = _load_cache_helpers()
+    calls: list[dict] = []
+
+    def fake_hf_hub_download(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return "/tmp/hf-cache/open_clip_pytorch_model.bin"
+
+    helpers["hf_hub_download"] = fake_hf_hub_download
+
+    assert helpers["_is_hf_file_cached"]("org/model", "weights.bin")
+    assert calls == [{
+        "args": ("org/model",),
+        "kwargs": {
+            "filename": "weights.bin",
+            "local_files_only": True,
+        },
+    }]
+
+
+def test_hf_file_cache_skip_rejects_missing_local_file() -> None:
+    helpers = _load_cache_helpers()
+
+    def fake_hf_hub_download(*args, **kwargs):
+        raise RuntimeError("file is not available offline")
+
+    helpers["hf_hub_download"] = fake_hf_hub_download
+
+    assert not helpers["_is_hf_file_cached"]("org/model", "weights.bin")
