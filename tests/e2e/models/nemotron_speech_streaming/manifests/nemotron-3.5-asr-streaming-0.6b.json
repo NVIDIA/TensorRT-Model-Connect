@@ -5,6 +5,7 @@
   "bundle": "nemotron-3.5-asr-streaming-0.6b.trtfb",
   "family": "nemotron_speech_streaming",
   "runtime_strategy": "speech_to_text_rnnt",
+  "reference_backend": "invariant_only",
   "test_type": "transcription",
   "max_cache_length": 128,
   "prompt": "test",
@@ -14,8 +15,16 @@
   "trust_remote_code": false,
   "test_input_audio": "data/Recording.wav",
   "language": "en-US",
+  "streaming": {
+    "enabled": true,
+    "chunk_ms": 1120,
+    "att_context_size": [56, 13]
+  },
   "threshold_overrides": {
     "wer": 0.35,
     "cer": 0.25
+  },
+  "metadata": {
+    "notes": "Uses invariant_only reference until the CI image is rebuilt with NeMo main (which ships EncDecRNNTBPEModelWithPrompt). Once that lands, flip reference_backend to \"hf_transformers\" so the comparator gates on WER/CER against a live NeMo reference."
   }
 }

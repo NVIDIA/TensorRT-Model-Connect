@@ -597,6 +597,7 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         "speech_min_rms",
         "language",
         "reference_transcript_file",
+        "streaming",
         "point_x",
         "point_y",
         "num_expected_masks",
@@ -677,6 +678,13 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         meta["language"] = manifest["language"]
     if "reference_transcript_file" in manifest:
         meta["reference_transcript_file"] = manifest["reference_transcript_file"]
+
+    # Streaming-mode ASR config (cache-aware streaming-only checkpoints like
+    # nemotron-3.5 require chunked decode; the non-streaming `trtmc transcribe`
+    # path produces garbage for them). Block shape:
+    #   {"enabled": true, "chunk_ms": 1120, "att_context_size": [56, 13]}
+    if "streaming" in manifest:
+        meta["streaming"] = manifest["streaming"]
 
     return meta
 
