@@ -12,9 +12,9 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-#include <cctype>
 #include <cstdint>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -41,62 +41,28 @@ std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
 }
 
-// Best-effort JSON object parser: pulls "key": <int> pairs out of the object
-// stored under `key` in `json`. Returns an empty map if the key is missing or
-// the value is not an object. Sufficient for the small prompt_dictionary
-// objects emitted by the Python builder.
-std::unordered_map<std::string, int32_t>
-extract_string_int_map(const std::string& json, const std::string& key) {
-    std::unordered_map<std::string, int32_t> out;
-    const std::string needle = "\"" + key + "\":";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos)
-        return out;
-    pos = json.find('{', pos);
-    if (pos == std::string::npos)
-        return out;
-    int depth = 1;
-    auto end = pos + 1;
-    while (end < json.size() && depth > 0) {
-        if (json[end] == '{')
-            ++depth;
-        else if (json[end] == '}')
-            --depth;
-        ++end;
-    }
-    if (depth != 0)
-        return out;
-    auto i = pos + 1;
-    while (i < end - 1) {
-        i = json.find('"', i);
-        if (i == std::string::npos || i >= end - 1)
-            break;
-        auto ke = json.find('"', i + 1);
-        if (ke == std::string::npos || ke >= end - 1)
-            break;
-        std::string k_str = json.substr(i + 1, ke - i - 1);
-        auto colon = json.find(':', ke + 1);
-        if (colon == std::string::npos || colon >= end - 1)
-            break;
-        auto j = colon + 1;
-        while (j < end - 1 && std::isspace(static_cast<unsigned char>(json[j])))
-            ++j;
-        std::string num;
-        while (j < end - 1 &&
-               (std::isdigit(static_cast<unsigned char>(json[j])) || json[j] == '-')) {
-            num.push_back(json[j]);
-            ++j;
+// Parse the small `prompt_dictionary` object emitted by the Python builder.
+// Defers the actual parsing to nlohmann/json after extracting the object's
+// text via the shared helper, so the schema-tolerant behaviour matches the
+// rest of the bundle-config readers.
+std::unordered_map<std::string, int32_t> extract_string_int_map(const std::string& json,
+                                                                const std::string& key) {
+    const auto obj_text = extract_json_object_text(json, key);
+    if (obj_text.empty())
+        return {};
+    try {
+        const auto parsed = nlohmann::json::parse(obj_text);
+        if (!parsed.is_object())
+            return {};
+        std::unordered_map<std::string, int32_t> out;
+        for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+            if (it.value().is_number_integer())
+                out.emplace(it.key(), it.value().get<int32_t>());
         }
-        if (!num.empty()) {
-            try {
-                out.emplace(std::move(k_str), std::stoi(num));
-            } catch (...) {
-                // ignore unparseable entry
-            }
-        }
-        i = j;
+        return out;
+    } catch (const nlohmann::json::exception&) {
+        return {};
     }
-    return out;
 }
 
 } // namespace
@@ -129,8 +95,7 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, "joint_engine_plan"), "rnnt joint", opts);
         std::unique_ptr<TrtModule> prompt_kernel_module;
         const bool has_prompt_kernel =
-            ctx.config_json.find("\"rnnt_has_prompt_kernel\": true") != std::string::npos ||
-            ctx.config_json.find("\"rnnt_has_prompt_kernel\":true") != std::string::npos;
+            extract_json_bool(ctx.config_json, "rnnt_has_prompt_kernel", false);
         if (has_prompt_kernel) {
             const auto* pk_plan = find_section(ctx.bundle, "prompt_kernel_plan");
             if (!pk_plan)

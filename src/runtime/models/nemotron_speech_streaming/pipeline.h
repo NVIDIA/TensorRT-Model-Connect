@@ -43,6 +43,7 @@ class RnntPipeline final : public IPipeline {
     // the bundle's prompt_dictionary. Returns 0 when the bundle has no
     // prompt_kernel or when `tag` is empty. Throws on unknown tags.
     int32_t resolve_prompt_index(const std::string& tag) const;
+    void setup_prompt_state(const std::string& language);
 
     ~RnntPipeline() override;
 

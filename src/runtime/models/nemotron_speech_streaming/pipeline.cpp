@@ -399,8 +399,7 @@ RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<T
             throw std::runtime_error(
                 "RnntPipeline: prompt_kernel module required when has_prompt_kernel=true");
         if (config_.num_prompts <= 0)
-            throw std::runtime_error(
-                "RnntPipeline: invalid num_prompts for prompt_kernel variant");
+            throw std::runtime_error("RnntPipeline: invalid num_prompts for prompt_kernel variant");
     }
 }
 
@@ -424,8 +423,7 @@ std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
     TensorMap inputs;
     inputs["encoder_frame"] =
         make_tensor(const_cast<float*>(encoder_frame), {1, enc_dim}, DType::kFloat32);
-    inputs["prompt_onehot"] =
-        make_tensor(prompt_onehot_.data(), {1, num_p}, DType::kFloat32);
+    inputs["prompt_onehot"] = make_tensor(prompt_onehot_.data(), {1, num_p}, DType::kFloat32);
 
     auto outputs = prompt_kernel_->forward(inputs);
     auto it = outputs.find("prompt_kernel_output");
@@ -438,21 +436,25 @@ std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
 
 RnntPipeline::~RnntPipeline() = default;
 
+void RnntPipeline::setup_prompt_state(const std::string& language) {
+    if (!config_.has_prompt_kernel) {
+        prompt_onehot_.clear();
+        prompt_index_ = -1;
+        return;
+    }
+    prompt_index_ = resolve_prompt_index(language);
+    prompt_onehot_.assign(static_cast<std::size_t>(config_.num_prompts), 0.0F);
+    if (prompt_index_ >= 0 && prompt_index_ < config_.num_prompts)
+        prompt_onehot_[static_cast<std::size_t>(prompt_index_)] = 1.0F;
+}
+
 std::unique_ptr<ITranscriptionStream>
 RnntPipeline::create_transcription_stream(const TranscriptionStreamConfig& cfg) {
     (void)make_nemotron_streaming_schedule(cfg.att_context_left, cfg.att_context_right,
                                            cfg.input_sample_rate, config_.mel_hop_length,
                                            config_.subsampling_factor);
 
-    if (config_.has_prompt_kernel) {
-        prompt_index_ = resolve_prompt_index(cfg.language);
-        prompt_onehot_.assign(static_cast<std::size_t>(config_.num_prompts), 0.0F);
-        if (prompt_index_ >= 0 && prompt_index_ < config_.num_prompts)
-            prompt_onehot_[static_cast<std::size_t>(prompt_index_)] = 1.0F;
-    } else {
-        prompt_onehot_.clear();
-        prompt_index_ = -1;
-    }
+    setup_prompt_state(cfg.language);
 
     if (cfg.online_normalization)
         throw std::runtime_error("RNNT streaming transcription does not support "

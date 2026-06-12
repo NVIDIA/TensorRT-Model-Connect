@@ -67,13 +67,12 @@ struct RnntStreamingSchedule {
     int32_t drop_extra_pre_encoded{2};
 };
 
-inline bool is_supported_nemotron_att_context(int32_t left, int32_t right,
-                                              int32_t supported_left,
+inline bool is_supported_nemotron_att_context(int32_t left, int32_t right, int32_t supported_left,
                                               const std::vector<int32_t>& supported_right) {
     if (left != supported_left)
         return false;
-    return std::find(supported_right.begin(), supported_right.end(), right)
-           != supported_right.end();
+    return std::find(supported_right.begin(), supported_right.end(), right) !=
+           supported_right.end();
 }
 
 inline RnntStreamingSchedule make_nemotron_streaming_schedule(int32_t att_context_left,
@@ -82,8 +81,7 @@ inline RnntStreamingSchedule make_nemotron_streaming_schedule(int32_t att_contex
                                                               int32_t mel_hop_length = 160,
                                                               int32_t subsampling_factor = 8) {
     if (att_context_left <= 0)
-        throw std::invalid_argument(
-            "Nemotron RNNT streaming requires positive att_context_left");
+        throw std::invalid_argument("Nemotron RNNT streaming requires positive att_context_left");
     if (att_context_right < 0)
         throw std::invalid_argument(
             "Nemotron RNNT streaming requires non-negative att_context_right");
