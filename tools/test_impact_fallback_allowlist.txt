@@ -10,6 +10,7 @@
 catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all Dockerfile.a100x86-trt11 # dev container recipe for A100 + TRT 11 (parallels Dockerfile); catch-all stays conservative
 catch_all _pyproject_backend.py # root PEP 517/660 backend routes wheel builds and editable installs; catch-all stays conservative
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -72,6 +73,9 @@ harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface;
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/test_orchestrator_phases.py # shared E2E harness surface; broad E2E impact is intentional
 no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
+no_impact scripts/bootstrap_trt11_container.sh # dev container bootstrap helper; no CI test impact is intentional
+no_impact scripts/docker_build_a100x86_trt11.sh # dev container build helper; no CI test impact is intentional
+no_impact scripts/docker_run_a100x86_trt11.sh # dev container run helper; no CI test impact is intentional
 no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
 no_impact scripts/_mk_fp8_bf16_bundle.py # developer utility script; no CI test impact is intentional
 no_impact scripts/_quantize_fp8.py # developer utility script; no CI test impact is intentional
