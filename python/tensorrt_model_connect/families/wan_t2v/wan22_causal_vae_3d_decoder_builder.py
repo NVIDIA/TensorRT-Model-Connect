@@ -91,9 +91,6 @@ def load_vae_weights_wan22(
     weights["decoder.conv_in.weight"] = _w("decoder.conv_in.weight")
     weights["decoder.conv_in.bias"] = _w("decoder.conv_in.bias")
 
-    channels_list = [decoder_base_dim * m for m in dim_mult]
-    mid_ch = channels_list[-1]
-
     # mid_block: 2 resnets + 1 attention (1024-channel for 5B)
     for i in range(2):
         p = f"decoder.mid_block.resnets.{i}"
