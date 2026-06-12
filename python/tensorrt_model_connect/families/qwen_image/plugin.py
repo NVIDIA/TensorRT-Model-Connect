@@ -140,7 +140,8 @@ class QwenImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "bf16", verbose: bool = False, **_kwargs,
+        *, precision: str = "bf16", verbose: bool = False,
+        parallel_config=None, **_kwargs,
     ) -> dict:
         """Build TRT engines and bundle blobs for a Qwen-Image T2I checkpoint.
 
@@ -165,6 +166,14 @@ class QwenImagePlugin:
 
         ``max_cache_length`` is part of the FamilyPlugin protocol but
         unused here -- Qwen-Image is a diffusion model and has no KV cache.
+
+        When ``parallel_config.enabled`` is True the MMDiT denoiser is
+        built once per TP rank via ``qwen_image_dit_tp_builder`` and the
+        per-rank plans are returned under ``denoiser_ranks`` (a
+        ``{rank: bytes}`` mapping), matching the contract that
+        engine_builder uses for FLUX / Wan TP diffusion bundles. The
+        text encoder, vision encoder, and VAE stay replicated (their
+        compute footprint is small relative to the 60-block MMDiT).
         """
         import sys
         import tempfile
@@ -179,6 +188,9 @@ class QwenImagePlugin:
             build_qwen_image_dit_engine,
             load_qwen_image_dit_weights,
         )
+        from .qwen_image_dit_tp_builder import (
+            build_qwen_image_dit_engine as build_qwen_image_dit_tp_engine,
+        )
         from .qwen_image_preprocessor import (
             extract_preprocessor_source,
             pack_qwen_image_preprocessor_weights,
@@ -189,6 +201,16 @@ class QwenImagePlugin:
             load_qwen_image_vae_weights,
         )
         from ..qwen_vl.qwen_vl_vision_builder import build_qwen_vl_vision_engine
+        from ...parallel_config import (
+            normalize_parallel_config,
+            require_tensorrt_11_for_tensor_parallel,
+            validate_dit_tp,
+        )
+
+        parallel = normalize_parallel_config(parallel_config)
+        require_tensorrt_11_for_tensor_parallel(
+            parallel, feature="Qwen-Image tensor-parallel builds",
+        )
 
         repo = Path(weights.get("_model_dir") or model_dir)
 
@@ -199,6 +221,13 @@ class QwenImagePlugin:
             repo,
             edit_condition_image_size=edit_condition_image_size,
         )
+        # Surface TP parallel-config fields in the bundle config so the C++
+        # runtime knows the per-rank denoiser sections exist and how to
+        # spin up the NCCL communicators. Qwen-Image emits its own
+        # config_json blob (engine_builder consumes it verbatim) so we
+        # have to inject these here rather than relying on
+        # engine_builder's inline cfg-dict path.
+        bundle_cfg.update(parallel.to_bundle_config_fields())
         is_edit = bundle_cfg.get("task_mode") == "edit"
         if is_edit and edit_condition_image_size is not None:
             print(
@@ -310,38 +339,80 @@ class QwenImagePlugin:
             file=sys.stderr,
         )
 
-        # 3. MMDiT denoiser engine.
+        # 3. MMDiT denoiser engine (optionally TP-sharded).
         print(
             f"[qwen-image] Loading MMDiT denoiser weights "
             f"from {repo / 'transformer'} ...",
             file=sys.stderr,
         )
         dit_cfg, dit_w = load_qwen_image_dit_weights(repo / "transformer")
-        with tempfile.NamedTemporaryFile(
-            suffix=".plan", delete=False, prefix="qwen_image_dit_"
-        ) as f:
-            dit_plan_path = Path(f.name)
-        try:
+        if parallel.enabled:
+            validate_dit_tp(
+                dim=dit_cfg.hidden_size,
+                num_heads=dit_cfg.num_attention_heads,
+                ffn_dim=dit_cfg.intermediate_size,
+                parallel=parallel.for_rank(0),
+                feature="Qwen-Image MMDiT tensor parallel",
+            )
+        dit_engine_bytes = None
+        dit_rank_plans: "dict[int, bytes] | None" = None
+        if parallel.enabled:
+            dit_rank_plans = {}
+            for rank in range(parallel.tp_size):
+                print(
+                    f"[qwen-image] Building MMDiT denoiser engine TP rank "
+                    f"{rank}/{parallel.tp_size} "
+                    f"(h_lat={h_lat}, w_lat={w_lat}, n_text={n_text}) ...",
+                    file=sys.stderr,
+                )
+                with tempfile.NamedTemporaryFile(
+                    suffix=f".rank{rank}.plan",
+                    delete=False,
+                    prefix="qwen_image_dit_tp_",
+                ) as f:
+                    dit_plan_path = Path(f.name)
+                try:
+                    build_qwen_image_dit_tp_engine(
+                        dit_cfg, dit_w, dit_plan_path,
+                        h_lat=h_lat, w_lat=w_lat, n_text=n_text,
+                        image_token_shapes=image_token_shapes,
+                        verbose=verbose,
+                        parallel_config=parallel.for_rank(rank),
+                    )
+                    dit_rank_plans[rank] = dit_plan_path.read_bytes()
+                finally:
+                    dit_plan_path.unlink(missing_ok=True)
+                print(
+                    f"[qwen-image]   denoiser rank {rank} plan: "
+                    f"{len(dit_rank_plans[rank]) / (1024 * 1024):.1f} MB",
+                    file=sys.stderr,
+                )
+        else:
+            with tempfile.NamedTemporaryFile(
+                suffix=".plan", delete=False, prefix="qwen_image_dit_"
+            ) as f:
+                dit_plan_path = Path(f.name)
+            try:
+                print(
+                    f"[qwen-image] Building MMDiT denoiser engine "
+                    f"(h_lat={h_lat}, w_lat={w_lat}, n_text={n_text}) ...",
+                    file=sys.stderr,
+                )
+                build_qwen_image_dit_engine(
+                    dit_cfg, dit_w, dit_plan_path,
+                    h_lat=h_lat, w_lat=w_lat, n_text=n_text,
+                    image_token_shapes=image_token_shapes,
+                    verbose=verbose,
+                )
+                dit_engine_bytes = dit_plan_path.read_bytes()
+            finally:
+                dit_plan_path.unlink(missing_ok=True)
             print(
-                f"[qwen-image] Building MMDiT denoiser engine "
-                f"(h_lat={h_lat}, w_lat={w_lat}, n_text={n_text}) ...",
+                f"[qwen-image]   denoiser plan: "
+                f"{len(dit_engine_bytes) / (1024 * 1024):.1f} MB",
                 file=sys.stderr,
             )
-            build_qwen_image_dit_engine(
-                dit_cfg, dit_w, dit_plan_path,
-                h_lat=h_lat, w_lat=w_lat, n_text=n_text,
-                image_token_shapes=image_token_shapes,
-                verbose=verbose,
-            )
-            dit_engine_bytes = dit_plan_path.read_bytes()
-        finally:
-            dit_plan_path.unlink(missing_ok=True)
         del dit_w
-        print(
-            f"[qwen-image]   denoiser plan: "
-            f"{len(dit_engine_bytes) / (1024 * 1024):.1f} MB",
-            file=sys.stderr,
-        )
 
         # 4. Optional Qwen2.5-VL vision engine for Edit prompt conditioning.
         vision_engine_bytes = None
@@ -445,10 +516,13 @@ class QwenImagePlugin:
         components = {
             "config_json": config_json_bytes,
             "text_encoders": [("qwen2_5_vl_lm", text_engine_bytes)],
-            "denoiser": dit_engine_bytes,
             "vae_decoder": vae_engine_bytes,
             "preprocessor_weights": prep_blob,
         }
+        if parallel.enabled:
+            components["denoiser_ranks"] = dit_rank_plans or {}
+        else:
+            components["denoiser"] = dit_engine_bytes
         if vision_engine_bytes is not None:
             components["vision_engine"] = vision_engine_bytes
         if vae_encoder_bytes is not None:
