@@ -159,11 +159,10 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
 
     for name, tensor in trt_outputs.items():
         tensor.name = name
+        # Strongly-typed network: output dtypes are inferred from the graph and
+        # are not settable (the ITensor.dtype setter was removed in TRT 11).
+        # These test graphs are fp32, so no explicit output cast is needed.
         network.mark_output(tensor)
-        # In newer TRT (10.x), `ITensor.dtype` is read-only after the layer
-        # graph is built; output dtype is inferred from the producing layer
-        # (here fp32 because inputs + weights are fp32). The explicit set
-        # was a no-op on older TRT and broke on newer.
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
