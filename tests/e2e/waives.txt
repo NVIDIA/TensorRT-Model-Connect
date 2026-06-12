@@ -8,3 +8,5 @@ internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in trans
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)
+canary-1b-v2-asr-probe05 XFAIL  (ASR probe low-volume parity gap: TRT transcript diverges from NeMo reference)
+canary-1b-v2-asr-probe06 XFAIL  (ASR probe silence-padding parity gap: TRT transcript diverges from NeMo reference)

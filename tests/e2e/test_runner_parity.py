@@ -10,6 +10,12 @@ import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
+_SPEECH_RUNTIME_STRATEGIES = {
+    "speech_to_text",
+    "speech_to_text_rnnt",
+    "speech_to_speech",
+}
+
 
 @pytest.mark.e2e
 def test_runner_parity(model_entry, trtmc_binary, hf_python, ld_library_path):
@@ -20,6 +26,11 @@ def test_runner_parity(model_entry, trtmc_binary, hf_python, ld_library_path):
         pytest.skip("Segmentation model — no text runner parity")
     if model_entry.get("test_type") == "audio":
         pytest.skip("Audio model — no text runner parity")
+    if (
+        model_entry.get("test_type") == "transcription"
+        or model_entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
+    ):
+        pytest.skip("Speech model — no text runner parity")
     max_new = min(model_entry.get("max_new_tokens", 20), 20)
 
     parity_script = PROJECT_DIR / "tools" / "test_runner_parity.py"

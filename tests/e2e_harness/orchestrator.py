@@ -160,9 +160,14 @@ def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[boo
         if candidate.is_file():
             p = candidate
         else:
-            # Fallback: try e2e data dir with just the filename
-            e2e_data = project_root / "tests" / "e2e" / "data"
-            p = e2e_data / Path(asset_path).name
+            e2e_dir = project_root / "tests" / "e2e"
+            candidate = e2e_dir / asset_path
+            if candidate.is_file():
+                p = candidate
+            else:
+                # Backward-compatible fallback for older manifests that
+                # provided bare filenames for assets under tests/e2e/data/.
+                p = e2e_dir / "data" / Path(asset_path).name
     if p.is_file():
         return True, f"Asset found: {p}"
     return False, f"Asset not found: {p}"

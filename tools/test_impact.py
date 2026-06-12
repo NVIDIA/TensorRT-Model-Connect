@@ -176,6 +176,7 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
 
 # E2E contract plugin filename (stem) -> task_strategies
 PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
+    "asr": ["speech_to_text"],
     "diffusion": ["diffusion_media_generation"],
     "vl_qa": ["vision_language_generation"],
     "multimodal_chat": ["omni_multimodal"],
