@@ -1,0 +1,38 @@
+{
+  "name": "cosmos-predict2-2b-l0",
+  "trace_id": "IT-E2E-COSMOS-PREDICT2-L0-01",
+  "hf_id": "nvidia/Cosmos-Predict2-2B-Video2World",
+  "bundle": "cosmos-predict2-2b-l0.trtfb",
+  "model_type": "cosmos_predict",
+  "family": "cosmos_predict",
+  "runtime_strategy": "diffusion",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "Cosmos-Predict2 2B Video2World — image+text conditioned video diffusion (T5 + CosmosTransformer3DModel + AutoencoderKLWan). L0 scaffold targets 384x672 at 5 frames / 15 steps.",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A robot arm carefully picks up a red cube from a table",
+  "test_image": "first_frame.png",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 384,
+  "video_width": 672,
+  "num_inference_steps": 15,
+  "num_conditioning_frames": 1,
+  "guidance_scale": 7.0,
+  "flow_shift": 7.0,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "min_pixel_mean": 0.10,
+  "max_pixel_mean": 0.90,
+  "min_pixel_std": 0.04,
+  "skip_text_comparison": true,
+  "skip": "scaffold only — CosmosTransformer3DModel TRT builder not yet implemented; remove this skip once GPU validation lands the DiT engine",
+  "notes": "Cosmos-Predict2 reuses Wan's T5 encoder and AutoencoderKLWan VAE shapes, but the DiT is CosmosTransformer3DModel (dim=2048, 28 layers, 32 heads, patch=[1,2,2], in_ch=68). The plugin currently builds the T5 + VAE engines and stubs the denoiser with a clear NotImplementedError. Update build_args / dimensions once the on-disk transformer/config.json is verified."
+}
