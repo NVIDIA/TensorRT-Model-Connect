@@ -147,13 +147,14 @@ class TestAddLayerNormNative:
         eps = 1e-5
 
         def build(network, trt_inputs):
-            import tensorrt as trt
             gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
             beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
             norm = network.add_normalization_v2(
                 trt_inputs["x"], gamma_t, beta_t, 1 << 1)
             norm.epsilon = eps
-            norm.compute_precision = trt.float32
+            # Strongly-typed network: normalization compute precision is inferred,
+            # not set (the INormalizationLayer.compute_precision setter was removed
+            # in TRT 11); this fp32 graph already normalizes in fp32.
             return {"out": norm.get_output(0)}
 
         out = _run_strongly_typed(build, {"x": x})["out"]
@@ -173,13 +174,14 @@ class TestAddLayerNormNative:
         eps = 1e-5
 
         def build(network, trt_inputs):
-            import tensorrt as trt
             gamma_t = graph_ops.add_constant(network, (1, H), gamma)
             beta_t = graph_ops.add_constant(network, (1, H), beta)
             norm = network.add_normalization_v2(
                 trt_inputs["x"], gamma_t, beta_t, 1 << 1)
             norm.epsilon = eps
-            norm.compute_precision = trt.float32
+            # Strongly-typed network: normalization compute precision is inferred,
+            # not set (the INormalizationLayer.compute_precision setter was removed
+            # in TRT 11); this fp32 graph already normalizes in fp32.
             return {"out": norm.get_output(0)}
 
         out = _run_strongly_typed(build, {"x": x})["out"]
