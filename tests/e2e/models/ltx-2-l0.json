@@ -1,0 +1,43 @@
+{
+  "name": "ltx-2-l0",
+  "trace_id": "IT-E2E-LTX2-L0-01",
+  "hf_id": "Lightricks/LTX-2",
+  "bundle": "ltx-2-l0.trtfb",
+  "model_type": "ltx_2",
+  "family": "ltx_2",
+  "runtime_strategy": "diffusion_ltx_2",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "LTX-2 L0 representative for the joint audio-video DiT (scaffold; build_components is currently NotImplementedError pending dual-stream DiT + audio_vae + vocoder + connectors + latent_upsampler builders).",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A cheerful small red robot with glossy metal panels walks through a sunlit botanical garden filled with colorful flowers, butterflies, and soft golden light. Smooth cinematic camera movement, detailed textures, vibrant colors, shallow depth of field, high quality.",
+  "test_type": "diffusion",
+  "video_num_frames": 9,
+  "video_height": 256,
+  "video_width": 256,
+  "num_inference_steps": 30,
+  "guidance_scale": 3.0,
+  "seed": 42,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "threshold_overrides": {
+    "min_pixel_mean": 0.08,
+    "max_pixel_mean": 0.98,
+    "min_pixel_std": 0.04,
+    "contract_min_pixel_mean": 0.08,
+    "contract_max_pixel_mean": 0.98,
+    "contract_min_pixel_std": 0.04,
+    "psnr": 12.0,
+    "ssim": 0.75
+  },
+  "skip_text_comparison": true,
+  "skip": "scaffold only — LTX-2 joint audio-video DiT not yet implemented; remove this skip once GPU validation lands the dual-stream DiT + audio_vae + vocoder + connectors + latent_upsampler builders",
+  "notes": "Scaffold lane for Lightricks/LTX-2. Plugin matches model_type=ltx_2 and emits get_diffusion_config; build_components raises NotImplementedError listing the missing builders. Promote to a real lane once the dual-stream DiT, audio VAE, vocoder, connectors and latent upsampler builders land."
+}
