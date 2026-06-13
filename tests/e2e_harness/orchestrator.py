@@ -817,14 +817,29 @@ def _build_repro_commands(
                     latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
                     infer_parts.extend(["--initial-latents-raw", str(latent_path)])
         elif task_strategy == "prompted_segmentation":
+            is_sam3 = (
+                case.family == "sam3"
+                or case.reference_family == "prompted_segmentation_sam3"
+            )
             infer_parts = [
                 ctx.binary_path, "segment-sam", bundle_path,
                 "--image", str(image or ""),
                 "--output", "/tmp/trtmc_masks",
-                "--point-x", str(case.inputs.get("point_x", 0.5)),
-                "--point-y", str(case.inputs.get("point_y", 0.5)),
             ]
-            if not case.inputs.get("is_foreground", True):
+            if is_sam3:
+                prompt = (
+                    case.inputs.get("prompt")
+                    or case.inputs.get("text_prompt")
+                    or case.metadata.get("text_prompt")
+                    or ""
+                )
+                infer_parts.extend(["--prompt", _shell_quote(str(prompt))])
+            else:
+                infer_parts.extend([
+                    "--point-x", str(case.inputs.get("point_x", 0.5)),
+                    "--point-y", str(case.inputs.get("point_y", 0.5)),
+                ])
+            if not is_sam3 and not case.inputs.get("is_foreground", True):
                 infer_parts.append("--background")
         elif task_strategy == "segmentation":
             infer_parts = [

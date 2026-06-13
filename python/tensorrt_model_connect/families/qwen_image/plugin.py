@@ -140,7 +140,8 @@ class QwenImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "bf16", verbose: bool = False, **_kwargs,
+        *, precision: str = "bf16", verbose: bool = False,
+        parallel_config=None, max_batch_size: int = 1, **_kwargs,
     ) -> dict:
         """Build TRT engines and bundle blobs for a Qwen-Image T2I checkpoint.
 
@@ -169,6 +170,31 @@ class QwenImagePlugin:
         import sys
         import tempfile
         from pathlib import Path
+
+        # TP + batch>1 is out of scope for this PR series. Qwen-Image does
+        # not currently support diffusion TP, but the guard mirrors the
+        # other families for symmetry.
+        if max_batch_size > 1 and parallel_config is not None and getattr(
+                parallel_config, "enabled", False):
+            raise NotImplementedError(
+                "Qwen-Image tensor-parallel + max_batch_size > 1 is not "
+                "supported in this release; build with either TP=1 or "
+                "max_batch_size=1."
+            )
+
+        # Per-component batch policy (Decisions C / E).
+        dit_mbs = int(max_batch_size)
+        dit_opt = min(dit_mbs, 4)
+        # Qwen2.5-VL text encoder is still single-sample only — its inner
+        # graph has static `(1, ...)` reshapes that TRT shape-propagation
+        # refuses under a dynamic leading dim. The pipeline already loops
+        # per-prompt for the encoder when the DiT is batched, so this clamp
+        # keeps Qwen-Image bundles building at any `--max-batch-size`. Lift
+        # this back to ``min(dit_mbs * 2, 8)`` once the Qwen2.5-VL inner
+        # blocks are batchified (Phase 1.5 follow-up).
+        te_mbs = 1
+        te_opt = 1
+        vae_mbs = 1
 
         from .qwen_image_bundle_config import build_bundle_config
         from .qwen25_vl_text_encoder_builder import (
@@ -298,6 +324,8 @@ class QwenImagePlugin:
                 else 2,
                 vision_tokens_per_second=int(vision_cfg.get("tokens_per_second", 2)),
                 verbose=verbose,
+                max_batch_size=te_mbs,
+                opt_batch_size=te_opt,
             )
             text_engine_bytes = text_plan_path.read_bytes()
         finally:
@@ -332,6 +360,8 @@ class QwenImagePlugin:
                 h_lat=h_lat, w_lat=w_lat, n_text=n_text,
                 image_token_shapes=image_token_shapes,
                 verbose=verbose,
+                max_batch_size=dit_mbs,
+                opt_batch_size=dit_opt,
             )
             dit_engine_bytes = dit_plan_path.read_bytes()
         finally:
@@ -453,6 +483,12 @@ class QwenImagePlugin:
             components["vision_engine"] = vision_engine_bytes
         if vae_encoder_bytes is not None:
             components["vae_encoder"] = vae_encoder_bytes
+        if max_batch_size > 1:
+            components["max_batch_size_envelope"] = {
+                "dit": dit_mbs,
+                "text_encoder": te_mbs,
+                "vae": vae_mbs,
+            }
         return components
 
 

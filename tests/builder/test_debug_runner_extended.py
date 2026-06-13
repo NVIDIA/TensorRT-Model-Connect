@@ -667,6 +667,42 @@ class TestPreprocessImageDispatch:
         # 3 channels * 2 temporal = 6 channels
         assert result.shape == (6, 28, 28)
 
+    def test_locateanything_patchify_inputs(self, tmp_path):
+        """locateanything_patchify returns pixel_values and image_grid_hws."""
+        from tensorrt_model_connect.debug_runner import (
+            preprocess_image_for_trt,
+            preprocess_image_inputs_for_trt,
+        )
+
+        from PIL import Image
+        img = Image.new("RGB", (4, 4), color=(64, 128, 255))
+        img_path = str(tmp_path / "test.png")
+        img.save(img_path)
+
+        inputs = preprocess_image_inputs_for_trt(
+            img_path,
+            preprocessor_type="locateanything_patchify",
+            fixed_image_size=4,
+            patch_size=2,
+            image_mean=(0.0, 0.0, 0.0),
+            image_std=(1.0, 1.0, 1.0),
+            interpolation="nearest",
+        )
+
+        assert set(inputs) == {"pixel_values", "image_grid_hws"}
+        assert inputs["pixel_values"].shape == (4, 3, 2, 2)
+        assert inputs["pixel_values"].dtype == np.float32
+        assert inputs["image_grid_hws"].tolist() == [[2, 2]]
+        assert preprocess_image_for_trt(
+            img_path,
+            preprocessor_type="locateanything_patchify",
+            fixed_image_size=4,
+            patch_size=2,
+            image_mean=(0.0, 0.0, 0.0),
+            image_std=(1.0, 1.0, 1.0),
+            interpolation="nearest",
+        ).shape == (4, 3, 2, 2)
+
     def test_center_crop_chw_dispatch(self, tmp_path):
         """center_crop_chw returns [C, H, W] for rectangular input."""
         from tensorrt_model_connect.debug_runner import preprocess_image_for_trt

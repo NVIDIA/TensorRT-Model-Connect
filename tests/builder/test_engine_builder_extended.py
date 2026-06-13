@@ -221,6 +221,14 @@ class TestEnsureTokenizerJson:
 
         assert not (tmp_path / "tokenizer.json").exists()
 
+    def test_sentencepiece_model_conversion_failure_raises(self, tmp_path):
+        """SentencePiece-only tokenizers fail fast instead of producing bad bundles."""
+        (tmp_path / "spiece.model").write_bytes(b"not a real sentencepiece model")
+
+        with patch.dict("sys.modules", {"transformers": None, "sentencepiece": None}):
+            with pytest.raises(RuntimeError, match="SentencePiece conversion failed"):
+                _ensure_tokenizer_json(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # build_bundle orchestration
@@ -448,6 +456,106 @@ class TestBuildBundleOrchestration:
                             sections = mock_write.call_args[0][2]
                             section_names = [s.name for s in sections]
                             assert "config.json" in section_names
+
+    def test_processor_config_embedded_in_sections(self, tmp_path):
+        """processor_config.json from model dir is embedded in bundle sections."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        (model_dir / "processor_config.json").write_text(
+            json.dumps({"image_processor": {"image_mean": [0.5, 0.5, 0.5]}})
+        )
+        output_path = str(tmp_path / "output.trtfb")
+
+        mock_plugin = MagicMock()
+        mock_plugin.name = "qwen"
+        mock_plugin.runtime_strategy = ""
+        mock_plugin.load_weights.return_value = {}
+        mock_plugin.build_engine.return_value = b"PLAN"
+
+        del mock_plugin.build_vision_engine
+        del mock_plugin.build_extra_engines
+        del mock_plugin.embed_input
+        del mock_plugin.get_vl_config
+        del mock_plugin.get_segmentation_config
+        del mock_plugin.get_audio_config
+        del mock_plugin.get_bundle_config_overrides
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                    return_value=mock_plugin):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                        return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                            return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                            build_bundle(str(model_dir), output_path)
+
+                            sections = mock_write.call_args[0][2]
+                            section_names = [s.name for s in sections]
+                            assert "processor_config.json" in section_names
+
+    def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(
+        self, tmp_path
+    ):
+        """SAM3 prompted segmentation needs tokenizer provisioning and all TRT plans."""
+        model_dir = self._make_model_dir(tmp_path, model_type="sam3")
+        output_path = str(tmp_path / "sam3.trtfb")
+
+        class _Sam3Plugin:
+            name = "sam3"
+            runtime_strategy = "prompted_segmentation"
+            requires_tokenizer = True
+
+            def load_weights(self, model_dir, config):
+                return {}
+
+            def build_engine(self, config, weights, max_cache_length, *, verbose=False):
+                return b"SAM3_TEXT_PLAN"
+
+            def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
+                return b"SAM3_VISION_PLAN"
+
+            def build_extra_engines(
+                self, config, weights, max_cache_length, *, verbose=False
+            ):
+                return {"sam3_core_engine_plan": b"SAM3_CORE_PLAN"}
+
+            def get_segmentation_config(self, config):
+                return {
+                    "prompted_segmentation_variant": "sam3_text_prompt_pcs",
+                    "sam3_text_max_position_embeddings": 32,
+                    "sam3_num_queries": 200,
+                }
+
+            def get_bundle_config_overrides(self, config):
+                return {
+                    "model_type": "sam3",
+                    "runtime_strategy": "prompted_segmentation",
+                    "prompted_segmentation_variant": "sam3_text_prompt_pcs",
+                }
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
+                   return_value=_Sam3Plugin()):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
+                       return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
+                           return_value=""):
+                    with patch(
+                        "tensorrt_model_connect.engine_builder._ensure_tokenizer_json"
+                    ) as mock_ensure:
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                            build_bundle(str(model_dir), output_path)
+
+        mock_ensure.assert_called_once_with(model_dir)
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        assert section_map["engine_plan"] == b"SAM3_TEXT_PLAN"
+        assert section_map["vision_engine_plan"] == b"SAM3_VISION_PLAN"
+        assert section_map["sam3_core_engine_plan"] == b"SAM3_CORE_PLAN"
+
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        assert cfg["prompted_segmentation_variant"] == "sam3_text_prompt_pcs"
+        assert cfg["has_vision_engine"] is True
+        assert cfg["sam3_num_queries"] == 200
 
     def test_yaml_only_elf_synthesizes_config_json_section(self, tmp_path):
         """GitHub ELF YAML-only directories still get runtime config.json."""

@@ -148,6 +148,16 @@ struct QwenImageConfig {
     QwenImageVisionEncoderConfig vision_encoder;
     QwenImageConditioningConfig image_conditioning;
 
+    // Engine batch envelope sourced from the bundle's `max_batch_size`
+    // top-level block. Defaults to {1,1,1} so legacy bundles preserve B=1
+    // semantics. Populated by QwenImagePlugin from `bundle.info`, not from
+    // config_json (the block lives at the bundle header level).
+    struct {
+        int32_t dit{1};
+        int32_t text_encoder{1};
+        int32_t vae{1};
+    } max_batch_size;
+
     // Parse a bundle config.json blob into a QwenImageConfig. Missing keys
     // / sections retain their struct defaults.
     static QwenImageConfig parse(std::string_view config_json);

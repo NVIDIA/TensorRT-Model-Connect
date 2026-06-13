@@ -63,6 +63,29 @@ def _resolve_mask_list(data: dict) -> list:
     return [loaded[i] for i in range(loaded.shape[0])]
 
 
+def _resolve_score_list(data: dict) -> list[float]:
+    scores = data.get("mask_scores")
+    if scores is None:
+        scores = data.get("scores")
+    if scores is None:
+        scores = data.get("iou_scores")
+    if scores is None:
+        return []
+    return [float(score) for score in scores]
+
+
+def _resolve_box_list(data: dict) -> list[list[float]]:
+    boxes = data.get("boxes")
+    if boxes is None:
+        return []
+    resolved = []
+    for box in boxes:
+        values = [float(value) for value in box]
+        if len(values) == 4:
+            resolved.append(values)
+    return resolved
+
+
 def _compute_iou(mask_a, mask_b) -> float:
     """Compute IoU between two binary masks (numpy arrays)."""
     np = _safe_import_numpy()
@@ -320,8 +343,10 @@ class PromptedSegmentationComparator:
 
         trt_masks = _resolve_mask_list(trt.data)
         ref_masks = _resolve_mask_list(ref.data)
-        trt_scores = trt.data.get("mask_scores", [])
-        ref_scores = ref.data.get("mask_scores", [])
+        trt_scores = _resolve_score_list(trt.data)
+        ref_scores = _resolve_score_list(ref.data)
+        trt_boxes = _resolve_box_list(trt.data)
+        ref_boxes = _resolve_box_list(ref.data)
 
         # Number of masks (informational)
         metrics["trt_num_masks"] = MetricResult(
@@ -405,6 +430,54 @@ class PromptedSegmentationComparator:
                     operator=">=", passed=True,
                     note="informational (no threshold configured)",
                 )
+
+        box_thresh = threshold.metrics.get("box_iou_mean")
+        if box_thresh is not None or trt_boxes or ref_boxes:
+            box_count_match = len(trt_boxes) == len(ref_boxes)
+            metrics["box_count_consistency"] = MetricResult(
+                value=1.0 if box_count_match else 0.0,
+                threshold=1.0 if box_thresh is not None else None,
+                operator="==",
+                passed=box_count_match,
+            )
+            box_ious = [
+                _compute_box_iou(trt_box, ref_box)
+                for trt_box, ref_box in zip(trt_boxes, ref_boxes)
+            ]
+            if box_ious:
+                mean_box_iou = float(sum(box_ious) / len(box_ious))
+            else:
+                mean_box_iou = 0.0
+            metrics["box_iou_mean"] = MetricResult(
+                value=mean_box_iou,
+                threshold=box_thresh,
+                operator=">=",
+                passed=True if box_thresh is None else mean_box_iou >= box_thresh,
+            )
+
+        score_thresh = threshold.metrics.get("score_abs_error_mean")
+        if score_thresh is not None or trt_scores or ref_scores:
+            score_count_match = len(trt_scores) == len(ref_scores)
+            metrics["score_count_consistency"] = MetricResult(
+                value=1.0 if score_count_match else 0.0,
+                threshold=1.0 if score_thresh is not None else None,
+                operator="==",
+                passed=score_count_match,
+            )
+            score_errors = [
+                abs(float(trt_score) - float(ref_score))
+                for trt_score, ref_score in zip(trt_scores, ref_scores)
+            ]
+            if score_errors:
+                mean_score_error = float(sum(score_errors) / len(score_errors))
+            else:
+                mean_score_error = 1.0e9 if score_thresh is not None else 0.0
+            metrics["score_abs_error_mean"] = MetricResult(
+                value=mean_score_error,
+                threshold=score_thresh,
+                operator="<=",
+                passed=True if score_thresh is None else mean_score_error <= score_thresh,
+            )
 
         gated = [m for m in metrics.values() if m.threshold is not None]
         overall = all(m.passed for m in gated) if gated else (n_compare > 0)

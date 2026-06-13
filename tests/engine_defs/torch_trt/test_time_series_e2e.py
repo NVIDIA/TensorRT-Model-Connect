@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,7 +24,39 @@ transformers = pytest.importorskip("transformers")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-TRTMC_BIN = REPO_ROOT / "build" / "trtmc"
+
+
+def _resolve_trtmc_binary() -> Path | None:
+    """Resolve the C++ trtmc binary, preferring an explicit override, then a
+    local source build, then the trtmc installed on PATH.
+
+    In CI there is no source-tree ``build/trtmc``; the wheel installs the native
+    trtmc on PATH (``command -v trtmc``), so ``shutil.which`` finds it and the
+    test runs against the packaged binary. Locally, ``build/trtmc`` (a fresh
+    source build) takes precedence, and ``TRTMC_BINARY`` overrides everything.
+    """
+    for candidate in (
+        os.environ.get("TRTMC_BINARY"),
+        str(REPO_ROOT / "build" / "trtmc"),
+        shutil.which("trtmc"),
+    ):
+        if candidate and Path(candidate).is_file():
+            return Path(candidate)
+    return None
+
+
+TRTMC_BIN = _resolve_trtmc_binary()
+
+
+def _require_trtmc_binary() -> Path:
+    """Skip only when no trtmc binary can be found anywhere (a missing build
+    artifact is an environment gap, gated like ``@requires_gpu``)."""
+    if TRTMC_BIN is None:
+        pytest.skip(
+            "trtmc binary not found (set TRTMC_BINARY, build ./build/trtmc, "
+            "or install the trtmc wheel so it is on PATH)"
+        )
+    return TRTMC_BIN
 
 
 def _has_torchtrt() -> bool:
@@ -72,7 +105,7 @@ def _parse_solve_stdout(stdout: str) -> torch.Tensor:
 
 
 def _build_bundle(model_dir: Path, bundle_path: Path, *, max_cache_length: int) -> None:
-    assert TRTMC_BIN.exists(), f"Expected built trtmc binary at {TRTMC_BIN}"
+    _require_trtmc_binary()
     _run(
         [
             str(TRTMC_BIN),
@@ -109,7 +142,7 @@ def _run_solve(bundle_path: Path, *, field_input: list[float] | None = None,
 @requires_torchtrt
 @requires_gpu
 def test_time_series_models_match_reference_end_to_end():
-    assert TRTMC_BIN.exists(), f"Expected built binary at {TRTMC_BIN}"
+    _require_trtmc_binary()
 
     torch.manual_seed(0)
 

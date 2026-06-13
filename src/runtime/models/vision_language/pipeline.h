@@ -94,8 +94,8 @@ class VLPipeline final : public IPipeline {
                                   const std::vector<const float*>& deepstack_embeds,
                                   float deepstack_active, std::vector<float>& logits);
 
-    // Run vision encoder on preprocessed pixel values.
-    bool run_vision_encoder(const float* pixel_values, std::size_t pixel_count,
+    // Run vision encoder on preprocessed image inputs.
+    bool run_vision_encoder(const PreprocessedImage& preprocessed,
                             std::vector<float>& image_features,
                             std::vector<std::vector<float>>* deepstack_features = nullptr);
 };

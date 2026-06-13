@@ -299,3 +299,23 @@ class TestCorruptedBundles:
         assert header["model_id"] == "corrupt-test"
         assert header["family"] == "qwen"
         assert len(sections["engine_plan"]) == 16
+
+
+def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
+    """``max_batch_size`` is an additive optional bundle field (Decision C):
+    new bundles serialize it, legacy bundles omit it.
+    """
+    new = BundleInfo(
+        model_id="flux", family="diffusion_flux",
+        max_batch_size={"dit": 4, "text_encoder": 8, "vae": 1},
+    )
+    new_path = str(tmp_path / "new.trtfb")
+    write_bundle(new_path, new, [BundleSection("engine_plan", b"x")])
+    new_header, _ = read_trtfb_bundle(new_path)
+    assert new_header["max_batch_size"] == {"dit": 4, "text_encoder": 8, "vae": 1}
+
+    legacy = BundleInfo(model_id="legacy", family="qwen")
+    legacy_path = str(tmp_path / "legacy.trtfb")
+    write_bundle(legacy_path, legacy, [BundleSection("engine_plan", b"x")])
+    legacy_header, _ = read_trtfb_bundle(legacy_path)
+    assert "max_batch_size" not in legacy_header

@@ -147,6 +147,15 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
         info.tokenizer_add_special_tokens_present = true;
     }
 
+    // Per-component diffusion batch caps (see design doc Decision C).
+    // Absent => leave the default {1, 1, 1} so legacy bundles run unchanged.
+    const std::string mbs_text = extract_json_object_text(json, "max_batch_size");
+    if (!mbs_text.empty()) {
+        info.max_batch_size.dit = extract_json_int(mbs_text, "dit", 1);
+        info.max_batch_size.text_encoder = extract_json_int(mbs_text, "text_encoder", 1);
+        info.max_batch_size.vae = extract_json_int(mbs_text, "vae", 1);
+    }
+
     sections_out.clear();
     parse_sections_table(json, sections_out);
     info.sections.clear();

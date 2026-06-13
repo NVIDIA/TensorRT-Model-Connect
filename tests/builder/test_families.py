@@ -341,6 +341,8 @@ _POSITIVE_MATCH_CASES = [
     # InternVL
     ("internvl_chat", "internvl"),
     ("internvl3", "internvl"),
+    # LocateAnything
+    ("locateanything", "locateanything"),
     # BERT (encoder-only)
     ("bert", "bert"),
     # RoBERTa / XLM-RoBERTa (encoder-only)
@@ -365,6 +367,9 @@ _POSITIVE_MATCH_CASES = [
     ("nemotron_hybrid", "nemotron_h"),
     # SAM (prompted segmentation)
     ("sam", "sam"),
+    # SAM3 (text-prompt prompted segmentation)
+    ("sam3", "sam3"),
+    ("sam3_video", "sam3"),
     # timm Vision Transformer (image classification)
     ("vit_base_patch16_224", "timm_vit"),
     ("timm_vit", "timm_vit"),
@@ -539,6 +544,10 @@ class TestRuntimeStrategy:
         plugin = find_plugin("internvl_chat")
         assert getattr(plugin, "runtime_strategy", None) == "vision_language"
 
+    def test_locateanything_strategy(self):
+        plugin = find_plugin("locateanything")
+        assert getattr(plugin, "runtime_strategy", None) == "vision_language"
+
     def test_omni_strategy(self):
         plugin = find_plugin("qwen3_omni")
         assert getattr(plugin, "runtime_strategy", None) == "omni_multimodal"
@@ -593,6 +602,10 @@ class TestEmbedInput:
         plugin = find_plugin("internvl_chat")
         assert getattr(plugin, "embed_input", False) is True
 
+    def test_locateanything_has_embed_input(self):
+        plugin = find_plugin("locateanything")
+        assert getattr(plugin, "embed_input", False) is True
+
     def test_omni_has_embed_input(self):
         plugin = find_plugin("qwen3_omni")
         assert getattr(plugin, "embed_input", False) is True
@@ -615,6 +628,11 @@ class TestVLMethods:
 
     def test_internvl_has_vl_methods(self):
         plugin = find_plugin("internvl_chat")
+        assert callable(getattr(plugin, "build_vision_engine", None))
+        assert callable(getattr(plugin, "get_vl_config", None))
+
+    def test_locateanything_has_vl_methods(self):
+        plugin = find_plugin("locateanything")
         assert callable(getattr(plugin, "build_vision_engine", None))
         assert callable(getattr(plugin, "get_vl_config", None))
 

@@ -376,6 +376,11 @@ def _add_self_attention_2d(
     hw = h * w
     attn_scale = 1.0 / np.sqrt(max(c, 1))
     identity = inp
+    # When ``b`` is a runtime-dynamic ``-1`` we must let TRT infer the merged
+    # batch*spatial leading dim via a single ``-1`` placeholder; ``b * hw``
+    # would produce ``-hw``, which TRT refuses.
+    dynamic_leading = b == -1
+    flat_leading = -1 if dynamic_leading else b * hw
 
     # GroupNorm
     normed = _add_group_norm_4d(
@@ -386,7 +391,7 @@ def _add_self_attention_2d(
     # Reshape [B, C, H, W] -> [B*H*W, C] (2D for matmul compatibility)
     flatten = network.add_shuffle(normed)
     flatten.first_transpose = trt.Permutation([0, 2, 3, 1])  # [B, H, W, C]
-    flatten.reshape_dims = (b * hw, c)
+    flatten.reshape_dims = (flat_leading, c)
 
     flat = flatten.get_output(0)  # [B*HW, C]
 
@@ -423,7 +428,7 @@ def _add_self_attention_2d(
 
     # Flatten context to 2D for output projection: [B*HW, C]
     ctx_flat = network.add_shuffle(context)
-    ctx_flat.reshape_dims = (b * hw, c)
+    ctx_flat.reshape_dims = (flat_leading, c)
 
     # Output projection: [B*HW, C] @ [C, C] -> [B*HW, C]
     out_w = weights[f"{prefix}.to_out.0.weight"].reshape(c, c)
@@ -482,14 +487,16 @@ def build_flux_vae_decoder_engine(
     scaling_factor: float = 0.3611,
     shift_factor: float = 0.1159,
     patch_size: tuple[int, int] = (1, 1),
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
     build_timing: dict | None = None,
     timing_component: str = "vae_decoder",
 ) -> bytes:
     """Build FLUX AutoencoderKL decoder TRT engine using TRT Python API.
 
-    Input:  latents [1, latent_channels, h_lat, w_lat] float32
-    Output: image   [1, 3, h_lat*8*patch_h, w_lat*8*patch_w] float32
+    Input:  latents [B, latent_channels, h_lat, w_lat] float32
+    Output: image   [B, 3, h_lat*8*patch_h, w_lat*8*patch_w] float32
 
     For patch_size=(1,1) (FLUX.1): standard 8x spatial upsampling.
     For patch_size=(2,2) (FLUX.2): decoder conv_out produces C*ph*pw channels,
@@ -497,7 +504,16 @@ def build_flux_vae_decoder_engine(
 
     The engine applies: x = latents / scaling_factor + shift_factor,
     then runs through the full decoder network.
+
+    When ``max_batch_size > 1`` the leading batch dim of ``latents`` is
+    dynamic (``-1``) so the runtime binding is uniform with the other
+    diffusion components. Per design Decision E, the VAE *always* caps at
+    ``max_batch = opt_batch = 1`` and the pipeline loops one latent at a time
+    (peak-memory bound). ``max_batch_size == 1`` (the default) preserves the
+    legacy static-shape engine byte-for-byte.
     """
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     from ...build_timing import timed_weight_loading
 
     total_t0 = time.monotonic()
@@ -532,8 +548,28 @@ def build_flux_vae_decoder_engine(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
 
     # --- Input ---
-    latents = network.add_input(
-        "latents", trt.float32, (1, latent_channels, h_lat, w_lat))
+    # When dynamic batching is enabled the leading dim is ``-1`` even though
+    # the profile clamps both kMIN/kOPT/kMAX to 1 (Decision E). This keeps the
+    # binding shape uniform across all diffusion components — the runtime
+    # treats every dim 0 as dynamic and only the VAE attaches a (1, 1, 1)
+    # profile.
+    if max_batch_size > 1:
+        from ...engine_builder import add_dynamic_batch_profile
+
+        latents = network.add_input(
+            "latents", trt.float32, (-1, latent_channels, h_lat, w_lat))
+        add_dynamic_batch_profile(
+            builder,
+            config,
+            network,
+            input_names=["latents"],
+            max_batch=1,  # VAE always caps at 1 — Decision E.
+            opt_batch=1,
+            static_shape={"latents": (latent_channels, h_lat, w_lat)},
+        )
+    else:
+        latents = network.add_input(
+            "latents", trt.float32, (1, latent_channels, h_lat, w_lat))
 
     # --- Scaling transform: x = latents / scaling_factor + shift_factor ---
     scale_t = network.add_constant(
@@ -635,20 +671,26 @@ def build_flux_vae_decoder_engine(
 
     # --- Unpatchify (pixel shuffle) for patched VAEs ---
     if patch_h > 1 or patch_w > 1:
-        # conv_out produces [1, out_ch * ph * pw, H, W]
-        # Unpatchify to [1, out_ch, H * ph, W * pw]
+        # conv_out produces [B, out_ch * ph * pw, H, W]
+        # Unpatchify to [B, out_ch, H * ph, W * pw]
         out_ch = conv_out_channels // (patch_h * patch_w)
+        # ``-1`` propagates the (possibly dynamic) batch dim through both
+        # shuffles — see the comment on ``flat_leading`` in
+        # ``_add_self_attention_2d`` for why we cannot substitute the static
+        # value ``1`` here.
+        leading = -1 if x.shape[0] == -1 else x.shape[0]
 
-        # Reshape: [1, out_ch, ph, pw, H, W]
+        # Reshape: [B, out_ch, ph, pw, H, W]
         reshape1 = network.add_shuffle(x)
-        reshape1.reshape_dims = (1, out_ch, patch_h, patch_w, cur_h, cur_w)
+        reshape1.reshape_dims = (leading, out_ch, patch_h, patch_w, cur_h, cur_w)
 
-        # Transpose: [1, out_ch, H, ph, W, pw]
+        # Transpose: [B, out_ch, H, ph, W, pw]
         reshape1.second_transpose = trt.Permutation([0, 1, 4, 2, 5, 3])
 
-        # Reshape: [1, out_ch, H * ph, W * pw]
+        # Reshape: [B, out_ch, H * ph, W * pw]
         reshape2 = network.add_shuffle(reshape1.get_output(0))
-        reshape2.reshape_dims = (1, out_ch, cur_h * patch_h, cur_w * patch_w)
+        reshape2.reshape_dims = (
+            leading, out_ch, cur_h * patch_h, cur_w * patch_w)
         x = reshape2.get_output(0)
 
         print(f"[flux-vae] unpatchify: [{conv_out_channels},{cur_h},{cur_w}] -> "

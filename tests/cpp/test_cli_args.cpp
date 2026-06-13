@@ -99,6 +99,7 @@ void test_run_parses_common_flags() {
                        "--cuda-graphs"});
     check(args.command == "run", "run command");
     check(args.bundle_path == "bundle.trtfb", "run bundle");
+    check(args.prompt_provided, "run prompt provided");
     check(args.prompt == "hello", "run prompt");
     check(args.max_new_tokens == 8, "run max tokens");
     check(args.generation_mode == "diffusion", "run generation mode");
@@ -184,6 +185,20 @@ void test_missing_value_fails() {
     check(args.error_message == "--prompt requires a value", "missing value message");
 }
 
+void test_missing_prompt_is_distinct_from_empty_prompt() {
+    auto missing = parse({"trtmc", "run", "bundle.trtfb", "--max-new-tokens", "8"});
+    check(missing.parse_error, "missing prompt parse error");
+    check(missing.error_message == "run requires bundle + --prompt or --prompts-file",
+          "missing prompt message");
+    check(!missing.prompt_provided, "missing prompt not provided");
+    check(missing.prompt.empty(), "missing prompt text empty");
+
+    auto empty = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "", "--max-new-tokens", "8"});
+    check(empty.prompt_provided, "empty prompt provided");
+    check(empty.prompt.empty(), "empty prompt text empty");
+    check(!empty.parse_error, "empty prompt parse ok");
+}
+
 void test_bad_kv_cache_size_fails() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size=abc"});
     check(args.parse_error, "bad kv cache parse error");
@@ -195,6 +210,31 @@ void test_unexpected_positional_fails() {
     check(args.parse_error, "unexpected positional parse error");
     check(args.error_message == "Unexpected positional argument: two.trtfb",
           "unexpected positional message");
+}
+
+void test_num_images_zero_fails() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--num-images", "0"});
+    check(args.parse_error, "num-images zero parse error");
+    check(args.error_message == "--num-images must be >= 1", "num-images error message");
+}
+
+void test_seed_csv_populates_seed_list() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "4",
+                       "--seed", "0,1,2,3"});
+    check(!args.parse_error, "seed csv parses cleanly");
+    check(args.num_images == 4, "num-images parsed");
+    check(args.seed_list.size() == 4, "seed list size");
+    check(args.seed_list[0] == 0 && args.seed_list[1] == 1 && args.seed_list[2] == 2 &&
+              args.seed_list[3] == 3,
+          "seed list values");
+}
+
+void test_prompt_and_prompts_file_mutually_exclusive() {
+    auto args =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--prompts-file", "prompts.txt"});
+    check(args.parse_error, "prompt+prompts-file parse error");
+    check(args.error_message == "--prompt and --prompts-file are mutually exclusive",
+          "prompt+prompts-file error message");
 }
 
 } // namespace
@@ -212,8 +252,12 @@ int main() {
     test_unknown_command_fails();
     test_unknown_flag_fails();
     test_missing_value_fails();
+    test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();
     test_unexpected_positional_fails();
+    test_num_images_zero_fails();
+    test_seed_csv_populates_seed_list();
+    test_prompt_and_prompts_file_mutually_exclusive();
 
     if (failures) {
         std::cerr << failures << " CLI parser tests failed\n";

@@ -33,6 +33,12 @@ class QwenImagePlugin final : public IPipelinePlugin {
         // Parse Qwen-Image-specific config (diffusion / text_encoder / denoiser
         // / vae / image / tokenizer sections) from the raw bundle config JSON.
         auto qi_config = QwenImageConfig::parse(ctx.config_json);
+        // The bundle's per-component batch caps live at the top-level header,
+        // not inside the qwen-image config_json. Mirror them onto qi_config so
+        // the pipeline only needs one place to read the envelope (Decision C).
+        qi_config.max_batch_size.dit = ctx.bundle.info.max_batch_size.dit;
+        qi_config.max_batch_size.text_encoder = ctx.bundle.info.max_batch_size.text_encoder;
+        qi_config.max_batch_size.vae = ctx.bundle.info.max_batch_size.vae;
 
         // Parse Qwen-Image preprocessor weights (latents_mean / latents_std)
         // from the bundle's preprocessor_weights section. Falls back to an

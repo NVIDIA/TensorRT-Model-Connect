@@ -74,6 +74,13 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
     }
 
     parts.config = make_diffusion_config(json);
+    // Carry the engine batch envelope (parsed from the bundle's top-level
+    // `max_batch_size` block by ReadBundleFile) into the runtime config so
+    // pipelines can clamp/chunk against it. Defaults to {1,1,1} when the
+    // block is absent — see design doc Decision C.
+    parts.config.max_batch_size.dit = bundle.info.max_batch_size.dit;
+    parts.config.max_batch_size.text_encoder = bundle.info.max_batch_size.text_encoder;
+    parts.config.max_batch_size.vae = bundle.info.max_batch_size.vae;
 
     auto* pw = find_section(bundle, "preprocessor_weights");
     if (pw && !pw->empty())

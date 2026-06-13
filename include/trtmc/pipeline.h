@@ -79,6 +79,7 @@ struct SegmentResult {
 struct PromptedSegmentationResult {
     std::vector<float> masks;      // [num_masks, H, W], logits after postprocess
     std::vector<float> iou_scores; // [num_masks]
+    std::vector<float> boxes;      // [num_masks, 4], xyxy absolute pixel coordinates
     int32_t num_masks{0};
     int32_t height{0};
     int32_t width{0};
@@ -204,6 +205,34 @@ class IPipeline {
                                  " does not support generate_image(TextEmbedding)");
     }
 
+    // -- Image batch generation (diffusion) --
+    //
+    // ``prompts.size() == per_sample_seeds.size()`` is the total per-call batch.
+    // Implementations may chunk internally if the engine cap is below that
+    // size — see the diffusion batch-inference RFC (Decisions A/D).
+    //
+    // Default implementation is a sequential ``generate_image`` loop with
+    // ``cfg.seed`` overridden per sample. Pipelines that can actually batch
+    // (FLUX, Z-Image, Qwen Image, …) override this for the speed win;
+    // pipelines that can't get correctness for free without an override.
+    virtual std::vector<ImageResult>
+    generate_image_batch(const std::vector<std::string>& prompts,
+                         const std::vector<std::uint32_t>& per_sample_seeds,
+                         const GenerateConfig& cfg = {}) {
+        if (prompts.size() != per_sample_seeds.size()) {
+            throw std::invalid_argument(
+                "generate_image_batch: prompts.size() must equal per_sample_seeds.size()");
+        }
+        std::vector<ImageResult> out;
+        out.reserve(prompts.size());
+        GenerateConfig per_sample_cfg = cfg;
+        for (std::size_t i = 0; i < prompts.size(); ++i) {
+            per_sample_cfg.seed = static_cast<int32_t>(per_sample_seeds[i]);
+            out.push_back(generate_image(prompts[i], per_sample_cfg));
+        }
+        return out;
+    }
+
     // -- Audio generation (bark, magpie) --
     virtual AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) {
         (void)prompt;
@@ -308,6 +337,18 @@ class IPipeline {
                                  " does not support segment_prompted()");
     }
 
+    virtual PromptedSegmentationResult segment_prompted_text(const float* image_pixels,
+                                                             int32_t image_height,
+                                                             int32_t image_width,
+                                                             const std::string& text_prompt) {
+        (void)image_pixels;
+        (void)image_height;
+        (void)image_width;
+        (void)text_prompt;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support segment_prompted_text()");
+    }
+
     // -- Image classification --
     virtual ClassificationResult classify(const float* pixels, int32_t height, int32_t width) {
         (void)pixels;
@@ -379,10 +420,59 @@ struct TrtmcPipelineOptions {
     int cuda_graphs;           // 0 = disabled
 };
 
+// --- C ABI error codes ---
+//
+// Returned by C-ABI functions that yield an int (e.g. trtmc_generate_batch).
+// On any non-zero return, callers may inspect trtmc_last_error() for a
+// descriptive message. Codes are stable and additive — new codes get new
+// non-zero integers; existing callers must treat unknown codes as a generic
+// failure.
+#define TRTMC_OK 0
+#define TRTMC_ERR_INVALID_ARG 1
+#define TRTMC_ERR_RUNTIME 2
+
+// --- C ABI image result ---
+//
+// Plain-old-data image result returned by trtmc_generate_batch. The caller
+// owns the trtmc_image_result_t array (typically a fixed-size stack/heap
+// buffer of N entries) and is responsible for releasing the per-result
+// `pixels` buffer via trtmc_image_result_free.
+struct trtmc_image_result_t {
+    float* pixels;            // malloc'd [C*H*W] float32 in [0,1]. nullptr on error.
+    int32_t height;           // image height in pixels
+    int32_t width;            // image width in pixels
+    int32_t channels;         // number of channels (typically 3)
+    int32_t num_frames;       // >1 for video
+    std::uint64_t num_pixels; // total floats in `pixels` (channels*height*width*num_frames)
+};
+
+// Opaque handle alias used by future C-ABI generation functions. Today the
+// C ABI hands users a `trtmc::IPipeline*` directly (a C++ type with a
+// trivial vtable); language bindings that don't want the C++ type can use
+// `trtmc_pipeline_t` for documentation purposes.
+typedef trtmc::IPipeline* trtmc_pipeline_t;
+
 trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags);
 trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
                                            const TrtmcPipelineOptions* options);
 const char* trtmc_last_error(void);
 const char* trtmc_version(void);
 int trtmc_has_trt(void);
+
+// Release the `pixels` buffer in a single trtmc_image_result_t entry. Safe
+// on a zero-initialized entry (no-op when pixels is null). Sets pixels to
+// nullptr after free.
+void trtmc_image_result_free(trtmc_image_result_t* result);
+
+// Generate a batch of images. `prompts` is an array of `num_prompts`
+// null-terminated C strings; `seeds` is an array of `num_seeds` uint32_t
+// per-sample seeds (caller can fill these via the upstream
+// derive_per_sample_seeds helper). `num_prompts` must equal `num_seeds`.
+// `out_results` is a caller-owned array of `num_prompts`
+// trtmc_image_result_t that the function fills; each result's `pixels`
+// buffer is malloc'd and must be released with trtmc_image_result_free.
+// Returns TRTMC_OK on success, a non-zero TRTMC_ERR_* code on failure.
+int trtmc_generate_batch(trtmc_pipeline_t handle, const char* const* prompts, int num_prompts,
+                         const std::uint32_t* seeds, int num_seeds, int num_inference_steps,
+                         float guidance_scale, trtmc_image_result_t* out_results);
 }

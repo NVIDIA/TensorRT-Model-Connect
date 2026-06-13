@@ -55,6 +55,19 @@ class QwenImagePipeline final : public IPipeline {
                                int32_t image_height, int32_t image_width,
                                const GenerateConfig& cfg = {}) override;
 
+    // Batched generation override per Decisions B/D/E (RFC 2026-05-11):
+    //  * Decision B: TWO denoiser forwards per step (cond + uncond) combined
+    //    by the existing per-token L2 renormalization helper.
+    //  * Decision D: chunk against ``config_.max_batch_size.dit``.
+    //  * Decision E: VAE always slices at B=1.
+    //
+    // ``generate_image()`` delegates to this override (Edit mode keeps the
+    // existing single-sample path — Edit batching is out of scope for PR 2).
+    std::vector<ImageResult>
+    generate_image_batch(const std::vector<std::string>& prompts,
+                         const std::vector<std::uint32_t>& per_sample_seeds,
+                         const GenerateConfig& cfg = {}) override;
+
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "QwenImagePipeline"; }
 
@@ -161,6 +174,22 @@ class QwenImagePipeline final : public IPipeline {
                           const std::vector<float>& condition_latents_packed = {},
                           int n_condition_img = 0) const;
 
+    // Public static combiner — exposed for unit testing the per-token L2
+    // renorm under batch (PR 2 of diffusion batch-inference). The
+    // implementation reduces strictly over the channel axis of each token, so
+    // a caller that passes a packed ``[n_tokens, channels]`` buffer gets
+    // independent renormalization per token — no cross-sample leakage when
+    // ``n_tokens = B * n_img``. The previous anonymous-namespace version
+    // hard-coded the single-sample ``n_img`` count; promoting to a static
+    // method also lets the C++ test target exercise it without an engine.
+    //
+    // ``noise_pos`` / ``noise_neg`` are flat ``[n_tokens * channels]`` row-major
+    // fp32, written into ``out`` (resized to match if needed).
+    static void combine_cfg_with_renorm(const std::vector<float>& noise_pos,
+                                        const std::vector<float>& noise_neg, float cfg_scale,
+                                        int n_tokens, std::size_t channels,
+                                        std::vector<float>& out);
+
     // -------------------------------------------------------------------------
     // VAE decode. Unpatchify packed latents back to [1, C, 1, h_lat, w_lat],
     // apply per-channel un-normalization (z = z * raw_std + mean), run the
@@ -208,6 +237,33 @@ class QwenImagePipeline final : public IPipeline {
                                         const std::vector<float>& image_features) const;
     std::vector<float> vision_encode_edit_condition(const EditInputTensors& edit_inputs) const;
     std::vector<float> vae_encode_edit_condition(const EditInputTensors& edit_inputs) const;
+
+    // -------------------------------------------------------------------------
+    // generate_image_batch helpers (PR 2 — diffusion batch inference).
+    // Extracted to keep `generate_image_batch` itself at CCN <= 10. None of
+    // these change observable behaviour; the public batch entry point routes
+    // each planned chunk to one of the two ``_chunk`` overloads.
+    // -------------------------------------------------------------------------
+
+    // Single-sample chunk (chunk_size == 1) — byte-for-byte preserves the
+    // legacy pre-batch behaviour. ``seed`` is the per-sample seed for this
+    // single slot; ``cfg`` is the caller-supplied config (forwarded so the
+    // optional ``cfg.initial_latents`` override flows through).
+    ImageResult generate_image_batch_single_sample_chunk(const std::string& prompt,
+                                                         std::uint32_t seed,
+                                                         const GenerateConfig& cfg,
+                                                         const LatentShape& shape, int num_steps,
+                                                         float cfg_scale,
+                                                         const std::string& negative_prompt);
+
+    // Batched chunk (chunk_size > 1) — runs the two-pass CFG denoise on a
+    // packed ``[B, n_img, in_ch]`` buffer, then VAE-decodes each sample at
+    // B=1 (Decision E).
+    std::vector<ImageResult>
+    generate_image_batch_chunk(const std::vector<std::string>& prompts, std::size_t chunk_begin,
+                               int chunk_size, const std::vector<std::uint32_t>& per_sample_seeds,
+                               const LatentShape& shape, int num_steps, float cfg_scale,
+                               const std::string& negative_prompt);
 
     // Patchify a 4D latent tensor [1, C, H, W] (row-major C, H, W) into the
     // packed denoiser-input layout [1, n_img, C * patch_size * patch_size],

@@ -54,6 +54,11 @@ class BundleInfo:
     # input to the config registry merge. None/empty → no block emitted, so
     # old readers continue to work untouched.
     defaults: dict | None = None
+    # Per-component batch-size envelope for diffusion bundles. Shape:
+    # `{"dit": N, "text_encoder": N, "vae": N}`. None → field is omitted from
+    # the JSON header so older runtimes still load the bundle and treat the
+    # engine as B=1. See design doc Decision C.
+    max_batch_size: dict[str, int] | None = None
 
 
 @dataclass
@@ -102,6 +107,8 @@ def write_bundle(
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
         **({"io_map": info.io_map} if info.io_map else {}),
         **({"defaults": info.defaults} if info.defaults else {}),
+        **({"max_batch_size": dict(info.max_batch_size)}
+           if info.max_batch_size else {}),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
             for s in section_meta

@@ -190,6 +190,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
             parallel_config=parallel_config,
             build_timing_path=getattr(args, "build_timing_json", None),
+            max_batch_size=int(getattr(args, "max_batch_size", 1) or 1),
             diffusion_overrides={
                 key: value
                 for key, value in {
@@ -602,6 +603,13 @@ def main() -> None:
                          help="Diffusion video frame count override")
     build_p.add_argument("--num-inference-steps", type=int, default=None,
                          help="Diffusion denoising step count override")
+    build_p.add_argument(
+        "--max-batch-size", type=int, default=1,
+        help="Build diffusion bundle whose engines support batch sizes up to N "
+             "(default: 1). Applied per component using the family policy: "
+             "DiT honors N, text encoder caps at min(2N, 8), VAE always builds "
+             "B=1 (the runtime slices)."
+    )
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
                          default="fp32",
                          help="Engine precision (default: fp32)")

@@ -59,6 +59,10 @@ def _is_qwen_vl(model_type: str) -> bool:
     return "qwen" in mt and "vl" in mt
 
 
+def _is_locateanything(model_type: str) -> bool:
+    return model_type.lower() == "locateanything"
+
+
 def _get_hf_vision_features_qwen(
     model_id: str,
     image_path: str,
@@ -137,6 +141,98 @@ def _get_hf_vision_features_qwen(
     del model
     _free_gpu()
     return hf_features_np, trt_pixel_values
+
+
+def _get_hf_vision_features_locateanything(
+    model_id: str,
+    image_path: str,
+    fixed_image_size: int = 448,
+) -> tuple[np.ndarray, np.ndarray]:
+    """LocateAnything HF vision features: MoonViT output after mlp1."""
+    import importlib.util
+    import torch
+    from PIL import Image
+
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families.locateanything.vision_builder import (
+        _build_moonvit,
+        _build_projector,
+        _load_modeling_vit,
+        _load_vision_and_projector_weights,
+    )
+
+    model_dir = Path(model_id)
+    if not model_dir.is_dir():
+        from huggingface_hub import snapshot_download
+        model_dir = Path(snapshot_download(
+            repo_id=model_id,
+            allow_patterns=[
+                "config.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "chat_template.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "*.py",
+                "*.safetensors",
+                "*.safetensors.index.json",
+            ],
+        ))
+
+    print(f"[diff_vl] Loading HF LocateAnything vision path from {model_dir} ...",
+          file=sys.stderr)
+
+    cfg = ModelConfig.from_dir(model_dir)
+    modeling_vit = _load_modeling_vit(model_dir)
+    vision_model = _build_moonvit(modeling_vit, cfg)
+    projector = _build_projector(cfg)
+    _load_vision_and_projector_weights(model_dir, vision_model, projector)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vision_model.to(device=device, dtype=torch.float32).eval()
+    projector.to(device=device, dtype=torch.float32).eval()
+
+    processor_path = model_dir / "image_processing_locateanything.py"
+    spec = importlib.util.spec_from_file_location(
+        "trtmc_locateanything_image_processing_ref", processor_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot import LocateAnything image processor: {processor_path}")
+    processor_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(processor_module)
+    vision_config = cfg.raw.get("vision_config", {})
+    image_processor = processor_module.LocateAnythingImageProcessor(
+        patch_size=int(vision_config.get("patch_size", 14)),
+        merge_kernel_size=vision_config.get("merge_kernel_size", [2, 2]),
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+    )
+
+    image = Image.open(image_path).convert("RGB")
+    image_fixed = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    image_inputs = image_processor(images=[image_fixed], return_tensors="pt")
+    pixel_values_hf = image_inputs["pixel_values"]
+    image_grid_hws = image_inputs["image_grid_hws"]
+
+    print(f"[diff_vl] HF pixel_values: {pixel_values_hf.shape}, "
+          f"image_grid_hws: {image_grid_hws.tolist()}", file=sys.stderr)
+
+    with torch.no_grad():
+        vit_features = vision_model(
+            pixel_values_hf.to(device=device, dtype=torch.float32),
+            image_grid_hws.to(device=device),
+        )
+        hf_features = projector(torch.cat(vit_features, dim=0))
+
+    hf_features_np = hf_features.float().cpu().numpy()
+    print(f"[diff_vl] HF features: shape={hf_features_np.shape}, "
+          f"mean={hf_features_np.mean():.6f}, std={hf_features_np.std():.6f}",
+          file=sys.stderr)
+
+    pixel_values_np = pixel_values_hf.float().cpu().numpy()
+    del vision_model, projector
+    _free_gpu()
+    return hf_features_np, pixel_values_np
 
 
 def _get_hf_vision_features_generic(
@@ -230,6 +326,9 @@ def _get_hf_vision_features(
     if _is_qwen_vl(model_type):
         return _get_hf_vision_features_qwen(
             model_id, image_path, fixed_image_size)
+    if _is_locateanything(model_type):
+        return _get_hf_vision_features_locateanything(
+            model_id, image_path, fixed_image_size)
     return _get_hf_vision_features_generic(
         model_id, image_path, fixed_image_size)
 
@@ -248,7 +347,7 @@ def test_vision_features(
     """
     from tensorrt_model_connect.debug_runner import (
         VisionTrtRunner, load_vision_engine_from_bundle,
-        preprocess_image_for_trt, load_preprocessor_config_from_bundle,
+        preprocess_image_inputs_for_trt, load_preprocessor_config_from_bundle,
         load_config_from_bundle,
     )
 
@@ -260,9 +359,14 @@ def test_vision_features(
     config = load_config_from_bundle(bundle_path)
     preproc = load_preprocessor_config_from_bundle(bundle_path)
     fixed_image_size = config.get("fixed_image_size", 448)
-    temporal = preproc.get("temporal_patch_size", 1)
-    image_mean = tuple(preproc.get("image_mean", [0.48145466, 0.4578275, 0.40821073]))
-    image_std = tuple(preproc.get("image_std", [0.26862954, 0.26130258, 0.27577711]))
+    temporal = preproc.get(
+        "temporal_patch_size", config.get("temporal_patch_size", 1))
+    image_mean = tuple(preproc.get(
+        "image_mean", config.get(
+            "image_mean", [0.48145466, 0.4578275, 0.40821073])))
+    image_std = tuple(preproc.get(
+        "image_std", config.get(
+            "image_std", [0.26862954, 0.26130258, 0.27577711])))
     preprocessor_type = config.get("preprocessor_type", "qwen_merge_group")
     interpolation = config.get("interpolation", "bicubic")
 
@@ -280,19 +384,20 @@ def test_vision_features(
     runner = VisionTrtRunner(vision_plan)
 
     # Prepare TRT pixel values
-    vis_patch_size = preproc.get("patch_size", 14)
-    vis_merge_size = preproc.get("merge_size", 2)
-    trt_pixel = preprocess_image_for_trt(
+    vis_patch_size = preproc.get("patch_size", config.get("patch_size", 14))
+    vis_merge_size = preproc.get("merge_size", config.get("merge_size", 2))
+    trt_inputs = preprocess_image_inputs_for_trt(
         image_path, preprocessor_type=preprocessor_type,
         fixed_image_size=fixed_image_size,
         temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std,
         patch_size=vis_patch_size, merge_size=vis_merge_size,
         interpolation=interpolation)
 
-    print(f"[diff_vl] TRT vision input: {trt_pixel.shape}", file=sys.stderr)
+    shapes = {name: value.shape for name, value in trt_inputs.items()}
+    print(f"[diff_vl] TRT vision inputs: {shapes}", file=sys.stderr)
 
     # Run TRT vision encoder
-    results = runner.encode(pixel_values=trt_pixel)
+    results = runner.encode(**trt_inputs)
     trt_features = results["image_features"]
 
     print(f"[diff_vl] TRT features: shape={trt_features.shape}, "
@@ -489,7 +594,31 @@ def test_vl_generation(
                     data = load_section_from_bundle(bundle_path, name)
                     if data:
                         (Path(tmpdir) / name).write_bytes(data)
-                tokenizer = AutoTokenizer.from_pretrained(tmpdir)
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(tmpdir)
+                except Exception as auto_exc:
+                    from tokenizers import Tokenizer
+
+                    raw_tokenizer = Tokenizer.from_file(
+                        str(Path(tmpdir) / "tokenizer.json"))
+
+                    class TokenizersWrapper:
+                        def __init__(self, tok):
+                            self._tok = tok
+
+                        def encode(self, text, add_special_tokens=False):
+                            return self._tok.encode(
+                                text,
+                                add_special_tokens=add_special_tokens).ids
+
+                        def decode(self, ids, skip_special_tokens=True):
+                            return self._tok.decode(
+                                ids,
+                                skip_special_tokens=skip_special_tokens)
+
+                    tokenizer = TokenizersWrapper(raw_tokenizer)
+                    print(f"[diff_vl] WARN: AutoTokenizer failed ({auto_exc}); "
+                          "using tokenizer.json fallback", file=sys.stderr)
         else:
             tokenizer = AutoTokenizer.from_pretrained(model_source)
     except Exception as e:

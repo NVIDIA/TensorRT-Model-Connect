@@ -425,3 +425,40 @@ def test_prompted_segmentation_runner_uses_segment_sam_cli(monkeypatch, tmp_path
     assert "--output-dir" not in cmd
     assert "--point" not in cmd
     assert out.metadata["command"] == cmd
+
+
+def test_prompted_segmentation_runner_uses_sam3_text_prompt_cli(monkeypatch, tmp_path):
+    image_path = tmp_path / "img.jpg"
+    image_path.write_text("img", encoding="utf-8")
+    case = _make_case(
+        "prompted_segmentation",
+        family="sam3",
+        reference_family="prompted_segmentation_sam3",
+        inputs={"image": str(image_path), "prompt": "ear"},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="Bundle missing sam3 vision_encoder",
+        )
+
+    monkeypatch.setattr(segmentation.subprocess, "run", _fake_run)
+
+    out = segmentation.PromptedSegmentationRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[1] == "segment-sam"
+    assert "--prompt" in cmd
+    assert cmd[cmd.index("--prompt") + 1] == "ear"
+    assert "--point-x" not in cmd
+    assert "--point-y" not in cmd
+    assert out.metadata["returncode"] == 1
+    assert "sam3 vision_encoder" in out.metadata["stderr"]

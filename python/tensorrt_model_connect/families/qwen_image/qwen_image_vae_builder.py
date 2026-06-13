@@ -846,6 +846,8 @@ def build_qwen_image_vae_decoder_engine(
     h_lat: int = 32,
     w_lat: int = 32,
     apply_latent_unnorm: bool = False,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
     verbose: bool = False,
 ) -> Path:
     """Build the Qwen-Image VAE decoder TRT engine and serialise the plan.
@@ -877,11 +879,30 @@ def build_qwen_image_vae_decoder_engine(
             latent (post-DiT) and applies ``z * std + mean`` internally. If
             False (default), the engine consumes a latent already in HF's
             ``vae.decode`` input convention.
+        max_batch_size: Accepted for API uniformity with the text encoder and
+            DiT builders, but per the diffusion batch-inference design
+            (Decision E, 2026-05-19) the VAE always caps at 1 — the C++
+            pipeline loops over per-sample latents calling this engine once
+            per latent. The leading batch dim stays statically baked at 1
+            regardless of the requested cap, so no dynamic TRT profile is
+            attached. Values >1 are accepted but logged-and-clamped so the
+            family plugin can pass the same cap through to every builder
+            without special-casing the VAE.
+        opt_batch_size: Accepted for API uniformity; unused (see
+            ``max_batch_size``).
         verbose: Enable TRT verbose logging.
 
     Returns:
         Resolved ``Path`` to the written plan file.
     """
+    if max_batch_size < 1:
+        raise ValueError(
+            f"max_batch_size must be >= 1 (got {max_batch_size})"
+        )
+    # Per design Decision E (2026-05-19) the VAE is always sliced at B=1.
+    # The kwarg above is accepted for API uniformity; we deliberately ignore
+    # the requested cap and keep the engine statically batched at 1.
+    del opt_batch_size  # Unused by design — see docstring.
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 

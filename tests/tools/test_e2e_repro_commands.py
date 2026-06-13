@@ -58,6 +58,35 @@ def test_repro_commands_use_segment_sam_for_prompted_segmentation(tmp_path) -> N
     assert "--point-y 0.25" in cmd
 
 
+def test_repro_commands_use_text_prompt_for_sam3(tmp_path) -> None:
+    case = E2ECase(
+        name="sam3",
+        hf_id="facebook/sam3",
+        family="sam3",
+        runtime_strategy="prompted_segmentation",
+        task_strategy="prompted_segmentation",
+        reference_family="prompted_segmentation_sam3",
+        bundle="sam3.trtfb",
+        inputs={
+            "image": "data/test_img.jpeg",
+            "prompt": "car",
+        },
+        stages=[],
+    )
+    repro = _build_repro_commands(
+        case,
+        _make_ctx(tmp_path),
+        "/tmp/engines/sam3.trtfb",
+        {},
+    )
+
+    cmd = repro["trt_inference"]
+    assert " segment-sam " in f" {cmd} "
+    assert "--image data/test_img.jpeg" in cmd
+    assert "--prompt car" in cmd
+    assert "--point-x" not in cmd
+    assert "--point-y" not in cmd
+
 
 def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
     case = E2ECase(

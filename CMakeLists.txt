@@ -170,6 +170,7 @@ add_library(trtmc_core
   src/runtime/domains/audio/audio_types.cpp
   src/runtime/domains/audio/mel_spectrogram.cpp
   src/runtime/domains/audio/audio_bundle_validation.cpp
+  src/runtime/domains/diffusion/batch_utils.cpp
   src/runtime/domains/diffusion/diffusion_preprocessor.cpp
   src/runtime/domains/diffusion/qwen_image_types.cpp
   src/tokenizer/vocab_tokenizer.cpp
@@ -211,6 +212,7 @@ add_library(trtmc_core
   src/runtime/models/elf_flow/pipeline.cpp
   src/runtime/models/segmentation/segment_pipeline.cpp
   src/runtime/models/segmentation/sam_pipeline.cpp
+  src/runtime/models/segmentation/sam3_pipeline.cpp
   src/runtime/models/timm_vit/pipeline.cpp
   src/runtime/models/vision_language/pipeline.cpp
   src/runtime/models/flux/pipeline.cpp
@@ -605,6 +607,7 @@ trtmc_add_test(test_trt_version)
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
+trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)
@@ -704,6 +707,11 @@ trtmc_add_test(test_diffusion_generation_plan)
 trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
+trtmc_add_test(test_diffusion_batch_utils)
+# PR 2 of diffusion batch-inference: bundle-free combiner-level unit that
+# proves combine_cfg_with_renorm reduces per-token (no cross-sample leak).
+# Full batch-vs-sequential parity lands as E2E tests in PR 3.
+trtmc_add_test(test_qwen_image_cfg_renorm)
 trtmc_add_test(test_ltx_video_pipeline)
 
 # Recurrent (Mamba / RWKV)
@@ -741,6 +749,7 @@ trtmc_add_test(test_omni_audio_plan)
 # Perception (segmentation, SAM, neural operator)
 trtmc_add_test(test_neural_operator_config)
 trtmc_add_test(test_sam_prompt_seam)
+trtmc_add_test(test_sam3_pipeline)
 trtmc_add_test(test_perception_preprocess_seams)
 
 # Diffusion — conditioning

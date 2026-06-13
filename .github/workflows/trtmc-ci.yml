@@ -1,9 +1,14 @@
 name: TensorRT-Model-Connect Premerge CI
 
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('PR #{0} {1}', github.event.pull_request.number, github.event.label.name) || format('Manual {0}', github.ref_name) }}
+
 on:
   pull_request:
     branches:
       - main
+    types:
+      - labeled
     paths-ignore:
       - "website/**"
       - ".github/workflows/pages.yml"
@@ -48,6 +53,14 @@ env:
 jobs:
   premerge-ci:
     name: Premerge CI
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.label.name == 'run-ci'
+        )
+      }}
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 

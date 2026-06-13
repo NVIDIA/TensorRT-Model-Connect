@@ -251,6 +251,12 @@ class PromptedSegmentationRunner:
             )
 
         # Extract point prompts from case inputs
+        is_sam3 = case.family == "sam3" or case.reference_family == "prompted_segmentation_sam3"
+        text_prompt = (
+            case.inputs.get("prompt")
+            or case.inputs.get("text_prompt")
+            or case.metadata.get("text_prompt")
+        )
         point_x = case.inputs.get("point_x", 0.5)
         point_y = case.inputs.get("point_y", 0.5)
         is_foreground = case.inputs.get("is_foreground", True)
@@ -267,10 +273,12 @@ class PromptedSegmentationRunner:
         cmd = [
             str(ctx.binary_path), "segment-sam", str(bundle_path),
             "--image", str(image_path),
-            "--point-x", str(point_x),
-            "--point-y", str(point_y),
         ]
-        if not is_foreground:
+        if is_sam3:
+            cmd.extend(["--prompt", str(text_prompt or "")])
+        else:
+            cmd.extend(["--point-x", str(point_x), "--point-y", str(point_y)])
+        if not is_sam3 and not is_foreground:
             cmd.append("--background")
         if distributed_runtime:
             wrapper = (
@@ -306,9 +314,10 @@ class PromptedSegmentationRunner:
         # Parse mask outputs from the output directory
         masks = []
         mask_scores = []
+        boxes = []
         segmented_image_path = None
         if result.returncode == 0:
-            masks, mask_scores = _load_mask_outputs(output_dir, result.stdout)
+            masks, mask_scores, boxes = _load_mask_outputs(output_dir, result.stdout)
             segmented_image_path = str(Path(output_dir) / "segmented.png")
             if not Path(segmented_image_path).is_file():
                 segmented_image_path = _write_segmented_overlay(
@@ -331,9 +340,12 @@ class PromptedSegmentationRunner:
             data={
                 "masks": masks,
                 "mask_scores": mask_scores,
+                "scores": mask_scores,
+                "boxes": boxes,
                 "num_masks": len(masks),
                 "num_expected_masks": num_expected_masks,
-                "point_prompt": {"x": point_x, "y": point_y},
+                "point_prompt": None if is_sam3 else {"x": point_x, "y": point_y},
+                "text_prompt": text_prompt if is_sam3 else None,
                 "output_dir": output_dir,
                 "image_path": str(image_path),
                 "segmented_image_path": segmented_image_path,
@@ -345,13 +357,15 @@ class PromptedSegmentationRunner:
 
 def _load_mask_outputs(
     output_dir: str, stdout_text: str
-) -> tuple[list, list[float]]:
-    """Load mask arrays and scores from the output directory or stdout.
+) -> tuple[list, list[float], list[list[float]]]:
+    """Load mask arrays, scores, and boxes from the output directory or stdout.
 
-    Returns (masks_list, scores_list) where masks are numpy arrays.
+    Returns (masks_list, scores_list, boxes_list) where masks are numpy arrays
+    and boxes are absolute xyxy float lists when available.
     """
     masks = []
     scores = []
+    boxes = []
 
     # Try loading .npy mask files from output directory
     try:
@@ -367,6 +381,15 @@ def _load_mask_outputs(
                     scores.append(score)
                 except (ValueError, OSError):
                     pass
+            for box_file in sorted(mask_dir.glob("box_*.txt")):
+                try:
+                    values = [
+                        float(part) for part in box_file.read_text().replace(",", " ").split()
+                    ]
+                except (ValueError, OSError):
+                    continue
+                if len(values) == 4:
+                    boxes.append(values)
     except ImportError:
         logger.warning("numpy not available for loading mask outputs")
 
@@ -393,7 +416,7 @@ def _load_mask_outputs(
         except (ImportError, Exception) as e:
             logger.warning("Failed to load PNG masks: %s", e)
 
-    return masks, scores
+    return masks, scores, boxes
 
 
 def _write_segmented_overlay(

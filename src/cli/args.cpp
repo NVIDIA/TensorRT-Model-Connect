@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 
 namespace trtmc::cli {
 
@@ -57,6 +59,75 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     return static_cast<std::uint64_t>(bytes + 0.5L);
 }
 
+std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text) {
+    std::vector<std::uint64_t> out;
+    if (text.empty())
+        return out;
+    std::string token;
+    auto flush = [&]() -> bool {
+        if (token.empty())
+            return false;
+        // Trim incidental whitespace ("0, 1, 2" is friendlier than "0,1,2").
+        std::size_t begin = 0;
+        std::size_t end = token.size();
+        while (begin < end && std::isspace(static_cast<unsigned char>(token[begin])))
+            ++begin;
+        while (end > begin && std::isspace(static_cast<unsigned char>(token[end - 1])))
+            --end;
+        if (begin == end)
+            return false;
+        try {
+            std::size_t consumed = 0;
+            const std::string slice = token.substr(begin, end - begin);
+            const unsigned long long value = std::stoull(slice, &consumed, 10);
+            if (consumed != slice.size())
+                return false;
+            out.push_back(static_cast<std::uint64_t>(value));
+        } catch (...) {
+            return false;
+        }
+        token.clear();
+        return true;
+    };
+
+    for (char ch : text) {
+        if (ch == ',') {
+            if (!flush())
+                return std::nullopt;
+        } else {
+            token.push_back(ch);
+        }
+    }
+    if (!flush())
+        return std::nullopt;
+    return out;
+}
+
+std::vector<std::string> read_prompts_file(const std::string& path, std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "failed to open prompts file: " + path;
+        return {};
+    }
+    std::vector<std::string> prompts;
+    std::string line;
+    while (std::getline(in, line)) {
+        // Strip trailing CR for files written on Windows.
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        prompts.push_back(line);
+    }
+    // Drop a trailing blank line introduced by a final newline; keep
+    // any deliberate blank prompts the user typed in the middle.
+    while (!prompts.empty() && prompts.back().empty())
+        prompts.pop_back();
+    if (prompts.empty()) {
+        error = "prompts file is empty: " + path;
+        return {};
+    }
+    return prompts;
+}
+
 void print_usage() {
     std::cerr
         << "Usage:\n"
@@ -72,11 +143,12 @@ void print_usage() {
            "[--output samples.jsonl]\n"
            "                        Diffusion text-to-image extras (Qwen-Image, FLUX, "
            "Z-Image): [--negative-prompt \"text\"] "
-           "[--num-inference-steps N] [--height N] [--width N]\n"
+           "[--num-inference-steps N] [--height N] [--width N] "
+           "[--num-images N] [--prompts-file PATH] [--seed s0,s1,...]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
-           "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\n"
+           "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH] "
            "[--score-threshold F]\n"
@@ -165,6 +237,31 @@ CliArgs parse_args(int argc, char** argv) {
 
         if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
             args.prompt = argv[++i];
+            args.prompt_provided = true;
+            if (!args.prompts_file.empty()) {
+                args.parse_error = true;
+                args.error_message = "--prompt and --prompts-file are mutually exclusive";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--prompts-file" && need_value(arg)) {
+            args.prompts_file = argv[++i];
+            if (args.prompt_provided) {
+                args.parse_error = true;
+                args.error_message = "--prompt and --prompts-file are mutually exclusive";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--num-images" && need_value(arg)) {
+            const int n = std::atoi(argv[++i]);
+            if (n < 1) {
+                args.parse_error = true;
+                args.error_message = "--num-images must be >= 1";
+                return args;
+            }
+            args.num_images = n;
             continue;
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
@@ -204,7 +301,18 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--seed" && need_value(arg)) {
-            args.seed = std::atoi(argv[++i]);
+            const std::string value = argv[++i];
+            if (value.find(',') != std::string::npos) {
+                auto parsed = parse_seed_csv(value);
+                if (!parsed.has_value() || parsed->empty()) {
+                    args.parse_error = true;
+                    args.error_message = "--seed CSV must be a non-empty list of unsigned integers";
+                    return args;
+                }
+                args.seed_list = std::move(*parsed);
+            } else {
+                args.seed = std::atoi(value.c_str());
+            }
             continue;
         }
         if (arg == "--tail-frames" && need_value(arg)) {
@@ -427,6 +535,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.error_message = "Unexpected positional argument: " + arg;
             return args;
         }
+    }
+
+    if (args.command == "run" && !args.bundle_path.empty() && !args.prompt_provided &&
+        args.prompts_file.empty()) {
+        args.parse_error = true;
+        args.error_message = "run requires bundle + --prompt or --prompts-file";
     }
 
     return args;

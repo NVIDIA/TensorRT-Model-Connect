@@ -25,6 +25,7 @@ from ... import graph_ops
 from ... import graph_blocks
 from ...config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
+from ...builders.utils import const_in_work_dtype
 
 trt = trt_compat.get_trt()
 
@@ -343,9 +344,10 @@ def build_standard_decoder_engine(
         flag_for_math = flag_broadcast.get_output(0)
         if work_trt_dtype != trt.float32:
             flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
-        one_const = graph_ops.add_constant(
+        one_const = const_in_work_dtype(
             network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            work_np_dtype, work_trt_dtype)
+        token_embed = _cast_work_dtype(token_embed)
         inv_flag = network.add_elementwise(
             one_const, flag_for_math,
             trt.ElementWiseOperation.SUB)

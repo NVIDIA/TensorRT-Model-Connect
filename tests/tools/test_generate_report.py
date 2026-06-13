@@ -1125,6 +1125,22 @@ class TestRenderSegmentationModel:
         assert "Reference Segmented Image" in html
         assert html.count("data:image/png;base64,") == 2
 
+    def test_prompted_segmentation_shows_text_prompt(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "sam3"
+        model_dir.mkdir()
+        r = _make_result(
+            name="sam3",
+            family="sam3",
+            task_strategy="prompted_segmentation",
+            prompt="car",
+        )
+        r["_artifact_dir"] = str(model_dir)
+
+        html = mod.render_segmentation_model(r, project_dir=None)
+
+        assert "<strong>Prompt:</strong> car" in html
+
 
 # ---------------------------------------------------------------------------
 # Tests: select_frames

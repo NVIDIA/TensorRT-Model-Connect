@@ -354,6 +354,8 @@ def build_vae_2d_decoder_engine(
     verbose: bool = False,
     build_timing: dict | None = None,
     timing_component: str = "vae_decoder",
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
 ) -> bytes:
     """Build a TRT engine for AutoencoderKL decoder using the TensorRT Python API.
 
@@ -365,7 +367,22 @@ def build_vae_2d_decoder_engine(
 
     Input tensor:  "latent_input"    [1, latent_channels, h_lat, w_lat]
     Output tensor: "decoder_output"  [1, 3, h_out, w_out]
+
+    Per design Decision E the VAE always slices at ``max_batch=1`` even when
+    a dynamic-batch profile is attached; the pipeline loops sequential B=1
+    forwards for B>1 outputs. ``max_batch_size`` is accepted so the wider
+    builder API is uniform across components; values >1 still produce a
+    profile capped at 1 here (and the leading dim becomes dynamic ``-1``
+    so the runtime can bind shape ``(1, C, H, W)`` against the engine).
     """
+    if max_batch_size < 1:
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    # Decision E: VAE always caps at 1 regardless of the requested ceiling.
+    vae_max_batch = 1
+    if opt_batch_size is None:
+        opt_batch_size = vae_max_batch
+    dynamic_batch = max_batch_size > 1
+
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
     from ...graph_ops import add_conv2d, add_silu
@@ -392,9 +409,17 @@ def build_vae_2d_decoder_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
-    # Input
-    inp = network.add_input("latent_input", trt.float32,
-                            (1, latent_channels, h_lat, w_lat))
+    # Input. Static-batch path keeps the original ``[1, C, H, W]`` shape;
+    # dynamic-batch path turns the leading dim into ``-1`` so the runtime
+    # can bind ``(1, C, H, W)`` against the engine (Decision E pins the
+    # actual VAE cap at 1, but the input is still declared dynamic for
+    # parity with the other components).
+    if dynamic_batch:
+        inp = network.add_input("latent_input", trt.float32,
+                                (-1, latent_channels, h_lat, w_lat))
+    else:
+        inp = network.add_input("latent_input", trt.float32,
+                                (1, latent_channels, h_lat, w_lat))
 
     # post_quant_conv: Conv2d(latent_channels, latent_channels, 1x1)
     # Applied before the decoder in AutoencoderKL.decode().
@@ -492,7 +517,20 @@ def build_vae_2d_decoder_engine(
     x_out.name = "decoder_output"
     network.mark_output(x_out)
 
-    print("[vae-2d] Building TRT engine ...", file=sys.stderr)
+    if dynamic_batch:
+        from ...engine_builder import add_dynamic_batch_profile
+        add_dynamic_batch_profile(
+            builder, config, network,
+            input_names=["latent_input"],
+            max_batch=vae_max_batch,
+            opt_batch=opt_batch_size,
+            static_shape={
+                "latent_input": (latent_channels, h_lat, w_lat),
+            },
+        )
+
+    print(f"[vae-2d] Building TRT engine (max_batch={vae_max_batch}) ...",
+          file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TRT engine build failed for VAE decoder")

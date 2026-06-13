@@ -2665,6 +2665,44 @@ def _preprocess_simple_chw(
     return img_np.transpose(2, 0, 1).astype(np.float32)
 
 
+def _preprocess_locateanything_patchify(
+    image_path: str,
+    fixed_image_size: int = 448,
+    image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
+    image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
+    patch_size: int = 14,
+    interpolation: str = "bicubic",
+    **_kwargs: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """LocateAnything preprocessing: [N, C, pH, pW] plus [1, 2] grid."""
+    from PIL import Image
+
+    if patch_size <= 0 or fixed_image_size % patch_size != 0:
+        raise ValueError(
+            "LocateAnything fixed_image_size must be divisible by patch_size")
+
+    resample = _resolve_pil_interpolation(interpolation)
+    img = Image.open(image_path).convert("RGB")
+    img = img.resize((fixed_image_size, fixed_image_size), resample)
+    img_np = np.array(img, dtype=np.float32) / 255.0
+
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    img_chw = img_np.transpose(2, 0, 1)
+    channels = img_chw.shape[0]
+    grid_h = fixed_image_size // patch_size
+    grid_w = fixed_image_size // patch_size
+    pixel_values = img_chw.reshape(
+        channels, grid_h, patch_size, grid_w, patch_size
+    ).transpose(1, 3, 0, 2, 4).reshape(
+        grid_h * grid_w, channels, patch_size, patch_size
+    )
+    image_grid_hws = np.array([[grid_h, grid_w]], dtype=np.int32)
+    return pixel_values.astype(np.float32), image_grid_hws
+
+
 def _preprocess_center_crop_chw(
     image_path: str,
     fixed_image_size: int = 448,
@@ -2774,6 +2812,55 @@ def _preprocess_pad_center_chw(
     return img_np.transpose(2, 0, 1).astype(np.float32)
 
 
+def preprocess_image_inputs_for_trt(
+    image_path: str,
+    preprocessor_type: str = "qwen_merge_group",
+    **kwargs: Any,
+) -> dict[str, np.ndarray]:
+    """Load and preprocess image inputs for a TRT vision engine.
+
+    Returns named arrays keyed by TensorRT input name. Most models only need
+    pixel_values; LocateAnything also needs image_grid_hws.
+    """
+    temporal = kwargs.get("temporal_patch_size", 1)
+
+    if preprocessor_type == "locateanything_patchify":
+        pixel_values, image_grid_hws = _preprocess_locateanything_patchify(
+            image_path, **kwargs)
+        return {
+            "pixel_values": pixel_values,
+            "image_grid_hws": image_grid_hws,
+        }
+
+    if preprocessor_type == "simple_chw":
+        result = _preprocess_simple_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return {"pixel_values": result}
+    if preprocessor_type == "center_crop_chw":
+        result = _preprocess_center_crop_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return {"pixel_values": result}
+    if preprocessor_type == "aspect_preserve_chw":
+        result = _preprocess_aspect_preserve_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return {"pixel_values": result}
+    if preprocessor_type == "pad_center_chw":
+        result = _preprocess_pad_center_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return {"pixel_values": result}
+    if preprocessor_type != "qwen_merge_group":
+        warnings.warn(
+            f"Unknown preprocessor_type {preprocessor_type!r}, "
+            f"falling back to qwen_merge_group",
+            stacklevel=2,
+        )
+    return {"pixel_values": _preprocess_qwen_merge_group(image_path, **kwargs)}
+
+
 def preprocess_image_for_trt(
     image_path: str,
     preprocessor_type: str = "qwen_merge_group",
@@ -2781,41 +2868,11 @@ def preprocess_image_for_trt(
 ) -> np.ndarray:
     """Load and preprocess an image for the TRT vision engine.
 
-    Dispatches to the appropriate strategy based on preprocessor_type:
-      "qwen_merge_group":    [C*T, H, W] with merge-group patch permutation
-      "simple_chw":          [C, H, W] standard resize + normalize
-      "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
-      "aspect_preserve_chw": [C, H, W] aspect-preserving resize + zero-pad
-      "pad_center_chw":      [C, H, W] aspect-preserving resize + centered zero-pad
+    Compatibility wrapper returning only pixel_values. Use
+    preprocess_image_inputs_for_trt when the engine has auxiliary inputs.
     """
-    temporal = kwargs.get("temporal_patch_size", 1)
-    if preprocessor_type == "simple_chw":
-        result = _preprocess_simple_chw(image_path, **kwargs)
-        if temporal > 1 and result.shape[0] < temporal * 3:
-            result = np.tile(result, (temporal, 1, 1))
-        return result
-    if preprocessor_type == "center_crop_chw":
-        result = _preprocess_center_crop_chw(image_path, **kwargs)
-        if temporal > 1 and result.shape[0] < temporal * 3:
-            result = np.tile(result, (temporal, 1, 1))
-        return result
-    if preprocessor_type == "aspect_preserve_chw":
-        result = _preprocess_aspect_preserve_chw(image_path, **kwargs)
-        if temporal > 1 and result.shape[0] < temporal * 3:
-            result = np.tile(result, (temporal, 1, 1))
-        return result
-    if preprocessor_type == "pad_center_chw":
-        result = _preprocess_pad_center_chw(image_path, **kwargs)
-        if temporal > 1 and result.shape[0] < temporal * 3:
-            result = np.tile(result, (temporal, 1, 1))
-        return result
-    if preprocessor_type != "qwen_merge_group":
-        warnings.warn(
-            f"Unknown preprocessor_type {preprocessor_type!r}, "
-            f"falling back to qwen_merge_group",
-            stacklevel=2,
-        )
-    return _preprocess_qwen_merge_group(image_path, **kwargs)
+    return preprocess_image_inputs_for_trt(
+        image_path, preprocessor_type=preprocessor_type, **kwargs)["pixel_values"]
 
 
 class SegmentationTrtRunner:
@@ -2952,13 +3009,18 @@ class VLTrtRunner:
             "preprocessor_type", "qwen_merge_group")
 
         # Preprocessor config
-        self.temporal_patch_size = self.preproc_config.get("temporal_patch_size", 2)
-        self.patch_size = self.preproc_config.get("patch_size", 14)
-        self.merge_size = self.preproc_config.get("merge_size", 2)
+        self.temporal_patch_size = self.preproc_config.get(
+            "temporal_patch_size", self.config.get("temporal_patch_size", 2))
+        self.patch_size = self.preproc_config.get(
+            "patch_size", self.config.get("patch_size", 14))
+        self.merge_size = self.preproc_config.get(
+            "merge_size", self.config.get("merge_size", 2))
         self.image_mean = tuple(self.preproc_config.get(
-            "image_mean", [0.48145466, 0.4578275, 0.40821073]))
+            "image_mean", self.config.get(
+                "image_mean", [0.48145466, 0.4578275, 0.40821073])))
         self.image_std = tuple(self.preproc_config.get(
-            "image_std", [0.26862954, 0.26130258, 0.27577711]))
+            "image_std", self.config.get(
+                "image_std", [0.26862954, 0.26130258, 0.27577711])))
         self.interpolation = self.config.get("interpolation", "bicubic")
 
         self.tokenizer = tokenizer
@@ -2975,7 +3037,7 @@ class VLTrtRunner:
         if self.vision_runner is None:
             raise RuntimeError("No vision engine in bundle")
 
-        pixel_values = preprocess_image_for_trt(
+        vision_inputs = preprocess_image_inputs_for_trt(
             image_path,
             preprocessor_type=self.preprocessor_type,
             fixed_image_size=self.fixed_image_size,
@@ -2986,7 +3048,7 @@ class VLTrtRunner:
             merge_size=self.merge_size,
             interpolation=self.interpolation,
         )
-        results = self.vision_runner.encode(pixel_values=pixel_values)
+        results = self.vision_runner.encode(**vision_inputs)
         return results["image_features"]
 
     def format_prompt(self, user_prompt: str) -> str:

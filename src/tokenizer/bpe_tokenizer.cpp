@@ -819,6 +819,9 @@ class BpeTokenizer final : public ITokenizer {
 
         for (const auto& word : words) {
             auto chars = byte_encode(word);
+            if (!chars.empty() && !mEndOfWordSuffix.empty()) {
+                chars.back() += mEndOfWordSuffix;
+            }
             auto tokens = apply_merges(std::move(chars));
             for (const auto& token : tokens) {
                 auto it = mTokenToId.find(token);
@@ -1263,6 +1266,13 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
+    static std::string optional_model_string(const nlohmann::json& model, const char* key) {
+        auto it = model.find(key);
+        if (it != model.end() && it->is_string())
+            return it->get<std::string>();
+        return {};
+    }
+
     void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
         nlohmann::json j;
         try {
@@ -1287,7 +1297,8 @@ class BpeTokenizer final : public ITokenizer {
         if (!model.contains("vocab"))
             throw std::runtime_error("Invalid tokenizer.json: missing model.vocab");
 
-        mByteFallback = j["model"].value("byte_fallback", false);
+        mByteFallback = model.value("byte_fallback", false);
+        mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
         parse_vocab(j);
         parse_merges(j);
         parse_added_tokens(j);
@@ -1436,6 +1447,7 @@ class BpeTokenizer final : public ITokenizer {
         false; // true for Normalizer Prepend, false for Metaspace first
     bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
+    std::string mEndOfWordSuffix;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true
     // Vectors to support multiple BOS/EOS tokens (e.g. GLM-4: [gMASK] + <sop>)

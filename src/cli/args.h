@@ -12,6 +12,7 @@ struct CliArgs {
     std::vector<std::string> build_args;
     std::string bundle_path;
     std::string prompt;
+    bool prompt_provided{false};
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
@@ -72,9 +73,25 @@ struct CliArgs {
     // New feature knobs should generally prefer these over adding flags.
     std::string config_path;
     std::vector<std::string> set_tokens;
+    // Diffusion batch-inference knobs (PR 3 — `trtmc run` batch dispatch).
+    // `num_images` is the requested batch count when `prompts_file` is empty.
+    // `prompts_file` (one prompt per line) is mutually exclusive with
+    // `--prompt`. `seed_list`, when non-empty, supplies per-sample seeds
+    // explicitly and must match the total batch count at dispatch time.
+    int num_images{1};
+    std::string prompts_file;
+    std::vector<std::uint64_t> seed_list;
 };
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
+// Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
+// any token fails to parse. Empty string returns an empty vector wrapped
+// in an optional (caller should treat empty CSV the same as no flag).
+std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text);
+// Read one prompt per line from `path`. On failure returns an empty vector
+// and writes a human-readable message to `error`. Trailing newlines and
+// fully-blank lines are stripped; interior blank lines are kept verbatim.
+std::vector<std::string> read_prompts_file(const std::string& path, std::string& error);
 void print_usage();
 CliArgs parse_args(int argc, char** argv);
 
