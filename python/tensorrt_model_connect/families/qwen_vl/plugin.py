@@ -1,15 +1,24 @@
-"""Qwen VL family plugin — vision-language models (Qwen2.5-VL + Qwen3-VL).
+"""Qwen VL family plugin — vision-language models (Qwen2-VL + Qwen2.5-VL + Qwen3-VL).
+
+Qwen2-VL is the original two-engine VL model:
+  1. Vision encoder (ViT with 2D RoPE, LayerNorm, GELU FC MLP, FULL attention only)
+  2. Text decoder (Qwen2 architecture — no per-head q_norm/k_norm) with embed_input.
 
 Qwen2.5-VL is a two-engine VL model:
-  1. Vision encoder (ViT with 3D RoPE + spatial merge)
-  2. Text decoder (standard Qwen2.5 architecture with embed_input mode)
+  1. Vision encoder (ViT with 2D RoPE + spatial merge, RMSNorm, SwiGLU MLP,
+     WINDOWED attention with full-attention indexes)
+  2. Text decoder (Qwen2.5 architecture with embed_input mode)
 
 Qwen3-VL adds DeepStack:
   1. Vision encoder (ViT with learned positions + multi-level DeepStack outputs)
   2. Text decoder with DeepStack injection: vision features are added at
      specified text decoder layers (not just via embed_input)
 
-Detection: ``deepstack_visual_indexes`` in vision_config means Qwen3-VL.
+Detection (order matters — checked top-to-bottom):
+  - ``deepstack_visual_indexes`` in vision_config -> Qwen3-VL
+  - ``fullatt_block_indexes`` or ``window_size`` in vision_config -> Qwen2.5-VL
+  - ``mlp_ratio`` / ``embed_dim`` in vision_config (no windowing, no deepstack)
+    -> Qwen2-VL
 """
 
 from __future__ import annotations
@@ -50,6 +59,27 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
     return bool(vc.get("deepstack_visual_indexes"))
 
 
+def _is_qwen2_vl(config: ModelConfig) -> bool:
+    """Detect Qwen2-VL (original, pre-Qwen2.5-VL) vision config.
+
+    Qwen2-VL's vision config is distinguished from Qwen2.5-VL / Qwen3-VL by:
+      - NO ``deepstack_visual_indexes`` (Qwen3-VL has it)
+      - NO ``fullatt_block_indexes`` AND NO ``window_size`` (Qwen2.5-VL has both)
+      - Presence of ``mlp_ratio`` and/or ``embed_dim`` (Qwen2-VL's legacy fields,
+        which Qwen2.5-VL renamed to ``intermediate_size`` / ``hidden_size``)
+    """
+    vc = config.raw.get("vision_config", {})
+    if not vc:
+        return False
+    if vc.get("deepstack_visual_indexes"):
+        return False
+    has_window = ("fullatt_block_indexes" in vc) or ("window_size" in vc)
+    if has_window:
+        return False
+    # Qwen2-VL uses legacy field names that Qwen2.5-VL renamed.
+    return ("mlp_ratio" in vc) or ("embed_dim" in vc)
+
+
 class QwenVLPlugin:
     name = "qwen_vl"
     runtime_strategy = "vision_language"
@@ -64,6 +94,10 @@ class QwenVLPlugin:
     ) -> WeightDict:
         if _is_qwen3_vl(config):
             return _load_qwen3_vl_weights(model_dir, config)
+        # Qwen2-VL and Qwen2.5-VL both use plain "model.layers.X.*" prefix
+        # with Qwen2-style Q/K/V biases (no per-head q_norm/k_norm). The
+        # standard loader already handles both via the optional q/k/v_bias
+        # branch and the (absent) q_norm/k_norm branch.
         return load_standard_weights(model_dir, config)
 
     def build_engine(
@@ -123,6 +157,12 @@ class QwenVLPlugin:
                 vision_config, vision_weights,
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
                 verbose=verbose)
+        elif _is_qwen2_vl(config):
+            from .qwen_vl_vision_builder import build_qwen2_vl_vision_engine
+            return build_qwen2_vl_vision_engine(
+                vision_config, vision_weights,
+                fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+                verbose=verbose)
         else:
             from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
             return build_qwen_vl_vision_engine(
@@ -144,7 +184,9 @@ class QwenVLPlugin:
         num_patches = grid_h * grid_w
         num_merged = num_patches // (merge_size * merge_size)
 
-        # Both Qwen2.5-VL and Qwen3-VL use merge-group pixel ordering
+        # Qwen2-VL, Qwen2.5-VL, and Qwen3-VL all use merge-group pixel ordering.
+        # The Qwen2-VL HF tokenizer assigns the same id (151655) to
+        # ``<|image_pad|>`` as Qwen2.5-VL and Qwen3-VL.
         preproc = "qwen_merge_group"
 
         vl_cfg = {
