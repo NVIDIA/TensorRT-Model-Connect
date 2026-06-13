@@ -59,6 +59,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
+    "diffusion_hunyuan_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
     "torchtrt_decoder": "text_generation_causal",
     "torchtrt_diffusion": "diffusion_media_generation",
