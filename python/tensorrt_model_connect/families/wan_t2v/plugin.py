@@ -40,14 +40,49 @@ class WanT2VPlugin:
     _SCALE_FACTOR_TEMPORAL = 4
     _SCALE_FACTOR_SPATIAL = 8
 
+    # When True, the DiT consumes per-patch timestep embeddings (Wan 2.2
+    # ``expand_timesteps``). Subclasses for Wan 2.2 variants override this.
+    _EXPAND_TIMESTEPS = False
+
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("wan", "wan2.1", "wan_t2v")
+
+    def _resolve_expand_timesteps(self, transformer_source) -> bool:
+        """Read ``expand_timesteps`` from the HF transformer config.
+
+        Accepts either a directory path (string/Path) containing ``config.json``
+        or an already-parsed config ``dict``. Falls back to the class-level
+        default ``_EXPAND_TIMESTEPS`` if the flag is absent (Wan 2.1) or the
+        file is unreadable. The transformer ``config.json`` is the source of
+        truth — Wan 2.2 sets this to True, which switches the DiT to per-patch
+        AdaLN modulation.
+        """
+        import json
+        from pathlib import Path
+
+        cfg = None
+        if isinstance(transformer_source, dict):
+            cfg = transformer_source
+        else:
+            cfg_path = Path(transformer_source) / "config.json"
+            if not cfg_path.exists():
+                return self._EXPAND_TIMESTEPS
+            try:
+                with cfg_path.open("r", encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                return self._EXPAND_TIMESTEPS
+        value = cfg.get("expand_timesteps")
+        if value is None:
+            return self._EXPAND_TIMESTEPS
+        return bool(value)
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
         """Load weights from all three subdirectories."""
+        import json
         from pathlib import Path
 
         model_path = Path(model_dir)
@@ -62,6 +97,18 @@ class WanT2VPlugin:
         else:
             raise ValueError(
                 f"Expected diffusers format with model_index.json in {model_dir}")
+
+        # Stash the transformer config so get_diffusion_config() can pull
+        # ``expand_timesteps`` (and similar architecture flags) without
+        # re-reading the file. engine_builder mirrors this dict onto
+        # config.raw["_transformer_config"] before invoking get_diffusion_config.
+        transformer_cfg_path = model_path / "transformer" / "config.json"
+        if transformer_cfg_path.exists():
+            try:
+                with transformer_cfg_path.open("r", encoding="utf-8") as fh:
+                    weights["_transformer_config"] = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                pass
 
         return weights
 
@@ -107,6 +154,14 @@ class WanT2VPlugin:
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
+
+        # Wan 2.2 sets ``expand_timesteps=True`` in the transformer config to
+        # tell the DiT to consume per-patch timestep embeddings instead of a
+        # single scalar broadcast across patches. Without honoring this flag
+        # the first denoising step explodes (lat_std -> 1e33 -> NaN) because
+        # the AdaLN modulation never sees the per-patch shift/scale the model
+        # was trained against.
+        expand_timesteps = self._resolve_expand_timesteps(transformer_dir)
 
         # Video dimensions from config (480x832@17fr matches HF reference)
         video_height = config.raw.get("video_height", 480)
@@ -184,6 +239,7 @@ class WanT2VPlugin:
                         ffn_activation="gelu_new",
                         verbose=verbose,
                         parallel_config=parallel.for_rank(rank),
+                        expand_timesteps=expand_timesteps,
                     )
             else:
                 dit_plan = build_standard_dit_engine(
@@ -199,6 +255,7 @@ class WanT2VPlugin:
                     cross_attn_norm=True,
                     ffn_activation="gelu_new",
                     verbose=verbose,
+                    expand_timesteps=expand_timesteps,
                 )
 
         # 3. Causal 3D VAE decoder
@@ -251,6 +308,20 @@ class WanT2VPlugin:
         video_width = config.raw.get("video_width", 832)
         video_num_frames = config.raw.get("video_num_frames", 17)
 
+        # ``expand_timesteps`` is needed at runtime so the C++ pipeline
+        # produces the matching per-patch timestep embedding shape that the
+        # DiT engine expects (Wan 2.2). Source-of-truth ordering:
+        #   1. The parsed transformer ``config.json`` mirrored onto
+        #      ``config.raw["_transformer_config"]`` by load_weights.
+        #   2. An explicit override in the build/user config.
+        #   3. The plugin class default ``_EXPAND_TIMESTEPS``.
+        transformer_cfg = config.raw.get("_transformer_config")
+        if isinstance(transformer_cfg, dict):
+            expand_timesteps = self._resolve_expand_timesteps(transformer_cfg)
+        else:
+            expand_timesteps = bool(
+                config.raw.get("expand_timesteps", self._EXPAND_TIMESTEPS))
+
         return {
             "diffusion_backend_type": "wan_3d",
             "scheduler": "flow_match_euler",
@@ -269,6 +340,7 @@ class WanT2VPlugin:
             "scale_factor_spatial": self._SCALE_FACTOR_SPATIAL,
             "freq_dim": self._DIT_FREQ_DIM,
             "text_seq_len": self._T5_MAX_SEQ_LEN,
+            "expand_timesteps": expand_timesteps,
             "latents_mean": [
                 -0.7571, -0.7089, -0.9113, 0.1075,
                 -0.1745, 0.9653, -0.1517, 1.5508,

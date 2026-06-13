@@ -46,6 +46,14 @@ struct DiffusionConfig {
     bool use_rope{true};
     float vae_scaling_factor{0.0F};
 
+    // Wan 2.2 ``expand_timesteps``: when true, the DiT consumes per-patch
+    // timestep embeddings (shape ``[num_patches, ...]``) instead of a single
+    // scalar broadcast across all patches. The C++ runtime mirrors the
+    // per-patch path in WanTransformer3DModel.forward() by tiling the scalar
+    // timestep across the patch axis. Required for Wan 2.2 TI2V-5B to match
+    // the HF reference output.
+    bool expand_timesteps{false};
+
     std::string diffusion_backend_type{"wan_3d"};
 
     // Per-call requested batch size. Defaults to 1 = today's behavior.
