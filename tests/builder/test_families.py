@@ -428,6 +428,10 @@ _POSITIVE_MATCH_CASES = [
     # M2M-100 / NLLB (encoder-decoder seq2seq)
     ("m2m_100", "m2m_100"),
     ("nllb", "m2m_100"),
+    # Cosmos-Transfer (video-to-video with ControlNet)
+    ("cosmos_transfer", "cosmos_transfer"),
+    ("cosmos-transfer", "cosmos_transfer"),
+    ("cosmos_transfer1", "cosmos_transfer"),
 ]
 
 
