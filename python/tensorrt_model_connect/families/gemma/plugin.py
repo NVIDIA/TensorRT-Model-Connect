@@ -22,7 +22,11 @@ class GemmaPlugin:
     name = "gemma"
 
     def matches(self, model_type: str) -> bool:
-        return model_type.lower().startswith("gemma")
+        mt = model_type.lower()
+        # gemma4 is a separate multimodal family; don't claim it here.
+        if mt.startswith("gemma4"):
+            return False
+        return mt.startswith("gemma")
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
