@@ -1,0 +1,63 @@
+{
+  "name": "nemotron-3-super-120b-tp8",
+  "trace_id": "IT-E2E-NM3SUP-TP8-01",
+  "hf_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "bundle": "nemotron-3-super-120b-tp8.trtfb",
+  "family": "nemotron_h",
+  "runtime_strategy": "hybrid_mamba_attention",
+  "reference_backend": "golden_snapshot",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
+  "ci_tier": "nightly_only",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "precision": "bf16",
+  "max_cache_length": 128,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.01,
+  "layer_atol": 0.1,
+  "trust_remote_code": true,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 8
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 8,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 8
+      },
+      "gating": true
+    }
+  ],
+  "metadata": {
+    "golden_snapshot_path": "tests/e2e/data/nemotron_3_super_120b_golden.json"
+  },
+  "notes": "Nemotron-3-Super 120B-A12B BF16 TP8 build/sanity lane. Uses hybrid Mamba2+attention+MoE (E layers): 40 mamba2, 8 attention, 40 latent-MoE (512 routed experts, top-k=22, shared expert, DeepSeek-V3-style sigmoid+e_score_correction_bias gating, routed_scaling_factor=5.0). Reference parity is unavailable in CI; the contract uses a deterministic golden answer."
+}

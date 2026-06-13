@@ -117,13 +117,16 @@ def test_nemotron_h_tp_slices_mamba_mlp_and_attention_weights():
     assert sharded["_mlp_size"] == 4
 
 
-def test_nemotron_h_tp_validation_rejects_non_divisible_kv_heads():
-    with pytest.raises(ValueError, match="num_key_value_heads"):
-        tp_builder._validate_nemotron_h_tp(
-            _config(num_kv_heads=2),
-            _weights(),
-            ParallelConfig(mode="tensor_parallel", tp_size=4, rank=0),
-        )
+def test_nemotron_h_tp_validation_accepts_non_divisible_kv_heads():
+    # With the replicate-KV fallback (added for Nemotron-3-Super-120B where
+    # num_kv_heads=2 and tp_size=8), the validator no longer raises when KV
+    # heads don't divide tp_size. Each rank replicates the full KV bank
+    # instead. Mirrors the policy used by qwen_moe TP.
+    tp_builder._validate_nemotron_h_tp(
+        _config(num_kv_heads=2),
+        _weights(),
+        ParallelConfig(mode="tensor_parallel", tp_size=4, rank=0),
+    )
 
 
 def test_nemotron_h_plugin_routes_parallel_builds(monkeypatch):
