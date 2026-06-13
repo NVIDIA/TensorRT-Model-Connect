@@ -292,15 +292,31 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
     )
     mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder", fake_trt=fake_trt)
 
-    plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
-    assert plan == b"engine-plan"
-    # EXPLICIT_BATCH (1 << 0) | STRONGLY_TYPED (1 << 1) = 3
-    assert _FakeBuilder.last_instance.flags == 3
-    assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
+    # Keep the fake patched during the call: trt_compat.network_creation_flags()
+    # reads sys.modules["tensorrt"] at call time, not at import time.
+    previous_trt = sys.modules.get("tensorrt")
+    previous_trt_compat_module = None
+    try:
+        from tensorrt_model_connect import trt_compat as _tc
+        previous_trt_compat_module = _tc._module
+        _tc._module = fake_trt
+        sys.modules["tensorrt"] = fake_trt
+        plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
+        assert plan == b"engine-plan"
+        # EXPLICIT_BATCH (1 << 0) | STRONGLY_TYPED (1 << 1) = 3
+        assert _FakeBuilder.last_instance.flags == 3
+        assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
 
-    _FakeBuilder.plan_to_return = None
-    with pytest.raises(RuntimeError, match="TensorRT vision engine build failed"):
-        mod.build_vision_engine_from_onnx(b"good-onnx")
+        _FakeBuilder.plan_to_return = None
+        with pytest.raises(RuntimeError, match="TensorRT vision engine build failed"):
+            mod.build_vision_engine_from_onnx(b"good-onnx")
+    finally:
+        if previous_trt is None:
+            sys.modules.pop("tensorrt", None)
+        else:
+            sys.modules["tensorrt"] = previous_trt
+        from tensorrt_model_connect import trt_compat as _tc
+        _tc._module = previous_trt_compat_module
 
 
 @pytest.mark.unit
