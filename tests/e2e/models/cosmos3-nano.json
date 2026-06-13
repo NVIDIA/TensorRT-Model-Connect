@@ -1,0 +1,35 @@
+{
+  "name": "cosmos3-nano",
+  "trace_id": "IT-E2E-COSMOS3-NANO-01",
+  "hf_id": "nvidia/Cosmos3-Nano",
+  "bundle": "cosmos3-nano.trtfb",
+  "model_type": "cosmos3",
+  "family": "cosmos3",
+  "runtime_strategy": "diffusion_cosmos3",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "NVIDIA Cosmos 3 Nano (16B) — same Mixture-of-Transformers omni-model architecture as Super but at 8B reasoner + 8B generator scale. Fits on a single workstation-grade GPU (RTX PRO 6000 per HF model card). L0 scaffold targets text→video at 480p / 5 frames / 30 steps.",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A robot arm carefully picks up a red cube from a table, smooth cinematic motion",
+  "test_type": "diffusion",
+  "video_num_frames": 5,
+  "video_height": 480,
+  "video_width": 832,
+  "num_inference_steps": 30,
+  "guidance_scale": 5.0,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "min_pixel_mean": 0.10,
+  "max_pixel_mean": 0.90,
+  "min_pixel_std": 0.04,
+  "skip_text_comparison": true,
+  "skip": "scaffold only — DM generator TRT graph (Phase 4) and C++ pipeline orchestration (Phase 6) not yet implemented; remove this skip once both land",
+  "notes": "Nano reasoner: hidden=4096, layers=36, num_heads=32 (GQA 32:8, head_dim=128), FFN=12288. ViT shares Super's shape but out_hidden_size=4096 to match. VAE / patch / modality dims (latent_channel=48, latent_patch_size=2, max_action_dim=64, 32 embodiments) are identical to Super. This is the natural single-GPU validation target before Super's 8-GPU sweep."
+}
