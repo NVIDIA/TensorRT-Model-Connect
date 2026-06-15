@@ -1,0 +1,4 @@
+interface:
+  display_name: "Submit GitHub Bug Issue"
+  short_description: "Turn QA findings into labeled GitHub bug issues"
+  default_prompt: "Use $submit-github-bug-issue to file this QA finding as a GitHub bug issue."
