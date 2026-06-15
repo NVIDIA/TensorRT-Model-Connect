@@ -1,0 +1,54 @@
+version: 1
+
+suites:
+  - id: mmlu_five_shot_mcq
+    description: >
+      Local five-shot MMLU multiple-choice accuracy evaluation. This validates
+      user-visible task quality for decoder-style text generation bundles and
+      records HF-reference agreement separately from absolute correctness.
+    user_contract: multiple_choice_qa
+    dataset:
+      kind: mmlu_five_shot_json
+      default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+    selectors:
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - decoder_kv_cache
+        - decoder_moe
+        - ssm_recurrent
+        - rwkv_recurrent
+        - hybrid_mamba_attention
+        - torchtrt_decoder
+      user_contracts:
+        - chat_response
+      exclude_user_contracts:
+        - continuation_parity
+        - code_completion
+        - translation
+        - seq2seq_output
+        - model_card_generation_parity
+    generation:
+      max_new_tokens: 1
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    build:
+      min_max_cache_length: 0
+    gates:
+      max_accuracy_drop_from_hf: 0.01
+      min_prediction_agreement: 0.98
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        First step is local execution. CI can later consume the same suite
+        manifest with a smaller sampled dataset and explicit model allowlist.
