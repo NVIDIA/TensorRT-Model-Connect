@@ -243,6 +243,13 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
+    if manifest.get("runtime_strategy") == "chronos_bolt_trt":
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "chronos", "phase": "build"},
+            gating=True,
+        ))
+
     # HF auth for gated models.  trust_remote_code still gets a non-gating
     # diagnostic because many public repos use remote code, but gated repos
     # should skip cleanly when a CI runner has no HF token.
@@ -509,6 +516,10 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "object_detection",
     "omni_multimodal",
     "neural_operator",
+    "patchtst_trt",
+    "patchtsmixer_trt",
+    "timesfm_trt",
+    "chronos_bolt_trt",
     "elf_flow",
 })
 

@@ -95,6 +95,10 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "speech_to_speech",
     "omni_multimodal",
     "diffusion",
+    "patchtst_trt",
+    "patchtsmixer_trt",
+    "timesfm_trt",
+    "chronos_bolt_trt",
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"

@@ -48,6 +48,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
+    "patchtst_trt": "neural_operator",
+    "patchtsmixer_trt": "neural_operator",
+    "timesfm_trt": "neural_operator",
+    "chronos_bolt_trt": "neural_operator",
     "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
@@ -208,6 +212,12 @@ _ORCHESTRATOR_MODULES = {
     "debug_runner", "diffusion_runner",
 }
 
+# Python profile names normally match a model family. Aliases cover profiles
+# that install package-level dependencies shared by a more specific family.
+PYTHON_PROFILE_TO_FAMILIES: Dict[str, List[str]] = {
+    "chronos": ["chronos_bolt"],
+}
+
 # Patterns for files that never affect E2E or unit tests
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
@@ -287,7 +297,7 @@ def _iter_family_python_files(families_dir: Path) -> List[tuple[str, Path]]:
     files: List[tuple[str, Path]] = []
     for py_file in sorted(families_dir.glob("*.py")):
         name = py_file.stem
-        if name in ("__init__", "base"):
+        if name in ("__init__", "base") or name.startswith("_"):
             continue
         files.append((name, py_file))
     for family_dir in sorted(path for path in families_dir.iterdir() if path.is_dir()):
@@ -751,6 +761,15 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
 
+def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    profile = _group(context)
+    families = PYTHON_PROFILE_TO_FAMILIES.get(profile, [profile])
+    models: Set[str] = set()
+    for family in families:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
 def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
     def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
         del context
@@ -958,6 +977,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "TestFamilyPlugin.test_family_base_all_models",
                 "TestFamilyPlugin.test_family_init_all_models",
             ),
+        ),
+        ClassificationRule(
+            priority=80,
+            name="python_profile_requirements",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/"
+                r"python_profile_requirements/([^/]+)\.lock\.txt$"
+            ),
+            resolver=_match_result("python_profile_requirements", _python_profile_models),
+            covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
         ),
         ClassificationRule(
             priority=90,
@@ -2434,7 +2463,7 @@ def validate_map(
     if families_dir.is_dir():
         for py_file in sorted(families_dir.glob("*.py")):
             name = py_file.stem
-            if name in ("__init__", "base"):
+            if name in ("__init__", "base") or name.startswith("_"):
                 continue
             if name not in imap.family_to_models:
                 warnings.append(f"Family plugin '{name}.py' has no manifests using it")

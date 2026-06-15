@@ -76,10 +76,14 @@ def _ensure_discovered() -> None:
     _discover_plugins()
 
 
-def find_plugin(model_type: str) -> "FamilyPlugin | None":
-    """Find the first plugin that matches the given model_type."""
+def find_plugin(model_type: object) -> "FamilyPlugin | None":
+    """Find the first plugin that matches a model type or config object."""
+    model_type_str = str(getattr(model_type, "model_type", model_type))
     for p in _ALL_PLUGINS:
-        if p.matches(model_type):
+        matches_config = getattr(p, "matches_config", None)
+        if callable(matches_config) and matches_config(model_type):
+            return p
+        if p.matches(model_type_str):
             return p
     return None
 

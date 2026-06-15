@@ -111,6 +111,9 @@ def mock_repo(tmp_path):
          "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B"},
         {"name": "convbert-base", "family": "convbert", "runtime_strategy": "encoder_only",
          "hf_id": "YituTech/conv-bert-base"},
+        {"name": "chronos-bolt-tiny", "family": "chronos_bolt",
+         "runtime_strategy": "chronos_bolt_trt",
+         "hf_id": "amazon/chronos-bolt-tiny"},
     ]
     for m in manifests:
         _write_json(models_dir / f"{m['name']}.json", m)
@@ -454,6 +457,16 @@ class TestSharedModules:
             "python/tensorrt_model_connect/config.py", imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
+
+    def test_python_profile_requirements_scope(self, imap):
+        """python profile locks affect only families that use that profile."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt",
+            imap,
+        )
+
+        assert match.rule == "python_profile_requirements"
+        assert match.models == ["chronos-bolt-tiny"]
 
 
 # ---------------------------------------------------------------------------

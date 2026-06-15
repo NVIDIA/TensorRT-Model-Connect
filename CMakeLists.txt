@@ -223,6 +223,10 @@ add_library(trtmc_core
   src/runtime/models/speech/pipeline.cpp
   src/runtime/models/omni/pipeline.cpp
   src/runtime/models/pixart/pipeline.cpp
+  src/runtime/models/chronos_bolt/pipeline.cpp
+  src/runtime/models/patchtsmixer/pipeline.cpp
+  src/runtime/models/patchtst/pipeline.cpp
+  src/runtime/models/timesfm/pipeline.cpp
 )
 
 # Keep warning policy strict for project code, but avoid CI log spam from

@@ -207,7 +207,7 @@ def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str
         return resolved_model_ref, getattr(plugin, "name", "")
 
     config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config.model_type)
+    plugin = find_plugin(config)
     return resolved_model_ref, getattr(plugin, "name", "")
 
 
@@ -280,7 +280,7 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
         )
     else:
         config = ModelConfig.from_dir(model_dir)
-        raw_plugin = find_plugin(config.model_type)
+        raw_plugin = find_plugin(config)
         raw_supported = raw_plugin is not None
 
     if raw_supported:

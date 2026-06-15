@@ -1,0 +1,2 @@
+runtime_strategies = ["chronos_bolt_trt"]
+task_strategy = "neural_operator"

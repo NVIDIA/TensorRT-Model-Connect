@@ -34,6 +34,10 @@ set(TRTMC_PIPELINE_PLUGINS
   "models/marian/plugin.cpp|register_marian_plugin"
   "models/seq2seq/plugin.cpp|register_seq2seq_plugin"
   "models/pixart/plugin.cpp|register_pixart_plugin"
+  "models/chronos_bolt/plugin.cpp|register_chronos_bolt_plugin"
+  "models/patchtsmixer/plugin.cpp|register_patchtsmixer_plugin"
+  "models/patchtst/plugin.cpp|register_patchtst_plugin"
+  "models/timesfm/plugin.cpp|register_timesfm_plugin"
 )
 
 set(TRTMC_PIPELINE_PLUGIN_REGISTRATION_SOURCE

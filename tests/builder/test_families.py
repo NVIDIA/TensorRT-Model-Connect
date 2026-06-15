@@ -427,6 +427,13 @@ _POSITIVE_MATCH_CASES = [
     # M2M-100 / NLLB (encoder-decoder seq2seq)
     ("m2m_100", "m2m_100"),
     ("nllb", "m2m_100"),
+    # Time-series neural operators
+    ("patchtst", "patchtst"),
+    ("patchtsmixer", "patchtsmixer"),
+    ("timesfm", "timesfm"),
+    ("chronos_bolt", "chronos_bolt"),
+    ("chronos-bolt", "chronos_bolt"),
+    ("chronosbolt", "chronos_bolt"),
 ]
 
 
@@ -578,6 +585,33 @@ class TestRuntimeStrategy:
     def test_nemotron_speech_streaming_strategy(self):
         plugin = find_plugin("nemotron_speech_streaming")
         assert getattr(plugin, "runtime_strategy", None) == "speech_to_text_rnnt"
+
+    def test_time_series_strategies(self):
+        expected = {
+            "patchtst": "patchtst_trt",
+            "patchtsmixer": "patchtsmixer_trt",
+            "timesfm": "timesfm_trt",
+            "chronos_bolt": "chronos_bolt_trt",
+        }
+        for model_type, runtime_strategy in expected.items():
+            plugin = find_plugin(model_type)
+            assert plugin is not None
+            assert getattr(plugin, "runtime_strategy", None) == runtime_strategy
+
+    def test_chronos_bolt_matches_official_t5_config(self):
+        from tensorrt_model_connect.config import ModelConfig
+
+        plugin = find_plugin(ModelConfig(
+            model_type="t5",
+            architectures=["ChronosBoltModelForForecasting"],
+            raw={
+                "model_type": "t5",
+                "architectures": ["ChronosBoltModelForForecasting"],
+                "chronos_config": {"context_length": 16},
+            },
+        ))
+        assert plugin is not None
+        assert plugin.name == "chronos_bolt"
 
     def test_standard_decoder_no_strategy(self):
         """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""
