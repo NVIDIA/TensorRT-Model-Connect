@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
+from ..contracts import MetricResult
 from .base import (normalize_text, levenshtein_ned, make_pass, make_fail, make_error)
 
 _NO_SPEECH_STATE_VALUE = {
