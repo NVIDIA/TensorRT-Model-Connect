@@ -1416,6 +1416,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
+            priority=475,
+            name="asr_probe_data",
+            matcher=_regex_rule(r"tests/e2e/data/asr_probes/.+$"),
+            resolver=_match_result(
+                "asr_probe_data",
+                _task_strategy_models(["speech_to_text"]),
+            ),
+            covered_by=("TestE2EDataFiles.test_asr_probe_support_files_select_asr",),
+        ),
+        ClassificationRule(
             priority=480,
             name="fp8_gen_script",
             matcher=_path_equals("scripts/_gen_fp8_bf16.py"),

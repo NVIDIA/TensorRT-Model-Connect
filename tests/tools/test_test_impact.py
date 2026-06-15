@@ -795,6 +795,20 @@ class TestE2EDataFiles:
         assert match.rule == "e2e_data_file"
         assert match.models == ["qwen25vl-3b"]
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/e2e/data/asr_probes/manifest.json",
+            "tests/e2e/data/asr_probes/generate_asr_probe_inputs.py",
+        ],
+    )
+    def test_asr_probe_support_files_select_asr(self, imap, path):
+        """ASR probe support files should stay scoped to speech-to-text."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "asr_probe_data"
+        assert "whisper-tiny-fp16" in match.models
+        assert "qwen3-0.6b" not in match.models
+
 
 # ---------------------------------------------------------------------------
 # Unit tier tests
