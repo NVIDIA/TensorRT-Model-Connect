@@ -104,6 +104,7 @@ no_impact scripts/prepare_lance_model.py # one-off Lance model staging helper; n
 no_impact scripts/profile_magpie_tts.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
+no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_clip_metrics_local.py # developer utility script for local CLIP metric validation; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
