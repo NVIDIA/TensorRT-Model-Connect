@@ -111,6 +111,18 @@ def mock_repo(tmp_path):
          "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B"},
         {"name": "convbert-base", "family": "convbert", "runtime_strategy": "encoder_only",
          "hf_id": "YituTech/conv-bert-base"},
+        {"name": "patchtst-granite", "family": "patchtst",
+         "runtime_strategy": "patchtst_trt",
+         "hf_id": "ibm-granite/granite-timeseries-patchtst"},
+        {"name": "patchtst-regression", "family": "patchtst",
+         "runtime_strategy": "patchtst_trt",
+         "hf_id": "hf-internal-testing/tiny-random-PatchTSTForRegression"},
+        {"name": "patchtsmixer-granite", "family": "patchtsmixer",
+         "runtime_strategy": "patchtsmixer_trt",
+         "hf_id": "ibm-granite/granite-timeseries-patchtsmixer"},
+        {"name": "timesfm-official", "family": "timesfm",
+         "runtime_strategy": "timesfm_trt",
+         "hf_id": "google/timesfm-2.0-500m-pytorch"},
         {"name": "chronos-bolt-tiny", "family": "chronos_bolt",
          "runtime_strategy": "chronos_bolt_trt",
          "hf_id": "amazon/chronos-bolt-tiny"},
@@ -196,6 +208,10 @@ def mock_repo(tmp_path):
             "builder.py": "from ... import graph_ops\n",
         },
     )
+    _write_family(families_dir, "patchtst", "from ..config import C\n")
+    _write_family(families_dir, "patchtsmixer", "from ..config import C\n")
+    _write_family(families_dir, "timesfm", "from ..config import C\n")
+    _write_family(families_dir, "chronos_bolt", "from ..config import C\n")
 
     # Placeholder source files
     (python_package_dir / "standard_decoder_builder.py").write_text("")
@@ -954,6 +970,13 @@ class TestHarness:
         """Diff refinement dispatch keeps named rules in reviewable order."""
         assert [rule.name for rule in test_impact.DIFF_REFINEMENT_RULES] == [
             "harness_shared_fp8_scales",
+            "e2e_timing_estimates_known_models",
+            "runtime_strategy_matrix_known_strategies",
+            "pyproject_known_profiles",
+            "python_profiles_known_profiles",
+            "shared_builder_config_lookup_family_registry",
+            "shared_builder_config_lookup_cli",
+            "shared_builder_config_lookup_engine",
             "sam3_public_prompted_segmentation_api",
             "sam3_engine_builder_metadata",
             "sam3_segment_sam_cli_usage",
@@ -963,6 +986,7 @@ class TestHarness:
             "sam3_harness_contract",
             "harness_reference_sam3_prompted_segmentation",
             "sam3_harness_repro_prompt",
+            "harness_shared_known_identifiers",
             "e2e_warm_hf_cache_diffusers_components",
             "shared_builder_fp8_scales_cli",
             "shared_builder_fp8_scales_engine",
@@ -970,10 +994,433 @@ class TestHarness:
             "harness_manifest_diffusion_thresholds",
             "harness_reference_dpr_context_encoder",
             "harness_reference_vl_generated_only_decode",
+            "harness_reference_known_identifiers",
             "e2e_waives_model_lines",
         ]
         assert all(callable(rule.matches) and callable(rule.refine)
                    for rule in test_impact.DIFF_REFINEMENT_RULES)
+
+    def test_metadata_rules_refine_known_model_and_strategy_diffs(self, imap):
+        """Registry additions for any known model/strategy avoid all-model E2E."""
+        timing_diff = """
+diff --git a/tests/e2e/timing_estimates.json b/tests/e2e/timing_estimates.json
+@@ -1 +1 @@
++    "chronos-bolt-tiny": 45,
++    "qwen3-0.6b": 38,
+"""
+        broad_timing = test_impact.classify_file("tests/e2e/timing_estimates.json", imap)
+        refined_timing = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e/timing_estimates.json", broad_timing, timing_diff, imap)
+        assert refined_timing.rule == "e2e_timing_estimates_known_models"
+        assert refined_timing.models == ["chronos-bolt-tiny", "qwen3-0.6b"]
+
+        matrix_diff = """
+diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
+@@ -1 +1 @@
++    "decoder_moe": {
++      "task_strategy": "text_generation_causal",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
++      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe']."
++    },
++    "chronos_bolt_trt": {
++      "task_strategy": "neural_operator",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_trt']."
++    },
+"""
+        broad_matrix = test_impact.classify_file("tests/runtime_strategy_matrix.yaml", imap)
+        refined_matrix = test_impact.maybe_refine_match_with_diff(
+            "tests/runtime_strategy_matrix.yaml", broad_matrix, matrix_diff, imap)
+        assert refined_matrix.rule == "runtime_strategy_matrix_known_strategies"
+        assert refined_matrix.models == [
+            "chronos-bolt-tiny",
+            "mixtral-15m",
+        ]
+
+    def test_shared_builder_rules_refine_config_lookup_to_candidate_models(self, imap):
+        """Config-object plugin lookup is scoped to PR-level candidate models."""
+        candidate_models = ["chronos-bolt-tiny"]
+        init_diff = """
+diff --git a/python/tensorrt_model_connect/families/__init__.py b/python/tensorrt_model_connect/families/__init__.py
+@@ -1 +1 @@
+-def find_plugin(model_type: str) -> "FamilyPlugin | None":
+-    \"\"\"Find the first plugin that matches the given model_type.\"\"\"
++def find_plugin(model_type: object) -> "FamilyPlugin | None":
++    \"\"\"Find the first plugin that matches a model type or config object.\"\"\"
++    model_type_str = str(getattr(model_type, "model_type", model_type))
+-        if p.matches(model_type):
++        matches_config = getattr(p, "matches_config", None)
++        if callable(matches_config) and matches_config(model_type):
++            return p
++        if p.matches(model_type_str):
+"""
+        broad_init = test_impact.classify_file(
+            "python/tensorrt_model_connect/families/__init__.py", imap)
+        refined_init = test_impact.maybe_refine_match_with_diff(
+            "python/tensorrt_model_connect/families/__init__.py",
+            broad_init,
+            init_diff,
+            imap,
+            candidate_models,
+        )
+        assert refined_init.rule == "shared_builder_config_lookup_family_registry"
+        assert refined_init.models == ["chronos-bolt-tiny"]
+
+        cli_diff = """
+diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_connect/build_cli.py
+@@ -1 +1 @@
+-    plugin = find_plugin(config.model_type)
++    plugin = find_plugin(config)
+-        raw_plugin = find_plugin(config.model_type)
++        raw_plugin = find_plugin(config)
+"""
+        broad_cli = test_impact.classify_file(
+            "python/tensorrt_model_connect/build_cli.py", imap)
+        refined_cli = test_impact.maybe_refine_match_with_diff(
+            "python/tensorrt_model_connect/build_cli.py",
+            broad_cli,
+            cli_diff,
+            imap,
+            candidate_models,
+        )
+        assert refined_cli.rule == "shared_builder_config_lookup_cli"
+        assert refined_cli.models == ["chronos-bolt-tiny"]
+
+    def test_harness_rules_refine_registry_diffs_for_known_identifiers(self, imap):
+        """Harness additions stay scoped to mentioned models and runtime strategies."""
+        expected = [
+            "chronos-bolt-tiny",
+            "patchtsmixer-granite",
+            "patchtst-granite",
+            "patchtst-regression",
+            "timesfm-official",
+        ]
+
+        contracts_diff = """
+diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
+@@ -1 +1 @@
++    # 5.28 TIME_SERIES_POINT_FORECAST
++    "patchtst-granite": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    "patchtsmixer-granite": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    "timesfm-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    # 5.29 TIME_SERIES_QUANTILE_FORECAST
++    "chronos-bolt-tiny": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
++    # 5.30 TIME_SERIES_REGRESSION
++    "patchtst-regression": ReferenceFamily.TIME_SERIES_REGRESSION.value,
++    "patchtst_trt": "neural_operator",
++    "patchtsmixer_trt": "neural_operator",
++    "timesfm_trt": "neural_operator",
++    "chronos_bolt_trt": "neural_operator",
+"""
+        broad_contracts = test_impact.classify_file("tests/e2e_harness/contracts.py", imap)
+        refined_contracts = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/contracts.py", broad_contracts, contracts_diff, imap)
+        assert refined_contracts.rule == "harness_shared_known_identifiers"
+        assert refined_contracts.models == expected
+
+        manifest_loader_diff = """
+diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_loader.py
+@@ -1 +1 @@
++    if manifest.get("runtime_strategy") == "chronos_bolt_trt":
++        reqs.append(PreflightRequirement(
++            kind="python_module_available",
++            args={"module": "chronos", "phase": "build"},
++            gating=True,
++        ))
++    "patchtst_trt",
++    "patchtsmixer_trt",
++    "timesfm_trt",
++    "chronos_bolt_trt",
+"""
+        broad_loader = test_impact.classify_file("tests/e2e_harness/manifest_loader.py", imap)
+        refined_loader = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/manifest_loader.py", broad_loader, manifest_loader_diff, imap)
+        assert refined_loader.rule == "harness_shared_known_identifiers"
+        assert refined_loader.models == expected
+
+    def test_generic_shared_file_diff_selects_non_time_series_models(
+        self, imap, mock_repo, monkeypatch,
+    ):
+        """Shared metadata diffs refine non-time-series models too."""
+        diffs = {
+            "pyproject.toml": """
+diff --git a/pyproject.toml b/pyproject.toml
+@@ -1 +1 @@
++qwen = ["qwen-builder>=1"]
+""",
+            "tests/e2e_harness/contracts.py": """
+diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
+@@ -1 +1 @@
++    "flux-schnell": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
+""",
+            "tests/runtime_strategy_matrix.yaml": """
+diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
+@@ -1 +1 @@
++    "decoder_moe": {
++      "task_strategy": "text_generation_causal",
++      "cli_commands": ["run"],
++      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
++      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
++      "diff_framework_check_classes": []
++    },
+""",
+        }
+        monkeypatch.setattr(
+            test_impact,
+            "get_file_diff",
+            lambda _base, _head, _repo_root, path: diffs.get(path, ""),
+        )
+
+        result = test_impact.analyze_impact(
+            sorted(diffs),
+            imap,
+            base="base",
+            head="head",
+            repo_root=mock_repo,
+        )
+
+        assert result.e2e_models == [
+            "flux-schnell",
+            "mixtral-15m",
+            "qwen3-0.6b",
+            "qwen3-4b",
+        ]
+
+    def test_time_series_pr_style_diff_selects_only_time_series(
+        self, imap, mock_repo, monkeypatch,
+    ):
+        """Aggregate shared-file time-series plumbing does not trigger all-model E2E."""
+        contracts_diff = """
+diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
+@@ -1 +1 @@
++    # 5.28 TIME_SERIES_POINT_FORECAST
++    "patchtst-granite": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    "patchtsmixer-granite": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    "timesfm-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
++    # 5.29 TIME_SERIES_QUANTILE_FORECAST
++    "chronos-bolt-tiny": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
++    # 5.30 TIME_SERIES_REGRESSION
++    "patchtst-regression": ReferenceFamily.TIME_SERIES_REGRESSION.value,
++    "patchtst_trt": "neural_operator",
++    "patchtsmixer_trt": "neural_operator",
++    "timesfm_trt": "neural_operator",
++    "chronos_bolt_trt": "neural_operator",
+"""
+        manifest_loader_diff = """
+diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_loader.py
+@@ -1 +1 @@
++    if manifest.get("runtime_strategy") == "chronos_bolt_trt":
++        reqs.append(PreflightRequirement(
++            kind="python_module_available",
++            args={"module": "chronos", "phase": "build"},
++            gating=True,
++        ))
++    "patchtst_trt",
++    "patchtsmixer_trt",
++    "timesfm_trt",
++    "chronos_bolt_trt",
+"""
+        diffs = {
+            "pyproject.toml": """
+diff --git a/pyproject.toml b/pyproject.toml
+@@ -1 +1 @@
++chronos = ["chronos-forecasting>=2.2.2"]
+""",
+            "python/tensorrt_model_connect/build_cli.py": """
+diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_connect/build_cli.py
+@@ -1 +1 @@
+-    plugin = find_plugin(config.model_type)
++    plugin = find_plugin(config)
+-        raw_plugin = find_plugin(config.model_type)
++        raw_plugin = find_plugin(config)
+""",
+            "python/tensorrt_model_connect/engine_builder.py": """
+diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
+@@ -1 +1 @@
+-    plugin = find_plugin(config.model_type)
++    plugin = find_plugin(config)
+""",
+            "python/tensorrt_model_connect/families/__init__.py": """
+diff --git a/python/tensorrt_model_connect/families/__init__.py b/python/tensorrt_model_connect/families/__init__.py
+@@ -1 +1 @@
+-def find_plugin(model_type: str) -> "FamilyPlugin | None":
++def find_plugin(model_type: object) -> "FamilyPlugin | None":
++    model_type_str = str(getattr(model_type, "model_type", model_type))
+-        if p.matches(model_type):
++        matches_config = getattr(p, "matches_config", None)
++        if callable(matches_config) and matches_config(model_type):
++            return p
++        if p.matches(model_type_str):
+""",
+            "python/tensorrt_model_connect/python_profiles.toml": """
+diff --git a/python/tensorrt_model_connect/python_profiles.toml b/python/tensorrt_model_connect/python_profiles.toml
+@@ -1 +1 @@
++[profiles.chronos]
++kind = "venv"
++requirements = "python_profile_requirements/chronos.lock.txt"
++system_site_packages = true
++verification_script = '''
++import chronos
++import transformers
++config = transformers.T5Config(
++    d_model=16,
++    d_ff=32,
++    num_layers=1,
++    num_decoder_layers=1,
++    num_heads=2,
++    dropout_rate=0.0,
++    decoder_start_token_id=0,
++    pad_token_id=0,
++    eos_token_id=1,
++)
++config.architectures = ["ChronosBoltModelForForecasting"]
++config.chronos_config = {
++    "context_length": 16,
++    "prediction_length": 4,
++    "input_patch_size": 4,
++    "input_patch_stride": 4,
++    "quantiles": [0.1, 0.5, 0.9],
++    "use_reg_token": True,
++}
++chronos.chronos_bolt.ChronosBoltModelForForecasting(config).eval()
++print(
++    f"chronos={chronos.__version__} "
++    f"transformers={transformers.__version__} "
++    "chronos_bolt_ctor=ok"
++)
++'''
++[family_defaults.chronos_bolt]
++build = "chronos"
++reference = "chronos"
+""",
+            "tests/e2e/timing_estimates.json": """
+diff --git a/tests/e2e/timing_estimates.json b/tests/e2e/timing_estimates.json
+@@ -1 +1 @@
++    "chronos-bolt-tiny": 45,
++    "patchtsmixer-granite": 30,
++    "patchtst-granite": 38,
++    "patchtst-regression": 32,
++    "timesfm-official": 111,
+""",
+            "tests/e2e_harness/contracts.py": contracts_diff,
+            "tests/e2e_harness/manifest_loader.py": manifest_loader_diff,
+            "tests/e2e_harness/orchestrator.py": """
+diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.py
+@@ -1 +1 @@
++    "patchtst_trt",
++    "patchtsmixer_trt",
++    "timesfm_trt",
++    "chronos_bolt_trt",
+""",
+            "tests/e2e_harness/references/torch_reference.py": """
+diff --git a/tests/e2e_harness/references/torch_reference.py b/tests/e2e_harness/references/torch_reference.py
+@@ -1 +1 @@
++        if task == "neural_operator" and _is_supported_time_series_case(case):
++            return self._run_time_series_ref(case, stage, ctx)
++def _run_time_series_forward(case: E2ECase):
++    if case.family == "patchtst":
++        return _run_patchtst_forward(case)
++    if case.family == "patchtsmixer":
++        return _run_patchtsmixer_forward(case)
++    if case.family == "timesfm":
++        return _run_timesfm_forward(case)
++    if case.family == "chronos_bolt":
++        return _run_chronos_bolt_forward(case)
++def _run_patchtst_forward(case: E2ECase):
++    import torch
++    import transformers
++    return torch.tensor([0.0]), "prediction_outputs"
++def _run_patchtsmixer_forward(case: E2ECase):
++    import torch
++    import transformers
++    return torch.tensor([0.0]), "prediction_outputs"
++def _run_timesfm_forward(case: E2ECase):
++    import torch
++    import transformers
++    return torch.tensor([0.0]), "mean_predictions"
++def _run_chronos_bolt_forward(case: E2ECase):
++    import torch
++    import chronos
++    return torch.tensor([0.0]), "quantile_preds"
+""",
+            "tests/runtime_strategy_matrix.yaml": """
+diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
+@@ -1 +1 @@
++    "patchtst_trt": {
++      "task_strategy": "neural_operator",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtst_trt']."
++    },
++    "patchtsmixer_trt": {
++      "task_strategy": "neural_operator",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtsmixer_trt']."
++    },
++    "timesfm_trt": {
++      "task_strategy": "neural_operator",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timesfm_trt']."
++    },
++    "chronos_bolt_trt": {
++      "task_strategy": "neural_operator",
++      "cli_commands": ["solve"],
++      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "diff_framework_check_classes": [],
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_trt']."
++    },
+""",
+        }
+        for model_name in (
+            "chronos-bolt-tiny",
+            "patchtsmixer-granite",
+            "patchtst-granite",
+            "patchtst-regression",
+            "timesfm-official",
+        ):
+            diffs[f"tests/e2e/models/{model_name}.json"] = (
+                f"diff --git a/tests/e2e/models/{model_name}.json "
+                f"b/tests/e2e/models/{model_name}.json\n"
+                "@@ -1 +1 @@\n"
+                f"+{{\"name\": \"{model_name}\"}}\n"
+            )
+
+        monkeypatch.setattr(
+            test_impact,
+            "get_file_diff",
+            lambda _base, _head, _repo_root, path: diffs.get(path, ""),
+        )
+        result = test_impact.analyze_impact(
+            sorted(diffs),
+            imap,
+            base="base",
+            head="head",
+            repo_root=mock_repo,
+        )
+
+        assert result.e2e_models == [
+            "chronos-bolt-tiny",
+            "patchtsmixer-granite",
+            "patchtst-granite",
+            "patchtst-regression",
+            "timesfm-official",
+        ]
+        assert "qwen3-0.6b" not in result.e2e_models
 
     def test_sam3_public_pipeline_rule_refines_prompted_segmentation_diff(self, imap):
         """SAM3 prompted-segmentation API additions stay scoped to segmentation."""
