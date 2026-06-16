@@ -808,6 +808,25 @@ class TestUnitTiers:
             assert match.models == []
             assert match.unit_tiers == ["tools"]
 
+    def test_task_eval_tool_triggers_tools_tier(self, imap):
+        """task_eval tool edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file("tools/task_eval.py", imap)
+
+        assert match.rule == "task_eval_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_task_eval_suite_config_triggers_tools_tier(self, imap):
+        """task_eval suite config edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file(
+            "tests/task_eval/validation_suites.yaml", imap)
+
+        assert match.rule == "task_eval_config"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
         match = test_impact.classify_file(

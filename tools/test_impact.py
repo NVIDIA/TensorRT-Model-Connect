@@ -1372,6 +1372,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
         ),
         ClassificationRule(
+            priority=486,
+            name="task_eval_tool",
+            matcher=_path_equals("tools/task_eval.py"),
+            resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=487,
+            name="task_eval_config",
+            matcher=_path_startswith("tests/task_eval/"),
+            resolver=_match_result("task_eval_config", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_task_eval_suite_config_triggers_tools_tier",),
+        ),
+        ClassificationRule(
             priority=490,
             name="no_impact",
             matcher=_no_impact_matcher,

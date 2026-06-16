@@ -52,3 +52,52 @@ suites:
       notes: >
         First step is local execution. CI can later consume the same suite
         manifest with a smaller sampled dataset and explicit model allowlist.
+
+  - id: mmlu_continuation_parity
+    description: >
+      Base / completion-model continuation parity. Both the HF reference and the
+      TRTFB bundle greedily continue the same plain-text MMLU prompt; the two
+      continuations are compared token-level (no gold answer, no logits). This
+      measures conversion fidelity for completion models rather than task
+      accuracy.
+    user_contract: continuation_parity
+    dataset:
+      kind: mmlu_five_shot_json
+      default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+    selectors:
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - decoder_kv_cache
+        - decoder_moe
+        - ssm_recurrent
+        - rwkv_recurrent
+        - hybrid_mamba_attention
+        - torchtrt_decoder
+      user_contracts:
+        - continuation_parity
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    build:
+      min_max_cache_length: 0
+    gates:
+      min_token_prefix_agreement: 0.98
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Intended for local/p2021 validation before a sampled CI variant is
+        enabled.

@@ -421,7 +421,28 @@ def write_predictions(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def predictions_file_valid(predictions_path: Path, answers_path: Path) -> bool:
+def _int_list(value: Any) -> list[int] | None:
+    if not isinstance(value, list):
+        return None
+    try:
+        return [int(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _generated_token_ids(row: dict[str, Any]) -> list[int] | None:
+    generated = _int_list(row.get("generated_token_ids"))
+    if generated is not None:
+        return generated
+    return _int_list(row.get("token_ids"))
+
+
+def predictions_file_valid(
+    predictions_path: Path,
+    answers_path: Path,
+    *,
+    require_token_ids: bool = False,
+) -> bool:
     if not predictions_path.is_file() or not answers_path.is_file():
         return False
     try:
@@ -431,7 +452,11 @@ def predictions_file_valid(predictions_path: Path, answers_path: Path) -> bool:
         return False
     responses = predictions.get("responses")
     requests = answers.get("requests")
-    return isinstance(responses, list) and isinstance(requests, list) and len(responses) == len(requests)
+    if not isinstance(responses, list) or not isinstance(requests, list) or len(responses) != len(requests):
+        return False
+    if require_token_ids:
+        return all(isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses)
+    return True
 
 
 def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
@@ -441,6 +466,7 @@ def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -
             "sample_id": row.get("sample_id", ""),
             "output_text": row.get("text", ""),
             "generated_tokens": row.get("generated_tokens"),
+            "generated_token_ids": _generated_token_ids(row),
             "wall_ms": row.get("wall_ms"),
             "source": "trtfb",
         })
@@ -726,10 +752,12 @@ def run_hf_reference(args: argparse.Namespace) -> None:
             wall_ms = (time.perf_counter() - start) * 1000.0
             generated = output_ids[0, encoded["input_ids"].shape[1]:]
             output_text = tokenizer.decode(generated, skip_special_tokens=False)
+            generated_token_ids = [int(token_id) for token_id in generated.tolist()]
             row = {
                 "sample_id": prompt_rows[idx].get("sample_id", f"mmlu_{idx:06d}"),
                 "output_text": output_text,
                 "generated_tokens": int(generated.shape[0]),
+                "generated_token_ids": generated_token_ids,
                 "wall_ms": wall_ms,
                 "source": "hf",
             }
@@ -1110,6 +1138,7 @@ def eval_one_model(
     dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
     if not dataset_path:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
+    scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     prepare_mmlu_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
@@ -1137,9 +1166,10 @@ def eval_one_model(
 
     max_prompt_len = None
     if not args.skip_prompt_length_check:
+        prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
             model_id=str(model["hf_id"]),
-            prompts_path=work_dir / "prompts.jsonl",
+            prompts_path=prompt_rows_path,
             local_files_only=args.local_files_only,
             trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
         )
@@ -1170,17 +1200,7 @@ def eval_one_model(
     # are never hidden behind stale predictions.
     run_trtfb(_namespace_for_run_trtfb(args, bundle_path, work_dir))
 
-    summary = compare_prediction_sets(
-        json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8")),
-        json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")),
-        json.loads(answers_path.read_text(encoding="utf-8")),
-    )
-    (work_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    write_summary_markdown(summary, work_dir / "summary.md")
-    result = {
+    base_result = {
         "suite": suite["id"],
         "model": model["name"],
         "hf_id": model["hf_id"],
@@ -1190,16 +1210,260 @@ def eval_one_model(
         "max_prompt_tokens": max_prompt_len,
         "hf_reused": hf_reused,
         "bundle_built": built,
-        "hf_accuracy": summary["hf"]["overall_accuracy"],
-        "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
-        "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
-        "prediction_agreement_rate": summary["prediction_agreement_rate"],
     }
+
+    if scorer == "continuation":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_continuation_sets(
+            hf_data,
+            trtfb_data,
+            tokenize=_model_tokenizer(model, args),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_continuation_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": "continuation",
+            "comparison_granularity": summary.get("comparison_granularity", ""),
+            "exact_match_rate": summary["exact_match_rate"],
+            "token_prefix_agreement": summary["token_prefix_agreement"],
+            "mean_first_divergence": summary["mean_first_divergence"],
+            "prediction_agreement_rate": summary["token_prefix_agreement"],
+        }
+    else:
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_prediction_sets(
+            hf_data, trtfb_data, json.loads(answers_path.read_text(encoding="utf-8"))
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": "mcq",
+            "hf_accuracy": summary["hf"]["overall_accuracy"],
+            "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
+            "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
+            "prediction_agreement_rate": summary["prediction_agreement_rate"],
+        }
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Continuation parity for base / completion models (generation-only, no logits).
+# HF reference and TRTFB both greedily generate from the same plain-text prompt;
+# we compare the two continuations. No gold answer or logprobs are needed — the
+# metric is HF<->TRTFB output agreement (conversion fidelity).
+# ---------------------------------------------------------------------------
+
+
+def _first_divergence(a: list[Any], b: list[Any]) -> int:
+    """Index of the first differing element; min length if one is a prefix."""
+    limit = min(len(a), len(b))
+    for i in range(limit):
+        if a[i] != b[i]:
+            return i
+    return limit
+
+
+def compare_continuation_sets(
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    tokenize: Any = None,
+    require_token_ids: bool = False,
+) -> dict[str, Any]:
+    """Compare HF vs TRTFB greedy continuations.
+
+    Prefer generated token ids emitted by the runners. ``tokenize`` is only a
+    compatibility fallback for older prediction files that do not contain ids.
+    """
+    hf_rows = hf_predictions.get("responses", [])
+    trt_rows = trtfb_predictions.get("responses", [])
+    if not isinstance(hf_rows, list) or not isinstance(trt_rows, list):
+        raise ValueError("HF and TRTFB predictions must contain response lists")
+    if len(hf_rows) != len(trt_rows):
+        raise ValueError(
+            f"HF and TRTFB predictions must have the same length: "
+            f"{len(hf_rows)} != {len(trt_rows)}"
+        )
+    if not all(isinstance(row, dict) for row in hf_rows + trt_rows):
+        raise ValueError("HF and TRTFB predictions must contain object rows")
+
+    hf_id_rows = [_generated_token_ids(row) for row in hf_rows]
+    trt_id_rows = [_generated_token_ids(row) for row in trt_rows]
+    has_all_token_ids = all(ids is not None for ids in hf_id_rows + trt_id_rows)
+    if require_token_ids and not has_all_token_ids:
+        missing = []
+        for label, rows in (("hf", hf_id_rows), ("trtfb", trt_id_rows)):
+            missing.extend(f"{label}[{idx}]" for idx, ids in enumerate(rows) if ids is None)
+        raise ValueError(
+            "Continuation token-id metric requires generated_token_ids in every prediction row; "
+            f"missing: {', '.join(missing[:8])}{' ...' if len(missing) > 8 else ''}"
+        )
+    if has_all_token_ids:
+        comparison_granularity = "generated_token_ids"
+    elif tokenize is not None:
+        comparison_granularity = "retokenized_output_text"
+    else:
+        comparison_granularity = "characters"
+
+        def tokenize(s: str) -> list[str]:
+            return list(s)
+
+    exact = 0
+    text_exact = 0
+    total_matched = 0
+    total_reference = 0
+    div_positions: list[int] = []
+    samples: list[dict[str, Any]] = []
+    for idx, (hf_row, trt_row) in enumerate(zip(hf_rows, trt_rows, strict=True)):
+        hf_text = str(hf_row.get("output_text", ""))
+        trt_text = str(trt_row.get("output_text", ""))
+        text_is_exact = hf_text == trt_text
+        text_exact += int(text_is_exact)
+        if has_all_token_ids:
+            hf_tokens = hf_id_rows[idx] or []
+            trt_tokens = trt_id_rows[idx] or []
+        else:
+            hf_tokens = tokenize(hf_text)
+            trt_tokens = tokenize(trt_text)
+        is_exact = hf_tokens == trt_tokens
+        exact += int(is_exact)
+        divergence = _first_divergence(hf_tokens, trt_tokens)
+        reference_len = max(1, len(hf_tokens), len(trt_tokens))
+        total_matched += min(divergence, reference_len)
+        total_reference += reference_len
+        div_positions.append(divergence)
+        hf_token_at_divergence = hf_tokens[divergence] if divergence < len(hf_tokens) else None
+        trt_token_at_divergence = trt_tokens[divergence] if divergence < len(trt_tokens) else None
+        samples.append({
+            "index": idx,
+            "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+            "exact": is_exact,
+            "text_exact": text_is_exact,
+            "first_divergence": divergence,
+            "hf_len": len(hf_tokens),
+            "trtfb_len": len(trt_tokens),
+            "hf_token_at_divergence": hf_token_at_divergence,
+            "trtfb_token_at_divergence": trt_token_at_divergence,
+        })
+
+    count = len(hf_rows)
+    exact_rate = (exact / count) if count else 0.0
+    prefix_agreement = (total_matched / total_reference) if total_reference else 0.0
+    mean_divergence = (sum(div_positions) / count) if count else 0.0
+    return {
+        "comparison_granularity": comparison_granularity,
+        "exact_match_rate": exact_rate,
+        "token_id_exact_match_rate": exact_rate if has_all_token_ids else None,
+        "text_exact_match_rate": (text_exact / count) if count else 0.0,
+        "token_prefix_agreement": prefix_agreement,
+        "token_id_prefix_agreement": prefix_agreement if has_all_token_ids else None,
+        "mean_first_divergence": mean_divergence,
+        "mean_first_token_id_divergence": mean_divergence if has_all_token_ids else None,
+        "count": count,
+        "exact_count": exact,
+        "text_exact_count": text_exact,
+        "samples": samples,
+    }
+
+
+def cmd_compare_continuation(args: argparse.Namespace) -> int:
+    work_dir = Path(args.work_dir)
+    hf_path = Path(args.hf_predictions) if args.hf_predictions else work_dir / "hf_predictions.json"
+    trtfb_path = (
+        Path(args.trtfb_predictions) if args.trtfb_predictions else work_dir / "trtfb_predictions.json"
+    )
+    tokenize = None
+    if args.model:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(
+            args.model,
+            trust_remote_code=args.trust_remote_code,
+            local_files_only=args.local_files_only,
+        )
+        tokenize = lambda s: tok(s, add_special_tokens=False).input_ids  # noqa: E731
+    summary = compare_continuation_sets(
+        json.loads(hf_path.read_text(encoding="utf-8")),
+        json.loads(trtfb_path.read_text(encoding="utf-8")),
+        tokenize=tokenize,
+    )
+    output_path = Path(args.output) if args.output else work_dir / "continuation_parity.json"
+    output_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(
+        f"exact_match={summary['exact_match_rate']:.4f} "
+        f"token_agreement={summary['token_prefix_agreement']:.4f} "
+        f"mean_first_divergence={summary['mean_first_divergence']:.2f} "
+        f"output={output_path}"
+    )
+    return 0
+
+
+def _model_tokenizer(model: dict[str, Any], args: argparse.Namespace) -> Any:
+    """Return a tokenize(str)->list[int] using the model tokenizer, or None."""
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(
+            str(model["hf_id"]),
+            trust_remote_code=getattr(args, "trust_remote_code", False)
+            or bool(model.get("trust_remote_code", False)),
+            local_files_only=getattr(args, "local_files_only", False),
+        )
+        return lambda s: tok(s, add_special_tokens=False).input_ids  # noqa: E731
+    except Exception:
+        return None
+
+
+def _format_optional_float(value: Any, *, precision: int = 4) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.{precision}f}"
+
+
+def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Continuation Parity Summary",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| comparison_granularity | {summary.get('comparison_granularity', '')} |",
+        f"| exact_match_rate | {summary['exact_match_rate']:.4f} |",
+        f"| token_id_exact_match_rate | {_format_optional_float(summary.get('token_id_exact_match_rate'))} |",
+        f"| text_exact_match_rate | {summary['text_exact_match_rate']:.4f} |",
+        f"| token_prefix_agreement | {summary['token_prefix_agreement']:.4f} |",
+        f"| token_id_prefix_agreement | {_format_optional_float(summary.get('token_id_prefix_agreement'))} |",
+        f"| mean_first_divergence | {summary['mean_first_divergence']:.2f} |",
+        f"| mean_first_token_id_divergence | {_format_optional_float(summary.get('mean_first_token_id_divergence'), precision=2)} |",
+        f"| count | {summary['count']} |",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
+    common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "continuation":
+        return (
+            f"model={model['name']} exact={result['exact_match_rate']:.4f} "
+            f"token_agreement={result['token_prefix_agreement']:.4f} "
+            f"mean_first_divergence={result['mean_first_divergence']:.2f} "
+            f"granularity={result.get('comparison_granularity', '')} {common}"
+        )
+    return (
+        f"model={model['name']} hf={result['hf_accuracy']:.4f} "
+        f"trtfb={result['trtfb_accuracy']:.4f} "
+        f"agreement={result['prediction_agreement_rate']:.4f} {common}"
+    )
 
 
 def add_generation_args(parser: argparse.ArgumentParser) -> None:
@@ -1279,6 +1543,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("convert-trtfb")
     p.add_argument("--raw", required=True)
     p.add_argument("--predictions", required=True)
+
+    p = sub.add_parser("compare-continuation")
+    p.add_argument("--work-dir", required=True)
+    p.add_argument("--hf-predictions")
+    p.add_argument("--trtfb-predictions")
+    p.add_argument("--model", default="", help="Optional model id; enables token-level parity.")
+    p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument("--local-files-only", action="store_true")
+    p.add_argument("--output")
 
     p = sub.add_parser("score")
     p.add_argument("--answers")
@@ -1760,12 +2033,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 continue
         result["status"] = "passed"
         results.append(result)
-        print(
-            f"[task_eval] model={model['name']} hf={result['hf_accuracy']:.4f} "
-            f"trtfb={result['trtfb_accuracy']:.4f} "
-            f"agreement={result['prediction_agreement_rate']:.4f} "
-            f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
-        )
+        print(f"[task_eval] {_format_result_line(model, result)}")
         if result.get("gpu_cleanup_confirmed") is False:
             reason = (
                 f"Skipped because GPU cleanup after {model['name']} was not confirmed"
@@ -1816,6 +2084,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "convert-trtfb":
         return cmd_convert_trtfb(args)
+    if args.cmd == "compare-continuation":
+        return cmd_compare_continuation(args)
     if args.cmd == "score":
         return cmd_score(args)
     if args.cmd == "compare":
