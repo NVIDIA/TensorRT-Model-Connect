@@ -1928,7 +1928,9 @@ def compare_continuation_sets(
         comparison_granularity = "retokenized_output_text"
     else:
         comparison_granularity = "characters"
-        tokenize = lambda s: list(s)
+
+        def tokenize(s: str) -> list[str]:
+            return list(s)
 
     exact = 0
     text_exact = 0
