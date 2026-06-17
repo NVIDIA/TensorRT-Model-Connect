@@ -31,7 +31,7 @@ DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
 DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
-CHOICE_LETTERS = set("ABCDEFGH")
+CHOICE_LETTERS = set("ABCDEFGHIJ")
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -357,6 +357,272 @@ def prepare_mmlu_dataset(
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
+def _message_text_parts(message: dict[str, Any]) -> list[str]:
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return parts
+
+
+def _message_image_refs(message: dict[str, Any]) -> list[str]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    refs: list[str] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "image":
+            continue
+        value = item.get("image")
+        if isinstance(value, str):
+            refs.append(value)
+    return refs
+
+
+def vlm_request_prompt(request: dict[str, Any]) -> str:
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        parts: list[str] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", ""))
+            if role and role not in {"system", "user"}:
+                continue
+            parts.extend(_message_text_parts(msg))
+        if parts:
+            return "\n\n".join(part.strip() for part in parts if part.strip())
+    prompt = request.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    raise ValueError("VLM request has neither text messages nor prompt")
+
+
+def _candidate_dataset_asset_paths(dataset_path: Path, asset_ref: str) -> list[Path]:
+    asset = Path(asset_ref)
+    if asset.is_absolute():
+        return [asset]
+    dataset_dir = dataset_path.parent
+    candidates = [dataset_dir / asset]
+    parts = asset.parts
+    if parts and parts[0].lower() == dataset_dir.name.lower():
+        candidates.append(dataset_dir.joinpath(*parts[1:]))
+    if parts:
+        parent = dataset_dir.parent
+        for child in parent.iterdir() if parent.is_dir() else []:
+            if child.name.lower() == parts[0].lower():
+                candidates.append(child.joinpath(*parts[1:]))
+                break
+    candidates.append(Path("/mnt/data") / asset)
+    return candidates
+
+
+def resolve_dataset_asset_path(dataset_path: Path, asset_ref: str) -> Path:
+    for candidate in _candidate_dataset_asset_paths(dataset_path, asset_ref):
+        if candidate.is_file():
+            return candidate.resolve()
+    candidates = ", ".join(str(path) for path in _candidate_dataset_asset_paths(dataset_path, asset_ref))
+    raise FileNotFoundError(f"Could not resolve dataset asset {asset_ref!r}; tried: {candidates}")
+
+
+def vlm_request_images(dataset_path: Path, request: dict[str, Any]) -> list[Path]:
+    refs: list[str] = []
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                refs.extend(_message_image_refs(msg))
+    if not refs and isinstance(request.get("image"), str):
+        refs.append(str(request["image"]))
+    return [resolve_dataset_asset_path(dataset_path, ref) for ref in refs]
+
+
+def _safe_sample_filename(sample_id: str, suffix: str = ".png") -> str:
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", sample_id).strip("._")
+    return f"{stem or 'sample'}{suffix}"
+
+
+def _resize_image_to_square(src: Path, dst: Path, image_size: int) -> None:
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("Fixed VLM task eval normalization requires Pillow") from exc
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(src) as image:
+        rgb = image.convert("RGB")
+        resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC", Image.BICUBIC)
+        rgb.resize((image_size, image_size), resampling).save(dst)
+
+
+def _normalized_single_user_vlm_request(
+    request: dict[str, Any],
+    *,
+    prompt: str,
+    image_path: Path,
+) -> dict[str, Any]:
+    normalized = {key: value for key, value in request.items() if key != "messages"}
+    normalized["messages"] = [{
+        "role": "user",
+        "content": [
+            {"type": "image", "image": str(image_path)},
+            {"type": "text", "text": prompt},
+        ],
+    }]
+    return normalized
+
+
+def load_vlm_chat_requests(
+    dataset_path: Path,
+    *,
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed = [
+        (idx, req)
+        for idx, req in enumerate(requests)
+        if isinstance(req, dict) and (not subject or str(req.get("subject", "")) == subject)
+    ]
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    return data, indexed
+
+
+def prepare_vlm_chat_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> dict[str, Path]:
+    data, indexed = load_vlm_chat_requests(
+        dataset_path,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+
+    image_count = 0
+    output_requests: list[dict[str, Any]] = []
+    dataset_cfg = suite.get("dataset", {})
+    normalization = dataset_cfg.get("normalization", {})
+    if not isinstance(normalization, dict):
+        normalization = {}
+    fixed_image_size = int(normalization.get("image_size", 0) or 0)
+    prompt_contract = str(normalization.get("prompt_contract", "native") or "native")
+    with prompts_path.open("w", encoding="utf-8") as f:
+        for out_idx, (dataset_index, request) in enumerate(indexed):
+            images = vlm_request_images(dataset_path, request)
+            if len(images) != 1:
+                raise ValueError(
+                    f"VLM task eval currently supports exactly one image per sample; "
+                    f"dataset_index={dataset_index} has {len(images)}"
+                )
+            image_count += len(images)
+            sample_id = str(request.get("id") or f"vlm_{dataset_index:06d}")
+            prompt = vlm_request_prompt(request)
+            output_image = images[0]
+            output_request = request
+            if prompt_contract == "single_user_image_first":
+                if fixed_image_size <= 0:
+                    raise ValueError(
+                        "single_user_image_first VLM normalization requires dataset.normalization.image_size"
+                    )
+                output_image = work_dir / "images" / _safe_sample_filename(sample_id)
+                _resize_image_to_square(images[0], output_image, fixed_image_size)
+                output_request = _normalized_single_user_vlm_request(
+                    request,
+                    prompt=prompt,
+                    image_path=output_image,
+                )
+            elif prompt_contract != "native":
+                raise ValueError(f"Unsupported VLM prompt normalization {prompt_contract!r}")
+            output_requests.append(output_request)
+            sample = {
+                "sample_id": sample_id,
+                "dataset_index": dataset_index,
+                "eval_index": out_idx,
+                "subject": request.get("subject", ""),
+                "answer": request["answer"],
+                "prompt": prompt,
+                "images": [str(output_image)],
+            }
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    answers = _copy_dataset_header(data, output_requests)
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(indexed),
+        "image_count": image_count,
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": suite.get("generation", {}),
+        "files": {
+            "answers": str(answers_path),
+            "prompts": str(prompts_path),
+        },
+    }
+    if normalization:
+        manifest["normalization"] = normalization
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_task_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> dict[str, Path]:
+    dataset_kind = suite.get("dataset", {}).get("kind", "")
+    if dataset_kind == "mmlu_five_shot_json":
+        return prepare_mmlu_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+        )
+    if dataset_kind == "vlm_chat_json":
+        return prepare_vlm_chat_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+        )
+    raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
@@ -473,6 +739,115 @@ def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -
     write_predictions(predictions_path, rows)
 
 
+def _trtmc_binary_from_args(args: argparse.Namespace) -> str:
+    return str(getattr(args, "trtmc_binary", "") or "build/trtmc")
+
+
+def run_vlm_trtfb(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    defaults = generation_defaults(work_dir)
+    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
+        defaults.get("max_new_tokens", 8)
+    )
+    temperature = args.temperature if args.temperature is not None else float(
+        defaults.get("temperature", 1.0)
+    )
+    top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
+    top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
+    min_p = args.min_p if args.min_p is not None else float(defaults.get("min_p", 0.0))
+    seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
+
+    env = os.environ.copy()
+    if args.cuda_visible_devices:
+        env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+
+    rows: list[dict[str, Any]] = []
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            images = prompt_row.get("images", [])
+            if not isinstance(images, list) or len(images) != 1:
+                raise ValueError(f"VLM TRTFB run expects exactly one image for sample {idx}")
+            cmd = [
+                _trtmc_binary_from_args(args),
+                "run",
+                args.bundle,
+                "--prompt",
+                str(prompt_row.get("prompt", "")),
+                "--image",
+                str(images[0]),
+                "--max-new-tokens",
+                str(max_new_tokens),
+                "--temperature",
+                str(temperature),
+                "--top-k",
+                str(top_k),
+                "--top-p",
+                str(top_p),
+                "--min-p",
+                str(min_p),
+            ]
+            if seed >= 0:
+                cmd.extend(["--seed", str(seed + idx)])
+            if args.hf_python:
+                cmd.extend(["--hf-python", args.hf_python])
+            if args.backend_dir:
+                cmd.extend(["--backend-dir", args.backend_dir])
+            if args.kv_cache_size:
+                cmd.extend(["--kv-cache-size", args.kv_cache_size])
+            if args.config:
+                cmd.extend(["--config", args.config])
+            for token in args.set or []:
+                cmd.extend(["--set", token])
+            if args.chat_template or bool(defaults.get("apply_chat_template", False)):
+                cmd.append("--chat-template")
+            if not bool(defaults.get("enable_thinking", True)):
+                cmd.append("--no-thinking")
+
+            log_f.write(f"$ {' '.join(cmd)}\n")
+            start = time.perf_counter()
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            if proc.stderr:
+                log_f.write(proc.stderr)
+                if not proc.stderr.endswith("\n"):
+                    log_f.write("\n")
+            if proc.returncode != 0:
+                if proc.stdout:
+                    log_f.write(proc.stdout)
+                    if not proc.stdout.endswith("\n"):
+                        log_f.write("\n")
+                raise RuntimeError(
+                    f"VLM TRTFB task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                )
+            output_text = _strip_generated_text_prefix(
+                proc.stdout,
+                str(prompt_row.get("prompt", "")),
+            )
+            row = {
+                "sample_id": prompt_row.get("sample_id", f"vlm_{idx:06d}"),
+                "output_text": output_text,
+                "generated_tokens": None,
+                "generated_token_ids": None,
+                "wall_ms": wall_ms,
+                "source": "trtfb",
+            }
+            rows.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.vlm_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+    write_predictions(predictions, rows)
+
+
 def clean_text(text: str) -> str:
     text = re.sub(r"(?:<think>)?.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<\|.*?\|>", "", text)
@@ -485,12 +860,12 @@ def _strip_markdown(text: str) -> str:
 
 def parse_multi_choice_response(text: str) -> str:
     text = _strip_markdown(text.strip())
-    match = re.search(r"\banswer\s*(?:is|:)?\s*\(?([A-H])\b", text, re.IGNORECASE)
+    match = re.search(r"\banswer\s*(?:is|:)?\s*\(?([A-J])\b", text, re.IGNORECASE)
     if match:
         return match.group(1).upper()
     if len(text) == 1 and text.upper() in CHOICE_LETTERS:
         return text.upper()
-    match = re.match(r"^[\(]?([A-H])[\.\):\s]", text, re.IGNORECASE)
+    match = re.match(r"^[\(]?([A-J])[\.\):\s]", text, re.IGNORECASE)
     if match:
         return match.group(1).upper()
     return text
@@ -653,14 +1028,248 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
 
 
 def generation_defaults(work_dir: Path) -> dict[str, Any]:
-    manifest_path = work_dir / "manifest.json"
-    if not manifest_path.exists():
-        return {}
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = work_manifest(work_dir)
     return manifest.get("generation", {})
 
 
+def work_manifest(work_dir: Path) -> dict[str, Any]:
+    manifest_path = work_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _work_dataset_kind(work_dir: Path) -> str:
+    return str(work_manifest(work_dir).get("dataset_kind", ""))
+
+
+def _model_dtype(torch_mod: Any, dtype_name: str) -> Any:
+    if dtype_name == "float16":
+        return torch_mod.float16
+    if dtype_name == "bfloat16":
+        return torch_mod.bfloat16
+    return "auto"
+
+
+def _load_pil_images(image_paths: list[str]) -> list[Any]:
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("VLM task eval requires Pillow") from exc
+    images: list[Any] = []
+    for image_path in image_paths:
+        with Image.open(image_path) as image:
+            images.append(image.convert("RGB"))
+    return images
+
+
+def _vlm_model_class(transformers_mod: Any) -> Any:
+    for name in ("AutoModelForImageTextToText", "AutoModelForVision2Seq", "AutoModelForCausalLM"):
+        cls = getattr(transformers_mod, name, None)
+        if cls is not None:
+            return cls
+    raise RuntimeError("Transformers installation does not expose a VLM-capable AutoModel class")
+
+
+def _vlm_prompt_has_image_placeholder(text: str) -> bool:
+    return any(marker in text for marker in (
+        "<|image_pad|>",
+        "<|vision_start|>",
+        "<image>",
+        "<IMG_CONTEXT>",
+    ))
+
+
+def _vlm_fallback_prompt(model_id: str, prompt: str) -> str:
+    lower_id = model_id.lower()
+    if "qwen" in lower_id and "vl" in lower_id:
+        return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
+    if "internvl" in lower_id:
+        return f"<IMG_CONTEXT>\n{prompt}"
+    return prompt
+
+
+def _vlm_chat_text(
+    processor: Any,
+    request: dict[str, Any],
+    fallback_prompt: str,
+    model_id: str,
+) -> str:
+    messages = request.get("messages")
+    rendered = ""
+    if hasattr(processor, "apply_chat_template") and isinstance(messages, list):
+        rendered = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    tokenizer = getattr(processor, "tokenizer", None)
+    if (
+        not rendered
+        and tokenizer is not None
+        and hasattr(tokenizer, "apply_chat_template")
+        and isinstance(messages, list)
+    ):
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    if rendered:
+        return rendered
+    if _vlm_prompt_has_image_placeholder(fallback_prompt):
+        return fallback_prompt
+    return _vlm_fallback_prompt(model_id, fallback_prompt)
+
+
+def _strip_generated_text_prefix(text: str, prompt: str) -> str:
+    generated = text.strip()
+    for marker in ("assistant\n", "assistant:", "ASSISTANT:"):
+        if marker in generated:
+            generated = generated.split(marker, 1)[-1].strip()
+            break
+    if prompt and generated.startswith(prompt):
+        generated = generated[len(prompt):].strip()
+    return generated
+
+
+def _to_device(batch: Any, device: Any) -> Any:
+    if hasattr(batch, "to"):
+        return batch.to(device)
+    return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
+
+
+def run_vlm_hf_reference(args: argparse.Namespace) -> None:
+    try:
+        import torch
+        import transformers
+        from transformers import AutoProcessor, logging
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("VLM run-hf requires torch and transformers") from exc
+
+    work_dir = Path(args.work_dir)
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    if len(prompt_rows) != len(answers["requests"]):
+        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
+    defaults = generation_defaults(work_dir)
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
+        defaults.get("max_new_tokens", 8)
+    )
+    temperature = args.temperature if args.temperature is not None else float(
+        defaults.get("temperature", 1.0)
+    )
+    top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
+    top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
+    seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
+    do_sample = args.do_sample or bool(defaults.get("do_sample", False))
+
+    logging.set_verbosity_error()
+    processor = AutoProcessor.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    model_cls = _vlm_model_class(transformers)
+    model_kwargs = {
+        "torch_dtype": _model_dtype(torch, args.dtype),
+        "trust_remote_code": args.trust_remote_code,
+        "local_files_only": args.local_files_only,
+    }
+    if args.device_map:
+        model_kwargs["device_map"] = args.device_map
+    if args.attn_impl:
+        model_kwargs["attn_implementation"] = args.attn_impl
+    model = model_cls.from_pretrained(args.model, **model_kwargs).eval()
+    if not args.device_map:
+        device = torch.device(args.device)
+        model.to(device)
+    else:
+        device = model.device
+
+    tokenizer = getattr(processor, "tokenizer", None)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if tokenizer is not None and pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        pad_token_id = tokenizer.pad_token_id
+
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, request in enumerate(answers["requests"]):
+            prompt_row = prompt_rows[idx]
+            image_paths = [str(path) for path in prompt_row.get("images", [])]
+            if len(image_paths) != 1:
+                raise ValueError(f"VLM HF reference expects exactly one image for sample {idx}")
+            images = _load_pil_images(image_paths)
+            prompt = _vlm_chat_text(
+                processor,
+                request,
+                str(prompt_row.get("prompt", "")),
+                args.model,
+            )
+            inputs = processor(
+                text=[prompt],
+                images=images,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = _to_device(inputs, device)
+            if seed >= 0:
+                torch.manual_seed(seed + idx)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed + idx)
+            generate_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+                "num_beams": 1,
+            }
+            if pad_token_id is not None:
+                generate_kwargs["pad_token_id"] = pad_token_id
+            if eos_token_id is not None:
+                generate_kwargs["eos_token_id"] = eos_token_id
+            start = time.perf_counter()
+            with torch.inference_mode():
+                output_ids = model.generate(**inputs, **generate_kwargs)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            input_len = int(inputs["input_ids"].shape[1])
+            generated = output_ids[0, input_len:]
+            if hasattr(processor, "batch_decode"):
+                output_text = processor.batch_decode(
+                    generated.unsqueeze(0), skip_special_tokens=False
+                )[0]
+            elif tokenizer is not None:
+                output_text = tokenizer.decode(generated, skip_special_tokens=False)
+            else:
+                output_text = str(generated.tolist())
+            row = {
+                "sample_id": prompt_row.get("sample_id", f"vlm_{idx:06d}"),
+                "output_text": output_text,
+                "generated_tokens": int(generated.shape[0]),
+                "generated_token_ids": [int(token_id) for token_id in generated.tolist()],
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+    write_predictions(pred_path, responses)
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def run_hf_reference(args: argparse.Namespace) -> None:
+    if _work_dataset_kind(Path(args.work_dir)) == "vlm_chat_json":
+        run_vlm_hf_reference(args)
+        return
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, logging
@@ -776,6 +1385,9 @@ def run_hf_reference(args: argparse.Namespace) -> None:
 
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
+    if _work_dataset_kind(work_dir) == "vlm_chat_json":
+        run_vlm_trtfb(args)
+        return
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
@@ -1049,6 +1661,7 @@ def _namespace_for_run_trtfb(args: argparse.Namespace, bundle_path: Path, work_d
     return argparse.Namespace(
         bundle=str(bundle_path),
         work_dir=str(work_dir),
+        trtmc_binary=args.trtmc_binary,
         benchmark_binary=args.benchmark_binary,
         hf_python=args.hf_python,
         backend_dir=args.backend_dir,
@@ -1139,7 +1752,7 @@ def eval_one_model(
     if not dataset_path:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
-    prepare_mmlu_dataset(
+    prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -1315,9 +1928,7 @@ def compare_continuation_sets(
         comparison_granularity = "retokenized_output_text"
     else:
         comparison_granularity = "characters"
-
-        def tokenize(s: str) -> list[str]:
-            return list(s)
+        tokenize = lambda s: list(s)
 
     exact = 0
     text_exact = 0
@@ -1527,6 +2138,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run-trtfb")
     p.add_argument("--bundle", required=True)
     p.add_argument("--work-dir", required=True)
+    p.add_argument("--trtmc-binary", default="build/trtmc")
     p.add_argument("--benchmark-binary", default="build/trtmc_dataset_benchmark")
     p.add_argument("--hf-python", default="")
     p.add_argument("--backend-dir", default="")
@@ -1672,13 +2284,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
 def cmd_prepare(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
-    dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind != "mmlu_five_shot_json":
-        raise ValueError(f"prepare currently supports mmlu_five_shot_json, got {dataset_kind!r}")
     dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
     if not dataset_path:
         raise ValueError(f"Suite {args.suite} has no dataset path; pass --dataset")
-    outputs = prepare_mmlu_dataset(
+    outputs = prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=Path(args.work_dir),
         suite=suite,
@@ -1968,8 +2577,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind != "mmlu_five_shot_json":
-        raise ValueError(f"eval currently supports mmlu_five_shot_json, got {dataset_kind!r}")
+    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json"}:
+        raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
     waives = load_waives(Path(args.waives), args.waive_platform) if args.waives else {}
     selected = selected_models_for_suite(
