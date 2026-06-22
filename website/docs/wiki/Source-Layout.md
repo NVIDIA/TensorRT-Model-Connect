@@ -135,9 +135,9 @@ strategy family in one place.
 | `z_image/` | `diffusion_zimage` | `ZImagePipeline` |
 | `pixart/`, `ltx_video/` | image/video diffusion strategies | family-specific pipelines |
 
-Shared helpers remain in `src/runtime/plugins/shared/`: `plugin_helpers.h/cpp`
-(ITrtModule loading via backend, tokenizer creation, KV-dim),
-`diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
+Runtime helper code is model-local. Each `src/runtime/models/<model>/`
+folder carries the helper copies it needs, such as `plugin_helpers.h/cpp`,
+`diffusion_helpers.h/cpp`, or `audio_helpers.h/cpp`.
 
 ### `src/runtime/core/`
 
@@ -417,7 +417,7 @@ Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 
-92 test executables. Plain `main()` programs with `check(condition, name)`
+94 test executables. Plain `main()` programs with `check(condition, name)`
 helpers. Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
 
 Covers: bundle format, tokenizers (vocab, HF Python), text/JSON parsers,
@@ -444,9 +444,10 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-122 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
-`family`, `runtime_strategy`, `prompt`, `max_new_tokens`, and optional
-fields like `logit_atol`, `trust_remote_code`, `skip`.
+197 JSON manifest files are grouped under family-owned `manifests/`
+directories and listed by 74 `MODEL.toml` indexes. Each manifest specifies
+`hf_id`, `bundle`, `family`, `runtime_strategy`, `prompt`, `max_new_tokens`,
+and optional fields like `logit_atol`, `trust_remote_code`, `skip`.
 
 ### `tests/e2e_harness/` -- E2E Test Framework
 

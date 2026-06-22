@@ -23,6 +23,7 @@
 #   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
 #   --task-strategy STR      Filter by task strategy
 #   --exclude-ci-tier STR    Exclude manifests with this ci_tier in full mode
+#   --tests-file PATH        Pytest node IDs to run (one per line)
 #   --progress-interval N    Progress print interval in seconds (default: 30)
 #   All other args are passed through to pytest (e.g., --rebuild-engines)
 #
@@ -55,6 +56,7 @@ EXTRA_ARGS=()
 FILTER_ARGS=()
 COLLECT_ARGS=()
 MODELS_FILE=""
+TESTS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --engine-dir)         ENGINE_DIR="$2"; shift 2 ;;
@@ -74,6 +76,10 @@ while [ $# -gt 0 ]; do
             ;;
         --models-file)
             MODELS_FILE="$2"
+            shift 2
+            ;;
+        --tests-file)
+            TESTS_FILE="$2"
             shift 2
             ;;
         *)
@@ -167,22 +173,61 @@ echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
 echo "  Collect args:    ${COLLECT_ARGS[*]:-none}"
 echo "  Models file:     ${MODELS_FILE:-none (collect all)}"
+echo "  Tests file:      ${TESTS_FILE:-none}"
 echo ""
 
 # --- Collect test IDs ---------------------------------------------------------
 
-if [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
-    # Selective mode: read model names from file (one per line), convert to test IDs
-    TESTS=$(sed '/^$/d' "$MODELS_FILE" | while read -r model || [ -n "$model" ]; do
-        echo "tests/test_e2e.py::test_e2e[${model}]"
-    done | sort)
-    echo "  Models file:     $MODELS_FILE ($(echo "$TESTS" | wc -l) models)"
+if [ -n "$TESTS_FILE" ] && [ -f "$TESTS_FILE" ]; then
+    # Selective mode: read pytest node IDs from file (one per line).
+    TESTS=$(sed '/^$/d' "$TESTS_FILE" | sort)
+    echo "  Tests file:      $TESTS_FILE ($(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l) tests)"
+elif [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
+    # Selective compatibility mode: read model names and resolve model-owned node IDs.
+    TESTS=$("$HF_PYTHON" - "$MODELS_FILE" <<'PY' | sort
+import json
+import sys
+from pathlib import Path
+
+models_file = Path(sys.argv[1])
+models_dir = Path("tests/e2e/models")
+model_to_family: dict[str, str] = {}
+
+for manifest_path in sorted({*models_dir.glob("*.json"), *models_dir.glob("*/manifests/*.json")}):
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    name = str(data.get("name", manifest_path.stem) or "")
+    family = str(data.get("family", "") or "")
+    if name and family:
+        model_to_family[name] = family
+
+ok = True
+for raw in models_file.read_text(encoding="utf-8").splitlines():
+    model = raw.strip()
+    if not model:
+        continue
+    if model.startswith("tests/"):
+        print(model)
+        continue
+    family = model_to_family.get(model)
+    if not family:
+        print(f"ERROR: no E2E family found for model {model!r}", file=sys.stderr)
+        ok = False
+        continue
+    print(f"tests/e2e/models/{family}/test_{family}_e2e.py::test_model_e2e[{model}]")
+
+raise SystemExit(0 if ok else 1)
+PY
+)
+    echo "  Models file:     $MODELS_FILE ($(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l) tests)"
 else
     # Full mode: collect all tests via pytest
-    TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" 2>/dev/null \
-        | grep "test_e2e\[" | sort)
+    TESTS=$("$HF_PYTHON" -m pytest tests/e2e/models --co -q "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" 2>/dev/null \
+        | grep "test_model_e2e\[" | sort)
 fi
-TOTAL=$(echo "$TESTS" | wc -l)
+TOTAL=$(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l)
 
 if [ "$TOTAL" -eq 0 ]; then
     echo "ERROR: No tests collected. Check --task-strategy filter." >&2
@@ -244,11 +289,11 @@ collect_test_progress() {
         esac
     done < <(
         awk '
-            /test_e2e\[/ {
+            /test_(model_)?e2e\[/ {
                 node = ""
                 status = ""
                 for (i = 1; i <= NF; i++) {
-                    if ($i ~ /^tests\/test_e2e\.py::test_e2e\[/) {
+                    if ($i ~ /^tests\/.*::test_(model_)?e2e\[/) {
                         node = $i
                     }
                     if ($i ~ /^(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)$/) {
@@ -812,7 +857,7 @@ if [ "$FAILURES" -gt 0 ]; then
 import re, sys
 
 log = open('$LOG').read()
-failed = re.findall(r'tests/test_e2e\.py::test_e2e\[(.+?)\] FAILED', log)
+failed = re.findall(r'tests/.+?::test_(?:model_)?e2e\[(.+?)\] FAILED', log)
 if not failed:
     sys.exit(0)
 
@@ -833,7 +878,7 @@ if not failures_match:
     sys.exit(0)
 
 failures_text = failures_match.group(1)
-blocks = re.split(r'_+ test_e2e\[(.+?)\] _+\n', failures_text)
+blocks = re.split(r'_+ test_(?:model_)?e2e\[(.+?)\] _+\n', failures_text)
 for i in range(1, len(blocks), 2):
     name = blocks[i]
     body = blocks[i + 1] if i + 1 < len(blocks) else ''

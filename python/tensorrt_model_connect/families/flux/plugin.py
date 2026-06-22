@@ -21,8 +21,8 @@ import re
 import sys
 import time
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 
 
 class FluxPlugin:

@@ -177,7 +177,11 @@ parser.add_argument(
 args = parser.parse_args()
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-manifests = sorted((ROOT / "tests" / "e2e" / "models").glob("*.json"))
+models_dir = ROOT / "tests" / "e2e" / "models"
+manifests = sorted({
+    *models_dir.glob("*.json"),
+    *models_dir.glob("*/manifests/*.json"),
+})
 
 # Optional filter: only consider models listed in --models-file
 filter_names: set[str] | None = None

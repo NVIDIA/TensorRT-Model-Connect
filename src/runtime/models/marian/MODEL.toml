@@ -1,1 +1,4 @@
+id = "marian"
+runtime_library = "libtrtmc_model_marian.so"
+runtime_plugins = ["plugin.cpp|register_marian_plugin"]
 runtime_strategies = ["marian_translation"]

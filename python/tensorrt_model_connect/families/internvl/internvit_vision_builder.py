@@ -32,13 +32,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ...builders.utils import create_builder_context
+from . import graph_ops
+from .utils import create_builder_context
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def _get_weight(weights: 'WeightDict', *keys: str):

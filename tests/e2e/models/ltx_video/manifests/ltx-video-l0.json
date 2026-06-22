@@ -1,0 +1,32 @@
+{
+  "name": "ltx-video-l0",
+  "trace_id": "IT-E2E-LTX-L0-01",
+  "hf_id": "Lightricks/LTX-Video",
+  "bundle": "ltx-video-l0.trtfb",
+  "model_type": "ltx_video",
+  "family": "ltx_video",
+  "runtime_strategy": "diffusion_ltx",
+  "ci_tier": "l0_only",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
+  "description": "LTX-Video L0 representative at reduced spatial size and frame count with model-card-style denoising",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A cheerful small red robot with glossy metal panels walks through a sunlit botanical garden filled with colorful flowers, butterflies, and soft golden light. Smooth cinematic camera movement, detailed textures, vibrant colors, shallow depth of field, high quality.",
+  "test_type": "diffusion",
+  "video_num_frames": 9,
+  "video_height": 256,
+  "video_width": 256,
+  "num_inference_steps": 30,
+  "guidance_scale": 3.0,
+  "seed": 42,
+  "stages": [
+    {
+      "name": "end_to_end",
+      "required": true
+    }
+  ],
+  "skip_text_comparison": true,
+  "notes": "PR L0 repro for LTX-Video. Uses the same checkpoint, T5 text encoder, LTX DiT denoiser, VAE decoder, native TRT runtime, runner, comparator, and video artifact contract. L0 keeps the 256x256, nine-frame CI shape but uses 30 denoising steps and a detailed English prompt matching the model card guidance; broader quality coverage can use the model default resolution and frame count."
+}

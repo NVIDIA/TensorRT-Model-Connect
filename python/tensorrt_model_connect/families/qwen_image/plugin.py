@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 import os
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 
 
 def _load_qwen25vl_visual_weights(text_encoder_dir: str) -> WeightDict:
@@ -214,7 +214,7 @@ class QwenImagePlugin:
             build_qwen_image_vae_decoder_engine,
             load_qwen_image_vae_weights,
         )
-        from ..qwen_vl.qwen_vl_vision_builder import build_qwen_vl_vision_engine
+        from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
 
         repo = Path(weights.get("_model_dir") or model_dir)
 

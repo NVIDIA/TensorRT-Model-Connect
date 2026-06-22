@@ -130,9 +130,9 @@ TensorRT-Model-Connect addresses that by separating "understand the model" from 
 
 The facts in these pages were refreshed from the current checkout:
 
-- 68 Python family plugins under `python/tensorrt_model_connect/families/`.
-- 122 E2E model manifests under `tests/e2e/models/`.
-- 31 C++ runtime strategy keys registered by plugin manifests under `src/runtime/plugins/` and `cmake/trtmc_pipeline_plugins.cmake`.
+- 71 Python family plugins under `python/tensorrt_model_connect/families/`.
+- 197 E2E model manifests and 74 family indexes under `tests/e2e/models/`.
+- 36 C++ runtime strategy keys registered by model manifests under `src/runtime/models/`.
 
 ## Reading order
 

@@ -1,0 +1,55 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b-tp4",
+  "trace_id": "IT-E2E-NEMO-RNNT-TP4-01",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "bundle": "nemotron-speech-streaming-en-0.6b-tp4.trtfb",
+  "family": "nemotron_speech_streaming",
+  "runtime_strategy": "speech_to_text_rnnt",
+  "test_type": "transcription",
+  "max_cache_length": 128,
+  "prompt": "test",
+  "max_new_tokens": 80,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+id = "gpt_neo"
+plugin = "gpt_neo"
+test_manifests = [
+  "manifests/gpt-neo-125m-tp4.json",
+  "manifests/gpt-neo-125m.json",
+]

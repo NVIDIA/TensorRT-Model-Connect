@@ -45,7 +45,7 @@ Infer or ask for:
 Detect `runtime_strategy` from an E2E manifest or bundle:
 
 ```bash
-rg '"runtime_strategy"' tests/e2e/models/<model-name>.json
+rg '"runtime_strategy"' tests/e2e/models/<family>/manifests/<model-name>.json
 ./build/trtmc inspect <bundle.trtfb> | grep "Runtime strategy"
 ```
 

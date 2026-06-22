@@ -1,1 +1,4 @@
+id = "t5"
+runtime_library = "libtrtmc_model_t5.so"
+runtime_plugins = ["plugin.cpp|register_t5_plugin"]
 runtime_strategies = ["text_to_text"]

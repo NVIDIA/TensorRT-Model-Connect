@@ -5,15 +5,8 @@
 
 namespace trtmc {
 
-extern void register_all_pipeline_plugins(PipelineRegistry& registry);
-
 PipelineRegistry& PipelineRegistry::instance() {
     static PipelineRegistry registry;
-    static const bool registered = [] {
-        register_all_pipeline_plugins(registry);
-        return true;
-    }();
-    (void)registered;
     return registry;
 }
 

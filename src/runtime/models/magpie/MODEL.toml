@@ -1,1 +1,4 @@
+id = "magpie"
+runtime_library = "libtrtmc_model_magpie.so"
+runtime_plugins = ["plugin.cpp|register_magpie_plugin"]
 runtime_strategies = ["text_to_audio_magpie"]

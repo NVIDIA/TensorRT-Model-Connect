@@ -1,0 +1,9 @@
+id = "bloom"
+plugin = "bloom"
+module = "plugin"
+aliases = [
+  "bloom",
+]
+prefixes = [
+  "bloom",
+]

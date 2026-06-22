@@ -59,8 +59,8 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -77,7 +77,7 @@ trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 # Conditionally import graph_ops -- it needs TRT
 try:
-    from ... import graph_ops
+    from . import graph_ops
     from .standard_decoder_builder import build_standard_decoder_engine
 except ImportError:
     graph_ops = None

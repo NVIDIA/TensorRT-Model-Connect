@@ -6,6 +6,7 @@
 #   ./scripts/validate_family.sh models/hf/Qwen__Qwen3-0.6B            # local dir
 #   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --max-cache-length 512
 #   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --binary ./build/trtmc
+#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --isolate-model-plugin
 #
 # Requirements: torch, tensorrt_model_connect installed, C++ binary built.
 
@@ -19,6 +20,8 @@ MAX_CACHE_LENGTH=256
 BINARY="${PROJECT_DIR}/build/trtmc"
 BUNDLE_DIR="/tmp"
 TRUST_REMOTE_CODE=""
+MODEL_PLUGIN_DIR=""
+ISOLATE_MODEL_PLUGIN="false"
 
 # Parse args
 MODEL=""
@@ -27,9 +30,11 @@ while [[ $# -gt 0 ]]; do
         --max-cache-length) MAX_CACHE_LENGTH="$2"; shift 2 ;;
         --binary) BINARY="$2"; shift 2 ;;
         --bundle-dir) BUNDLE_DIR="$2"; shift 2 ;;
+        --model-plugin-dir) MODEL_PLUGIN_DIR="$2"; shift 2 ;;
+        --isolate-model-plugin) ISOLATE_MODEL_PLUGIN="true"; shift ;;
         --trust-remote-code) TRUST_REMOTE_CODE="--trust-remote-code"; shift ;;
         -h|--help)
-            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--trust-remote-code]"
+            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
             exit 0
             ;;
         *)
@@ -49,6 +54,55 @@ if [[ -z "$MODEL" ]]; then
     echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH]" >&2
     exit 1
 fi
+
+copy_isolated_model_plugin() {
+    local runtime_strategy="$1"
+    local binary_path="$2"
+    local out_dir="$3"
+
+    "$HF_PYTHON" - "$PROJECT_DIR" "$runtime_strategy" "$binary_path" "$out_dir" <<'PY'
+from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+project = Path(sys.argv[1])
+strategy = sys.argv[2]
+binary = Path(sys.argv[3])
+out_dir = Path(sys.argv[4])
+
+matches: list[tuple[str, str]] = []
+for index_path in sorted((project / "src" / "runtime" / "models").glob("*/MODEL.toml")):
+    raw = tomllib.loads(index_path.read_text(encoding="utf-8"))
+    strategies = raw.get("runtime_strategies") or []
+    if strategy in strategies:
+        model_id = str(raw.get("id") or index_path.parent.name)
+        library = str(raw.get("runtime_library") or f"libtrtmc_model_{model_id}.so")
+        matches.append((model_id, library))
+
+if not matches:
+    raise SystemExit(f"No runtime model plugin owns runtime_strategy={strategy!r}")
+if len(matches) > 1:
+    owners = ", ".join(model for model, _ in matches)
+    raise SystemExit(f"Multiple runtime model plugins own runtime_strategy={strategy!r}: {owners}")
+
+model_id, library = matches[0]
+src = binary.parent / "models" / model_id / library
+if not src.is_file():
+    raise SystemExit(f"Runtime model plugin library not found: {src}")
+
+out_dir.mkdir(parents=True, exist_ok=True)
+dst = out_dir / library
+shutil.copy2(src, dst)
+print(out_dir)
+PY
+}
 
 # Derive a safe bundle filename from the model ID.
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
@@ -100,6 +154,35 @@ if [[ -x "$BINARY" ]]; then
 else
     RUNTIME_STRATEGY=""
 fi
+
+if [[ "$ISOLATE_MODEL_PLUGIN" == "true" ]]; then
+    if [[ -z "$RUNTIME_STRATEGY" ]]; then
+        echo ""
+        echo "==== isolate model plugin ===="
+        echo "FAIL: cannot isolate plugin because runtime strategy could not be read"
+        STEPS+=("FAIL  isolate model plugin (missing runtime strategy)")
+        FAIL=$((FAIL + 1))
+    elif [[ ! -x "$BINARY" ]]; then
+        echo ""
+        echo "==== isolate model plugin ===="
+        echo "FAIL: cannot isolate plugin because C++ binary is not executable: $BINARY"
+        STEPS+=("FAIL  isolate model plugin (no binary)")
+        FAIL=$((FAIL + 1))
+    else
+        ONLY_DIR="${BUNDLE_DIR}/only-${SAFE_NAME}"
+        echo ""
+        echo "==== isolate model plugin ===="
+        if MODEL_PLUGIN_DIR="$(copy_isolated_model_plugin "$RUNTIME_STRATEGY" "$BINARY" "$ONLY_DIR")"; then
+            echo "Using isolated model plugin dir: $MODEL_PLUGIN_DIR"
+            STEPS+=("PASS  isolate model plugin (${RUNTIME_STRATEGY})")
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: unable to prepare isolated model plugin dir"
+            STEPS+=("FAIL  isolate model plugin (${RUNTIME_STRATEGY})")
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+fi
 DECODER_STRATEGIES="decoder_kv_cache decoder_moe ssm_recurrent rwkv_recurrent hybrid_mamba_attention"
 IS_DECODER=false
 for s in $DECODER_STRATEGIES; do
@@ -143,33 +226,44 @@ else
 fi
 
 # Step 5: E2E pytest (if a manifest exists for this model)
-# Find manifest by matching hf_id or model name in tests/e2e/models/*.json
+# Find manifest by matching hf_id or model name in supported E2E manifest layouts.
 E2E_MODEL=""
-for manifest in "${PROJECT_DIR}"/tests/e2e/models/*.json; do
-    hf_id=$("$HF_PYTHON" -c "import json; d=json.load(open('$manifest')); print(d.get('hf_id',''))" 2>/dev/null || true)
-    manifest_name=$("$HF_PYTHON" -c "import json; d=json.load(open('$manifest')); print(d.get('name',''))" 2>/dev/null || true)
-    skip=$("$HF_PYTHON" -c "import json; d=json.load(open('$manifest')); print(d.get('skip',''))" 2>/dev/null || true)
+E2E_FAMILY=""
+while IFS= read -r -d '' manifest; do
+    hf_id=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("hf_id",""))' "$manifest" 2>/dev/null || true)
+    manifest_name=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("name",""))' "$manifest" 2>/dev/null || true)
+    skip=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("skip",""))' "$manifest" 2>/dev/null || true)
     if [[ -n "$skip" ]]; then
         continue
     fi
     if [[ "$hf_id" == "$MODEL" ]] || [[ "$MODEL" == *"$manifest_name"* ]]; then
         E2E_MODEL="$manifest_name"
+        E2E_FAMILY="$(basename "$(dirname "$(dirname "$manifest")")")"
         break
     fi
-done
+done < <(find "${PROJECT_DIR}/tests/e2e/models" -maxdepth 3 -type f -name "*.json" -print0 | sort -z)
 
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
     ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/tensorrt-model-connect/engines}"
+    E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
+    E2E_ARGS=(
+        "$E2E_NODE"
+        -v
+        --engine-dir "$ENGINE_DIR"
+        --trtmc-binary "$BINARY"
+        --hf-python "$HF_PYTHON"
+        --rebuild-engines
+    )
+    if [[ -n "$MODEL_PLUGIN_DIR" ]]; then
+        E2E_ARGS+=(--model-plugin-dir "$MODEL_PLUGIN_DIR")
+    fi
     run_step "E2E pytest [${E2E_MODEL}]" \
-        "$HF_PYTHON" -m pytest "${PROJECT_DIR}/tests/test_e2e.py::test_e2e[${E2E_MODEL}]" -v \
-            --engine-dir "$ENGINE_DIR" \
-            --trtmc-binary "$BINARY" --hf-python "$HF_PYTHON" \
-            --rebuild-engines
+        "$HF_PYTHON" -m pytest "${E2E_ARGS[@]}"
 elif [[ -z "$E2E_MODEL" ]]; then
     echo ""
     echo "==== E2E pytest ===="
     echo "WARN: no matching E2E manifest found for $MODEL"
-    echo "Create a manifest at tests/e2e/models/<name>.json before declaring success."
+    echo "Create a manifest at tests/e2e/models/<family>/manifests/<name>.json and list it in tests/e2e/models/<family>/MODEL.toml before declaring success."
     STEPS+=("WARN  E2E pytest (no manifest -- create one)")
 elif [[ ! -x "$BINARY" ]]; then
     echo ""

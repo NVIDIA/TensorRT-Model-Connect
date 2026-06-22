@@ -1,0 +1,9 @@
+id = "dpr"
+plugin = "dpr"
+module = "plugin"
+aliases = [
+  "dpr",
+]
+prefixes = [
+  "dpr",
+]

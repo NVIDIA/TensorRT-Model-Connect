@@ -1,0 +1,69 @@
+{
+  "name": "internvl3-8b-tp4",
+  "trace_id": "IT-E2E-IVL3-01-TP4",
+  "hf_id": "OpenGVLab/InternVL3-8B-hf",
+  "bundle": "internvl3-8b-tp4-vl.trtfb",
+  "family": "internvl",
+  "runtime_strategy": "vision_language",
+  "reference_backend": "golden_snapshot",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "internvl3-2b-tp2",
+  "l0_replacement_reason": "InternVL3-8B TP4 is scale coverage; internvl3-2b-tp2 keeps the InternVL3 TP VL path for PR validation because the 2B checkpoint has only 2 KV heads.",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 384,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "test_image": "data/test_img.jpeg",
+  "trust_remote_code": false,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "stages": [
+    {
+      "name": "full_generation",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "golden_snapshot_path": "data/internvl3_8b_golden.json"
+  },
+  "notes": "InternVL3 8B TP4 scale coverage. Uses the same checkpoint, prompt, cache length, image, thresholds, and golden snapshot as internvl3-8b while running the text decoder through rank-local TP engines."
+}

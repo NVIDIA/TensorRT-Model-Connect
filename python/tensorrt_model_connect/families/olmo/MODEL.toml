@@ -1,0 +1,9 @@
+id = "olmo"
+plugin = "olmo"
+module = "plugin"
+aliases = [
+  "olmo",
+]
+prefixes = [
+  "olmo",
+]

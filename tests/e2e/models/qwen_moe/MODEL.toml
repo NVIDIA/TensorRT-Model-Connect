@@ -1,0 +1,7 @@
+id = "qwen_moe"
+plugin = "qwen_moe"
+test_manifests = [
+  "manifests/qwen3-moe-30b-a3b-tp4.json",
+  "manifests/qwen3-moe-30b-a3b.json",
+  "manifests/qwen3-moe-tiny-random.json",
+]

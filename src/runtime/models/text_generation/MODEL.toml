@@ -1,1 +1,4 @@
+id = "text_generation"
+runtime_library = "libtrtmc_model_text_generation.so"
+runtime_plugins = ["plugin.cpp|register_decoder_plugin"]
 runtime_strategies = ["decoder_kv_cache", "decoder_moe", "nemotron_labs_diffusion"]

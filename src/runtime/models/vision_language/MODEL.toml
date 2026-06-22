@@ -1,1 +1,4 @@
+id = "vision_language"
+runtime_library = "libtrtmc_model_vision_language.so"
+runtime_plugins = ["plugin.cpp|register_vl_plugin"]
 runtime_strategies = ["vision_language"]

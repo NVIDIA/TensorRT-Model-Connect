@@ -1,0 +1,9 @@
+id = "xglm"
+plugin = "xglm"
+module = "plugin"
+aliases = [
+  "xglm",
+]
+prefixes = [
+  "xglm",
+]

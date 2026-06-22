@@ -17,14 +17,22 @@ import sys
 from pathlib import Path
 
 # Plugins that are known-WIP and not yet wired into the E2E harness.
-# Keep this list as small as possible — every entry is a coverage gap.
-_EXEMPT_PLUGINS = {
-    "qwen3_omni",  # omni_multimodal strategy not yet wired in E2E harness
-}
+# Keep this list as small as possible: every entry is a coverage gap.
+_EXEMPT_PLUGINS: set[str] = set()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAMILIES_DIR = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
+
+
+def iter_manifest_paths() -> list[Path]:
+    """Return E2E manifests from flat and model-owned layouts."""
+    if not MODELS_DIR.is_dir():
+        return []
+    return sorted({
+        *MODELS_DIR.glob("*.json"),
+        *MODELS_DIR.glob("*/manifests/*.json"),
+    })
 
 
 def discover_plugin_names() -> set[str]:
@@ -78,7 +86,7 @@ def discover_plugin_names() -> set[str]:
 def discover_manifest_families() -> dict[str, list[str]]:
     """Load all E2E manifests and return {family: [model_names]}."""
     families: dict[str, list[str]] = {}
-    for manifest_path in sorted(MODELS_DIR.glob("*.json")):
+    for manifest_path in iter_manifest_paths():
         with open(manifest_path) as f:
             data = json.load(f)
         family = data.get("family")
@@ -121,8 +129,8 @@ def main() -> int:
             f"{', '.join(sorted(uncovered))}"
         )
         print(
-            "Add a JSON manifest in tests/e2e/models/ with 'family' matching "
-            "the plugin name."
+            "Add a JSON manifest in tests/e2e/models/<family>/manifests/ "
+            "with 'family' matching the plugin name."
         )
         return 1
 

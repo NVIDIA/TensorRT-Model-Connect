@@ -1,1 +1,4 @@
+id = "z_image"
+runtime_library = "libtrtmc_model_z_image.so"
+runtime_plugins = ["plugin.cpp|register_zimage_plugin"]
 runtime_strategies = ["diffusion_zimage"]

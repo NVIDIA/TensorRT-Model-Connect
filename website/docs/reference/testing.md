@@ -8,12 +8,16 @@ title: Testing Reference
 pytest tests/builder -q
 pytest tests/tools -q
 ctest --test-dir build --output-on-failure
-pytest tests/test_e2e.py::test_e2e[<manifest-name>] -v \
+pytest tests/e2e/models/<family> --e2e-model <manifest-name> -v \
   --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models
 ```
 
 Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code, such as speech-to-speech prompt handling or legacy fallback paths.
+`tests/test_e2e.py` remains available for repository-wide compatibility runs,
+but model work should use the owning `tests/e2e/models/<family>/` runner so
+collection, waives, artifacts, and impact selection stay model-local.
 
 ## When to use which test
 
@@ -40,4 +44,7 @@ Common fields include:
 - `precision`
 - `max_cache_length`
 - task input fields such as `prompt`, `test_prompt`, `audio`, `image`, or `inputs`
-- oracle fields such as `reference_backend`, `reference_family`, `user_contract`, and thresholds
+- oracle fields such as `reference_backend`, `reference_family`, and `user_contract`
+
+Model-specific tolerances live next to the manifest as
+`tests/e2e/models/<family>/thresholds/<manifest-name>.json`.

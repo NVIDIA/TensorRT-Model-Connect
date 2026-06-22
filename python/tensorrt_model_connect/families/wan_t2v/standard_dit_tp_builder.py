@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 from ...parallel_config import (
     ParallelConfig,
     _slice_first_dim,
@@ -41,7 +41,7 @@ from ...parallel_config import (
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def build_standard_dit_engine(
@@ -470,7 +470,7 @@ def load_dit_weights(
     Returns WeightDict with transposed projections for TRT matmul.
     """
     from pathlib import Path
-    from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     model_path = Path(model_dir)
     readers = _open_safetensors(model_path)

@@ -7,7 +7,7 @@
 #include "runtime/domains/audio/whisper_cross_kv_plan.h"
 #include "runtime/domains/audio/whisper_decode_policy.h"
 #include "runtime/domains/audio/whisper_host_plan.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 

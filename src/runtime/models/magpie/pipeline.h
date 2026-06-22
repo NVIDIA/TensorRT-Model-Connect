@@ -5,7 +5,7 @@
 
 #include "runtime/core/trt_common.h"
 #include "runtime/domains/audio/audio_configs.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

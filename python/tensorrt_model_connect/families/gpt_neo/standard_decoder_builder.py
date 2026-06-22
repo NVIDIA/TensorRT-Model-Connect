@@ -1,6 +1,6 @@
 """Compatibility shim for the shared default decoder builder."""
 
-from ...builders.default_decoder import (
+from .default_decoder import (
     _apply_norm,
     _mark_debug_output,
     build_standard_decoder_engine,

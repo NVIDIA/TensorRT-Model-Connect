@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -310,8 +310,8 @@ def _build_eagle_engine(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops
-    from ... import graph_blocks
+    from . import graph_ops
+    from . import graph_blocks
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
@@ -554,7 +554,7 @@ def _build_siglip_vision_engine(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops
+    from . import graph_ops
 
     image_size = vision_config.get("image_size", 384)
     patch_size = vision_config.get("patch_size", 14)
@@ -941,7 +941,7 @@ def _add_layer_norm_vision(
     """Add LayerNorm for vision transformer."""
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops
+    from . import graph_ops
 
     gamma_const = graph_ops.add_constant(
         network, (1, hidden_size), gamma.reshape(1, hidden_size))

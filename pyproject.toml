@@ -47,7 +47,12 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/builder", "tests/tools", "tests/e2e"]
+testpaths = [
+    "tests/builder",
+    "tests/tools",
+    "tests/e2e",
+    "python/tensorrt_model_connect/families",
+]
 markers = [
     "trt: tests requiring TensorRT + CUDA GPU",
     "e2e: end-to-end tests requiring GPU and engine bundles",

@@ -1,0 +1,9 @@
+id = "granite"
+plugin = "granite"
+module = "plugin"
+aliases = [
+  "granite",
+]
+prefixes = [
+  "granite",
+]

@@ -20,14 +20,14 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ...checkpoint_mapper import WeightDict, _transpose_2d
-from ...config import ModelConfig
+from . import graph_ops
+from .checkpoint_mapper import WeightDict, _transpose_2d
+from .config import ModelConfig
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from ..canary import (
+from .canary_encoder_helpers import (
     _add_conv_norm,
     _add_half_ffn,
     _build_encoder,

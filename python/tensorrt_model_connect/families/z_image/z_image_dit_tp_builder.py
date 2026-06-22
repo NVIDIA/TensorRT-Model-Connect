@@ -42,8 +42,8 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
+from . import graph_ops
+from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
 from ...parallel_config import (
     ParallelConfig,
     _slice_first_dim,

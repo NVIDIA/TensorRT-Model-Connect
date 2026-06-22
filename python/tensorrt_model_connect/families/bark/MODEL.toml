@@ -1,0 +1,9 @@
+id = "bark"
+plugin = "bark"
+module = "plugin"
+aliases = [
+  "bark",
+]
+prefixes = [
+  "bark",
+]

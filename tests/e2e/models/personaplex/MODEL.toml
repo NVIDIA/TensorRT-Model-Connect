@@ -1,0 +1,7 @@
+id = "personaplex"
+plugin = "personaplex"
+test_manifests = [
+  "manifests/personaplex-7b-l0-tp4.json",
+  "manifests/personaplex-7b-l0.json",
+  "manifests/personaplex-7b.json",
+]

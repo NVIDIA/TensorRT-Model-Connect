@@ -1,0 +1,2067 @@
+"""HuggingFace Transformers reference backend — gold-standard L1 oracle.
+
+Runs HF model inference in a subprocess for GPU memory isolation and returns
+per-step logits + generated text for comparison against TRT outputs.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from .. import save_full_stderr, _case_artifact_dir
+from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+
+logger = logging.getLogger(__name__)
+
+
+_PRECISION_TO_TORCH_DTYPE = {
+    "fp16": "torch.float16",
+    "fp32": "torch.float32",
+    "bf16": "torch.bfloat16",
+}
+
+_NEMOTRON_LABS_DIFFUSION_MODES = {
+    "": "diffusion",
+    "auto": "diffusion",
+    "diffusion": "diffusion",
+    "dlm": "diffusion",
+    "ar": "ar",
+    "autoregressive": "ar",
+    "linear_spec": "linear_spec",
+    "linear_speculation": "linear_spec",
+    "linear_spec_lora": "linear_spec_lora",
+    "linear_spec_adapter": "linear_spec_lora",
+    "linear_speculation_lora": "linear_spec_lora",
+}
+
+_NEMOTRON_LABS_DIFFUSION_FALLBACK_CHAT_TEMPLATE = (
+    "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False -%}"
+    "{%- if messages[0]['role'] == 'system' -%}"
+    "{{ '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+    "{%- set loop_messages = messages[1:] -%}"
+    "{%- else -%}"
+    "{{ '<|im_start|>system\\n<|im_end|>\\n' }}"
+    "{%- set loop_messages = messages -%}"
+    "{%- endif -%}"
+    "{%- for message in loop_messages -%}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}"
+    "{%- if enable_thinking -%}"
+    "{{ '<|im_start|>assistant\\n<think>\\n' }}"
+    "{%- else -%}"
+    "{{ '<|im_start|>assistant\\n<think></think>' }}"
+    "{%- endif -%}"
+    "{%- endif -%}"
+)
+
+
+def _torch_dtype_for_case(case: E2ECase) -> str:
+    """Return a torch dtype expression string matching the manifest precision.
+
+    The reference runner injects this into subprocess scripts so the HF model
+    loads at the same precision as the TRT engine, keeping comparisons fair.
+    """
+    precision = case.metadata.get("precision", "fp32")
+    return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
+
+
+def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
+    """Return a model-family prompt that preserves one image placeholder."""
+    lower_id = hf_id.lower()
+    if "qwen" in lower_id and "vl" in lower_id:
+        return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
+    if "internvl" in lower_id:
+        return f"<IMG_CONTEXT>\n{prompt}"
+    return prompt
+
+
+def _vl_prompt_has_image_placeholder(text: str) -> bool:
+    """Return true when a rendered VL prompt still carries an image placeholder."""
+    return any(marker in text for marker in (
+        "<|image_pad|>",
+        "<|vision_start|>",
+        "<image>",
+        "<IMG_CONTEXT>",
+    ))
+
+
+def _is_locateanything_vl_case(case: E2ECase) -> bool:
+    """Return true for LocateAnything VL cases."""
+    return case.family.lower() == "locateanything" or "locateanything" in case.hf_id.lower()
+
+
+def _normalize_vl_prompt_guard(text: str) -> str:
+    """Normalize decoded VL text for prompt-only reference detection."""
+    normalized = " ".join(str(text or "").split()).strip().lower()
+    for marker in (
+        "<img_context>",
+        "<image>",
+        "<|image_pad|>",
+        "<|vision_start|>",
+        "<|vision_end|>",
+    ):
+        normalized = normalized.replace(marker, " ")
+    return " ".join(normalized.split()).strip()
+
+
+def _is_prompt_only_vl_text(text: str, prompt_texts: tuple[str, ...]) -> bool:
+    """Return true when decoded VL text contains only the input prompt/template."""
+    normalized_text = _normalize_vl_prompt_guard(text)
+    if not normalized_text:
+        return True
+
+    for prompt_text in prompt_texts:
+        normalized_prompt = _normalize_vl_prompt_guard(prompt_text)
+        if not normalized_prompt:
+            continue
+        if normalized_text == normalized_prompt:
+            return True
+        if normalized_text.startswith(normalized_prompt):
+            tail = normalized_text[len(normalized_prompt):].strip(" :")
+            if tail in {"", "assistant", "answer"}:
+                return True
+        if normalized_text.endswith(normalized_prompt):
+            return True
+    return False
+
+
+def _decode_vl_generated_text(
+    processor,
+    generated_ids,
+    input_len: int,
+    prompt_texts: tuple[str, ...] = (),
+) -> str:
+    """Decode VL generation whether generate() returns full ids or generated ids only."""
+    token_count = len(generated_ids)
+
+    def _decode_token_ids(token_ids) -> str:
+        return processor.decode(token_ids, skip_special_tokens=True).strip()
+
+    if input_len > 0 and token_count > input_len:
+        text = _decode_token_ids(generated_ids[input_len:])
+        if text and not _is_prompt_only_vl_text(text, prompt_texts):
+            return text
+
+    text = _decode_token_ids(generated_ids)
+    if text and not _is_prompt_only_vl_text(text, prompt_texts):
+        return text
+    return ""
+
+
+def _resolve_cached_model_ref(hf_id: str) -> str:
+    """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
+    if not hf_id:
+        return hf_id
+    p = Path(hf_id)
+    if p.exists():
+        return hf_id
+
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(hf_id, local_files_only=True)
+    except Exception:
+        return hf_id
+
+
+def _normalize_nemotron_labs_diffusion_mode(mode: object) -> str:
+    normalized = str(mode or "").strip().lower().replace("-", "_")
+    return _NEMOTRON_LABS_DIFFUSION_MODES.get(normalized, normalized)
+
+
+ReferenceOutputReader = Callable[[], dict[str, Any]]
+
+
+def _coerce_stream_text(stream: object) -> str:
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode(errors="replace")
+    return str(stream)
+
+
+def _read_text_artifact(path: str, *, encoding: str = "utf-8") -> str:
+    artifact_path = Path(path)
+    if not artifact_path.is_file():
+        return ""
+    return artifact_path.read_text(encoding=encoding)
+
+
+def _json_output_reader(path: str, *, encoding: str = "utf-8") -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        artifact_path = Path(path)
+        if not artifact_path.is_file():
+            return {}
+        return json.loads(artifact_path.read_text(encoding=encoding))
+
+    return _reader
+
+
+def _json_text_reader(
+    path: str, key: str = "text", *, encoding: str = "utf-8"
+) -> Callable[[], str]:
+    def _reader() -> str:
+        data = _json_output_reader(path, encoding=encoding)()
+        value = data.get(key, "")
+        return "" if value is None else str(value)
+
+    return _reader
+
+
+def _npy_output_reader(
+    path: str,
+    data_key: str,
+    *,
+    path_key: str = "",
+    allow_pickle: bool = False,
+) -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        artifact_path = Path(path)
+        if not artifact_path.is_file():
+            return {}
+        import numpy as np
+
+        data: dict[str, Any] = {}
+        if path_key:
+            data[path_key] = path
+        data[data_key] = np.load(artifact_path, allow_pickle=allow_pickle)
+        return data
+
+    return _reader
+
+
+def _existing_path_reader(path: str, data_key: str) -> ReferenceOutputReader:
+    def _reader() -> dict[str, Any]:
+        return {data_key: path} if Path(path).is_file() else {}
+
+    return _reader
+
+
+def _reference_env(ctx: RunContext) -> dict[str, str]:
+    env = dict(os.environ)
+    if ctx.ld_library_path:
+        env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+    return env
+
+
+def run_reference_subprocess(
+    *,
+    command: Sequence[str],
+    timeout_s: float,
+    label: str,
+    artifact_dir: str,
+    case_name: str,
+    stage_name: str,
+    env: Mapping[str, str] | None = None,
+    output_readers: Iterable[ReferenceOutputReader] = (),
+    text_reader: Callable[[], str] | None = None,
+    logits_reader: Callable[[], Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    include_stdio_metadata: bool = False,
+    failure_label: str | None = None,
+) -> StageOutput:
+    """Run a reference subprocess and build the matching StageOutput."""
+    failure_prefix = failure_label or label.replace("_", " ")
+    cmd = list(command)
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=dict(env) if env is not None else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - t0
+        stderr = _coerce_stream_text(exc.stderr)
+        truncated, log_path = save_full_stderr(
+            stderr, artifact_dir, label, case_name
+        )
+        msg = f"{failure_prefix} timed out for {case_name} after {elapsed:.0f}s"
+        if truncated:
+            msg += f":\n{truncated}"
+        if log_path:
+            msg += f" (full stderr: {log_path})"
+        raise RuntimeError(msg) from exc
+    except Exception as exc:
+        raise RuntimeError(f"{failure_prefix} failed for {case_name}: {exc}") from exc
+    elapsed = time.monotonic() - t0
+
+    if result.returncode != 0:
+        truncated, log_path = save_full_stderr(
+            result.stderr or "", artifact_dir, label, case_name
+        )
+        msg = (
+            f"{failure_prefix} failed for {case_name} "
+            f"(rc={result.returncode}):\n{truncated}"
+        )
+        if log_path:
+            msg += f" (full stderr: {log_path})"
+        raise RuntimeError(msg)
+
+    data: dict[str, Any] = {}
+    for reader in output_readers:
+        data.update(reader() or {})
+
+    output_metadata: dict[str, Any] = {"returncode": result.returncode}
+    if include_stdio_metadata:
+        output_metadata.update({"stdout": result.stdout, "stderr": result.stderr})
+    if metadata:
+        output_metadata.update(dict(metadata))
+
+    return StageOutput(
+        stage_name=stage_name,
+        data=data,
+        text=text_reader() if text_reader is not None else None,
+        logits=logits_reader() if logits_reader is not None else None,
+        timing_s=elapsed,
+        metadata=output_metadata,
+    )
+
+
+class HfTransformersReference:
+    """Run HuggingFace Transformers inference as the reference oracle."""
+
+    @property
+    def backend_name(self) -> str:
+        return "hf_transformers"
+
+    def run_stage(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        if stage.name == "full_generation":
+            return self._run_full_generation(case, stage, ctx)
+        if stage.name == "full_inference":
+            return self._run_full_inference(case, stage, ctx)
+        if stage.name == "vision_encode":
+            # Vision encode is TRT-side only; reference skips this stage
+            return StageOutput(
+                stage_name=stage.name,
+                data={"skipped": True},
+                metadata={"reason": "vision_encode handled by TRT runner only"},
+            )
+        raise ValueError(f"Unknown stage for hf_transformers: {stage.name!r}")
+
+    def _run_full_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF model inference in a subprocess, collecting per-step logits.
+
+        Dispatches to task-specific methods for non-standard tasks:
+        - text_to_audio -> _run_text_to_audio_ref()
+        - vision_language_generation -> _run_vl_full_generation()
+        - speech_to_text -> _run_speech_to_text_ref() (via full_inference)
+        """
+        task = case.task_strategy
+        if task == "text_to_audio":
+            return self._run_text_to_audio_ref(case, stage, ctx)
+        if task == "vision_language_generation":
+            return self._run_vl_full_generation(case, stage, ctx)
+        if task == "speech_to_text":
+            return self._run_speech_to_text_ref(case, stage, ctx)
+        if case.runtime_strategy == "nemotron_labs_diffusion":
+            return self._run_nemotron_labs_diffusion_generation(case, stage, ctx)
+
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        logits_path = str(Path(model_dir) / "hf_logits.npy")
+        text_path = str(Path(model_dir) / "hf_text.txt")
+
+        prompt = case.inputs.get("prompt", "The capital of France is")
+        max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        contract_config = case.metadata.get("contract_config", {})
+        use_chat_template = contract_config.get("use_chat_template", False)
+        enable_thinking = contract_config.get("enable_thinking", True)
+
+        script = textwrap.dedent(f"""\
+            import sys, numpy as np, torch
+            from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            max_new_tokens = {max_new_tokens}
+            trust_remote_code = {trust_remote_code!r}
+            logits_path = {logits_path!r}
+            text_path = {text_path!r}
+            use_chat_template = {use_chat_template!r}
+            enable_thinking = {enable_thinking!r}
+
+            def _np(t):
+                return t.detach().float().cpu().numpy()
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            if use_chat_template:
+                messages = [{{"role": "user", "content": prompt}}]
+                try:
+                    chat_kwargs = {{"add_generation_prompt": True}}
+                    if not enable_thinking:
+                        chat_kwargs["enable_thinking"] = False
+                    text_input = tokenizer.apply_chat_template(
+                        messages, tokenize=False, **chat_kwargs)
+                    input_ids = tokenizer.encode(text_input, add_special_tokens=False)
+                except Exception:
+                    # Fallback: model doesn't support chat template
+                    input_ids = tokenizer.encode(prompt)
+            else:
+                input_ids = tokenizer.encode(prompt)
+
+            load_kwargs = {{
+                "trust_remote_code": trust_remote_code,
+                "torch_dtype": {torch_dtype_expr},
+            }}
+            # Detect encoder-decoder models by checking config
+            from transformers import AutoConfig
+            _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
+            is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
+
+            if is_seq2seq:
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_ref, **load_kwargs)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
+            model.eval()
+
+            ids_tensor = torch.tensor([input_ids], dtype=torch.long)
+            all_logits = []
+
+            with torch.no_grad():
+                if is_seq2seq:
+                    # Encoder-decoder: use model.generate() for greedy decoding
+                    output_ids = model.generate(
+                        ids_tensor, max_new_tokens=max_new_tokens,
+                        do_sample=False, num_beams=1)
+                    generated_token_ids = output_ids[0].tolist()
+                    # Re-run to get logits for each decoder step
+                    decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)
+                    outputs = model(ids_tensor, decoder_input_ids=decoder_ids)
+                    for i in range(outputs.logits.shape[1]):
+                        all_logits.append(_np(outputs.logits[0, i]))
+                    text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+                else:
+                    # Decoder-only: step-by-step autoregressive
+                    outputs = model(ids_tensor)
+                    prefill_logits = _np(outputs.logits[0])
+                    for i in range(len(input_ids)):
+                        all_logits.append(prefill_logits[i])
+
+                    gen_ids = list(input_ids)
+                    generated_token_ids = []
+                    eos_id = getattr(tokenizer, "eos_token_id", None)
+                    for _ in range(max_new_tokens):
+                        next_token = int(np.argmax(all_logits[-1]))
+                        generated_token_ids.append(next_token)
+                        if eos_id is not None and next_token == eos_id:
+                            break
+                        gen_ids.append(next_token)
+                        ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+                        outputs = model(ids_tensor)
+                        all_logits.append(_np(outputs.logits[0, -1]))
+                    text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+
+            with open(text_path, "w") as f:
+                f.write(text)
+
+            # Pad and save logits
+            max_len = max(l.shape[0] for l in all_logits)
+            padded = np.zeros((len(all_logits), max_len), dtype=np.float32)
+            for i, l in enumerate(all_logits):
+                padded[i, :l.shape[0]] = l
+            np.save(logits_path, padded)
+
+            print(f"OK steps={{len(all_logits)}} vocab={{max_len}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        logger.info("HF reference: running %s", case.name)
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_full_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_existing_path_reader(logits_path, "logits_path"),),
+            text_reader=lambda: _read_text_artifact(text_path),
+            logits_reader=(
+                lambda: logits_path if Path(logits_path).is_file() else None
+            ),
+            metadata={"trust_remote_code": trust_remote_code},
+            include_stdio_metadata=True,
+            failure_label="HF reference",
+        )
+
+    def _run_nemotron_labs_diffusion_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run the upstream Nemotron Labs Diffusion generation APIs.
+
+        This family registers ``AutoModel`` with custom ``ar_generate``,
+        diffusion ``generate``, and ``linear_spec_generate`` methods.  The
+        generic causal reference path uses ``AutoModelForCausalLM`` plus
+        stepwise logits, which does not represent the model-card surface.
+        """
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = (
+            _case_artifact_dir(artifacts_dir, case.name)
+            if ctx.artifacts_dir
+            else artifacts_dir
+        )
+        text_path = str(Path(model_dir) / "hf_text.txt")
+        tokens_path = str(Path(model_dir) / "hf_tokens.json")
+
+        prompt = case.inputs.get("prompt", "The capital of France is")
+        max_new_tokens = int(case.inputs.get("max_new_tokens", 30))
+        generation_mode = _normalize_nemotron_labs_diffusion_mode(
+            case.inputs.get("generation_mode", "auto")
+        )
+        block_length = int(case.inputs.get("block_length", 32))
+        threshold = float(
+            case.inputs.get("threshold", case.inputs.get("score_threshold", 0.9))
+        )
+        temperature = float(case.inputs.get("temperature", 0.0))
+        trust_remote_code = bool(case.metadata.get("trust_remote_code", True))
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        contract_config = case.metadata.get("contract_config", {})
+        use_chat_template = contract_config.get("use_chat_template", False)
+        enable_thinking = contract_config.get("enable_thinking", True)
+        fallback_chat_template = _NEMOTRON_LABS_DIFFUSION_FALLBACK_CHAT_TEMPLATE
+
+        script = textwrap.dedent(f"""\
+            import inspect, json, torch
+            from pathlib import Path
+            from transformers import AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            max_new_tokens = {max_new_tokens}
+            generation_mode = {generation_mode!r}
+            block_length = {block_length}
+            threshold = {threshold}
+            temperature = {temperature}
+            trust_remote_code = {trust_remote_code!r}
+            text_path = {text_path!r}
+            tokens_path = {tokens_path!r}
+            use_chat_template = {use_chat_template!r}
+            enable_thinking = {enable_thinking!r}
+            fallback_chat_template = {fallback_chat_template!r}
+
+            def _call_supported(fn, input_ids, **kwargs):
+                sig = inspect.signature(fn)
+                accepts_kwargs = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+                filtered_kwargs = (
+                    kwargs if accepts_kwargs
+                    else {{k: v for k, v in kwargs.items()
+                           if k in sig.parameters}}
+                )
+                if "input_ids" in sig.parameters or accepts_kwargs:
+                    try:
+                        return fn(input_ids=input_ids, **filtered_kwargs)
+                    except TypeError as exc:
+                        if "input_ids" not in str(exc):
+                            raise
+                # The model-card APIs take token IDs as the first positional
+                # argument in some upstream revisions.
+                return fn(input_ids, **filtered_kwargs)
+
+            def _as_token_list(output):
+                if hasattr(output, "sequences"):
+                    output = output.sequences
+                if isinstance(output, (tuple, list)) and output:
+                    output = output[0]
+                if isinstance(output, torch.Tensor):
+                    if output.ndim == 2:
+                        output = output[0]
+                    return [int(x) for x in output.detach().cpu().tolist()]
+                return [int(x) for x in output]
+
+            import transformers.utils.generic as _tf_generic
+            if not hasattr(_tf_generic, "check_model_inputs"):
+                _tf_generic.check_model_inputs = lambda fn: fn
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            if use_chat_template:
+                messages = [{{"role": "user", "content": prompt}}]
+                chat_kwargs = {{"add_generation_prompt": True}}
+                if not enable_thinking:
+                    chat_kwargs["enable_thinking"] = False
+                template_path = Path(model_ref) / "chat_template.jinja"
+                if getattr(tokenizer, "chat_template", None) is None and template_path.is_file():
+                    chat_kwargs["chat_template"] = template_path.read_text(encoding="utf-8")
+                if (getattr(tokenizer, "chat_template", None) is None
+                        and "chat_template" not in chat_kwargs):
+                    chat_kwargs["chat_template"] = fallback_chat_template
+                text_input = tokenizer.apply_chat_template(
+                    messages, tokenize=False, **chat_kwargs)
+                input_ids = tokenizer.encode(text_input, add_special_tokens=False)
+            else:
+                input_ids = tokenizer.encode(prompt)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = AutoModel.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            generation_model = model
+            if generation_mode == "linear_spec_lora":
+                from peft import PeftModel
+                adapter_path = Path(model_ref) / "linear_spec_lora"
+                if adapter_path.is_dir():
+                    model = PeftModel.from_pretrained(
+                        model, str(adapter_path), adapter_name="linear_spec_lora")
+                else:
+                    model = PeftModel.from_pretrained(
+                        model, hf_id, subfolder="linear_spec_lora",
+                        adapter_name="linear_spec_lora")
+                generation_model = model.model
+            model.to(device)
+            model.eval()
+
+            ids_tensor = torch.tensor(
+                [input_ids], dtype=torch.long, device=device)
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            common_kwargs = {{
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "eos_token_id": eos_id,
+            }}
+
+            with torch.no_grad():
+                if generation_mode == "ar":
+                    output = _call_supported(
+                        generation_model.ar_generate,
+                        ids_tensor,
+                        **common_kwargs,
+                    )
+                elif generation_mode == "diffusion":
+                    output = _call_supported(
+                        generation_model.generate,
+                        ids_tensor,
+                        **common_kwargs,
+                        block_length=block_length,
+                        threshold=threshold,
+                    )
+                elif generation_mode in {{"linear_spec", "linear_spec_lora"}}:
+                    output = _call_supported(
+                        generation_model.linear_spec_generate,
+                        ids_tensor,
+                        **common_kwargs,
+                        block_length=block_length,
+                        threshold=threshold,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported generation_mode={{generation_mode!r}}")
+
+            output_ids = _as_token_list(output)
+            if output_ids[:len(input_ids)] == input_ids:
+                generated_ids = output_ids[len(input_ids):]
+            else:
+                generated_ids = output_ids
+            text = tokenizer.decode(
+                generated_ids, skip_special_tokens=True).strip()
+            with open(text_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(tokens_path, "w", encoding="utf-8") as f:
+                json.dump({{
+                    "token_ids": generated_ids,
+                    "eos_token_id": eos_id,
+                }}, f)
+            print(f"OK mode={{generation_mode}} tokens={{len(generated_ids)}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        logger.info(
+            "HF reference: running %s with Nemotron Labs Diffusion %s mode",
+            case.name,
+            generation_mode,
+        )
+        def _nemotron_outputs() -> dict[str, Any]:
+            token_ids = []
+            eos_token_id = None
+            if Path(tokens_path).is_file():
+                token_payload = json.loads(
+                    Path(tokens_path).read_text(encoding="utf-8")
+                )
+                raw_token_ids = token_payload.get("token_ids", [])
+                if isinstance(raw_token_ids, list):
+                    token_ids = [int(token) for token in raw_token_ids]
+                if token_payload.get("eos_token_id") is not None:
+                    eos_token_id = int(token_payload["eos_token_id"])
+            return {
+                "generation_mode": generation_mode,
+                "text_path": text_path if Path(text_path).is_file() else "",
+                "tokens_path": tokens_path if Path(tokens_path).is_file() else "",
+                "token_ids": token_ids,
+                "eos_token_id": eos_token_id,
+            }
+
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_nemotron_labs_diffusion",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_nemotron_outputs,),
+            text_reader=lambda: _read_text_artifact(text_path),
+            metadata={
+                "trust_remote_code": trust_remote_code,
+                "generation_mode": generation_mode,
+            },
+            include_stdio_metadata=True,
+            failure_label="HF reference",
+        )
+
+
+    def _run_full_inference(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF model forward pass for non-generative tasks.
+
+        Dispatches based on task_strategy to the appropriate HF Auto class.
+        """
+        task = case.task_strategy
+        if task == "encoder_only_nlp":
+            return self._run_encoder_only(case, stage, ctx)
+        if task == "segmentation":
+            return self._run_segmentation_ref(case, stage, ctx)
+        if task == "prompted_segmentation":
+            return self._run_prompted_segmentation_ref(case, stage, ctx)
+        if task == "embedding":
+            return self._run_embedding_ref(case, stage, ctx)
+        if task == "reranking":
+            return self._run_reranking_ref(case, stage, ctx)
+        if task == "speech_to_text":
+            return self._run_speech_to_text_ref(case, stage, ctx)
+        if task == "object_detection":
+            return self._run_object_detection_ref(case, stage, ctx)
+        if task == "image_classification":
+            return self._run_image_classification_ref(case, stage, ctx)
+        raise ValueError(
+            f"full_inference not implemented for task_strategy={task!r}")
+
+    def _run_encoder_only(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF encoder-only model (e.g. BERT) and return CLS embedding."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_encoder.json")
+
+        prompt = case.inputs.get("prompt", "Hello world")
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            # Load model — try AutoModel first, fall back to base model
+            # for specialized wrappers (DPR, etc.) that don't return
+            # last_hidden_state in the expected format.
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            model_type = getattr(config, 'model_type', '')
+
+            if model_type == 'dpr':
+                # AutoTokenizer/AutoModel route this context checkpoint through
+                # the DPR question classes in transformers 5.x.  Use the
+                # context fast tokenizer so HF sees the same token ids as the
+                # tokenizer.json bundled into the TRT artifact.
+                from transformers import DPRContextEncoder, DPRContextEncoderTokenizerFast
+                tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                _dpr = DPRContextEncoder.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code,
+                    torch_dtype={torch_dtype_expr})
+                model = _dpr.ctx_encoder.bert_model
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                model = AutoModel.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code,
+                    torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            inputs = tokenizer(prompt, return_tensors="pt")
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            # CLS token embedding from last_hidden_state
+            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+                cls_embedding = outputs.last_hidden_state[0, 0].float().cpu().numpy().tolist()
+            else:
+                first_out = outputs[0]
+                if first_out.ndim == 3:
+                    cls_embedding = first_out[0, 0].float().cpu().numpy().tolist()
+                elif first_out.ndim == 2:
+                    cls_embedding = first_out[0].float().cpu().numpy().tolist()
+                else:
+                    cls_embedding = first_out.float().cpu().numpy().tolist()
+            result = {{"cls_embedding": cls_embedding}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_encoder_only",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF encoder-only",
+        )
+
+    @staticmethod
+    def _resolve_image_path(image_path: str) -> str:
+        """Resolve image path, handling relative paths from manifests."""
+        if not image_path:
+            return image_path
+        if os.path.isabs(image_path):
+            return image_path
+        # Resolve relative to tests/e2e/ directory
+        e2e_dir = Path(__file__).resolve().parents[2] / "e2e"
+        resolved = e2e_dir / image_path
+        if resolved.exists():
+            return str(resolved)
+        # Also try relative to project root
+        project_dir = Path(__file__).resolve().parents[3]
+        resolved2 = project_dir / image_path
+        if resolved2.exists():
+            return str(resolved2)
+        return image_path
+
+    def _run_embedding_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF embedding model as reference — mean pool + L2 normalize."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_embedding.json")
+
+        prompt = case.inputs.get("prompt", "What is machine learning?")
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            model = AutoModel.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            # Generic forward pass: tokenize -> forward -> mean pool -> L2 norm
+            # (We use the raw forward pass to match TRT, not encode_queries()
+            # which adds an instruction prefix that TRT doesn't replicate.)
+            inputs = tokenizer(prompt, return_tensors="pt", padding=True,
+                               truncation=True)
+            with torch.no_grad():
+                outputs = model(**inputs, output_hidden_states=True)
+            # Try last_hidden_state first, then fall back to hidden_states[-1]
+            if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+                hidden = outputs.last_hidden_state
+            elif hasattr(outputs, "hidden_states") and outputs.hidden_states:
+                hidden = outputs.hidden_states[-1]
+            else:
+                raise RuntimeError("Model output has no hidden states")
+            mask = inputs["attention_mask"].unsqueeze(-1).float()
+            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
+            embedding = pooled[0].float().cpu().numpy().tolist()
+
+            result = {{"embedding": embedding}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_embedding",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF embedding ref",
+        )
+
+    def _run_image_classification_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run timm image classification as the reference oracle."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_image_classification.json")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        hf_id = case.hf_id
+
+        script = textwrap.dedent(f"""\
+            import json
+            from pathlib import Path
+
+            import numpy as np
+            import timm
+            import torch
+            from PIL import Image
+
+            hf_id = {hf_id!r}
+            image_path = {image_path!r}
+            output_path = {output_path!r}
+
+            target = 224
+            crop_pct = 0.9
+            resize_short = int(target / crop_pct + 0.5)
+            image = Image.open(image_path).convert("RGB")
+            width, height = image.size
+            if height <= width:
+                resized_h = resize_short
+                resized_w = max(1, int(width * resize_short / height + 0.5))
+            else:
+                resized_w = resize_short
+                resized_h = max(1, int(height * resize_short / width + 0.5))
+
+            source = np.asarray(image, dtype=np.float32) / 255.0
+            crop_x = max(0, (resized_w - target) // 2)
+            crop_y = max(0, (resized_h - target) // 2)
+            chw = np.empty((3, target, target), dtype=np.float32)
+            for y in range(target):
+                ry = crop_y + y
+                src_y = min(height - 1, int(float(ry) * height / resized_h))
+                for x in range(target):
+                    rx = crop_x + x
+                    src_x = min(width - 1, int(float(rx) * width / resized_w))
+                    chw[:, y, x] = (source[src_y, src_x, :] - 0.5) / 0.5
+            chw = chw[None, ...].copy()
+
+            model_ref = f"hf-hub:{{hf_id}}"
+            try:
+                model = timm.create_model(model_ref, pretrained=True)
+            except Exception:
+                model = timm.create_model(f"hf_hub:{{hf_id}}", pretrained=True)
+            model.eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+
+            with torch.no_grad():
+                tensor = torch.from_numpy(chw).to(device)
+                logits = model(tensor)[0].float().cpu().numpy()
+
+            top_class = int(np.argmax(logits))
+            result = {{
+                "top_class": top_class,
+                "top_score": float(logits[top_class]),
+                "num_classes": int(logits.shape[0]),
+            }}
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=900,
+            label="hf_image_classification",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            include_stdio_metadata=True,
+            failure_label="HF image classification",
+        )
+
+    def _run_segmentation_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF segmentation model as reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_seg.npy")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import numpy as np, torch
+            from transformers import AutoModelForSemanticSegmentation, AutoImageProcessor
+            from PIL import Image
+
+            hf_id = {hf_id!r}
+            image_path = {image_path!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            processor = AutoImageProcessor.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model = AutoModelForSemanticSegmentation.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            image = Image.open(image_path).convert("RGB")
+            inputs = processor(images=image, return_tensors="pt")
+            with torch.no_grad():
+                outputs = model(**inputs)
+            logits = outputs.logits[0].float().cpu().numpy()
+            class_map = np.argmax(logits, axis=0).astype(np.int32)
+            np.save(output_path, class_map)
+            print(f"OK classes={{class_map.max() + 1}}")
+        """)
+
+        def _segmentation_outputs() -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            if Path(output_path).is_file():
+                data["class_map_path"] = output_path
+                import numpy as np
+
+                data["class_map"] = np.load(output_path)
+
+                try:
+                    from PIL import Image
+
+                    cmap = data["class_map"]
+                    num_classes = int(cmap.max()) + 1
+                    np.random.seed(42)
+                    palette = np.random.randint(
+                        0, 255, (num_classes, 3), dtype=np.uint8
+                    )
+                    palette[0] = [0, 0, 0]
+                    colored = palette[cmap]
+                    viz_path = output_path.replace(".npy", "_viz.png")
+                    Image.fromarray(colored).save(viz_path)
+                    data["viz_path"] = viz_path
+                except Exception as e:
+                    logger.warning("Failed to save segmentation viz: %s", e)
+            return data
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_segmentation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_segmentation_outputs,),
+            failure_label="HF segmentation",
+        )
+
+    def _run_reranking_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF cross-encoder reranking and return one score per document."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_rerank.json")
+
+        prompt = case.inputs.get("prompt", "query: test")
+        documents = case.inputs.get("documents")
+        if documents is None:
+            document = case.inputs.get("document", "")
+            documents = [document] if document else []
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch
+            from transformers import AutoModelForSequenceClassification, AutoProcessor, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            documents = {documents!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+            torch_dtype = {torch_dtype_expr}
+
+            model = AutoModelForSequenceClassification.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code,
+                torch_dtype=torch_dtype)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model.to(device)
+            model.eval()
+
+            examples = [
+                {{"question": prompt, "doc_text": doc, "doc_image": ""}}
+                for doc in documents
+            ]
+
+            try:
+                processor = AutoProcessor.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code,
+                    max_input_tiles=6, use_thumbnail=True,
+                    rerank_max_length=8192)
+                if not hasattr(processor, "process_queries_documents_crossencoder"):
+                    raise AttributeError("processor has no cross-encoder helper")
+                inputs = processor.process_queries_documents_crossencoder(examples)
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                texts = [
+                    f"question:{{prompt}}   passage:{{doc}}"
+                    for doc in documents
+                ]
+                inputs = tokenizer(
+                    texts, return_tensors="pt", padding=True, truncation=True)
+
+            inputs = {{
+                key: value.to(device) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }}
+            with torch.no_grad():
+                outputs = model(**inputs)
+            logits = outputs.logits.detach().float().cpu()
+            if logits.ndim == 2 and logits.shape[-1] == 1:
+                scores = logits[:, 0].tolist()
+            elif logits.ndim == 2:
+                scores = logits[:, -1].tolist()
+            else:
+                scores = logits.reshape(-1).tolist()
+            result = {{"scores": scores}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_reranking",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF reranking",
+        )
+
+    def _run_speech_to_text_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run speech-to-text reference (Whisper via HF, NeMo ASR via NeMo)."""
+        family = case.metadata.get("family", case.family)
+        if family in {"canary", "nemotron_speech_streaming"}:
+            return self._run_canary_ref(case, stage, ctx)
+
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_stt.json")
+
+        audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+            import scipy.io.wavfile as wav
+
+            hf_id = {hf_id!r}
+            audio_path = {audio_path!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            processor = AutoProcessor.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            sr, audio = wav.read(audio_path)
+            if audio.dtype == np.int16:
+                audio = audio.astype(np.float32) / 32768.0
+            elif audio.dtype == np.int32:
+                audio = audio.astype(np.float32) / 2147483648.0
+            if len(audio.shape) > 1:
+                audio = audio.mean(axis=1)
+
+            # Resample to model's expected sample rate (e.g. 16kHz for Whisper)
+            target_sr = getattr(processor.feature_extractor, "sampling_rate", sr)
+            if sr != target_sr:
+                from scipy.signal import resample
+                num_samples = int(len(audio) * target_sr / sr)
+                audio = resample(audio, num_samples).astype(np.float32)
+                sr = target_sr
+
+            inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
+            # Cast floating-point inputs to match model dtype (e.g. fp16 mel features)
+            model_dtype = next(model.parameters()).dtype
+            inputs = {{k: v.to(model_dtype) if v.is_floating_point() else v
+                       for k, v in inputs.items()}}
+            with torch.no_grad():
+                generated_ids = model.generate(**inputs, max_new_tokens=100)
+            text = processor.batch_decode(
+                generated_ids, skip_special_tokens=True)[0]
+
+            result = {{"text": text}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_speech_to_text",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            text_reader=_json_text_reader(output_path),
+            failure_label="HF speech-to-text",
+        )
+
+    def _run_canary_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run NeMo Canary model for speech-to-text reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_stt.json")
+
+        audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, numpy as np
+            import scipy.io.wavfile as wav
+
+            hf_id = {hf_id!r}
+            audio_path = {audio_path!r}
+            output_path = {output_path!r}
+
+            # Try NeMo ASR model
+            try:
+                import nemo.collections.asr as nemo_asr
+                import tempfile, struct
+                # Convert to mono WAV if needed (Canary requires mono)
+                sr_raw, audio_raw = wav.read(audio_path)
+                if audio_raw.dtype == np.int16:
+                    audio_f = audio_raw.astype(np.float32) / 32768.0
+                elif audio_raw.dtype == np.int32:
+                    audio_f = audio_raw.astype(np.float32) / 2147483648.0
+                else:
+                    audio_f = audio_raw.astype(np.float32)
+                if len(audio_f.shape) > 1:
+                    audio_f = audio_f.mean(axis=1)
+                # Write mono 16kHz WAV
+                target_sr = 16000
+                if sr_raw != target_sr:
+                    from scipy.signal import resample
+                    audio_f = resample(audio_f, int(len(audio_f)*target_sr/sr_raw)).astype(np.float32)
+                mono_path = audio_path + ".mono.wav"
+                audio_i16 = np.clip(audio_f * 32768, -32768, 32767).astype(np.int16)
+                wav.write(mono_path, target_sr, audio_i16)
+                model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
+                model = model.cpu()
+                model.eval()
+                transcriptions = model.transcribe([mono_path], batch_size=1)
+                if isinstance(transcriptions, list):
+                    if hasattr(transcriptions[0], 'text'):
+                        text = transcriptions[0].text
+                    else:
+                        text = str(transcriptions[0])
+                else:
+                    text = str(transcriptions)
+            except ImportError:
+                # Fallback: try HF pipeline
+                import torch
+                from transformers import pipeline
+                sr, audio = wav.read(audio_path)
+                if audio.dtype == np.int16:
+                    audio = audio.astype(np.float32) / 32768.0
+                pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model=hf_id,
+                    torch_dtype={torch_dtype_expr})
+                result = pipe(audio)
+                text = result.get("text", "")
+
+            result = {{"text": text}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="nemo_canary_stt",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            text_reader=_json_text_reader(output_path),
+            failure_label="NeMo Canary reference",
+        )
+
+    def _run_object_detection_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF object detection model as reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_det.json")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch
+            from transformers import AutoModelForObjectDetection, AutoImageProcessor
+            from PIL import Image
+
+            hf_id = {hf_id!r}
+            image_path = {image_path!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            processor = AutoImageProcessor.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model = AutoModelForObjectDetection.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            image = Image.open(image_path).convert("RGB")
+            inputs = processor(images=image, return_tensors="pt")
+            with torch.no_grad():
+                outputs = model(**inputs)
+            # Post-process to get boxes + scores
+            target_sizes = torch.tensor([image.size[::-1]])
+            results = processor.post_process_object_detection(
+                outputs, target_sizes=target_sizes, threshold=0.5)[0]
+            detections = []
+            for score, label, box in zip(
+                results["scores"], results["labels"], results["boxes"]
+            ):
+                detections.append({{
+                    "score": score.item(),
+                    "label": label.item(),
+                    "box": box.tolist(),
+                }})
+            with open(output_path, "w") as f:
+                json.dump({{"detections": detections}}, f)
+            print(f"OK detections={{len(detections)}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_object_detection",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(_json_output_reader(output_path),),
+            failure_label="HF object detection",
+        )
+
+
+    def _run_text_to_audio_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF Bark model for text-to-audio reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_audio.json")
+        wav_path = str(Path(model_dir) / "hf_audio.wav")
+
+        prompt = case.inputs.get("prompt", "Hello, this is a test.")
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        seed = int(case.determinism.get("seed", 42))
+        voice_preset = case.inputs.get("voice_preset", "")
+
+        script = textwrap.dedent(f"""\
+            import json, random, struct
+            import numpy as np
+            import torch
+            from transformers import AutoProcessor, BarkModel, set_seed
+
+            hf_id = {hf_id!r}
+            prompt = {prompt!r}
+            trust_remote_code = {trust_remote_code!r}
+            seed = {seed!r}
+            voice_preset = {voice_preset!r}
+            output_path = {output_path!r}
+            wav_path = {wav_path!r}
+
+            # Make Bark reference generation deterministic across runs.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            set_seed(seed)
+            try:
+                torch.use_deterministic_algorithms(True, warn_only=True)
+            except Exception:
+                pass
+
+            processor = AutoProcessor.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model = BarkModel.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            if voice_preset:
+                inputs = processor(
+                    prompt, voice_preset=voice_preset, return_tensors="pt")
+            else:
+                inputs = processor(prompt, return_tensors="pt")
+            with torch.no_grad():
+                audio_values = model.generate(**inputs)
+
+            audio = audio_values.cpu().numpy().squeeze()
+            sample_rate = model.generation_config.sample_rate
+
+            # Write WAV
+            audio_f32 = audio.astype(np.float32)
+            data_bytes = audio_f32.tobytes()
+            with open(wav_path, "wb") as f:
+                f.write(b"RIFF")
+                f.write(struct.pack("<I", 36 + len(data_bytes)))
+                f.write(b"WAVE")
+                f.write(b"fmt ")
+                f.write(struct.pack("<IHHIIHH", 16, 3, 1, sample_rate,
+                        sample_rate * 4, 4, 32))
+                f.write(b"data")
+                f.write(struct.pack("<I", len(data_bytes)))
+                f.write(data_bytes)
+
+            rms = float(np.sqrt(np.mean(audio_f32 ** 2)))
+            duration = len(audio_f32) / sample_rate
+            result = {{"rms": rms, "duration_s": duration,
+                      "sample_rate": sample_rate, "num_samples": len(audio_f32),
+                      "seed": seed, "voice_preset": voice_preset}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK seed={{seed}} rms={{rms:.4f}} duration={{duration:.2f}}s")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_text_to_audio",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(
+                _json_output_reader(output_path),
+                _existing_path_reader(wav_path, "wav_path"),
+            ),
+            failure_label="HF text-to-audio",
+        )
+
+    def _run_vl_full_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF vision-language model for reference generation."""
+        if _is_locateanything_vl_case(case):
+            return self._run_locateanything_vl_full_generation(case, stage, ctx)
+
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        text_path = str(Path(model_dir) / "hf_vl_text.txt")
+
+        prompt = case.inputs.get("prompt", "Describe this image.")
+        max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        fallback_text = _vl_fallback_prompt(hf_id, prompt)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import sys, torch
+            from transformers import AutoProcessor
+            from PIL import Image
+            from {__name__} import (
+                _decode_vl_generated_text,
+                _vl_prompt_has_image_placeholder,
+            )
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            fallback_text = {fallback_text!r}
+            max_new_tokens = {max_new_tokens}
+            trust_remote_code = {trust_remote_code!r}
+            image_path = {image_path!r}
+            text_path = {text_path!r}
+
+            processor = AutoProcessor.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+
+            # Try VL-specific auto classes in preference order
+            import transformers
+            model = None
+            for cls_name in ["AutoModelForImageTextToText",
+                             "AutoModelForVision2Seq"]:
+                try:
+                    cls = getattr(transformers, cls_name)
+                    model = cls.from_pretrained(
+                        model_ref, trust_remote_code=trust_remote_code,
+                        torch_dtype={torch_dtype_expr})
+                    break
+                except (AttributeError, ImportError, ValueError, KeyError):
+                    continue
+            # Fallback for models registered as causal LM with multimodal
+            # inputs (e.g. Phi-4-multimodal)
+            if model is None:
+                model = transformers.AutoModelForCausalLM.from_pretrained(
+                    model_ref, trust_remote_code=True,
+                    torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            image = Image.open(image_path).convert("RGB")
+
+            # Build conversation for chat-template models
+            messages = [
+                {{"role": "user", "content": [
+                    {{"type": "image", "image": image_path}},
+                    {{"type": "text", "text": prompt}},
+                ]}}
+            ]
+            text_input = ""
+            try:
+                text_input = processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True)
+                if not isinstance(text_input, str):
+                    raise TypeError("processor.apply_chat_template did not return text")
+                if not _vl_prompt_has_image_placeholder(text_input):
+                    raise ValueError("chat template produced no image placeholder")
+                inputs = processor(
+                    text=text_input, images=image, return_tensors="pt")
+            except Exception:
+                # Fallback for models without chat template
+                inputs = processor(
+                    text=fallback_text, images=image, return_tensors="pt")
+
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs, max_new_tokens=max_new_tokens)
+
+            # Decode only the generated portion (after input)
+            input_len = inputs.get("input_ids", torch.tensor([])).shape[-1]
+            text = _decode_vl_generated_text(
+                processor,
+                generated_ids[0],
+                input_len,
+                (prompt, fallback_text, text_input),
+            )
+            if not text.strip():
+                raise RuntimeError(
+                    "HF VL reference produced empty or prompt-only generated text")
+
+            with open(text_path, "w") as f:
+                f.write(text)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_vl_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
+            text_reader=lambda: _read_text_artifact(text_path),
+            metadata={"trust_remote_code": trust_remote_code},
+            failure_label="HF VL generation",
+        )
+
+    def _run_locateanything_vl_full_generation(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run LocateAnything HF reference without the optional remote processor."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        text_path = str(Path(model_dir) / "hf_vl_text.txt")
+
+        prompt = case.inputs.get("prompt", "Describe this image.")
+        max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json
+            import sys
+            from pathlib import Path
+
+            import torch
+            from tensorrt_model_connect.debug_runner import (
+                preprocess_image_inputs_for_trt,
+            )
+            from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
+            prompt = {prompt!r}
+            max_new_tokens = {max_new_tokens}
+            trust_remote_code = {trust_remote_code!r}
+            image_path = {image_path!r}
+            text_path = {text_path!r}
+
+            def _install_tied_weight_compat():
+                from transformers.cache_utils import DynamicCache
+                from transformers.modeling_utils import PreTrainedModel
+
+                if not hasattr(DynamicCache, "to_legacy_cache"):
+                    def _to_legacy_cache(self):
+                        return tuple(
+                            (layer.keys, layer.values) for layer in self.layers
+                        )
+
+                    DynamicCache.to_legacy_cache = _to_legacy_cache
+
+                if not hasattr(DynamicCache, "from_legacy_cache"):
+                    @classmethod
+                    def _from_legacy_cache(cls, past_key_values=None):
+                        cache = cls()
+                        if past_key_values is None:
+                            return cache
+                        for layer_idx, (key_states, value_states) in enumerate(
+                            past_key_values
+                        ):
+                            cache.update(key_states, value_states, layer_idx)
+                        return cache
+
+                    DynamicCache.from_legacy_cache = _from_legacy_cache
+
+                if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+                    PreTrainedModel.all_tied_weights_keys = {{}}
+                original = PreTrainedModel.get_expanded_tied_weights_keys
+
+                def _compat_get_expanded_tied_weights_keys(self, all_submodels=False):
+                    tied_mapping = getattr(self, "_tied_weights_keys", None)
+                    if not isinstance(tied_mapping, list):
+                        return original(self, all_submodels=all_submodels)
+                    if all_submodels:
+                        expanded_tied_weights = {{}}
+                        for prefix, submodule in self.named_modules(
+                            remove_duplicate=False
+                        ):
+                            if isinstance(submodule, PreTrainedModel):
+                                submodel_tied_weights = (
+                                    submodule.get_expanded_tied_weights_keys(
+                                        all_submodels=False
+                                    )
+                                )
+                                if prefix:
+                                    submodel_tied_weights = {{
+                                        f"{{prefix}}.{{key}}": f"{{prefix}}.{{value}}"
+                                        for key, value in submodel_tied_weights.items()
+                                    }}
+                                expanded_tied_weights.update(submodel_tied_weights)
+                        return expanded_tied_weights
+                    if not getattr(self.config, "tie_word_embeddings", False):
+                        return {{}}
+                    if "lm_head.weight" in tied_mapping:
+                        return {{"lm_head.weight": "model.embed_tokens.weight"}}
+                    return {{}}
+
+                PreTrainedModel.get_expanded_tied_weights_keys = (
+                    _compat_get_expanded_tied_weights_keys
+                )
+
+            def _load_locateanything_config(model_ref):
+                config = AutoConfig.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+                raw_config_path = Path(model_ref) / "config.json"
+                if raw_config_path.is_file() and hasattr(config, "text_config"):
+                    raw_config = json.loads(raw_config_path.read_text(encoding="utf-8"))
+                    raw_text_config = raw_config.get("text_config", {{}})
+                    if not hasattr(config.text_config, "rope_theta"):
+                        rope_theta = raw_text_config.get("rope_theta")
+                        if rope_theta is None:
+                            rope_parameters = raw_text_config.get("rope_parameters", {{}})
+                            rope_theta = rope_parameters.get("rope_theta", 10000.0)
+                        config.text_config.rope_theta = float(rope_theta)
+                return config
+
+            def _load_locateanything_tokenizer(model_ref):
+                try:
+                    return AutoTokenizer.from_pretrained(
+                        model_ref, trust_remote_code=trust_remote_code)
+                except Exception as auto_exc:
+                    from tokenizers import Tokenizer
+
+                    model_path = Path(model_ref)
+                    raw_tokenizer = Tokenizer.from_file(
+                        str(model_path / "tokenizer.json"))
+                    tokenizer_config = {{}}
+                    tokenizer_config_path = model_path / "tokenizer_config.json"
+                    if tokenizer_config_path.is_file():
+                        tokenizer_config = json.loads(
+                            tokenizer_config_path.read_text(encoding="utf-8"))
+                    model_max_length = int(
+                        tokenizer_config.get("model_max_length", 16384))
+
+                    class TokenizersWrapper:
+                        def __init__(self, tok, max_length):
+                            self._tok = tok
+                            self.model_max_length = max_length
+
+                        def encode(self, text, add_special_tokens=False):
+                            return self._tok.encode(
+                                text,
+                                add_special_tokens=add_special_tokens).ids
+
+                        def __call__(self, text, return_tensors=None):
+                            ids = self.encode(text, add_special_tokens=False)
+                            if return_tensors == "pt":
+                                input_ids = torch.tensor([ids], dtype=torch.long)
+                                attention_mask = torch.ones_like(input_ids)
+                                return {{
+                                    "input_ids": input_ids,
+                                    "attention_mask": attention_mask,
+                                }}
+                            return {{"input_ids": ids}}
+
+                        def decode(self, ids, skip_special_tokens=True):
+                            if torch.is_tensor(ids):
+                                ids = ids.detach().cpu().tolist()
+                            if isinstance(ids, int):
+                                ids = [ids]
+                            return self._tok.decode(
+                                [int(token) for token in ids],
+                                skip_special_tokens=skip_special_tokens)
+
+                        def batch_decode(self, batch_ids, skip_special_tokens=True):
+                            return [
+                                self.decode(ids, skip_special_tokens=skip_special_tokens)
+                                for ids in batch_ids
+                            ]
+
+                    print(
+                        f"WARN AutoTokenizer failed ({{auto_exc}}); "
+                        "using tokenizer.json fallback",
+                        file=sys.stderr,
+                    )
+                    return TokenizersWrapper(raw_tokenizer, model_max_length)
+
+            def _repair_locateanything_rotary_buffers(model):
+                # Restore non-persistent Qwen2 RoPE buffers zeroed by remote loading.
+                repaired = 0
+                model_device = next(model.parameters()).device
+                for module in model.language_model.modules():
+                    if not (
+                        hasattr(module, "_set_cos_sin_cache")
+                        and hasattr(module, "base")
+                        and hasattr(module, "dim")
+                    ):
+                        continue
+                    buffer_device = getattr(
+                        getattr(module, "inv_freq", None), "device", model_device)
+                    inv_freq = 1.0 / (
+                        float(module.base) ** (
+                            torch.arange(
+                                0,
+                                int(module.dim),
+                                2,
+                                device=buffer_device,
+                                dtype=torch.float32,
+                            ) / float(module.dim)
+                        )
+                    )
+                    module.register_buffer("inv_freq", inv_freq, persistent=False)
+                    seq_len = int(
+                        getattr(
+                            module,
+                            "max_position_embeddings",
+                            getattr(model.config.text_config, "max_position_embeddings", 32768),
+                        )
+                    )
+                    module._set_cos_sin_cache(
+                        seq_len=seq_len, device=inv_freq.device, dtype=torch.float32)
+                    repaired += 1
+                if repaired == 0:
+                    raise RuntimeError("LocateAnything reference did not find RoPE buffers")
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            _install_tied_weight_compat()
+            config = _load_locateanything_config(model_ref)
+            tokenizer = _load_locateanything_tokenizer(model_ref)
+            model = AutoModel.from_pretrained(
+                model_ref, config=config, trust_remote_code=trust_remote_code,
+                torch_dtype={torch_dtype_expr})
+            model.to(device)
+            model.eval()
+            _repair_locateanything_rotary_buffers(model)
+
+            image_inputs = preprocess_image_inputs_for_trt(
+                image_path,
+                preprocessor_type="locateanything_patchify",
+                fixed_image_size=448,
+                image_mean=(0.5, 0.5, 0.5),
+                image_std=(0.5, 0.5, 0.5),
+                patch_size=14,
+                interpolation="bicubic",
+            )
+            pixel_values = torch.from_numpy(image_inputs["pixel_values"]).to(device)
+            image_grid_hws = torch.from_numpy(
+                image_inputs["image_grid_hws"]).to(device=device, dtype=torch.int32)
+
+            image_pads = "<IMG_CONTEXT>" * 256
+            prompt_text = (
+                "<|im_start|>system\\n"
+                "You are a helpful assistant.<|im_end|>\\n"
+                "<|im_start|>user\\n"
+                f"<img>{{image_pads}}</img>{{prompt}}<|im_end|>\\n"
+                "<|im_start|>assistant\\n"
+            )
+            inputs = tokenizer(prompt_text, return_tensors="pt")
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+
+            generate_kwargs = {{
+                "pixel_values": pixel_values,
+                "image_grid_hws": image_grid_hws,
+                "input_ids": input_ids,
+                "tokenizer": tokenizer,
+                "max_new_tokens": max_new_tokens,
+                "use_cache": True,
+                "generation_mode": "slow",
+                "do_sample": False,
+            }}
+            if attention_mask is not None:
+                generate_kwargs["attention_mask"] = attention_mask
+
+            with torch.no_grad():
+                output = model.generate(**generate_kwargs)
+
+            if isinstance(output, str):
+                text = output
+            elif isinstance(output, (list, tuple)) and output and isinstance(output[0], str):
+                text = output[0]
+            else:
+                input_len = input_ids.shape[-1]
+                generated_ids = output[0][input_len:] if output.ndim > 1 else output[input_len:]
+                text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            if not text.strip():
+                raise RuntimeError("HF LocateAnything reference produced empty text")
+
+            with open(text_path, "w") as f:
+                f.write(text)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=1800,
+            label="hf_vl_generation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
+            text_reader=lambda: _read_text_artifact(text_path),
+            metadata={
+                "trust_remote_code": trust_remote_code,
+                "reference_variant": "locateanything_manual_processor",
+            },
+            failure_label="HF VL generation",
+        )
+
+    def _run_prompted_segmentation_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF SAM model for prompted segmentation reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_sam.json")
+        masks_path = str(Path(model_dir) / "hf_sam_masks.npy")
+        segmented_image_path = str(Path(model_dir) / "hf_sam_segmented.png")
+
+        image_path = self._resolve_image_path(case.inputs.get("image", ""))
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        point_x = case.inputs.get("point_x", 0.5)
+        point_y = case.inputs.get("point_y", 0.5)
+        hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import SamModel, SamProcessor
+            from PIL import Image
+
+            hf_id = {hf_id!r}
+            image_path = {image_path!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+            masks_path = {masks_path!r}
+            segmented_image_path = {segmented_image_path!r}
+            point_x_frac = {point_x!r}
+            point_y_frac = {point_y!r}
+
+            processor = SamProcessor.from_pretrained(hf_id)
+            model = SamModel.from_pretrained(
+                hf_id, torch_dtype={torch_dtype_expr})
+            model.eval()
+
+            image = Image.open(image_path).convert("RGB")
+            w, h = image.size
+
+            # Convert fractional coords to pixel coords
+            px = int(point_x_frac * w)
+            py = int(point_y_frac * h)
+            input_points = [[[px, py]]]
+
+            inputs = processor(
+                image, input_points=input_points, return_tensors="pt")
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            masks = processor.image_processor.post_process_masks(
+                outputs.pred_masks.cpu(),
+                inputs["original_sizes"].cpu(),
+                inputs["reshaped_input_sizes"].cpu()
+            )[0]
+
+            iou_scores = outputs.iou_scores[0, 0].cpu().numpy().tolist()
+            mask_np = masks[0].cpu().numpy().astype(np.uint8)
+            np.save(masks_path, mask_np)
+
+            selected_mask = int(np.argmax(iou_scores)) if iou_scores else 0
+            selected_mask = min(selected_mask, mask_np.shape[0] - 1)
+            overlay_mask = mask_np[selected_mask].astype(bool)
+            if overlay_mask.shape != (h, w):
+                mask_img = Image.fromarray(overlay_mask.astype(np.uint8) * 255)
+                mask_img = mask_img.resize((w, h), Image.NEAREST)
+                overlay_mask = np.asarray(mask_img, dtype=np.uint8) > 0
+
+            image_arr = np.asarray(image, dtype=np.float32)
+            overlay = np.zeros_like(image_arr)
+            overlay[..., 0] = 255.0
+            overlay[..., 1] = 96.0
+            alpha = 0.55
+            image_arr[overlay_mask] = (
+                image_arr[overlay_mask] * (1.0 - alpha)
+                + overlay[overlay_mask] * alpha
+            )
+            Image.fromarray(np.clip(image_arr, 0, 255).astype(np.uint8)).save(
+                segmented_image_path)
+
+            result = {{
+                "iou_scores": iou_scores,
+                "num_masks": mask_np.shape[0],
+                "mask_shape": list(mask_np.shape),
+                "segmented_image_path": segmented_image_path,
+            }}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK masks={{mask_np.shape[0]}} iou={{iou_scores}}")
+        """)
+
+        python = ctx.reference_python_path() or sys.executable
+        return run_reference_subprocess(
+            command=[python, "-c", script],
+            timeout_s=600,
+            label="hf_prompted_segmentation",
+            artifact_dir=ctx.artifacts_dir or "",
+            case_name=case.name,
+            stage_name=stage.name,
+            env=_reference_env(ctx),
+            output_readers=(
+                _json_output_reader(output_path),
+                _existing_path_reader(masks_path, "masks_path"),
+                _existing_path_reader(segmented_image_path, "segmented_image_path"),
+            ),
+            failure_label="HF prompted segmentation",
+        )
+
+
+plugin = HfTransformersReference()

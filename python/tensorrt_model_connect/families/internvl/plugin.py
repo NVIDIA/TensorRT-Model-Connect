@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,

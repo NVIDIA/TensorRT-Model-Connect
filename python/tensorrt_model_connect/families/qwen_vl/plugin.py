@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     load_standard_weights,
     _open_safetensors,
@@ -32,8 +32,8 @@ from ...checkpoint_mapper import (
 from ...parallel_config import normalize_parallel_config
 from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
-from ... import graph_ops
-from ... import graph_blocks
+from . import graph_ops
+from . import graph_blocks
 
 trt = trt_compat.get_trt()
 

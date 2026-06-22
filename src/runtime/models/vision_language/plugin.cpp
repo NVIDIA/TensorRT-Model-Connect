@@ -4,7 +4,7 @@
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/domains/multimodal/image_preprocessor.h"
 #include "runtime/models/vision_language/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

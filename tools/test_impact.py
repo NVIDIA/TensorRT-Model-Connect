@@ -237,7 +237,6 @@ _NO_IMPACT_PATTERNS = [
     r"^\.gitignore$",
     r"^\.clang-format$",
     r"^\.editorconfig$",
-    r"^\.github/",
     r"^\.claude/",
     r"^\.agents/",
     r"^plugins/trtmc-agent-skills/",
@@ -284,6 +283,7 @@ class ImpactMap:
     all_model_names_set: Set[str]
     core_models: List[str]
     model_metadata: Dict[str, Dict]
+    manifest_path_to_model: Dict[str, str]
     builder_to_families: Dict[str, List[str]]       # parent module -> families
     cpp_runtime_model_strategies: Dict[str, List[str]]
     manifest_field_to_models: Dict[str, List[str]]
@@ -300,6 +300,7 @@ class ImpactResult:
     rebuild_cpp: bool
     cap_applied: bool
     matched_rules: List[Dict]
+    e2e_test_ids: List[str] = field(default_factory=list)
     builder_tests: List[str] = field(default_factory=list)
     cpp_tests: List[str] = field(default_factory=list)
     tools_tests: List[str] = field(default_factory=list)
@@ -449,6 +450,16 @@ def _iter_manifest_data_paths(value: object) -> List[str]:
     return sorted(paths)
 
 
+def _iter_e2e_manifest_paths(models_dir: Path) -> List[Path]:
+    """Return E2E manifests from flat and model-owned layouts."""
+    if not models_dir.is_dir():
+        return []
+    return sorted({
+        *models_dir.glob("*.json"),
+        *models_dir.glob("*/manifests/*.json"),
+    })
+
+
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
@@ -465,9 +476,10 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     all_model_names: List[str] = []
     core_models: List[str] = []
     model_metadata: Dict[str, Dict] = {}
+    manifest_path_to_model: Dict[str, str] = {}
     l0_replacement_by_model: Dict[str, str] = {}
 
-    for manifest_path in sorted(models_dir.glob("*.json")):
+    for manifest_path in _iter_e2e_manifest_paths(models_dir):
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -480,6 +492,10 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
 
         all_model_names.append(name)
         model_metadata[name] = data
+        try:
+            manifest_path_to_model[manifest_path.relative_to(repo_root).as_posix()] = name
+        except ValueError:
+            pass
 
         if family:
             family_to_models.setdefault(family, []).append(name)
@@ -565,6 +581,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         all_model_names_set=set(all_model_names),
         core_models=sorted(core_models),
         model_metadata=model_metadata,
+        manifest_path_to_model=manifest_path_to_model,
         builder_to_families=builder_to_families,
         cpp_runtime_model_strategies=cpp_runtime_model_strategies,
         manifest_field_to_models={
@@ -640,6 +657,7 @@ def _apply_l0_replacements(
     models: List[str],
     imap: ImpactMap,
     preserve_models: Set[str],
+    exact_models: Optional[Set[str]] = None,
 ) -> tuple[List[str], List[Dict[str, str]]]:
     """Replace nightly-only scale models with their L0 representatives.
 
@@ -651,6 +669,7 @@ def _apply_l0_replacements(
     changed, so keep those exact model IDs even if they normally have an L0
     representative.
     """
+    del exact_models  # Retained in the signature to keep call sites stable.
     selected: Set[str] = set()
     replacements: List[Dict[str, str]] = []
     for model in models:
@@ -840,6 +859,9 @@ def _all_models(context: RuleContext, imap: ImpactMap) -> List[str]:
 
 
 def _manifest_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    path_model = imap.manifest_path_to_model.get(context.path)
+    if path_model:
+        return [path_model]
     name = _group(context)
     return [name] if name in imap.all_model_names_set else []
 
@@ -855,6 +877,15 @@ def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     for family in families:
         models.update(imap.family_to_models.get(family, []))
     return sorted(models)
+
+
+def _e2e_model_threshold_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    if context.match is None:
+        return []
+    model_name = context.match.group(2)
+    if model_name in imap.all_model_names_set:
+        return [model_name]
+    return sorted(imap.family_to_models.get(context.match.group(1), []))
 
 
 def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
@@ -905,13 +936,6 @@ def _cpp_pipeline_strategies(context: RuleContext, imap: ImpactMap) -> List[str]
     return CPP_PIPELINE_STRATEGIES.get(_group(context), [])
 
 
-def _shared_cpp_helper_strategies(
-    context: RuleContext, imap: ImpactMap,
-) -> List[str]:
-    del imap
-    return SHARED_CPP_HELPER_STRATEGIES.get(_group(context), [])
-
-
 def _specialized_builder_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     families = imap.builder_to_families[_group(context)]
     models: Set[str] = set()
@@ -926,6 +950,18 @@ def _scoped_cpp_helper_models(context: RuleContext, imap: ImpactMap) -> List[str
 
 def _e2e_data_file_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return imap.e2e_data_file_to_models[context.path]
+
+
+def _model_owned_e2e_test_id(model: str, imap: ImpactMap) -> str:
+    metadata = imap.model_metadata.get(model, {})
+    family = str(metadata.get("family", "") or "").strip()
+    if not family:
+        return f"tests/test_e2e.py::test_e2e[{model}]"
+    return f"tests/e2e/models/{family}/test_{family}_e2e.py::test_model_e2e[{model}]"
+
+
+def _model_owned_e2e_test_ids(models: List[str], imap: ImpactMap) -> List[str]:
+    return [_model_owned_e2e_test_id(model, imap) for model in models]
 
 
 def _fp8_scale_models(context: RuleContext, imap: ImpactMap) -> List[str]:
@@ -1031,14 +1067,64 @@ def _catch_all_resolver(
     return RuleMatch("catch_all", list(imap.all_model_names), unit_tiers, True)
 
 
+def _is_family_builder_test(path: str) -> bool:
+    return re.match(
+        r"^python/tensorrt_model_connect/families/[A-Za-z]\w*/tests/.+\.py$",
+        path,
+    ) is not None
+
+
 def _classification_rules() -> Tuple[ClassificationRule, ...]:
     rules = (
         ClassificationRule(
             priority=10,
             name="manifest",
-            matcher=_regex_rule(r"tests/e2e/models/(.+)\.json$"),
+            matcher=_regex_rule(
+                r"tests/e2e/models/(?:[^/]+/manifests/)?([^/]+)\.json$"
+            ),
             resolver=_match_result("manifest", _manifest_models),
             covered_by=("TestSafetyNet.test_manifest_self",),
+        ),
+        ClassificationRule(
+            priority=11,
+            name="e2e_model_index",
+            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/MODEL\.toml$"),
+            resolver=_match_result("e2e_model_index", _family_models),
+            covered_by=("TestSafetyNet.test_e2e_model_index_self",),
+        ),
+        ClassificationRule(
+            priority=12,
+            name="e2e_model_threshold",
+            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/thresholds/([^/]+)\.json$"),
+            resolver=_match_result("e2e_model_threshold", _e2e_model_threshold_models),
+            covered_by=("TestSafetyNet.test_e2e_model_owned_threshold_self",),
+        ),
+        ClassificationRule(
+            priority=14,
+            name="e2e_model_owned_test",
+            matcher=_regex_rule(
+                r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|.*\.py$)"
+            ),
+            resolver=_match_result("e2e_model_owned_test", _family_models),
+            covered_by=("TestSafetyNet.test_e2e_model_owned_test_self",),
+        ),
+        ClassificationRule(
+            priority=13,
+            name="family_unit_builder",
+            matcher=lambda path, _imap: (
+                RuleContext(path) if _is_family_builder_test(path) else None
+            ),
+            resolver=_match_result("family_unit_builder", _no_models),
+            covered_by=("TestUnitTiers.test_family_unit_builder",),
+        ),
+        ClassificationRule(
+            priority=15,
+            name="family_model_index",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/families/([A-Za-z]\w*)/MODEL\.toml$"
+            ),
+            resolver=_match_result("family_model_index", _family_models),
+            covered_by=("TestFamilyOwnedBuilder.test_family_model_index",),
         ),
         ClassificationRule(
             priority=20,
@@ -1191,41 +1277,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 _unknown_plugin_stem(CPP_PIPELINE_STRATEGIES),
             ),
             resolver=_match_result("cpp_pipeline_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=190,
-            name="cpp_shared_plugin_helpers",
-            matcher=_regex_rule(
-                r"src/runtime/plugins/shared/(plugin_helpers)\.(h|cpp)$"
-            ),
-            resolver=_match_result("cpp_shared_plugin_helpers", _all_models),
-            covered_by=("TestCppScope.test_cpp_shared_plugin_helpers",),
-        ),
-        ClassificationRule(
-            priority=200,
-            name="cpp_shared_helper",
-            matcher=_regex_rule(
-                r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$",
-                _known_task_strategy_stem(SHARED_CPP_HELPER_STRATEGIES),
-            ),
-            resolver=_match_result(
-                "cpp_shared_helper",
-                _runtime_strategy_models(_shared_cpp_helper_strategies),
-            ),
-            covered_by=(
-                "TestCppScope.test_cpp_shared_audio",
-                "TestCppScope.test_cpp_shared_diffusion",
-            ),
-        ),
-        ClassificationRule(
-            priority=210,
-            name="cpp_shared_helper_unknown",
-            matcher=_regex_rule(
-                r"src/runtime/plugins/shared/(\w+)\.(h|cpp)$",
-                _unknown_task_strategy_stem(SHARED_CPP_HELPER_STRATEGIES),
-            ),
-            resolver=_match_result("cpp_shared_helper_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
@@ -1481,6 +1532,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
         ClassificationRule(
+            priority=416,
+            name="model_plugin_evidence_report",
+            matcher=_regex_rule(r"reports/model-plugin-encapsulation/.+\.json$"),
+            resolver=_match_result("model_plugin_evidence_report", _no_models, [], False),
+            covered_by=("TestNoImpact.test_model_plugin_evidence_report",),
+        ),
+        ClassificationRule(
             priority=420,
             name="unit_builder",
             matcher=_path_startswith("tests/builder/"),
@@ -1500,6 +1558,23 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_startswith("tests/tools/"),
             resolver=_match_result("unit_tools", _no_models),
             covered_by=("TestUnitTiers.test_unit_tier_tools",),
+        ),
+        ClassificationRule(
+            priority=445,
+            name="e2e_selection_unit",
+            matcher=_path_equals("tests/test_e2e_selection.py"),
+            resolver=_match_result("e2e_selection_unit", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_e2e_selection_unit",),
+        ),
+        ClassificationRule(
+            priority=446,
+            name="model_plugin_validation_tool",
+            matcher=_path_in({
+                "tools/e2e_origin_main_parity.py",
+                "tools/model_plugin_isolation.py",
+            }),
+            resolver=_match_result("model_plugin_validation_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_model_plugin_validation_tools",),
         ),
         ClassificationRule(
             priority=450,
@@ -1581,6 +1656,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_task_eval_suite_config_triggers_tools_tier",),
         ),
         ClassificationRule(
+            priority=488,
+            name="test_impact_tool",
+            matcher=_path_equals("tools/test_impact.py"),
+            resolver=_match_result("test_impact_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_test_impact_tool_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=489,
+            name="github_ci_config",
+            matcher=_path_startswith(".github/"),
+            resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
+        ),
+        ClassificationRule(
             priority=490,
             name="no_impact",
             matcher=_no_impact_matcher,
@@ -1630,7 +1719,10 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
         path = raw_path.replace("\\", "/").strip("/")
         if not path.endswith(".py"):
             continue
-        if path.startswith("tests/builder/"):
+        if (
+            path.startswith("tests/builder/")
+            or _is_family_builder_test(path)
+        ):
             builder_tests.add(path)
         elif path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
             tools_tests.add(path)
@@ -1670,6 +1762,7 @@ def analyze_impact(
 
     all_models: Set[str] = set()
     preserve_l0_models: Set[str] = set()
+    exact_models: Set[str] = set()
     all_tiers: Set[str] = set()
     rebuild_cpp = False
     matched_rules: List[Dict] = []
@@ -1700,6 +1793,8 @@ def analyze_impact(
         all_models.update(match.models)
         if match.rule == "e2e_waives_model_lines":
             preserve_l0_models.update(match.models)
+        if match.rule in ("manifest", "e2e_data_file", "e2e_model_threshold"):
+            exact_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
         matched_rules.append({
@@ -1712,7 +1807,7 @@ def analyze_impact(
     l0_replacements: List[Dict[str, str]] = []
     if e2e_suite == "l0":
         e2e_models, l0_replacements = _apply_l0_replacements(
-            e2e_models, imap, preserve_l0_models,
+            e2e_models, imap, preserve_l0_models, exact_models,
         )
     cap_applied = False
     if cap is not None and len(e2e_models) > cap:
@@ -1747,6 +1842,7 @@ def analyze_impact(
         rebuild_cpp=rebuild_cpp,
         cap_applied=cap_applied,
         matched_rules=matched_rules,
+        e2e_test_ids=_model_owned_e2e_test_ids(e2e_models, imap),
         builder_tests=builder_tests,
         cpp_tests=cpp_tests,
         tools_tests=tools_tests,
@@ -3301,8 +3397,11 @@ def format_human(result: ImpactResult) -> str:
     lines: List[str] = []
     if result.e2e_models:
         lines.append(f"# E2E tests to run ({len(result.e2e_models)} models):")
-        for model in result.e2e_models:
-            lines.append(f"tests/test_e2e.py::test_e2e[{model}]")
+        if result.e2e_test_ids:
+            lines.extend(result.e2e_test_ids)
+        else:
+            for model in result.e2e_models:
+                lines.append(f"tests/test_e2e.py::test_e2e[{model}]")
     else:
         lines.append("# No E2E models affected.")
     if result.unit_tiers:
@@ -3320,6 +3419,7 @@ def format_human(result: ImpactResult) -> str:
 def format_json(result: ImpactResult) -> str:
     return json.dumps({
         "e2e_models": result.e2e_models,
+        "e2e_test_ids": result.e2e_test_ids,
         "unit_tiers": result.unit_tiers,
         "rebuild_cpp": result.rebuild_cpp,
         "cap_applied": result.cap_applied,
@@ -3432,6 +3532,7 @@ def main() -> int:
                 "file": "<all>", "rule": "git_diff_failed",
                 "models": e2e_models,
             }],
+            e2e_test_ids=_model_owned_e2e_test_ids(e2e_models, imap),
         )
     elif not changed:
         print("No changed files detected.", file=sys.stderr)

@@ -1,0 +1,10 @@
+id = "internlm"
+plugin = "internlm"
+module = "plugin"
+aliases = [
+  "internlm",
+  "internlm2",
+]
+prefixes = [
+  "internlm",
+]

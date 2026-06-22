@@ -1,1 +1,4 @@
+id = "seq2seq"
+runtime_library = "libtrtmc_model_seq2seq.so"
+runtime_plugins = ["plugin.cpp|register_seq2seq_plugin"]
 runtime_strategies = ["seq2seq_encoder_decoder"]

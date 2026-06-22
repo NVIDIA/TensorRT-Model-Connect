@@ -1,0 +1,9 @@
+id = "mpnet"
+plugin = "mpnet"
+module = "plugin"
+aliases = [
+  "mpnet",
+]
+prefixes = [
+  "mpnet",
+]

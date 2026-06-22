@@ -1,0 +1,14 @@
+{
+  "name": "canary-1b-v2",
+  "trace_id": "IT-E2E-CANRY-01",
+  "hf_id": "nvidia/canary-1b-v2",
+  "bundle": "canary-1b-v2.trtfb",
+  "family": "canary",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "max_cache_length": 128,
+  "prompt": "test",
+  "max_new_tokens": 50,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav"
+}

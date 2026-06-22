@@ -1,0 +1,14 @@
+{
+  "name": "qwen3-0.6b-fp16",
+  "trace_id": "IT-E2E-QWN3-FP16-01",
+  "hf_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b-fp16.trtfb",
+  "family": "qwen",
+  "runtime_strategy": "decoder_kv_cache",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false,
+  "core": true
+}

@@ -1,0 +1,13 @@
+{
+  "name": "qwen3-vl-2b",
+  "trace_id": "IT-E2E-Q3VL-01",
+  "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
+  "bundle": "qwen3-vl-2b.trtfb",
+  "family": "qwen_vl",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 256,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "test_image": "data/test_img.jpeg",
+  "trust_remote_code": false
+}

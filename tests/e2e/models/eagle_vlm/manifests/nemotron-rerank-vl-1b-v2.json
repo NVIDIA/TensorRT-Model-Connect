@@ -1,0 +1,22 @@
+{
+  "name": "nemotron-rerank-vl-1b-v2",
+  "trace_id": "IT-E2E-EGRK-01",
+  "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+  "bundle": "nemotron-rerank-vl-1b-v2.trtfb",
+  "family": "eagle_vlm",
+  "runtime_strategy": "reranking",
+  "reference_family": "vl_rerank",
+  "user_contract": "ranking_order",
+  "max_cache_length": 256,
+  "inputs": {
+    "prompt": "Which planet is known as the Red Planet?",
+    "documents": [
+      "Venus is often called Earth's twin because of its similar size and proximity.",
+      "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
+      "Jupiter, the largest planet in our solar system, has a prominent red spot.",
+      "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+    ]
+  },
+  "max_new_tokens": 1,
+  "trust_remote_code": true
+}

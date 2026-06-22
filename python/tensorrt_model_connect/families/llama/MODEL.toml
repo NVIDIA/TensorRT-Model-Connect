@@ -1,0 +1,10 @@
+id = "llama"
+plugin = "llama"
+module = "plugin"
+aliases = [
+  "LLaMA",
+  "llama",
+]
+prefixes = [
+  "llama",
+]

@@ -1,0 +1,26 @@
+{
+  "name": "flux-2-dev",
+  "trace_id": "IT-E2E-FLX2D-01",
+  "hf_id": "black-forest-labs/FLUX.2-dev",
+  "bundle": "flux-2-dev.trtfb",
+  "model_type": "flux.2",
+  "family": "flux",
+  "runtime_strategy": "diffusion_flux",
+  "gated": true,
+  "ci_tier": "nightly_only",
+  "l0_replacement": "flux-2-dev-l0",
+  "l0_replacement_reason": "FLUX.2-dev scale stays nightly; flux-2-dev-l0 keeps the Flux2 image path at 384px/20 steps for PR L0.",
+  "precision": "fp16",
+  "description": "FLUX.2-dev text-to-image (Mistral 3 encoder, Flux2 DiT, 32ch VAE)",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+  "test_type": "diffusion",
+  "image_height": 1024,
+  "image_width": 1024,
+  "video_num_frames": 1,
+  "num_inference_steps": 28,
+  "skip_text_comparison": true,
+  "notes": "FLUX.2-dev: Mistral 3 text encoder, Flux2 DiT (8 joint + 48 single, 6144-dim), AutoencoderKLFlux2 (32ch, patch=[2,2])."
+}

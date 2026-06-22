@@ -1,0 +1,9 @@
+id = "codegen"
+plugin = "codegen"
+module = "plugin"
+aliases = [
+  "codegen",
+]
+prefixes = [
+  "codegen",
+]

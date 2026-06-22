@@ -1,0 +1,6 @@
+id = "gpt2"
+plugin = "gpt2"
+test_manifests = [
+  "manifests/gpt2-125m-tp4.json",
+  "manifests/gpt2-125m.json",
+]

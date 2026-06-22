@@ -1,0 +1,55 @@
+{
+  "name": "whisper-large-v3-turbo-tp4",
+  "trace_id": "IT-E2E-WHSPL-TP4-01",
+  "hf_id": "openai/whisper-large-v3-turbo",
+  "bundle": "whisper-large-v3-turbo-tp4.trtfb",
+  "family": "whisper",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "max_cache_length": 64,
+  "prompt": "test",
+  "max_new_tokens": 20,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ]
+}

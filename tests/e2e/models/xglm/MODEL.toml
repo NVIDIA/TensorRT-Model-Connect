@@ -1,0 +1,6 @@
+id = "xglm"
+plugin = "xglm"
+test_manifests = [
+  "manifests/xglm-564m-tp4.json",
+  "manifests/xglm-564m.json",
+]

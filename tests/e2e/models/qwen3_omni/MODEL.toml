@@ -1,0 +1,5 @@
+id = "qwen3_omni"
+plugin = "qwen3_omni"
+test_manifests = [
+  "manifests/qwen3-omni-30b-a3b-instruct.json",
+]

@@ -1,0 +1,14 @@
+id = "qwen"
+plugin = "qwen"
+module = "plugin"
+aliases = [
+  "qwen",
+  "Qwen2",
+  "qwen2",
+  "qwen3",
+  "qwq",
+]
+prefixes = [
+  "qwen",
+  "qwq",
+]

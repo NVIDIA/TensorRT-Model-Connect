@@ -1,0 +1,5 @@
+id = "locateanything"
+plugin = "locateanything"
+test_manifests = [
+  "manifests/locateanything-3b.json",
+]

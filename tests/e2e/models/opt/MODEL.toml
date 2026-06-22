@@ -1,0 +1,6 @@
+id = "opt"
+plugin = "opt"
+test_manifests = [
+  "manifests/opt-125m-tp4.json",
+  "manifests/opt-125m.json",
+]

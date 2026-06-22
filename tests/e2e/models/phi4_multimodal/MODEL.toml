@@ -1,0 +1,5 @@
+id = "phi4_multimodal"
+plugin = "phi4_multimodal"
+test_manifests = [
+  "manifests/phi4-multimodal.json",
+]

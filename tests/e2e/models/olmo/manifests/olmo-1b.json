@@ -1,0 +1,12 @@
+{
+  "name": "olmo-1b",
+  "trace_id": "IT-E2E-OLMO-01",
+  "hf_id": "allenai/OLMo-1B-hf",
+  "bundle": "olmo-1b.trtfb",
+  "family": "olmo",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

@@ -39,17 +39,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     load_standard_weights,
     _open_safetensors,
     _load_tensor,
 )
-# Reuse the Qwen-VL building blocks: the understanding decoder is a Qwen2.5-VL
-# decoder, and the ViT is the Qwen2.5-VL vision encoder.
-from ..qwen_vl.standard_decoder_builder import build_standard_decoder_engine
-from ..qwen_vl.qwen_vl_vision_builder import build_qwen_vl_vision_engine
+# Reuse the Qwen-VL vision encoder shape. The decoder builder is local so the
+# Lance family does not depend on another family's text-builder package.
+from .default_decoder import build_standard_decoder_engine
+from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
 
 # Standard Qwen2.5-VL ViT input size; the runtime resizes images to this.
 _DEFAULT_FIXED_IMAGE_SIZE = 448

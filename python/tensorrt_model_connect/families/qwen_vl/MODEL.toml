@@ -1,0 +1,13 @@
+id = "qwen_vl"
+plugin = "qwen_vl"
+module = "plugin"
+aliases = [
+  "qwen2_5_vl",
+  "qwen2_vl",
+  "qwen3_vl",
+  "qwen_vl",
+  "qwenvl",
+]
+prefixes = [
+  "qwen_vl",
+]

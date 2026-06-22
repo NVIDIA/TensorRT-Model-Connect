@@ -1,0 +1,14 @@
+id = "flux"
+plugin = "flux"
+module = "plugin"
+aliases = [
+  "flux",
+  "flux.2",
+]
+prefixes = [
+  "flux",
+]
+diffusion_pipeline_classes = [
+  "Flux2Pipeline",
+  "FluxPipeline",
+]

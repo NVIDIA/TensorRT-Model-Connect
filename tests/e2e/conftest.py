@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 E2E_DIR = Path(__file__).resolve().parent
 MODELS_DIR = E2E_DIR / "models"
@@ -18,15 +19,14 @@ PROJECT_DIR = E2E_DIR.parents[1]
 
 
 def _load_manifest():
-    """Load model manifest from per-model JSON files in tests/e2e/models/."""
+    """Load model manifests from flat and model-owned E2E layouts."""
     models = []
     engine_dir = "/mnt/storage/tensorrt-model-connect/engines"
 
-    if MODELS_DIR.is_dir():
-        for model_file in sorted(MODELS_DIR.glob("*.json")):
-            with open(model_file) as f:
-                entry = json.load(f)
-            models.append(entry)
+    for model_file in iter_manifest_paths(MODELS_DIR):
+        with open(model_file) as f:
+            entry = json.load(f)
+        models.append(entry)
 
     return {"engine_dir": engine_dir, "models": models}
 
@@ -46,16 +46,28 @@ def _models():
 # ---------------------------------------------------------------------------
 
 def pytest_addoption(parser):
-    parser.addoption(
+    def addoption(*args, **kwargs):
+        try:
+            parser.addoption(*args, **kwargs)
+        except ValueError:
+            pass
+
+    addoption(
         "--engine-dir", default=None,
         help="Directory containing .trtfb bundles (default: from engines.json)")
-    parser.addoption(
+    addoption(
         "--trtmc-binary", default=None,
         help="Path to the C++ trtmc binary (default: build/trtmc)")
-    parser.addoption(
+    addoption(
         "--hf-python", default=None,
         help="Python interpreter with HuggingFace tokenizers (default: .venv/bin/python)")
-    parser.addoption(
+    addoption(
+        "--model-plugin-dir", default=None,
+        help="Directory containing libtrtmc_model_*.so")
+    addoption(
+        "--e2e-model", action="append", default=[],
+        help="Filter by E2E case name or family; repeat or comma-separate values")
+    addoption(
         "--rebuild-engines", action="store_true", default=False,
         help="Force rebuild of all engine bundles (default: use cached)")
 

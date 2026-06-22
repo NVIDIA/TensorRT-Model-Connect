@@ -15,19 +15,19 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...checkpoint_mapper import (
+from .checkpoint_mapper import (
     WeightDict,
     _has_tensor,
     _load_tensor,
     _open_safetensors,
     _transpose_2d,
 )
-from ...config import ModelConfig
+from .config import ModelConfig
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from ...builders.default_decoder import build_standard_decoder_engine
+from .default_decoder import build_standard_decoder_engine
 
 if TYPE_CHECKING:
     from ...quantization.context import QuantContext
@@ -71,7 +71,7 @@ class LocateAnythingPlugin:
                 raise ValueError(
                     "LocateAnything tensor-parallel builds do not support "
                     "debug layer outputs")
-            from ..qwen_vl.decoder_tp_builder import build_qwen_vl_tp_decoder_engine
+            from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 
             return build_qwen_vl_tp_decoder_engine(
                 config,

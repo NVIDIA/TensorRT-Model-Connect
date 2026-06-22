@@ -272,6 +272,23 @@ class TestNemotronLabsDiffusionPlugin:
         assert captured["decoder_engine_role"] == "dual_profile"
         assert captured["full_logits_raw"] is True
 
+    def test_default_decoder_threads_full_logits_to_dual_profile(self, tmp_path, monkeypatch):
+        pytest.importorskip("tensorrt")
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import default_decoder
+
+        self._setup(tmp_path)
+        cfg = ModelConfig.from_dir(tmp_path)
+        captured = {}
+
+        def fake_build(config, weights, max_cache_length, **kwargs):
+            captured.update(kwargs)
+            return b"plan"
+
+        monkeypatch.setattr(default_decoder, "build_dual_profile_decoder_engine", fake_build)
+        assert default_decoder.build_standard_decoder_engine(
+            cfg, {}, 64, precision="bf16", full_logits_output=True) == b"plan"
+        assert captured["full_logits_output"] is True
+
     def test_build_extra_engines_merges_linear_spec_lora(self, tmp_path, monkeypatch):
         plugin_mod = importlib.import_module(
             "tensorrt_model_connect.families.nemotron_labs_diffusion.plugin")

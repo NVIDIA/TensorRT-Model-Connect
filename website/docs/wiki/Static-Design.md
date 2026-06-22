@@ -302,12 +302,12 @@ classDiagram
 | **Functions** | `ReadBundleFile()` (full load), `ReadBundleHeader()` (metadata only), `HasBundleMagic()` (validation). |
 | **Public API** | `BundleInfo InspectBundle()`, `bool IsBundle()` -- thin wrappers for external callers. |
 
-### UD-BDL-02: Plugin Helpers
+### UD-BDL-02: Model-Local Plugin Helpers
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/plugins/shared/plugin_helpers.h`, `src/runtime/plugins/shared/plugin_helpers.cpp` |
-| **Purpose** | Shared plumbing for pipeline plugins: `find_section()` extracts named sections from bundles, `load_trt_module_from_plan()` deserializes TRT engine plans, `create_tokenizer_from_bundle()` creates tokenizers, `compute_kv_dim()` derives KV dimensions from config. |
+| **Files** | `src/runtime/models/<model>/plugin_helpers.h`, `src/runtime/models/<model>/plugin_helpers.cpp` |
+| **Purpose** | Model-owned plumbing for pipeline plugins: `find_section()` extracts named sections from bundles, `load_trt_module_from_plan()` deserializes TRT engine plans, `create_tokenizer_from_bundle()` creates tokenizers, and model-local config helpers derive cache dimensions or strategy-specific runtime values. |
 
 ### UD-FAC-01: Pipeline Factory and Plugin Registry
 
@@ -393,7 +393,7 @@ classDiagram
 |---|---|
 | **Files** | `src/runtime/models/whisper/pipeline.h/cpp`, `bark_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp` |
 | **Purpose** | Five audio pipeline classes. `WhisperPipeline` (`transcribe()`), `BarkPipeline` (`generate_audio()`), `MagpiePipeline` (`generate_audio()`), `SpeechPipeline` (`speak()`), and `OmniPipeline` (`generate_audio()` -- three-stage: thinker->talker->code2wav). |
-| **Plugin dispatch** | Each audio strategy has its own model runtime folder in `src/runtime/models/`: `whisper/`, `bark/`, `magpie/`, `speech/`, `omni/`. Plugins use shared helpers from `src/runtime/plugins/shared/audio_helpers.h`. Audio config types and seam headers live in `src/runtime/domains/audio/`. |
+| **Plugin dispatch** | Each audio strategy has its own model runtime folder in `src/runtime/models/`: `whisper/`, `bark/`, `magpie/`, `speech/`, `omni/`. Plugins use model-local helper copies such as `audio_helpers.h` inside the owning folder. Audio config types and seam headers live in `src/runtime/domains/audio/`. |
 
 ### UD-PIP-DIFF-01: Diffusion Pipelines
 

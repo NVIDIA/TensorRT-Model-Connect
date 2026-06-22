@@ -1,1 +1,4 @@
+id = "pixart"
+runtime_library = "libtrtmc_model_pixart.so"
+runtime_plugins = ["plugin.cpp|register_pixart_plugin"]
 runtime_strategies = ["diffusion_pixart"]

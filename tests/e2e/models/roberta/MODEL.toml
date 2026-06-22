@@ -1,0 +1,12 @@
+id = "roberta"
+plugin = "roberta"
+test_manifests = [
+  "manifests/camembert-base-tp4.json",
+  "manifests/camembert-base.json",
+  "manifests/roberta-base-tp4.json",
+  "manifests/roberta-base.json",
+  "manifests/roberta-large-tp4.json",
+  "manifests/roberta-large.json",
+  "manifests/xlm-roberta-base-tp4.json",
+  "manifests/xlm-roberta-base.json",
+]

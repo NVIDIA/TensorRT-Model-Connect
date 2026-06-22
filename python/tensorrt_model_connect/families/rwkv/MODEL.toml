@@ -1,0 +1,9 @@
+id = "rwkv"
+plugin = "rwkv"
+module = "plugin"
+aliases = [
+  "rwkv",
+]
+prefixes = [
+  "rwkv",
+]

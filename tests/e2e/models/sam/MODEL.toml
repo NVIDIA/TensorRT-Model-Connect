@@ -1,0 +1,6 @@
+id = "sam"
+plugin = "sam"
+test_manifests = [
+  "manifests/sam-vit-base-tp4.json",
+  "manifests/sam-vit-base.json",
+]

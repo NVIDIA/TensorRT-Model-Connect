@@ -24,7 +24,8 @@ import importlib
 import logging
 import pkgutil
 from pathlib import Path
-from typing import Dict, Optional
+import re
+from typing import Dict, Iterable, Optional
 
 from .contracts import Comparator, ReferenceBackendRunner, TaskStrategyRunner
 
@@ -67,6 +68,39 @@ def register_comparator(comp: Comparator) -> None:
     if name in _comparators:
         logger.warning("Overwriting comparator for %s", name)
     _comparators[name] = comp
+
+
+def _register_plugin_object(module_name: str, plugin: object) -> None:
+    """Register one plugin object exposed by a shared or model-local module."""
+    if isinstance(plugin, TaskStrategyRunner):
+        register_runner(plugin)
+        logger.debug("Registered runner from %s: %s", module_name, plugin.strategy_name)
+        return
+    if isinstance(plugin, ReferenceBackendRunner):
+        register_reference(plugin)
+        logger.debug("Registered reference from %s: %s", module_name, plugin.backend_name)
+        return
+    if isinstance(plugin, Comparator):
+        register_comparator(plugin)
+        logger.debug("Registered comparator from %s: %s", module_name, plugin.task_strategy)
+        return
+    logger.warning(
+        "Module %s exposed a plugin object that does not match a known E2E "
+        "protocol: %r",
+        module_name,
+        plugin,
+    )
+
+
+def _iter_module_plugins(mod) -> Iterable[object]:
+    for attr_name in ("runner", "reference", "comparator", "plugin"):
+        plugin = getattr(mod, attr_name, None)
+        if plugin is None:
+            continue
+        if isinstance(plugin, (list, tuple)):
+            yield from plugin
+        else:
+            yield plugin
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +184,46 @@ def discover_plugins() -> None:
             logger.warning(
                 "Module %s has plugin attribute but it is not a Comparator", mod_name
             )
+
+
+def activate_model_plugins(model_dir: str | Path | None) -> None:
+    """Reset registry state and register plugins from one model folder.
+
+    Model-owned plugins live in ``tests/e2e/models/<family>/e2e_plugins/*.py``.
+    Each module may expose ``runner``, ``reference``, ``comparator``, or
+    ``plugin`` objects implementing the E2E protocol contracts.
+    """
+    global _discovered
+    reset()
+
+    if not model_dir:
+        discover_plugins()
+        return
+    plugin_dir = Path(model_dir) / "e2e_plugins"
+    if not plugin_dir.is_dir():
+        _discovered = True
+        return
+
+    family = re.sub(r"[^0-9A-Za-z_]+", "_", Path(model_dir).name)
+    package_prefix = f"tests.e2e.models.{family}.e2e_plugins"
+    _discovered = True
+    for plugin_path in sorted(plugin_dir.glob("*.py")):
+        if plugin_path.name.startswith("_"):
+            continue
+        if plugin_path.stem in {"contracts", "registry", "runtime_config"}:
+            continue
+        module_name = f"{package_prefix}.{plugin_path.stem}"
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception:
+            logger.warning(
+                "Failed to import model-local E2E plugin module %s",
+                plugin_path,
+                exc_info=True,
+            )
+            continue
+        for plugin in _iter_module_plugins(mod):
+            _register_plugin_object(module_name, plugin)
 
 
 # ---------------------------------------------------------------------------

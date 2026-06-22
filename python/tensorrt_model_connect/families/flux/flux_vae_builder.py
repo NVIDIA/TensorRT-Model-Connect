@@ -396,7 +396,7 @@ def _add_self_attention_2d(
     flat = flatten.get_output(0)  # [B*HW, C]
 
     # Q, K, V projections: [B*HW, C] @ [C, C] -> [B*HW, C]
-    from ... import graph_ops
+    from . import graph_ops
 
     def _proj(name: str) -> trt.ITensor:
         w = weights[f"{prefix}.{name}.weight"].reshape(c, c)

@@ -1,0 +1,9 @@
+id = "t5"
+plugin = "t5"
+module = "plugin"
+aliases = [
+  "t5",
+]
+prefixes = [
+  "t5",
+]

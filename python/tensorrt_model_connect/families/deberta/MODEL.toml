@@ -1,0 +1,9 @@
+id = "deberta"
+plugin = "deberta"
+module = "plugin"
+aliases = [
+  "deberta",
+]
+prefixes = [
+  "deberta",
+]

@@ -1,0 +1,6 @@
+id = "bart"
+plugin = "bart"
+test_manifests = [
+  "manifests/bart-base-tp4.json",
+  "manifests/bart-base.json",
+]

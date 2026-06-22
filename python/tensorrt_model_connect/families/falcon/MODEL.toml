@@ -1,0 +1,11 @@
+id = "falcon"
+plugin = "falcon"
+module = "plugin"
+aliases = [
+  "falcon",
+  "refinedweb",
+  "refinedwebmodel",
+]
+prefixes = [
+  "falcon",
+]

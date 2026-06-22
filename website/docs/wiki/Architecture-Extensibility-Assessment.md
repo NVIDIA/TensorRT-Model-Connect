@@ -160,7 +160,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - `wan_plugin.cpp`: Self-registering plugin for `diffusion_wan` and `diffusion_pixart` strategies. Constructs `WanPipeline`.
 - `flux_plugin.cpp`: Plugin for `diffusion_flux`. Constructs `FluxPipeline`.
 - `zimage_plugin.cpp`: Plugin for `diffusion_zimage`. Constructs `ZImagePipeline`.
-- Shared diffusion helpers in `src/runtime/plugins/shared/diffusion_helpers.h/cpp`.
+- Model-local diffusion helper copies in each diffusion runtime folder, for example `src/runtime/models/flux/diffusion_helpers.h/cpp`.
 - Pipeline implementations in `src/runtime/models/wan/pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp`.
 - `DiffusionConfig`, `PreprocessorWeights` in `src/runtime/domains/diffusion/diffusion_types.h`.
 - `FlowMatchEulerScheduler` in `src/runtime/core/flow_match_euler_scheduler.cpp`.

@@ -1,0 +1,7 @@
+id = "phi_moe"
+plugin = "phi_moe"
+test_manifests = [
+  "manifests/phi-moe-l0-tp4.json",
+  "manifests/phi-moe-l0.json",
+  "manifests/phi-moe.json",
+]

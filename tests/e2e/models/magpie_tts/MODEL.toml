@@ -1,0 +1,6 @@
+id = "magpie_tts"
+plugin = "magpie_tts"
+test_manifests = [
+  "manifests/magpie-tts-357m-tp4.json",
+  "manifests/magpie-tts-357m.json",
+]

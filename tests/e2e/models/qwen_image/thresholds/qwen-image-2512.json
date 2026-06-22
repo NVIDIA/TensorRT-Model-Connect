@@ -1,0 +1,14 @@
+{
+  "threshold_overrides": {
+    "latent_cosine_per_step": 0.95,
+    "lpips": 0.3,
+    "max_pixel_mean": 0.85,
+    "min_pixel_mean": 0.15,
+    "min_pixel_std": 0.05,
+    "min_reference_std_ratio": 0.35,
+    "psnr": 11.0,
+    "reference_min_pixel_std_for_ratio": 0.08,
+    "ssim": 0.1,
+    "temporal_consistency": 0.6
+  }
+}

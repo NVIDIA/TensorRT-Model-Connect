@@ -1,0 +1,15 @@
+{
+  "name": "phi-moe",
+  "trace_id": "IT-E2E-PHIMOE-01",
+  "hf_id": "microsoft/Phi-tiny-MoE-instruct",
+  "bundle": "phi-moe.trtfb",
+  "family": "phi_moe",
+  "runtime_strategy": "decoder_kv_cache",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "phi-moe-l0",
+  "l0_replacement_reason": "Phi MoE scale stays nightly; phi-moe-l0 keeps the Phi MoE decoder path with shorter decode for PR L0.",
+  "max_cache_length": 256,
+  "prompt": "Name the largest ocean on Earth.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false
+}

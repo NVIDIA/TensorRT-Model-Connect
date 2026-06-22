@@ -102,7 +102,7 @@ def _add_group_norm_4d(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ...graph_ops import add_constant
+    from .graph_ops import add_constant
 
     n, c, h, w = inp.shape
     group_size = num_channels // num_groups
@@ -170,7 +170,7 @@ def _add_resnet_block_2d(network, inp, weights, prefix: str,
     """ResNetBlock2D: norm1 -> SiLU -> conv1 -> norm2 -> SiLU -> conv2 + shortcut."""
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ...graph_ops import add_conv2d, add_silu
+    from .graph_ops import add_conv2d, add_silu
 
     # norm1 -> SiLU -> conv1
     x = _add_group_norm_4d(
@@ -232,8 +232,8 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops
-    from ...graph_ops import add_conv2d
+    from . import graph_ops
+    from .graph_ops import add_conv2d
 
     residual = inp
 
@@ -320,7 +320,7 @@ def _add_upsample_2d(network, inp, weights, prefix: str,
     """Nearest-neighbor 2x upsample + Conv2d(3x3, pad=1)."""
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ...graph_ops import add_conv2d
+    from .graph_ops import add_conv2d
 
     n, c = inp.shape[0], inp.shape[1]
     resize = network.add_resize(inp)
@@ -385,7 +385,7 @@ def build_vae_2d_decoder_engine(
 
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ...graph_ops import add_conv2d, add_silu
+    from .graph_ops import add_conv2d, add_silu
 
     total_t0 = time.monotonic()
     weights_before = _timing_phase(build_timing, "weights_loading_s")

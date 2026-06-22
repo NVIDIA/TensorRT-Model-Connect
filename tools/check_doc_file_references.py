@@ -169,7 +169,10 @@ def _get_actual_counts(repo_root: Path) -> dict:
     manifest_dir = repo_root / "tests" / "e2e" / "models"
     if manifest_dir.is_dir():
         counts["manifests"] = len(
-            [f for f in os.listdir(manifest_dir) if f.endswith(".json")]
+            {
+                *manifest_dir.glob("*.json"),
+                *manifest_dir.glob("*/manifests/*.json"),
+            }
         )
     else:
         counts["manifests"] = 0
@@ -282,11 +285,11 @@ def extract_numerical_claims(
                         continue  # ambiguous context, skip
                 elif claim_kind == "manifests":
                     actual_key = "manifests"
-                    label = "E2E model manifests (tests/e2e/models/*.json)"
+                    label = "E2E model manifests (tests/e2e/models/<family>/manifests/*.json)"
                 elif claim_kind == "models_e2e":
                     # "N models" claims -- map to manifest count
                     actual_key = "manifests"
-                    label = "E2E model manifests (tests/e2e/models/*.json)"
+                    label = "E2E model manifests (tests/e2e/models/<family>/manifests/*.json)"
                 elif claim_kind == "family_plugins":
                     actual_key = "family_plugins"
                     label = "family plugins (excluding __init__.py and base.py)"
@@ -436,7 +439,7 @@ def main() -> int:
     counts = getattr(report, "_actual_counts", {})
     if counts:
         print("=== Actual file counts ===")
-        print(f"  E2E manifests (tests/e2e/models/*.json):           {counts.get('manifests', '?')}")
+        print(f"  E2E manifests (tests/e2e/models/<family>/manifests/*.json): {counts.get('manifests', '?')}")
         print(f"  Family plugins (excl __init__/base):               {counts.get('family_plugins', '?')}")
         print(f"  Family dir total .py files:                        {counts.get('families_total_py', '?')}")
         print(f"  C++ test files (tests/cpp/*.cpp):                  {counts.get('cpp_tests', '?')}")

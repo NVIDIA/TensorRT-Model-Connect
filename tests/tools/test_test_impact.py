@@ -320,7 +320,6 @@ class TestDeclarativeClassificationRules:
             ("src/runtime/pipelines/flux_pipeline.cpp", "cpp_pipeline_flux_runtime"),
             ("src/runtime/pipelines/text_generation_pipeline.cpp", "cpp_pipeline"),
             ("src/runtime/pipelines/custom_pipeline.cpp", "cpp_pipeline_unknown"),
-            ("src/runtime/plugins/shared/custom_helper.h", "cpp_shared_helper_unknown"),
             ("tests/e2e_harness/runners/__init__.py", "harness_runner_init"),
             ("tests/e2e_harness/runners/custom.py", "harness_runner_unknown"),
             ("tests/e2e_harness/comparators/__init__.py", "harness_comparator_init"),
@@ -528,6 +527,15 @@ class TestFamilyOwnedBuilder:
         assert match.rule == "family_package"
         assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
 
+    def test_family_model_index(self, imap):
+        """families/qwen/MODEL.toml -> exactly qwen models."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/families/qwen/MODEL.toml",
+            imap,
+        )
+        assert match.rule == "family_model_index"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
+
     def test_root_encoder_builder_shim_is_broad(self, imap):
         """Root encoder_builder.py is only a compatibility shim."""
         match = test_impact.classify_file(
@@ -570,29 +578,13 @@ class TestCppScope:
         assert match.rule == "cpp_runtime_model"
         assert set(match.models) == {"qwen25vl-3b"}
 
-    def test_cpp_shared_audio(self, imap):
-        """audio_helpers.h -> only audio pipeline models."""
+    def test_cpp_model_local_plugin_helpers(self, imap):
+        """Model-local plugin_helpers.h is scoped to its owning runtime model."""
         match = test_impact.classify_file(
-            "src/runtime/plugins/shared/audio_helpers.h", imap)
-        assert match.rule == "cpp_shared_helper"
-        assert "whisper-tiny-fp16" in match.models
-        assert "bark-small" in match.models
-        assert "bert-base" not in match.models
-
-    def test_cpp_shared_diffusion(self, imap):
-        """diffusion_helpers.cpp -> only diffusion models."""
-        match = test_impact.classify_file(
-            "src/runtime/plugins/shared/diffusion_helpers.cpp", imap)
-        assert match.rule == "cpp_shared_helper"
+            "src/runtime/models/flux/plugin_helpers.h", imap)
+        assert match.rule == "cpp_runtime_model"
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
-
-    def test_cpp_shared_plugin_helpers(self, imap):
-        """plugin_helpers.h -> ALL models."""
-        match = test_impact.classify_file(
-            "src/runtime/plugins/shared/plugin_helpers.h", imap)
-        assert match.rule == "cpp_shared_plugin_helpers"
-        assert len(match.models) == len(imap.all_model_names)
 
     def test_cpp_wildcard_all(self, imap):
         """trt_common.cpp -> all models (generic C++ source)."""
@@ -709,9 +701,81 @@ class TestSafetyNet:
     def test_manifest_self(self, imap):
         """Changing a manifest JSON -> only that one model."""
         match = test_impact.classify_file(
-            "tests/e2e/models/qwen3-0.6b.json", imap)
+            "tests/e2e/models/qwen/manifests/qwen3-0.6b.json", imap)
         assert match.rule == "manifest"
         assert match.models == ["qwen3-0.6b"]
+
+    def test_nested_manifest_uses_manifest_name_not_filename(self, mock_repo):
+        """Nested manifest path lookup handles filename/name mismatches."""
+        manifest_dir = mock_repo / "tests" / "e2e" / "models" / "m2m_100" / "manifests"
+        manifest_dir.mkdir(parents=True)
+        _write_json(
+            manifest_dir / "nllb-200.json",
+            {
+                "name": "nllb-200-distilled-600m",
+                "family": "m2m_100",
+                "runtime_strategy": "marian_translation",
+                "hf_id": "facebook/nllb-200-distilled-600M",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        match = test_impact.classify_file(
+            "tests/e2e/models/m2m_100/manifests/nllb-200.json", imap)
+
+        assert match.rule == "manifest"
+        assert match.models == ["nllb-200-distilled-600m"]
+
+    def test_e2e_model_index_self(self, imap):
+        """Changing a model E2E index -> only that family's models."""
+        match = test_impact.classify_file("tests/e2e/models/qwen/MODEL.toml", imap)
+        assert match.rule == "e2e_model_index"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
+
+    def test_e2e_model_owned_test_self(self, imap):
+        """Changing a model-owned E2E test -> only that family's models."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/qwen/test_qwen_e2e.py",
+            imap,
+        )
+        assert match.rule == "e2e_model_owned_test"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
+
+    def test_e2e_model_owned_runner_self(self, imap):
+        """Changing a model-owned E2E runner -> only that family's models."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/qwen/runner.py",
+            imap,
+        )
+        assert match.rule == "e2e_model_owned_test"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
+
+    def test_e2e_model_owned_waives_self(self, imap):
+        """Changing a model-owned waive file -> only that family's models."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/qwen/waives.txt",
+            imap,
+        )
+        assert match.rule == "e2e_model_owned_test"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
+
+    def test_e2e_model_owned_threshold_self(self, imap):
+        """Changing a model-owned threshold sidecar -> only that model."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/qwen/thresholds/qwen3-0.6b.json",
+            imap,
+        )
+        assert match.rule == "e2e_model_threshold"
+        assert match.models == ["qwen3-0.6b"]
+
+    def test_e2e_model_owned_unknown_threshold_falls_back_to_family(self, imap):
+        """Unknown threshold sidecars remain conservative."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/qwen/thresholds/new-threshold-profile.json",
+            imap,
+        )
+        assert match.rule == "e2e_model_threshold"
+        assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
 
     def test_cmake_no_e2e_models(self, imap):
         """CMakeLists.txt -> no E2E models (build infra only) + rebuild flag."""
@@ -764,11 +828,29 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
-    def test_github_ci_no_impact(self, imap):
-        """.github workflows -> no E2E tests."""
-        match = test_impact.classify_file(".github/workflows/trtmc-ci.yml", imap)
-        assert match.rule == "no_impact"
+    def test_model_plugin_evidence_report(self, imap):
+        """Generated model-plugin evidence JSON is report-only."""
+        match = test_impact.classify_file(
+            "reports/model-plugin-encapsulation/e2e-parity-evidence-agent4.json",
+            imap,
+        )
+        assert match.rule == "model_plugin_evidence_report"
         assert match.models == []
+        assert match.unit_tiers == []
+
+    def test_github_ci_config_triggers_tools_tier(self, imap):
+        """.github workflows should validate CI tooling without selecting E2E."""
+        match = test_impact.classify_file(".github/workflows/trtmc-ci.yml", imap)
+        assert match.rule == "github_ci_config"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
+    def test_test_impact_tool_triggers_tools_tier(self, imap):
+        """Changing impact analysis should run tools-tier tests."""
+        match = test_impact.classify_file("tools/test_impact.py", imap)
+        assert match.rule == "test_impact_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
 
     @pytest.mark.parametrize(
         "path",
@@ -934,6 +1016,14 @@ class TestUnitTiers:
         assert match.models == []
         assert "builder" in match.unit_tiers
 
+    def test_family_unit_builder(self, imap):
+        """families/<family>/tests/ -> unit tier 'builder', no E2E."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/families/qwen/tests/test_family.py", imap)
+        assert match.rule == "family_unit_builder"
+        assert match.models == []
+        assert "builder" in match.unit_tiers
+
     def test_unit_tier_cpp(self, imap):
         """tests/cpp/ -> unit tier 'cpp', no E2E."""
         match = test_impact.classify_file(
@@ -990,6 +1080,26 @@ class TestUnitTiers:
         assert match.models == []
         assert match.unit_tiers == ["cpp"]
         assert match.rebuild_cpp is True
+
+    def test_e2e_selection_unit(self, imap):
+        """E2E selection unit tests run tools-tier validation without E2E."""
+        match = test_impact.classify_file("tests/test_e2e_selection.py", imap)
+        assert match.rule == "e2e_selection_unit"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_model_plugin_validation_tools(self, imap):
+        """Model-plugin validation tools run tools-tier validation without E2E."""
+        for path in (
+            "tools/e2e_origin_main_parity.py",
+            "tools/model_plugin_isolation.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "model_plugin_validation_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+            assert match.rebuild_cpp is False
 
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
@@ -2183,7 +2293,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["tests/e2e/models/qwen3-4b.json"], imap)
+            ["tests/e2e/models/qwen/manifests/qwen3-4b.json"], imap)
 
         assert result.e2e_models == ["qwen3-0.6b"]
         assert result.l0_replacements == [{
@@ -2301,9 +2411,12 @@ class TestOutput:
             rebuild_cpp=False,
             cap_applied=False,
             matched_rules=[],
+            e2e_test_ids=[
+                "tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b]",
+            ],
         )
         output = test_impact.format_human(result)
-        assert "qwen3-0.6b" in output
+        assert "tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b]" in output
         assert "builder" in output
         assert "rebuild needed: no" in output
 
@@ -2318,6 +2431,7 @@ class TestOutput:
         output = test_impact.format_json(result)
         data = json.loads(output)
         assert data["e2e_models"] == ["qwen3-0.6b", "qwen3-4b"]
+        assert data["e2e_test_ids"] == []
         assert data["rebuild_cpp"] is False
 
     def test_json_cap_applied(self, imap):
@@ -2405,6 +2519,18 @@ class TestCoverageMapIntegration:
         assert result.builder_tests == ["tests/builder/test_family_timm_vit.py"]
         assert "builder" in result.fallback_tiers
 
+    def test_changed_family_builder_test_selected_directly_without_coverage_map(self, imap):
+        """Changed colocated family builder tests run directly without E2E impact."""
+        result = test_impact.analyze_impact(
+            ["python/tensorrt_model_connect/families/flux/tests/test_family.py"], imap,
+        )
+
+        assert result.builder_tests == [
+            "python/tensorrt_model_connect/families/flux/tests/test_family.py"
+        ]
+        assert result.e2e_models == []
+        assert result.fallback_tiers == []
+
     def test_changed_e2e_harness_unit_test_selected_directly(self, imap):
         """Changed e2e_harness test files run directly without broad E2E impact."""
         result = test_impact.analyze_impact(
@@ -2415,6 +2541,30 @@ class TestCoverageMapIntegration:
         assert result.e2e_models == []
         assert result.tools_tests == ["tests/e2e_harness/test_orchestrator_phases.py"]
         assert "tools" not in result.fallback_tiers
+
+    def test_github_ci_config_selects_tools_tier(self, imap):
+        """CI config edits must not be classified as unit-test no-impact."""
+        result = test_impact.analyze_impact(
+            [".github/scripts/run-trtmc-ci.sh"],
+            imap,
+            coverage_map={},
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert "tools" in result.fallback_tiers
+
+    def test_test_impact_tool_selects_tools_tier(self, imap):
+        """Impact tool edits must force validation of tools tests."""
+        result = test_impact.analyze_impact(
+            ["tools/test_impact.py"],
+            imap,
+            coverage_map={},
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert "tools" in result.fallback_tiers
 
     def test_json_output_includes_test_lists(self, imap):
         """JSON output includes builder_tests, cpp_tests, fallback_tiers."""

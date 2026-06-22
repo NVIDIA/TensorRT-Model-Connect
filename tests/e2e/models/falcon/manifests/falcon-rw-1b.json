@@ -1,0 +1,12 @@
+{
+  "name": "falcon-rw-1b",
+  "trace_id": "IT-E2E-FALRW-01",
+  "hf_id": "tiiuae/falcon-rw-1b",
+  "bundle": "falcon-rw-1b.trtfb",
+  "family": "falcon",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

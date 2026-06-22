@@ -2,8 +2,8 @@
 // Bark semantic + coarse pipeline with optional codec and fine engines.
 
 #include "runtime/models/bark/pipeline.h"
-#include "runtime/plugins/shared/audio_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "audio_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

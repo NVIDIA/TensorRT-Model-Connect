@@ -1,0 +1,10 @@
+{
+  "name": "modernbert-base",
+  "hf_id": "answerdotai/ModernBERT-base",
+  "bundle": "modernbert-base.trtfb",
+  "family": "modernbert",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 1
+}

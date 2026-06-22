@@ -64,6 +64,7 @@ struct CliArgs {
     int att_context_right{13};
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
+    std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};
     bool list_engines{false};
     bool show_help{false};

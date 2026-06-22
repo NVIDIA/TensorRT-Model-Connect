@@ -29,10 +29,10 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 from ...build_timing import timed_trt_compile
-from ... import graph_ops
+from . import graph_ops
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -48,7 +48,7 @@ def _load_bark_state_dict(model_dir: str) -> dict:
     model_path = Path(model_dir) / "pytorch_model.bin"
     if not model_path.exists():
         # Try safetensors
-        from ...checkpoint_mapper import _open_safetensors
+        from .checkpoint_mapper import _open_safetensors
         readers = _open_safetensors(Path(model_dir))
         state_dict = {}
         for reader in readers:

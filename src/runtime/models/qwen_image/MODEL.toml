@@ -1,1 +1,4 @@
+id = "qwen_image"
+runtime_library = "libtrtmc_model_qwen_image.so"
+runtime_plugins = ["plugin.cpp|register_qwen_image_plugin"]
 runtime_strategies = ["diffusion_qwen_image"]

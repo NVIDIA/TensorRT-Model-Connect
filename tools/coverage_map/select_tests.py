@@ -22,7 +22,6 @@ _NO_IMPACT_PATTERNS = [
     r"^\.gitignore$",
     r"^\.clang-format$",
     r"^\.editorconfig$",
-    r"^\.github/",
     r"^\.claude/",
     r"^LICENSE",
     r"^CLAUDE\.md$",
@@ -42,6 +41,8 @@ class SelectionResult:
 
 def _is_no_impact(path: str) -> bool:
     """Check if a file path has no impact on unit tests."""
+    if path == "tools/test_impact.py" or path.startswith(".github/"):
+        return False
     if path.endswith(".md"):
         return True
     for pattern in _NO_IMPACT_PATTERNS:
@@ -67,6 +68,8 @@ def _classify_tier(path: str) -> Optional[str]:
     if path.startswith("tests/cpp/"):
         return "cpp"
     if path.startswith("tests/tools/"):
+        return "tools"
+    if path == "tools/test_impact.py" or path.startswith(".github/"):
         return "tools"
     return None
 

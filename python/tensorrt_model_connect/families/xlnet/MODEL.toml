@@ -1,0 +1,9 @@
+id = "xlnet"
+plugin = "xlnet"
+module = "plugin"
+aliases = [
+  "xlnet",
+]
+prefixes = [
+  "xlnet",
+]

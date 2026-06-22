@@ -1,0 +1,7 @@
+id = "glm"
+plugin = "glm"
+test_manifests = [
+  "manifests/glm-4-9b-l0-tp2.json",
+  "manifests/glm-4-9b-l0.json",
+  "manifests/glm-4-9b.json",
+]

@@ -1,0 +1,7 @@
+id = "deepseek_ocr"
+plugin = "deepseek_ocr"
+test_manifests = [
+  "manifests/deepseek-ocr-l0-tp2.json",
+  "manifests/deepseek-ocr-l0.json",
+  "manifests/deepseek-ocr.json",
+]

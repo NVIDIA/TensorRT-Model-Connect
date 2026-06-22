@@ -1,0 +1,8 @@
+id = "eagle_vlm"
+plugin = "eagle_vlm"
+test_manifests = [
+  "manifests/nemotron-embed-vl-1b-v2-tp4.json",
+  "manifests/nemotron-embed-vl-1b-v2.json",
+  "manifests/nemotron-rerank-vl-1b-v2-tp4.json",
+  "manifests/nemotron-rerank-vl-1b-v2.json",
+]

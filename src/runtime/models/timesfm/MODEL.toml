@@ -1,1 +1,4 @@
+id = "timesfm"
+runtime_library = "libtrtmc_model_timesfm.so"
+runtime_plugins = ["plugin.cpp|register_timesfm_plugin"]
 runtime_strategies = ["timesfm_trt"]

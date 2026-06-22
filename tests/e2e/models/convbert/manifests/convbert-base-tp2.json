@@ -1,0 +1,55 @@
+{
+  "name": "convbert-base-tp2",
+  "trace_id": "IT-E2E-CONVBERT-TP2-01",
+  "hf_id": "YituTech/conv-bert-base",
+  "bundle": "convbert-base-tp2.trtfb",
+  "family": "convbert",
+  "runtime_strategy": "encoder_only",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 1,
+  "trust_remote_code": false,
+  "notes": "ConvBERT TP2 coverage. TP4 is invalid for conv-bert-base because its 6 effective attention heads are not divisible by 4. Uses the same checkpoint, prompt, cache length, and thresholds as convbert-base.",
+  "core": false,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 2
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 2,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 2
+      },
+      "gating": true
+    }
+  ]
+}

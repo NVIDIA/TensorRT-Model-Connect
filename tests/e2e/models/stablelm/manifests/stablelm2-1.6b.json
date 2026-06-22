@@ -1,0 +1,12 @@
+{
+  "name": "stablelm2-1.6b",
+  "trace_id": "IT-E2E-SLM2-01",
+  "hf_id": "stabilityai/stablelm-2-1_6b",
+  "bundle": "stablelm2-1.6b.trtfb",
+  "family": "stablelm",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

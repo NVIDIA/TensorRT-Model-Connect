@@ -1,0 +1,9 @@
+id = "starcoder2"
+plugin = "starcoder2"
+module = "plugin"
+aliases = [
+  "starcoder2",
+]
+prefixes = [
+  "starcoder2",
+]

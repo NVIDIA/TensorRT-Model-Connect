@@ -1,0 +1,6 @@
+id = "gemma"
+plugin = "gemma"
+test_manifests = [
+  "manifests/gemma-2-2b-tp4.json",
+  "manifests/gemma-2-2b.json",
+]

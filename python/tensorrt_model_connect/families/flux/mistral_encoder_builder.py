@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def load_mistral_encoder_weights(
@@ -55,7 +55,7 @@ def load_mistral_encoder_weights(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from ...checkpoint_mapper import (
+    from .checkpoint_mapper import (
         WeightDict, _open_safetensors, _load_tensor, _has_tensor,
         _target_np_dtype, _transpose_2d)
 

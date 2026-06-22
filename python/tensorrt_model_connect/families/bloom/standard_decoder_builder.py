@@ -21,15 +21,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ... import graph_blocks
-from ...config import ModelConfig
+from . import graph_ops
+from . import graph_blocks
+from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
     from ...quantization.context import QuantContext
 
 

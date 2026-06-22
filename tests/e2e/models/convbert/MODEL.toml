@@ -1,0 +1,6 @@
+id = "convbert"
+plugin = "convbert"
+test_manifests = [
+  "manifests/convbert-base-tp2.json",
+  "manifests/convbert-base.json",
+]

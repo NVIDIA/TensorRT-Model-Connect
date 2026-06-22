@@ -18,8 +18,8 @@ import math
 
 import numpy as np
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict, load_standard_weights
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict, load_standard_weights
 from ...parallel_config import normalize_parallel_config
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine

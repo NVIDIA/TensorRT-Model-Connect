@@ -99,6 +99,8 @@ void test_run_parses_common_flags() {
                        "2GiB",
                        "--backend-dir",
                        "/tmp/lib",
+                       "--model-plugin-dir",
+                       "/tmp/models",
                        "--runtime-cache",
                        "/tmp/cache",
                        "--cuda-graphs"});
@@ -119,6 +121,9 @@ void test_run_parses_common_flags() {
     check(args.kv_cache_size_bytes == 2147483648ULL, "run kv cache size");
     check(args.backend_search_paths.size() == 1 && args.backend_search_paths[0] == "/tmp/lib",
           "run backend dir");
+    check(args.model_plugin_search_paths.size() == 1 &&
+              args.model_plugin_search_paths[0] == "/tmp/models",
+          "run model plugin dir");
     check(args.runtime_cache == "/tmp/cache", "run runtime cache");
     check(args.cuda_graphs, "run cuda graphs");
 }

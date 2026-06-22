@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import sys
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 
 
 class ZImagePlugin:

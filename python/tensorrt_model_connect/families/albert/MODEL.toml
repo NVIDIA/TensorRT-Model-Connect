@@ -1,0 +1,9 @@
+id = "albert"
+plugin = "albert"
+module = "plugin"
+aliases = [
+  "albert",
+]
+prefixes = [
+  "albert",
+]

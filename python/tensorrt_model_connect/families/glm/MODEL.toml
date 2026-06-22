@@ -1,0 +1,9 @@
+id = "glm"
+plugin = "glm"
+module = "plugin"
+aliases = [
+  "glm",
+]
+prefixes = [
+  "glm",
+]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import sys
 import types
 
 import pytest
@@ -119,6 +120,32 @@ def test_find_plugin_returns_none_when_registry_has_no_match(monkeypatch):
     monkeypatch.setattr(families, "_ALL_PLUGINS", plugins)
 
     assert families.find_plugin("baz") is None
+
+
+def test_find_plugin_imports_only_candidate_family_for_qwen():
+    """Intent: normal lookup imports the target family, not every family package."""
+    reloaded = importlib.reload(families)
+    for name in list(sys.modules):
+        if (
+            name.startswith("tensorrt_model_connect.families.")
+            and name != "tensorrt_model_connect.families.base"
+        ):
+            sys.modules.pop(name, None)
+    reloaded._PLUGIN_CACHE.clear()
+
+    resolved = reloaded.find_plugin("qwen3")
+
+    loaded_families = {
+        name.split(".")[2]
+        for name in sys.modules
+        if (
+            name.startswith("tensorrt_model_connect.families.")
+            and name != "tensorrt_model_connect.families.base"
+        )
+    }
+    assert resolved is not None
+    assert resolved.name == "qwen"
+    assert loaded_families == {"qwen"}
 
 
 def test_base_protocol_required_method_bodies_are_executable_defaults():

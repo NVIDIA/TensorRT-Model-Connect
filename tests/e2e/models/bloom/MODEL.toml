@@ -1,0 +1,6 @@
+id = "bloom"
+plugin = "bloom"
+test_manifests = [
+  "manifests/bloom-560m-tp4.json",
+  "manifests/bloom-560m.json",
+]

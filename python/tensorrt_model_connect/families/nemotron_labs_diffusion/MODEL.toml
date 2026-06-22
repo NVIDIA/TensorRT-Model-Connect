@@ -1,0 +1,10 @@
+id = "nemotron_labs_diffusion"
+plugin = "nemotron_labs_diffusion"
+module = "plugin"
+aliases = [
+  "nemotron_labs_diffusion",
+  "nemotronlabsdiffusion",
+]
+prefixes = [
+  "nemotron_labs_diffusion",
+]

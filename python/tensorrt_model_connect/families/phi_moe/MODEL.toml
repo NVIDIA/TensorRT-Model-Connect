@@ -1,0 +1,10 @@
+id = "phi_moe"
+plugin = "phi_moe"
+module = "plugin"
+aliases = [
+  "phi_moe",
+  "phimoe",
+]
+prefixes = [
+  "phi_moe",
+]

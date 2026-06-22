@@ -1,0 +1,10 @@
+id = "bart"
+plugin = "bart"
+module = "plugin"
+aliases = [
+  "bart",
+  "mbart",
+]
+prefixes = [
+  "bart",
+]

@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_DIR / "tools"
@@ -41,12 +42,11 @@ MODELS_DIR = Path(__file__).resolve().parent / "models"
 def _load_diffusion_models():
     """Load all model manifests with test_type=='diffusion'."""
     models = []
-    if MODELS_DIR.is_dir():
-        for model_file in sorted(MODELS_DIR.glob("*.json")):
-            with open(model_file) as f:
-                entry = json.load(f)
-            if entry.get("test_type") == "diffusion":
-                models.append(entry)
+    for model_file in iter_manifest_paths(MODELS_DIR):
+        with open(model_file) as f:
+            entry = json.load(f)
+        if entry.get("test_type") == "diffusion":
+            models.append(entry)
     return models
 
 

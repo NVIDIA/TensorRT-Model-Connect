@@ -1,0 +1,23 @@
+{
+  "name": "internvl3-8b",
+  "trace_id": "IT-E2E-IVL3-01",
+  "hf_id": "OpenGVLab/InternVL3-8B-hf",
+  "bundle": "internvl3-8b-vl.trtfb",
+  "family": "internvl",
+  "runtime_strategy": "vision_language",
+  "reference_backend": "golden_snapshot",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "internvl3-2b",
+  "l0_replacement_reason": "InternVL3-8B is scale coverage; internvl3-2b keeps the InternVL3 VL path for PR L0.",
+  "max_cache_length": 384,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "test_image": "data/test_img.jpeg",
+  "trust_remote_code": false,
+  "metadata": {
+    "golden_snapshot_path": "data/internvl3_8b_golden.json"
+  },
+  "notes": "InternVL3 HF reference emits EOS-only text for this fixture under the CI Transformers stack. Nightly scale coverage validates the stable one-word VL answer against a golden snapshot while internvl3-2b keeps the smaller InternVL path in PR L0."
+}

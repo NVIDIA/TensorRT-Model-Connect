@@ -535,6 +535,7 @@ class RunContext:
         reference_profile: Symbolic profile name selected for references.
         ld_library_path: LD_LIBRARY_PATH with TRT/CUDA libs.
         engine_dir: Directory containing .trtfb bundles.
+        model_plugin_dir: Directory containing isolated model plugin DSOs.
         rebuild: If True, force rebuild bundles from HF.
         verbose: If True, emit extra debug output.
     """
@@ -551,6 +552,7 @@ class RunContext:
     reference_profile: str = "base"
     ld_library_path: str = ""
     engine_dir: str = ""
+    model_plugin_dir: str = ""
     rebuild: bool = False
     verbose: bool = False
 
@@ -589,6 +591,7 @@ class PluginRuntimeContext:
         runtime_python: Python interpreter for TRT-side helper subprocesses.
         reference_python: Python interpreter for reference/validation tools.
         artifacts_dir: Directory where this case writes E2E artifacts.
+        model_plugin_dir: Directory containing isolated model plugin DSOs.
     """
 
     engine_dir: str = ""
@@ -597,6 +600,7 @@ class PluginRuntimeContext:
     runtime_python: str = ""
     reference_python: str = ""
     artifacts_dir: str = ""
+    model_plugin_dir: str = ""
 
 
 # ---------------------------------------------------------------------------

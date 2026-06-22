@@ -1,0 +1,9 @@
+id = "mixtral"
+plugin = "mixtral"
+module = "plugin"
+aliases = [
+  "mixtral",
+]
+prefixes = [
+  "mixtral",
+]

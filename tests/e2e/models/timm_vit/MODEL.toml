@@ -1,0 +1,6 @@
+id = "timm_vit"
+plugin = "timm_vit"
+test_manifests = [
+  "manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.json",
+  "manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k.json",
+]

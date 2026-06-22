@@ -21,10 +21,6 @@ MODEL_AGNOSTIC_SHARED_FILES = (
     BUILDERS_DIR / "default_dual_profile_decoder_tp.py",
     BUILDERS_DIR / "utils.py",
 )
-SHARED_SHIM_IMPORTS = (
-    "builders.default_decoder",
-    "builders.default_dual_profile_decoder",
-)
 FAMILY_NAMES = {
     path.name
     for path in FAMILIES_DIR.iterdir()
@@ -36,8 +32,21 @@ def _family_files(name: str) -> list[Path]:
     return sorted(FAMILIES_DIR.glob(f"*/{name}"))
 
 
-def _is_shared_decoder_shim(text: str) -> bool:
-    return any(import_path in text for import_path in SHARED_SHIM_IMPORTS)
+def _builder_contract_text(path: Path, *, local_module: str) -> str:
+    """Return the source that owns the contract for a builder or shim."""
+    text = path.read_text(encoding="utf-8")
+    if f"from .{local_module} import" in text:
+        target = path.with_name(f"{local_module}.py")
+        if target.is_file():
+            return target.read_text(encoding="utf-8")
+
+    shared_import = f"builders.{local_module}"
+    if shared_import in text:
+        target = BUILDERS_DIR / f"{local_module}.py"
+        if target.is_file():
+            return target.read_text(encoding="utf-8")
+
+    return text
 
 
 def _python_files(*dirs: Path) -> list[Path]:
@@ -59,9 +68,7 @@ def test_family_standard_decoder_builders_are_shims_or_honor_split_roles():
     """Family builders can be tiny shims or owned implementations."""
     missing: list[str] = []
     for path in _family_files("standard_decoder_builder.py"):
-        text = path.read_text(encoding="utf-8")
-        if _is_shared_decoder_shim(text):
-            continue
+        text = _builder_contract_text(path, local_module="default_decoder")
         if (
             "_decoder_engine_role" not in text
             or "_decoder_engine_layout_supported" not in text
@@ -85,9 +92,8 @@ def test_family_dual_profile_builders_are_shims_or_support_prefill_only_mode():
     """Family dual-profile builders can be tiny shims or owned implementations."""
     missing: list[str] = []
     for path in _family_files("dual_profile_decoder_builder.py"):
-        text = path.read_text(encoding="utf-8")
-        if _is_shared_decoder_shim(text):
-            continue
+        text = _builder_contract_text(
+            path, local_module="default_dual_profile_decoder")
         if (
             'profile_mode: str = "dual_profile"' not in text
             or 'profile_mode == "prefill"' not in text

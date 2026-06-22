@@ -1,0 +1,6 @@
+id = "fnet"
+plugin = "fnet"
+test_manifests = [
+  "manifests/fnet-base-tp4.json",
+  "manifests/fnet-base.json",
+]

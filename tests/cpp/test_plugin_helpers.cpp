@@ -1,7 +1,7 @@
 // Unit tests for runtime plugin helper parsing.
 // Focus: tokenizer_add_special_tokens detection from bundle config.
 
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "runtime/models/text_generation/plugin_helpers.h"
 
 #include <iostream>
 #include <string>

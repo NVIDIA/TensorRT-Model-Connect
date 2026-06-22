@@ -1,0 +1,6 @@
+id = "segformer"
+plugin = "segformer"
+test_manifests = [
+  "manifests/segformer-b0-ade-tp4.json",
+  "manifests/segformer-b0-ade.json",
+]

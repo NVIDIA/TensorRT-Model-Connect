@@ -1,0 +1,14 @@
+id = "nemotron_speech_streaming"
+plugin = "nemotron_speech_streaming"
+module = "plugin"
+aliases = [
+  "enc_dec_rnnt_bpe",
+  "fastconformer_cacheaware_rnnt",
+  "nemotron_asr_streaming",
+  "nemotron_speech_streaming",
+  "nemotronspeechstreaming",
+  "rnnt_bpe",
+]
+prefixes = [
+  "nemotron_speech_streaming",
+]

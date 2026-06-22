@@ -1,0 +1,13 @@
+id = "timm_vit"
+plugin = "timm_vit"
+module = "plugin"
+aliases = [
+  "timm_vit",
+  "timmvit",
+  "vision_transformer",
+  "vit_base_patch16_224",
+]
+prefixes = [
+  "timm_vit",
+  "vit_",
+]

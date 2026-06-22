@@ -7,6 +7,7 @@
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
+#include "trtmc/runtime/pipeline_plugin_loader.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -65,7 +66,9 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
     return strategy;
 }
 
-IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy) {
+IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
+                                        const std::vector<std::string>& model_plugin_paths) {
+    load_model_plugin_for_strategy(strategy, model_plugin_paths);
     auto* plugin = PipelineRegistry::instance().lookup(strategy);
     if (plugin != nullptr)
         return plugin;
@@ -225,11 +228,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
-    // Load backend DSO based on bundle metadata
+    auto* plugin = lookup_plugin_or_throw(strategy, {});
+
+    // Load backend DSO based on bundle metadata after strategy ownership is known.
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
-
-    auto* plugin = lookup_plugin_or_throw(strategy);
 
     // Parse base config and dispatch to plugin
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
@@ -283,11 +286,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
+    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
+
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
                                                 options.backend_search_paths);
-
-    auto* plugin = lookup_plugin_or_throw(strategy);
 
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;

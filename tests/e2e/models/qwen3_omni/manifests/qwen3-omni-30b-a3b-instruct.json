@@ -1,0 +1,26 @@
+{
+  "name": "qwen3-omni-30b-a3b-instruct",
+  "trace_id": "IT-E2E-QWEN3-OMNI-01",
+  "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "bundle": "qwen3-omni-30b-a3b-instruct.trtfb",
+  "family": "qwen3_omni",
+  "runtime_strategy": "omni_multimodal",
+  "task_strategy": "omni_multimodal",
+  "reference_backend": "invariant_only",
+  "oracle_level": "L4_invariants",
+  "user_contract": "tts_audio",
+  "precision": "bf16",
+  "max_cache_length": 256,
+  "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
+  "max_new_tokens": 16,
+  "trust_remote_code": true,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "stages": [
+    {
+      "name": "talker_decode",
+      "required": true,
+      "artifact_type": "waveform",
+      "comparison_mode": "invariant_check"
+    }
+  ]
+}

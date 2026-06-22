@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import sys
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 
 
 class PixArtPlugin:
@@ -340,7 +340,7 @@ def _load_pixart_dit_weights(
     PixArt naming and maps them to the standard convention.
     """
     from pathlib import Path
-    from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     import numpy as np
 

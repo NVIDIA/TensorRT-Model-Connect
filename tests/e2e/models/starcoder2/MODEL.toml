@@ -1,0 +1,6 @@
+id = "starcoder2"
+plugin = "starcoder2"
+test_manifests = [
+  "manifests/starcoder2-3b-tp2.json",
+  "manifests/starcoder2-3b.json",
+]

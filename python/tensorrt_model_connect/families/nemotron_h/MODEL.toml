@@ -1,0 +1,11 @@
+id = "nemotron_h"
+plugin = "nemotron_h"
+module = "plugin"
+aliases = [
+  "nemotron_h",
+  "nemotron_hybrid",
+  "nemotronh",
+]
+prefixes = [
+  "nemotron_h",
+]

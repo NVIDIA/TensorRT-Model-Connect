@@ -114,7 +114,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     Repeat up to 3 times. Each cycle: read error → understand → fix → validate.
 
     ## Step 4: Create E2E manifest (after validation passes)
-    Write the file tests/e2e/models/{family_name}.json:
+    Write the file tests/e2e/models/{family_name}/manifests/{family_name}.json:
     ```json
     {{
         "name": "{family_name}",
@@ -127,6 +127,8 @@ WORKER_PROMPT = textwrap.dedent("""\
         "max_new_tokens": 20{trust_manifest_line}
     }}
     ```
+    Also create tests/e2e/models/{family_name}/MODEL.toml with this manifest
+    listed under test_manifests.
     Adjust runtime_strategy if the model is not a standard decoder (check the
     plugin's runtime_strategy attribute if it has one).
 
@@ -136,7 +138,8 @@ WORKER_PROMPT = textwrap.dedent("""\
     git fetch github main
     git switch -C autopilot/{family_name} github/main
     git add python/tensorrt_model_connect/families/{family_name}.py
-    git add tests/e2e/models/{family_name}.json
+    git add tests/e2e/models/{family_name}/MODEL.toml
+    git add tests/e2e/models/{family_name}/manifests/{family_name}.json
     ```
 
     Add any C++ runtime, CMake, contract, or test files required for the model

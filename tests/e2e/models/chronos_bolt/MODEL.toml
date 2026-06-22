@@ -1,0 +1,6 @@
+id = "chronos_bolt"
+plugin = "chronos_bolt"
+test_manifests = [
+  "manifests/chronos-bolt-tiny-official-tp4.json",
+  "manifests/chronos-bolt-tiny-official.json",
+]

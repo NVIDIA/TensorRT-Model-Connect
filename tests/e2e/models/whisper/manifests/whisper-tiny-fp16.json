@@ -1,0 +1,15 @@
+{
+  "name": "whisper-tiny-fp16",
+  "trace_id": "IT-E2E-WHSPT-FP16-01",
+  "hf_id": "openai/whisper-tiny",
+  "bundle": "whisper-tiny-fp16.trtfb",
+  "family": "whisper",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "precision": "fp16",
+  "max_cache_length": 64,
+  "prompt": "test",
+  "max_new_tokens": 10,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav"
+}

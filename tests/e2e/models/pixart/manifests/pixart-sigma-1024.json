@@ -1,0 +1,24 @@
+{
+  "name": "pixart-sigma-1024",
+  "trace_id": "IT-E2E-PXART-01",
+  "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+  "bundle": "pixart-sigma-1024.trtfb",
+  "model_type": "pixart",
+  "family": "pixart",
+  "runtime_strategy": "diffusion_pixart",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "pixart-sigma-1024-l0",
+  "l0_replacement_reason": "PixArt-Sigma scale stays nightly; pixart-sigma-1024-l0 keeps the PixArt image path at 512px for PR L0.",
+  "description": "PixArt-Sigma XL-2 text-to-image (T5-XXL + DiT ada_norm_single + 4ch VAE)",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+  "test_type": "diffusion",
+  "image_height": 1024,
+  "image_width": 1024,
+  "video_num_frames": 1,
+  "num_inference_steps": 20,
+  "skip_text_comparison": true,
+  "notes": "PixArt-Sigma: T5-XXL text encoder + DiT denoiser (ada_norm_single, no RoPE) + AutoencoderKL VAE. DPM-Solver++ scheduler."
+}

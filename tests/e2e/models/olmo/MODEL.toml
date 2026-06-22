@@ -1,0 +1,6 @@
+id = "olmo"
+plugin = "olmo"
+test_manifests = [
+  "manifests/olmo-1b-tp4.json",
+  "manifests/olmo-1b.json",
+]

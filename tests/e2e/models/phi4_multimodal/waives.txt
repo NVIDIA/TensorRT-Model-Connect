@@ -1,0 +1,2 @@
+# Model-local E2E waives. Format: [platform/]model-name SKIP|XFAIL (reason)
+phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)

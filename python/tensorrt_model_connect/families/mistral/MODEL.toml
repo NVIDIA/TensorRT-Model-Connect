@@ -1,0 +1,10 @@
+id = "mistral"
+plugin = "mistral"
+module = "plugin"
+aliases = [
+  "Mistral",
+  "mistral",
+]
+prefixes = [
+  "mistral",
+]

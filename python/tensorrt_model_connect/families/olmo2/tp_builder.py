@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ... import graph_blocks
-from ... import graph_ops
-from ...checkpoint_mapper import WeightDict
+from . import graph_blocks
+from . import graph_ops
+from .checkpoint_mapper import WeightDict
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -17,7 +17,7 @@ from ...parallel_config import (
 )
 
 if TYPE_CHECKING:
-    from ...config import ModelConfig
+    from .config import ModelConfig
     from ...parallel_config import ParallelConfig
 
 

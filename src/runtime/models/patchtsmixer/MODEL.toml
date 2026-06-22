@@ -1,1 +1,4 @@
+id = "patchtsmixer"
+runtime_library = "libtrtmc_model_patchtsmixer.so"
+runtime_plugins = ["plugin.cpp|register_patchtsmixer_plugin"]
 runtime_strategies = ["patchtsmixer_trt"]

@@ -142,7 +142,7 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
-add_library(trtmc_core
+add_library(trtmc_core SHARED
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
   src/cabi/api/trtmc_c.cpp
@@ -195,38 +195,8 @@ add_library(trtmc_core
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp
   src/runtime/registry/pipeline_plugin.cpp
-  # Plugin shared helpers
-  src/runtime/plugins/shared/plugin_helpers.cpp
-  src/runtime/plugins/shared/diffusion_helpers.cpp
-  src/runtime/plugins/shared/audio_helpers.cpp
-  ${TRTMC_PIPELINE_PLUGIN_REGISTRATION_SOURCE}
-  ${TRTMC_PIPELINE_PLUGIN_SOURCES}
-  # Pipeline implementations
-  src/runtime/models/text_generation/pipeline.cpp
-  src/runtime/models/recurrent/pipeline.cpp
-  src/runtime/models/encoder/pipeline.cpp
-  src/runtime/models/elf_flow/pipeline.cpp
-  src/runtime/models/segmentation/segment_pipeline.cpp
-  src/runtime/models/segmentation/sam_pipeline.cpp
-  src/runtime/models/segmentation/sam3_pipeline.cpp
-  src/runtime/models/timm_vit/pipeline.cpp
-  src/runtime/models/vision_language/pipeline.cpp
-  src/runtime/models/flux/pipeline.cpp
-  src/runtime/models/ltx_video/pipeline.cpp
-  src/runtime/models/wan/pipeline.cpp
-  src/runtime/models/z_image/pipeline.cpp
-  src/runtime/models/qwen_image/pipeline.cpp
-  src/runtime/models/whisper/pipeline.cpp
-  src/runtime/models/rnnt/pipeline.cpp
-  src/runtime/models/bark/pipeline.cpp
-  src/runtime/models/magpie/pipeline.cpp
-  src/runtime/models/speech/pipeline.cpp
-  src/runtime/models/omni/pipeline.cpp
-  src/runtime/models/pixart/pipeline.cpp
-  src/runtime/models/chronos_bolt/pipeline.cpp
-  src/runtime/models/patchtsmixer/pipeline.cpp
-  src/runtime/models/patchtst/pipeline.cpp
-  src/runtime/models/timesfm/pipeline.cpp
+  src/runtime/registry/pipeline_plugin_loader.cpp
+  ${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}
 )
 
 # Keep warning policy strict for project code, but avoid CI log spam from
@@ -279,6 +249,8 @@ target_compile_definitions(trtmc_core
   PUBLIC
     TRTMC_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
     TRTMC_VERSION_STRING=\"${PROJECT_VERSION}\"
+  PRIVATE
+    TRTMC_BINARY_DIR=\"${CMAKE_BINARY_DIR}\"
 )
 
 target_compile_options(trtmc_core
@@ -416,6 +388,47 @@ if(NOT _trtmc_has_tvm_ffi)
   message(STATUS "TVM-FFI kernel bridge disabled")
 endif()
 
+# --- Per-model runtime plugin DSOs ---
+add_custom_target(trtmc_model_plugins)
+foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
+  string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
+  file(GLOB _trtmc_model_sources CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/*.cpp")
+  add_library(trtmc_model_${_trtmc_model} SHARED
+    ${_trtmc_model_sources}
+    ${TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE}
+  )
+  add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
+  target_include_directories(trtmc_model_${_trtmc_model}
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}/src
+      ${PROJECT_SOURCE_DIR}/include
+  )
+  target_include_directories(trtmc_model_${_trtmc_model} SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+    ${_trtmc_nlohmann_json_include}
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE
+    trtmc_core
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_definitions(trtmc_model_${_trtmc_model} PRIVATE TRTMC_HAS_TRT=0)
+  target_compile_options(trtmc_model_${_trtmc_model}
+    PRIVATE
+      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+      "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  )
+  set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}"
+    BUILD_RPATH "\$ORIGIN/../.."
+    INSTALL_RPATH "\$ORIGIN/../.."
+  )
+  install(TARGETS trtmc_model_${_trtmc_model}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
+  )
+endforeach()
+
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
 if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   add_library(trtmc_tvm_ffi_plugin SHARED
@@ -469,8 +482,8 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   set_target_properties(trtmc_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    SKIP_BUILD_RPATH TRUE
-    INSTALL_RPATH ""
+    BUILD_RPATH "\$ORIGIN"
+    INSTALL_RPATH "\$ORIGIN"
   )
   if(TRTMC_TRT_BACKEND_ABI)
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD
@@ -600,6 +613,8 @@ trtmc_add_test(test_bundle_format)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
+trtmc_add_test(test_model_plugin_loader)
+add_dependencies(test_model_plugin_loader trtmc_model_text_generation)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
 
@@ -623,6 +638,9 @@ trtmc_add_test(test_config_schemas_triattention)
 trtmc_add_test(test_decode_runtime REQUIRES_TRT)
 trtmc_add_test(test_sampler)
 trtmc_add_test(test_plugin_helpers)
+target_sources(test_plugin_helpers PRIVATE
+  src/runtime/models/text_generation/plugin_helpers.cpp
+)
 trtmc_add_test(test_trt_logger REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtmc_backend_trt)
@@ -661,23 +679,50 @@ trtmc_add_test(test_text_generation_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_text_generation_pipeline PRIVATE trtmc_backend_trt)
 endif()
+if(TARGET test_text_generation_pipeline)
+  target_link_libraries(test_text_generation_pipeline PRIVATE trtmc_model_text_generation)
+endif()
 trtmc_add_test(test_elf_flow_pipeline)
+target_link_libraries(test_elf_flow_pipeline PRIVATE trtmc_model_elf_flow)
 trtmc_add_test(test_recurrent_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_backend_trt)
+endif()
+if(TARGET test_recurrent_pipeline)
+  target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_model_recurrent)
 endif()
 trtmc_add_test(test_encoder_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_encoder_pipeline PRIVATE trtmc_backend_trt)
 endif()
+if(TARGET test_encoder_pipeline)
+  target_link_libraries(test_encoder_pipeline PRIVATE trtmc_model_encoder trtmc_model_segmentation)
+endif()
 trtmc_add_test(test_vl_pipeline REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_vl_pipeline PRIVATE trtmc_backend_trt)
 endif()
+if(TARGET test_vl_pipeline)
+  target_link_libraries(test_vl_pipeline PRIVATE trtmc_model_vision_language)
+endif()
 trtmc_add_test(test_diffusion_pipeline_new)
+target_link_libraries(test_diffusion_pipeline_new PRIVATE
+  trtmc_model_flux
+  trtmc_model_wan
+  trtmc_model_z_image
+)
 trtmc_add_test(test_audio_pipeline_new REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_audio_pipeline_new PRIVATE trtmc_backend_trt)
+endif()
+if(TARGET test_audio_pipeline_new)
+  target_link_libraries(test_audio_pipeline_new PRIVATE
+    trtmc_model_bark
+    trtmc_model_magpie
+    trtmc_model_omni
+    trtmc_model_speech
+    trtmc_model_whisper
+  )
 endif()
 
 # Tokenizers
@@ -712,6 +757,11 @@ trtmc_add_test(test_diffusion_batch_utils)
 # Full batch-vs-sequential parity lands as E2E tests in PR 3.
 trtmc_add_test(test_qwen_image_cfg_renorm)
 trtmc_add_test(test_ltx_video_pipeline)
+target_sources(test_ltx_video_pipeline PRIVATE
+  src/runtime/models/ltx_video/plugin_helpers.cpp
+  src/runtime/models/ltx_video/diffusion_helpers.cpp
+)
+target_link_libraries(test_ltx_video_pipeline PRIVATE trtmc_model_ltx_video)
 
 # Recurrent (Mamba / RWKV)
 trtmc_add_test(test_recurrent_step_contracts)

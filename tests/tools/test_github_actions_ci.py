@@ -245,6 +245,22 @@ def test_release_wheel_build_disables_libtorch_linkage() -> None:
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
 
 
+def test_model_plugins_are_staged_for_installed_trtmc() -> None:
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    loader = (
+        REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_plugin_loader.cpp"
+    ).read_text()
+
+    assert "install(TARGETS trtmc_model_${_trtmc_model}" in cmake
+    assert "${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}" in cmake
+    assert '"libtrtmc_model_*.so*"' in conanfile
+    assert "model_plugins = sorted(package_bin.glob" in conanfile
+    assert "TRTMC model plugin DSOs were not staged" in conanfile
+    assert '"site-packages" / "tensorrt_model_connect" / "bin"' in loader
+    assert '"trtmc" / "models"' in loader
+
+
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
     wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
@@ -262,6 +278,15 @@ def test_ci_cpp_test_build_reuses_wheel_conan_tree() -> None:
     assert 'conan build . -of "$TRTMC_REUSE_CONAN_OUT_DIR"' in script
     assert 'ctest --test-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR"' in script
     assert "wheel_build_metadata_file" in script
+
+
+def test_ci_prepares_isolated_model_plugins_for_e2e() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "tools/model_plugin_isolation.py prepare" in script
+    assert "trtmc_model_plugins" in script
+    assert 'prepare_model_plugin_dir "$model_plugin_dir" --models-file e2e_models.txt' in script
+    assert 'prepare_model_plugin_dir "$model_plugin_dir" --all' in script
+    assert '--model-plugin-dir "$model_plugin_dir"' in script
 
 
 def test_cpp_coverage_builds_excluded_test_target() -> None:

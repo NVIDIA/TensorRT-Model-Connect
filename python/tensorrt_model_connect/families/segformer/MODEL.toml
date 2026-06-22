@@ -1,0 +1,9 @@
+id = "segformer"
+plugin = "segformer"
+module = "plugin"
+aliases = [
+  "segformer",
+]
+prefixes = [
+  "segformer",
+]

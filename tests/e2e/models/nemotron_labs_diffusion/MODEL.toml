@@ -1,0 +1,8 @@
+id = "nemotron_labs_diffusion"
+plugin = "nemotron_labs_diffusion"
+test_manifests = [
+  "manifests/nemotron-labs-diffusion-8b-ar.json",
+  "manifests/nemotron-labs-diffusion-8b-diffusion.json",
+  "manifests/nemotron-labs-diffusion-8b-linear-spec.json",
+  "manifests/nemotron-labs-diffusion-8b.json",
+]

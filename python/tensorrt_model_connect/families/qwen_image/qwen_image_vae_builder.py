@@ -82,7 +82,7 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 
 
 trt = trt_compat.get_trt()

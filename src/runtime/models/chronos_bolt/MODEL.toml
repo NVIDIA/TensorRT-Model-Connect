@@ -1,2 +1,5 @@
+id = "chronos_bolt"
+runtime_library = "libtrtmc_model_chronos_bolt.so"
+runtime_plugins = ["plugin.cpp|register_chronos_bolt_plugin"]
 runtime_strategies = ["chronos_bolt_trt"]
 task_strategy = "neural_operator"

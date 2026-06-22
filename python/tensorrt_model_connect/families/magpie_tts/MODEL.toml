@@ -1,0 +1,11 @@
+id = "magpie_tts"
+plugin = "magpie_tts"
+module = "plugin"
+aliases = [
+  "decoder_ce",
+  "magpie_tts",
+  "magpietts",
+]
+prefixes = [
+  "magpie_tts",
+]

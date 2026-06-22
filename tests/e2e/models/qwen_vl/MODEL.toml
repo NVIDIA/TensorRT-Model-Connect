@@ -1,0 +1,8 @@
+id = "qwen_vl"
+plugin = "qwen_vl"
+test_manifests = [
+  "manifests/qwen25vl-3b-tp2.json",
+  "manifests/qwen25vl-3b.json",
+  "manifests/qwen3-vl-2b-tp4.json",
+  "manifests/qwen3-vl-2b.json",
+]

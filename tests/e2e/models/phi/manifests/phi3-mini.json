@@ -1,0 +1,12 @@
+{
+  "name": "phi3-mini",
+  "trace_id": "IT-E2E-PHI3-01",
+  "hf_id": "microsoft/Phi-3-mini-4k-instruct",
+  "bundle": "phi3-mini.trtfb",
+  "family": "phi",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false
+}

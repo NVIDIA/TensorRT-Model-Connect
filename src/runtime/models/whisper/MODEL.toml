@@ -1,1 +1,4 @@
+id = "whisper"
+runtime_library = "libtrtmc_model_whisper.so"
+runtime_plugins = ["plugin.cpp|register_whisper_plugin"]
 runtime_strategies = ["speech_to_text"]

@@ -1,0 +1,11 @@
+{
+  "name": "t5-small",
+  "hf_id": "google-t5/t5-small",
+  "bundle": "t5-small.trtfb",
+  "family": "t5",
+  "runtime_strategy": "text_to_text",
+  "max_cache_length": 256,
+  "prompt": "translate English to German: The house is wonderful.",
+  "max_new_tokens": 20,
+  "notes": "Seq2seq model \u2014 text output perfect (ned=0.0) but debug runner produces garbage logits; relax logit gates"
+}

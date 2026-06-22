@@ -1,0 +1,6 @@
+id = "phi"
+plugin = "phi"
+test_manifests = [
+  "manifests/phi3-mini-tp4.json",
+  "manifests/phi3-mini.json",
+]

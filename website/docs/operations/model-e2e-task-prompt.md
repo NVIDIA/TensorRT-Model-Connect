@@ -40,7 +40,8 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
 
   B) Implement model support
   - If existing family supports the model:
-    - Add/update manifest in tests/e2e/models/<MODEL_NAME>.json
+    - Add/update manifest in tests/e2e/models/<FAMILY>/manifests/<MODEL_NAME>.json
+    - Add/update tests/e2e/models/<FAMILY>/MODEL.toml so it lists the manifest.
   - If new family required:
     - Scaffold with scripts/new_family.py
     - Implement plugin in python/tensorrt_model_connect/families/<family>.py

@@ -1,1 +1,4 @@
+id = "segmentation"
+runtime_library = "libtrtmc_model_segmentation.so"
+runtime_plugins = ["plugin.cpp|register_segmentation_plugin"]
 runtime_strategies = ["segmentation", "prompted_segmentation"]

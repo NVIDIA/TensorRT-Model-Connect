@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...checkpoint_mapper import WeightDict
+from .checkpoint_mapper import WeightDict
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -16,7 +16,7 @@ from ...parallel_config import (
 from .plugin import _make_llama3_rope_table_half_dim
 
 if TYPE_CHECKING:
-    from ...config import ModelConfig
+    from .config import ModelConfig
     from ...parallel_config import ParallelConfig
 
 
@@ -59,8 +59,8 @@ def build_eagle_vlm_tp_engine(
 
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops
-    from ... import graph_blocks
+    from . import graph_ops
+    from . import graph_blocks
 
     attention_size = int(rank_weights.get(
         "_attention_size", config.attention_size // parallel.tp_size))

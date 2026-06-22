@@ -11,17 +11,18 @@ from typing import TYPE_CHECKING
 import sys
 
 import numpy as np
-from tensorrt_model_connect import graph_ops, trt_compat
+from tensorrt_model_connect import trt_compat
 
-from ...checkpoint_mapper import _transpose_2d
+from . import graph_ops
+from .checkpoint_mapper import _transpose_2d
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 from .plugin import _resolve_vit_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
-    from ...config import ModelConfig
+    from .checkpoint_mapper import WeightDict
+    from .config import ModelConfig
     from ...parallel_config import ParallelConfig
 
 

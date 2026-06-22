@@ -1,1 +1,4 @@
+id = "rnnt"
+runtime_library = "libtrtmc_model_rnnt.so"
+runtime_plugins = ["plugin.cpp|register_rnnt_plugin"]
 runtime_strategies = ["speech_to_text_rnnt"]

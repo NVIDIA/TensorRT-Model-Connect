@@ -1,17 +1,24 @@
 """Manifest loader — load, validate, and normalize E2E model manifests.
 
-Reads per-model JSON manifests from tests/e2e/models/ and returns
-normalized E2ECase dataclass instances. Supports both v1 (current) and
-v2 (target) manifest schemas with backward compatibility.
+Reads per-model JSON manifests from tests/e2e/models/ and model-owned
+tests/e2e/models/<family>/manifests/ directories, then returns normalized
+E2ECase dataclass instances. Supports both v1 (current) and v2 (target)
+manifest schemas with backward compatibility.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import warnings
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    tomllib = None
 
 from .contracts import (
     CILane,
@@ -29,6 +36,226 @@ logger = logging.getLogger(__name__)
 
 # Default manifest directory (relative to project root)
 _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
+
+_THRESHOLD_SIDECAR_FIELDS = frozenset({
+    "threshold_overrides",
+    "logit_atol",
+    "layer_atol",
+    "min_pixel_agreement",
+    "min_pixel_mean",
+    "max_pixel_mean",
+    "min_pixel_std",
+    "reference_min_pixel_std_for_ratio",
+    "min_reference_std_ratio",
+    "speech_min_token_match",
+    "speech_min_frame_exact",
+    "speech_min_rms",
+})
+
+_MODEL_ASSET_FIELDS = frozenset({
+    "test_image",
+    "test_input_audio",
+    "speech_reference_tokens",
+    "golden_snapshot_path",
+    "edit_condition_image",
+    "fp8_scales",
+})
+
+
+def _model_test_dir_from_manifest_path(manifest_path: Path) -> Path:
+    if manifest_path.parent.name == "manifests":
+        return manifest_path.parent.parent
+    return manifest_path.parent
+
+
+def _resolve_model_asset_path(value: str, model_test_dir: Path) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return value
+
+    posix = PurePosixPath(value)
+    if posix.parts[:3] == ("tests", "e2e", "data"):
+        return str(model_test_dir / "data" / posix.name)
+    if posix.parts and posix.parts[0] == "data":
+        return str(model_test_dir / Path(*posix.parts))
+
+    candidate = model_test_dir / "data" / value
+    if candidate.is_file():
+        return str(candidate)
+    return value
+
+
+def _resolve_model_asset_paths(value: Any, model_test_dir: Path, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            item_key: _resolve_model_asset_paths(item_value, model_test_dir, item_key)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _resolve_model_asset_paths(item, model_test_dir, key)
+            for item in value
+        ]
+    if isinstance(value, str) and key in _MODEL_ASSET_FIELDS:
+        return _resolve_model_asset_path(value, model_test_dir)
+    return value
+
+
+def _read_model_index(index_path: Path) -> dict[str, Any]:
+    text = index_path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        return tomllib.loads(text)
+
+    entries: list[str] = []
+    in_array = False
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if not in_array:
+            if not line.startswith("test_manifests"):
+                continue
+            _, value = line.split("=", 1)
+            line = value.strip()
+            if not line.startswith("["):
+                raise ValueError(f"{index_path}: test_manifests must be an array")
+            line = line[1:]
+            in_array = True
+        if in_array:
+            if "]" in line:
+                line = line.split("]", 1)[0]
+                in_array = False
+            entries.extend(re.findall(r'"([^"]+)"', line))
+    return {"test_manifests": entries}
+
+
+def _manifest_paths_from_model_index(index_path: Path) -> list[Path]:
+    """Return manifest paths declared by tests/e2e/models/<family>/MODEL.toml."""
+    raw = _read_model_index(index_path)
+    manifest_entries = raw.get("test_manifests", [])
+    if not isinstance(manifest_entries, list):
+        raise TypeError(f"{index_path}: test_manifests must be a list")
+
+    paths: list[Path] = []
+    for entry in manifest_entries:
+        if not isinstance(entry, str):
+            raise TypeError(f"{index_path}: test_manifests entries must be strings")
+        rel = PurePosixPath(entry.replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"{index_path}: invalid manifest path {entry!r}")
+        manifest_path = index_path.parent / Path(*rel.parts)
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"{index_path}: missing manifest {entry!r}")
+        paths.append(manifest_path)
+    return paths
+
+
+def _threshold_sidecar_path(manifest_path: Path) -> Path:
+    """Return the model-local threshold sidecar path for a manifest."""
+    if manifest_path.parent.name == "manifests":
+        return manifest_path.parent.parent / "thresholds" / manifest_path.name
+    return manifest_path.parent / "thresholds" / manifest_path.name
+
+
+def _load_threshold_sidecar(manifest_path: Path) -> dict[str, Any]:
+    """Load tests/e2e/models/<family>/thresholds/<case>.json if present."""
+    sidecar_path = _threshold_sidecar_path(manifest_path)
+    if not sidecar_path.is_file():
+        return {}
+
+    try:
+        raw = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{sidecar_path}: invalid threshold JSON: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise TypeError(f"{sidecar_path}: threshold sidecar must be an object")
+
+    unknown = sorted(set(raw) - _THRESHOLD_SIDECAR_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"{sidecar_path}: unsupported threshold sidecar field(s): {unknown}"
+        )
+
+    overrides = raw.get("threshold_overrides", {})
+    if overrides is not None and not isinstance(overrides, dict):
+        raise TypeError(f"{sidecar_path}: threshold_overrides must be an object")
+
+    for key, value in raw.items():
+        if key == "threshold_overrides":
+            for metric in value:
+                if not isinstance(metric, str):
+                    raise TypeError(
+                        f"{sidecar_path}: threshold_overrides keys must be strings"
+                    )
+        elif not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{sidecar_path}: {key} must be numeric")
+
+    return raw
+
+
+def _merge_threshold_sidecar(raw: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
+    sidecar = _load_threshold_sidecar(manifest_path)
+    if not sidecar:
+        return raw
+
+    merged = raw.copy()
+    sidecar_overrides = sidecar.get("threshold_overrides", {})
+    raw_overrides = merged.get("threshold_overrides", {})
+    if raw_overrides and not isinstance(raw_overrides, dict):
+        raise TypeError(f"{manifest_path}: threshold_overrides must be an object")
+
+    merged.update({
+        key: value for key, value in sidecar.items()
+        if key != "threshold_overrides"
+    })
+    if sidecar_overrides:
+        merged["threshold_overrides"] = {
+            **raw_overrides,
+            **sidecar_overrides,
+        }
+    return merged
+
+
+def iter_manifest_paths(models_dir: str | Path | None = None) -> list[Path]:
+    """Return E2E manifest paths from indexed, flat, and nested layouts."""
+    if models_dir is None:
+        models_dir = _DEFAULT_MODELS_DIR
+
+    models_dir = Path(models_dir)
+    if not models_dir.is_dir():
+        return []
+
+    paths = set(models_dir.glob("*.json"))
+    direct_index = models_dir / "MODEL.toml"
+    if direct_index.is_file():
+        paths.update(_manifest_paths_from_model_index(direct_index))
+    else:
+        paths.update(models_dir.glob("manifests/*.json"))
+
+    indexed_model_dirs: set[Path] = set()
+    for index_path in sorted(models_dir.glob("*/MODEL.toml")):
+        indexed_model_dirs.add(index_path.parent)
+        paths.update(_manifest_paths_from_model_index(index_path))
+    for manifest_path in models_dir.glob("*/manifests/*.json"):
+        if manifest_path.parent.parent not in indexed_model_dirs:
+            paths.add(manifest_path)
+    return sorted(paths)
+
+
+def find_manifest_path(
+    manifest_name: str,
+    models_dir: str | Path | None = None,
+) -> Path | None:
+    """Find a manifest by file name or case name across supported layouts."""
+    target = manifest_name
+    if not target.endswith(".json"):
+        target = f"{target}.json"
+
+    for manifest_path in iter_manifest_paths(models_dir):
+        if manifest_path.name == target or manifest_path.stem == manifest_name:
+            return manifest_path
+    return None
 
 # ---------------------------------------------------------------------------
 # Reference backend defaults per task strategy
@@ -607,6 +834,9 @@ def load_manifest(
     path = Path(manifest_path)
     with open(path) as f:
         raw = json.load(f)
+    raw = _merge_threshold_sidecar(raw, path)
+    model_test_dir = _model_test_dir_from_manifest_path(path)
+    raw = _resolve_model_asset_paths(raw, model_test_dir)
 
     _validate_manifest(raw, str(path))
 
@@ -622,6 +852,8 @@ def load_manifest(
     # Handle skip -> known_limitations migration
     known_limitation = _convert_skip_to_known_limitation(raw)
     metadata = _build_metadata(raw)
+    metadata["manifest_path"] = str(path)
+    metadata["model_test_dir"] = str(model_test_dir)
     if known_limitation:
         metadata["known_limitations"] = [known_limitation]
         metadata["skip_reason"] = raw["skip"]
@@ -666,8 +898,8 @@ def load_all_manifests(
     """Load all model manifests from a directory.
 
     Args:
-        models_dir: Directory containing *.json manifests.
-            Defaults to tests/e2e/models/.
+        models_dir: Directory containing flat *.json manifests or
+            <family>/manifests/*.json manifests. Defaults to tests/e2e/models/.
         task_strategy_filter: If set, only return cases matching this
             task_strategy.
 
@@ -683,7 +915,7 @@ def load_all_manifests(
         return []
 
     cases: list[E2ECase] = []
-    for manifest_path in sorted(models_dir.glob("*.json")):
+    for manifest_path in iter_manifest_paths(models_dir):
         try:
             case = load_manifest(manifest_path)
             if task_strategy_filter and case.task_strategy != task_strategy_filter:

@@ -1,0 +1,10 @@
+id = "gpt_neo"
+plugin = "gpt_neo"
+module = "plugin"
+aliases = [
+  "gpt_neo",
+  "gptneo",
+]
+prefixes = [
+  "gpt_neo",
+]

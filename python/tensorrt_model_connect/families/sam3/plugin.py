@@ -12,8 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ...checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
-from ...config import ModelConfig
+from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .config import ModelConfig
 
 
 _TEXT_PREFIXES = (

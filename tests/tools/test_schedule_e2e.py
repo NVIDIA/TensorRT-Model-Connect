@@ -9,6 +9,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from tests.e2e_harness.manifest_loader import find_manifest_path
 
 _SCHEDULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "schedule_e2e.py"
 _SPEC = importlib.util.spec_from_file_location("schedule_e2e", _SCHEDULE_PATH)
@@ -288,14 +289,36 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
             from pathlib import Path
 
             args = sys.argv[1:]
-            if args == ["-"]:
+            if args and args[0] == "-":
                 sys.stdin.read()
+                if len(args) == 2:
+                    families = {
+                        "flux-2-dev-l0": "flux",
+                        "flux-schnell-l0": "flux",
+                        "albert-base": "albert",
+                        "bert-base-uncased": "bert",
+                        "gpt2-125m": "gpt2",
+                        "opt-125m": "opt",
+                    }
+                    for raw in Path(args[1]).read_text(encoding="utf-8").splitlines():
+                        model = raw.strip()
+                        if not model:
+                            continue
+                        family = families[model]
+                        print(
+                            f"tests/e2e/models/{family}/test_{family}_e2e.py"
+                            f"::test_model_e2e[{model}]"
+                        )
                 raise SystemExit(0)
 
             if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
                 tests = [
                     arg for arg in args
-                    if arg.startswith("tests/test_e2e.py::test_e2e[")
+                    if arg.startswith("tests/")
+                    and (
+                        "::test_e2e[" in arg
+                        or "::test_model_e2e[" in arg
+                    )
                 ]
                 junit_path = None
                 for arg in args:
@@ -394,25 +417,22 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
         for test in worker_tests
     }
     assert exclusive_tests == {
-        "tests/test_e2e.py::test_e2e[flux-2-dev-l0]",
-        "tests/test_e2e.py::test_e2e[flux-schnell-l0]",
+        "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-2-dev-l0]",
+        "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-schnell-l0]",
     }
     assert shared_tests == {
-        "tests/test_e2e.py::test_e2e[albert-base]",
-        "tests/test_e2e.py::test_e2e[bert-base-uncased]",
-        "tests/test_e2e.py::test_e2e[gpt2-125m]",
-        "tests/test_e2e.py::test_e2e[opt-125m]",
+        "tests/e2e/models/albert/test_albert_e2e.py::test_model_e2e[albert-base]",
+        "tests/e2e/models/bert/test_bert_e2e.py::test_model_e2e[bert-base-uncased]",
+        "tests/e2e/models/gpt2/test_gpt2_e2e.py::test_model_e2e[gpt2-125m]",
+        "tests/e2e/models/opt/test_opt_e2e.py::test_model_e2e[opt-125m]",
     }
     assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
 
 
 def test_qwen35_is_marked_exclusive_gpu() -> None:
-    manifest_path = (
-        Path(__file__).resolve().parents[1]
-        / "e2e"
-        / "models"
-        / "qwen35-9b.json"
-    )
+    models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+    manifest_path = find_manifest_path("qwen35-9b", models_dir)
+    assert manifest_path is not None
     manifest = json.loads(manifest_path.read_text())
 
     assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"
@@ -421,6 +441,8 @@ def test_qwen35_is_marked_exclusive_gpu() -> None:
 def test_gpt_oss_20b_is_marked_exclusive_gpu() -> None:
     manifest_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
 
-    for manifest_name in ("gpt-oss-20b.json", "gpt-oss-20b-l0.json"):
-        manifest = json.loads((manifest_dir / manifest_name).read_text())
+    for manifest_name in ("gpt-oss-20b", "gpt-oss-20b-l0"):
+        manifest_path = find_manifest_path(manifest_name, manifest_dir)
+        assert manifest_path is not None
+        manifest = json.loads(manifest_path.read_text())
         assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"

@@ -1,0 +1,15 @@
+{
+  "name": "mistral-7b",
+  "trace_id": "IT-E2E-MIST7B-01",
+  "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "bundle": "mistral-7b.trtfb",
+  "family": "mistral",
+  "runtime_strategy": "decoder_kv_cache",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "mistral-7b-l0",
+  "l0_replacement_reason": "Mistral-7B scale stays nightly; mistral-7b-l0 keeps the Mistral decoder path with shorter decode for PR L0.",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of Japan? Answer in one word.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false
+}

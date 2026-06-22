@@ -1,0 +1,12 @@
+id = "eagle_vlm"
+plugin = "eagle_vlm"
+module = "plugin"
+aliases = [
+  "eagle_vlm",
+  "eaglevlm",
+  "llama_nemotron_vl",
+]
+prefixes = [
+  "eagle_vlm",
+  "llama_nemotron_vl",
+]

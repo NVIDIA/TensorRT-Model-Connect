@@ -11,8 +11,8 @@
 
 #include "runtime/domains/diffusion/qwen_image_types.h"
 #include "runtime/models/qwen_image/pipeline.h"
-#include "runtime/plugins/shared/diffusion_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "diffusion_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 namespace trtmc {

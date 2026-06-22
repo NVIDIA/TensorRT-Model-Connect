@@ -34,7 +34,8 @@ class OmniPipeline final : public IPipeline {
     const char* pipeline_type() const override { return "OmniPipeline"; }
 
   private:
-    void run_thinker_step(int32_t token_id, std::vector<float>& logits);
+    void run_thinker_step(int32_t token_id, std::vector<float>& logits,
+                          std::vector<float>* hidden_state = nullptr);
     void run_talker_embed_step(const float* embed_ptr, int32_t embed_size,
                                std::vector<float>& logits);
     std::vector<int32_t> run_thinker(const std::vector<int32_t>& input_ids, int32_t max_tokens,

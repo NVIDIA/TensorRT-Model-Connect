@@ -1,0 +1,13 @@
+{
+  "name": "mixtral-stories-15m",
+  "trace_id": "IT-E2E-MXTRL-01",
+  "hf_id": "ggml-org/stories15M_MOE",
+  "bundle": "mixtral-stories-15m.trtfb",
+  "family": "mixtral",
+  "runtime_strategy": "decoder_moe",
+  "max_cache_length": 256,
+  "prompt": "Once upon a time there was a little",
+  "max_new_tokens": 20,
+  "trust_remote_code": false,
+  "core": true
+}

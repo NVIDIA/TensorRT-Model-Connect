@@ -1,0 +1,16 @@
+id = "wan_t2v"
+plugin = "wan_t2v"
+module = "plugin"
+aliases = [
+  "wan",
+  "wan2.1",
+  "wan_t2v",
+  "want2v",
+]
+prefixes = [
+  "wan_t2v",
+]
+diffusion_pipeline_classes = [
+  "WanPipeline",
+  "WanVideoToVideoPipeline",
+]

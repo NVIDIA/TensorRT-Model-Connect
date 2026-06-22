@@ -33,7 +33,8 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
 
 OmniPipeline::~OmniPipeline() = default;
 
-void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits) {
+void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits,
+                                    std::vector<float>* hidden_state) {
     Tensor token_tensor;
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
@@ -53,6 +54,17 @@ void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits
     auto n = lt.numel();
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), lt.data, n * sizeof(float));
+
+    if (hidden_state != nullptr) {
+        auto hs_it = outputs.find("hidden_state");
+        if (hs_it == outputs.end())
+            throw std::runtime_error("OmniPipeline thinker: no 'hidden_state' output");
+
+        const auto& ht = hs_it->second;
+        auto hn = ht.numel();
+        hidden_state->resize(static_cast<std::size_t>(hn));
+        std::memcpy(hidden_state->data(), ht.data, hn * sizeof(float));
+    }
 
     thinker_state_->advance();
 }
@@ -109,10 +121,9 @@ static int32_t omni_argmax(const std::vector<float>& logits) {
 std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input_ids,
                                                int32_t max_tokens,
                                                std::vector<float>& hidden_states_out) {
-    (void)hidden_states_out;
-
     thinker_state_->reset();
     thinker_state_->bind_to(*thinker_);
+    hidden_states_out.clear();
 
     std::vector<float> logits;
 
@@ -132,7 +143,10 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
         if (token == 0)
             break;
         output_ids.push_back(token);
-        run_thinker_step(token, logits);
+        std::vector<float> hidden_state;
+        run_thinker_step(token, logits, &hidden_state);
+        hidden_states_out.insert(
+            hidden_states_out.end(), hidden_state.begin(), hidden_state.end());
     }
 
     std::cerr << "[trtmc] Omni Thinker: generated " << output_ids.size() << " text tokens"

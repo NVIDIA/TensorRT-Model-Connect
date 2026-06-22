@@ -1,6 +1,6 @@
 #include "runtime/models/patchtsmixer/pipeline.h"
 
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>

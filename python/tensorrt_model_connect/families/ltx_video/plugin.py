@@ -15,8 +15,8 @@ import json
 import sys
 from pathlib import Path
 
-from ...checkpoint_mapper import WeightDict
-from ...config import ModelConfig
+from .checkpoint_mapper import WeightDict
+from .config import ModelConfig
 
 
 class LTXVideoPlugin:

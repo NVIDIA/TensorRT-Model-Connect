@@ -1,0 +1,7 @@
+id = "mistral"
+plugin = "mistral"
+test_manifests = [
+  "manifests/mistral-7b-l0.json",
+  "manifests/mistral-7b.json",
+  "manifests/riva-translate-4b.json",
+]

@@ -1,0 +1,13 @@
+id = "flux"
+plugin = "flux"
+test_manifests = [
+  "manifests/flux-2-dev-fp8-l0-tp4.json",
+  "manifests/flux-2-dev-fp8-l0.json",
+  "manifests/flux-2-dev-fp8.json",
+  "manifests/flux-2-dev-l0-tp4.json",
+  "manifests/flux-2-dev-l0.json",
+  "manifests/flux-2-dev.json",
+  "manifests/flux-schnell-l0-tp4.json",
+  "manifests/flux-schnell-l0.json",
+  "manifests/flux-schnell.json",
+]

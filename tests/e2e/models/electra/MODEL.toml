@@ -1,0 +1,6 @@
+id = "electra"
+plugin = "electra"
+test_manifests = [
+  "manifests/electra-base-discriminator-tp4.json",
+  "manifests/electra-base-discriminator.json",
+]

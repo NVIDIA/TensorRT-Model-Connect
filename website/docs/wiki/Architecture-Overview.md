@@ -608,7 +608,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/models/wan/plugin.cpp` | diffusion_wan, diffusion_pixart |
 | `src/runtime/models/z_image/plugin.cpp` | diffusion_zimage |
 | `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
-| `src/runtime/plugins/shared/plugin_helpers.h` | Shared plugin helpers (TrtModule loading, tokenizer, KV) |
+| `src/runtime/models/<model>/plugin_helpers.h` | Model-local plugin helpers (TrtModule loading, tokenizer, cache/config helpers) |
 
 ### C++ Runtime -- Implementation
 | Path | Purpose |

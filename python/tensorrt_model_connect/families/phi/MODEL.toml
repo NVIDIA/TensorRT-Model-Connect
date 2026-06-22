@@ -1,0 +1,11 @@
+id = "phi"
+plugin = "phi"
+module = "plugin"
+aliases = [
+  "phi",
+  "Phi3",
+  "phi3",
+]
+prefixes = [
+  "phi",
+]

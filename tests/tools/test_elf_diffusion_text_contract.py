@@ -13,7 +13,7 @@ from tests.e2e_harness.contracts import (
     StageSpec,
     ThresholdProfile,
 )
-from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness.manifest_loader import find_manifest_path, load_manifest
 from tests.e2e_harness.plugins import find_plugin
 from tests.e2e_harness.registry import get_comparator, get_runner
 from tests.e2e_harness.runners import diffusion_text_generation
@@ -567,7 +567,12 @@ def test_elf_l0_manifests_record_user_contract_and_skip_reason() -> None:
         ("elf-b-xsum-l0", "elf_conditional_text"),
         ("elf-b-de-en-l0", "elf_conditional_text"),
     ):
-        case = load_manifest(REPO_ROOT / "tests" / "e2e" / "models" / f"{name}.json")
+        manifest_path = find_manifest_path(
+            name,
+            REPO_ROOT / "tests" / "e2e" / "models",
+        )
+        assert manifest_path is not None
+        case = load_manifest(manifest_path)
 
         assert case.family == "elf_flow"
         assert case.runtime_strategy == "elf_flow"

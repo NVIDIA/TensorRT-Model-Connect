@@ -1,0 +1,9 @@
+id = "convbert"
+plugin = "convbert"
+module = "plugin"
+aliases = [
+  "convbert",
+]
+prefixes = [
+  "convbert",
+]

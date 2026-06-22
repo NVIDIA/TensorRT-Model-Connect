@@ -3,7 +3,7 @@
 // using KvCache for attention layers and RecurrentState for SSM layers.
 
 #include "runtime/models/recurrent/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/hybrid_state.h"
 #include "trtmc/runtime/pipeline_registry.h"

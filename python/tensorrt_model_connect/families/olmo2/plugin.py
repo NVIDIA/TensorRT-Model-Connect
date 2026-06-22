@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -161,8 +161,8 @@ class Olmo2Plugin:
         import sys
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from ... import graph_ops
-        from ... import graph_blocks
+        from . import graph_ops
+        from . import graph_blocks
 
         attention_size: int = weights.get("_attention_size", config.attention_size)
         mlp_size: int = weights.get("_mlp_size", config.intermediate_size)

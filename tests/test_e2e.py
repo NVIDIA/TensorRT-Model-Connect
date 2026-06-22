@@ -3,6 +3,7 @@
 Usage:
     # Single model:
     pytest tests/test_e2e.py::test_e2e[qwen3-0.6b]
+    pytest tests/test_e2e.py --e2e-model qwen
 
     # All models:
     pytest tests/test_e2e.py
@@ -34,6 +35,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -86,6 +88,25 @@ def _resolve_engine_dir(config) -> str:
         d = Path("/mnt/storage/tensorrt-model-connect/engines")
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
+
+
+def _resolve_model_plugin_dir(config) -> str:
+    cli_val = config.getoption("--model-plugin-dir", default=None)
+    return str(Path(cli_val).absolute()) if cli_val else ""
+
+
+@contextmanager
+def _model_plugin_dir_env(path: str):
+    old_value = os.environ.get("TRTMC_MODEL_PLUGIN_DIR")
+    if path:
+        os.environ["TRTMC_MODEL_PLUGIN_DIR"] = path
+    try:
+        yield
+    finally:
+        if old_value is None:
+            os.environ.pop("TRTMC_MODEL_PLUGIN_DIR", None)
+        else:
+            os.environ["TRTMC_MODEL_PLUGIN_DIR"] = old_value
 
 
 def _resolve_ld_library_path() -> str:
@@ -173,9 +194,12 @@ def _get_case_names(config=None) -> list[str]:
     partition_size = None
     multi_device_only = False
     excluded_ci_tiers = set()
+    model_filters: set[str] = set()
 
     if config is not None:
         strategy_filter = config.getoption("--e2e-task-strategy", default=None)
+        model_filters = _parse_e2e_model_filters(
+            config.getoption("--e2e-model", default=[]) or [])
         core_only = config.getoption("--e2e-core-only", default=False)
         partition_id = config.getoption("--e2e-partition-id", default=None)
         partition_size = config.getoption("--e2e-partition-size", default=None)
@@ -184,6 +208,9 @@ def _get_case_names(config=None) -> list[str]:
             config.getoption("--e2e-exclude-ci-tier", default=[]) or [])
 
     cases = load_all_manifests(task_strategy_filter=strategy_filter)
+
+    if model_filters:
+        cases = [c for c in cases if _case_matches_e2e_model(c, model_filters)]
 
     if excluded_ci_tiers:
         cases = [
@@ -214,6 +241,32 @@ def _get_case_names(config=None) -> list[str]:
 def _is_multi_device_case(case) -> bool:
     metadata = case.metadata or {}
     return str(metadata.get("ci_tier", "") or "") == "multi_device"
+
+
+def _parse_e2e_model_filters(values: list[str] | None) -> set[str]:
+    filters: set[str] = set()
+    for raw in values or []:
+        for item in str(raw).split(","):
+            item = item.strip()
+            if item:
+                filters.add(item)
+    return filters
+
+
+def _case_matches_e2e_model(case, filters: set[str]) -> bool:
+    if not filters:
+        return True
+    metadata = case.metadata or {}
+    fields = {
+        case.name,
+        case.family,
+        case.runtime_strategy,
+        case.task_strategy,
+        Path(case.hf_id).name if case.hf_id else "",
+        str(metadata.get("family", "")),
+        str(metadata.get("runtime_strategy", "")),
+    }
+    return bool(filters & {field for field in fields if field})
 
 
 # ---------------------------------------------------------------------------
@@ -288,13 +341,15 @@ def test_e2e(case_name: str, request) -> None:
         reference_profile=profile_names["reference"],
         ld_library_path=_resolve_ld_library_path(),
         engine_dir=_resolve_engine_dir(config),
+        model_plugin_dir=_resolve_model_plugin_dir(config),
         rebuild=config.getoption("--rebuild-engines", default=False),
         verbose=config.getoption("verbose", default=0) > 0,
     )
 
     # Run orchestrator
     orchestrator = E2EOrchestrator()
-    result = orchestrator.run(case, ctx)
+    with _model_plugin_dir_env(ctx.model_plugin_dir):
+        result = orchestrator.run(case, ctx)
 
     # Assert
     if result.status == E2EStatus.SKIP.value:

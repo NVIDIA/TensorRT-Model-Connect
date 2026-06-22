@@ -1,0 +1,5 @@
+id = "lance"
+plugin = "lance"
+test_manifests = [
+  "manifests/lance-3b-x2t-image.json",
+]

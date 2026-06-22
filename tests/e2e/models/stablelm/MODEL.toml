@@ -1,0 +1,6 @@
+id = "stablelm"
+plugin = "stablelm"
+test_manifests = [
+  "manifests/stablelm2-1.6b-tp4.json",
+  "manifests/stablelm2-1.6b.json",
+]

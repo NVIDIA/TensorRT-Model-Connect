@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _has_tensor,
     _load_tensor,

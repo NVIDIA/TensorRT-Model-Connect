@@ -1,0 +1,50 @@
+{
+  "name": "elf-b-owt-l0",
+  "trace_id": "IT-E2E-ELFB-OWT-L0-01",
+  "model_id": "github.com/lillian039/ELF:ELF-B-owt",
+  "bundle": "elf-b-owt-l0.trtfb",
+  "family": "elf_flow",
+  "runtime_strategy": "elf_flow",
+  "reference_backend": "invariant_only",
+  "oracle_level": "L4_invariants",
+  "reference_family": "elf_unconditional_text",
+  "user_contract": "diffusion_text_generation",
+  "ci_tier": "contract_only",
+  "precision": "fp32",
+  "skip": "Contract-only in CI because GitHub ELF checkpoint artifacts are not bundled; local trtmc run supports API-path sampling and tokenizer decode when the ELF bundle contains engine_plan and tokenizer.json.",
+  "inputs": {
+    "generation_mode": "unconditional",
+    "dataset_contract": "OpenWebText-style unconditional samples",
+    "num_samples": 1000,
+    "sampling_method": "sde",
+    "num_sampling_steps": 32,
+    "self_cond_cfg_scale": 3.0,
+    "output_schema": "jsonl lines with id, generated, and token_ids"
+  },
+  "stages": [
+    {
+      "name": "flow_sampling",
+      "required": true,
+      "artifact_type": "embedding",
+      "comparison_mode": "invariant_check"
+    },
+    {
+      "name": "final_decode",
+      "required": true,
+      "artifact_type": "logits",
+      "comparison_mode": "numeric_tensor"
+    },
+    {
+      "name": "decoded_text",
+      "required": true,
+      "artifact_type": "text_samples",
+      "comparison_mode": "text_quality_metrics"
+    }
+  ],
+  "metadata": {
+    "github_reference": "https://github.com/lillian039/ELF",
+    "upstream_entrypoint": "src/eval.py --config configs/training_configs/train_owt_ELF-B.yml",
+    "expected_report": "Gen. PPL around 24 and unigram entropy around 5.15 for ELF-B at 32 SDE steps.",
+    "notes": "Represents the user-visible ELF unconditional contract: generate fixed-length samples from Gaussian embedding noise, decode final logits to token ids, and write JSONL records containing id, generated text, and token_ids."
+  }
+}

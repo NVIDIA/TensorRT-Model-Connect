@@ -179,13 +179,15 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ### Done
     When ALL THREE validation gates pass, create the E2E manifest at (HOST path):
-    /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}.json
+    /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}/manifests/{family_name}.json
+    Also list it in tests/e2e/models/{family_name}/MODEL.toml.
     The manifest must NOT have a "skip" field.
 
     Then run the final E2E test to confirm:
     ```
     docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
-        tests/test_e2e.py::test_e2e[{family_name}] -v \
+        tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \
+        --e2e-model {family_name} \
         --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
         --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
         --rebuild-engines

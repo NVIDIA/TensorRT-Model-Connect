@@ -2,9 +2,10 @@
 // Omni pipeline with thinker (MoE decoder), optional talker, and optional code2wav.
 
 #include "runtime/models/omni/pipeline.h"
-#include "runtime/plugins/shared/audio_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "audio_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/recurrent_state.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {
@@ -43,12 +44,17 @@ class OmniPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, "talker_engine_plan"), "talker", opts);
         if (talker_loaded.module && talker_loaded.module->ok()) {
             talker_module = std::move(talker_loaded.module);
-            int32_t talker_kv_dim = omni_talker_hidden_size;
-            int32_t talker_cache_len = omni_talker_max_cache_length;
-            int32_t talker_layers =
-                omni_talker_num_layers > 0 ? omni_talker_num_layers : ctx.config.num_layers;
-            talker_state = std::make_unique<KvCache>(talker_layers, talker_cache_len, talker_kv_dim,
-                                                     stream, cache_dtype);
+            if (talker_module->has_input("cache_k_0")) {
+                int32_t talker_kv_dim = omni_talker_hidden_size;
+                int32_t talker_cache_len = omni_talker_max_cache_length;
+                int32_t talker_layers =
+                    omni_talker_num_layers > 0 ? omni_talker_num_layers : ctx.config.num_layers;
+                talker_state = std::make_unique<KvCache>(
+                    talker_layers, talker_cache_len, talker_kv_dim, stream, cache_dtype);
+            } else {
+                talker_state = std::make_unique<RecurrentState>(
+                    0, std::vector<RecurrentState::TensorSpec>{}, stream);
+            }
         }
 
         // Code2Wav (optional)

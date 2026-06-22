@@ -14,14 +14,14 @@ from typing import Any
 
 import numpy as np
 
-from ...checkpoint_mapper import WeightDict
-from ...config import ModelConfig
+from .checkpoint_mapper import WeightDict
+from .model_config import ModelConfig
 from .config import resolve_elf_config
 
 
 class _TensorStore:
     def __init__(self, model_dir: str | Path):
-        from ...checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
+        from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
 
         self._has_tensor = _has_tensor
         self._load_tensor = _load_tensor

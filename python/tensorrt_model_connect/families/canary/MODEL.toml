@@ -1,0 +1,11 @@
+id = "canary"
+plugin = "canary"
+module = "plugin"
+aliases = [
+  "canary",
+  "canary_asr",
+  "enc_dec_multi_task",
+]
+prefixes = [
+  "canary",
+]

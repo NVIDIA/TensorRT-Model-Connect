@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def load_vae_weights(
@@ -50,7 +50,7 @@ def load_vae_weights(
                    "group_norm" loads .weight/.bias keys.
     """
     from pathlib import Path
-    from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     model_path = Path(model_dir)
     readers = _open_safetensors(model_path)
@@ -209,7 +209,7 @@ def build_causal_vae_3d_engine(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from ... import graph_ops, graph_blocks
+    from . import graph_ops, graph_blocks
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

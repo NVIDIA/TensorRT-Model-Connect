@@ -1,1 +1,4 @@
+id = "wan"
+runtime_library = "libtrtmc_model_wan.so"
+runtime_plugins = ["plugin.cpp|register_wan_plugin"]
 runtime_strategies = ["diffusion_wan"]

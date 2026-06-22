@@ -1,0 +1,9 @@
+id = "locateanything"
+plugin = "locateanything"
+module = "plugin"
+aliases = [
+  "locateanything",
+]
+prefixes = [
+  "locateanything",
+]

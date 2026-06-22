@@ -1,0 +1,5 @@
+id = "qwen3_5"
+plugin = "qwen3_5"
+test_manifests = [
+  "manifests/qwen35-9b.json",
+]

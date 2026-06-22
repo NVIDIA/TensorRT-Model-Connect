@@ -1,0 +1,10 @@
+id = "llama"
+plugin = "llama"
+test_manifests = [
+  "manifests/falcon3-1b.json",
+  "manifests/minitron-4b-depth.json",
+  "manifests/minitron-4b-width-l0.json",
+  "manifests/minitron-4b-width.json",
+  "manifests/nemotron-nano-4b.json",
+  "manifests/tinyllama-1.1b.json",
+]

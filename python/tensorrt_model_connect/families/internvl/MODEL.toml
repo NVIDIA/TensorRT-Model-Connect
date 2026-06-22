@@ -1,0 +1,11 @@
+id = "internvl"
+plugin = "internvl"
+module = "plugin"
+aliases = [
+  "internvl",
+  "internvl3",
+  "internvl_chat",
+]
+prefixes = [
+  "internvl",
+]

@@ -1,0 +1,16 @@
+{
+  "name": "riva-translate-4b",
+  "trace_id": "IT-E2E-RIVA-01",
+  "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
+  "bundle": "riva-translate-4b.trtfb",
+  "family": "mistral",
+  "runtime_strategy": "decoder_kv_cache",
+  "reference_family": "translation_chat_template",
+  "user_contract": "translation",
+  "max_cache_length": 256,
+  "prompt": "<s>System\nYou are an expert at translating text from English to French.</s>\n<s>User\nWhat is the French translation of the sentence: Hello, how are you?</s>\n<s>Assistant\n",
+  "max_new_tokens": 20,
+  "trust_remote_code": false,
+  "gated": true,
+  "notes": "Prompt is the model-card tokenizer.apply_chat_template expansion for messages [{\"role\":\"system\",\"content\":\"en-fr\"},{\"role\":\"user\",\"content\":\"Hello, how are you?\"}] with add_generation_prompt=True."
+}

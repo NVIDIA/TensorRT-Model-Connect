@@ -145,7 +145,7 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 | Runtime strategy exists | `rg "REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST" src/runtime/plugins` |
 | Plugin is in manifest | `rg "<plugin file>" cmake/trtmc_pipeline_plugins.cmake` |
 | Engine sections exist | `./build/trtmc inspect model.trtfb --list-engines` |
-| E2E manifest matches expected contract | `tests/e2e/models/<model>.json` |
+| E2E manifest matches expected contract | `tests/e2e/models/<family>/manifests/<model>.json` |
 
 Inspecting the bundle should become muscle memory. It tells you whether you are debugging the builder, the artifact, the runtime loader, or request execution.
 

@@ -399,6 +399,7 @@ struct LoadOptions {
     std::string config_path;                       // --config <file> (empty = none)
     std::vector<std::string> set_tokens;           // --set ns.field=value (repeatable)
     std::vector<std::string> backend_search_paths; // Extra directories for backend DSOs
+    std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
 };
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",

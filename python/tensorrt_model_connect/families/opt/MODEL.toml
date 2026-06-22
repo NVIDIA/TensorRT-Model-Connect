@@ -1,0 +1,9 @@
+id = "opt"
+plugin = "opt"
+module = "plugin"
+aliases = [
+  "opt",
+]
+prefixes = [
+  "opt",
+]

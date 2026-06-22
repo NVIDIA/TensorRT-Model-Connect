@@ -1,0 +1,11 @@
+id = "qwen3_omni"
+plugin = "qwen3_omni"
+module = "plugin"
+aliases = [
+  "qwen3_omni",
+  "qwen3_omni_moe",
+  "qwen3omni",
+]
+prefixes = [
+  "qwen3_omni",
+]

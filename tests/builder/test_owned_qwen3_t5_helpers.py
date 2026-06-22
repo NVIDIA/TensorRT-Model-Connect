@@ -201,20 +201,14 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
         tensors[f"{prefix}.layer.1.DenseReluDense.wo.weight"] = np.arange(24, dtype=np.float32).reshape(4, 6) + layer + 2
         tensors[f"{prefix}.layer.1.layer_norm.weight"] = np.arange(4, dtype=np.float32) + layer + 10
 
-    fake_cm = types.ModuleType("tensorrt_model_connect.checkpoint_mapper")
+    cm = importlib.import_module("tensorrt_model_connect.families.flux.checkpoint_mapper")
 
-    class _WeightDict(dict):
-        pass
-
-    fake_cm.WeightDict = _WeightDict  # type: ignore[attr-defined]
-    fake_cm._open_safetensors = lambda _path: tensors  # type: ignore[attr-defined]
-    fake_cm._load_tensor = lambda readers, name: readers[name]  # type: ignore[attr-defined]
-    fake_cm._has_tensor = lambda readers, name: name in readers  # type: ignore[attr-defined]
-    fake_cm._target_np_dtype = (  # type: ignore[attr-defined]
-        lambda precision: np.float16 if precision == "fp16" else np.float32
-    )
-
-    with patch.dict(sys.modules, {"tensorrt_model_connect.checkpoint_mapper": fake_cm}):
+    with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
+        cm, "_load_tensor", lambda readers, name: readers[name]
+    ), patch.object(cm, "_has_tensor", lambda readers, name: name in readers), patch.object(
+        cm, "_target_np_dtype",
+        lambda precision: np.float16 if precision == "fp16" else np.float32,
+    ):
         weights = mod.load_t5_weights(
             model_dir="unused",
             d_model=4,
@@ -237,7 +231,12 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     assert "encoder.block.1.layer.0.SelfAttention.relative_attention_bias.weight" not in weights
     assert weights["encoder.final_layer_norm.weight"].dtype == np.float32
 
-    with patch.dict(sys.modules, {"tensorrt_model_connect.checkpoint_mapper": fake_cm}):
+    with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
+        cm, "_load_tensor", lambda readers, name: readers[name]
+    ), patch.object(cm, "_has_tensor", lambda readers, name: name in readers), patch.object(
+        cm, "_target_np_dtype",
+        lambda precision: np.float16 if precision == "fp16" else np.float32,
+    ):
         fp16_weights = mod.load_t5_weights(
             model_dir="unused",
             d_model=4,

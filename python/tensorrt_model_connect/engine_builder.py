@@ -16,7 +16,7 @@ from .build_timing import (
     write_build_timing as _write_build_timing,
 )
 from .config import ModelConfig
-from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
+from .families import available_plugin_ids, find_plugin, find_diffusion_plugin
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from . import trt_compat
 from .triattention_export import (
@@ -819,7 +819,7 @@ def build_bundle(
     # 2. Find family plugin
     plugin = find_plugin(config)
     if plugin is None:
-        supported = ", ".join(p.name for p in _ALL_PLUGINS)
+        supported = ", ".join(available_plugin_ids())
         raise ValueError(
             f"No family plugin for model_type={config.model_type!r}. "
             f"Supported: {supported}")
@@ -1408,7 +1408,7 @@ def _build_diffusion_bundle(
         # Fallback: try model_type-based lookup with lowercased pipeline class
         plugin = find_plugin(pipeline_class.lower())
     if plugin is None:
-        supported = ", ".join(p.name for p in _ALL_PLUGINS)
+        supported = ", ".join(available_plugin_ids())
         raise ValueError(
             f"No family plugin for diffusion pipeline {pipeline_class!r}. "
             f"Supported: {supported}")

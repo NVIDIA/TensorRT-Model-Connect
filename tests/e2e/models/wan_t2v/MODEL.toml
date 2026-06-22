@@ -1,0 +1,7 @@
+id = "wan_t2v"
+plugin = "wan_t2v"
+test_manifests = [
+  "manifests/wan21-t2v-1.3b-l0-tp4.json",
+  "manifests/wan21-t2v-1.3b-l0.json",
+  "manifests/wan21-t2v-1.3b.json",
+]

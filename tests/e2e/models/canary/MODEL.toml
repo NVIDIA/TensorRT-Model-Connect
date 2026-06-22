@@ -1,0 +1,6 @@
+id = "canary"
+plugin = "canary"
+test_manifests = [
+  "manifests/canary-1b-v2-tp4.json",
+  "manifests/canary-1b-v2.json",
+]

@@ -1,0 +1,11 @@
+{
+  "name": "marian-en-ru",
+  "hf_id": "Helsinki-NLP/opus-mt-en-ru",
+  "bundle": "marian-en-ru.trtfb",
+  "family": "marian",
+  "runtime_strategy": "marian_translation",
+  "max_cache_length": 256,
+  "prompt": "The house is wonderful.",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

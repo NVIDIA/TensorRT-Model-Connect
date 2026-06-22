@@ -1,0 +1,11 @@
+id = "roberta"
+plugin = "roberta"
+module = "plugin"
+aliases = [
+  "camembert",
+  "roberta",
+  "xlm-roberta",
+]
+prefixes = [
+  "roberta",
+]

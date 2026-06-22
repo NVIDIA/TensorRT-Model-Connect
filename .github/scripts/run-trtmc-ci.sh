@@ -283,6 +283,7 @@ load_wheel_build_metadata() {
 select_cpp_build_targets() {
   if [ "${FULL_E2E:-false}" = "true" ]; then
     printf '%s\n' "trtmc_cpp_tests"
+    printf '%s\n' "trtmc_model_plugins"
     return 0
   fi
 
@@ -290,21 +291,43 @@ select_cpp_build_targets() {
 import json
 from pathlib import Path
 
+from tools import model_plugin_isolation
+
 impact = Path("impact.json")
 if not impact.exists():
     print("trtmc_cpp_tests")
+    print("trtmc_model_plugins")
     raise SystemExit(0)
 
 d = json.loads(impact.read_text())
-if "cpp" not in d.get("unit_tiers", []):
-    raise SystemExit(0)
+targets = set()
 
-tests = d.get("cpp_tests", [])
-fallback = d.get("fallback_tiers", [])
-if "cpp" in fallback or not tests:
-    print("trtmc_cpp_tests")
-else:
-    print(" ".join(tests))
+if "cpp" in d.get("unit_tiers", []):
+    tests = d.get("cpp_tests", [])
+    fallback = d.get("fallback_tiers", [])
+    if "cpp" in fallback or not tests:
+        targets.add("trtmc_cpp_tests")
+    else:
+        targets.update(str(test) for test in tests)
+
+selected_models = {str(model) for model in d.get("e2e_models", []) if str(model)}
+for test_id in d.get("e2e_test_ids", []):
+    match = model_plugin_isolation._NODE_ID_MODEL_RE.search(str(test_id))
+    if match:
+        selected_models.add(match.group(1))
+
+if selected_models:
+    manifests = model_plugin_isolation.discover_e2e_manifests(Path.cwd())
+    runtime_plugins = model_plugin_isolation.discover_runtime_plugins(Path.cwd())
+    targets.update(
+        plugin.target
+        for plugin in model_plugin_isolation.plugins_for_models(
+            selected_models, manifests, runtime_plugins
+        )
+    )
+
+for target in sorted(targets):
+    print(target)
 PY
 }
 
@@ -332,6 +355,19 @@ build_cpp_test_executables() {
     TRTMC_CUDA_INCLUDE_DIR="${TRTMC_CUDA_INCLUDE_DIR:-}" \
     TRTMC_CUDART_LIBRARY="${TRTMC_CUDART_LIBRARY:-}" \
     conan build . -of "$TRTMC_REUSE_CONAN_OUT_DIR" "${conan_profile_args[@]}"
+}
+
+prepare_model_plugin_dir() {
+  local output_dir="$1"
+  shift
+
+  load_wheel_build_metadata
+  rm -rf "$output_dir"
+  mkdir -p "$output_dir"
+  python3 tools/model_plugin_isolation.py prepare \
+    --build-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR" \
+    --output-dir "$output_dir" \
+    "$@"
 }
 
 check_family_coverage() {
@@ -525,14 +561,20 @@ run_selective_e2e() {
 import json
 d = json.load(open('impact.json'))
 models = d.get('e2e_models', [])
+test_ids = d.get('e2e_test_ids', [])
 with open('e2e_models.txt', 'w') as f:
     for m in models:
         f.write(m + '\n')
+with open('e2e_test_ids.txt', 'w') as f:
+    for test_id in test_ids:
+        f.write(test_id + '\n')
 print(f'Selective E2E: {len(models)} models')
 for m in models[:10]:
     print(f'  {m}')
 if len(models) > 10:
     print(f'  ... and {len(models) - 10} more')
+if test_ids:
+    print(f'Selective E2E node IDs: {len(test_ids)}')
 "
   local model_count
   model_count=$(wc -l < e2e_models.txt)
@@ -544,6 +586,9 @@ if len(models) > 10:
 
   export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
   configure_e2e_timing_cache
+  local model_plugin_dir="$PWD/e2e_artifacts/model_plugins"
+  echo "=== Preparing isolated runtime model plugins ==="
+  prepare_model_plugin_dir "$model_plugin_dir" --models-file e2e_models.txt
 
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
@@ -554,7 +599,11 @@ if len(models) > 10:
     --trtmc-binary "$(command -v trtmc)"
     --workers-per-gpu 4
     --models-file e2e_models.txt
+    --model-plugin-dir "$model_plugin_dir"
   )
+  if [ -s e2e_test_ids.txt ]; then
+    args+=(--tests-file e2e_test_ids.txt)
+  fi
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
@@ -570,6 +619,9 @@ run_full_e2e() {
   echo "=== Nightly Full E2E: all models ==="
   nvidia-smi
   configure_e2e_timing_cache
+  local model_plugin_dir="$PWD/e2e_artifacts/model_plugins"
+  echo "=== Preparing isolated runtime model plugins ==="
+  prepare_model_plugin_dir "$model_plugin_dir" --all
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   # TODO: Remove the multi_device exclusions once nightly CI has a runner pool
   # that can reserve all GPUs for tensor-parallel E2E cases.
@@ -584,6 +636,7 @@ run_full_e2e() {
     --workers-per-gpu 4
     --exclude-ci-tier l0_only
     --exclude-ci-tier multi_device
+    --model-plugin-dir "$model_plugin_dir"
   )
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)

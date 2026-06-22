@@ -1,1 +1,4 @@
+id = "bark"
+runtime_library = "libtrtmc_model_bark.so"
+runtime_plugins = ["plugin.cpp|register_bark_plugin"]
 runtime_strategies = ["text_to_audio_bark"]

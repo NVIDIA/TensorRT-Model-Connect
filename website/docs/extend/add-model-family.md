@@ -73,7 +73,7 @@ If the model requires remote tokenizer or modeling code, pass the relevant trust
 
 ## 4. Add an E2E manifest
 
-Create `tests/e2e/models/<model-name>.json` with:
+Create `tests/e2e/models/<family>/manifests/<model-name>.json` with:
 
 - `name`
 - `hf_id`
@@ -81,6 +81,26 @@ Create `tests/e2e/models/<model-name>.json` with:
 - `family`
 - `runtime_strategy`
 - task input fields
-- thresholds or reference backend
+- reference backend
 
 Use nearby manifests with the same task contract as the template.
+List the manifest in `tests/e2e/models/<family>/MODEL.toml` under `test_manifests`.
+
+Each family directory also owns its E2E runner surface:
+
+- `tests/e2e/models/<family>/runner.py`
+- `tests/e2e/models/<family>/test_<family>_e2e.py`
+- `tests/e2e/models/<family>/e2e_plugins/*.py`
+- `tests/e2e/models/<family>/thresholds/<model-name>.json`
+- optional `tests/e2e/models/<family>/waives.txt`
+
+For a new family, copy the runner and test shim from the closest existing
+family and update only the family name in the docstrings and filename. Put any
+family-specific runner, reference, or comparator overrides in `e2e_plugins/`
+with module-level `runner`, `reference`, or `comparator` objects. Validate with:
+
+```bash
+pytest tests/e2e/models/<family> --e2e-model <model-name> -v \
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models
+```

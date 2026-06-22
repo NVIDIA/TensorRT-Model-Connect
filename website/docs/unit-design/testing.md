@@ -68,14 +68,15 @@ Use for:
 Paths:
 
 - `tests/test_e2e.py`
-- `tests/e2e/models/*.json`
+- `tests/e2e/models/*/MODEL.toml`
+- `tests/e2e/models/*/manifests/*.json`
 - `tests/e2e_harness/`
 
 E2E manifests are user-contract evidence. They define the model, bundle, family, runtime strategy, reference backend, prompts or modality inputs, and pass/fail thresholds.
 
 ```mermaid
 flowchart LR
-  Manifest["tests/e2e/models/*.json"] --> Harness["tests/test_e2e.py + harness"]
+  Manifest["tests/e2e/models/*/manifests/*.json"] --> Harness["tests/test_e2e.py + harness"]
   Harness --> Bundle["prebuilt or generated bundle"]
   Harness --> Trtf["./build/trtmc"]
   Harness --> Oracle["reference backend or verifier"]

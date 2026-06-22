@@ -7,15 +7,16 @@ from typing import Any
 
 import numpy as np
 
-from tensorrt_model_connect import graph_ops, trt_compat
-from tensorrt_model_connect.checkpoint_mapper import (
+from tensorrt_model_connect import trt_compat
+
+from . import graph_ops
+from .checkpoint_mapper import (
     WeightDict,
     _load_tensor,
     _open_safetensors,
     _target_np_dtype,
 )
-
-from ...config import ModelConfig
+from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 from .._time_series_trt import (
     add_batch_norm_last_dim,

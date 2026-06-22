@@ -410,7 +410,7 @@ def test_load_pixart_dit_weights_maps_optional_biases(
 
     import importlib
 
-    cm = importlib.import_module("tensorrt_model_connect.checkpoint_mapper")
+    cm = importlib.import_module("tensorrt_model_connect.families.pixart.checkpoint_mapper")
     monkeypatch.setattr(cm, "_open_safetensors", lambda _p: ["reader"])
     monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in tensors)
     monkeypatch.setattr(cm, "_load_tensor", lambda _r, name: tensors[name])

@@ -466,16 +466,11 @@ def test_load_clip_weights_transposes_projection_matrices_and_keeps_biases() -> 
         tensors[f"{p}.mlp.fc2.weight"] = np.arange(24, dtype=np.float32).reshape(4, 6) + layer
         tensors[f"{p}.mlp.fc2.bias"] = np.arange(4, dtype=np.float32) + layer
 
-    fake_cm = types.ModuleType("tensorrt_model_connect.checkpoint_mapper")
+    cm = importlib.import_module("tensorrt_model_connect.families.flux.checkpoint_mapper")
 
-    class _WeightDict(dict):
-        pass
-
-    fake_cm.WeightDict = _WeightDict  # type: ignore[attr-defined]
-    fake_cm._open_safetensors = lambda _path: tensors  # type: ignore[attr-defined]
-    fake_cm._load_tensor = lambda readers, name: readers[name]  # type: ignore[attr-defined]
-
-    with patch.dict(sys.modules, {"tensorrt_model_connect.checkpoint_mapper": fake_cm}):
+    with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
+        cm, "_load_tensor", lambda readers, name: readers[name]
+    ):
         weights = mod.load_clip_weights("unused", hidden_size=4, num_layers=2)
 
     np.testing.assert_allclose(

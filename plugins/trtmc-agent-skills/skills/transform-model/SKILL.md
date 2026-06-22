@@ -117,7 +117,7 @@ If output is wrong, use `$debug-trt-mismatch` and iterate.
 
 ## Phase 5: E2E Manifest
 
-Create or update `tests/e2e/models/<model-name>.json`:
+Create or update `tests/e2e/models/<family>/manifests/<model-name>.json` and list it in `tests/e2e/models/<family>/MODEL.toml`:
 
 ```json
 {

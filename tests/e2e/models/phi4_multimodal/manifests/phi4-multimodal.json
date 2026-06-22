@@ -1,0 +1,13 @@
+{
+  "name": "phi4-multimodal",
+  "trace_id": "IT-E2E-PHI4MM-01",
+  "hf_id": "microsoft/Phi-4-multimodal-instruct",
+  "bundle": "phi4-multimodal.trtfb",
+  "family": "phi4_multimodal",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 384,
+  "prompt": "Describe this image.",
+  "max_new_tokens": 30,
+  "trust_remote_code": true,
+  "test_image": "data/test_img.jpeg"
+}

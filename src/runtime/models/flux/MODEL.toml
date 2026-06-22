@@ -1,1 +1,4 @@
+id = "flux"
+runtime_library = "libtrtmc_model_flux.so"
+runtime_plugins = ["plugin.cpp|register_flux_plugin"]
 runtime_strategies = ["diffusion_flux"]

@@ -1,0 +1,19 @@
+id = "qwen_image"
+plugin = "qwen_image"
+module = "plugin"
+aliases = [
+  "qwen-image",
+  "qwen_image",
+  "qwen-image-edit",
+  "qwen_image_edit",
+  "qwenimage",
+  "qwenimageedit",
+]
+prefixes = [
+  "qwen_image",
+]
+diffusion_pipeline_classes = [
+  "QwenImageEditPipeline",
+  "QwenImageEditPlusPipeline",
+  "QwenImagePipeline",
+]

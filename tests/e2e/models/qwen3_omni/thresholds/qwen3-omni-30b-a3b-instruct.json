@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "audio_artifact_bytes_min": 1.0
+  }
+}

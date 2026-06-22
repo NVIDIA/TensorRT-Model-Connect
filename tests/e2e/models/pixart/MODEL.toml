@@ -1,0 +1,7 @@
+id = "pixart"
+plugin = "pixart"
+test_manifests = [
+  "manifests/pixart-sigma-1024-l0.json",
+  "manifests/pixart-sigma-1024-tp4.json",
+  "manifests/pixart-sigma-1024.json",
+]

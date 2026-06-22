@@ -15,7 +15,7 @@ purpose, dependency profile, and speed:
 | 2. C++ runtime unit | `tests/cpp/` | 92 | 70+ | Mix | ~8 s | C++ runtime correctness |
 | 3. Tools self-tests | `tests/tools/` | 62 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 122 manifests | 108 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Model E2E | `tests/e2e/models/<family>/` + `tests/e2e_harness/` | 197 manifests + 74 indexes | 197 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -135,7 +135,7 @@ for the majority of tests.
 | `test_family_bert.py` | BERT-specific plugin tests |
 | `test_family_deepseek_v2.py` | DeepSeek-V2 plugin tests |
 | `test_family_distilbert.py` | DistilBERT plugin tests |
-| `test_family_flux.py` | FLUX diffusion plugin tests |
+| `python/tensorrt_model_connect/families/flux/tests/test_family.py` | FLUX diffusion plugin tests |
 | `test_family_gpt_oss.py` | GPT-OSS plugin tests |
 | `test_family_mpnet.py` | MPNet plugin tests |
 | `test_family_nemotron_h.py` | Nemotron-H hybrid plugin tests |
@@ -472,40 +472,48 @@ engine build + execution.
 
 ---
 
-## Layer 5: Unified E2E Tests
+## Layer 5: Model E2E Tests
 
-**Directory**: `tests/test_e2e.py` + `tests/e2e_harness/`
+**Directory**: `tests/e2e/models/<family>/` + `tests/e2e_harness/`
 
 **Intent**: Validate the full pipeline end-to-end -- build bundle from HF,
 run C++ inference, compare output against HuggingFace reference. This is the
-gold-standard correctness gate. All modalities use the same harness.
+gold-standard correctness gate. Each family owns its pytest runner surface,
+manifests, optional waives, and default artifact folder while the shared
+harness provides contracts and orchestration.
 
 **How to run**:
 
 ```bash
 # Single model (auto-builds bundle if missing)
-.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+.venv/bin/python -m pytest tests/e2e/models/qwen --e2e-model qwen3-0.6b -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
+  --model-plugin-dir ./build/models
 
 # Force rebuild bundle from HF
-.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+.venv/bin/python -m pytest tests/e2e/models/qwen --e2e-model qwen3-0.6b -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
-  --rebuild-engines
+  --model-plugin-dir ./build/models --rebuild-engines
 
-# All 122 models with artifact output
-.venv/bin/python -m pytest tests/test_e2e.py -v \
+# All 197 models with artifact output
+.venv/bin/python -m pytest tests/e2e/models -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
-  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+  --model-plugin-dir ./build/models --rebuild-engines \
+  --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # Filter by modality
-.venv/bin/python -m pytest tests/test_e2e.py -v \
+.venv/bin/python -m pytest tests/e2e/models -v \
   --e2e-task-strategy text_generation_causal \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
+  --model-plugin-dir ./build/models
 ```
+
+`tests/test_e2e.py` remains available for repository-wide compatibility runs,
+but new model work should use the owning family directory.
 
 **Available `--e2e-task-strategy` values**:
 
@@ -527,8 +535,13 @@ gold-standard correctness gate. All modalities use the same harness.
 ### E2E harness architecture (DIP-first)
 
 ```
-tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 122 per-model JSON manifests
+tests/e2e/models/*/MODEL.toml        # Per-family manifest indexes
+tests/e2e/models/*/runner.py         # Model-owned pytest runner
+tests/e2e/models/*/test_*_e2e.py     # Model-owned pytest entrypoint
+tests/e2e/models/*/e2e_plugins/*.py  # Optional model-owned runner/reference/comparator plugins
+tests/e2e/models/*/manifests/*.json  # 197 per-model JSON manifests
+tests/e2e/models/*/thresholds/*.json # Model-owned threshold sidecars
+tests/e2e/models/*/waives.txt        # Optional model-owned waives
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -575,7 +588,9 @@ tests/e2e_harness/
 
 ### Manifest schema
 
-Each model is defined by a JSON manifest in `tests/e2e/models/<model-name>.json`:
+Each model is defined by a JSON manifest in
+`tests/e2e/models/<family>/manifests/<model-name>.json`, listed from
+`tests/e2e/models/<family>/MODEL.toml`:
 
 ```json
 {
@@ -618,7 +633,7 @@ Every `CompareResult` returned by any comparator includes:
 - **Full tracebacks**: Exception blocks in the orchestrator capture
   `traceback.format_exc()` and include it in the `CompareResult.message`.
 
-### 122 model manifests by category
+### Model manifests by category
 
 | Category | Count | Models |
 |----------|:--:|---------|
@@ -702,8 +717,8 @@ ctest --test-dir build --output-on-failure
 
 **What's covered**:
 - Python: 98 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
-- Tools: 62 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
-- C++: 92 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
+- Tools: 63 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
+- C++: 94 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, under 1 min)
 
@@ -740,21 +755,22 @@ Current policy and status:
 ### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
 
 ```bash
-.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+.venv/bin/python -m pytest tests/e2e/models/qwen --e2e-model qwen3-0.6b -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
-  --rebuild-engines
+  --model-plugin-dir ./build/models --rebuild-engines
 ```
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 122 models, force-rebuild every bundle. Gold-standard regression gate.
+All 197 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
-.venv/bin/python -m pytest tests/test_e2e.py -v \
+.venv/bin/python -m pytest tests/e2e/models -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
-  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+  --model-plugin-dir ./build/models --rebuild-engines \
+  --e2e-artifacts-dir /tmp/e2e_artifacts
 ```
 
 ### Tier 5: Performance regression (~10 min per model)
@@ -885,14 +901,14 @@ All 4 steps must pass. Step 4 is skipped if `./build/trtmc` is not found.
 
 1. **Run `validate_family.sh`** to confirm the model builds and passes diff checks.
 
-2. **Create a manifest JSON** in `tests/e2e/models/<model-name>.json`.
+2. **Create a manifest JSON** in `tests/e2e/models/<family>/manifests/<model-name>.json` and list it in `tests/e2e/models/<family>/MODEL.toml`.
 
 3. **Run Tier 3 smoke test**:
    ```bash
-   .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[my-model] -v \
+   .venv/bin/python -m pytest tests/e2e/models/<family> --e2e-model my-model -v \
      --engine-dir /mnt/storage/tensorrt-model-connect/engines \
      --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
-     --rebuild-engines
+     --model-plugin-dir ./build/models --rebuild-engines
    ```
 
 4. **Run Tier 4 full suite** to confirm no regressions.

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
-from ...checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -42,7 +42,7 @@ def _ensure_trt() -> Any:
 def _ensure_graph_ops() -> Any:
     global graph_ops
     if graph_ops is None:
-        from ... import graph_ops as graph_ops_module
+        from . import graph_ops as graph_ops_module
 
         graph_ops = graph_ops_module
     return graph_ops

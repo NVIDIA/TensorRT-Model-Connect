@@ -14,9 +14,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from tensorrt_model_connect import graph_ops, trt_compat
+from tensorrt_model_connect import trt_compat
 
-from ...checkpoint_mapper import (
+from . import graph_ops
+from .checkpoint_mapper import (
     WeightDict,
     _has_tensor,
     _load_tensor,
@@ -24,7 +25,7 @@ from ...checkpoint_mapper import (
     _target_np_dtype,
     _transpose_2d,
 )
-from ...config import ModelConfig
+from .config import ModelConfig
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,

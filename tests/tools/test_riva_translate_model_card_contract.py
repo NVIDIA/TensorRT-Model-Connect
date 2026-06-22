@@ -6,12 +6,16 @@ import json
 from pathlib import Path
 
 from tests import test_e2e
-from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness.manifest_loader import find_manifest_path, load_manifest
 from tests.e2e_harness.plugins.translation import plugin as translation_plugin
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_PATH = REPO_ROOT / "tests/e2e/models/riva-translate-4b.json"
+MANIFEST_PATH = find_manifest_path(
+    "riva-translate-4b",
+    REPO_ROOT / "tests" / "e2e" / "models",
+)
+assert MANIFEST_PATH is not None
 
 
 MODEL_CARD_EN_FR_PROMPT = (

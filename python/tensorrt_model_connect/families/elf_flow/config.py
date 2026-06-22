@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from ...config import ModelConfig
+    from .model_config import ModelConfig
 
 
 ELF_VARIANTS: dict[str, tuple[int, int, int]] = {

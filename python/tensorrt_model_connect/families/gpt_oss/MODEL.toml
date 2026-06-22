@@ -1,0 +1,10 @@
+id = "gpt_oss"
+plugin = "gpt_oss"
+module = "plugin"
+aliases = [
+  "gpt_oss",
+  "gptoss",
+]
+prefixes = [
+  "gpt_oss",
+]

@@ -1,0 +1,9 @@
+id = "modernbert"
+plugin = "modernbert"
+module = "plugin"
+aliases = [
+  "modernbert",
+]
+prefixes = [
+  "modernbert",
+]

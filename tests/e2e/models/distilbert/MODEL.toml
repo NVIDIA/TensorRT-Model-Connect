@@ -1,0 +1,6 @@
+id = "distilbert"
+plugin = "distilbert"
+test_manifests = [
+  "manifests/distilbert-base-uncased-tp4.json",
+  "manifests/distilbert-base-uncased.json",
+]

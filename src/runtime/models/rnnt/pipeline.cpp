@@ -3,7 +3,7 @@
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/domains/audio/mel_spectrogram.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "utils/wav_reader.h"
 
 #include <algorithm>

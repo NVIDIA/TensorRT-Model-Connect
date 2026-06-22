@@ -1,0 +1,7 @@
+id = "patchtst"
+plugin = "patchtst"
+test_manifests = [
+  "manifests/patchtst-etth1-regression-distribution-tp4.json",
+  "manifests/patchtst-etth1-regression-distribution.json",
+  "manifests/patchtst-granite-official.json",
+]

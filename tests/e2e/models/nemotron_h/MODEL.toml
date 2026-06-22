@@ -1,0 +1,6 @@
+id = "nemotron_h"
+plugin = "nemotron_h"
+test_manifests = [
+  "manifests/nemotron-h-nano-9b-tp4.json",
+  "manifests/nemotron-h-nano-9b.json",
+]

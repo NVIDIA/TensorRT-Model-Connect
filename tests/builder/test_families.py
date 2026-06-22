@@ -19,6 +19,129 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
+from tests.e2e_harness.manifest_loader import iter_manifest_paths
+
+
+def test_load_plugin_by_id_does_not_scan_family_metadata(monkeypatch):
+    import tensorrt_model_connect.families as families
+
+    class DummyPlugin:
+        name = "qwen"
+
+    def fail_metadata_scan():
+        raise AssertionError("metadata scan should not run for direct plugin id")
+
+    families._PLUGIN_CACHE.clear()
+    monkeypatch.setattr(families, "_load_family_metadata", fail_metadata_scan)
+    monkeypatch.setattr(
+        families,
+        "_load_plugin_from_module",
+        lambda module_name: DummyPlugin() if module_name == "qwen" else None,
+    )
+
+    plugin = families.load_plugin_by_id("qwen")
+
+    assert plugin is not None
+    assert plugin.name == "qwen"
+
+
+def test_candidate_module_names_uses_cached_metadata_index(monkeypatch):
+    import tensorrt_model_connect.families as families
+
+    metadata = [
+        families._FamilyMetadata(
+            id="qwen",
+            import_module="qwen",
+            aliases=frozenset({"qwen"}),
+            compact_aliases=frozenset({"qwen"}),
+            prefixes=frozenset({"qwen"}),
+            compact_prefixes=frozenset({"qwen"}),
+            diffusion_pipeline_classes=frozenset(),
+        ),
+        families._FamilyMetadata(
+            id="qwen_vl",
+            import_module="qwen_vl",
+            aliases=frozenset({"qwen_vl"}),
+            compact_aliases=frozenset({"qwenvl"}),
+            prefixes=frozenset({"qwen_vl"}),
+            compact_prefixes=frozenset({"qwenvl"}),
+            diffusion_pipeline_classes=frozenset(),
+        ),
+    ]
+    monkeypatch.setattr(families, "_METADATA_CACHE", metadata)
+    monkeypatch.setattr(families, "_METADATA_INDEX_CACHE", None)
+
+    assert families._candidate_module_names("qwen3") == ["qwen"]
+    assert families._candidate_module_names("qwen_vl") == ["qwen_vl", "qwen"]
+
+    def fail_metadata_scan():
+        raise AssertionError("candidate lookup should use the metadata index cache")
+
+    monkeypatch.setattr(families, "_load_family_metadata", fail_metadata_scan)
+
+    assert families._candidate_module_names("qwen3") == ["qwen"]
+    assert families._candidate_module_names("qwen_vl") == ["qwen_vl", "qwen"]
+
+
+def test_repo_family_builders_use_model_local_helpers():
+    """Model family builders must not import broad shared builder helpers."""
+    families_dir = (
+        Path(__file__).resolve().parent.parent.parent
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+    )
+    required_helpers = {
+        "graph_ops.py",
+        "graph_blocks.py",
+        "checkpoint_mapper.py",
+        "default_decoder.py",
+        "default_dual_profile_decoder.py",
+        "default_dual_profile_decoder_tp.py",
+        "utils.py",
+    }
+    forbidden_imports = (
+        "from ...checkpoint_mapper import",
+        "from ...config import",
+        "from ...graph_ops import",
+        "from ...graph_blocks import",
+        "from ...builders.",
+        "from ... import graph_ops",
+        "from ... import graph_blocks",
+        "from tensorrt_model_connect.checkpoint_mapper import",
+        "from tensorrt_model_connect.config import",
+        "from tensorrt_model_connect.graph_ops import",
+        "from tensorrt_model_connect.graph_blocks import",
+        "from tensorrt_model_connect.builders.",
+    )
+
+    missing_helpers = []
+    central_imports = []
+    for family_dir in sorted(families_dir.iterdir()):
+        if not family_dir.is_dir() or not (family_dir / "MODEL.toml").is_file():
+            continue
+        expected = set(required_helpers)
+        if family_dir.name == "elf_flow":
+            expected.add("model_config.py")
+        else:
+            expected.add("config.py")
+        missing_helpers.extend(
+            f"{family_dir.name}/{helper}"
+            for helper in sorted(expected)
+            if not (family_dir / helper).is_file()
+        )
+
+        for path in sorted(family_dir.glob("*.py")):
+            if path.name == "MODEL.toml":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(item in text for item in forbidden_imports):
+                central_imports.append(
+                    path.relative_to(families_dir).as_posix()
+                )
+
+    assert not missing_helpers
+    assert not central_imports
 
 
 def _discover_plugin_names_from_filesystem() -> set[str]:
@@ -205,13 +328,11 @@ class TestPluginDiscovery:
         new family plugin, they must also add a JSON manifest in
         tests/e2e/models/ so the E2E test suite covers that model.
         """
-        _EXEMPT_PLUGINS = {
-            "qwen3_omni",  # omni_multimodal strategy not yet wired in E2E harness
-        }
+        _EXEMPT_PLUGINS: set[str] = set()
 
         models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
         families_in_manifests: set[str] = set()
-        for manifest_path in models_dir.glob("*.json"):
+        for manifest_path in iter_manifest_paths(models_dir):
             with open(manifest_path) as f:
                 data = json.load(f)
             family = data.get("family")
@@ -238,7 +359,7 @@ class TestPluginDiscovery:
 
         models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
         invalid: list[str] = []
-        for manifest_path in sorted(models_dir.glob("*.json")):
+        for manifest_path in iter_manifest_paths(models_dir):
             with open(manifest_path) as f:
                 data = json.load(f)
             family = data.get("family", "")
@@ -279,6 +400,7 @@ _POSITIVE_MATCH_CASES = [
     ("phimoe", "phi_moe"),
     # Qwen3 MoE
     ("qwen3_moe", "qwen_moe"),
+    ("qwen2_moe", "qwen_moe"),
     # Granite
     ("granite", "granite"),
     # InternLM
@@ -292,6 +414,8 @@ _POSITIVE_MATCH_CASES = [
     ("opt", "opt"),
     # Falcon
     ("falcon", "falcon"),
+    ("refinedweb", "falcon"),
+    ("refinedwebmodel", "falcon"),
     # StableLM
     ("stablelm", "stablelm"),
     # Mamba
@@ -324,9 +448,12 @@ _POSITIVE_MATCH_CASES = [
     # Wan T2V (diffusion)
     ("wan_t2v", "wan_t2v"),
     ("wan", "wan_t2v"),
+    ("wan2.1", "wan_t2v"),
     # LTX-Video (diffusion T2V)
     ("ltx_video", "ltx_video"),
+    ("ltx", "ltx_video"),
     ("ltx-video", "ltx_video"),
+    ("ltxpipeline", "ltx_video"),
     # Bark (text-to-audio)
     ("bark", "bark"),
     # SegFormer (segmentation)
@@ -337,6 +464,7 @@ _POSITIVE_MATCH_CASES = [
     ("rwkv", "rwkv"),
     # DeepSeek-V2
     ("deepseek_v2", "deepseek_v2"),
+    ("deepseek_v3", "deepseek_v2"),
     # InternVL
     ("internvl_chat", "internvl"),
     ("internvl3", "internvl"),
@@ -372,6 +500,7 @@ _POSITIVE_MATCH_CASES = [
     # timm Vision Transformer (image classification)
     ("vit_base_patch16_224", "timm_vit"),
     ("timm_vit", "timm_vit"),
+    ("vision_transformer", "timm_vit"),
     # Phi-4 Multimodal
     ("phi4_multimodal", "phi4_multimodal"),
     # FLUX (diffusion T2I)
@@ -379,14 +508,22 @@ _POSITIVE_MATCH_CASES = [
     ("flux.2", "flux"),
     # Z-Image (diffusion T2I)
     ("z_image", "z_image"),
+    ("zimage", "z_image"),
+    ("z-image", "z_image"),
+    ("zimagepipeline", "z_image"),
     # Qwen-Image (diffusion T2I/Edit)
     ("qwen_image", "qwen_image"),
+    ("qwenimage", "qwen_image"),
     ("qwen-image", "qwen_image"),
     ("qwen_image_edit", "qwen_image"),
+    ("qwenimageedit", "qwen_image"),
+    ("qwen-image-edit", "qwen_image"),
     # PixArt (diffusion T2I)
     ("pixart", "pixart"),
     ("pixart_sigma", "pixart"),
     ("pixart_alpha", "pixart"),
+    ("pixartsigma", "pixart"),
+    ("pixartalpha", "pixart"),
     # ELF Flow (diffusion text generation)
     ("elf", "elf_flow"),
     ("embedded_language_flow", "elf_flow"),
@@ -410,6 +547,8 @@ _POSITIVE_MATCH_CASES = [
     ("nemotron_speech_streaming", "nemotron_speech_streaming"),
     ("nemotron_asr_streaming", "nemotron_speech_streaming"),
     ("fastconformer_cacheaware_rnnt", "nemotron_speech_streaming"),
+    ("enc_dec_rnnt_bpe", "nemotron_speech_streaming"),
+    ("rnnt_bpe", "nemotron_speech_streaming"),
     # Autopilot-generated families
     ("electra", "electra"),
     ("modernbert", "modernbert"),

@@ -1,0 +1,9 @@
+id = "stablelm"
+plugin = "stablelm"
+module = "plugin"
+aliases = [
+  "stablelm",
+]
+prefixes = [
+  "stablelm",
+]

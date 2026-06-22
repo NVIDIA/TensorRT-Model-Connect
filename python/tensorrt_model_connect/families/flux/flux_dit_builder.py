@@ -27,12 +27,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def build_flux_dit_engine(
@@ -948,7 +948,7 @@ def load_flux_dit_weights(
 ) -> "WeightDict":
     """Load FLUX DiT weights from diffusers-format transformer directory."""
     from pathlib import Path
-    from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     readers = _open_safetensors(Path(model_dir))
     weights = WeightDict()

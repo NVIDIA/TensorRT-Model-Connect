@@ -1,0 +1,12 @@
+{
+  "name": "starcoder2-3b",
+  "trace_id": "IT-E2E-SC2-01",
+  "hf_id": "bigcode/starcoder2-3b",
+  "bundle": "starcoder2-3b.trtfb",
+  "family": "starcoder2",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "def fibonacci(n):",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

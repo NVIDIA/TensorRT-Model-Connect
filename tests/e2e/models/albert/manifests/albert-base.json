@@ -1,0 +1,11 @@
+{
+  "name": "albert-base",
+  "hf_id": "albert/albert-base-v2",
+  "bundle": "albert-base.trtfb",
+  "family": "albert",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 0,
+  "notes": "ALBERT cross-layer sharing and embedding factorization; C++ Unigram tokenization must match HF lowercasing"
+}

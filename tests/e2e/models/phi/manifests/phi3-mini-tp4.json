@@ -1,0 +1,55 @@
+{
+  "name": "phi3-mini-tp4",
+  "trace_id": "IT-E2E-PHI3-TP4-01",
+  "hf_id": "microsoft/Phi-3-mini-4k-instruct",
+  "bundle": "phi3-mini-tp4.trtfb",
+  "family": "phi",
+  "runtime_strategy": "decoder_kv_cache",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 256,
+  "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
+  "max_new_tokens": 10,
+  "trust_remote_code": false,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "debug_logits": true,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "command_available",
+      "args": {
+        "command": "mpirun"
+      },
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 4
+      },
+      "gating": true
+    }
+  ],
+  "notes": "Phi-3 Mini TP4 repro using the same checkpoint, prompt, generation length, and thresholds as phi3-mini."
+}

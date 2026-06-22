@@ -1,8 +1,8 @@
 // RnntPlugin: handles "speech_to_text_rnnt" strategy.
 
 #include "runtime/models/rnnt/pipeline.h"
-#include "runtime/plugins/shared/audio_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "audio_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

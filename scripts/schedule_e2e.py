@@ -100,7 +100,11 @@ def classify_parallel_resource(manifest: dict) -> str:
 
 def _load_manifests(manifest_dir: Path) -> dict[str, dict]:
     manifests: dict[str, dict] = {}
-    for f in manifest_dir.glob("*.json"):
+    manifest_paths = {
+        *manifest_dir.glob("*.json"),
+        *manifest_dir.glob("*/manifests/*.json"),
+    }
+    for f in sorted(manifest_paths):
         try:
             m = json.loads(f.read_text())
             manifests[m["name"]] = m

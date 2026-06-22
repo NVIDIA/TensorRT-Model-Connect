@@ -1,0 +1,16 @@
+{
+  "name": "mistral-7b-l0",
+  "trace_id": "IT-E2E-MIST7B-L0-01",
+  "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "bundle": "mistral-7b-l0.trtfb",
+  "family": "mistral",
+  "runtime_strategy": "decoder_kv_cache",
+  "ci_tier": "l0_only",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of Japan? Answer in one word.",
+  "max_new_tokens": 5,
+  "trust_remote_code": false,
+  "notes": "PR L0 repro for Mistral-7B. Uses the same checkpoint, decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
+}

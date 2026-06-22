@@ -46,14 +46,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ... import graph_blocks
+from . import graph_ops
+from . import graph_blocks
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...config import ModelConfig
-    from ...checkpoint_mapper import WeightDict
+    from .config import ModelConfig
+    from .checkpoint_mapper import WeightDict
     from ...quantization.context import QuantContext
 
 

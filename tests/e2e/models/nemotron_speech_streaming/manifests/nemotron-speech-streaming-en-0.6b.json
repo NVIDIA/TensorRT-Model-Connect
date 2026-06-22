@@ -1,0 +1,14 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b",
+  "trace_id": "IT-E2E-NEMO-RNNT-01",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "bundle": "nemotron-speech-streaming-en-0.6b.trtfb",
+  "family": "nemotron_speech_streaming",
+  "runtime_strategy": "speech_to_text_rnnt",
+  "test_type": "transcription",
+  "max_cache_length": 128,
+  "prompt": "test",
+  "max_new_tokens": 80,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav"
+}

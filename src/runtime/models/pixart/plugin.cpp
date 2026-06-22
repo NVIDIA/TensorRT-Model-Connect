@@ -4,8 +4,8 @@
 // Standalone plugin — no delegation to WanPlugin.
 
 #include "runtime/models/pixart/pipeline.h"
-#include "runtime/plugins/shared/diffusion_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "diffusion_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

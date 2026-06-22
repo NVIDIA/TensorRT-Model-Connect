@@ -4,7 +4,7 @@
 #include "runtime/core/chat_template.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/models/text_generation/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

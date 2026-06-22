@@ -2,8 +2,8 @@
 // Magpie TTS encoder-decoder pipeline with IPA tokenizer and optional CFG.
 
 #include "runtime/models/magpie/pipeline.h"
-#include "runtime/plugins/shared/audio_helpers.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "audio_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

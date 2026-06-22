@@ -5,8 +5,8 @@ Composes shared builders: T5 encoder + standard DiT + causal 3D VAE.
 
 from __future__ import annotations
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
 
 
 class WanT2VPlugin:

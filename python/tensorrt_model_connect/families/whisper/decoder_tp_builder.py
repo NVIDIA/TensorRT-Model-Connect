@@ -17,7 +17,7 @@ import sys
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -26,8 +26,8 @@ from ...parallel_config import (
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
-    from ...config import ModelConfig
+    from .checkpoint_mapper import WeightDict
+    from .config import ModelConfig
     from ...parallel_config import ParallelConfig
 
 

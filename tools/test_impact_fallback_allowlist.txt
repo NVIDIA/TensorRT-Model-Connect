@@ -117,7 +117,6 @@ no_impact tools/perfdb.py # developer utility script; no CI test impact is inten
 no_impact tools/profile_report.py # developer utility script; no CI test impact is intentional
 no_impact tools/sol_estimate.py # developer utility script; no CI test impact is intentional
 no_impact tools/test_graph_ops.py # developer utility script; no CI test impact is intentional
-no_impact tools/test_impact.py # developer utility script; no CI test impact is intentional
 no_impact tools/test_impact_fallback_allowlist.txt # validation metadata; no CI test impact is intentional
 no_impact tools/test_runner_parity.py # developer utility script; no CI test impact is intentional
 no_impact tools/tool_helpers.py # developer utility script; no CI test impact is intentional

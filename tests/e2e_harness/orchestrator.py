@@ -52,7 +52,13 @@ from .contracts import (
 )
 from . import _case_artifact_dir, save_full_stderr
 from .python_profiles import profile_env_var
-from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
+from .registry import (
+    activate_model_plugins,
+    get_comparator,
+    get_contract_plugin,
+    get_reference,
+    get_runner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +158,8 @@ def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[boo
     asset_path = req.args.get("path", "")
     if not asset_path:
         return False, "Asset path not specified"
-    # Resolve relative paths against project root, then e2e data dir
+    # Resolve relative paths against the project root. Model-owned manifests are
+    # normalized to absolute model-local asset paths by manifest_loader.
     p = Path(asset_path)
     if not p.is_absolute():
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -371,8 +378,11 @@ def _resolve_bundle(
         cmd.append("--trust-remote-code")
     fp8_scales = case.metadata.get("fp8_scales")
     if fp8_scales:
-        # Resolve relative to tests/e2e/data/
-        scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales
+        scales_path = Path(fp8_scales)
+        if not scales_path.is_absolute():
+            model_test_dir = case.metadata.get("model_test_dir", "")
+            if model_test_dir:
+                scales_path = Path(model_test_dir) / fp8_scales
         if scales_path.is_file():
             cmd.extend(["--fp8-scales", str(scales_path)])
 
@@ -463,38 +473,11 @@ def _resolve_bundle(
 def _resolve_threshold(
     case: E2ECase,
 ) -> ThresholdProfile:
-    """Build a ThresholdProfile from defaults + overrides.
-
-    Resolution chain: defaults -> profile -> per-model -> manifest inline.
-    """
-    # Start with conservative defaults
-    metrics: dict[str, float] = {
-        "logit_atol": 1e-3,
-        "layer_atol": 0.05,
-        "token_agreement_rate": 0.8,
-        "logit_cosine_p5": 0.99,
-        "logit_rel_l2_p95": 0.05,
-        "stable_top1_match_rate": 0.9,
-        "unstable_topk_hit_rate": 0.8,
-        "normalized_text_edit_distance": 0.2,
-    }
-
-    # Try to load strategy-specific defaults
-    try:
-        from .thresholds import load_defaults
-        strategy_defaults = load_defaults(case.task_strategy)
-        if strategy_defaults:
-            metrics.update(strategy_defaults)
-    except ImportError:
-        pass
-
-    # Apply per-model overrides from manifest
-    metrics.update(case.threshold_overrides)
-
+    """Build a ThresholdProfile from model-owned manifest sidecar values."""
     return ThresholdProfile(
         task_strategy=case.task_strategy,
         profile_name=case.comparison_profile,
-        metrics=metrics,
+        metrics=dict(case.threshold_overrides),
     )
 
 
@@ -1160,6 +1143,7 @@ def _build_plugin_runtime_context(ctx: RunContext) -> PluginRuntimeContext:
         runtime_python=ctx.runtime_python_path(),
         reference_python=ctx.reference_python_path(),
         artifacts_dir=ctx.artifacts_dir,
+        model_plugin_dir=ctx.model_plugin_dir,
     )
 
 
@@ -1460,11 +1444,13 @@ class E2EOrchestrator:
             reference_profile=ctx.reference_profile,
             ld_library_path=ctx.ld_library_path,
             engine_dir=ctx.engine_dir,
+            model_plugin_dir=ctx.model_plugin_dir,
             rebuild=ctx.rebuild,
             verbose=ctx.verbose,
         )
         state.plugin_runtime_context = _build_plugin_runtime_context(state.ctx)
 
+        activate_model_plugins(state.case.metadata.get("model_test_dir", ""))
         state.runner = get_runner(state.case.task_strategy)
         state.reference = get_reference(state.case.reference_backend)
         state.comparator = get_comparator(state.case.task_strategy)

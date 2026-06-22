@@ -1,0 +1,9 @@
+id = "mamba"
+plugin = "mamba"
+module = "plugin"
+aliases = [
+  "mamba",
+]
+prefixes = [
+  "mamba",
+]

@@ -1,0 +1,9 @@
+id = "gpt2"
+plugin = "gpt2"
+module = "plugin"
+aliases = [
+  "gpt2",
+]
+prefixes = [
+  "gpt2",
+]

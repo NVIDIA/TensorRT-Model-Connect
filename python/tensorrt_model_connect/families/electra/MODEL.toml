@@ -1,0 +1,9 @@
+id = "electra"
+plugin = "electra"
+module = "plugin"
+aliases = [
+  "electra",
+]
+prefixes = [
+  "electra",
+]

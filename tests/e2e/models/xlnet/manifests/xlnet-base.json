@@ -1,0 +1,10 @@
+{
+  "name": "xlnet-base",
+  "hf_id": "xlnet/xlnet-base-cased",
+  "bundle": "xlnet-base.trtfb",
+  "family": "xlnet",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris",
+  "max_new_tokens": 0
+}

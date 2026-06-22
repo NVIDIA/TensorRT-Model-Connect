@@ -1,0 +1,12 @@
+{
+  "name": "granite-3.1-2b",
+  "trace_id": "IT-E2E-GRN31-01",
+  "hf_id": "ibm-granite/granite-3.1-2b-base",
+  "bundle": "granite-3.1-2b.trtfb",
+  "family": "granite",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

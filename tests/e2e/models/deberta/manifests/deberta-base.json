@@ -1,0 +1,13 @@
+{
+  "name": "deberta-base",
+  "hf_id": "microsoft/deberta-base",
+  "bundle": "deberta-base.trtfb",
+  "family": "deberta",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 1,
+  "trust_remote_code": false,
+  "notes": "Encoder-only model with disentangled attention. Outputs hidden states, not logits.",
+  "core": false
+}

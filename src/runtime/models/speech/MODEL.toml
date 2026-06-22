@@ -1,1 +1,4 @@
+id = "speech"
+runtime_library = "libtrtmc_model_speech.so"
+runtime_plugins = ["plugin.cpp|register_speech_plugin"]
 runtime_strategies = ["speech_to_speech"]

@@ -1,0 +1,11 @@
+id = "deepseek_ocr"
+plugin = "deepseek_ocr"
+module = "plugin"
+aliases = [
+  "deepseek_ocr",
+  "deepseek_vl_v2",
+  "deepseekocr",
+]
+prefixes = [
+  "deepseek_ocr",
+]

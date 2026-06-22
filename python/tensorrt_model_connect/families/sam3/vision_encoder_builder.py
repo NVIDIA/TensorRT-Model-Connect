@@ -11,7 +11,7 @@ import sys
 
 import numpy as np
 
-from ...checkpoint_mapper import WeightDict
+from .checkpoint_mapper import WeightDict
 
 
 def _trt():
@@ -21,7 +21,7 @@ def _trt():
 
 
 def _graph_ops():
-    from ... import graph_ops
+    from . import graph_ops
 
     return graph_ops
 

@@ -13,7 +13,20 @@ from pathlib import Path
 
 # Try to import manifest_loader
 try:
-    from tests.e2e_harness.manifest_loader import load_manifest, _validate_manifest
+    from tests.e2e_harness.manifest_loader import (
+        _validate_manifest,
+        find_manifest_path,
+        iter_manifest_paths,
+        load_all_manifests,
+        load_manifest,
+    )
+    from tests.e2e_harness.registry import (
+        activate_model_plugins,
+        get_comparator,
+        get_reference,
+        get_runner,
+        reset as reset_e2e_registry,
+    )
 except ImportError:
     pytest.skip("e2e_harness not available", allow_module_level=True)
 
@@ -110,6 +123,308 @@ class TestManifestValidation:
             "prompt": "Hello",
         }
         _validate_manifest(data, "test.json")  # Should not raise
+
+    def test_model_owned_layout_is_discovered(self, tmp_path):
+        """Nested tests/e2e/models/<family>/manifests layout is supported."""
+        models_dir = tmp_path / "models"
+        manifest_dir = models_dir / "qwen" / "manifests"
+        manifest_dir.mkdir(parents=True)
+        manifest_path = manifest_dir / "qwen3-test.json"
+        manifest_path.write_text(
+            json.dumps({
+                "name": "qwen3-test",
+                "hf_id": "Qwen/Qwen3-0.6B",
+                "family": "qwen",
+                "runtime_strategy": "decoder_kv_cache",
+                "prompt": "Hello",
+                "max_new_tokens": 4,
+            }),
+            encoding="utf-8",
+        )
+
+        assert iter_manifest_paths(models_dir) == [manifest_path]
+        assert find_manifest_path("qwen3-test", models_dir) == manifest_path
+        cases = load_all_manifests(models_dir)
+        assert [case.name for case in cases] == ["qwen3-test"]
+        family_cases = load_all_manifests(models_dir / "qwen")
+        assert [case.name for case in family_cases] == ["qwen3-test"]
+
+    def test_model_owned_threshold_sidecar_is_loaded(self, tmp_path):
+        """Model-local thresholds/<case>.json sidecars feed E2E thresholds."""
+        family_dir = tmp_path / "models" / "qwen"
+        manifest_dir = family_dir / "manifests"
+        threshold_dir = family_dir / "thresholds"
+        manifest_dir.mkdir(parents=True)
+        threshold_dir.mkdir()
+        manifest_path = manifest_dir / "qwen3-test.json"
+        manifest_path.write_text(
+            json.dumps({
+                "name": "qwen3-test",
+                "hf_id": "Qwen/Qwen3-0.6B",
+                "family": "qwen",
+                "runtime_strategy": "decoder_kv_cache",
+                "prompt": "Hello",
+                "max_new_tokens": 4,
+            }),
+            encoding="utf-8",
+        )
+        (threshold_dir / "qwen3-test.json").write_text(
+            json.dumps({
+                "logit_atol": 10.0,
+                "threshold_overrides": {
+                    "logit_cosine_p5": 0.0,
+                    "token_agreement_rate": 0.0,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        case = load_manifest(manifest_path)
+        assert case.threshold_overrides == {
+            "logit_atol": 10.0,
+            "logit_cosine_p5": 0.0,
+            "token_agreement_rate": 0.0,
+        }
+
+    def test_repo_model_indexes_cover_all_nested_manifests(self):
+        """Every repo E2E manifest is listed from its family MODEL.toml."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        nested_manifests = set(models_dir.glob("*/manifests/*.json"))
+        assert nested_manifests
+
+        family_dirs = {path.parent.parent for path in nested_manifests}
+        missing_indexes = [
+            path.relative_to(models_dir).as_posix()
+            for path in sorted(family_dirs)
+            if not (path / "MODEL.toml").is_file()
+        ]
+        assert not missing_indexes
+
+        assert set(iter_manifest_paths(models_dir)) == nested_manifests
+
+    def test_repo_model_dirs_own_e2e_runner(self):
+        """Each model E2E folder owns its pytest runner entrypoint."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        family_dirs = sorted(
+            path for path in models_dir.iterdir()
+            if path.is_dir() and (path / "MODEL.toml").is_file()
+        )
+        assert family_dirs
+
+        missing_runner = []
+        missing_test = []
+        missing_plugins = []
+        central_imports = []
+        for family_dir in family_dirs:
+            runner = family_dir / "runner.py"
+            tests = sorted(family_dir.glob("test_*_e2e.py"))
+            if not runner.is_file():
+                missing_runner.append(family_dir.name)
+            if len(tests) != 1:
+                missing_test.append(family_dir.name)
+            for plugin_name in ("runner.py", "reference.py", "comparator.py"):
+                if not (family_dir / "e2e_plugins" / plugin_name).is_file():
+                    missing_plugins.append(
+                        f"{family_dir.relative_to(models_dir).as_posix()}/"
+                        f"e2e_plugins/{plugin_name}"
+                    )
+            for plugin_subdir in ("runners", "references", "comparators"):
+                if not (family_dir / "e2e_plugins" / plugin_subdir).is_dir():
+                    missing_plugins.append(
+                        f"{family_dir.relative_to(models_dir).as_posix()}/"
+                        f"e2e_plugins/{plugin_subdir}"
+                    )
+
+            local_files = [path for path in [runner, *tests] if path.is_file()]
+            local_files.extend(sorted((family_dir / "e2e_plugins").rglob("*.py")))
+            for path in local_files:
+                text = path.read_text(encoding="utf-8")
+                if "tests.test_e2e" in text:
+                    central_imports.append(path.relative_to(models_dir).as_posix())
+                if any(
+                    forbidden in text
+                    for forbidden in (
+                        "tests.e2e_harness.runners",
+                        "tests.e2e_harness.references",
+                        "tests.e2e_harness.comparators",
+                    )
+                ):
+                    central_imports.append(path.relative_to(models_dir).as_posix())
+
+        assert not missing_runner
+        assert not missing_test
+        assert not missing_plugins
+        assert not central_imports
+
+    def test_repo_model_thresholds_are_sidecars(self):
+        """Per-model threshold overrides live under model-owned thresholds/."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        inline_fields = {
+            "threshold_overrides",
+            "logit_atol",
+            "layer_atol",
+            "min_pixel_agreement",
+            "min_pixel_mean",
+            "max_pixel_mean",
+            "min_pixel_std",
+            "reference_min_pixel_std_for_ratio",
+            "min_reference_std_ratio",
+            "speech_min_token_match",
+            "speech_min_frame_exact",
+            "speech_min_rms",
+        }
+
+        inline_thresholds = []
+        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            keys = sorted(inline_fields & raw.keys())
+            if keys:
+                inline_thresholds.append(
+                    (manifest_path.relative_to(models_dir).as_posix(), keys)
+                )
+
+        sidecars = sorted(models_dir.glob("*/thresholds/*.json"))
+        missing_sidecars = [
+            path.relative_to(models_dir).as_posix()
+            for path in sorted(models_dir.glob("*/manifests/*.json"))
+            if not (path.parent.parent / "thresholds" / path.name).is_file()
+        ]
+        missing_manifests = [
+            path.relative_to(models_dir).as_posix()
+            for path in sidecars
+            if not (path.parent.parent / "manifests" / path.name).is_file()
+        ]
+
+        assert sidecars
+        assert not inline_thresholds
+        assert not missing_sidecars
+        assert not missing_manifests
+
+    def test_repo_model_assets_are_local(self):
+        """Model E2E manifests resolve data assets from their own folders."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        asset_fields = {
+            "test_image",
+            "test_input_audio",
+            "speech_reference_tokens",
+            "golden_snapshot_path",
+            "edit_condition_image",
+            "fp8_scales",
+        }
+        global_refs = []
+        missing_assets = []
+
+        def iter_asset_values(value, key=""):
+            if isinstance(value, dict):
+                for item_key, item_value in value.items():
+                    yield from iter_asset_values(item_value, item_key)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from iter_asset_values(item, key)
+            elif isinstance(value, str) and key in asset_fields:
+                yield value
+
+        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+            text = manifest_path.read_text(encoding="utf-8")
+            if "tests/e2e/data" in text:
+                global_refs.append(manifest_path.relative_to(models_dir).as_posix())
+
+            raw = json.loads(text)
+            family_dir = manifest_path.parent.parent
+            for asset in iter_asset_values(raw):
+                if asset.startswith("tests/e2e/data"):
+                    global_refs.append(manifest_path.relative_to(models_dir).as_posix())
+                    continue
+                if asset.startswith("data/") and not (family_dir / asset).is_file():
+                    missing_assets.append(
+                        f"{manifest_path.relative_to(models_dir).as_posix()}: {asset}"
+                    )
+
+        assert not global_refs
+        assert not missing_assets
+
+    def test_repo_models_use_model_local_e2e_plugins(self):
+        """Every manifest resolves runner/reference/comparator from its folder."""
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        failures = []
+        for family_dir in sorted(
+            path for path in models_dir.iterdir()
+            if path.is_dir() and (path / "MODEL.toml").is_file()
+        ):
+            family_prefix = f"tests.e2e.models.{family_dir.name}.e2e_plugins."
+            try:
+                activate_model_plugins(family_dir)
+                for manifest_path in sorted((family_dir / "manifests").glob("*.json")):
+                    case = load_manifest(manifest_path)
+                    resolved = {
+                        "runner": get_runner(case.task_strategy),
+                        "reference": get_reference(case.reference_backend),
+                        "comparator": get_comparator(case.task_strategy),
+                    }
+                    for kind, plugin in resolved.items():
+                        module = type(plugin).__module__ if plugin is not None else ""
+                        if not module.startswith(family_prefix):
+                            failures.append(
+                                (
+                                    manifest_path.relative_to(models_dir).as_posix(),
+                                    kind,
+                                    module,
+                                )
+                            )
+            finally:
+                reset_e2e_registry()
+
+        assert not failures
+
+    def test_repo_runtime_models_use_model_local_helpers(self):
+        """Runtime plugin helpers are owned by each runtime model folder."""
+        repo_root = Path(__file__).resolve().parents[2]
+        runtime_models_dir = repo_root / "src" / "runtime" / "models"
+        shared_helpers_dir = repo_root / "src" / "runtime" / "plugins" / "shared"
+
+        obsolete_shared_helpers = sorted(shared_helpers_dir.glob("*_helpers.*"))
+        obsolete_shared_helpers.extend(sorted(shared_helpers_dir.glob("plugin_helpers.*")))
+        assert not obsolete_shared_helpers
+
+        cmake_text = (repo_root / "CMakeLists.txt").read_text(encoding="utf-8")
+        assert "src/runtime/plugins/shared" not in cmake_text
+
+        missing_helpers = []
+        shared_includes = []
+        cross_model_includes = []
+        for model_dir in sorted(path for path in runtime_models_dir.iterdir() if path.is_dir()):
+            if not (model_dir / "MODEL.toml").is_file():
+                continue
+            for helper in ("plugin_helpers.h", "plugin_helpers.cpp"):
+                if not (model_dir / helper).is_file():
+                    missing_helpers.append(f"{model_dir.name}/{helper}")
+
+            for path in sorted(model_dir.glob("*.[ch]pp")) + sorted(model_dir.glob("*.h")):
+                text = path.read_text(encoding="utf-8")
+                if "runtime/plugins/shared" in text:
+                    shared_includes.append(path.relative_to(repo_root).as_posix())
+                for include_line in [
+                    line.strip()
+                    for line in text.splitlines()
+                    if line.strip().startswith("#include \"runtime/models/")
+                ]:
+                    prefix = f'#include "runtime/models/{model_dir.name}/'
+                    if not include_line.startswith(prefix):
+                        cross_model_includes.append(
+                            f"{path.relative_to(repo_root).as_posix()}: {include_line}"
+                        )
+                if '#include "audio_helpers.h"' in text:
+                    for helper in ("audio_helpers.h", "audio_helpers.cpp"):
+                        if not (model_dir / helper).is_file():
+                            missing_helpers.append(f"{model_dir.name}/{helper}")
+                if '#include "diffusion_helpers.h"' in text:
+                    for helper in ("diffusion_helpers.h", "diffusion_helpers.cpp"):
+                        if not (model_dir / helper).is_file():
+                            missing_helpers.append(f"{model_dir.name}/{helper}")
+
+        assert not missing_helpers
+        assert not shared_includes
+        assert not cross_model_includes
 
     def test_model_id_accepted_as_hf_id_alternative(self, tmp_path):
         """model_id is accepted as an alternative to hf_id."""
@@ -226,11 +541,12 @@ class TestManifestValidation:
         """The 8B model-card generation surfaces should all have nightly cases."""
         models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
         manifest_paths = [
-            models_dir / "nemotron-labs-diffusion-8b-ar.json",
-            models_dir / "nemotron-labs-diffusion-8b-diffusion.json",
-            models_dir / "nemotron-labs-diffusion-8b-linear-spec.json",
-            models_dir / "nemotron-labs-diffusion-8b.json",
+            find_manifest_path("nemotron-labs-diffusion-8b-ar", models_dir),
+            find_manifest_path("nemotron-labs-diffusion-8b-diffusion", models_dir),
+            find_manifest_path("nemotron-labs-diffusion-8b-linear-spec", models_dir),
+            find_manifest_path("nemotron-labs-diffusion-8b", models_dir),
         ]
+        assert all(path is not None for path in manifest_paths)
         cases = [load_manifest(path) for path in manifest_paths]
 
         modes = {case.inputs["generation_mode"] for case in cases}
@@ -316,13 +632,9 @@ class TestManifestValidation:
 
     def test_flux2_fp8_manifest_uses_end_to_end_image_contract(self):
         """FLUX.2 FP8 should not inherit unrelated optional debug substages."""
-        manifest_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "e2e",
-            "models",
-            "flux-2-dev-fp8.json",
-        )
+        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        manifest_path = find_manifest_path("flux-2-dev-fp8", models_dir)
+        assert manifest_path is not None
         case = load_manifest(manifest_path)
 
         assert case.reference_family == "diffusers_image_gen"

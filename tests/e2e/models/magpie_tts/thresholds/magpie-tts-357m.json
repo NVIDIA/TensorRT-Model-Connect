@@ -1,0 +1,12 @@
+{
+  "threshold_overrides": {
+    "codec_token_match": 0.7,
+    "duration_ratio_max": 1.5,
+    "duration_ratio_min": 0.6,
+    "log_spectral_distance": 8.0,
+    "logit_atol": 0.01,
+    "mel_spectrogram_distance": 6.0,
+    "rms_max": 1.0,
+    "rms_min": 0.001
+  }
+}

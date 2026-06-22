@@ -1,7 +1,7 @@
 // ElfFlowPlugin: loads GitHub ELF denoiser/decoder bundles.
 
 #include "runtime/models/elf_flow/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

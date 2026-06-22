@@ -1,0 +1,7 @@
+id = "z_image"
+plugin = "z_image"
+test_manifests = [
+  "manifests/z-image-turbo-l0-tp2.json",
+  "manifests/z-image-turbo-l0.json",
+  "manifests/z-image-turbo.json",
+]

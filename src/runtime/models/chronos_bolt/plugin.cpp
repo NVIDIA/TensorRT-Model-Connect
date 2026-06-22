@@ -5,7 +5,7 @@
 // TRT engine, feed dense context tensors, and return the forecast tensor.
 
 #include "runtime/models/chronos_bolt/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

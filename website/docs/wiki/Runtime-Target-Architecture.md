@@ -61,7 +61,7 @@ Key files:
 | `src/runtime/models/*/plugin.cpp` | Manifest-registered model plugin files |
 | `src/runtime/models/*/pipeline.h/*.cpp` | Concrete model-owned `IPipeline` implementations |
 | `src/runtime/models/*/MODEL.toml` | Runtime strategy ownership manifests |
-| `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
+| `src/runtime/models/<model>/plugin_helpers.*` | Model-local runtime helper copies used by that model plugin |
 | `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/cabi/api/trtmc_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
 
@@ -150,7 +150,7 @@ src/runtime/models/
   flux/                       # diffusion_flux
   wan/                        # diffusion_wan, diffusion_pixart
   z_image/                    # diffusion_zimage
-src/runtime/plugins/shared/   # plugin_helpers, diffusion_helpers, audio_helpers
+src/runtime/models/<model>/   # plugin.cpp, pipeline.*, MODEL.toml, local helper copies
 ```
 
 ## 4. Migration History
@@ -172,7 +172,7 @@ All phases have been **completed**.
 ### Phase 3: Migrate strategies to plugins -- DONE
 
 - All 25 strategies migrated to manifest-registered model folders in `src/runtime/models/`.
-- Shared helpers factored into `src/runtime/plugins/shared/`.
+- Helper code is duplicated into the owning `src/runtime/models/<model>/` folders.
 
 ### Phase 4: Simplify pipeline_factory.cpp -- DONE
 

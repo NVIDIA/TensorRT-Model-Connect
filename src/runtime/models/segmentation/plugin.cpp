@@ -4,7 +4,7 @@
 #include "runtime/models/segmentation/sam3_pipeline.h"
 #include "runtime/models/segmentation/sam_pipeline.h"
 #include "runtime/models/segmentation/segment_pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

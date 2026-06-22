@@ -1,0 +1,6 @@
+id = "mpnet"
+plugin = "mpnet"
+test_manifests = [
+  "manifests/all-mpnet-base-v2-tp4.json",
+  "manifests/all-mpnet-base-v2.json",
+]

@@ -1,0 +1,6 @@
+id = "dpr"
+plugin = "dpr"
+test_manifests = [
+  "manifests/dpr-ctx-encoder-tp4.json",
+  "manifests/dpr-ctx-encoder.json",
+]

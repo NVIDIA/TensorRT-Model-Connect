@@ -1,0 +1,12 @@
+{
+  "name": "internlm2-1.8b",
+  "trace_id": "IT-E2E-ILM2-01",
+  "hf_id": "internlm/internlm2-math-plus-1_8b",
+  "bundle": "internlm2-1.8b.trtfb",
+  "family": "internlm",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "trust_remote_code": true
+}

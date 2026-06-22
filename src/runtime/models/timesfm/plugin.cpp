@@ -2,7 +2,7 @@
 // Loads a single TRT engine and routes solve() through TimesFmPipeline.
 
 #include "runtime/models/timesfm/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

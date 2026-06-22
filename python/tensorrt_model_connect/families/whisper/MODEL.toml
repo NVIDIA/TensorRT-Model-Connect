@@ -1,0 +1,9 @@
+id = "whisper"
+plugin = "whisper"
+module = "plugin"
+aliases = [
+  "whisper",
+]
+prefixes = [
+  "whisper",
+]

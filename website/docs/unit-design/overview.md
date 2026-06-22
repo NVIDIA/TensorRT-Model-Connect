@@ -54,7 +54,7 @@ flowchart TB
 | Bundle reader | `src/bundle/` | `.trtfb` parsing and section lookup. |
 | Registry | `src/runtime/registry/` | Strategy dispatch and plugin lookup. |
 | Model runtimes | `src/runtime/models/` | Strategy-specific construction and task-specific inference behavior. |
-| Runtime plugin helpers | `src/runtime/plugins/` | Shared helpers for model runtime plugins. |
+| Runtime plugin helpers | `src/runtime/models/<model>/` | Model-local helper copies for runtime plugins. |
 | Runtime core | `src/runtime/core/` | Device tensors, caches, samplers, CUDA helpers, schedulers. |
 | Domains | `src/runtime/domains/` | Modality-specific plans and helpers. |
 | Python builder | `python/tensorrt_model_connect/` | Model resolution, plugins, graph building, bundle writing. |

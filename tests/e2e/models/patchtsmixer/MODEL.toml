@@ -1,0 +1,6 @@
+id = "patchtsmixer"
+plugin = "patchtsmixer"
+test_manifests = [
+  "manifests/patchtsmixer-granite-official-tp4.json",
+  "manifests/patchtsmixer-granite-official.json",
+]

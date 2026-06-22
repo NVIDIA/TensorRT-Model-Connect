@@ -16,10 +16,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
 DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
 DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
+DEFAULT_RUNTIME_REGISTRY_PATH = PROJECT_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
+DEFAULT_RUNTIME_MODELS_DIR = PROJECT_ROOT / "src" / "runtime" / "models"
+DEFAULT_TORCHTRT_STRATEGIES_DIR = (
+    PROJECT_ROOT
+    / "python"
+    / "tensorrt_model_connect"
+    / "engine_defs"
+    / "torch_trt"
+    / "strategies"
+)
 DEFAULT_CONTRACTS_PATH = PROJECT_ROOT / "tests" / "e2e_harness" / "contracts.py"
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
-DEFAULT_RUNNERS_DIR = PROJECT_ROOT / "tests" / "e2e_harness" / "runners"
-DEFAULT_COMPARATORS_DIR = PROJECT_ROOT / "tests" / "e2e_harness" / "comparators"
+DEFAULT_E2E_MODELS_DIR = PROJECT_ROOT / "tests" / "e2e" / "models"
+DEFAULT_RUNNERS_DIR = DEFAULT_E2E_MODELS_DIR
+DEFAULT_COMPARATORS_DIR = DEFAULT_E2E_MODELS_DIR
 
 _STRING_LITERAL_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
 _RUNTIME_LIKE_RE = re.compile(r"[a-z]+(?:_[a-z0-9]+)+")
@@ -108,7 +119,7 @@ def extract_runtime_strategies_from_cpp_files(
     cpp_paths: Iterable[Path],
     candidate_strategies: Iterable[str] | None = None,
 ) -> set[str]:
-    """Extract runtime_strategy keys from multiple C++ files."""
+    """Extract runtime_strategy keys from multiple source files."""
     strategies: set[str] = set()
     for file_path in cpp_paths:
         strategies.update(
@@ -125,6 +136,46 @@ def discover_runtime_cpp_files(*, cpp_path: Path, builders_dir: Path) -> list[Pa
     if builders_dir.exists():
         discovered.extend(path.resolve() for path in sorted(builders_dir.rglob("*.cpp")))
     return discovered
+
+
+def discover_runtime_strategy_source_files(
+    *,
+    cpp_path: Path,
+    builders_dir: Path,
+    runtime_registry_path: Path,
+    torchtrt_strategies_dir: Path,
+) -> list[Path]:
+    """Discover source files that spell runtime strategy keys."""
+    discovered = discover_runtime_cpp_files(cpp_path=cpp_path, builders_dir=builders_dir)
+    if runtime_registry_path.exists():
+        discovered.append(runtime_registry_path.resolve())
+    if torchtrt_strategies_dir.exists():
+        discovered.extend(
+            path.resolve()
+            for path in sorted(torchtrt_strategies_dir.glob("*.py"))
+            if not path.name.startswith("_")
+        )
+    return discovered
+
+
+def extract_runtime_strategies_from_model_manifest(path: Path) -> set[str]:
+    """Extract runtime strategies from a src/runtime/models/<id>/MODEL.toml."""
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"runtime_strategies\s*=\s*\[([^\]]*)\]", text)
+    if match:
+        return set(re.findall(r'"([^"]+)"', match.group(1)))
+    match = re.search(r'runtime_strategy\s*=\s*"([^"]+)"', text)
+    return {match.group(1)} if match else set()
+
+
+def extract_runtime_strategies_from_model_manifests(models_dir: Path) -> set[str]:
+    """Extract runtime strategies from all runtime model descriptors."""
+    strategies: set[str] = set()
+    if not models_dir.exists():
+        return strategies
+    for manifest_path in sorted(models_dir.glob("*/MODEL.toml")):
+        strategies.update(extract_runtime_strategies_from_model_manifest(manifest_path))
+    return strategies
 
 
 def extract_runtime_to_task_strategy(path: Path) -> dict[str, str]:
@@ -172,9 +223,22 @@ def _extract_constant_return(class_node: ast.ClassDef, method_name: str) -> str 
     return None
 
 
-def _extract_class_map_by_method(directory: Path, method_name: str) -> dict[str, set[str]]:
+def _iter_plugin_python_files(root: Path, kind: str) -> Iterable[Path]:
+    """Yield central legacy or model-local E2E plugin files for ``kind``."""
+    if (root / kind).is_dir():
+        yield from sorted((root / kind).glob("*.py"))
+        return
+    flat_files = sorted(root.glob("*.py"))
+    if flat_files:
+        yield from flat_files
+        return
+    for plugin_dir in sorted(root.glob(f"*/e2e_plugins/{kind}")):
+        yield from sorted(plugin_dir.glob("*.py"))
+
+
+def _extract_class_map_by_method(root: Path, kind: str, method_name: str) -> dict[str, set[str]]:
     mapping: dict[str, set[str]] = {}
-    for file_path in sorted(directory.glob("*.py")):
+    for file_path in _iter_plugin_python_files(root, kind):
         if file_path.name.startswith("_"):
             continue
         tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
@@ -189,13 +253,13 @@ def _extract_class_map_by_method(directory: Path, method_name: str) -> dict[str,
 
 
 def extract_runner_classes_by_task_strategy(runners_dir: Path) -> dict[str, set[str]]:
-    return _extract_class_map_by_method(runners_dir, "strategy_name")
+    return _extract_class_map_by_method(runners_dir, "runners", "strategy_name")
 
 
 def extract_comparator_classes_by_task_strategy(
     comparators_dir: Path,
 ) -> dict[str, set[str]]:
-    return _extract_class_map_by_method(comparators_dir, "task_strategy")
+    return _extract_class_map_by_method(comparators_dir, "comparators", "task_strategy")
 
 
 def extract_diff_framework_checks(checks_dir: Path) -> dict[str, set[str]]:
@@ -270,12 +334,12 @@ def validate_matrix_data(
         errors,
         left_name="contracts.py RUNTIME_TO_TASK_STRATEGY",
         left_values=contracts_strategies,
-        right_name="runtime builder sources strategy keys",
+        right_name="runtime sources strategy keys",
         right_values=cpp_runtime_strategies,
     )
     _append_set_mismatch(
         errors,
-        left_name="runtime builder sources strategy keys",
+        left_name="runtime sources strategy keys",
         left_values=cpp_runtime_strategies,
         right_name="tests/runtime_strategy_matrix.yaml",
         right_values=matrix_strategies,
@@ -400,6 +464,9 @@ def validate_matrix_paths(
     matrix_path: Path = DEFAULT_MATRIX_PATH,
     cpp_path: Path = DEFAULT_CPP_PATH,
     builders_dir: Path = DEFAULT_BUILDERS_DIR,
+    runtime_registry_path: Path = DEFAULT_RUNTIME_REGISTRY_PATH,
+    runtime_models_dir: Path = DEFAULT_RUNTIME_MODELS_DIR,
+    torchtrt_strategies_dir: Path = DEFAULT_TORCHTRT_STRATEGIES_DIR,
     contracts_path: Path = DEFAULT_CONTRACTS_PATH,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
     runners_dir: Path = DEFAULT_RUNNERS_DIR,
@@ -410,13 +477,18 @@ def validate_matrix_paths(
     runtime_to_task_strategy = extract_runtime_to_task_strategy(contracts_path)
     candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
 
-    runtime_cpp_files = discover_runtime_cpp_files(
+    runtime_cpp_files = discover_runtime_strategy_source_files(
         cpp_path=cpp_path.resolve(),
         builders_dir=builders_dir.resolve(),
+        runtime_registry_path=runtime_registry_path.resolve(),
+        torchtrt_strategies_dir=torchtrt_strategies_dir.resolve(),
     )
     cpp_runtime_strategies = extract_runtime_strategies_from_cpp_files(
         runtime_cpp_files,
         candidate_strategies,
+    )
+    cpp_runtime_strategies.update(
+        extract_runtime_strategies_from_model_manifests(runtime_models_dir)
     )
     diff_checks_by_strategy = extract_diff_framework_checks(diff_checks_dir)
     runner_classes_by_task = extract_runner_classes_by_task_strategy(runners_dir)
@@ -456,6 +528,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to src/runtime/builders directory.",
     )
     parser.add_argument(
+        "--runtime-registry",
+        type=Path,
+        default=DEFAULT_RUNTIME_REGISTRY_PATH,
+        help="Path to src/runtime/registry/pipeline_factory.cpp.",
+    )
+    parser.add_argument(
+        "--runtime-models-dir",
+        type=Path,
+        default=DEFAULT_RUNTIME_MODELS_DIR,
+        help="Path to src/runtime/models directory.",
+    )
+    parser.add_argument(
+        "--torchtrt-strategies-dir",
+        type=Path,
+        default=DEFAULT_TORCHTRT_STRATEGIES_DIR,
+        help="Path to torch-trt strategy source files.",
+    )
+    parser.add_argument(
         "--contracts",
         type=Path,
         default=DEFAULT_CONTRACTS_PATH,
@@ -471,13 +561,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--runners-dir",
         type=Path,
         default=DEFAULT_RUNNERS_DIR,
-        help="Path to tests/e2e_harness/runners directory.",
+        help="Path to tests/e2e/models directory or a legacy runners directory.",
     )
     parser.add_argument(
         "--comparators-dir",
         type=Path,
         default=DEFAULT_COMPARATORS_DIR,
-        help="Path to tests/e2e_harness/comparators directory.",
+        help="Path to tests/e2e/models directory or a legacy comparators directory.",
     )
     return parser
 
@@ -490,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
             matrix_path=args.matrix,
             cpp_path=args.cpp,
             builders_dir=args.builders_dir,
+            runtime_registry_path=args.runtime_registry,
+            runtime_models_dir=args.runtime_models_dir,
+            torchtrt_strategies_dir=args.torchtrt_strategies_dir,
             contracts_path=args.contracts,
             diff_checks_dir=args.diff_checks_dir,
             runners_dir=args.runners_dir,

@@ -195,10 +195,10 @@ config from the raw JSON, extracts the bundle sections it needs via
 `find_section(ctx.bundle, "section_name")`, loads TRT engines, creates
 tokenizers and caches, and returns a fully constructed pipeline.
 
-Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
+Each runtime model folder owns the helper code it needs:
 - `plugin_helpers.h/cpp` -- `load_trt_module_from_plan()`, `create_tokenizer_from_bundle()`, `compute_kv_dim()`, `cache_dtype_from_precision()`, `find_section()`
-- `diffusion_helpers.h/cpp` -- `load_diffusion_parts()`, `DiffusionConfig` parsing
-- `audio_helpers.h/cpp` -- Audio-specific bundle loading helpers
+- `diffusion_helpers.h/cpp` -- model-local diffusion loading and `DiffusionConfig` parsing
+- `audio_helpers.h/cpp` -- model-local audio bundle loading helpers
 
 ### 4.1 Decoder Plugins
 
@@ -271,7 +271,7 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 - `src/runtime/models/flux/pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`
 - `src/runtime/models/wan/pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` -- implementations
 - `src/runtime/domains/diffusion/diffusion_types.h` -- `DiffusionConfig`, `PreprocessorWeights`
-- `src/runtime/plugins/shared/diffusion_helpers.h` -- shared diffusion loading
+- `src/runtime/models/<diffusion-model>/diffusion_helpers.h` -- model-local diffusion loading
 
 ### 4.4 Audio Plugins
 
@@ -293,7 +293,7 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 
 **Key files:**
 - `src/runtime/models/whisper/pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`
-- `src/runtime/plugins/shared/audio_helpers.h` -- shared audio loading helpers
+- `src/runtime/models/<audio-model>/audio_helpers.h` -- model-local audio loading helpers
 - `src/runtime/domains/audio/` -- audio config types and seam headers
 
 ### 4.5 Encoder and Seq2Seq Plugins
@@ -513,7 +513,7 @@ All pipelines also implement `model_id()` and `pipeline_type()` (pure virtual).
 
 In the plugin-based architecture, each plugin accesses bundle sections directly
 via the `find_section(bundle, "section_name")` helper from
-`src/runtime/plugins/shared/plugin_helpers.h`. This returns a `const BundleSection*`
+the owning model's `plugin_helpers.h`. This returns a `const BundleSection*`
 (non-owning pointer into the `BundleFile::sections` vector).
 
 Common section names used by plugins:
@@ -592,7 +592,7 @@ each plugin reads only the fields it requires.
 | Pipeline factory header | `include/trtmc/runtime/pipeline_factory.h` |
 | Pipeline registry | `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp` |
 | Plugin interface + BaseConfig | `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
-| Plugin shared helpers | `src/runtime/plugins/shared/plugin_helpers.h`, `.cpp` |
+| Model-local plugin helpers | `src/runtime/models/<model>/plugin_helpers.h`, `.cpp` |
 | Plugin source/anchor manifest | `cmake/trtmc_pipeline_plugins.cmake` |
 | IPipeline interface | `include/trtmc/pipeline.h` |
 | TextGenerationPipeline | `src/runtime/models/text_generation/pipeline.h`, `.cpp` |
@@ -608,8 +608,8 @@ each plugin reads only the fields it requires.
 | Bundle format | `src/bundle/bundle_format.h`, `.cpp` |
 | Image preprocessor | `src/runtime/domains/multimodal/image_preprocessor.h`, `.cpp` |
 | Diffusion types | `src/runtime/domains/diffusion/diffusion_types.h` |
-| Diffusion helpers | `src/runtime/plugins/shared/diffusion_helpers.h`, `.cpp` |
-| Audio helpers | `src/runtime/plugins/shared/audio_helpers.h`, `.cpp` |
+| Diffusion helpers | `src/runtime/models/<diffusion-model>/diffusion_helpers.h`, `.cpp` |
+| Audio helpers | `src/runtime/models/<audio-model>/audio_helpers.h`, `.cpp` |
 | Scheduler | `src/runtime/core/flow_match_euler_scheduler.cpp` |
 | Tokenizer interface | `include/trtmc/runtime/tokenizer_interface.h` |
 | HF Python tokenizer | `src/tokenizer/bpe_tokenizer.cpp` |

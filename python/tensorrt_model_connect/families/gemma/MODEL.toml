@@ -1,0 +1,10 @@
+id = "gemma"
+plugin = "gemma"
+module = "plugin"
+aliases = [
+  "gemma",
+  "gemma2",
+]
+prefixes = [
+  "gemma",
+]

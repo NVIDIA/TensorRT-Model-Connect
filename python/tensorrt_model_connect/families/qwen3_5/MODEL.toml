@@ -1,0 +1,11 @@
+id = "qwen3_5"
+plugin = "qwen3_5"
+module = "plugin"
+aliases = [
+  "qwen35",
+  "qwen3.5",
+  "qwen3_5",
+]
+prefixes = [
+  "qwen3_5",
+]

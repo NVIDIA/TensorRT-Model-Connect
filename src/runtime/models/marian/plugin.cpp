@@ -7,7 +7,7 @@
 //   3. Run decoder autoregressively with cross-attention to encoder output
 //   4. Detokenize output
 
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/kv_cache.h"

@@ -1,0 +1,17 @@
+id = "pixart"
+plugin = "pixart"
+module = "plugin"
+aliases = [
+  "pixart",
+  "pixart_alpha",
+  "pixart_sigma",
+  "pixartalpha",
+  "pixartsigma",
+]
+prefixes = [
+  "pixart",
+]
+diffusion_pipeline_classes = [
+  "PixArtAlphaPipeline",
+  "PixArtSigmaPipeline",
+]

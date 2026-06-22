@@ -1,1 +1,4 @@
+id = "ltx_video"
+runtime_library = "libtrtmc_model_ltx_video.so"
+runtime_plugins = ["plugin.cpp|register_ltx_video_plugin"]
 runtime_strategies = ["diffusion_ltx"]

@@ -87,6 +87,69 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
     }
 
 
+def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
+    mod = _import_checker()
+
+    model_dir = tmp_path / "src" / "runtime" / "models"
+    (model_dir / "text_generation").mkdir(parents=True)
+    (model_dir / "text_generation" / "MODEL.toml").write_text(
+        'runtime_strategies = ["decoder_kv_cache", "decoder_moe"]\n',
+        encoding="utf-8",
+    )
+    (model_dir / "flux").mkdir(parents=True)
+    (model_dir / "flux" / "MODEL.toml").write_text(
+        'runtime_strategy = "diffusion_flux"\n',
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_strategies_from_model_manifests(model_dir) == {
+        "decoder_kv_cache",
+        "decoder_moe",
+        "diffusion_flux",
+    }
+
+
+def test_model_local_e2e_plugin_discovery(tmp_path: Path):
+    mod = _import_checker()
+
+    runners_dir = tmp_path / "tests" / "e2e" / "models" / "qwen" / "e2e_plugins" / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "text_generation.py").write_text(
+        """
+class TextGenerationCausalRunner:
+    def strategy_name(self):
+        return "text_generation_causal"
+        """,
+        encoding="utf-8",
+    )
+    comparators_dir = (
+        tmp_path
+        / "tests"
+        / "e2e"
+        / "models"
+        / "qwen"
+        / "e2e_plugins"
+        / "comparators"
+    )
+    comparators_dir.mkdir(parents=True)
+    (comparators_dir / "text.py").write_text(
+        """
+class TextComparator:
+    def task_strategy(self):
+        return "text_generation_causal"
+        """,
+        encoding="utf-8",
+    )
+
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
+        "text_generation_causal": {"TextGenerationCausalRunner"},
+    }
+    assert mod.extract_comparator_classes_by_task_strategy(models_dir) == {
+        "text_generation_causal": {"TextComparator"},
+    }
+
+
 def test_validate_matrix_data_requires_exemption_when_no_diff_check():
     mod = _import_checker()
     errors = mod.validate_matrix_data(
@@ -128,7 +191,7 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
         comparator_classes_by_task={"vision_language_generation": {"VisionLanguageComparator"}},
     )
 
-    assert any("runtime builder sources strategy keys missing" in message for message in errors)
+    assert any("runtime sources strategy keys missing" in message for message in errors)
 
 
 def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path):
@@ -259,6 +322,9 @@ class VLPipelineTest:
         matrix_path=matrix_path,
         cpp_path=cpp_path,
         builders_dir=builders_dir,
+        runtime_registry_path=tmp_path / "missing_pipeline_factory.cpp",
+        runtime_models_dir=tmp_path / "missing_runtime_models",
+        torchtrt_strategies_dir=tmp_path / "missing_torchtrt_strategies",
         contracts_path=contracts_path,
         diff_checks_dir=diff_checks_dir,
         runners_dir=runners_dir,

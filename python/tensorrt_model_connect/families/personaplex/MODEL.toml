@@ -1,0 +1,11 @@
+id = "personaplex"
+plugin = "personaplex"
+module = "plugin"
+aliases = [
+  "moshi",
+  "personaplex",
+  "personaplex_7b",
+]
+prefixes = [
+  "personaplex",
+]

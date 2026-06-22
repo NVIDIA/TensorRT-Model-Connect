@@ -1,0 +1,12 @@
+{
+  "name": "nemotron-nano-4b",
+  "trace_id": "IT-E2E-NMNN-01",
+  "hf_id": "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1",
+  "bundle": "nemotron-nano-4b.trtfb",
+  "family": "llama",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France?",
+  "max_new_tokens": 20,
+  "trust_remote_code": false
+}

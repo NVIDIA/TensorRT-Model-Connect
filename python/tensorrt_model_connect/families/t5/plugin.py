@@ -5,8 +5,8 @@ import sys
 from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
-from ...checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
-from ... import graph_ops
+from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
+from . import graph_ops
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 trt = trt_compat.get_trt()

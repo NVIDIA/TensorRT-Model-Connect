@@ -1,0 +1,12 @@
+{
+  "name": "camembert-base",
+  "trace_id": "IT-E2E-CAMB-01",
+  "hf_id": "almanach/camembert-base",
+  "bundle": "camembert-base.trtfb",
+  "family": "roberta",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "Bonjour le monde",
+  "max_new_tokens": 0,
+  "trust_remote_code": false
+}

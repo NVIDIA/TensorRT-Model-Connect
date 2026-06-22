@@ -1,0 +1,11 @@
+id = "m2m_100"
+plugin = "m2m_100"
+module = "plugin"
+aliases = [
+  "m2m100",
+  "m2m_100",
+  "nllb",
+]
+prefixes = [
+  "m2m_100",
+]

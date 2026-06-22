@@ -43,8 +43,8 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -52,8 +52,8 @@ from ...checkpoint_mapper import (
     _transpose_2d,
 )
 from ...build_timing import timed_trt_compile
-from ... import graph_ops
-from ... import graph_blocks
+from . import graph_ops
+from . import graph_blocks
 from .standard_decoder_builder import _mark_debug_output
 
 
@@ -401,9 +401,21 @@ class Qwen3OmniPlugin:
         if not _has_tensor(readers, embed_key):
             embed_key = "model.talker.embed_tokens.weight"
         if not _has_tensor(readers, embed_key):
+            embed_key = "talker.model.codec_embedding.weight"
+        if not _has_tensor(readers, embed_key):
+            embed_key = "model.talker.model.codec_embedding.weight"
+        if not _has_tensor(readers, embed_key):
             return {}
         embed_w = _load_tensor(readers, embed_key)
         talker_vocab, talker_hidden = embed_w.shape
+
+        talker_raw = config.raw.get("talker_config", {})
+        talker_text = talker_raw.get("text_config", {})
+        input_hidden = (
+            talker_raw.get("thinker_hidden_size")
+            or config.hidden_size
+        )
+        decoder_hidden = talker_text.get("hidden_size", talker_hidden)
 
         # Detect layer prefix
         talker_layer_base = "talker.model.layers"
@@ -450,10 +462,18 @@ class Qwen3OmniPlugin:
             if n_codebooks > 0:
                 head_w = _load_tensor(readers, f"{cp_base}.0.weight")
                 codebook_size = head_w.shape[0]
+                # Qwen3-Omni predicts one semantic group with codec_head plus
+                # the indexed code_predictor heads for the remaining groups.
+                n_codebooks += 1
+
+        n_codebooks = int(talker_raw.get("num_code_groups", n_codebooks))
+        code_predictor = talker_raw.get("code_predictor_config", {})
+        codebook_size = int(code_predictor.get("vocab_size", codebook_size))
 
         return {
             "vocab_size": int(talker_vocab),
-            "hidden_size": int(talker_hidden),
+            "hidden_size": int(input_hidden),
+            "decoder_hidden_size": int(decoder_hidden),
             "num_layers": int(num_layers),
             "n_codebooks": int(n_codebooks),
             "codebook_size": int(codebook_size),
@@ -665,6 +685,10 @@ class Qwen3OmniPlugin:
                 network, hidden_state, hidden, final_norm, None,
                 eps_tensor, "rmsnorm")
 
+        hidden_out = network.add_identity(hidden_state).get_output(0)
+        hidden_out.name = "hidden_state"
+        network.mark_output(hidden_out)
+
         # LM head
         logits = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, vocab, weights["w_out"])
@@ -710,7 +734,7 @@ class Qwen3OmniPlugin:
             return None
 
         # Load vision weights from safetensors
-        from ...checkpoint_mapper import _open_safetensors, _load_tensor
+        from .checkpoint_mapper import _open_safetensors, _load_tensor
 
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -1221,65 +1245,92 @@ def _build_talker_engine(
     if num_layers == 0 or talker_hidden == 0:
         return None
 
-    # Extract talker weights and build using standard decoder pattern
-    talker_weights = WeightDict()
-    prefix = "talker."
-    for k, v in weights.items():
-        if k.startswith(prefix) and not k.startswith("_"):
-            talker_weights[k[len(prefix):]] = v
-
-    # Count layers and detect head_dim
-    num_heads = talker_hidden // 64  # default guess
-    q_key = "layers.0.self_attn.q_proj.weight"
-    if q_key in talker_weights:
-        q_shape = talker_weights[q_key].shape
-        for hd in [64, 128, 96, 80]:
-            if q_shape[0] % hd == 0:
-                num_heads = q_shape[0] // hd
-                break
-
-    # Build a standard decoder engine for the Talker
-    from .standard_decoder_builder import build_standard_decoder_engine
-
-    sub_mc = ModelConfig(
-        model_type="qwen3_omni_talker",
-        vocab_size=talker_vocab,
-        hidden_size=talker_hidden,
-        intermediate_size=talker_hidden * 4,
-        num_hidden_layers=num_layers,
-        num_attention_heads=num_heads,
-        num_key_value_heads=num_heads,
-        max_position_embeddings=max_cache_length,
-        rms_norm_eps=1e-5,
-        rope_theta=10000.0,
-        raw={},
-    )
-
-    # Map talker weights to standard format
-    std_weights = WeightDict()
-    # The talker weights may already be in the right format or need mapping
-    # Try to use them directly through standard builder
-    for k, v in talker_weights.items():
-        std_weights[k] = v
-
     if verbose:
-        print(f"[trtmc build]   Talker: layers={num_layers}, "
+        print(f"[trtmc build]   Talker projection: layers={num_layers}, "
               f"hidden={talker_hidden}, vocab={talker_vocab}, "
               f"codebooks={n_codebooks}, cb_size={codebook_size}",
               file=sys.stderr)
 
-    try:
-        plan = build_standard_decoder_engine(
-            sub_mc, std_weights, max_cache_length,
-            norm_type="rmsnorm",
-            embed_input=True,
-            verbose=verbose,
-        )
-        return plan
-    except Exception as e:
-        print(f"[trtmc build]   Warning: Talker engine build failed: {e}",
-              file=sys.stderr)
+    input_hidden = talker_cfg.get("hidden_size", talker_hidden)
+    decoder_hidden = talker_cfg.get("decoder_hidden_size", talker_hidden)
+    if (
+        "talker.hidden_projection.linear_fc1.weight" not in weights
+        or "talker.hidden_projection.linear_fc2.weight" not in weights
+        or "talker.codec_head.weight" not in weights
+    ):
         return None
+
+    lm_head_keys = [
+        f"talker.code_predictor.lm_head.{i}.weight"
+        for i in range(max(n_codebooks - 1, 0))
+    ]
+    if any(k not in weights for k in lm_head_keys):
+        return None
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    trt_config = builder.create_builder_config()
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+
+    input_embed = network.add_input(
+        "input_embed", trt.float32, (input_hidden,))
+    hidden_in = network.add_shuffle(input_embed)
+    hidden_in.reshape_dims = (1, input_hidden)
+    hidden = hidden_in.get_output(0)
+
+    fc1_w = _transpose_2d(
+        weights["talker.hidden_projection.linear_fc1.weight"], "talker_fc1")
+    fc1 = graph_ops.add_matmul_rhs_constant(
+        network, hidden, input_hidden, input_hidden, fc1_w)
+    fc1_b = weights.get("talker.hidden_projection.linear_fc1.bias")
+    if fc1_b is not None:
+        fc1 = graph_ops.add_bias_sum(
+            network, fc1, input_hidden, fc1_b.astype(np.float32))
+
+    sigmoid = network.add_activation(fc1, trt.ActivationType.SIGMOID)
+    silu = network.add_elementwise(
+        fc1, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+
+    fc2_w = _transpose_2d(
+        weights["talker.hidden_projection.linear_fc2.weight"], "talker_fc2")
+    hidden = graph_ops.add_matmul_rhs_constant(
+        network, silu.get_output(0), input_hidden, decoder_hidden, fc2_w)
+    fc2_b = weights.get("talker.hidden_projection.linear_fc2.bias")
+    if fc2_b is not None:
+        hidden = graph_ops.add_bias_sum(
+            network, hidden, decoder_hidden, fc2_b.astype(np.float32))
+
+    codec_head = weights["talker.codec_head.weight"]
+    head_parts = []
+    first_head_rows = min(codebook_size, codec_head.shape[0])
+    if first_head_rows < codebook_size:
+        return None
+    first_head = _transpose_2d(
+        codec_head[:codebook_size], "talker_codec_head")
+    head_parts.append(graph_ops.add_matmul_rhs_constant(
+        network, hidden, decoder_hidden, codebook_size, first_head))
+
+    for i, key in enumerate(lm_head_keys):
+        head = _transpose_2d(weights[key], f"talker_lm_head_{i}")
+        head_parts.append(graph_ops.add_matmul_rhs_constant(
+            network, hidden, decoder_hidden, codebook_size, head))
+
+    if len(head_parts) == 1:
+        logits = head_parts[0]
+    else:
+        concat = network.add_concatenation(head_parts)
+        concat.axis = 1
+        logits = concat.get_output(0)
+
+    logits.name = "logits"
+    network.mark_output(logits)
+
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError("TensorRT Qwen3-Omni Talker projection build failed")
+    return bytes(plan)
 
 
 # ---------------------------------------------------------------------------

@@ -11,15 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import (
+from .config import ModelConfig
+from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from .standard_decoder_builder import build_standard_decoder_engine
 
 
 class Phi4MultimodalPlugin:
@@ -152,6 +151,8 @@ class Phi4MultimodalPlugin:
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
+        from .standard_decoder_builder import build_standard_decoder_engine
+
         partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
         return build_standard_decoder_engine(
             config, weights, max_cache_length,

@@ -1,0 +1,12 @@
+id = "qwen_moe"
+plugin = "qwen_moe"
+module = "plugin"
+aliases = [
+  "qwen2_moe",
+  "qwen3_moe",
+  "qwen_moe",
+  "qwenmoe",
+]
+prefixes = [
+  "qwen_moe",
+]

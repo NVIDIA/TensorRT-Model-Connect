@@ -224,6 +224,8 @@ void print_usage() {
            "\n"
            "Options:\n"
            "  --backend-dir PATH    Extra directory to search for libtrtmc_backend_*.so\n"
+           "  --model-plugin-dir PATH\n"
+           "                        Extra directory to search for libtrtmc_model_*.so\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
            "\n"
@@ -600,6 +602,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--backend-dir" && need_value(arg)) {
             args.backend_search_paths.emplace_back(argv[++i]);
+            continue;
+        }
+        if (arg == "--model-plugin-dir" && need_value(arg)) {
+            args.model_plugin_search_paths.emplace_back(argv[++i]);
             continue;
         }
         if (arg == "--cuda-graphs") {

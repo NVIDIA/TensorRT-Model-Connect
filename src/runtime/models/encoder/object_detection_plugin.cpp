@@ -2,7 +2,7 @@
 // Uses EncoderPipeline in "object_detection" mode (no tokenizer needed).
 
 #include "runtime/models/encoder/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 namespace trtmc {

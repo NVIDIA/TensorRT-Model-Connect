@@ -1,0 +1,9 @@
+id = "lance"
+plugin = "lance"
+module = "plugin"
+aliases = [
+  "lance",
+]
+prefixes = [
+  "lance",
+]

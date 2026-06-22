@@ -1,1 +1,4 @@
+id = "omni"
+runtime_library = "libtrtmc_model_omni.so"
+runtime_plugins = ["plugin.cpp|register_omni_plugin"]
 runtime_strategies = ["omni_multimodal"]

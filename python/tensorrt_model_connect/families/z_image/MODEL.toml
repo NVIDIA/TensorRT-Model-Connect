@@ -1,0 +1,15 @@
+id = "z_image"
+plugin = "z_image"
+module = "plugin"
+aliases = [
+  "z-image",
+  "z_image",
+  "zimage",
+  "zimagepipeline",
+]
+prefixes = [
+  "z_image",
+]
+diffusion_pipeline_classes = [
+  "ZImagePipeline",
+]

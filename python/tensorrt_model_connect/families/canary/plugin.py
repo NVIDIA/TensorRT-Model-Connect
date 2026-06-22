@@ -31,10 +31,10 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict, _transpose_2d
-from ... import graph_ops
-from ... import graph_blocks
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict, _transpose_2d
+from . import graph_ops
+from . import graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,

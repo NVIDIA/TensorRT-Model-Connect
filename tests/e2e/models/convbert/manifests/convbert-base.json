@@ -1,0 +1,14 @@
+{
+  "name": "convbert-base",
+  "trace_id": "IT-E2E-CONVBERT-01",
+  "hf_id": "YituTech/conv-bert-base",
+  "bundle": "convbert-base.trtfb",
+  "family": "convbert",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 1,
+  "trust_remote_code": false,
+  "notes": "Encoder-only model with hybrid attention + span-based dynamic convolution. Outputs hidden states, not logits.",
+  "core": false
+}

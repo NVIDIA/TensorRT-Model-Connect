@@ -1,0 +1,6 @@
+id = "falcon"
+plugin = "falcon"
+test_manifests = [
+  "manifests/falcon-rw-1b-tp4.json",
+  "manifests/falcon-rw-1b.json",
+]

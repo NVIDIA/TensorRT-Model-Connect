@@ -2,7 +2,7 @@
 // Numeric time-series models compiled from the PatchTST HF family.
 
 #include "runtime/models/patchtst/pipeline.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
-from ...checkpoint_mapper import WeightDict
-from ...config import ModelConfig
+from . import graph_ops
+from .checkpoint_mapper import WeightDict
+from .config import ModelConfig
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,

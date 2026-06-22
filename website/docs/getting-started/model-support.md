@@ -7,7 +7,7 @@ Model support is defined by two source-of-truth surfaces:
 - Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
 
-The current checkout contains 68 Python family plugins and 122 E2E model manifests.
+The current checkout contains 71 Python family plugins, 197 E2E model manifests, and 74 E2E family indexes.
 
 ## Support Levels
 

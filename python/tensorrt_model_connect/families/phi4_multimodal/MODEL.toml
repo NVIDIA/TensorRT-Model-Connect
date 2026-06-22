@@ -1,0 +1,11 @@
+id = "phi4_multimodal"
+plugin = "phi4_multimodal"
+module = "plugin"
+aliases = [
+  "phi4mm",
+  "phi4_multimodal",
+  "phi4multimodal",
+]
+prefixes = [
+  "phi4_multimodal",
+]

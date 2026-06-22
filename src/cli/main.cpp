@@ -89,6 +89,7 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     options.config_path = args.config_path;
     options.set_tokens = args.set_tokens;
     options.backend_search_paths = args.backend_search_paths;
+    options.model_plugin_search_paths = args.model_plugin_search_paths;
     return options;
 }
 

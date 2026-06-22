@@ -13,14 +13,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 from .config import make_elf_rope_cache, resolve_elf_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
-    from ...config import ModelConfig
+    from .checkpoint_mapper import WeightDict
+    from .model_config import ModelConfig
 
 
 def _storage_dtype(precision: str) -> np.dtype:

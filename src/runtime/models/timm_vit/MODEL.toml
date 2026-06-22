@@ -1,1 +1,4 @@
+id = "timm_vit"
+runtime_library = "libtrtmc_model_timm_vit.so"
+runtime_plugins = ["plugin.cpp|register_timm_vit_plugin"]
 runtime_strategies = ["image_classification"]

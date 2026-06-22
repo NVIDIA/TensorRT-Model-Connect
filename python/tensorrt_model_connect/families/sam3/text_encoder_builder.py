@@ -14,10 +14,10 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from ... import graph_ops
+from . import graph_ops
 
 if TYPE_CHECKING:
-    from ...checkpoint_mapper import WeightDict
+    from .checkpoint_mapper import WeightDict
 
 
 def _trt():

@@ -1,0 +1,12 @@
+id = "qwen"
+plugin = "qwen"
+test_manifests = [
+  "manifests/qwen3-0.6b-fp16-tp4.json",
+  "manifests/qwen3-0.6b-fp16.json",
+  "manifests/qwen3-0.6b-fp8-tp4.json",
+  "manifests/qwen3-0.6b-fp8.json",
+  "manifests/qwen3-0.6b-topp-tp4.json",
+  "manifests/qwen3-0.6b-topp.json",
+  "manifests/qwen3-4b-instruct-2507-tp4.json",
+  "manifests/qwen3-4b-instruct-2507.json",
+]
