@@ -43,6 +43,11 @@ _COMPOSITE_RULE = (
     "AND (agreement >= T OR (stable_top1 >= T AND unstable_topk >= T)) "
     "AND ned <= T"
 )
+_COMPOSITE_RULE_WITH_EXPECTED_ANSWER = (
+    "(cosine_p5 >= T OR rel_l2_p95 <= T) "
+    "AND (agreement >= T OR (stable_top1 >= T AND unstable_topk >= T)) "
+    "AND (ned <= T OR expected_answer_present == 1)"
+)
 
 # If the model echoes the prompt, allow a modest amount of non-text preamble
 # (warnings/logs) before the prompt appears in stdout.
@@ -139,6 +144,37 @@ def _normalize_for_ned(text: str) -> str:
         return ""
     # Collapse whitespace and case-fold to reduce cosmetic diffs.
     return " ".join(text.split()).strip().lower()
+
+
+def _normalize_expected_answer(answer: str) -> str:
+    answer = _normalize_for_ned(answer)
+    return answer.strip(" \"'`.,;:!?()[]{}")
+
+
+def _contains_expected_answer(text: str, answer: str) -> bool:
+    norm_text = _normalize_for_ned(text)
+    norm_answer = _normalize_expected_answer(answer)
+    if not norm_text or not norm_answer:
+        return False
+    if norm_answer.isalnum():
+        return re.search(rf"(?<![a-z0-9]){re.escape(norm_answer)}(?![a-z0-9])",
+                         norm_text) is not None
+    return norm_answer in norm_text
+
+
+def _expected_answers_from_output(output: StageOutput) -> list[str]:
+    raw = (output.data or {}).get("expected_answers")
+    if raw is None:
+        raw = (output.data or {}).get("expected_answer")
+    if raw is None:
+        raw = (output.metadata or {}).get("expected_answers")
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        values = []
+    return [str(value) for value in values if _normalize_expected_answer(str(value))]
 
 
 def _strip_leading_role_prefix(text: str) -> str:
@@ -429,6 +465,22 @@ class TextComparator:
             operator="<=", passed=ned <= ned_thresh,
         )
 
+        expected_answers = _expected_answers_from_output(trt)
+        expected_answer_ok = False
+        if expected_answers:
+            expected_answer_ok = any(
+                _contains_expected_answer(trt_text_for_ned, answer)
+                and _contains_expected_answer(ref_text_for_ned, answer)
+                for answer in expected_answers
+            )
+            metrics["expected_answer_present"] = MetricResult(
+                value=1.0 if expected_answer_ok else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=expected_answer_ok,
+                note="model-owned semantic answer gate",
+            )
+
         # --- Composite gating ---
         logit_quality_ok = (
             metrics["logit_cosine_p5"].passed
@@ -443,7 +495,10 @@ class TextComparator:
             )
         )
 
-        text_ok = metrics["normalized_text_edit_distance"].passed
+        text_ok = (
+            metrics["normalized_text_edit_distance"].passed
+            or expected_answer_ok
+        )
 
         passed = logit_quality_ok and token_level_ok and text_ok
 
@@ -458,7 +513,10 @@ class TextComparator:
             stage_name=stage.name,
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            composite_rule=_COMPOSITE_RULE,
+            composite_rule=(
+                _COMPOSITE_RULE_WITH_EXPECTED_ANSWER
+                if expected_answers else _COMPOSITE_RULE
+            ),
             message=message,
         )
 

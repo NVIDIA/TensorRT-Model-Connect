@@ -14,7 +14,10 @@
   },
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
+  "expected_answers": [
+    "Paris"
+  ],
   "max_new_tokens": 10,
   "trust_remote_code": false,
-  "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded output agreement. Keep default token agreement and normalized edit distance gates for output confidence."
+  "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the default logit and token agreement gates for output confidence."
 }

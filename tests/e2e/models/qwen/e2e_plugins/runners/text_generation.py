@@ -108,6 +108,17 @@ def _read_text_generation_sample(path: Path) -> dict:
     return {}
 
 
+def _expected_answers(case: E2ECase) -> list[str]:
+    raw = case.metadata.get("expected_answers", case.metadata.get("expected_answer", []))
+    if isinstance(raw, str):
+        raw_values = [raw]
+    elif isinstance(raw, (list, tuple)):
+        raw_values = list(raw)
+    else:
+        raw_values = []
+    return [str(value) for value in raw_values if str(value).strip()]
+
+
 def _ensure_distributed_runtime_env(
     case: E2ECase,
     ctx: RunContext,
@@ -373,6 +384,9 @@ class TextGenerationCausalRunner:
                 "prompt": prompt,
                 "runner_mode": "single_process_debug_generation",
             }
+            answers = _expected_answers(case)
+            if answers:
+                data["expected_answers"] = answers
             if logits_path:
                 data["logits_path"] = logits_path
             return StageOutput(
@@ -412,6 +426,9 @@ class TextGenerationCausalRunner:
             "cpp_returncode": cpp_meta.get("effective_returncode", cpp_meta.get("returncode", -1)),
             "prompt": prompt,
         }
+        answers = _expected_answers(case)
+        if answers:
+            data["expected_answers"] = answers
         if cpp_meta.get("runtime_error_detected"):
             data["cpp_runtime_error"] = cpp_meta["runtime_error_detected"]
         if cpp_meta.get("token_ids") is not None:
