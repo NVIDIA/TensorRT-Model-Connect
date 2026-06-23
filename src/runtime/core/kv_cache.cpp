@@ -96,7 +96,7 @@ void KvCache::rebind_cache_rows(int32_t cache_rows) {
 // wire the causal mask with different shapes:
 //   * static decoder (cache-full, e.g. legacy builds): [max_length + 1]
 //   * dynamic decoder (standard + triattention):       [1, mask_width]
-//   * magpie TTS decoder (3-D with query dim):         [1, 1, mask_width]
+//   * 3-D decoder mask with query dim:                 [1, 1, mask_width]
 // The tensor content is identical (width = current mask_width); only the
 // leading broadcast dimensions change.
 std::vector<int64_t> KvCache::mask_shape_for_engine(int32_t mask_width,
@@ -211,9 +211,8 @@ void KvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
-    // Static-shape engines (e.g. magpie TTS decoder with fixed
-    // [max_length, kv_dim] cache) reject setInputShape on cache inputs even
-    // when other inputs in the same engine are dynamic.
+    // Static-shape engines with fixed [max_length, kv_dim] cache reject
+    // setInputShape on cache inputs even when other inputs are dynamic.
     dynamic_binding_enabled_ =
         !names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front());
     bound_cache_rows_ = 0;

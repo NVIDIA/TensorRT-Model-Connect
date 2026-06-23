@@ -78,9 +78,13 @@ class QwenPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, parallel_config=None,
+        debug_layer_outputs: bool = False,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if debug_layer_outputs:
+                raise NotImplementedError(
+                    "Qwen tensor-parallel debug layer outputs are not supported")
             return build_dual_profile_tp_decoder_engine(
                 config,
                 weights,
@@ -97,6 +101,7 @@ class QwenPlugin:
             precision=precision,
             quant_ctx=quant_ctx,
             verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs,
         )
 
     def calibration_data(self, format_name: str) -> list[str] | None:

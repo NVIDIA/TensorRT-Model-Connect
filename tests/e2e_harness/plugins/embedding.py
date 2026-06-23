@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..contracts import MetricResult
-from .base import make_pass, make_fail, make_error
+from .base import contract_config, make_pass, make_fail, make_error
 
 
 _MIN_CONTRACT_COSINE = 0.80
@@ -12,16 +12,12 @@ _MIN_CONTRACT_COSINE = 0.80
 class EmbeddingPlugin:
     reference_families = [
         "sentence_transformer_embed", "bge_retrieval_embed",
-        "dpr_context_embed", "vl_embed_retrieval",
+        "vl_embed_retrieval",
     ]
     user_contract = "embedding_vector"
 
     def configure_reference(self, case):
-        if case.reference_family == "sentence_transformer_embed":
-            return {"use_sentence_transformers": True}
-        if case.reference_family == "dpr_context_embed":
-            return {"auto_class": "DPRContextEncoder"}
-        return {}
+        return contract_config(case)
 
     def verify(self, trt_output, ref_output, case, threshold):
         trt_emb = trt_output.data.get("embedding") or trt_output.data.get("cls_embedding")

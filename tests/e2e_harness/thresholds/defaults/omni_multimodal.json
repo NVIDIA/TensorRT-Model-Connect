@@ -1,5 +1,5 @@
 {
-  "description": "Default thresholds for omni multimodal models (Qwen3-Omni-style)",
+  "description": "Default thresholds for omni multimodal models",
   "metrics": {
     "thinker_token_agreement": 0.8,
     "vision_embedding_cosine": 0.95,

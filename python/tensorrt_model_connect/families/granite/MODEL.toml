@@ -1,6 +1,7 @@
 id = "granite"
 plugin = "granite"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "granite",
 ]

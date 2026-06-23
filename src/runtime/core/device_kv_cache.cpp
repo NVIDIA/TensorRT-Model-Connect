@@ -190,7 +190,7 @@ bool transfer_decoder_inputs(const DecoderStepEngine& engine, DeviceResources& r
 template <typename FailFn>
 bool bind_core_tensors(const DecoderStepEngine& engine, DeviceResources& resources,
                        const FailFn& fail) {
-    // token_id may be absent in embed-only models (e.g. MagpieTTS) that only use input_embed.
+    // token_id may be absent in embed-only decoder engines that only use input_embed.
     if (engine.module != nullptr && has_io_tensor(*engine.module, engine.token_input_name)) {
         if (!bind_tensor_or_fail(engine.module, engine.token_input_name,
                                  resources.d_token_id.data(), "bind token_id failed", fail)) {

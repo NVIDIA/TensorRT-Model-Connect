@@ -36,7 +36,7 @@ SOL_DATA = {
 def full_prompt():
     """Generate a full prompt with all data."""
     return build_evolve_prompt(
-        model="Qwen/Qwen2.5-1.5B",
+        model="example-org/example-decoder",
         container="trtmc-test-evolve",
         baseline=BASELINE,
         max_iterations=5,
@@ -49,7 +49,7 @@ def full_prompt():
 def prompt_no_sol():
     """Generate a prompt without SOL data."""
     return build_evolve_prompt(
-        model="Qwen/Qwen2.5-1.5B",
+        model="example-org/example-decoder",
         container="trtmc-test-evolve",
         baseline=BASELINE,
         max_iterations=5,
@@ -184,7 +184,7 @@ class TestInterpolation:
         assert "trtmc-test-evolve" in full_prompt
 
     def test_model_name(self, full_prompt):
-        assert "Qwen/Qwen2.5-1.5B" in full_prompt
+        assert "example-org/example-decoder" in full_prompt
 
     def test_baseline_throughput(self, full_prompt):
         assert "265.7" in full_prompt
@@ -227,14 +227,16 @@ class TestFocusArea:
 # ---------------------------------------------------------------------------
 
 class TestInferFamily:
-    @pytest.mark.parametrize("model,expected", [
-        ("Qwen/Qwen3-0.6B", "qwen"),
-        ("meta-llama/Llama-3-8B", "llama"),
-        ("microsoft/Phi-3-mini-4k-instruct", "phi"),
-        ("google/gemma-2b", "gemma"),
-        ("openai-community/gpt2", "gpt2"),
-        ("facebook/opt-125m", "opt"),
-        ("bigscience/bloom-560m", "bloom"),
-    ])
-    def test_family_mapping(self, model, expected):
-        assert _infer_family(model) == expected
+    def test_uses_family_registry(self, monkeypatch):
+        from tensorrt_model_connect import families
+
+        monkeypatch.setattr(
+            families,
+            "resolve_family_id",
+            lambda model_type: "owned_family" if model_type == "owned-model" else None,
+        )
+
+        assert _infer_family("example-org/owned-model") == "owned_family"
+
+    def test_falls_back_to_normalized_prefix(self):
+        assert _infer_family("example-org/example-decoder") == "example"

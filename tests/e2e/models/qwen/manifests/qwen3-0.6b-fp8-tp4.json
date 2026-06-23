@@ -5,6 +5,7 @@
   "bundle": "qwen3-0.6b-fp8-bf16base-tp4.trtfb",
   "family": "qwen",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
   "precision": "bf16",
   "quantization": {
     "format": "fp8",

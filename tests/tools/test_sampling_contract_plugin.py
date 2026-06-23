@@ -4,9 +4,9 @@ from tests.e2e_harness.plugins.sampling import plugin
 
 def _case() -> E2ECase:
     return E2ECase(
-        name="qwen3-0.6b-topp",
-        hf_id="Qwen/Qwen3-0.6B",
-        family="qwen",
+        name="example-decoder-topp",
+        hf_id="example-org/example-decoder",
+        family="example_decoder",
         runtime_strategy="decoder_kv_cache",
         reference_backend="invariant_only",
         reference_family="sampling_top_p",
@@ -31,7 +31,7 @@ def test_sampling_contract_accepts_forwarded_top_p_flags() -> None:
                 "command": [
                     "./build/trtmc",
                     "run",
-                    "qwen3-0.6b.trtfb",
+                    "example-decoder.trtfb",
                     "--temperature",
                     "0.7",
                     "--top-p",
@@ -66,7 +66,7 @@ def test_sampling_contract_rejects_missing_top_p_flag() -> None:
                 "command": [
                     "./build/trtmc",
                     "run",
-                    "qwen3-0.6b.trtfb",
+                    "example-decoder.trtfb",
                     "--temperature",
                     "0.7",
                     "--top-k",

@@ -11,8 +11,13 @@
   "task_mode": "edit",
   "description": "Qwen-Image-Edit-2511 image edit (Qwen2.5-VL text+vision conditioning + Qwen-Image DiT + VAE encode/decode)",
   "build_args": {
-    "max_cache_length": 256,
-    "edit_condition_image": "data/test_img.jpeg"
+    "max_cache_length": 256
+  },
+  "build_env": {
+    "TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE": {
+      "path": "data/test_img.jpeg",
+      "relative_to": "model"
+    }
   },
   "prompt": "Turn the image into a watercolor illustration while preserving the main subject.",
   "test_image": "data/test_img.jpeg",

@@ -3,8 +3,8 @@ from tests.test_e2e import _case_matches_e2e_model, _parse_e2e_model_filters
 
 
 def test_parse_e2e_model_filters_supports_repeat_and_csv():
-    assert _parse_e2e_model_filters(["qwen, bark", "flux"]) == {
-        "qwen",
+    assert _parse_e2e_model_filters(["decoder_family, bark", "flux"]) == {
+        "decoder_family",
         "bark",
         "flux",
     }
@@ -12,13 +12,13 @@ def test_parse_e2e_model_filters_supports_repeat_and_csv():
 
 def test_case_matches_e2e_model_by_name_family_and_strategy():
     case = E2ECase(
-        name="qwen3-0.6b-fp16",
-        hf_id="Qwen/Qwen3-0.6B",
-        family="qwen",
+        name="example-decoder-fp16",
+        hf_id="example-org/example-decoder",
+        family="example_decoder",
         runtime_strategy="decoder_kv_cache",
     )
 
-    assert _case_matches_e2e_model(case, {"qwen3-0.6b-fp16"})
-    assert _case_matches_e2e_model(case, {"qwen"})
+    assert _case_matches_e2e_model(case, {"example-decoder-fp16"})
+    assert _case_matches_e2e_model(case, {"example_decoder"})
     assert _case_matches_e2e_model(case, {"decoder_kv_cache"})
     assert not _case_matches_e2e_model(case, {"bark"})

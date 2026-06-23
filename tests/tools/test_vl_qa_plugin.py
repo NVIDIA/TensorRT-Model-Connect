@@ -17,15 +17,19 @@ def _case(
     reference_backend: str = "hf_transformers",
     oracle_level: str = OracleLevel.L1_EXTERNAL_REFERENCE.value,
 ) -> E2ECase:
+    contract_config = {"use_processor": True, "use_chat_template": True}
+    if reference_family == "ocr_markdown":
+        contract_config["ocr_mode"] = True
     return E2ECase(
-        name="qwen3-vl-2b",
-        hf_id="Qwen/Qwen3-VL-2B-Instruct",
-        family="qwen_vl",
+        name="example-vl-2b",
+        hf_id="example-org/example-vl",
+        family="example_vl",
         runtime_strategy="vision_language",
         reference_backend=reference_backend,
         oracle_level=oracle_level,
         reference_family=reference_family,
         inputs={"prompt": "What color is the vehicle in this image? Answer in one word."},
+        metadata={"contract_config": contract_config},
     )
 
 
@@ -107,9 +111,9 @@ def test_vl_qa_full_generation_nonzero_returncode_fails() -> None:
 
 def test_vl_qa_ocr_required_substrings_are_real_contract() -> None:
     ref_text = (
-        "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. "
-        "Unlike the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA), "
-        "OCR-2 uses standard Llama-style multi-head attention."
+        "OCR-2 is a VL model with a latent-attention language decoder. "
+        "Unlike the larger decoder which uses Multi-head Latent Attention (MLA), "
+        "OCR-2 uses standard multi-head attention."
     )
     result = VLQAPlugin().verify(
         StageOutput(
@@ -124,9 +128,9 @@ def test_vl_qa_ocr_required_substrings_are_real_contract() -> None:
             data={
                 "text": ref_text,
                 "required_substrings": [
-                    "DeepSeek-OCR-2 is a VL model",
+                    "OCR-2 is a VL model",
                     "Multi-head Latent Attention (MLA)",
-                    "OCR-2 uses standard Llama-style multi-head attention",
+                    "OCR-2 uses standard multi-head attention",
                 ]
             },
         ),
@@ -143,14 +147,14 @@ def test_vl_qa_ocr_required_substrings_need_visible_reference() -> None:
     result = VLQAPlugin().verify(
         StageOutput(
             stage_name="full_generation",
-            data={"generated_text": "DeepSeek-OCR-2 family plugin"},
+            data={"generated_text": "OCR sample family plugin"},
             metadata={"returncode": 0},
         ),
         StageOutput(
             stage_name="full_generation",
             data={
                 "required_substrings": [
-                    "DeepSeek-OCR-2 family plugin",
+                    "OCR sample family plugin",
                 ]
             },
         ),
@@ -168,7 +172,7 @@ def test_vl_qa_ocr_required_substrings_must_be_visible_in_reference() -> None:
             stage_name="full_generation",
             data={
                 "generated_text": (
-                    "DeepSeek-OCR-2 family plugin. Vision: SAM ViT-B + Qwen2 encoder."
+                    "OCR sample family plugin. Vision: region encoder + example adapter."
                 )
             },
             metadata={"returncode": 0},
@@ -176,10 +180,10 @@ def test_vl_qa_ocr_required_substrings_must_be_visible_in_reference() -> None:
         StageOutput(
             stage_name="full_generation",
             data={
-                "text": "DeepSeek-OCR-2 family plugin.",
+                "text": "OCR sample family plugin.",
                 "required_substrings": [
-                    "DeepSeek-OCR-2 family plugin",
-                    "Vision: SAM ViT-B + Qwen2 encoder",
+                    "OCR sample family plugin",
+                    "Vision: region encoder + example adapter",
                 ],
             },
         ),
@@ -195,19 +199,19 @@ def test_vl_qa_ocr_required_substrings_fail_when_missing() -> None:
     result = VLQAPlugin().verify(
         StageOutput(
             stage_name="full_generation",
-            data={"generated_text": "DeepSeek-OCR-2 family plugin"},
+            data={"generated_text": "OCR sample family plugin"},
             metadata={"returncode": 0},
         ),
         StageOutput(
             stage_name="full_generation",
             data={
                 "text": (
-                    "DeepSeek-OCR-2 family plugin.\n"
-                    "Vision: SAM ViT-B + Qwen2 encoder."
+                    "OCR sample family plugin.\n"
+                    "Vision: region encoder + example adapter."
                 ),
                 "required_substrings": [
-                    "DeepSeek-OCR-2 family plugin",
-                    "Vision: SAM ViT-B + Qwen2 encoder",
+                    "OCR sample family plugin",
+                    "Vision: region encoder + example adapter",
                 ]
             },
         ),
@@ -216,14 +220,14 @@ def test_vl_qa_ocr_required_substrings_fail_when_missing() -> None:
     )
 
     assert result.status == StageStatus.FAILED.value
-    assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
+    assert "Vision: region encoder + example adapter" in result.message
 
 
 def test_vl_qa_ocr_rejects_missing_contracted_architecture_output() -> None:
     ref_text = (
         "Architecture:\n"
         "- Attention: Standard Q/K/V/O.\n"
-        "- Vision: SAM ViT-B + Qwen2 encoder."
+        "- Vision: region encoder + example adapter."
     )
     result = VLQAPlugin().verify(
         StageOutput(
@@ -244,7 +248,7 @@ def test_vl_qa_ocr_rejects_missing_contracted_architecture_output() -> None:
                 "required_substrings": [
                     "Architecture",
                     "Attention: Standard Q/K/V/O",
-                    "Vision: SAM ViT-B + Qwen2 encoder",
+                    "Vision: region encoder + example adapter",
                 ]
             },
         ),
@@ -253,7 +257,7 @@ def test_vl_qa_ocr_rejects_missing_contracted_architecture_output() -> None:
     )
 
     assert result.status == StageStatus.FAILED.value
-    assert "Vision: SAM ViT-B + Qwen2 encoder" in result.message
+    assert "Vision: region encoder + example adapter" in result.message
 
 
 def test_vl_qa_accepts_single_word_answer_inside_reference_sentence() -> None:

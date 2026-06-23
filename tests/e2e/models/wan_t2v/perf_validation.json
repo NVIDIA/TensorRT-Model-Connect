@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+      "pipeline_type": "diffusion_wan",
+      "label": "B2-diffusion-wan",
+      "benchmark": {
+        "label": "generate",
+        "gpu_argmax_label": "generate",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "generate-video", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_dir}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

@@ -6,9 +6,9 @@
 #include "runtime/models/wan/pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/domains/diffusion/wan_generation_conditioning.h"
+#include "runtime/models/wan/wan_generation_conditioning.h"
+#include "runtime/models/wan/wan_generation_plan.h"
 
 #include <algorithm>
 #include <cmath>
@@ -425,7 +425,7 @@ bool run_wan_denoising_loop(int32_t num_inference_steps, bool use_ddim, float gu
                             EmbedHiddenFn&& embed_hidden, UnpatchifyFn&& unpatchify,
                             RunDenoiserFn&& run_denoiser) {
     std::vector<float> patches;
-    return diffusion::run_wan_denoising_steps(
+    return diffusion::run_video_denoising_steps(
         num_inference_steps, step_timesteps, latents, error, compute_temb,
         [&](const std::vector<float>& current_latents, std::vector<float>& hidden) {
             patchify(current_latents, patches);

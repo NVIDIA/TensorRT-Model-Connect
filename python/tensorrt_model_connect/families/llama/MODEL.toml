@@ -1,6 +1,7 @@
 id = "llama"
 plugin = "llama"
 module = "plugin"
+capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 aliases = [
   "LLaMA",
   "llama",

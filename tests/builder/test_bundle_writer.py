@@ -40,8 +40,8 @@ class TestWriteBundle:
     def test_single_section(self, tmp_path):
         info = BundleInfo(
             model_id="test-model",
-            model_type="qwen3",
-            family="qwen",
+            model_type="example_decoder",
+            family="example_family",
             vocab_size=32000,
             hidden_size=1024,
             num_layers=12,
@@ -55,8 +55,8 @@ class TestWriteBundle:
 
         header, sdata = self._read_bundle(out_path)
         assert header["model_id"] == "test-model"
-        assert header["model_type"] == "qwen3"
-        assert header["family"] == "qwen"
+        assert header["model_type"] == "example_decoder"
+        assert header["family"] == "example_family"
         assert header["vocab_size"] == 32000
         assert header["hidden_size"] == 1024
         assert header["num_layers"] == 12
@@ -136,8 +136,8 @@ class TestWriteBundle:
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(
             model_id="full-test",
-            model_type="llama",
-            family="llama",
+            model_type="example_decoder",
+            family="example_family",
             trt_version="10.1.0",
             trt_abi="10.1",
             gpu_name="NVIDIA RTX 4090",
@@ -199,8 +199,8 @@ class TestCorruptedBundles:
         """Build a minimal valid bundle in memory and return its bytes."""
         header = {
             "model_id": "corrupt-test",
-            "model_type": "qwen3",
-            "family": "qwen",
+            "model_type": "example_decoder",
+            "family": "example_family",
             "vocab_size": 100,
             "hidden_size": 64,
             "num_layers": 1,
@@ -297,7 +297,7 @@ class TestCorruptedBundles:
         data = self._make_valid_bundle_bytes()
         header, sections = _read_bundle_from_bytes(data)
         assert header["model_id"] == "corrupt-test"
-        assert header["family"] == "qwen"
+        assert header["family"] == "example_family"
         assert len(sections["engine_plan"]) == 16
 
 
@@ -306,7 +306,7 @@ def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
     new bundles serialize it, legacy bundles omit it.
     """
     new = BundleInfo(
-        model_id="flux", family="diffusion_flux",
+        model_id="batched-model", family="batched_family",
         max_batch_size={"dit": 4, "text_encoder": 8, "vae": 1},
     )
     new_path = str(tmp_path / "new.trtfb")
@@ -314,7 +314,7 @@ def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
     new_header, _ = read_trtfb_bundle(new_path)
     assert new_header["max_batch_size"] == {"dit": 4, "text_encoder": 8, "vae": 1}
 
-    legacy = BundleInfo(model_id="legacy", family="qwen")
+    legacy = BundleInfo(model_id="legacy", family="legacy_family")
     legacy_path = str(tmp_path / "legacy.trtfb")
     write_bundle(legacy_path, legacy, [BundleSection("engine_plan", b"x")])
     legacy_header, _ = read_trtfb_bundle(legacy_path)

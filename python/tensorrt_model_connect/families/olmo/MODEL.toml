@@ -1,6 +1,7 @@
 id = "olmo"
 plugin = "olmo"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "olmo",
 ]

@@ -13,6 +13,7 @@ Design principles (per team feedback 2026-04-01):
 """
 from __future__ import annotations
 
+import re
 import textwrap
 
 
@@ -29,7 +30,7 @@ def build_evolve_prompt(
     """Build the full agent prompt for performance evolution.
 
     Args:
-        model: HuggingFace model ID (e.g., "Qwen/Qwen3-0.6B")
+        model: HuggingFace model ID (for example, "org/model-name")
         container: Docker container name
         baseline: Dict with throughput_tps, decode_ms, prefill_ms, per_token_ms
         max_iterations: Max optimization attempts
@@ -425,7 +426,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
         ### Level 3: Graph Topology (low priority — 0% effect in Phase 0)
 
         **WARNING**: In Phase 0 experiments (2026-04-01), ALL graph topology
-        optimizations had ZERO effect on Qwen3-0.6B and Qwen2.5-1.5B.
+        optimizations had ZERO effect on the measured decoder fixtures.
         TRT's internal optimizer already handles fusion and tactic selection.
         Only try these AFTER L1 and L2 are exhausted.
 
@@ -476,19 +477,15 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
 
 def _infer_family(model: str) -> str:
-    """Infer family plugin name from model ID."""
-    name = model.lower().split("/")[-1]
-    mappings = {
-        "qwen": "qwen", "llama": "llama", "mistral": "mistral",
-        "phi": "phi", "gemma": "gemma", "gpt2": "gpt2", "opt": "opt",
-        "bloom": "bloom", "falcon": "falcon", "mamba": "mamba",
-        "stablelm": "stablelm", "starcoder": "starcoder2",
-        "codegen": "codegen", "granite": "granite", "olmo": "olmo",
-        "internlm": "internlm", "nemotron": "nemotron", "xglm": "xglm",
-        "mixtral": "mixtral", "gpt-neo": "gpt_neo", "gpt-j": "codegen",
-        "bert": "bert", "whisper": "whisper", "bark": "bark",
-    }
-    for key, family in mappings.items():
-        if key in name:
-            return family
-    return name.split("-")[0]
+    """Infer family plugin name from model-owned registry metadata."""
+    model_type = str(model).split("/")[-1]
+    try:
+        from tensorrt_model_connect.families import resolve_family_id
+
+        family_id = resolve_family_id(model_type)
+    except Exception:
+        family_id = None
+    if family_id:
+        return family_id
+
+    return re.split(r"[-_]", model_type.lower().replace(".", "_"), maxsplit=1)[0]

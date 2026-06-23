@@ -44,7 +44,7 @@ struct PluginRegistrar {
 // Legacy macro: declare a static plugin instance and register it for one
 // strategy at process startup.
 // Usage (at file scope in a plugin .cpp):
-//   REGISTER_PIPELINE_PLUGIN("decoder_kv_cache", DecoderPlugin);
+//   REGISTER_PIPELINE_PLUGIN("example_strategy", ExamplePlugin);
 //
 // For plugins handling multiple strategies, use the multi variant.
 #define REGISTER_PIPELINE_PLUGIN(strategy, PluginClass)                                            \
@@ -52,15 +52,15 @@ struct PluginRegistrar {
 
 // Legacy multi-strategy variant: register same instance for multiple strategies.
 // Usage:
-//   REGISTER_PIPELINE_PLUGIN_MULTI(DecoderPlugin, "decoder_kv_cache", "decoder_moe");
+//   REGISTER_PIPELINE_PLUGIN_MULTI(ExamplePlugin, "example_strategy", "alternate_strategy");
 #define REGISTER_PIPELINE_PLUGIN_MULTI(PluginClass, ...)                                           \
     static PluginClass g_##PluginClass##_instance;                                                 \
     namespace {                                                                                    \
     struct PluginClass##_MultiReg {                                                                \
         PluginClass##_MultiReg() {                                                                 \
             for (const char* s : std::initializer_list<const char*>{__VA_ARGS__})                  \
-                ::trtmc::PipelineRegistry::instance().register_plugin(s,                            \
-                                                                     &g_##PluginClass##_instance); \
+                ::trtmc::PipelineRegistry::instance().register_plugin(                             \
+                    s, &g_##PluginClass##_instance);                                               \
         }                                                                                          \
     };                                                                                             \
     static PluginClass##_MultiReg g_##PluginClass##_multi_reg;                                     \
@@ -69,7 +69,7 @@ struct PluginRegistrar {
 // Define the registration function consumed by the generated manifest source.
 // The function name must match cmake/trtmc_pipeline_plugins.cmake.
 #define REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(RegisterFunction, PluginClass, ...)                 \
-    void RegisterFunction(::trtmc::PipelineRegistry& registry) {                                    \
+    void RegisterFunction(::trtmc::PipelineRegistry& registry) {                                   \
         static PluginClass plugin_instance;                                                        \
         for (const char* s : std::initializer_list<const char*>{__VA_ARGS__})                      \
             registry.register_plugin(s, &plugin_instance);                                         \

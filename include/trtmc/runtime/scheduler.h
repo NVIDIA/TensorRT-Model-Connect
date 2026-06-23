@@ -33,9 +33,9 @@ class IScheduler {
 };
 
 // Full FlowMatchEulerDiscreteScheduler configuration. Mirrors the diffusers
-// constructor surface that Qwen-Image relies on. The defaults match the
-// legacy static-shift behavior used by FLUX / Z-Image so the existing
-// single-arg constructor remains a no-op equivalent.
+// constructor surface used by dynamic-shift schedulers. The defaults match
+// the legacy static-shift behavior so the existing single-arg constructor
+// remains a no-op equivalent.
 struct FlowMatchEulerConfig {
     int32_t num_train_timesteps = 1000;
     float shift = 1.0f; // static shift; used when use_dynamic_shifting=false
@@ -51,19 +51,18 @@ struct FlowMatchEulerConfig {
 };
 
 // Flow Matching Euler Discrete Scheduler.
-// Used by: FLUX, Wan, Z-Image, SD3, Qwen-Image.
 //
 // Two construction modes:
-//   - Static-shift (FLUX / Z-Image): pass `shift` directly. Equivalent to
+//   - Static-shift: pass `shift` directly. Equivalent to
 //     diffusers' use_dynamic_shifting=False.
-//   - Full config (Qwen-Image): pass FlowMatchEulerConfig. Supports
-//     dynamic-mu shifting, exponential time_shift_type, and shift_terminal.
+//   - Full config: pass FlowMatchEulerConfig. Supports dynamic-mu shifting,
+//     exponential time_shift_type, and shift_terminal.
 class FlowMatchEulerScheduler final : public IScheduler {
   public:
     explicit FlowMatchEulerScheduler(float shift = 1.0f, int32_t num_train_timesteps = 1000);
     explicit FlowMatchEulerScheduler(const FlowMatchEulerConfig& cfg);
 
-    // Static-shift path (matches the original behavior, unchanged for FLUX).
+    // Static-shift path that preserves the original scheduler behavior.
     void set_timesteps(int32_t num_steps) override;
 
     // Dynamic-shifting path. Mirrors diffusers'

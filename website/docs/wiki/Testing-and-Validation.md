@@ -210,7 +210,7 @@ Graph-op tests use the `trt_runner` fixture from `conftest.py`: a `build_fn(netw
 | `test_cli_coverage.py` | CLI coverage tests |
 | `test_quantization.py` | FP16/FP8/INT8/INT4/NVFP4/W4A8 quantization framework tests |
 | `test_bark_tokenizer.py` | Bark tokenizer tests |
-| `test_magpie_tokenizer_script.py` | Magpie tokenizer script tests |
+| `test_magpie_tokenizer_script.py` | Magpie-owned tokenizer module tests |
 | `test_owned_builder_mocked_paths.py` | Builder mocked path tests |
 | `test_owned_encoder_builders_coverage.py` | Encoder builder coverage tests |
 | `test_owned_qwen3_t5_helpers.py` | Qwen3/T5 helper tests |
@@ -427,7 +427,7 @@ importing. Comparison logic tested with synthetic NumPy arrays.
 | `test_diff_layers.py` | Layer-wise hidden state comparison |
 | `test_diff_vl.py` | Vision-language diff utilities |
 | `test_diff_audio.py` | Energy computation, WAV I/O round-trip, token stats |
-| `test_diff_segmentation.py` | Pixel agreement (non-tautological), logit diff, argument parsing |
+| `test_segformer_diff_segmentation.py` | SegFormer pixel agreement, logit diff, argument parsing |
 | `test_diff_framework.py` | `DiffResult`, registry, runner, CLI parsing |
 | `test_diffusion_helpers.py` | silu, gelu_tanh, bundle config/weights, timestep embedding |
 | `test_parity.py` | Text/token comparison for runner parity |

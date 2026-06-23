@@ -1,6 +1,7 @@
 id = "glm"
 plugin = "glm"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "glm",
 ]

@@ -6,12 +6,12 @@ generated tokens. This is the consistency guarantee between the Python
 debug runner and the C++ runtime — if either side changes its mask,
 cache, or position logic, this test catches the divergence.
 
-Supports both standard KV-cache decoders (TrtRunner) and Mamba/SSM
-models (MambaTrtRunner), auto-detected from the bundle's config.json.
+Supports standard KV-cache decoders and family-owned debug runners,
+auto-detected from bundle metadata.
 
 Usage (inside container):
     python3 tools/test_runner_parity.py \
-      --bundle /tmp/qwen3.trtfb \
+      --bundle /tmp/model.trtfb \
       --binary ./build/trtmc \
       --hf-python .venv/bin/python \
       --prompt "The capital of France is" \
@@ -94,17 +94,12 @@ def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
 
 def run_python(bundle: str, prompt: str,
                max_new_tokens: int) -> tuple[str, list[int]]:
-    """Run Python TrtRunner (or MambaTrtRunner), return (text, token_ids)."""
-    from tensorrt_model_connect.debug_runner import load_engine_from_bundle, TrtRunner
-
-    engine_plan, _header = load_engine_from_bundle(bundle)
+    """Run Python debug runner, return (text, token_ids)."""
+    from tensorrt_model_connect.debug_runner import runner_from_bundle
 
     header_raw, sections, data_start = _read_bundle_header(bundle)
     tmpdir = _extract_bundle_files(bundle, sections, data_start)
     cfg = _read_bundle_config(bundle, sections, data_start)
-
-    # Determine runtime strategy
-    runtime_strategy = cfg.get("runtime_strategy", "decoder_kv_cache")
 
     # Extract eos_token_id (matches C++ EOS detection)
     eid = cfg.get("eos_token_id", -1)
@@ -116,19 +111,7 @@ def run_python(bundle: str, prompt: str,
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tmpdir, trust_remote_code=True)
 
-    # Create the appropriate runner
-    if runtime_strategy == "ssm_recurrent":
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-        runner = MambaTrtRunner(
-            engine_plan=engine_plan,
-            num_layers=header_raw["num_layers"],
-        )
-    else:
-        runner = TrtRunner(
-            engine_plan=engine_plan,
-            max_cache_length=header_raw["max_cache_length"],
-            num_layers=header_raw["num_layers"],
-        )
+    runner = runner_from_bundle(bundle)
 
     # Encode prompt — use add_special_tokens=False to match the C++ runtime,
     # which calls hf_tokenizer.py with add_special_tokens=False.
@@ -232,50 +215,9 @@ def run_as_diff_test(ctx):
         hf_python = ctx.hf_python or ""
         prompt = "The capital of France is"
 
-        py_text, py_ids = run_python(bundle, prompt, ctx.max_new_tokens)
-
-        try:
-            cpp_text = run_cpp(
-                binary, bundle, prompt, ctx.max_new_tokens, hf_python)
-        except FileNotFoundError:
-            return DiffResult.skip(
-                "runner_parity", ctx.model, ctx.runtime_strategy,
-                f"C++ binary not found: {binary}")
-
-        cpp_text = cpp_text.strip()
-        py_text = py_text.strip()
-        match = cpp_text == py_text
-
-        return DiffResult(
-            test_name="runner_parity", model=ctx.model,
-            runtime_strategy=ctx.runtime_strategy,
-            passed=match,
-            status="PASS" if match else "FAIL",
-            message=f"Exact text match: {match}",
-            metrics={"text_match": match,
-                     "cpp_len": len(cpp_text), "py_len": len(py_text)},
-            duration_s=_time.monotonic() - t0,
-            details=f"C++:    {cpp_text!r}\nPython: {py_text!r}")
-    except Exception as e:
-        return DiffResult.error(
-            "runner_parity", ctx.model, ctx.runtime_strategy, str(e))
-
-
-def run_as_diff_test(ctx):
-    """Framework entry point. Returns DiffResult."""
-    from diff_framework.protocol import DiffResult
-    import time as _time
-
-    t0 = _time.monotonic()
-    try:
-        bundle = ctx.bundle_path
-        binary = ctx.binary_path or "./build/trtmc"
-        hf_python = ctx.hf_python or ""
-        prompt = "The capital of France is"
-
         cpp_text = run_cpp(
             binary, bundle, prompt, ctx.max_new_tokens, hf_python)
-        py_text, py_ids = run_python(
+        py_text, _ = run_python(
             bundle, prompt, ctx.max_new_tokens)
 
         cpp_text = cpp_text.strip()

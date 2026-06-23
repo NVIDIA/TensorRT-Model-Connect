@@ -2,3 +2,6 @@ id = "vision_language"
 runtime_library = "libtrtmc_model_vision_language.so"
 runtime_plugins = ["plugin.cpp|register_vl_plugin"]
 runtime_strategies = ["vision_language"]
+runtime_tests = [
+  "test_vl_pipeline|test_vl_pipeline.cpp|trtmc_model_vision_language,trtmc_backend_trt|_|REQUIRES_TRT",
+]

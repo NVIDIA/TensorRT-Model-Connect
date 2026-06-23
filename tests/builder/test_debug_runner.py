@@ -177,7 +177,7 @@ class TestBundleSectionUtils:
         from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         # Build a bundle with a config.json section
-        config_data = json.dumps({"model_type": "qwen3"}).encode("utf-8")
+        config_data = json.dumps({"model_type": "example_decoder"}).encode("utf-8")
         magic = b"TRTFB\x00\x01\x00"
 
         engine_plan = b"FAKE_ENGINE"
@@ -196,7 +196,7 @@ class TestBundleSectionUtils:
         path.write_bytes(magic + header_len + header_json + engine_plan + config_data)
 
         cfg = load_config_from_bundle(str(path))
-        assert cfg["model_type"] == "qwen3"
+        assert cfg["model_type"] == "example_decoder"
 
     def test_load_triattention_stats_from_bundle(self, tmp_path):
         from tensorrt_model_connect.debug_runner import load_triattention_stats_from_bundle
@@ -248,100 +248,6 @@ class TestRunnerFromBundle:
         assert kwargs["engine_plan"] == b"RANK1_ENGINE"
         assert kwargs["distributed_communicator"] is communicator
 
-    def test_rwkv_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({"runtime_strategy": "rwkv_recurrent"}).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_ENGINE",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"RWKV_RANK1_ENGINE",
-            },
-        )
-
-        path = tmp_path / "rwkv_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.RwkvTrtRunner",
-                   return_value="rwkv-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "rwkv-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["engine_plan"] == b"RWKV_RANK1_ENGINE"
-        assert kwargs["distributed_communicator"] is communicator
-
-    def test_hybrid_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({
-            "runtime_strategy": "hybrid_mamba_attention",
-            "num_mamba_layers": 1,
-            "num_attention_layers": 1,
-        }).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_ENGINE",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"HYBRID_RANK1_ENGINE",
-            },
-        )
-
-        path = tmp_path / "hybrid_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.HybridTrtRunner",
-                   return_value="hybrid-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "hybrid-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["engine_plan"] == b"HYBRID_RANK1_ENGINE"
-        assert kwargs["distributed_communicator"] is communicator
-
-    def test_mamba_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({"runtime_strategy": "ssm_recurrent"}).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_ENGINE",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"RANK1_ENGINE",
-            },
-        )
-
-        path = tmp_path / "mamba_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.MambaTrtRunner",
-                   return_value="mamba-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "mamba-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["engine_plan"] == b"RANK1_ENGINE"
-        assert kwargs["distributed_communicator"] is communicator
-
     def test_seq2seq_engine_section_and_communicator_forwarded(self, tmp_path):
         from tensorrt_model_connect.debug_runner import runner_from_bundle
 
@@ -378,43 +284,7 @@ class TestRunnerFromBundle:
         assert kwargs["encoder_plan"] == b"ENCODER_PLAN"
         assert kwargs["distributed_communicator"] is communicator
 
-    def test_marian_seq2seq_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({
-            "runtime_strategy": "marian_translation",
-            "decoder_layers": 2,
-            "decoder_start_token_id": 0,
-        }).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_DECODER",
-            vision_plan=b"ENCODER_PLAN",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"RANK1_DECODER",
-            },
-        )
-
-        path = tmp_path / "marian_seq2seq_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.Seq2SeqTrtRunner",
-                   return_value="seq2seq-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "seq2seq-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["decoder_plan"] == b"RANK1_DECODER"
-        assert kwargs["encoder_plan"] == b"ENCODER_PLAN"
-        assert kwargs["distributed_communicator"] is communicator
-
-    def test_bart_seq2seq_engine_section_and_communicator_forwarded(self, tmp_path):
+    def test_seq2seq_encoder_decoder_engine_section_and_communicator_forwarded(self, tmp_path):
         from tensorrt_model_connect.debug_runner import runner_from_bundle
 
         config_data = json.dumps({
@@ -432,7 +302,7 @@ class TestRunnerFromBundle:
             },
         )
 
-        path = tmp_path / "bart_seq2seq_tp_dispatch.trtfb"
+        path = tmp_path / "seq2seq_encoder_decoder_tp_dispatch.trtfb"
         path.write_bytes(bundle)
 
         communicator = object()
@@ -560,50 +430,6 @@ class TestTrtRunnerCleanup:
 
 
 # ---------------------------------------------------------------------------
-# MambaTrtRunner.__del__ cleanup
-# ---------------------------------------------------------------------------
-
-class TestMambaTrtRunnerCleanup:
-    """Verify MambaTrtRunner.__del__ frees device buffers and stream."""
-
-    def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-
-        runner = MambaTrtRunner.__new__(MambaTrtRunner)
-        runner.num_layers = 1
-        runner.d_inner = 4
-        runner.conv_kernel = 3
-        runner.state_size = 2
-        runner._d_token_id = 100
-        runner._d_logits = 101
-        runner._d_conv_state = [200]
-        runner._d_ssm_state = [300]
-        runner._d_present_conv = [400]
-        runner._d_present_ssm = [500]
-        runner._d_debug = {}
-        runner.stream = 8888
-        runner.context = MagicMock()
-        runner.engine = MagicMock()
-
-        mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.__del__()
-            # Neutralize so GC won't call __del__ again with real cudart
-            del runner._d_token_id
-
-        freed = [c.args[0] for c in mock_cudart.cudaFree.call_args_list]
-        expected = [100, 101, 200, 300, 400, 500]
-        assert sorted(freed) == sorted(expected)
-        mock_cudart.cudaStreamDestroy.assert_called_once_with(8888)
-
-    def test_del_noop_before_init(self):
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-
-        runner = MambaTrtRunner.__new__(MambaTrtRunner)
-        runner.__del__()  # Should not raise
-
-
-# ---------------------------------------------------------------------------
 # TrtRunner.step() mask/position logic (mocked CUDA)
 # ---------------------------------------------------------------------------
 
@@ -684,36 +510,3 @@ class TestTrtRunnerMaskLogic:
 
 
 # ---------------------------------------------------------------------------
-# MambaTrtRunner.reset() device-side
-# ---------------------------------------------------------------------------
-
-class TestMambaStateReset:
-    """Test that MambaTrtRunner.reset() calls cudaMemsetAsync for all states."""
-
-    def test_reset_calls_memset(self):
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-
-        runner = MambaTrtRunner.__new__(MambaTrtRunner)
-        runner.num_layers = 2
-        runner.d_inner = 4
-        runner.state_size = 3
-        runner.conv_kernel = 2
-        runner._d_conv_state = [100, 200]
-        runner._d_ssm_state = [300, 400]
-        runner.stream = MagicMock()
-        # Prevent __del__ from crashing on GC
-        runner._d_token_id = None
-
-        mock_cudart = MagicMock()
-        # _check_cuda checks hasattr(cudart, "cudaError_t") — mock always has it.
-        # So status must equal mock_cudart.cudaError_t.cudaSuccess.
-        success = mock_cudart.cudaError_t.cudaSuccess
-        mock_cudart.cudaMemsetAsync.return_value = (success,)
-
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.reset()
-
-        # Should have called cudaMemsetAsync 4 times (2 conv + 2 ssm)
-        assert mock_cudart.cudaMemsetAsync.call_count == 4
-        # Neutralize
-        runner._d_token_id = None

@@ -14,14 +14,13 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 # Ensure tools/ is importable (conftest.py adds it, but be explicit)
 _TOOLS_DIR = str(Path(__file__).resolve().parents[2] / "tools")
 if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
-from perfdb import PerfDB, _compute_env_id
+from perfdb import PerfDB, _compute_env_id  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +42,7 @@ def _make_fingerprint(**overrides):
 def _make_perf_compare_json(**overrides):
     data = {
         "metadata": {
-            "model": "Qwen/Qwen3-0.6B",
+            "model": "example-org/example-decoder",
             "gpu": "NVIDIA H100",
             "trt_version": "10.1.0",
             "prompt": "The capital of France is",
@@ -100,7 +99,7 @@ class _FakeCompareResult:
 
 class _FakeE2EResult:
     """Minimal stand-in for contracts.E2EResult."""
-    def __init__(self, case_name="qwen3-0.6b", status="pass",
+    def __init__(self, case_name="example-decoder", status="pass",
                  timing=None, stages=None):
         self.case_name = case_name
         self.status = status
@@ -110,7 +109,7 @@ class _FakeE2EResult:
 
 class _FakeE2ECase:
     """Minimal stand-in for contracts.E2ECase."""
-    def __init__(self, name="qwen3-0.6b", hf_id="Qwen/Qwen3-0.6B",
+    def __init__(self, name="example-decoder", hf_id="example-org/example-decoder",
                  runtime_strategy="decoder_kv_cache",
                  task_strategy="text_generation_causal"):
         self.name = name
@@ -233,10 +232,10 @@ class TestRecordAndQueryHistory:
         assert isinstance(run_id, int)
         assert run_id > 0
 
-        history = db.query_history("qwen3-0.6b")
+        history = db.query_history("example-decoder")
         assert len(history) == 1
         row = history[0]
-        assert row["model_name"] == "qwen3-0.6b"
+        assert row["model_name"] == "example-decoder"
         assert row["source"] == "e2e_harness"
         assert row["git_commit"] == "abc123"
         assert row["build_s"] == 10.5
@@ -253,7 +252,7 @@ class TestRecordAndQueryHistory:
         run_id = db.record_perf_compare(json_data, git_info)
         assert run_id > 0
 
-        history = db.query_history("Qwen/Qwen3-0.6B")
+        history = db.query_history("example-org/example-decoder")
         assert len(history) == 1
         row = history[0]
         assert row["source"] == "perf_compare"
@@ -275,7 +274,7 @@ class TestRecordAndQueryHistory:
             db.record_e2e(result, case, fp, {"commit": f"c{i}", "branch": "main"})
 
         # Limit to 3
-        history = db.query_history("qwen3-0.6b", limit=3)
+        history = db.query_history("example-decoder", limit=3)
         assert len(history) == 3
         db.close()
 
@@ -296,11 +295,11 @@ class TestRecordAndQueryHistory:
             case, fp2, {"commit": "c2", "branch": "main"})
 
         # Filter by env
-        h1 = db.query_history("qwen3-0.6b", env_id=env1)
+        h1 = db.query_history("example-decoder", env_id=env1)
         assert len(h1) == 1
         assert h1[0]["env_id"] == env1
 
-        h2 = db.query_history("qwen3-0.6b", env_id=env2)
+        h2 = db.query_history("example-decoder", env_id=env2)
         assert len(h2) == 1
         assert h2[0]["env_id"] == env2
         db.close()
@@ -326,7 +325,7 @@ class TestQueryBaseline:
         db.record_perf_compare(json1, {"commit": "c1", "branch": "main"})
         db.record_perf_compare(json2, {"commit": "c2", "branch": "main"})
 
-        baseline = db.query_baseline("Qwen/Qwen3-0.6B")
+        baseline = db.query_baseline("example-org/example-decoder")
         assert baseline is not None
         assert baseline["throughput_tps"] == 250.0
         db.close()
@@ -344,7 +343,7 @@ class TestQueryBaseline:
         db.record_e2e(r1, case, fp, {"commit": "c1", "branch": "main"})
         db.record_e2e(r2, case, fp, {"commit": "c2", "branch": "main"})
 
-        baseline = db.query_baseline("qwen3-0.6b")
+        baseline = db.query_baseline("example-decoder")
         assert baseline is not None
         assert baseline["trt_run_s"] == 2.0  # fastest
         db.close()
@@ -375,7 +374,7 @@ class TestCompareToBaseline:
 
         # Current run is 5% slower (within 10% threshold)
         current = {"throughput_tps": 192.0, "decode_ms_mean": 104.0}
-        result = db.compare_to_baseline("Qwen/Qwen3-0.6B", None, current)
+        result = db.compare_to_baseline("example-org/example-decoder", None, current)
         assert result["has_baseline"] is True
         assert result["regression"] is False
         assert "Within threshold" in result["details"]
@@ -390,7 +389,7 @@ class TestCompareToBaseline:
 
         # Current run is 25% slower (beyond 10% threshold)
         current = {"throughput_tps": 140.0, "decode_ms_mean": 130.0}
-        result = db.compare_to_baseline("Qwen/Qwen3-0.6B", None, current)
+        result = db.compare_to_baseline("example-org/example-decoder", None, current)
         assert result["has_baseline"] is True
         assert result["regression"] is True
         assert "throughput_tps" in result["details"]
@@ -406,12 +405,12 @@ class TestCompareToBaseline:
         # 8% regression with 5% threshold
         current = {"throughput_tps": 184.0}
         result = db.compare_to_baseline(
-            "Qwen/Qwen3-0.6B", None, current, threshold=0.05)
+            "example-org/example-decoder", None, current, threshold=0.05)
         assert result["regression"] is True
 
         # Same 8% regression with 10% threshold
         result = db.compare_to_baseline(
-            "Qwen/Qwen3-0.6B", None, current, threshold=0.10)
+            "example-org/example-decoder", None, current, threshold=0.10)
         assert result["regression"] is False
         db.close()
 
@@ -428,7 +427,7 @@ class TestExport:
         parsed = json.loads(output)
         assert isinstance(parsed, list)
         assert len(parsed) == 1
-        assert parsed[0]["model_name"] == "Qwen/Qwen3-0.6B"
+        assert parsed[0]["model_name"] == "example-org/example-decoder"
         db.close()
 
     def test_export_csv(self):
@@ -440,7 +439,7 @@ class TestExport:
         lines = output.strip().split("\n")
         assert len(lines) == 2  # header + 1 row
         assert "model_name" in lines[0]
-        assert "Qwen/Qwen3-0.6B" in lines[1]
+        assert "example-org/example-decoder" in lines[1]
         db.close()
 
     def test_export_empty_json(self):
@@ -515,7 +514,7 @@ class TestEdgeCases:
         run_id = db.record_e2e(result, case, fp, {"commit": "", "branch": ""})
         assert run_id > 0
 
-        history = db.query_history("qwen3-0.6b")
+        history = db.query_history("example-decoder")
         assert len(history) == 1
         assert history[0]["build_s"] is None
         db.close()
@@ -524,9 +523,9 @@ class TestEdgeCases:
         """perf_compare result with token_match=False."""
         db = PerfDB(":memory:")
         json_data = _make_perf_compare_json(token_match=False)
-        run_id = db.record_perf_compare(json_data, {"commit": "c1", "branch": "main"})
+        db.record_perf_compare(json_data, {"commit": "c1", "branch": "main"})
 
-        history = db.query_history("Qwen/Qwen3-0.6B")
+        history = db.query_history("example-org/example-decoder")
         assert history[0]["token_match"] == 0
         db.close()
 
@@ -560,7 +559,7 @@ class TestEdgeCases:
         fp = _make_fingerprint()
         db.record_e2e(result, case, fp, {"commit": "c1", "branch": "main"})
 
-        history = db.query_history("qwen3-0.6b")
+        history = db.query_history("example-decoder")
         assert history[0]["token_match"] == 0
         db.close()
 
@@ -579,7 +578,7 @@ class TestEdgeCases:
         fp = _make_fingerprint()
         db.record_e2e(result, case, fp, {"commit": "c1", "branch": "main"})
 
-        history = db.query_history("qwen3-0.6b")
+        history = db.query_history("example-decoder")
         extra = json.loads(history[0]["extra_json"])
         assert "stages" in extra
         assert "generate" in extra["stages"]

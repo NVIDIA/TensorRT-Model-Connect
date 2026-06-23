@@ -13,7 +13,7 @@ def _import():
 def _make_perf_compare(with_compile: bool = False) -> dict:
     base = {
         "metadata": {
-            "model": "Qwen/Qwen3-0.6B",
+            "model": "example-org/example-decoder",
             "gpu": "NVIDIA H100",
             "hf_dtype": "float16",
             "iterations": 5,
@@ -59,7 +59,7 @@ def _make_perf_compare(with_compile: bool = False) -> dict:
 def _make_layer_profile() -> dict:
     return {
         "metadata": {
-            "model": "Qwen/Qwen3-0.6B",
+            "model": "example-org/example-decoder",
             "gpu": "NVIDIA H100",
             "timestamp": "2026-03-20T00:00:00Z",
         },
@@ -80,7 +80,7 @@ def _make_layer_profile() -> dict:
 def _make_cpu_profile() -> dict:
     return {
         "metadata": {
-            "model": "Qwen/Qwen3-0.6B",
+            "model": "example-org/example-decoder",
             "gpu": "NVIDIA H100",
             "num_layers": 28,
             "timestamp": "2026-03-20T00:00:00Z",
@@ -104,7 +104,7 @@ def _make_nsight(backend: str = "trt") -> dict:
         "tool": "nsys",
         "backend": backend,
         "metadata": {
-            "model": "Qwen/Qwen3-0.6B",
+            "model": "example-org/example-decoder",
             "gpu": "NVIDIA H100",
             "tool": "nsys",
             "timestamp": "2026-03-20T00:00:00Z",
@@ -187,7 +187,7 @@ class TestBuildReport:
             layer_profile=None, cpu_profile=None,
             nsight_trt=None, nsight_hf=None,
         )
-        assert "Qwen/Qwen3-0.6B" in html
+        assert "example-org/example-decoder" in html
 
     def test_gpu_in_output(self):
         mod = _import()

@@ -14,10 +14,7 @@ struct ImageNormalizationParams {
     float image_std[3]{1.0F, 1.0F, 1.0F};
 };
 
-enum class ImageTransformLayout {
-    kSimpleChw,
-    kQwenMergeGroup
-};
+enum class ImageTransformLayout { kSimpleChw, kMergeGroupChw };
 
 struct ImageTransformParams {
     ImageTransformLayout layout{ImageTransformLayout::kSimpleChw};
@@ -28,41 +25,33 @@ struct ImageTransformParams {
     int32_t temporal_patch_size{1};
 };
 
-inline bool normalize_hwc_u8_to_chw(
-    const std::vector<unsigned char>& image_hwc,
-    const ImageNormalizationParams& params,
-    std::vector<float>& out_chw)
-{
-    if (params.width <= 0 || params.height <= 0 || params.channels <= 0 || params.channels > 3)
-    {
+inline bool normalize_hwc_u8_to_chw(const std::vector<unsigned char>& image_hwc,
+                                    const ImageNormalizationParams& params,
+                                    std::vector<float>& out_chw) {
+    if (params.width <= 0 || params.height <= 0 || params.channels <= 0 || params.channels > 3) {
         return false;
     }
 
     const std::size_t pixel_count = static_cast<std::size_t>(params.width) * params.height;
     const std::size_t required_size = pixel_count * static_cast<std::size_t>(params.channels);
-    if (image_hwc.size() < required_size)
-    {
+    if (image_hwc.size() < required_size) {
         return false;
     }
 
     out_chw.resize(required_size);
-    for (int32_t c = 0; c < params.channels; ++c)
-    {
+    for (int32_t c = 0; c < params.channels; ++c) {
         const float mean = params.image_mean[c];
         const float std = params.image_std[c];
         const float inv_std = (std > 1e-8F) ? (1.0F / std) : 1.0F;
 
-        for (int32_t y = 0; y < params.height; ++y)
-        {
-            for (int32_t x = 0; x < params.width; ++x)
-            {
+        for (int32_t y = 0; y < params.height; ++y) {
+            for (int32_t x = 0; x < params.width; ++x) {
                 const std::size_t src_idx =
                     (static_cast<std::size_t>(y) * params.width + x) * params.channels + c;
                 const float pixel = static_cast<float>(image_hwc[src_idx]) / 255.0F;
 
-                const std::size_t dst_idx =
-                    static_cast<std::size_t>(c) * pixel_count
-                    + static_cast<std::size_t>(y) * params.width + x;
+                const std::size_t dst_idx = static_cast<std::size_t>(c) * pixel_count +
+                                            static_cast<std::size_t>(y) * params.width + x;
                 out_chw[dst_idx] = (pixel - mean) * inv_std;
             }
         }
@@ -71,36 +60,28 @@ inline bool normalize_hwc_u8_to_chw(
     return true;
 }
 
-inline bool transform_chw_layout(
-    const std::vector<float>& input_chw,
-    const ImageTransformParams& params,
-    std::vector<float>& out_values,
-    int32_t& out_channels)
-{
+inline bool transform_chw_layout(const std::vector<float>& input_chw,
+                                 const ImageTransformParams& params, std::vector<float>& out_values,
+                                 int32_t& out_channels) {
     out_channels = 0;
-    if (params.target_size <= 0 || params.channels <= 0)
-    {
+    if (params.target_size <= 0 || params.channels <= 0) {
         return false;
     }
 
     const std::size_t pixel_count =
         static_cast<std::size_t>(params.target_size) * params.target_size;
-    const std::size_t required_size =
-        static_cast<std::size_t>(params.channels) * pixel_count;
-    if (input_chw.size() < required_size)
-    {
+    const std::size_t required_size = static_cast<std::size_t>(params.channels) * pixel_count;
+    if (input_chw.size() < required_size) {
         return false;
     }
 
-    if (params.layout == ImageTransformLayout::kSimpleChw)
-    {
+    if (params.layout == ImageTransformLayout::kSimpleChw) {
         out_values.assign(input_chw.begin(), input_chw.begin() + required_size);
         out_channels = params.channels;
         return true;
     }
 
-    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0)
-    {
+    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0) {
         return false;
     }
 
@@ -114,39 +95,31 @@ inline bool transform_chw_layout(
     out_channels = total_channels;
 
     int32_t dst_patch_idx = 0;
-    for (int32_t mh = 0; mh < merge_h; ++mh)
-    {
-        for (int32_t mw = 0; mw < merge_w; ++mw)
-        {
-            for (int32_t dh = 0; dh < params.merge_size; ++dh)
-            {
-                for (int32_t dw = 0; dw < params.merge_size; ++dw)
-                {
+    for (int32_t mh = 0; mh < merge_h; ++mh) {
+        for (int32_t mw = 0; mw < merge_w; ++mw) {
+            for (int32_t dh = 0; dh < params.merge_size; ++dh) {
+                for (int32_t dw = 0; dw < params.merge_size; ++dw) {
                     const int32_t orig_h = mh * params.merge_size + dh;
                     const int32_t orig_w = mw * params.merge_size + dw;
 
                     const int32_t dst_h = dst_patch_idx / grid_w;
                     const int32_t dst_w = dst_patch_idx % grid_w;
 
-                    for (int32_t c = 0; c < params.channels; ++c)
-                    {
-                        for (int32_t t = 0; t < params.temporal_patch_size; ++t)
-                        {
+                    for (int32_t c = 0; c < params.channels; ++c) {
+                        for (int32_t t = 0; t < params.temporal_patch_size; ++t) {
                             const int32_t out_ch = c * params.temporal_patch_size + t;
-                            for (int32_t py = 0; py < params.patch_size; ++py)
-                            {
-                                for (int32_t px = 0; px < params.patch_size; ++px)
-                                {
+                            for (int32_t py = 0; py < params.patch_size; ++py) {
+                                for (int32_t px = 0; px < params.patch_size; ++px) {
                                     const std::size_t src =
-                                        static_cast<std::size_t>(c) * pixel_count
-                                        + static_cast<std::size_t>(orig_h * params.patch_size + py)
-                                            * params.target_size
-                                        + (orig_w * params.patch_size + px);
+                                        static_cast<std::size_t>(c) * pixel_count +
+                                        static_cast<std::size_t>(orig_h * params.patch_size + py) *
+                                            params.target_size +
+                                        (orig_w * params.patch_size + px);
                                     const std::size_t dst =
-                                        static_cast<std::size_t>(out_ch) * pixel_count
-                                        + static_cast<std::size_t>(dst_h * params.patch_size + py)
-                                            * params.target_size
-                                        + (dst_w * params.patch_size + px);
+                                        static_cast<std::size_t>(out_ch) * pixel_count +
+                                        static_cast<std::size_t>(dst_h * params.patch_size + py) *
+                                            params.target_size +
+                                        (dst_w * params.patch_size + px);
                                     out_values[dst] = input_chw[src];
                                 }
                             }

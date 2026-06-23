@@ -1,6 +1,7 @@
 id = "falcon"
 plugin = "falcon"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "falcon",
   "refinedweb",

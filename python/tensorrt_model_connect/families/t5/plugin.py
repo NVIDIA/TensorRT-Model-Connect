@@ -18,6 +18,11 @@ class T5Plugin:
     def matches(self, model_type):
         return model_type.lower() in ("t5",)
 
+    def ensure_tokenizer_json(self, model_dir, *, previous_error=None):
+        from .tokenizer_json import ensure_tokenizer_json
+
+        return ensure_tokenizer_json(model_dir, previous_error=previous_error)
+
     def load_weights(self, model_dir, config):
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)

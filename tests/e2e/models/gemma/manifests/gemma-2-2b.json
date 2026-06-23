@@ -5,8 +5,17 @@
   "bundle": "gemma-2-2b.trtfb",
   "family": "gemma",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
   "prompt": "What is 2 + 2? Answer with just the number.",
   "max_new_tokens": 10,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  }
 }

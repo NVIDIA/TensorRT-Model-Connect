@@ -27,11 +27,11 @@ def test_embedding_contract_raises_unreasonably_low_cosine_threshold() -> None:
         trt,
         ref,
         E2ECase(
-            name="dpr",
-            hf_id="hf/dpr",
-            family="dpr",
+            name="embedding-case",
+            hf_id="hf/embedding-case",
+            family="embedding_family",
             runtime_strategy="encoder_only",
-            reference_family="dpr_context_embed",
+            reference_family="sentence_transformer_embed",
         ),
         ThresholdProfile(
             task_strategy="encoder_only_nlp",
@@ -50,9 +50,9 @@ def test_encoder_contract_raises_unreasonably_low_cosine_threshold() -> None:
         trt,
         ref,
         E2ECase(
-            name="albert",
-            hf_id="hf/albert",
-            family="albert",
+            name="encoder-case",
+            hf_id="hf/encoder-case",
+            family="encoder_family",
             runtime_strategy="encoder_only",
             reference_family="encoder_base_features",
         ),

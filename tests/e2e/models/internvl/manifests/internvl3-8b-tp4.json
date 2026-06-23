@@ -5,6 +5,7 @@
   "bundle": "internvl3-8b-tp4-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "reference_backend": "golden_snapshot",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
@@ -63,7 +64,11 @@
     }
   ],
   "metadata": {
-    "golden_snapshot_path": "data/internvl3_8b_golden.json"
+    "golden_snapshot_path": "data/internvl3_8b_golden.json",
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true
+    }
   },
   "notes": "InternVL3 8B TP4 scale coverage. Uses the same checkpoint, prompt, cache length, image, thresholds, and golden snapshot as internvl3-8b while running the text decoder through rank-local TP engines."
 }

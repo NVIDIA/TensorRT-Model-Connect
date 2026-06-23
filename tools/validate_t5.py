@@ -1,134 +1,117 @@
 #!/usr/bin/env python3
-"""Validate T5 encoder: TRT vs HuggingFace per-token embedding comparison.
+"""Encoder validation entrypoint.
 
-Usage:
-    python tools/validate_t5.py --model-dir <wan-diffusers-dir>
+Concrete validation behavior is owned by model-family modules under
+``python/tensorrt_model_connect/families/*/validate_t5.py``. This shared tool
+only discovers and dispatches to those handlers.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
-import time
+from functools import lru_cache
 from pathlib import Path
-
-import numpy as np
-
-from diffusion_helpers import run_trt_engine as _run_trt_engine
+from types import ModuleType
+from typing import Any
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", required=True,
-                        help="Wan2.1-T2V-1.3B-Diffusers directory")
-    parser.add_argument("--max-seq-len", type=int, default=64)
-    parser.add_argument("--atol", type=float, default=0.1)
-    parser.add_argument("--prompt", default="A cat sitting on a beach")
-    args = parser.parse_args()
-
-    model_dir = Path(args.model_dir)
-    te_dir = str(model_dir / "text_encoder")
-
-    # --- HF reference ---
-    print("[validate] Loading HF T5 encoder ...", file=sys.stderr)
-    import torch
-    from transformers import AutoTokenizer, UMT5EncoderModel
-
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir / "tokenizer"))
-    hf_model = UMT5EncoderModel.from_pretrained(te_dir, torch_dtype=torch.float32)
-    # Fix: UMT5 checkpoint stores embedding as 'shared.weight' but
-    # UMT5EncoderModel expects 'encoder.embed_tokens.weight'. Copy it.
-    if (hasattr(hf_model, 'shared') and hf_model.shared is not None and
-            hf_model.encoder.embed_tokens.weight.abs().sum().item() < 1e-6):
-        hf_model.encoder.embed_tokens.weight = hf_model.shared.weight
-    hf_model.eval()
-
-    encoding = tokenizer(
-        args.prompt,
-        max_length=args.max_seq_len,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
+def _family_root() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
     )
-    input_ids = encoding["input_ids"]
 
-    with torch.no_grad():
-        hf_out = hf_model(
-            input_ids=input_ids,
-            attention_mask=encoding["attention_mask"],
-        ).last_hidden_state.numpy()
 
-    print(f"[validate] HF shape: {hf_out.shape}, "
-          f"range=[{hf_out.min():.4f}, {hf_out.max():.4f}]", file=sys.stderr)
+@lru_cache(maxsize=1)
+def _family_validation_modules() -> tuple[ModuleType, ...]:
+    modules: list[ModuleType] = []
+    for handler_path in sorted(_family_root().glob("*/validate_t5.py")):
+        module_name = f"_trtmc_validate_t5_{handler_path.parent.name}"
+        spec = importlib.util.spec_from_file_location(module_name, handler_path)
+        if spec is None or spec.loader is None:
+            print(f"[validate_t5] WARN: cannot load family validation handler "
+                  f"{handler_path}", file=sys.stderr)
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            print(f"[validate_t5] WARN: failed to import family validation handler "
+                  f"{handler_path}: {exc}", file=sys.stderr)
+            continue
+        modules.append(module)
+    return tuple(modules)
 
-    # --- TRT ---
-    print("[validate] Loading T5 weights ...", file=sys.stderr)
-    sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-    from tensorrt_model_connect.families.flux.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
-    cfg = hf_model.config
-    t0 = time.time()
-    weights = load_t5_weights(
-        te_dir, d_model=cfg.d_model, num_heads=cfg.num_heads,
-        d_kv=cfg.d_kv, d_ff=cfg.d_ff, num_layers=cfg.num_layers,
-        vocab_size=cfg.vocab_size,
-    )
-    print(f"[validate] Weights loaded [{time.time()-t0:.1f}s]", file=sys.stderr)
+def _select_family_from_argv(argv: list[str]) -> str | None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--family", default=None)
+    ns, _ = parser.parse_known_args(argv)
+    return ns.family
 
-    print("[validate] Building TRT engine ...", file=sys.stderr)
-    t1 = time.time()
-    plan = build_t5_encoder_engine(
-        weights, d_model=cfg.d_model, num_heads=cfg.num_heads,
-        d_kv=cfg.d_kv, d_ff=cfg.d_ff, num_layers=cfg.num_layers,
-        vocab_size=cfg.vocab_size, max_seq_len=args.max_seq_len,
-    )
-    print(f"[validate] Engine built [{time.time()-t1:.1f}s, "
-          f"{len(plan)/(1024*1024):.0f}MB]", file=sys.stderr)
 
-    # Run TRT
-    print("[validate] Running TRT inference ...", file=sys.stderr)
-    inp_np = input_ids.numpy().astype(np.int32)
-    # Build attention mask: 0.0 for valid tokens, -inf for padding
-    attn_mask_np = encoding["attention_mask"].numpy().astype(np.float32)
-    # HF mask: 1 = valid, 0 = padding -> TRT mask: 0 = valid, -3.4e38 = padding
-    trt_mask = np.where(attn_mask_np > 0.5, 0.0, np.finfo(np.float32).min).astype(np.float32)
-    results = _run_trt_engine(plan, {
-        "input_ids": inp_np,
-        "attention_mask": trt_mask,
-    }, {
-        "text_embeddings": ((1, args.max_seq_len, cfg.d_model), np.float32),
-    })
-    trt_out = results["text_embeddings"]
+def _find_family_validation_handler(argv: list[str] | None = None) -> ModuleType:
+    args = list(sys.argv[1:] if argv is None else argv)
+    requested_family = _select_family_from_argv(args)
+    modules = _family_validation_modules()
 
-    print(f"[validate] TRT shape: {trt_out.shape}, "
-          f"range=[{trt_out.min():.4f}, {trt_out.max():.4f}]", file=sys.stderr)
+    if requested_family:
+        for module in modules:
+            if Path(str(module.__file__)).parent.name == requested_family:
+                return module
+        raise SystemExit(f"No encoder validation handler for family {requested_family!r}")
 
-    # --- Compare ---
-    attn_mask = encoding["attention_mask"].numpy()[0]
-    valid_len = int(attn_mask.sum())
+    claimants = [
+        module for module in modules
+        if callable(getattr(module, "handles_validate_t5_args", None))
+        and module.handles_validate_t5_args(args)
+    ]
+    if len(claimants) == 1:
+        return claimants[0]
+    if len(claimants) > 1:
+        names = ", ".join(Path(str(module.__file__)).parent.name
+                          for module in claimants)
+        raise SystemExit(f"Multiple encoder validation handlers matched: {names}")
+    if len(modules) == 1:
+        return modules[0]
 
-    hf_valid = hf_out[0, :valid_len, :]
-    trt_valid = trt_out[0, :valid_len, :]
+    raise SystemExit("No encoder validation handler matched; pass --family <name>")
 
-    max_diff = np.max(np.abs(hf_valid - trt_valid))
-    mean_diff = np.mean(np.abs(hf_valid - trt_valid))
-    cos_sim = np.sum(hf_valid * trt_valid) / (
-        np.linalg.norm(hf_valid) * np.linalg.norm(trt_valid) + 1e-8)
 
-    print("\n=== T5 Encoder Validation ===")
-    print(f"Prompt: {args.prompt!r}")
-    print(f"Seq len: {args.max_seq_len} (valid: {valid_len})")
-    print(f"Max abs diff: {max_diff:.6f}")
-    print(f"Mean abs diff: {mean_diff:.6f}")
-    print(f"Cosine sim: {cos_sim:.6f}")
+def _strip_wrapper_args(argv: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--family":
+            skip_next = True
+            continue
+        if arg.startswith("--family="):
+            continue
+        stripped.append(arg)
+    return stripped
 
-    if max_diff <= args.atol:
-        print(f"PASS (max_diff={max_diff:.6f} <= atol={args.atol})")
-        return 0
-    else:
-        print(f"FAIL (max_diff={max_diff:.6f} > atol={args.atol})")
-        return 1
+
+def __getattr__(name: str) -> Any:
+    return getattr(_find_family_validation_handler([]), name)
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    handler = _find_family_validation_handler(argv)
+    original_argv = sys.argv
+    sys.argv = [original_argv[0], *_strip_wrapper_args(argv)]
+    try:
+        raise SystemExit(handler.main())
+    finally:
+        sys.argv = original_argv
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

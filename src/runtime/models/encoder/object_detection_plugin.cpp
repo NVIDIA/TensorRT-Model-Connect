@@ -1,8 +1,8 @@
 // ObjectDetectionPlugin: handles "object_detection" strategy.
 // Uses EncoderPipeline in "object_detection" mode (no tokenizer needed).
 
-#include "runtime/models/encoder/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/encoder/pipeline.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 namespace trtmc {

@@ -1,6 +1,7 @@
 id = "mixtral"
 plugin = "mixtral"
 module = "plugin"
+capabilities = ["disable_dual_profile_decoder"]
 aliases = [
   "mixtral",
 ]

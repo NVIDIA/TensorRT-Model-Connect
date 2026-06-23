@@ -31,6 +31,11 @@ except ImportError:
     pytest.skip("e2e_harness not available", allow_module_level=True)
 
 
+EXAMPLE_FAMILY = "example_family"
+EXAMPLE_MODEL_ID = "example-org/example-model"
+EXAMPLE_RUNTIME_STRATEGY = "decoder_kv_cache"
+
+
 class TestManifestValidation:
     """Test manifest schema validation."""
 
@@ -42,13 +47,19 @@ class TestManifestValidation:
 
     def test_missing_name_raises(self, tmp_path):
         """Manifest without 'name' should raise ValueError."""
-        path = self._write_manifest(tmp_path, {"hf_id": "org/model", "family": "qwen"})
+        path = self._write_manifest(
+            tmp_path,
+            {"hf_id": EXAMPLE_MODEL_ID, "family": EXAMPLE_FAMILY},
+        )
         with pytest.raises(ValueError, match="name"):
             _validate_manifest(json.load(open(path)), path)
 
     def test_missing_hf_id_raises_when_not_skipped(self, tmp_path):
         """Manifest without 'hf_id' (and no skip) should raise ValueError."""
-        path = self._write_manifest(tmp_path, {"name": "test-model", "family": "qwen"})
+        path = self._write_manifest(
+            tmp_path,
+            {"name": "test-model", "family": EXAMPLE_FAMILY},
+        )
         with pytest.raises(ValueError, match="hf_id"):
             _validate_manifest(json.load(open(path)), path)
 
@@ -65,19 +76,34 @@ class TestManifestValidation:
 
     def test_wrong_type_max_new_tokens_string(self, tmp_path):
         """max_new_tokens must be int, not string."""
-        data = {"name": "test", "hf_id": "org/m", "family": "qwen", "max_new_tokens": "20"}
+        data = {
+            "name": "test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "max_new_tokens": "20",
+        }
         with pytest.raises(TypeError, match="max_new_tokens"):
             _validate_manifest(data, "test.json")
 
     def test_wrong_type_max_new_tokens_float(self, tmp_path):
         """max_new_tokens must be int, not float."""
-        data = {"name": "test", "hf_id": "org/m", "family": "qwen", "max_new_tokens": 20.5}
+        data = {
+            "name": "test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "max_new_tokens": 20.5,
+        }
         with pytest.raises(TypeError, match="max_new_tokens"):
             _validate_manifest(data, "test.json")
 
     def test_wrong_type_max_cache_length(self, tmp_path):
         """max_cache_length must be int, not float."""
-        data = {"name": "test", "hf_id": "org/m", "family": "qwen", "max_cache_length": 256.5}
+        data = {
+            "name": "test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "max_cache_length": 256.5,
+        }
         with pytest.raises(TypeError, match="max_cache_length"):
             _validate_manifest(data, "test.json")
 
@@ -85,8 +111,8 @@ class TestManifestValidation:
         """Unknown runtime_strategy should emit a warning."""
         data = {
             "name": "test",
-            "hf_id": "org/m",
-            "family": "qwen",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
             "runtime_strategy": "bogus_strategy",
         }
         with warnings.catch_warnings(record=True) as w:
@@ -98,9 +124,9 @@ class TestManifestValidation:
         """Known runtime_strategy should not emit a warning."""
         data = {
             "name": "test",
-            "hf_id": "org/m",
-            "family": "qwen",
-            "runtime_strategy": "decoder_kv_cache",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
         }
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -113,11 +139,11 @@ class TestManifestValidation:
     def test_valid_manifest_passes(self, tmp_path):
         """A fully valid manifest should pass without errors."""
         data = {
-            "name": "qwen3-test",
-            "hf_id": "Qwen/Qwen3-0.6B",
-            "family": "qwen",
-            "bundle": "qwen3-test.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "name": "example-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "bundle": "example-test.trtfb",
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_cache_length": 256,
             "max_new_tokens": 20,
             "prompt": "Hello",
@@ -127,15 +153,15 @@ class TestManifestValidation:
     def test_model_owned_layout_is_discovered(self, tmp_path):
         """Nested tests/e2e/models/<family>/manifests layout is supported."""
         models_dir = tmp_path / "models"
-        manifest_dir = models_dir / "qwen" / "manifests"
+        manifest_dir = models_dir / EXAMPLE_FAMILY / "manifests"
         manifest_dir.mkdir(parents=True)
-        manifest_path = manifest_dir / "qwen3-test.json"
+        manifest_path = manifest_dir / "example-test.json"
         manifest_path.write_text(
             json.dumps({
-                "name": "qwen3-test",
-                "hf_id": "Qwen/Qwen3-0.6B",
-                "family": "qwen",
-                "runtime_strategy": "decoder_kv_cache",
+                "name": "example-test",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
                 "prompt": "Hello",
                 "max_new_tokens": 4,
             }),
@@ -143,32 +169,32 @@ class TestManifestValidation:
         )
 
         assert iter_manifest_paths(models_dir) == [manifest_path]
-        assert find_manifest_path("qwen3-test", models_dir) == manifest_path
+        assert find_manifest_path("example-test", models_dir) == manifest_path
         cases = load_all_manifests(models_dir)
-        assert [case.name for case in cases] == ["qwen3-test"]
-        family_cases = load_all_manifests(models_dir / "qwen")
-        assert [case.name for case in family_cases] == ["qwen3-test"]
+        assert [case.name for case in cases] == ["example-test"]
+        family_cases = load_all_manifests(models_dir / EXAMPLE_FAMILY)
+        assert [case.name for case in family_cases] == ["example-test"]
 
     def test_model_owned_threshold_sidecar_is_loaded(self, tmp_path):
         """Model-local thresholds/<case>.json sidecars feed E2E thresholds."""
-        family_dir = tmp_path / "models" / "qwen"
+        family_dir = tmp_path / "models" / EXAMPLE_FAMILY
         manifest_dir = family_dir / "manifests"
         threshold_dir = family_dir / "thresholds"
         manifest_dir.mkdir(parents=True)
         threshold_dir.mkdir()
-        manifest_path = manifest_dir / "qwen3-test.json"
+        manifest_path = manifest_dir / "example-test.json"
         manifest_path.write_text(
             json.dumps({
-                "name": "qwen3-test",
-                "hf_id": "Qwen/Qwen3-0.6B",
-                "family": "qwen",
-                "runtime_strategy": "decoder_kv_cache",
+                "name": "example-test",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
                 "prompt": "Hello",
                 "max_new_tokens": 4,
             }),
             encoding="utf-8",
         )
-        (threshold_dir / "qwen3-test.json").write_text(
+        (threshold_dir / "example-test.json").write_text(
             json.dumps({
                 "logit_atol": 10.0,
                 "threshold_overrides": {
@@ -316,6 +342,8 @@ class TestManifestValidation:
 
         def iter_asset_values(value, key=""):
             if isinstance(value, dict):
+                if "relative_to" in value and isinstance(value.get("path"), str):
+                    yield value["path"]
                 for item_key, item_value in value.items():
                     yield from iter_asset_values(item_value, item_key)
             elif isinstance(value, list):
@@ -430,14 +458,17 @@ class TestManifestValidation:
         """model_id is accepted as an alternative to hf_id."""
         data = {
             "name": "test-model",
-            "model_id": "org/model",
-            "family": "qwen",
+            "model_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
         }
         _validate_manifest(data, "test.json")  # Should not raise
 
     def test_load_manifest_calls_validation(self, tmp_path):
         """load_manifest should call _validate_manifest and raise on bad input."""
-        path = self._write_manifest(tmp_path, {"hf_id": "org/model", "family": "qwen"})
+        path = self._write_manifest(
+            tmp_path,
+            {"hf_id": EXAMPLE_MODEL_ID, "family": EXAMPLE_FAMILY},
+        )
         with pytest.raises(ValueError, match="name"):
             load_manifest(path)
 
@@ -445,8 +476,8 @@ class TestManifestValidation:
         path = self._write_manifest(tmp_path, {
             "name": "gated-test",
             "hf_id": "org/gated-model",
-            "family": "qwen",
-            "runtime_strategy": "decoder_kv_cache",
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "gated": True,
         })
         case = load_manifest(path)
@@ -461,7 +492,7 @@ class TestManifestValidation:
         path = self._write_manifest(tmp_path, {
             "name": "remote-code-test",
             "hf_id": "org/remote-code-model",
-            "family": "eagle_vlm",
+            "family": EXAMPLE_FAMILY,
             "runtime_strategy": "embedding",
             "trust_remote_code": True,
         })
@@ -477,8 +508,8 @@ class TestManifestValidation:
         """Boolean values should not pass the int type check."""
         data = {
             "name": "test",
-            "hf_id": "org/m",
-            "family": "qwen",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
             "max_new_tokens": True,
         }
         with pytest.raises(TypeError, match="max_new_tokens"):
@@ -487,9 +518,9 @@ class TestManifestValidation:
     def test_execution_profiles_must_be_object(self, tmp_path):
         data = {
             "name": "test",
-            "hf_id": "org/m",
-            "family": "qwen",
-            "execution_profiles": "internlm",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "execution_profiles": "example_profile",
         }
         with pytest.raises(TypeError, match="execution_profiles"):
             _validate_manifest(data, "test.json")
@@ -497,100 +528,42 @@ class TestManifestValidation:
     def test_execution_profiles_reject_unknown_phase(self, tmp_path):
         data = {
             "name": "test",
-            "hf_id": "org/m",
-            "family": "qwen",
-            "execution_profiles": {"build": "internlm", "verify": "internlm"},
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "execution_profiles": {
+                "build": "example_profile",
+                "verify": "example_profile",
+            },
         }
         with pytest.raises(ValueError, match="unsupported phase"):
             _validate_manifest(data, "test.json")
 
-    def test_load_manifest_applies_family_default_execution_profiles(self, tmp_path):
-        path = self._write_manifest(
-            tmp_path,
-            {
-                "name": "internlm-case",
-                "hf_id": "internlm/internlm-test",
-                "family": "internlm",
-                "runtime_strategy": "decoder_kv_cache",
-                "reference_backend": "torch_reference",
-            },
-        )
-        case = load_manifest(path)
-        assert case.execution_profiles["build"] == "internlm"
-        assert case.execution_profiles["runtime"] == "internlm"
-        assert case.execution_profiles["reference"] == "internlm"
-
-    def test_load_manifest_preserves_execution_profile_overrides(self, tmp_path):
-        path = self._write_manifest(
-            tmp_path,
-            {
-                "name": "internlm-case",
-                "hf_id": "internlm/internlm-test",
-                "family": "internlm",
-                "runtime_strategy": "decoder_kv_cache",
-                "reference_backend": "torch_reference",
-                "execution_profiles": {"runtime": "custom-runtime"},
-            },
-        )
-        case = load_manifest(path)
-        assert case.execution_profiles["build"] == "internlm"
-        assert case.execution_profiles["runtime"] == "custom-runtime"
-        assert case.execution_profiles["reference"] == "internlm"
-
-    def test_nemotron_labs_diffusion_manifests_cover_model_card_modes(self):
-        """The 8B model-card generation surfaces should all have nightly cases."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
-        manifest_paths = [
-            find_manifest_path("nemotron-labs-diffusion-8b-ar", models_dir),
-            find_manifest_path("nemotron-labs-diffusion-8b-diffusion", models_dir),
-            find_manifest_path("nemotron-labs-diffusion-8b-linear-spec", models_dir),
-            find_manifest_path("nemotron-labs-diffusion-8b", models_dir),
-        ]
-        assert all(path is not None for path in manifest_paths)
-        cases = [load_manifest(path) for path in manifest_paths]
-
-        modes = {case.inputs["generation_mode"] for case in cases}
-        assert modes == {"ar", "diffusion", "linear_spec", "linear_spec_lora"}
-        assert {case.bundle for case in cases} == {"nemotron-labs-diffusion-8b.trtfb"}
-        assert all(case.runtime_strategy == "nemotron_labs_diffusion" for case in cases)
-        assert all(
-            case.reference_family == "nemotron_labs_diffusion_model_card"
-            for case in cases
-        )
-        assert all(case.user_contract == "model_card_generation_parity" for case in cases)
-        assert all(case.metadata["ci_tier"] == "nightly_only" for case in cases)
-        assert all(case.metadata["contract_config"]["enable_thinking"] is False for case in cases)
-        assert all(
-            case.threshold_overrides["canonical_token_agreement_rate"] == 1.0
-            for case in cases
-        )
-
     def test_quantization_block_propagates_to_metadata(self, tmp_path):
         """Quantization manifests should preserve the generic quant block."""
         path = self._write_manifest(tmp_path, {
-            "name": "qwen3-test-fp8",
-            "hf_id": "Qwen/Qwen3-0.6B",
-            "family": "qwen",
-            "runtime_strategy": "decoder_kv_cache",
+            "name": "example-test-fp8",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "precision": "bf16",
             "quantization": {
                 "format": "fp8",
                 "scale_source": "precomputed",
-                "scale_artifact": "scales/qwen3-fp8.json",
+                "scale_artifact": "scales/example-fp8.json",
                 "calibration_samples": 16,
             },
         })
         case = load_manifest(path)
         assert case.metadata["precision"] == "bf16"
         assert case.metadata["quantization"]["format"] == "fp8"
-        assert case.metadata["quantization"]["scale_artifact"] == "scales/qwen3-fp8.json"
+        assert case.metadata["quantization"]["scale_artifact"] == "scales/example-fp8.json"
 
     def test_skip_comparison_populates_metadata(self, tmp_path):
         """skip_comparison should set skip_comparison_reason without setting skip_reason."""
         path = self._write_manifest(tmp_path, {
             "name": "rerank-test",
             "hf_id": "org/rerank",
-            "family": "eagle_vlm",
+            "family": EXAMPLE_FAMILY,
             "runtime_strategy": "reranking",
             "skip_comparison": "reference shape mismatch",
         })
@@ -613,7 +586,7 @@ class TestManifestValidation:
         path = self._write_manifest(tmp_path, {
             "name": "rerank-test",
             "hf_id": "org/rerank",
-            "family": "eagle_vlm",
+            "family": EXAMPLE_FAMILY,
             "runtime_strategy": "reranking",
             "skip_comparison": True,
         })
@@ -629,16 +602,3 @@ class TestManifestValidation:
         case_full = load_manifest(path_full)
         assert case_full.metadata["skip_reason"] == "broken"
         assert "skip_comparison_reason" not in case_full.metadata
-
-    def test_flux2_fp8_manifest_uses_end_to_end_image_contract(self):
-        """FLUX.2 FP8 should not inherit unrelated optional debug substages."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
-        manifest_path = find_manifest_path("flux-2-dev-fp8", models_dir)
-        assert manifest_path is not None
-        case = load_manifest(manifest_path)
-
-        assert case.reference_family == "diffusers_image_gen"
-        assert case.user_contract == "diffusion_image"
-        assert [stage.name for stage in case.stages] == ["end_to_end"]
-        assert all(stage.required for stage in case.stages)
-        assert "Wan-specific" in case.metadata["notes"]

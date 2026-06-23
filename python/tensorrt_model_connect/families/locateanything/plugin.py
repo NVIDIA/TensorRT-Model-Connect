@@ -138,7 +138,7 @@ class LocateAnythingPlugin:
             "merge_size": merge_h,
             "num_image_pad_tokens": num_image_tokens,
             "vision_output_dim": config.hidden_size,
-            "preprocessor_type": "locateanything_patchify",
+            "preprocessor_type": "patchify_chw",
             "image_mean": [0.5, 0.5, 0.5],
             "image_std": [0.5, 0.5, 0.5],
             "temporal_patch_size": 1,

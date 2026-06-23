@@ -61,7 +61,7 @@ and comments. Grep scope:
 - `python/tensorrt_model_connect/triattention_export.py`
 - `include/trtmc/runtime/triattention_kv_cache.h`
 - `src/runtime/core/triattention_kv_cache.cpp`
-- `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
+- `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py`
 - worklog entries and any test names
 
 Rename lands before the env-var deletion so the diff stays readable and
@@ -116,7 +116,7 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 - [x] `--config` + `--set` on `src/cli/main.cpp` (commit `3bf3fbb8`)
 - [x] `--config` + `--set` on `examples/trtmc_dataset_benchmark.cpp` (commit TBD)
 - [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
-      `tools/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
+      `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
 - [ ] C ABI `trtmc_create_pipeline_ex` gains `const char* config_json`
   - Deferred further: the C++ CLI and dataset benchmark both thread
     config through without needing the C ABI. The ABI extension is only
@@ -300,7 +300,7 @@ deleted (hard removal with no shims), tests updated.
   - Architecture is validated; what remains is the 10–12 hour empirical
     benchmark to confirm accuracy/throughput parity with iter2.
     Deferred to a user-driven kickoff. One-liner:
-      tools/benchmark_qwen3_8b_aime25_vs_hf.py
+      python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py
           --dense-bundle PATH.trtfb --tri-bundle PATH.trtfb
           --output-dir artifacts/triattention/loop/iter3
           --set triattention.profile=true
@@ -559,8 +559,8 @@ Commit chain:
 ### Tick 17 (2026-04-20)
 - Phase 5 gate (b) "zero env-var reads" closed. Seventh schema
   (platform.*) landed.
-- Python `audio_magpie_asset_dir` env var also deleted (was in
-  scripts/magpie_tokenizer.py).
+- Python `audio_magpie_asset_dir` env var also deleted (was in the
+  Magpie-owned tokenizer module).
 - `src/runtime/core/trt_common.cpp`:
   * Deleted the env-var-driven static initializers inside
     `trt_log_to_stderr_enabled()` / `trt_log_stderr_min_severity()`.
@@ -586,12 +586,12 @@ Commit chain:
     INTERNAL_ERROR / ERROR / WARNING / INFO / VERBOSE validator). Session /
     platform layers.
   * Schema manifest entry added — eighth row in the list.
-- `scripts/magpie_tokenizer.py`:
+- `python/tensorrt_model_connect/families/magpie_tts/magpie_tokenizer.py`:
   * Deleted the `TRTMC_MAGPIE_ASSET_DIR` env-var read. Asset dir now
     resolves via standard `XDG_CACHE_HOME` / `~/.cache/trtmc_nemo_assets`
     / `/tmp/trtmc_nemo_assets` fallbacks only. The migration doc note
     in the source explains why.
-- `scripts/profile_magpie_tts.py`:
+- `python/tensorrt_model_connect/families/magpie_tts/profile.py`:
   * Deleted the `os.environ["TRTMC_MAGPIE_GREEDY"]` assignment — the
     Python debug runner doesn't go through the C++ pipeline factory,
     so the registry isn't consulted here. Noted in a comment.
@@ -635,14 +635,12 @@ Commit chain:
   max_source_positions is build-time and flows via the Python path).
   Session fields use "apply only if non-default source" so pre-migration
   bundles keep their JSON-derived defaults.
-- Python side: `engine_builder.build`/`build_bundle` gain
-  `audio_magpie_max_source_positions` kwarg; stashes on
-  `config.raw["_audio_magpie_max_source_positions"]`.
-  `families/magpie_tts.py` reads from `config.raw` instead of
-  `os.environ.get`; comment in the file docstring updated to the
-  `--set audio_magpie.X=Y` form.
-- `build_cli.py` — extracts `audio_magpie.max_source_positions` from the
-  resolved ConfigBundle, passes to `build()`.
+- Python side: `build_cli.py` resolves the ConfigBundle into generic
+  `family_build_options`; `engine_builder.build`/`build_bundle` stash that
+  opaque dict on `config.raw["_family_build_options"]`.
+  `families/magpie_tts.py` reads its owned `audio_magpie` namespace from
+  that dict instead of `os.environ.get`; comment in the file docstring
+  updated to the `--set audio_magpie.X=Y` form.
 - Gates: 11 relevant ctests pass (config trio + triattention +
   magpie trio + bark + both C ABI regressions); 76 Python tests pass;
   full build clean. `grep TRTMC_MAGPIE_ src/ tensorrt_model_connect/` returns only
@@ -1043,7 +1041,7 @@ Commit chain:
   supplied and schemas are registered, writes `effective_config.json`
   next to the bundle path. Same no-schemas-yet pre-Phase-4 message as
   the main CLI.
-- `tools/benchmark_qwen3_8b_aime25_vs_hf.py` — four new flags, all in
+- `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py` — four new flags, all in
   the generic config-registry shape:
     * `--config <file>` — shared config profile, applied to both runs.
     * `--set NS.FIELD=VALUE` — shared session-layer override (repeatable).

@@ -118,6 +118,33 @@ def _stable_env_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_manifest_build_env_resolves_model_relative_paths(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    case = E2ECase(
+        name="unit",
+        hf_id="unit/model",
+        family="unit",
+        runtime_strategy="unit_runtime",
+        metadata={
+            "model_test_dir": str(model_dir),
+            "build_env": {
+                "UNIT_MODEL_ASSET": {
+                    "path": "data/input.png",
+                    "relative_to": "model",
+                },
+                "UNIT_LITERAL": "enabled",
+            },
+        },
+    )
+
+    env: dict[str, str] = {}
+    orchestrator._apply_manifest_build_env(env, case)
+
+    assert env["UNIT_MODEL_ASSET"] == str(model_dir / "data/input.png")
+    assert env["UNIT_LITERAL"] == "enabled"
+
+
 def _make_case(
     name: str,
     *,

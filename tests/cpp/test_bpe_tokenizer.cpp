@@ -27,7 +27,7 @@ void check(bool condition, const std::string& name) {
     }
 }
 
-// ─── Minimal tokenizer JSON with ARRAY merge format (Qwen3 style) ───
+// ─── Minimal tokenizer JSON with ARRAY merge format (NewlineAware style) ───
 static const char* kArrayMergesJson = R"({
   "model": {
     "type": "BPE",
@@ -62,7 +62,7 @@ static const char* kArrayMergesJson = R"({
   ]
 })";
 
-// ─── Same tokenizer but with STRING merge format (GPT-2 / LLaMA style) ───
+// ─── Same tokenizer but with STRING merge format (StringMerge / SentencePiece style) ───
 static const char* kStringMergesJson = R"({
   "model": {
     "type": "BPE",
@@ -145,8 +145,8 @@ static const char* kNullEndOfWordSuffixJson = R"({
   }
 })";
 
-// ─── GPT-2 style pre_tokenizer config (ByteLevel) ───
-static const char* kGpt2StyleJson = R"({
+// ─── StringMerge style pre_tokenizer config (ByteLevel) ───
+static const char* kStringMergeStyleJson = R"({
   "model": {
     "type": "BPE",
     "vocab": {
@@ -184,8 +184,8 @@ static const char* kGpt2StyleJson = R"({
   ]
 })";
 
-// ─── Qwen3 style pre_tokenizer config (Sequence + Split + ByteLevel) ───
-static const char* kQwen3StyleJson = R"({
+// ─── NewlineAware style pre_tokenizer config (Sequence + Split + ByteLevel) ───
+static const char* kNewlineAwareStyleJson = R"({
   "model": {
     "type": "BPE",
     "vocab": {
@@ -280,8 +280,8 @@ static const char* kBoundaryTestJson = R"({
   }
 })";
 
-// ─── LLaMA style: special tokens with <|end_of_text|> ───
-static const char* kLlamaStyleJson = R"({
+// ─── SentencePiece style: special tokens with <|end_of_text|> ───
+static const char* kSpecialTokenStyleJson = R"({
   "model": {
     "type": "BPE",
     "vocab": {
@@ -448,7 +448,7 @@ int main() {
         check(!ids.empty(), "null_end_of_word_suffix_encode");
     }
 
-    // === 8. STRING merge format (GPT-2 / LLaMA style) ===
+    // === 8. STRING merge format (StringMerge / SentencePiece style) ===
     {
         std::cerr << "\n=== String Merge Format ===\n";
 
@@ -466,55 +466,55 @@ int main() {
         check(decoded == "hello world", "string_merges_roundtrip");
     }
 
-    // === 9. GPT-2 pre_tokenizer config (ByteLevel) ===
+    // === 9. StringMerge pre_tokenizer config (ByteLevel) ===
     {
-        std::cerr << "\n=== GPT-2 Pre-tokenizer Config ===\n";
+        std::cerr << "\n=== StringMerge Pre-tokenizer Config ===\n";
 
-        std::string gj(kGpt2StyleJson);
+        std::string gj(kStringMergeStyleJson);
         auto tok = trtmc::CreateBpeTokenizer(gj.data(), gj.size(), false);
-        check(tok != nullptr, "gpt2_style_create");
+        check(tok != nullptr, "string_merge_style_create");
 
         auto ids = tok->encode("hello");
-        check(!ids.empty(), "gpt2_style_encode");
+        check(!ids.empty(), "string_merge_style_encode");
 
         // <|endoftext|> should be filtered in decode
-        check(tok->id_for_token("<|endoftext|>") == 19, "gpt2_eos_token");
-        check(tok->decode({19}).empty(), "gpt2_decode_filters_eos");
+        check(tok->id_for_token("<|endoftext|>") == 19, "string_merge_eos_token");
+        check(tok->decode({19}).empty(), "string_merge_decode_filters_eos");
     }
 
-    // === 10. Qwen3 pre_tokenizer config (Sequence) ===
+    // === 10. NewlineAware pre_tokenizer config (Sequence) ===
     {
-        std::cerr << "\n=== Qwen3 Pre-tokenizer Config ===\n";
+        std::cerr << "\n=== NewlineAware Pre-tokenizer Config ===\n";
 
-        std::string qj(kQwen3StyleJson);
+        std::string qj(kNewlineAwareStyleJson);
         auto tok = trtmc::CreateBpeTokenizer(qj.data(), qj.size(), false);
-        check(tok != nullptr, "qwen3_style_create");
+        check(tok != nullptr, "newline_aware_style_create");
 
         auto ids = tok->encode("hello");
-        check(!ids.empty(), "qwen3_style_encode");
+        check(!ids.empty(), "newline_aware_style_encode");
 
         // </s> should be recognized as special
-        check(tok->id_for_token("</s>") == 19, "qwen3_eos_token");
-        check(tok->decode({19}).empty(), "qwen3_decode_filters_eos");
+        check(tok->id_for_token("</s>") == 19, "newline_aware_eos_token");
+        check(tok->decode({19}).empty(), "newline_aware_decode_filters_eos");
     }
 
-    // === 11. LLaMA style special tokens ===
+    // === 11. SentencePiece style special tokens ===
     {
-        std::cerr << "\n=== LLaMA Style Special Tokens ===\n";
+        std::cerr << "\n=== SentencePiece Style Special Tokens ===\n";
 
-        std::string lj(kLlamaStyleJson);
+        std::string lj(kSpecialTokenStyleJson);
         auto tok = trtmc::CreateBpeTokenizer(lj.data(), lj.size(), false);
-        check(tok != nullptr, "llama_style_create");
+        check(tok != nullptr, "special_token_style_create");
 
-        check(tok->id_for_token("<|begin_of_text|>") == 9, "llama_bos_token");
-        check(tok->id_for_token("<|end_of_text|>") == 10, "llama_eos_token");
-        check(tok->id_for_token("<|eot_id|>") == 11, "llama_eot_token");
+        check(tok->id_for_token("<|begin_of_text|>") == 9, "special_token_bos_token");
+        check(tok->id_for_token("<|end_of_text|>") == 10, "special_token_eos_token");
+        check(tok->id_for_token("<|eot_id|>") == 11, "special_token_eot_token");
 
         // All special tokens filtered in decode
-        check(tok->decode({9, 10, 11}).empty(), "llama_decode_filters_all_special");
+        check(tok->decode({9, 10, 11}).empty(), "special_token_decode_filters_all_special");
 
         auto ids = tok->encode("hello");
-        check(!ids.empty(), "llama_encode_hello");
+        check(!ids.empty(), "special_token_encode_hello");
     }
 
     // === 12. Merge-all optimization: multiple same pairs merged in one pass ===
@@ -547,7 +547,7 @@ int main() {
 
     // === 13. Pre-tokenizer: contraction splitting ===
     //
-    // Verifies that the hand-written GPT-2 pre-tokenizer correctly splits
+    // Verifies that the hand-written StringMerge pre-tokenizer correctly splits
     // contractions at the apostrophe boundary, preventing cross-boundary
     // merges from firing.
     {
@@ -672,7 +672,7 @@ int main() {
         auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "a  b" → pre-tokenize ["a", " ", " b"]
-        //   GPT-2 regex: \s+(?!\S) leaves last space for next token
+        //   StringMerge regex: \s+(?!\S) leaves last space for next token
         //   "a": a → [0]
         //   " ": SPACE → [19]
         //   " b": SPACE,b → [19,1]
@@ -713,13 +713,13 @@ int main() {
         }
     }
 
-    // === 19. BLOOM pre-tokenizer: punctuation splitting ===
+    // === 19. word-separator pre-tokenizer: punctuation splitting ===
     {
-        std::cerr << "\n=== BLOOM Pre-tokenizer ===\n";
+        std::cerr << "\n=== word-separator Pre-tokenizer ===\n";
 
-        // BLOOM splits on punctuation: . , ! ? and CJK punct
+        // word-separator splits on punctuation: . , ! ? and CJK punct
         // Vocab: letters + Ġ(space) + punctuation
-        std::string bloom_json = R"({
+        std::string word_separator_json = R"({
           "model": {
             "type": "BPE",
             "vocab": {
@@ -749,10 +749,11 @@ int main() {
           }
         })";
 
-        auto tok = trtmc::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
-        check(tok != nullptr, "bloom_create");
+        auto tok = trtmc::CreateBpeTokenizer(word_separator_json.data(), word_separator_json.size(),
+                                             false);
+        check(tok != nullptr, "word_separator_create");
 
-        // "hello!" → BLOOM splits: ["hello", "!"]
+        // "hello!" → word-separator splits: ["hello", "!"]
         // "hello" → h,e,l,l,o → he(0),l,l,o → he,ll(1),o → hell(3),o
         //   Result: [19,3] = [hell,o]
         // "!" → [8]
@@ -760,36 +761,36 @@ int main() {
         {
             auto ids = tok->encode("hello!");
             check(ids.size() == 3 && ids[0] == 19 && ids[1] == 3 && ids[2] == 8,
-                  "bloom_punct_split_bang");
+                  "word_separator_punct_split_bang");
         }
 
-        // "hello.world" → BLOOM splits: ["hello", ".", "world"]
+        // "hello.world" → word-separator splits: ["hello", ".", "world"]
         // "hello" → [19,3] = [hell,o]
         // "." → [9]
         // "world" → w,o,r,l,d → [4,3,5,2,6] (no merges apply among these)
-        //   Actually: o+r at rank 6? No, the merge list doesn't have "o r" for BLOOM.
+        //   Actually: o+r at rank 6? No, the merge list doesn't have "o r" for word-separator.
         //   Wait, merges include "\u0120 w", "o r", "l d", "or ld", "\u0120w orld"
         //   So o+r → or(15), l+d → ld(16), or+ld → orld(13+?). Wait, orld is not in vocab.
         //   Actually "\u0120w orld" merge: but "orld" itself... let me check vocab:
-        //   No "orld" token in the BLOOM test vocab. So: w,o,r,l,d → o+r→or, l+d→ld → w,or,ld
-        //   "or ld" merge (rank 8) → w,orld. But "orld" not in vocab.
-        //   So result: w,or,ld → [4,15,16]
+        //   No "orld" token in the word-separator test vocab. So: w,o,r,l,d → o+r→or, l+d→ld →
+        //   w,or,ld "or ld" merge (rank 8) → w,orld. But "orld" not in vocab. So result: w,or,ld →
+        //   [4,15,16]
         {
             auto ids = tok->encode("hello.world");
             // hello=[19,3], .=[9], world=w,o,r,l,d→w,or,ld→w,orld=[4,21]
-            check(ids.size() == 5, "bloom_punct_split_dot_size");
-            check(ids[0] == 19 && ids[1] == 3, "bloom_punct_split_dot_hello");
-            check(ids[2] == 9, "bloom_punct_split_dot_period");
+            check(ids.size() == 5, "word_separator_punct_split_dot_size");
+            check(ids[0] == 19 && ids[1] == 3, "word_separator_punct_split_dot_hello");
+            check(ids[2] == 9, "word_separator_punct_split_dot_period");
         }
 
         // Round-trip: "hell" + "o" → byte_decode → "hello"
         {
             auto decoded = tok->decode(tok->encode("hello"));
-            check(decoded == "hello", "bloom_roundtrip");
+            check(decoded == "hello", "word_separator_roundtrip");
         }
     }
 
-    // === 20. Metaspace pre-tokenizer (DeepSeek style) ===
+    // === 20. Metaspace pre-tokenizer (metaspace style) ===
     {
         std::cerr << "\n=== Metaspace Pre-tokenizer ===\n";
 
@@ -998,10 +999,10 @@ int main() {
           }
         })";
 
-        // This should default to GPT-2, not throw (unrecognized regex → fallback)
+        // This should default to StringMerge, not throw (unrecognized regex → fallback)
         auto tok =
             trtmc::CreateBpeTokenizer(unknown_regex_json.data(), unknown_regex_json.size(), false);
-        check(tok != nullptr, "unknown_regex_falls_back_to_gpt2");
+        check(tok != nullptr, "unknown_regex_falls_back_to_string_merge");
     }
 
     // === 23. Metaspace decode edge cases ===
@@ -1141,12 +1142,12 @@ int main() {
         }
     }
 
-    // === 28. Qwen3 trailing newlines after "other" chars ===
+    // === 28. NewlineAware trailing newlines after "other" chars ===
     {
-        std::cerr << "\n=== Qwen3 Trailing Newlines ===\n";
+        std::cerr << "\n=== NewlineAware Trailing Newlines ===\n";
 
-        // Qwen3: ` ?[^\s\p{L}\p{N}]+[\r\n]*` — other chars can absorb trailing newlines
-        // \n byte (0x0A) is non-direct in GPT-2 byte encoding → maps to U+010A = Ċ
+        // NewlineAware: ` ?[^\s\p{L}\p{N}]+[\r\n]*` — other chars can absorb trailing newlines
+        // \n byte (0x0A) is non-direct in StringMerge byte encoding → maps to U+010A = Ċ
         std::string q_json = R"({
           "model": {
             "type": "BPE",
@@ -1165,18 +1166,18 @@ int main() {
         })";
 
         auto tok = trtmc::CreateBpeTokenizer(q_json.data(), q_json.size(), false);
-        check(tok != nullptr, "qwen3_trailing_nl_create");
+        check(tok != nullptr, "newline_aware_trailing_nl_create");
 
-        // "!\n" with Qwen3: pre-tokenize as one chunk "!\n" (! is other, \n absorbed)
+        // "!\n" with NewlineAware: pre-tokenize as one chunk "!\n" (! is other, \n absorbed)
         // Then byte-encode: "!" → "!" (direct), "\n" → Ċ (U+010A)
         // Merge "!" + "Ċ" → "!Ċ" → token 4
-        // BUT: pre-tokenizer needs to detect Qwen3 variant. The regex
-        // "[^\r\n]?test" contains literal CR/LF bytes which triggers Qwen3 detection.
+        // BUT: pre-tokenizer needs to detect NewlineAware variant. The regex
+        // "[^\r\n]?test" contains literal CR/LF bytes which triggers NewlineAware detection.
         {
             auto ids = tok->encode("!\n");
-            // Qwen3 must keep punctuation + trailing newline in one chunk,
+            // NewlineAware must keep punctuation + trailing newline in one chunk,
             // then allow BPE to merge "!" + "Ċ" -> "!Ċ".
-            check(ids.size() == 1 && ids[0] == 4, "qwen3_trailing_nl_merged");
+            check(ids.size() == 1 && ids[0] == 4, "newline_aware_trailing_nl_merged");
         }
 
         // Double newline after punctuation must also stay in the same chunk.
@@ -1211,10 +1212,10 @@ int main() {
         })";
         auto tok_double =
             trtmc::CreateBpeTokenizer(q_double_nl_json.data(), q_double_nl_json.size(), false);
-        check(tok_double != nullptr, "qwen3_double_nl_create");
+        check(tok_double != nullptr, "newline_aware_double_nl_create");
         {
             auto ids = tok_double->encode(".\n\n");
-            check(ids.size() == 1 && ids[0] == 3, "qwen3_double_nl_merged");
+            check(ids.size() == 1 && ids[0] == 3, "newline_aware_double_nl_merged");
         }
     }
 
@@ -1225,15 +1226,15 @@ int main() {
         std::string bj(kBoundaryTestJson);
         auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
-        // "123" (no leading space) → pre-tokenize ["123"] (GPT-2: \p{N}+)
+        // "123" (no leading space) → pre-tokenize ["123"] (StringMerge: \p{N}+)
         //   byte-encode: 1,2,3 → [14,15,16]
         {
             auto ids = tok->encode("123");
             check(ids.size() == 3 && ids[0] == 14 && ids[1] == 15 && ids[2] == 16,
-                  "digit_run_no_prefix_gpt2");
+                  "digit_run_no_prefix_string_merge");
         }
 
-        // Qwen3 single digit: "123" → pre-tokenize ["1", "2", "3"]
+        // NewlineAware single digit: "123" → pre-tokenize ["1", "2", "3"]
         std::string q_digit_json = R"({
           "model": {
             "type": "BPE",
@@ -1251,21 +1252,21 @@ int main() {
         auto tok_q = trtmc::CreateBpeTokenizer(q_digit_json.data(), q_digit_json.size(), false);
         {
             auto ids = tok_q->encode("123");
-            // Qwen3: each digit is a separate pre-tokenized chunk → "1","2","3"
+            // NewlineAware: each digit is a separate pre-tokenized chunk → "1","2","3"
             // Within each chunk: single char → no merge possible across chunks
             // So "1"→[0], "2"→[1], "3"→[2], total size=3
             // (The merge "1 2" can't fire because they're in separate chunks)
             check(ids.size() == 3 && ids[0] == 0 && ids[1] == 1 && ids[2] == 2,
-                  "digit_run_no_prefix_qwen3");
+                  "digit_run_no_prefix_newline_aware");
         }
     }
 
-    // === 30. BLOOM whitespace handling ===
+    // === 30. word-separator whitespace handling ===
     {
-        std::cerr << "\n=== BLOOM Whitespace ===\n";
+        std::cerr << "\n=== word-separator Whitespace ===\n";
 
-        // Reuse BLOOM JSON from test 19 (search for bloom_json)
-        std::string bloom_json = R"({
+        // Reuse word-separator JSON from test 19 (search for word_separator_json)
+        std::string word_separator_json = R"({
           "model": {
             "type": "BPE",
             "vocab": {
@@ -1289,42 +1290,43 @@ int main() {
           }
         })";
 
-        auto tok = trtmc::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(word_separator_json.data(), word_separator_json.size(),
+                                             false);
 
-        // "hello  world" → BLOOM: ["hello", " ", " world"]
-        //   (leave-last-space rule applies to BLOOM whitespace too)
+        // "hello  world" → word-separator: ["hello", " ", " world"]
+        //   (leave-last-space rule applies to word-separator whitespace too)
         //   "hello" → hell,o → [19,3]
         //   " " → byte-encode → Ġ → [7]
         //   " world" → byte-encode → Ġ,w,o,r,l,d → Ġw,or,ld → Ġw,orld → Ġworld → [18]
         {
             auto ids = tok->encode("hello  world");
             // [19,3,7,18] = [hell,o,Ġ,Ġworld]
-            check(ids.size() == 4, "bloom_whitespace_double_space_size");
-            check(ids[0] == 19 && ids[1] == 3, "bloom_whitespace_hello");
-            check(ids[2] == 7, "bloom_whitespace_space");
-            check(ids[3] == 18, "bloom_whitespace_world");
+            check(ids.size() == 4, "word_separator_whitespace_double_space_size");
+            check(ids[0] == 19 && ids[1] == 3, "word_separator_whitespace_hello");
+            check(ids[2] == 7, "word_separator_whitespace_space");
+            check(ids[3] == 18, "word_separator_whitespace_world");
         }
     }
 
-    // === 31. Newline handling in GPT-2 and Qwen3 ===
+    // === 31. Newline handling in StringMerge and NewlineAware ===
     {
         std::cerr << "\n=== Newline Handling ===\n";
 
         std::string bj(kBoundaryTestJson);
         auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
-        // "a\nb" → GPT-2: \n is whitespace, byte-encoded to non-ASCII char
+        // "a\nb" → StringMerge: \n is whitespace, byte-encoded to non-ASCII char
         // The boundary test vocab doesn't have the byte-encoded newline token,
         // so the \n token gets dropped. Result: [a, b] = [0, 1]
         {
             auto ids = tok->encode("a\nb");
-            check(ids[0] == 0, "gpt2_newline_a");
+            check(ids[0] == 0, "string_merge_newline_a");
             // \n byte-encoded char not in vocab → dropped
             // "b" is a separate chunk → [1]
-            check(ids.back() == 1, "gpt2_newline_b");
+            check(ids.back() == 1, "string_merge_newline_b");
         }
 
-        // Qwen3 variant: \n triggers \s*[\r\n]+ pattern
+        // NewlineAware variant: \n triggers \s*[\r\n]+ pattern
         std::string q_nl_json = R"({
           "model": {
             "type": "BPE",
@@ -1342,15 +1344,15 @@ int main() {
         auto tok_q = trtmc::CreateBpeTokenizer(q_nl_json.data(), q_nl_json.size(), false);
         {
             auto ids = tok_q->encode("a\nb");
-            // Qwen3: "a" (letter), "\n" (newline sequence), "b" (letter)
+            // NewlineAware: "a" (letter), "\n" (newline sequence), "b" (letter)
             // byte-encode \n → Ċ (U+010A, id=2)
             // Result: [0, 2, 1] = [a, Ċ, b]
             check(ids.size() == 3 && ids[0] == 0 && ids[1] == 2 && ids[2] == 1,
-                  "qwen3_newline_sequence");
+                  "newline_aware_newline_sequence");
         }
     }
 
-    // === Sequence decoder (SentencePiece BPE: LLaMA, Mistral, Phi-3) ===
+    // === Sequence decoder (SentencePiece BPE: SentencePiece, SentencePiece, SentencePiece) ===
     {
         std::cerr << "\n=== Sequence Decoder ===\n";
 
@@ -1480,11 +1482,12 @@ int main() {
         check(text == "hello world", "explicit_bytelevel_decoder_decode");
     }
 
-    // === 33. Sequence post_processor with nested TemplateProcessing (LLaMA 3.1 style) ===
+    // === 33. Sequence post_processor with nested TemplateProcessing (SentencePiece 3.1 style) ===
     {
         std::cerr << "\n=== Sequence Post-Processor ===\n";
 
-        // LLaMA 3.1 style: post_processor is Sequence containing ByteLevel + TemplateProcessing
+        // SentencePiece 3.1 style: post_processor is Sequence containing ByteLevel +
+        // TemplateProcessing
         std::string seq_pp_json = R"({
           "model": {
             "type": "BPE",
@@ -1608,7 +1611,7 @@ int main() {
     {
         std::cerr << "\n=== VL Special Token Encode ===\n";
 
-        // Qwen VL style: special tokens in prompt text must be encoded to their IDs
+        // VL style: special tokens in prompt text must be encoded to their IDs
         std::string vl_json = R"({
           "model": {
             "type": "BPE",
@@ -1720,11 +1723,11 @@ int main() {
         }
     }
 
-    // === 37. Gemma Split pre-tokenizer with SentencePiece-BPE normalizer ===
+    // === 37. Normalizer Split pre-tokenizer with SentencePiece-BPE normalizer ===
     {
-        std::cerr << "\n=== Gemma Split SentencePiece-BPE ===\n";
+        std::cerr << "\n=== Normalizer Split SentencePiece-BPE ===\n";
 
-        std::string gemma_json = R"({
+        std::string normalizer_json = R"({
           "model": {
             "type": "BPE",
             "vocab": {
@@ -1789,16 +1792,16 @@ int main() {
           }
         })";
 
-        auto tok = trtmc::CreateBpeTokenizer(gemma_json.data(), gemma_json.size(), true);
-        check(tok != nullptr, "gemma_split_create");
+        auto tok = trtmc::CreateBpeTokenizer(normalizer_json.data(), normalizer_json.size(), true);
+        check(tok != nullptr, "normalizer_split_create");
         {
             auto ids = tok->encode("What is 2 + 2?");
             std::vector<int32_t> expected = {0, 16, 5, 1, 6, 8, 1, 6, 9};
-            check(ids == expected, "gemma_split_encode_no_leading_space");
+            check(ids == expected, "normalizer_split_encode_no_leading_space");
         }
         {
             auto text = tok->decode({0, 16, 5, 1, 6, 8, 1, 6, 9});
-            check(text == "What is 2 + 2?", "gemma_split_decode");
+            check(text == "What is 2 + 2?", "normalizer_split_decode");
         }
     }
 

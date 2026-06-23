@@ -17,13 +17,13 @@ from tensorrt_model_connect.config import ModelConfig
 
 
 def test_language_config_merges_when_hidden_size_missing():
-    """Intent: cover DeepSeek-VL language_config merge path.
+    """Intent: cover language_config merge path.
     Preconditions: top-level hidden_size is absent and language_config contains decoder fields.
     Postconditions: decoder fields come from language_config while top-level identity fields are preserved.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "deepseek_vl_v2",
-        "architectures": ["DeepseekVLV2ForCausalLM"],
+        "model_type": "language_config_vl",
+        "architectures": ["LanguageConfigVLForCausalLM"],
         "vision_config": {"image_size": 384},
         "language_config": {
             "hidden_size": 4096,
@@ -35,8 +35,8 @@ def test_language_config_merges_when_hidden_size_missing():
         },
     }))
 
-    assert cfg.model_type == "deepseek_vl_v2"
-    assert cfg.architectures == ["DeepseekVLV2ForCausalLM"]
+    assert cfg.model_type == "language_config_vl"
+    assert cfg.architectures == ["LanguageConfigVLForCausalLM"]
     assert cfg.hidden_size == 4096
     assert cfg.num_hidden_layers == 30
     assert cfg.num_attention_heads == 32
@@ -52,7 +52,7 @@ def test_language_config_is_skipped_when_top_level_hidden_size_exists():
     Postconditions: top-level hidden_size is retained and no language_config override occurs.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "deepseek_vl_v2",
+        "model_type": "language_config_vl",
         "hidden_size": 1024,
         "language_config": {
             "hidden_size": 4096,
@@ -84,13 +84,13 @@ def test_text_config_merge_still_works_without_top_level_identity_fields():
 
 
 def test_llm_config_merges_when_hidden_size_missing():
-    """Intent: cover Eagle/Nemotron llm_config merge path.
+    """Intent: cover llm_config merge path.
     Preconditions: hidden_size is missing at top-level and llm_config is a dict.
     Postconditions: LLM fields are loaded from llm_config and top-level vision_config is preserved.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "llama_nemotron_vl",
-        "architectures": ["NemotronVLForConditionalGeneration"],
+        "model_type": "llm_config_vl",
+        "architectures": ["LLMConfigVLForConditionalGeneration"],
         "vision_config": {"image_size": 448},
         "llm_config": {
             "hidden_size": 3072,
@@ -100,7 +100,7 @@ def test_llm_config_merges_when_hidden_size_missing():
         },
     }))
 
-    assert cfg.model_type == "llama_nemotron_vl"
+    assert cfg.model_type == "llm_config_vl"
     assert cfg.hidden_size == 3072
     assert cfg.num_hidden_layers == 24
     assert cfg.num_attention_heads == 24
@@ -114,7 +114,7 @@ def test_llm_config_non_dict_is_ignored():
     Postconditions: llm_config is ignored and hidden_size remains unresolved (zero).
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "llama_nemotron_vl",
+        "model_type": "llm_config_vl",
         "llm_config": ["not", "a", "dict"],
     }))
 
@@ -122,13 +122,13 @@ def test_llm_config_non_dict_is_ignored():
 
 
 def test_thinker_text_config_merges_and_propagates_thinker_vision_config():
-    """Intent: cover Qwen3-Omni thinker_config.text_config merge behavior.
+    """Intent: cover thinker_config.text_config merge behavior.
     Preconditions: hidden_size is absent, thinker_config.text_config is present, and merged config lacks vision_config.
     Postconditions: text fields are merged and thinker_config vision_config is propagated.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "qwen3_omni",
-        "architectures": ["Qwen3OmniForConditionalGeneration"],
+        "model_type": "thinker_text_config",
+        "architectures": ["ThinkerTextConfigForConditionalGeneration"],
         "thinker_config": {
             "text_config": {
                 "hidden_size": 2048,
@@ -139,7 +139,7 @@ def test_thinker_text_config_merges_and_propagates_thinker_vision_config():
         },
     }))
 
-    assert cfg.model_type == "qwen3_omni"
+    assert cfg.model_type == "thinker_text_config"
     assert cfg.hidden_size == 2048
     assert cfg.num_hidden_layers == 20
     assert cfg.num_attention_heads == 16
@@ -152,7 +152,7 @@ def test_thinker_text_config_non_dict_is_ignored():
     Postconditions: thinker text merge is skipped and hidden_size remains unresolved (zero).
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "qwen3_omni",
+        "model_type": "thinker_text_config",
         "thinker_config": {
             "text_config": ["not", "a", "dict"],
         },
@@ -167,7 +167,7 @@ def test_thinker_vision_config_does_not_overwrite_existing_top_level_value():
     Postconditions: top-level vision_config remains effective after merge.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "qwen3_omni",
+        "model_type": "thinker_text_config",
         "vision_config": {"source": "top"},
         "thinker_config": {
             "text_config": {
@@ -209,7 +209,7 @@ def test_num_attention_heads_falls_back_to_n_heads():
     Postconditions: num_attention_heads is sourced from n_heads.
     """
     cfg = ModelConfig.from_json(json.dumps({
-        "model_type": "distilbert",
+        "model_type": "dim_encoder",
         "dim": 768,
         "n_heads": 12,
     }))

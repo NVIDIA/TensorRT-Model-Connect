@@ -5,6 +5,9 @@
   "bundle": "personaplex-7b.trtfb",
   "family": "personaplex",
   "runtime_strategy": "speech_to_speech",
+  "task_strategy": "speech_to_speech",
+  "reference_family": "s2s_personaplex",
+  "user_contract": "speech_response",
   "gated": true,
   "ci_tier": "nightly_only",
   "l0_replacement": "personaplex-7b-l0",
@@ -16,5 +19,8 @@
   "speech_test_max_frames": 300,
   "prompt": "",
   "max_new_tokens": 1000,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "metadata": {
+    "runtime_cli_requires_hf_python": true
+  }
 }

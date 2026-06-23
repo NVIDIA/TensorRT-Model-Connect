@@ -42,6 +42,30 @@ def _elf_yaml_to_config(raw: dict) -> dict:
     return converted
 
 
+def config_from_dir(model_dir: str | Path) -> dict | None:
+    """Return a synthetic ModelConfig dict for official ELF YAML directories."""
+    model_path = Path(model_dir)
+    yaml_candidates = [
+        model_path / "config.yaml",
+        model_path / "config.yml",
+        *sorted(model_path.glob("*.yaml")),
+        *sorted(model_path.glob("*.yml")),
+    ]
+    for yaml_path in yaml_candidates:
+        if not yaml_path.exists():
+            continue
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise RuntimeError("PyYAML is required to load ELF YAML configs") from exc
+        data = yaml.safe_load(yaml_path.read_text()) or {}
+        if not isinstance(data, dict):
+            continue
+        if str(data.get("model", "")).upper().replace("_", "-") in _ELF_VARIANTS:
+            return _elf_yaml_to_config(data)
+    return None
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -85,10 +109,10 @@ class ModelConfig:
     def from_json(text: str) -> ModelConfig:
         d = json.loads(text)
 
-        # VL models (e.g. Qwen3-VL) nest text model config under "text_config".
+        # Some multimodal configs nest decoder fields under "text_config".
         # Merge text_config into top level so standard key lookup works.
         # Preserve top-level model_type and architectures (these identify the
-        # VL model, not the text backbone).
+        # top-level model, not the nested decoder).
         original_raw = d
         text_config = d.get("text_config")
         if text_config and isinstance(text_config, dict):
@@ -101,7 +125,7 @@ class ModelConfig:
                 merged["architectures"] = top_architectures
             d = merged
 
-        # DeepSeek-VL-v2 models nest the language decoder config under
+        # Some multimodal configs nest the language decoder config under
         # "language_config".  Merge into top level like text_config.
         if not d.get("hidden_size"):
             lang_config = d.get("language_config")
@@ -118,7 +142,7 @@ class ModelConfig:
                     merged["vision_config"] = top_vision_config
                 d = merged
 
-        # Eagle VLM / Nemotron VL models nest LLM config under "llm_config".
+        # Some multimodal configs nest LLM config under "llm_config".
         # Merge into top level like text_config, preserving top-level
         # model_type, architectures, and vision_config.
         if not d.get("hidden_size"):
@@ -136,7 +160,7 @@ class ModelConfig:
                     merged["vision_config"] = top_vision_config
                 d = merged
 
-        # Omni models (e.g. Qwen3-Omni) nest the primary decoder config
+        # Some multimodal audio/text configs nest the primary decoder config
         # under thinker_config.text_config. If top-level hidden_size is
         # still missing after the text_config merge above, look there.
         if not d.get("hidden_size"):
@@ -176,7 +200,7 @@ class ModelConfig:
                         or hidden_size * 4)
 
         # Norm epsilon: try rms_norm_eps, then layer_norm_epsilon, then
-        # layer_norm_eps, then norm_epsilon, then norm_eps (Nemotron).
+        # layer_norm_eps, then norm_epsilon, then norm_eps.
         eps = (d.get("rms_norm_eps")
                or d.get("layer_norm_epsilon")
                or d.get("layer_norm_eps")
@@ -185,8 +209,8 @@ class ModelConfig:
                or 1e-5)
 
         # rope_theta: check top-level first, then rope_parameters dict
-        # (Llama-3.1 variants like Minitron/Nemotron-Nano store it there),
-        # then rope_scaling dict (Qwen3 stores it there).
+        # (some model configs store it there),
+        # then rope_scaling dict.
         rope_theta = d.get("rope_theta", None)
         if rope_theta is None:
             rope_params = d.get("rope_parameters")

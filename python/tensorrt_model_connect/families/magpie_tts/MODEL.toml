@@ -1,6 +1,12 @@
 id = "magpie_tts"
 plugin = "magpie_tts"
 module = "plugin"
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_model_type = "magpie_tts"
+nemo_target_patterns = [
+  "MagpieTTS",
+  "magpietts",
+]
 aliases = [
   "decoder_ce",
   "magpie_tts",
@@ -8,4 +14,10 @@ aliases = [
 ]
 prefixes = [
   "magpie_tts",
+]
+hf_warm_dependencies = [
+  "tts-asr-verifier|openai/whisper-large-v3-turbo",
+  "magpie-nanocodec|nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps",
+  "magpie-byt5-tokenizer|google/byt5-small",
+  "magpie-wavlm-discriminator|microsoft/wavlm-base-plus",
 ]

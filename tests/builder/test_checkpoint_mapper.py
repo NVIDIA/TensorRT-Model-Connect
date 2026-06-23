@@ -167,7 +167,7 @@ class TestLoadStandardWeights:
     def test_basic_loading(self, tmp_path):
         """Load standard weights from a minimal model dir."""
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 2,
@@ -201,7 +201,7 @@ class TestLoadStandardWeights:
     def test_transpose_applied(self, tmp_path):
         """Verify projections are transposed from [out, in] to [in, out]."""
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -224,7 +224,7 @@ class TestLoadStandardWeights:
     def test_gqa_kv_stays_compact(self, tmp_path):
         """Verify GQA K/V projections stay at compact KV width."""
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -245,7 +245,7 @@ class TestLoadStandardWeights:
         from safetensors.numpy import save_file
 
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -285,7 +285,7 @@ class TestLoadStandardWeights:
     def test_metadata_keys(self, tmp_path):
         """Verify attention, KV attention, and MLP metadata."""
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -371,7 +371,7 @@ class TestLoadStandardWeightsExtended:
         head_dim = hidden // num_heads  # 2
 
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -400,7 +400,7 @@ class TestLoadStandardWeightsExtended:
         hidden = 16
         vocab = 32
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": vocab,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -427,7 +427,7 @@ class TestLoadStandardWeightsExtended:
         hidden = 16
         vocab = 32
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": vocab,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -454,7 +454,7 @@ class TestLoadStandardWeightsExtended:
         """QKV biases are loaded when present in safetensors."""
         hidden = 16
         config = {
-            "model_type": "qwen2",
+            "model_type": "standard_decoder_with_bias",
             "vocab_size": 32,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -481,7 +481,7 @@ class TestLoadStandardWeightsExtended:
         """QKV biases are absent from weights when not in safetensors."""
         hidden = 16
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -510,7 +510,7 @@ class TestLoadStandardWeightsExtended:
         kv_hidden = num_kv_heads * head_dim
 
         config = {
-            "model_type": "qwen2",
+            "model_type": "standard_decoder_with_bias",
             "vocab_size": 32,
             "hidden_size": hidden,
             "num_hidden_layers": 1,
@@ -540,7 +540,7 @@ class TestLoadStandardWeightsExtended:
         from safetensors.numpy import save_file
 
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -565,7 +565,7 @@ class TestLoadStandardWeightsExtended:
         from safetensors.numpy import save_file
 
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 0,
@@ -590,7 +590,7 @@ class TestLoadStandardWeightsExtended:
     def test_no_safetensors_raises(self, tmp_path):
         """Model dir without any safetensors/bin files raises FileNotFoundError."""
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -613,7 +613,7 @@ class TestLoadStandardWeightsExtended:
         kv_hidden = num_kv_heads * head_dim  # 2
 
         config = {
-            "model_type": "qwen3",
+            "model_type": "standard_decoder",
             "vocab_size": 32,
             "hidden_size": hidden,
             "num_hidden_layers": 1,

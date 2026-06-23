@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """Cross-strategy CPU phase bottleneck harness.
 
-Runs the CPU-phase profiler across representative models for each runtime
-strategy and prints a side-by-side comparison table showing where host-side
-time is spent per strategy type.
-
-Supported strategies:
-  decoder_kv_cache   -- standard KV-cache decoder (DECODER phases)
-  decoder_moe        -- mixture-of-experts decoder (DECODER phases)
-  ssm_recurrent      -- Mamba/SSM recurrent state (MAMBA phases)
-  rwkv_recurrent     -- RWKV recurrent state (MAMBA phases, no mask_build)
-  hybrid_mamba_attention -- hybrid Mamba+attention (DECODER phases)
+Runs the CPU-phase profiler across representative family-owned specs and prints
+a side-by-side comparison table showing where host-side time is spent per
+runtime strategy.
 
 Usage:
     # Use pre-built bundles from engine-dir (recommended)
@@ -21,12 +14,12 @@ Usage:
     # Profile specific strategies only
     python tools/cpu_profile_matrix.py \\
       --engine-dir /path/to/engines \\
-      --strategies decoder_kv_cache decoder_moe ssm_recurrent
+      --strategies decoder_kv_cache decoder_moe
 
     # Override the representative model for a strategy
     python tools/cpu_profile_matrix.py \\
       --engine-dir /path/to/engines \\
-      --model-override decoder_kv_cache=Qwen/Qwen3-0.6B:qwen3-0.6b.trtfb
+      --model-override strategy_name=org/model:model.trtfb
 
     # Save JSON and HTML report
     python tools/cpu_profile_matrix.py \\
@@ -42,10 +35,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import NamedTuple
 
 
@@ -58,49 +54,88 @@ class StrategySpec(NamedTuple):
     label: str             # display name in table
     hf_id: str             # HuggingFace model ID
     bundle: str            # bundle filename (relative to engine-dir)
-    runner: str            # "decoder" or "mamba"
+    runner: str            # "decoder" or "family"
     trust_remote_code: bool = False
 
 
-# Default representative model per strategy.
-# Chosen to be small/fast — these are profiling runs, not accuracy tests.
-_DEFAULT_SPECS: list[StrategySpec] = [
-    StrategySpec(
-        strategy="decoder_kv_cache",
-        label="decoder_kv_cache\n(qwen3-0.6b)",
-        hf_id="Qwen/Qwen3-0.6B",
-        bundle="qwen3-0.6b.trtfb",
-        runner="decoder",
-    ),
-    StrategySpec(
-        strategy="decoder_moe",
-        label="decoder_moe\n(mixtral-stories-15m)",
-        hf_id="RichardErkhov/mistralai_-_Mixtral-8x7B-v0.1-Stories-15M",
-        bundle="mixtral-stories-15m.trtfb",
-        runner="decoder",
-    ),
-    StrategySpec(
-        strategy="ssm_recurrent",
-        label="ssm_recurrent\n(mamba-130m)",
-        hf_id="state-spaces/mamba-130m-hf",
-        bundle="mamba-130m.trtfb",
-        runner="mamba",
-    ),
-    StrategySpec(
-        strategy="rwkv_recurrent",
-        label="rwkv_recurrent\n(rwkv-169m)",
-        hf_id="RWKV/rwkv-4-169m-pile",
-        bundle="rwkv-169m.trtfb",
-        runner="mamba",
-    ),
-    StrategySpec(
-        strategy="hybrid_mamba_attention",
-        label="hybrid_mamba_attn\n(qwen35-9b)",
-        hf_id="Qwen/Qwen3-5B",
-        bundle="qwen35-9b.trtfb",
-        runner="decoder",
-    ),
-]
+def _family_root() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+    )
+
+
+@lru_cache(maxsize=1)
+def _family_matrix_modules() -> tuple[ModuleType, ...]:
+    """Load optional family-owned matrix specs."""
+    modules: list[ModuleType] = []
+    for hook_path in sorted(_family_root().glob("*/cpu_profile_matrix.py")):
+        module_name = f"_trtmc_cpu_profile_matrix_{hook_path.parent.name}"
+        spec = importlib.util.spec_from_file_location(module_name, hook_path)
+        if spec is None or spec.loader is None:
+            print(f"[matrix] WARN: cannot load family matrix hook "
+                  f"{hook_path}", file=sys.stderr)
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            print(f"[matrix] WARN: failed to import family matrix hook "
+                  f"{hook_path}: {exc}", file=sys.stderr)
+            continue
+        if callable(getattr(module, "cpu_profile_matrix_specs", None)):
+            modules.append(module)
+    return tuple(modules)
+
+
+def _strategy_spec_from_mapping(raw: dict, source: str) -> StrategySpec:
+    required = ("strategy", "label", "hf_id", "bundle", "runner")
+    missing = [key for key in required if not raw.get(key)]
+    if missing:
+        raise ValueError(
+            f"{source} returned an incomplete CPU profile matrix spec; "
+            f"missing {missing}"
+        )
+    runner = str(raw["runner"])
+    if runner not in {"decoder", "family"}:
+        raise ValueError(
+            f"{source} returned unsupported runner {runner!r}; "
+            "expected 'decoder' or 'family'"
+        )
+    return StrategySpec(
+        strategy=str(raw["strategy"]),
+        label=str(raw["label"]),
+        hf_id=str(raw["hf_id"]),
+        bundle=str(raw["bundle"]),
+        runner=runner,
+        trust_remote_code=bool(raw.get("trust_remote_code", False)),
+    )
+
+
+def _load_default_specs() -> list[StrategySpec]:
+    """Collect default representative specs from model-family hooks."""
+    ordered: list[tuple[int, str, int, StrategySpec]] = []
+    for module in _family_matrix_modules():
+        source = getattr(module, "__file__", module.__name__)
+        for index, raw in enumerate(module.cpu_profile_matrix_specs()):
+            if not isinstance(raw, dict):
+                raise TypeError(
+                    f"{source} returned non-dict CPU profile matrix spec "
+                    f"{raw!r}"
+                )
+            order = int(raw.get("order", 1000))
+            ordered.append((
+                order,
+                str(source),
+                index,
+                _strategy_spec_from_mapping(raw, str(source)),
+            ))
+    return [item[3] for item in sorted(ordered, key=lambda item: item[:3])]
+
+
+_DEFAULT_SPECS: list[StrategySpec] = _load_default_specs()
 
 # All phases across both runner types (union)
 _ALL_PHASES = ("mask_build", "h2d", "tensor_bind", "execute",
@@ -129,10 +164,10 @@ def _profile_strategy(
         sys.path.insert(0, str(tools_dir))
 
     from cpu_profile import (
-        _TimedDecoderRunner, _TimedMambaRunner,
+        _TimedDecoderRunner,
         _run_profile, _aggregate,
     )
-    from perf_compare import build_trt_engine, load_trt_from_bundle
+    from perf_compare import _handler_attr, build_trt_engine, load_trt_from_bundle
 
     # Resolve bundle path
     bundle_path: str | None = None
@@ -166,21 +201,28 @@ def _profile_strategy(
     if bundle_path:
         print(f"[matrix] [{spec.strategy}] loading bundle: {bundle_path}",
               file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, is_mamba = \
+        engine_plan, num_layers, max_cache_length, _, perf_handler = \
             load_trt_from_bundle(bundle_path)
-        runner_type = "mamba" if is_mamba else "decoder"
+        runner_type = _handler_attr(
+            perf_handler, "cpu_profile_runner_type", "decoder")
     else:
         print(f"[matrix] [{spec.strategy}] building engine for {spec.hf_id} ...",
               file=sys.stderr)
-        engine_plan, config, _, is_mamba = build_trt_engine(
+        engine_plan, config, _, perf_handler = build_trt_engine(
             model_dir, 256, verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = 256
-        runner_type = "mamba" if is_mamba else spec.runner
+        runner_type = _handler_attr(
+            perf_handler, "cpu_profile_runner_type", spec.runner)
 
     # Build timed runner
-    if runner_type == "mamba":
-        runner = _TimedMambaRunner(engine_plan, num_layers)
+    make_family_runner = getattr(perf_handler, "make_cpu_profile_runner", None)
+    if callable(make_family_runner):
+        runner = make_family_runner(
+            engine_plan=engine_plan,
+            num_layers=num_layers,
+            max_cache_length=max_cache_length,
+        )
     else:
         runner = _TimedDecoderRunner(engine_plan, max_cache_length, num_layers)
     del engine_plan
@@ -515,7 +557,7 @@ def main() -> None:
     parser.add_argument(
         "--model-override", nargs="+", metavar="STRATEGY=HF_ID:BUNDLE",
         help="Override the model for a strategy, e.g. "
-             "decoder_kv_cache=Qwen/Qwen3-0.6B:qwen3-0.6b.trtfb")
+             "strategy_name=org/model:model.trtfb")
     parser.add_argument("--prompt",
                         default="The capital of France is",
                         help="Input prompt for all strategies")

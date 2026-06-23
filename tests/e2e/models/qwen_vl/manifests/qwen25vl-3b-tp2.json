@@ -5,6 +5,9 @@
   "bundle": "qwen25vl-3b-vl-tp2.trtfb",
   "family": "qwen_vl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
@@ -53,5 +56,11 @@
       "gating": true
     }
   ],
-  "notes": "Tensor-parallel TP=2 Qwen2.5-VL coverage; TP4 is not valid because the model has two KV heads."
+  "notes": "Tensor-parallel TP=2 Qwen2.5-VL coverage; TP4 is not valid because the model has two KV heads.",
+  "metadata": {
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true
+    }
+  }
 }

@@ -8,18 +8,35 @@ import json
 import pathlib
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib  # type: ignore
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
+FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
     "_diffusers_missing_weight_components",
     "_is_hf_file_cached",
     "_is_diffusers_component_enabled",
     "_is_cached",
-    "_manifest_needs_clip_metrics",
     "_snapshot_has_required_files",
 }
+
+
+def _family_metadata_values(field: str) -> list[str]:
+    values: list[str] = []
+    for model_toml in sorted(FAMILIES.glob("*/MODEL.toml")):
+        data = tomllib.loads(model_toml.read_text(encoding="utf-8"))
+        for spec in data.get(field, []):
+            if not isinstance(spec, str):
+                continue
+            parts = [part for part in spec.split("|")[1:] if part]
+            values.extend(parts)
+    return values
 
 
 def _load_cache_helpers() -> dict:
@@ -38,7 +55,7 @@ def _load_cache_helpers() -> dict:
             "vae",
         },
         "_REQUIRED_FILES_BY_HF_ID": {
-            "nvidia/Nemotron-Labs-Diffusion-8B": [
+            "org/adapter-model": [
                 "linear_spec_lora/adapter_config.json",
                 "linear_spec_lora/adapter_model.safetensors",
             ],
@@ -56,46 +73,30 @@ def _load_cache_helpers() -> dict:
     return namespace
 
 
-def test_magpie_reference_dependencies_are_warmed() -> None:
+def test_family_reference_dependencies_are_metadata_driven() -> None:
     text = WARM_HF_CACHE.read_text()
-    assert "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps" in text
-    assert "google/byt5-small" in text
-    assert "microsoft/wavlm-base-plus" in text
+    assert "_family_hf_warm_dependencies" in text
+    assert "family_hf_warm_dependencies" in text
+    for value in _family_metadata_values("hf_warm_dependencies"):
+        assert value not in text
 
 
-def test_nemotron_labs_diffusion_lora_files_are_warmed() -> None:
+def test_required_hf_files_are_metadata_driven() -> None:
     text = WARM_HF_CACHE.read_text()
     assert '"chat_template.jinja"' in text
     assert '"linear_spec_lora/**"' in text
-    assert '"linear_spec_lora/adapter_config.json"' in text
-    assert '"linear_spec_lora/adapter_model.safetensors"' in text
+    assert "family_hf_required_files_by_id" in text
+    assert "adapter_config.json" not in text
+    assert "adapter_model.safetensors" not in text
 
 
-def test_clip_metric_comparator_weights_are_warmed() -> None:
+def test_family_file_assets_are_metadata_driven() -> None:
     text = WARM_HF_CACHE.read_text()
-    assert "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" in text
-    assert "open_clip_pytorch_model.bin" in text
-    assert "Warming comparator assets" in text
-
-
-def test_clip_metric_assets_only_needed_for_image_diffusion() -> None:
-    helpers = _load_cache_helpers()
-    needs_clip = helpers["_manifest_needs_clip_metrics"]
-
-    assert needs_clip({
-        "runtime_strategy": "diffusion_qwen_image",
-        "video_num_frames": 1,
-    })
-    assert needs_clip({
-        "task_strategy": "diffusion_media_generation",
-    })
-    assert not needs_clip({
-        "runtime_strategy": "diffusion_wan",
-        "video_num_frames": 16,
-    })
-    assert not needs_clip({
-        "runtime_strategy": "decoder_kv_cache",
-    })
+    assert "_family_hf_warm_files" in text
+    assert "family_hf_warm_files" in text
+    assert "Warming family file assets" in text
+    for value in _family_metadata_values("hf_warm_files"):
+        assert value not in text
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
@@ -112,11 +113,11 @@ def test_diffusers_snapshot_requires_component_weights(tmp_path: Path) -> None:
     (snapshot / "text_encoder").mkdir(parents=True)
     (snapshot / "transformer").mkdir()
     (snapshot / "model_index.json").write_text(json.dumps({
-        "_class_name": "FluxPipeline",
+        "_class_name": "SyntheticDiffusionPipeline",
         "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
         "text_encoder": ["transformers", "T5EncoderModel"],
         "tokenizer": ["transformers", "T5TokenizerFast"],
-        "transformer": ["diffusers", "FluxTransformer2DModel"],
+        "transformer": ["diffusers", "SyntheticTransformer2DModel"],
         "vae": ["diffusers", "AutoencoderKL"],
     }))
     (snapshot / "text_encoder" / "model.safetensors").write_bytes(b"weights")
@@ -136,11 +137,11 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
     (snapshot / "transformer").mkdir()
     (snapshot / "vae").mkdir()
     (snapshot / "model_index.json").write_text(json.dumps({
-        "_class_name": "FluxPipeline",
+        "_class_name": "SyntheticDiffusionPipeline",
         "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
         "text_encoder": ["transformers", "T5EncoderModel"],
         "tokenizer": ["transformers", "T5TokenizerFast"],
-        "transformer": ["diffusers", "FluxTransformer2DModel"],
+        "transformer": ["diffusers", "SyntheticTransformer2DModel"],
         "vae": ["diffusers", "AutoencoderKL"],
     }))
     (snapshot / "text_encoder" / "model.safetensors").write_bytes(b"weights")
@@ -153,7 +154,7 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
     assert helpers["_snapshot_has_required_files"](snapshot)
 
 
-def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) -> None:
+def test_snapshot_requires_declared_extra_files(tmp_path: Path) -> None:
     helpers = _load_cache_helpers()
     snapshot = tmp_path / "snapshots" / "abc"
     snapshot.mkdir(parents=True)
@@ -161,17 +162,17 @@ def test_nemotron_labs_diffusion_snapshot_requires_lora_adapter(tmp_path: Path) 
     (snapshot / "model.safetensors").write_bytes(b"weights")
 
     assert not helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+        snapshot, hf_id="org/adapter-model")
 
     lora_dir = snapshot / "linear_spec_lora"
     lora_dir.mkdir()
     (lora_dir / "adapter_config.json").write_text("{}")
     assert not helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+        snapshot, hf_id="org/adapter-model")
 
     (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
     assert helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="nvidia/Nemotron-Labs-Diffusion-8B")
+        snapshot, hf_id="org/adapter-model")
 
 
 def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:

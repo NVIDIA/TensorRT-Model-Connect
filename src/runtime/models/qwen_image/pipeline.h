@@ -13,7 +13,7 @@
 // Trace: ARCH-FAM-001, UD-FAM-QWEN-IMAGE-01.
 // =============================================================================
 
-#include "runtime/domains/diffusion/qwen_image_types.h"
+#include "runtime/models/qwen_image/qwen_image_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -50,6 +50,7 @@ class QwenImagePipeline final : public IPipeline {
     explicit QwenImagePipeline(Construction c);
     ~QwenImagePipeline() override;
 
+    bool supports_image_generation() const override { return true; }
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
     ImageResult generate_image(const std::string& prompt, const float* image_pixels,
                                int32_t image_height, int32_t image_width,
@@ -124,7 +125,7 @@ class QwenImagePipeline final : public IPipeline {
     // pad to text_encoder.max_seq_len, run the text encoder, drop the first
     // prompt_template_drop_idx hidden_state rows, and zero-pad back to
     // denoiser.max_text_tokens × text_embed_dim. Mirrors
-    // QwenImageDebugRunner._encode_prompt in debug_runner.py.
+    // QwenImageDebugRunner._encode_prompt in families/qwen_image/debug_runner.py.
     //
     // Throws std::runtime_error on missing engine/tokenizer or when the
     // tokenized template+prompt has ≤ drop_idx valid tokens.
@@ -196,7 +197,7 @@ class QwenImagePipeline final : public IPipeline {
     // VAE decoder engine, and convert the [-1, 1] image into the HWC float32
     // [0, 1] layout used by ImageResult (matches FLUX / Z-Image).
     //
-    // Mirrors QwenImageDebugRunner._vae_decode (debug_runner.py).
+    // Mirrors QwenImageDebugRunner._vae_decode (families/qwen_image/debug_runner.py).
     // -------------------------------------------------------------------------
     struct DecodedImage {
         std::vector<float> pixels; // [H * W * 3] HWC float32 in [0, 1]

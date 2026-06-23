@@ -5,6 +5,7 @@
   "bundle": "minitron-4b-width-l0.trtfb",
   "family": "llama",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
   "ci_tier": "l0_only",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

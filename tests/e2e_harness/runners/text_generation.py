@@ -1,8 +1,6 @@
 """Text generation causal strategy runner -- TRT inference via C++ binary and debug runner.
 
-Handles decoder_kv_cache, decoder_moe, ssm_recurrent, rwkv_recurrent, and
-hybrid_mamba_attention runtime strategies, all of which map to
-task_strategy="text_generation_causal".
+Handles runtime strategies that map to task_strategy="text_generation_causal".
 
 Supported stages:
     - "full_generation": C++ binary inference + debug runner logits (both prefill + decode)
@@ -543,12 +541,6 @@ class TextGenerationCausalRunner:
                 cmd.extend(["--top-k", str(inputs["top_k"])])
             if inputs.get("seed", -1) >= 0:
                 cmd.extend(["--seed", str(inputs["seed"])])
-            if inputs.get("generation_mode"):
-                cmd.extend(["--generation-mode", str(inputs["generation_mode"])])
-            if inputs.get("block_length", 0):
-                cmd.extend(["--block-length", str(inputs["block_length"])])
-            if inputs.get("threshold") is not None:
-                cmd.extend(["--threshold", str(inputs["threshold"])])
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})

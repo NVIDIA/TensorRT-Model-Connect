@@ -63,10 +63,10 @@ void test_version_aliases() {
 
 void test_build_forwards_args_verbatim() {
     auto args =
-        parse({"trtmc", "build", "Qwen/Qwen3-0.6B", "-o", "out.trtfb", "--precision", "fp16"});
+        parse({"trtmc", "build", "Example/Decoder-0.6B", "-o", "out.trtfb", "--precision", "fp16"});
     check(args.command == "build", "build command");
     check(args.build_args.size() == 5, "build forwards arg count");
-    check(args.build_args[0] == "Qwen/Qwen3-0.6B", "build forwards model");
+    check(args.build_args[0] == "Example/Decoder-0.6B", "build forwards model");
     check(args.build_args[4] == "fp16", "build forwards final value");
 }
 

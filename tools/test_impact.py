@@ -10,188 +10,33 @@ Usage:
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
     python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/text_generation/plugin.cpp
-    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/qwen/plugin.py --cap 15
+    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/example/plugin.py --cap 15
 """
 
 import argparse
+import ast
 import json
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
-# Constants -- strategy mappings (mirrored from e2e_harness/contracts.py)
+# Constants -- strategy mappings
 # ---------------------------------------------------------------------------
 
-RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
-    "decoder_kv_cache": "text_generation_causal",
-    "decoder_moe": "text_generation_causal",
-    "ssm_recurrent": "text_generation_causal",
-    "rwkv_recurrent": "text_generation_causal",
-    "hybrid_mamba_attention": "text_generation_causal",
-    "nemotron_labs_diffusion": "text_generation_causal",
-    "vision_language": "vision_language_generation",
-    "speech_to_text": "speech_to_text",
-    "speech_to_text_rnnt": "speech_to_text",
-    "text_to_audio": "text_to_audio",
-    "text_to_audio_bark": "text_to_audio",
-    "text_to_audio_magpie": "text_to_audio",
-    "speech_to_speech": "speech_to_speech",
-    "segmentation": "segmentation",
-    "prompted_segmentation": "prompted_segmentation",
-    "image_classification": "image_classification",
-    "object_detection": "object_detection",
-    "embedding": "embedding",
-    "reranking": "reranking",
-    "encoder_only": "encoder_only_nlp",
-    "neural_operator": "neural_operator",
-    "patchtst_trt": "neural_operator",
-    "patchtsmixer_trt": "neural_operator",
-    "timesfm_trt": "neural_operator",
-    "chronos_bolt_trt": "neural_operator",
-    "elf_flow": "diffusion_text_generation",
-    "diffusion": "diffusion_media_generation",
-    "diffusion_flux": "diffusion_media_generation",
-    "diffusion_ltx": "diffusion_media_generation",
-    "diffusion_wan": "diffusion_media_generation",
-    "diffusion_zimage": "diffusion_media_generation",
-    "diffusion_qwen_image": "diffusion_media_generation",
-    "diffusion_pixart": "diffusion_media_generation",
-    "omni_multimodal": "omni_multimodal",
-    "text_to_text": "text_generation_causal",
-    "marian_translation": "text_generation_causal",
-    "seq2seq_encoder_decoder": "text_generation_causal",
-}
-
-# C++ plugin filename (stem) -> registered runtime_strategies
-CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
-    "decoder_plugin": ["decoder_kv_cache", "decoder_moe"],
-    "ssm_plugin": ["ssm_recurrent"],
-    "rwkv_plugin": ["rwkv_recurrent"],
-    "hybrid_plugin": ["hybrid_mamba_attention"],
-    "vl_plugin": ["vision_language"],
-    "whisper_plugin": ["speech_to_text"],
-    "rnnt_plugin": ["speech_to_text_rnnt"],
-    "bark_plugin": ["text_to_audio_bark"],
-    "magpie_plugin": ["text_to_audio_magpie"],
-    "speech_plugin": ["speech_to_speech"],
-    "encoder_plugin": ["encoder_only", "embedding", "reranking", "neural_operator"],
-    "elf_flow_plugin": ["elf_flow"],
-    "segmentation_plugin": ["segmentation", "prompted_segmentation"],
-    "object_detection_plugin": ["object_detection"],
-    "omni_plugin": ["omni_multimodal"],
-    "flux_plugin": ["diffusion_flux"],
-    "ltx_video_plugin": ["diffusion_ltx"],
-    "wan_plugin": ["diffusion_wan"],
-    "pixart_plugin": ["diffusion_pixart"],
-    "zimage_plugin": ["diffusion_zimage"],
-    "qwen_image_plugin": ["diffusion_qwen_image"],
-    "t5_plugin": ["text_to_text"],
-    "marian_plugin": ["marian_translation"],
-    "seq2seq_plugin": ["seq2seq_encoder_decoder"],
-}
-
-# C++ pipeline filename (stem) -> runtime_strategies it serves
-CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
-    "text_generation_pipeline": ["decoder_kv_cache", "decoder_moe"],
-    "recurrent_pipeline": ["ssm_recurrent", "rwkv_recurrent", "hybrid_mamba_attention"],
-    "vl_pipeline": ["vision_language"],
-    # Audio/speech pipelines — each has its own .cpp file (no shared audio_pipeline.cpp):
-    "whisper_pipeline": ["speech_to_text"],
-    "rnnt_pipeline": ["speech_to_text_rnnt"],
-    "bark_pipeline": ["text_to_audio_bark"],
-    "magpie_pipeline": ["text_to_audio_magpie"],
-    "speech_pipeline": ["speech_to_speech"],
-    "omni_pipeline": ["omni_multimodal"],
-    # Segmentation pipelines — separate files, not part of encoder_pipeline:
-    "segment_pipeline": ["segmentation"],
-    "sam_pipeline": ["prompted_segmentation"],
-    "image_classification_pipeline": ["image_classification"],
-    "encoder_pipeline": [
-        "encoder_only", "embedding", "reranking", "neural_operator",
-        "object_detection",
-    ],
-    "elf_flow_pipeline": ["elf_flow"],
-    "flux_pipeline": ["diffusion_flux"],
-    "ltx_video_pipeline": ["diffusion_ltx"],
-    "wan_pipeline": ["diffusion_wan"],
-    "pixart_pipeline": ["diffusion_pixart"],
-    "z_image_pipeline": ["diffusion_zimage"],
-    "qwen_image_pipeline": ["diffusion_qwen_image"],
-    "diffusion_pipeline": [
-        "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage", "diffusion_qwen_image",
-    ],
-}
-
-# E2E runner filename (stem) -> task_strategies
-RUNNER_TASK_STRATEGIES: Dict[str, List[str]] = {
-    "text_generation": ["text_generation_causal"],
-    "vision_language": ["vision_language_generation"],
-    "audio_speech": ["speech_to_text", "text_to_audio", "speech_to_speech"],
-    "diffusion": ["diffusion_media_generation"],
+# Shared placeholder sidecars intentionally contain no plugin object. Their
+# concrete behavior lives in model-owned E2E plugins; these fallback routes keep
+# changes scoped to the same task while preserving the zero-false-negative rule.
+RUNNER_TASK_STRATEGY_FALLBACKS: Dict[str, List[str]] = {
     "diffusion_text_generation": ["diffusion_text_generation"],
     "image_classification": ["image_classification"],
-    "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
-    "embedding": ["embedding"],
-    "reranking": ["reranking"],
-    "encoder_only": ["encoder_only_nlp"],
-    "omni": ["omni_multimodal"],
-    "neural_operator": ["neural_operator"],
 }
-
-# E2E comparator filename (stem) -> task_strategies
-COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
-    "text": ["text_generation_causal"],
-    "vision_language": ["vision_language_generation"],
-    "speech_to_text": ["speech_to_text"],
-    "text_to_audio": ["text_to_audio"],
-    "speech_to_speech": ["speech_to_speech"],
-    "encoder_only": ["encoder_only_nlp"],
-    "embedding": ["embedding"],
-    "reranking": ["reranking"],
-    "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
-    "image_classification": ["image_classification"],
-    "diffusion": ["diffusion_media_generation"],
+COMPARATOR_TASK_STRATEGY_FALLBACKS: Dict[str, List[str]] = {
     "diffusion_text_generation": ["diffusion_text_generation"],
-    "omni": ["omni_multimodal"],
-    "neural_operator": ["neural_operator"],
-}
-
-# E2E contract plugin filename (stem) -> task_strategies
-PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
-    "asr": ["speech_to_text"],
-    "diffusion": ["diffusion_media_generation"],
-    "vl_qa": ["vision_language_generation"],
-    "multimodal_chat": ["omni_multimodal"],
-    "segmentation": ["segmentation", "prompted_segmentation", "object_detection"],
-    "time_series_regression": ["neural_operator"],
-    "time_series_classification": ["neural_operator"],
-    "tts": ["text_to_audio"],
-    "elf_diffusion_text": ["diffusion_text_generation"],
-}
-
-# E2E reference filename (stem) -> task_strategies
-REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
-    "hf_transformers": [
-        "text_generation_causal", "vision_language_generation", "text_to_audio",
-        "speech_to_text", "encoder_only_nlp", "embedding", "reranking",
-        "segmentation", "prompted_segmentation", "image_classification",
-        "object_detection",
-    ],
-    "hf_diffusers": ["diffusion_media_generation"],
-    "torch_reference": ["speech_to_speech", "omni_multimodal", "neural_operator"],
-}
-
-# E2E threshold profile filename (stem) -> task_strategies
-THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
-    "diffusion_media_generation": ["diffusion_media_generation"],
-    "vision_language_generation": ["vision_language_generation"],
-    "omni_multimodal": ["omni_multimodal"],
-    "segmentation": ["segmentation"],
+    "image_classification": ["image_classification"],
 }
 
 # Third-party image loaders are used by image/video-producing or image-consuming
@@ -222,12 +67,6 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
     "debug_runner", "diffusion_runner",
-}
-
-# Python profile names normally match a model family. Aliases cover profiles
-# that install package-level dependencies shared by a more specific family.
-PYTHON_PROFILE_TO_FAMILIES: Dict[str, List[str]] = {
-    "chronos": ["chronos_bolt"],
 }
 
 # Patterns for files that never affect E2E or unit tests
@@ -274,6 +113,15 @@ class RuleMatch:
     rebuild_cpp: bool
 
 
+@dataclass(frozen=True)
+class ModelOwnedDiffRuleSpec:
+    owner: str
+    name: str
+    path: str
+    allowed_tokens: Tuple[str, ...]
+    scope: Dict[str, Any]
+
+
 @dataclass
 class ImpactMap:
     family_to_models: Dict[str, List[str]]
@@ -291,6 +139,12 @@ class ImpactMap:
     path_scope_overrides: Dict[str, List[str]]
     l0_replacement_by_model: Dict[str, str]
     reference_family_to_models: Dict[str, List[str]]
+    model_owned_diff_rules: Tuple[ModelOwnedDiffRuleSpec, ...]
+    runner_task_strategies: Dict[str, List[str]]
+    comparator_task_strategies: Dict[str, List[str]]
+    reference_task_strategies: Dict[str, List[str]]
+    plugin_task_strategies: Dict[str, List[str]]
+    threshold_profile_task_strategies: Dict[str, List[str]]
 
 
 @dataclass
@@ -389,83 +243,317 @@ def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
     return scoped
 
 
-def _scan_contract_reference_families(
-    contracts_path: Path,
-    known_models: Set[str],
-) -> Dict[str, List[str]]:
-    """Build ReferenceFamily value -> models from the static contract table."""
-    try:
-        text = contracts_path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-
-    reference_family_block = re.search(
-        r"class\s+ReferenceFamily\([^)]*\):(?P<body>.*?)(?=^class\s+\w+\()",
-        text,
-        re.M | re.S,
-    )
-    if reference_family_block is None:
-        return {}
-
-    enum_values: Dict[str, str] = {}
-    for match in re.finditer(
-        r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*\"([^\"]+)\"",
-        reference_family_block.group("body"),
-        re.M,
-    ):
-        enum_values[match.group(1)] = match.group(2)
-
-    models_by_reference_family: Dict[str, Set[str]] = {}
-    for match in re.finditer(
-        r"\"([^\"]+)\"\s*:\s*(?:\(\s*)?ReferenceFamily\.([A-Z0-9_]+)\.value",
-        text,
-        re.S,
-    ):
-        model, enum_name = match.groups()
-        reference_family = enum_values.get(enum_name)
-        if reference_family and model in known_models:
-            models_by_reference_family.setdefault(reference_family, set()).add(model)
-
-    return {
-        reference_family: sorted(models)
-        for reference_family, models in models_by_reference_family.items()
-    }
-
-
-def _iter_manifest_data_paths(value: object) -> List[str]:
-    """Return repo-relative tests/e2e/data paths referenced by a manifest."""
-    paths: Set[str] = set()
-    if isinstance(value, dict):
-        for child in value.values():
-            paths.update(_iter_manifest_data_paths(child))
-    elif isinstance(value, list):
-        for child in value:
-            paths.update(_iter_manifest_data_paths(child))
-    elif isinstance(value, str):
-        normalized = value.strip().replace("\\", "/")
-        if normalized.startswith("tests/e2e/data/"):
-            paths.add(normalized)
-        elif normalized.startswith("data/"):
-            paths.add(f"tests/e2e/{normalized}")
-    return sorted(paths)
+def _scan_model_owned_diff_rules(models_dir: Path) -> Tuple[ModelOwnedDiffRuleSpec, ...]:
+    """Load model-owned diff narrowing rules from tests/e2e/models/<id>."""
+    specs: List[ModelOwnedDiffRuleSpec] = []
+    if not models_dir.is_dir():
+        return ()
+    for rules_path in sorted(models_dir.glob("*/impact_diff_rules.json")):
+        owner = rules_path.parent.name
+        try:
+            raw_rules = json.loads(rules_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid model-owned impact rules {rules_path}: {exc}") from exc
+        if not isinstance(raw_rules, list):
+            raise ValueError(f"{rules_path}: expected a list of impact rule objects")
+        for index, raw in enumerate(raw_rules, start=1):
+            if not isinstance(raw, dict):
+                raise ValueError(f"{rules_path}:{index}: expected an impact rule object")
+            name = raw.get("name")
+            path = raw.get("path")
+            allowed_tokens = raw.get("allowed_tokens")
+            scope = raw.get("scope")
+            if not (
+                isinstance(name, str)
+                and isinstance(path, str)
+                and isinstance(allowed_tokens, list)
+                and isinstance(scope, dict)
+            ):
+                raise ValueError(
+                    f"{rules_path}:{index}: expected string name/path, list "
+                    "allowed_tokens, and object scope"
+                )
+            tokens = tuple(
+                token for token in allowed_tokens if isinstance(token, str)
+            )
+            if len(tokens) != len(allowed_tokens) or not tokens:
+                raise ValueError(
+                    f"{rules_path}:{index}: allowed_tokens must be a non-empty "
+                    "list of strings"
+                )
+            specs.append(ModelOwnedDiffRuleSpec(owner, name, path, tokens, scope))
+    return tuple(specs)
 
 
 def _iter_e2e_manifest_paths(models_dir: Path) -> List[Path]:
-    """Return E2E manifests from flat and model-owned layouts."""
+    """Return flat legacy and model-owned E2E manifest paths."""
     if not models_dir.is_dir():
         return []
-    return sorted({
-        *models_dir.glob("*.json"),
-        *models_dir.glob("*/manifests/*.json"),
-    })
+    paths = set(models_dir.glob("*.json"))
+    paths.update(models_dir.glob("*/manifests/*.json"))
+    return sorted(paths)
+
+
+_MODEL_ASSET_FIELDS = {
+    "test_image",
+    "test_input_audio",
+    "speech_reference_tokens",
+    "golden_snapshot_path",
+    "edit_condition_image",
+    "fp8_scales",
+}
+
+
+def _manifest_asset_repo_path(value: str, manifest_path: Path, models_dir: Path) -> str:
+    repo_root = models_dir.parent.parent.parent
+
+    def _repo_relative(path: Path) -> str:
+        try:
+            return path.relative_to(repo_root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("tests/e2e/"):
+        return normalized
+    if normalized.startswith("data/"):
+        if manifest_path.parent.name == "manifests":
+            family_dir = manifest_path.parent.parent
+            return _repo_relative(family_dir / normalized)
+        return _repo_relative(models_dir.parent / normalized)
+    if "/" not in normalized:
+        if manifest_path.parent.name == "manifests":
+            family_dir = manifest_path.parent.parent
+            return _repo_relative(family_dir / "data" / normalized)
+        return _repo_relative(models_dir.parent / "data" / normalized)
+    return normalized
+
+
+def _iter_manifest_data_paths(
+    value: object,
+    manifest_path: Path,
+    models_dir: Path,
+    key: str = "",
+) -> List[str]:
+    if isinstance(value, dict):
+        paths: List[str] = []
+        if "relative_to" in value and isinstance(value.get("path"), str):
+            paths.append(
+                _manifest_asset_repo_path(value["path"], manifest_path, models_dir)
+            )
+        for item_key, item_value in value.items():
+            paths.extend(
+                _iter_manifest_data_paths(item_value, manifest_path, models_dir, item_key)
+            )
+        return paths
+    if isinstance(value, list):
+        paths: List[str] = []
+        for item in value:
+            paths.extend(_iter_manifest_data_paths(item, manifest_path, models_dir, key))
+        return paths
+    if isinstance(value, str) and key in _MODEL_ASSET_FIELDS:
+        return [_manifest_asset_repo_path(value, manifest_path, models_dir)]
+    return []
+
+
+def _literal_method_returns(py_file: Path, method_names: Set[str]) -> List[str]:
+    """Return string literals returned by methods such as strategy_name."""
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+
+    values: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in method_names:
+            continue
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Return)
+                and isinstance(child.value, ast.Constant)
+                and isinstance(child.value.value, str)
+                and child.value.value
+            ):
+                values.add(child.value.value)
+    return sorted(values)
+
+
+def _literal_string_list(value: ast.AST) -> List[str]:
+    if not isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return []
+    strings: Set[str] = set()
+    for item in value.elts:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+            if item.value:
+                strings.add(item.value)
+    return sorted(strings)
+
+
+def _target_name(target: ast.AST) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _literal_string_list_assignments(
+    py_file: Path,
+    assignment_names: Set[str],
+) -> Dict[str, List[str]]:
+    """Return literal string-list assignments such as reference_families."""
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return {}
+
+    assignments: Dict[str, List[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                name = _target_name(target)
+                if name in assignment_names:
+                    values = _literal_string_list(node.value)
+                    if values:
+                        assignments[name] = values
+        elif isinstance(node, ast.AnnAssign):
+            name = _target_name(node.target)
+            if name in assignment_names:
+                values = _literal_string_list(node.value)
+                if values:
+                    assignments[name] = values
+    return assignments
+
+
+def _literal_string_dict_assignment(py_file: Path, name: str) -> Dict[str, str]:
+    """Return a literal string->string dict assignment from a Python file."""
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return {}
+
+    for node in ast.walk(tree):
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            if any(_target_name(target) == name for target in node.targets):
+                value = node.value
+        elif isinstance(node, ast.AnnAssign) and _target_name(node.target) == name:
+            value = node.value
+        if value is None:
+            continue
+        try:
+            raw = ast.literal_eval(value)
+        except (TypeError, ValueError, SyntaxError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        return {
+            key: val
+            for key, val in raw.items()
+            if isinstance(key, str) and isinstance(val, str)
+        }
+    return {}
+
+
+def _scan_harness_task_strategy_modules(
+    directory: Path,
+    *,
+    method_names: Set[str],
+    fallbacks: Dict[str, List[str]] | None = None,
+) -> Dict[str, List[str]]:
+    """Build file-stem -> task strategies from plugin source metadata."""
+    routes: Dict[str, List[str]] = {}
+    if not directory.is_dir():
+        return dict(fallbacks or {})
+
+    for py_file in sorted(directory.glob("*.py")):
+        stem = py_file.stem
+        if stem.startswith("_") or stem.startswith("test_") or stem == "__init__":
+            continue
+        strategies = _literal_method_returns(py_file, method_names)
+        if strategies:
+            routes[stem] = strategies
+
+    for stem, strategies in (fallbacks or {}).items():
+        routes.setdefault(stem, list(strategies))
+    return routes
+
+
+def _scan_harness_reference_modules(
+    directory: Path,
+    reference_backend_to_task_strategies: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """Build reference backend file-stem -> task strategies from backend_name."""
+    routes: Dict[str, List[str]] = {}
+    if not directory.is_dir():
+        return routes
+
+    for py_file in sorted(directory.glob("*.py")):
+        stem = py_file.stem
+        if stem.startswith("_") or stem.startswith("test_") or stem == "__init__":
+            continue
+        strategies: Set[str] = set()
+        for backend in _literal_method_returns(py_file, {"backend_name"}):
+            strategies.update(reference_backend_to_task_strategies.get(backend, []))
+        if strategies:
+            routes[stem] = sorted(strategies)
+    return routes
+
+
+def _scan_harness_contract_plugin_modules(
+    directory: Path,
+    reference_family_to_task_strategies: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """Build contract plugin file-stem -> task strategies from reference_families."""
+    routes: Dict[str, List[str]] = {}
+    if not directory.is_dir():
+        return routes
+
+    for py_file in sorted(directory.glob("*.py")):
+        stem = py_file.stem
+        if (
+            stem.startswith("_")
+            or stem.startswith("test_")
+            or stem in {"__init__", "base"}
+        ):
+            continue
+        assignments = _literal_string_list_assignments(
+            py_file, {"reference_families"})
+        strategies: Set[str] = set()
+        for reference_family in assignments.get("reference_families", []):
+            strategies.update(
+                reference_family_to_task_strategies.get(reference_family, []))
+        if strategies:
+            routes[stem] = sorted(strategies)
+    return routes
+
+
+def _threshold_profile_task_strategy_routes(
+    thresholds_dir: Path,
+    task_strategy_to_models: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """Map threshold profile file stems to matching task strategies."""
+    routes: Dict[str, List[str]] = {}
+    if not thresholds_dir.is_dir():
+        return routes
+    known_task_strategies = set(task_strategy_to_models)
+    for profile_path in sorted(thresholds_dir.glob("*.json")):
+        stem = profile_path.stem
+        if stem in known_task_strategies:
+            routes[stem] = [stem]
+    return routes
 
 
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
-    pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
+    harness_dir = repo_root / "tests" / "e2e_harness"
+    default_reference_backend_by_task = _literal_string_dict_assignment(
+        harness_dir / "manifest_loader.py", "_DEFAULT_REFERENCE_BACKEND")
 
     family_to_models: Dict[str, List[str]] = {}
     strategy_to_models: Dict[str, List[str]] = {}
@@ -473,6 +561,8 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     manifest_field_to_models_sets: Dict[str, Set[str]] = {}
     e2e_data_file_to_models_sets: Dict[str, Set[str]] = {}
     reference_family_to_models_sets: Dict[str, Set[str]] = {}
+    reference_family_to_task_strategies_sets: Dict[str, Set[str]] = {}
+    reference_backend_to_task_strategies_sets: Dict[str, Set[str]] = {}
     all_model_names: List[str] = []
     core_models: List[str] = []
     model_metadata: Dict[str, Dict] = {}
@@ -501,9 +591,11 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             family_to_models.setdefault(family, []).append(name)
         if runtime_strategy:
             strategy_to_models.setdefault(runtime_strategy, []).append(name)
-            task_strategy = RUNTIME_TO_TASK_STRATEGY.get(runtime_strategy, "")
-            if task_strategy:
-                task_strategy_to_models.setdefault(task_strategy, []).append(name)
+        task_strategy = data.get("task_strategy", "")
+        if isinstance(task_strategy, str) and task_strategy:
+            task_strategy_to_models.setdefault(task_strategy, []).append(name)
+        else:
+            task_strategy = ""
         if is_core:
             core_models.append(name)
         l0_replacement = data.get("l0_replacement")
@@ -512,21 +604,57 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         fp8_scales = data.get("fp8_scales")
         if isinstance(fp8_scales, str) and fp8_scales:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
-            e2e_data_file_to_models_sets.setdefault(
-                f"tests/e2e/data/{fp8_scales}", set()).add(name)
-        for data_path in _iter_manifest_data_paths(data):
+        for data_path in _iter_manifest_data_paths(data, manifest_path, models_dir):
             e2e_data_file_to_models_sets.setdefault(data_path, set()).add(name)
         reference_family = data.get("reference_family")
         if isinstance(reference_family, str) and reference_family:
             reference_family_to_models_sets.setdefault(reference_family, set()).add(name)
+            if task_strategy:
+                reference_family_to_task_strategies_sets.setdefault(
+                    reference_family, set()).add(task_strategy)
+        reference_backend = data.get("reference_backend")
+        if not isinstance(reference_backend, str) or not reference_backend:
+            reference_backend = (
+                default_reference_backend_by_task.get(task_strategy, "hf_transformers")
+                if task_strategy else ""
+            )
+        if reference_backend and task_strategy:
+            reference_backend_to_task_strategies_sets.setdefault(
+                reference_backend, set()).add(task_strategy)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
     cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
-    for reference_family, models in _scan_contract_reference_families(
-        repo_root / "tests" / "e2e_harness" / "contracts.py",
-        set(all_model_names),
-    ).items():
-        reference_family_to_models_sets.setdefault(reference_family, set()).update(models)
+    model_owned_diff_rules = _scan_model_owned_diff_rules(models_dir)
+    reference_family_to_task_strategies = {
+        key: sorted(values)
+        for key, values in reference_family_to_task_strategies_sets.items()
+    }
+    reference_backend_to_task_strategies = {
+        key: sorted(values)
+        for key, values in reference_backend_to_task_strategies_sets.items()
+    }
+    runner_task_strategies = _scan_harness_task_strategy_modules(
+        harness_dir / "runners",
+        method_names={"strategy_name"},
+        fallbacks=RUNNER_TASK_STRATEGY_FALLBACKS,
+    )
+    comparator_task_strategies = _scan_harness_task_strategy_modules(
+        harness_dir / "comparators",
+        method_names={"task_strategy"},
+        fallbacks=COMPARATOR_TASK_STRATEGY_FALLBACKS,
+    )
+    reference_task_strategies = _scan_harness_reference_modules(
+        harness_dir / "references",
+        reference_backend_to_task_strategies,
+    )
+    plugin_task_strategies = _scan_harness_contract_plugin_modules(
+        harness_dir / "plugins",
+        reference_family_to_task_strategies,
+    )
+    threshold_profile_task_strategies = _threshold_profile_task_strategy_routes(
+        harness_dir / "thresholds" / "defaults",
+        task_strategy_to_models,
+    )
 
     def _models_for_scoped_strategies(strategies: Set[str]) -> List[str]:
         models: Set[str] = set()
@@ -550,15 +678,6 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     }
     for path, token in scoped_cpp_tokens.items():
         strategies: Set[str] = set()
-        if pipelines_dir.is_dir():
-            for cpp_file in sorted(pipelines_dir.glob("*.cpp")):
-                try:
-                    content = cpp_file.read_text(encoding="utf-8")
-                except OSError:
-                    continue
-                if token not in content:
-                    continue
-                strategies.update(CPP_PIPELINE_STRATEGIES.get(cpp_file.stem, []))
         if runtime_models_dir.is_dir():
             for cpp_file in sorted(runtime_models_dir.glob("*/*.cpp")):
                 try:
@@ -598,6 +717,12 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             reference_family: sorted(models)
             for reference_family, models in reference_family_to_models_sets.items()
         },
+        model_owned_diff_rules=model_owned_diff_rules,
+        runner_task_strategies=runner_task_strategies,
+        comparator_task_strategies=comparator_task_strategies,
+        reference_task_strategies=reference_task_strategies,
+        plugin_task_strategies=plugin_task_strategies,
+        threshold_profile_task_strategies=threshold_profile_task_strategies,
     )
 
 # ---------------------------------------------------------------------------
@@ -871,12 +996,7 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
 
 
 def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    profile = _group(context)
-    families = PYTHON_PROFILE_TO_FAMILIES.get(profile, [profile])
-    models: Set[str] = set()
-    for family in families:
-        models.update(imap.family_to_models.get(family, []))
-    return sorted(models)
+    return sorted(imap.family_to_models.get(_group(context), []))
 
 
 def _e2e_model_threshold_models(context: RuleContext, imap: ImpactMap) -> List[str]:
@@ -926,16 +1046,6 @@ def _cpp_runtime_model_strategies(
     return imap.cpp_runtime_model_strategies.get(_group(context), [])
 
 
-def _cpp_plugin_strategies(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del imap
-    return CPP_PLUGIN_STRATEGIES.get(_group(context), [])
-
-
-def _cpp_pipeline_strategies(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del imap
-    return CPP_PIPELINE_STRATEGIES.get(_group(context), [])
-
-
 def _specialized_builder_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     families = imap.builder_to_families[_group(context)]
     models: Set[str] = set()
@@ -964,11 +1074,6 @@ def _model_owned_e2e_test_ids(models: List[str], imap: ImpactMap) -> List[str]:
     return [_model_owned_e2e_test_id(model, imap) for model in models]
 
 
-def _fp8_scale_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del context
-    return sorted(imap.manifest_field_to_models.get("fp8_scales", []))
-
-
 def _known_cpp_runtime_model(
     path: str, imap: ImpactMap, match: re.Match[str],
 ) -> bool:
@@ -995,54 +1100,44 @@ def _is_specialized_builder(
     return any(imap.family_to_models.get(family, []) for family in families)
 
 
-def _known_plugin_stem(
-    strategy_map: Dict[str, List[str]],
-    excluded_stems: Set[str],
-) -> RulePredicate:
+StrategyMapSource = (
+    Dict[str, List[str]] | Callable[[ImpactMap], Dict[str, List[str]]]
+)
+
+
+def _strategy_map(
+    strategy_map_source: StrategyMapSource,
+    imap: ImpactMap,
+) -> Dict[str, List[str]]:
+    if callable(strategy_map_source):
+        return strategy_map_source(imap)
+    return strategy_map_source
+
+
+def _known_task_strategy_stem(strategy_map_source: StrategyMapSource) -> RulePredicate:
     def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
-        del path, imap
+        del path
+        return bool(_strategy_map(strategy_map_source, imap).get(match.group(1), []))
+
+    return _predicate
+
+
+def _unknown_task_strategy_stem(strategy_map_source: StrategyMapSource) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path
         stem = match.group(1)
-        return stem not in excluded_stems and bool(strategy_map.get(stem, []))
-
-    return _predicate
-
-
-def _unknown_plugin_stem(
-    strategy_map: Dict[str, List[str]],
-) -> RulePredicate:
-    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
-        del path, imap
-        return not bool(strategy_map.get(match.group(1), []))
-
-    return _predicate
-
-
-def _known_task_strategy_stem(
-    strategy_map: Dict[str, List[str]],
-) -> RulePredicate:
-    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
-        del path, imap
-        return bool(strategy_map.get(match.group(1), []))
-
-    return _predicate
-
-
-def _unknown_task_strategy_stem(
-    strategy_map: Dict[str, List[str]],
-) -> RulePredicate:
-    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
-        del path, imap
-        stem = match.group(1)
-        return stem != "__init__" and not bool(strategy_map.get(stem, []))
+        return stem != "__init__" and not bool(
+            _strategy_map(strategy_map_source, imap).get(stem, []))
 
     return _predicate
 
 
 def _task_strategy_models_from_group(
-    strategy_map: Dict[str, List[str]],
+    strategy_map_source: StrategyMapSource,
 ) -> ModelsResolver:
     def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
-        return _models_for_task_strategies(strategy_map.get(_group(context), []), imap)
+        return _models_for_task_strategies(
+            _strategy_map(strategy_map_source, imap).get(_group(context), []), imap)
 
     return _resolver
 
@@ -1103,13 +1198,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=14,
             name="e2e_model_owned_test",
             matcher=_regex_rule(
-                r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|.*\.py$)"
+                r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|"
+                r"impact_diff_rules\.json$|[^/]+\.json$|.*\.py$)"
             ),
             resolver=_match_result("e2e_model_owned_test", _family_models),
             covered_by=("TestSafetyNet.test_e2e_model_owned_test_self",),
         ),
         ClassificationRule(
-            priority=13,
+            priority=16,
             name="family_unit_builder",
             matcher=lambda path, _imap: (
                 RuleContext(path) if _is_family_builder_test(path) else None
@@ -1168,7 +1264,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="python_profile_requirements",
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/"
-                r"python_profile_requirements/([^/]+)\.lock\.txt$"
+                r"families/([^/]+)/python_profile_requirements/[^/]+\.lock\.txt$"
             ),
             resolver=_match_result("python_profile_requirements", _python_profile_models),
             covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
@@ -1214,72 +1310,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
-            priority=130,
-            name="cpp_plugin_flux_runtime",
-            matcher=_regex_rule(r"src/runtime/plugins/(flux_plugin)\.cpp$"),
-            resolver=_match_result(
-                "cpp_plugin_flux_runtime",
-                _runtime_strategy_models(_cpp_plugin_strategies),
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=140,
-            name="cpp_plugin",
-            matcher=_regex_rule(
-                r"src/runtime/plugins/(\w+)\.cpp$",
-                _known_plugin_stem(CPP_PLUGIN_STRATEGIES, {"flux_plugin"}),
-            ),
-            resolver=_match_result(
-                "cpp_plugin",
-                _runtime_strategy_models(_cpp_plugin_strategies),
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=150,
-            name="cpp_plugin_unknown",
-            matcher=_regex_rule(
-                r"src/runtime/plugins/(\w+)\.cpp$",
-                _unknown_plugin_stem(CPP_PLUGIN_STRATEGIES),
-            ),
-            resolver=_match_result("cpp_plugin_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=160,
-            name="cpp_pipeline_flux_runtime",
-            matcher=_regex_rule(r"src/runtime/pipelines/(flux_pipeline)\.(h|cpp)$"),
-            resolver=_match_result(
-                "cpp_pipeline_flux_runtime",
-                _runtime_strategy_models(_cpp_pipeline_strategies),
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=170,
-            name="cpp_pipeline",
-            matcher=_regex_rule(
-                r"src/runtime/pipelines/(\w+)\.(h|cpp)$",
-                _known_plugin_stem(CPP_PIPELINE_STRATEGIES, {"flux_pipeline"}),
-            ),
-            resolver=_match_result(
-                "cpp_pipeline",
-                _runtime_strategy_models(_cpp_pipeline_strategies),
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=180,
-            name="cpp_pipeline_unknown",
-            matcher=_regex_rule(
-                r"src/runtime/pipelines/(\w+)\.(h|cpp)$",
-                _unknown_plugin_stem(CPP_PIPELINE_STRATEGIES),
-            ),
-            resolver=_match_result("cpp_pipeline_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
             priority=220,
             name="cpp_scoped_helper",
             matcher=_path_in_impact_map(lambda imap: imap.path_scope_overrides),
@@ -1321,11 +1351,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_runner",
             matcher=_regex_rule(
                 r"tests/e2e_harness/runners/(\w+)\.py$",
-                _known_task_strategy_stem(RUNNER_TASK_STRATEGIES),
+                _known_task_strategy_stem(lambda imap: imap.runner_task_strategies),
             ),
             resolver=_match_result(
                 "harness_runner",
-                _task_strategy_models_from_group(RUNNER_TASK_STRATEGIES),
+                _task_strategy_models_from_group(lambda imap: imap.runner_task_strategies),
             ),
             covered_by=("TestHarness.test_harness_runner",),
         ),
@@ -1334,7 +1364,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_runner_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/runners/(\w+)\.py$",
-                _unknown_task_strategy_stem(RUNNER_TASK_STRATEGIES),
+                _unknown_task_strategy_stem(lambda imap: imap.runner_task_strategies),
             ),
             resolver=_match_result("harness_runner_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1351,11 +1381,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_comparator",
             matcher=_regex_rule(
                 r"tests/e2e_harness/comparators/(\w+)\.py$",
-                _known_task_strategy_stem(COMPARATOR_TASK_STRATEGIES),
+                _known_task_strategy_stem(lambda imap: imap.comparator_task_strategies),
             ),
             resolver=_match_result(
                 "harness_comparator",
-                _task_strategy_models_from_group(COMPARATOR_TASK_STRATEGIES),
+                _task_strategy_models_from_group(
+                    lambda imap: imap.comparator_task_strategies),
             ),
             covered_by=("TestHarness.test_harness_comparator",),
         ),
@@ -1364,7 +1395,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_comparator_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/comparators/(\w+)\.py$",
-                _unknown_task_strategy_stem(COMPARATOR_TASK_STRATEGIES),
+                _unknown_task_strategy_stem(lambda imap: imap.comparator_task_strategies),
             ),
             resolver=_match_result("harness_comparator_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1381,11 +1412,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_reference",
             matcher=_regex_rule(
                 r"tests/e2e_harness/references/(\w+)\.py$",
-                _known_task_strategy_stem(REFERENCE_TASK_STRATEGIES),
+                _known_task_strategy_stem(lambda imap: imap.reference_task_strategies),
             ),
             resolver=_match_result(
                 "harness_reference",
-                _task_strategy_models_from_group(REFERENCE_TASK_STRATEGIES),
+                _task_strategy_models_from_group(
+                    lambda imap: imap.reference_task_strategies),
             ),
             covered_by=("TestHarness.test_torch_reference_includes_neural_operator_models",),
         ),
@@ -1394,7 +1426,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_reference_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/references/(\w+)\.py$",
-                _unknown_task_strategy_stem(REFERENCE_TASK_STRATEGIES),
+                _unknown_task_strategy_stem(lambda imap: imap.reference_task_strategies),
             ),
             resolver=_match_result("harness_reference_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1411,11 +1443,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_plugin",
             matcher=_regex_rule(
                 r"tests/e2e_harness/plugins/(\w+)\.py$",
-                _known_task_strategy_stem(PLUGIN_TASK_STRATEGIES),
+                _known_task_strategy_stem(lambda imap: imap.plugin_task_strategies),
             ),
             resolver=_match_result(
                 "harness_plugin",
-                _task_strategy_models_from_group(PLUGIN_TASK_STRATEGIES),
+                _task_strategy_models_from_group(lambda imap: imap.plugin_task_strategies),
             ),
             covered_by=("TestHarness.test_harness_plugin",),
         ),
@@ -1424,7 +1456,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_plugin_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/plugins/(\w+)\.py$",
-                _unknown_task_strategy_stem(PLUGIN_TASK_STRATEGIES),
+                _unknown_task_strategy_stem(lambda imap: imap.plugin_task_strategies),
             ),
             resolver=_match_result("harness_plugin_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1434,11 +1466,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_threshold_profile",
             matcher=_regex_rule(
                 r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
-                _known_task_strategy_stem(THRESHOLD_PROFILE_TASK_STRATEGIES),
+                _known_task_strategy_stem(
+                    lambda imap: imap.threshold_profile_task_strategies),
             ),
             resolver=_match_result(
                 "harness_threshold_profile",
-                _task_strategy_models_from_group(THRESHOLD_PROFILE_TASK_STRATEGIES),
+                _task_strategy_models_from_group(
+                    lambda imap: imap.threshold_profile_task_strategies),
             ),
             covered_by=("TestHarness.test_harness_threshold_profile",),
         ),
@@ -1447,7 +1481,8 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_threshold_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
-                _unknown_task_strategy_stem(THRESHOLD_PROFILE_TASK_STRATEGIES),
+                _unknown_task_strategy_stem(
+                    lambda imap: imap.threshold_profile_task_strategies),
             ),
             resolver=_match_result("harness_threshold_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1605,41 +1640,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestSafetyNet.test_cmake_no_e2e_models",),
         ),
         ClassificationRule(
-            priority=470,
+            priority=13,
             name="e2e_data_file",
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
-        ),
-        ClassificationRule(
-            priority=475,
-            name="asr_probe_data",
-            matcher=_regex_rule(r"tests/e2e/data/asr_probes/.+$"),
-            resolver=_match_result(
-                "asr_probe_data",
-                _task_strategy_models(["speech_to_text"]),
-            ),
-            covered_by=("TestE2EDataFiles.test_asr_probe_support_files_select_asr",),
-        ),
-        ClassificationRule(
-            priority=480,
-            name="fp8_gen_script",
-            matcher=_path_equals("scripts/_gen_fp8_bf16.py"),
-            resolver=_match_result(
-                "fp8_gen_script", _fp8_scale_models, [], False,
-            ),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=485,
-            name="elf_replay_tool",
-            matcher=_path_in({
-                "tools/make_elf_replay_artifact.py",
-                "tools/prepare_elf_model_dir.py",
-                "tools/validate_elf_replay_artifact.py",
-            }),
-            resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
-            covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
         ),
         ClassificationRule(
             priority=486,
@@ -1950,13 +1955,6 @@ def _diffusion_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(["diffusion_media_generation"], imap)
 
 
-def _sam3_models(imap: ImpactMap) -> List[str]:
-    models = imap.family_to_models.get("sam3", [])
-    if models:
-        return models
-    return ["sam3"] if "sam3" in imap.all_model_names_set else []
-
-
 def _segmentation_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(
         ["segmentation", "prompted_segmentation", "object_detection"], imap)
@@ -1966,6 +1964,28 @@ def _models_for_families(families: Tuple[str, ...], imap: ImpactMap) -> List[str
     models: Set[str] = set()
     for family in families:
         models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
+def _model_owned_scope_models(
+    spec: ModelOwnedDiffRuleSpec, imap: ImpactMap,
+) -> List[str]:
+    scope = spec.scope
+    models: Set[str] = set()
+    if bool(scope.get("owner_family")):
+        models.update(imap.family_to_models.get(spec.owner, []))
+    for model in scope.get("models", []):
+        if isinstance(model, str) and model in imap.all_model_names_set:
+            models.add(model)
+    for family in scope.get("families", []):
+        if isinstance(family, str):
+            models.update(imap.family_to_models.get(family, []))
+    for strategy in scope.get("runtime_strategies", []):
+        if isinstance(strategy, str):
+            models.update(imap.strategy_to_models.get(strategy, []))
+    for task_strategy in scope.get("task_strategies", []):
+        if isinstance(task_strategy, str):
+            models.update(imap.task_strategy_to_models.get(task_strategy, []))
     return sorted(models)
 
 
@@ -1982,11 +2002,6 @@ def _diff_identifier_fragments(line: str) -> Set[str]:
             if part:
                 fragments.add(part)
     return {fragment for fragment in fragments if fragment}
-
-
-def _models_for_profile_name(profile: str, imap: ImpactMap) -> List[str]:
-    families = PYTHON_PROFILE_TO_FAMILIES.get(profile, [profile])
-    return _models_for_families(tuple(families), imap)
 
 
 def _line_identifier_models(
@@ -2013,9 +2028,6 @@ def _line_identifier_models(
     for reference_family, reference_models in imap.reference_family_to_models.items():
         if _canonical_identifier(reference_family) in fragments:
             models.update(reference_models)
-    for profile in PYTHON_PROFILE_TO_FAMILIES:
-        if _canonical_identifier(profile) in fragments:
-            models.update(_models_for_profile_name(profile, imap))
     if include_task_strategies:
         for task_strategy, task_models in imap.task_strategy_to_models.items():
             if _canonical_identifier(task_strategy) in fragments:
@@ -2086,41 +2098,6 @@ def _candidate_models_from_diffs(
     return sorted(models)
 
 
-_PROFILE_METADATA_TOKENS: Tuple[str, ...] = (
-    "'''",
-    "architectures",
-    "build",
-    "config",
-    "context_length",
-    "ctor",
-    "d_ff",
-    "d_model",
-    "decoder_start_token_id",
-    "dropout_rate",
-    "eos_token_id",
-    "eval",
-    "family_defaults",
-    "import",
-    "input_patch_size",
-    "input_patch_stride",
-    "kind",
-    "num_decoder_layers",
-    "num_heads",
-    "num_layers",
-    "pad_token_id",
-    "prediction_length",
-    "print",
-    "profiles",
-    "quantiles",
-    "reference",
-    "requirements",
-    "system_site_packages",
-    "transformers",
-    "use_reg_token",
-    "venv",
-    "verification_script",
-)
-
 _HARNESS_REGISTRY_TOKENS: Tuple[str, ...] = (
     "args",
     "build",
@@ -2177,6 +2154,37 @@ class TokenDiffRefinementRule(DiffRefinementRule):
         return RuleMatch(
             self.name,
             self.models_for_impact(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+@dataclass(frozen=True)
+class ModelOwnedTokenDiffRefinementRule(DiffRefinementRule):
+    spec: ModelOwnedDiffRuleSpec
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        return (
+            path == self.spec.path
+            and _all_lines_match_tokens(lines, self.spec.allowed_tokens)
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines
+        return RuleMatch(
+            self.name,
+            _model_owned_scope_models(self.spec, imap),
             match.unit_tiers,
             match.rebuild_cpp,
         )
@@ -2279,136 +2287,6 @@ class CandidateTokenDiffRefinementRule(DiffRefinementRule):
         return RuleMatch(
             self.name,
             sorted(set(candidate_models)),
-            match.unit_tiers,
-            match.rebuild_cpp,
-        )
-
-
-@dataclass(frozen=True)
-class Sam3ReferenceDiffRefinementRule(DiffRefinementRule):
-    name: str = "harness_reference_sam3_prompted_segmentation"
-    path: str = "tests/e2e_harness/references/hf_transformers.py"
-
-    allowed_tokens: tuple[str, ...] = (
-        "_case_artifact_dir",
-        "_existing_path_reader",
-        "_json_output_reader",
-        "_reference_env",
-        "_resolve_cached_model_ref",
-        "_run_sam3_prompted_segmentation_ref",
-        "_torch_dtype_for_case",
-        "alpha",
-        "artifact_dir",
-        "autotokenizer",
-        "boxes",
-        "case",
-        "command",
-        "ctx",
-        "detach",
-        "device",
-        "do_convert_rgb",
-        "do_normalize",
-        "do_rescale",
-        "do_resize",
-        "env",
-        "eval",
-        "else",
-        "ear",
-        "except_oserror",
-        "failure_label",
-        "float",
-        "from_pretrained",
-        "hf_id",
-        "hf_sam3",
-        "image",
-        "image_arr",
-        "image_processor",
-        "image_processor_kwargs",
-        "image_path",
-        "image_url",
-        "instance_segmentation",
-        "isdir",
-        "isfile",
-        "json",
-        "label",
-        "load_sam3_processor",
-        "mask",
-        "model",
-        "model_card",
-        "model_ref",
-        "np.",
-        "numpy",
-        "original_sizes",
-        "output",
-        "overlay",
-        "os.",
-        "pil",
-        "pop",
-        "post_process_instance_segmentation",
-        "prompt",
-        "processor_error",
-        "processor_config",
-        "prompted_segmentation_sam3",
-        "python",
-        "raise",
-        "reference_python_path",
-        "reference_variant",
-        "requests",
-        "result",
-        "resample",
-        "run_reference_subprocess",
-        "sam3",
-        "sam3imageprocessorfast",
-        "sam3model",
-        "sam3processor",
-        "score",
-        "segmented",
-        "size",
-        "stage",
-        "sys.executable",
-        "target_size",
-        "target_sizes",
-        "text_prompt",
-        "textwrap",
-        "threshold",
-        "timeout_s",
-        "tokenizer",
-        "torch",
-        "try",
-        "trust_remote_code",
-        "rescale_factor",
-        "with_open",
-    )
-
-    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
-        del imap
-        if path != self.path:
-            return False
-        normalized_lines = [
-            _normalize_diff_line(line)
-            for line in lines
-            if any(ch.isalpha() for ch in _normalize_diff_line(line))
-        ]
-        if not normalized_lines:
-            return False
-        if not any("sam3" in line for line in normalized_lines):
-            return False
-        return all(
-            any(token in line for token in self.allowed_tokens)
-            for line in normalized_lines
-        )
-
-    def refine(
-        self,
-        path: str,
-        match: RuleMatch,
-        lines: List[str],
-        imap: ImpactMap,
-    ) -> RuleMatch:
-        del path, lines
-        return RuleMatch(
-            self.name,
-            _sam3_models(imap),
             match.unit_tiers,
             match.rebuild_cpp,
         )
@@ -2543,57 +2421,6 @@ class RuntimeStrategyMatrixRule(DiffRefinementRule):
         )
 
 
-class HarnessReferenceDprContextEncoderRule(DiffRefinementRule):
-    name = "harness_reference_dpr_context_encoder"
-    path = "tests/e2e_harness/references/hf_transformers.py"
-    dpr_tokens = (
-        "dpr",
-        "dprcontextencoder",
-        "dprcontextencodertokenizerfast",
-        "ctx_encoder",
-        "bert_model",
-        "autotokenizer.from_pretrained",
-        "automodel.from_pretrained",
-        "model_type",
-        "context",
-        "tokenizer",
-        "same_token_ids",
-        "tokenizer.json",
-        "trt_artifact",
-        "question_classes",
-        "wrong_class",
-        "dprquestionencoder",
-        "model_ref",
-        "trust_remote_code",
-    )
-
-    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
-        del imap
-        if path != self.path:
-            return False
-        normalized_lines = [_normalize_diff_line(line) for line in lines]
-        return (
-            all(any(token in line for token in self.dpr_tokens) for line in normalized_lines)
-            and any("dprcontextencodertokenizerfast" in line for line in normalized_lines)
-            and any("dprcontextencoder" in line for line in normalized_lines)
-        )
-
-    def refine(
-        self,
-        path: str,
-        match: RuleMatch,
-        lines: List[str],
-        imap: ImpactMap,
-    ) -> RuleMatch:
-        del path, lines, imap
-        return RuleMatch(
-            self.name,
-            ["dpr-ctx-encoder"],
-            match.unit_tiers,
-            match.rebuild_cpp,
-        )
-
-
 class HarnessReferenceVlGeneratedOnlyDecodeRule(DiffRefinementRule):
     name = "harness_reference_vl_generated_only_decode"
     path = "tests/e2e_harness/references/hf_transformers.py"
@@ -2711,11 +2538,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
             "version",
         ),
     ),
-    IdentifierDiffRefinementRule(
-        "python_profiles_known_profiles",
-        paths=("python/tensorrt_model_connect/python_profiles.toml",),
-        allowed_tokens=_PROFILE_METADATA_TOKENS,
-    ),
     CandidateTokenDiffRefinementRule(
         "shared_builder_config_lookup_family_registry",
         "python/tensorrt_model_connect/families/__init__.py",
@@ -2750,157 +2572,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
             "find_plugin(config.model_type)",
             "plugin",
         ),
-    ),
-    TokenDiffRefinementRule(
-        "sam3_public_prompted_segmentation_api",
-        "include/trtmc/pipeline.h",
-        (
-            "boxes",
-            "does_not_support_segment_prompted_text",
-            "image_height",
-            "image_pixels",
-            "image_width",
-            "pipeline_type",
-            "promptedsegmentationresult",
-            "segment_prompted_text",
-            "text_prompt",
-            "vector",
-        ),
-        _segmentation_task_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_engine_builder_metadata",
-        "python/tensorrt_model_connect/engine_builder.py",
-        (
-            "getattr(plugin",
-            "preprocessor_config.json",
-            "processor_config.json",
-            "requires_tokenizer",
-            "runtime_strategy",
-        ),
-        _sam3_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_segment_sam_cli_usage",
-        "src/cli/args.cpp",
-        (
-            "background",
-            "hf_python",
-            "point_x",
-            "point_y",
-            "prompt",
-            "segment-sam",
-        ),
-        _segmentation_task_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_segment_sam_cli_runtime",
-        "src/cli/main.cpp",
-        (
-            ".txt",
-            "args.prompt",
-            "box",
-            "else",
-            "image.height",
-            "image.pixels",
-            "image.width",
-            "is_foreground",
-            "mask_idx",
-            "out_dir",
-            "point_x",
-            "point_y",
-            "promptedsegmentationresult",
-            "result.boxes",
-            "segment_prompted",
-            "segment_prompted_text",
-            "setfill",
-            "setprecision",
-            "static_cast",
-            "std::",
-        ),
-        _segmentation_task_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_perception_config",
-        "src/runtime/domains/perception/perception_types.h",
-        (
-            "image_mean",
-            "image_size",
-            "image_std",
-            "class_map",
-            "low_res_mask_size",
-            "mask_threshold",
-            "masks",
-            "not_a_point_embed",
-            "num_mask_outputs",
-            "num_queries",
-            "point_embed_bg",
-            "point_embed_fg",
-            "sam3config",
-            "score_threshold",
-            "shared_image_pe",
-            "text_max_position_embeddings",
-            "text_pad_token_id",
-            "text_projection_dim",
-            "vector",
-        ),
-        _segmentation_task_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_bpe_end_of_word_suffix",
-        "src/tokenizer/bpe_tokenizer.cpp",
-        (
-            "byte_fallback",
-            "chars.back",
-            "end_of_word_suffix",
-            "get<std::string>",
-            "j[\"model\"].value",
-            "is_string",
-            "model.find",
-            "model.value",
-            "mendofwordsuffix",
-            "optional_model_string",
-            "return_{}",
-            "string",
-        ),
-        _sam3_models,
-    ),
-    TokenDiffRefinementRule(
-        "sam3_harness_contract",
-        "tests/e2e_harness/contracts.py",
-        (
-            "comparisonmode.mask_overlap",
-            "prompted_mask",
-            "prompted_segmentation_sam3",
-            "referencefamily.prompted_segmentation_sam3",
-            "sam3",
-            "usercontract.prompted_mask",
-        ),
-        _sam3_models,
-    ),
-    Sam3ReferenceDiffRefinementRule(),
-    TokenDiffRefinementRule(
-        "sam3_harness_repro_prompt",
-        "tests/e2e_harness/orchestrator.py",
-        (
-            "case.family_==_\"sam3\"",
-            "case.inputs.get(\"prompt\")",
-            "case.inputs.get(\"text_prompt\")",
-            "case.metadata.get(\"text_prompt\")",
-            "else:",
-            "if_is_sam3",
-            "if_not_case.inputs.get(\"is_foreground\"",
-            "if_not_is_sam3_and_not_case.inputs.get(\"is_foreground\"",
-            "infer_parts.extend([",
-            "infer_parts.extend([\"_prompt\"",
-            "is_sam3",
-            "or_\"\"",
-            "or_case.reference_family_==_\"prompted_segmentation_sam3\"",
-            "point_x",
-            "point_y",
-            "prompt_=_(",
-        ),
-        _sam3_models,
     ),
     IdentifierDiffRefinementRule(
         "harness_shared_known_identifiers",
@@ -3004,7 +2675,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         ),
         _diffusion_task_models,
     ),
-    HarnessReferenceDprContextEncoderRule(),
     HarnessReferenceVlGeneratedOnlyDecodeRule(),
     IdentifierDiffRefinementRule(
         "harness_reference_known_identifiers",
@@ -3095,6 +2765,24 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
 )
 
 
+def _diff_refinement_rules_for_impact(imap: ImpactMap) -> List[DiffRefinementRule]:
+    """Return shared rules plus model-owned rules at the generic handoff point."""
+    model_rules: List[DiffRefinementRule] = [
+        ModelOwnedTokenDiffRefinementRule(spec)
+        for spec in imap.model_owned_diff_rules
+    ]
+    rules: List[DiffRefinementRule] = []
+    inserted_model_rules = False
+    for rule in DIFF_REFINEMENT_RULES:
+        if not inserted_model_rules and rule.name == "harness_shared_known_identifiers":
+            rules.extend(model_rules)
+            inserted_model_rules = True
+        rules.append(rule)
+    if not inserted_model_rules:
+        rules.extend(model_rules)
+    return rules
+
+
 def maybe_refine_match_with_diff(
     path: str,
     match: RuleMatch,
@@ -3110,7 +2798,7 @@ def maybe_refine_match_with_diff(
     if candidate_models is None:
         candidate_models = []
 
-    for rule in DIFF_REFINEMENT_RULES:
+    for rule in _diff_refinement_rules_for_impact(imap):
         if isinstance(rule, CandidateTokenDiffRefinementRule):
             if rule.matches_with_candidates(path, lines, imap, candidate_models):
                 return rule.refine_with_candidates(
@@ -3212,7 +2900,7 @@ def _tracked_repo_paths(repo_root: Path) -> tuple[List[str], List[str]]:
     paths = [
         path.replace("\\", "/").strip("/")
         for path in result.stdout.splitlines()
-        if path.strip()
+        if path.strip() and (repo_root / path.strip()).exists()
     ]
     return sorted(paths), []
 
@@ -3330,12 +3018,11 @@ def validate_map(
             f"Core models don't cover task_strategies: {sorted(missing)}"
         )
 
-    # 4. Every runtime_strategy in manifests is in RUNTIME_TO_TASK_STRATEGY
-    for strategy in imap.strategy_to_models:
-        if strategy not in RUNTIME_TO_TASK_STRATEGY:
+    # 4. Every model manifest declares its task strategy locally.
+    for model, metadata in sorted(imap.model_metadata.items()):
+        if metadata.get("runtime_strategy") and not metadata.get("task_strategy"):
             errors.append(
-                f"Unknown runtime_strategy '{strategy}' in manifests "
-                f"(not in RUNTIME_TO_TASK_STRATEGY)"
+                f"Manifest for '{model}' declares runtime_strategy but no task_strategy"
             )
 
     # 5. L0 replacements must preserve the execution contract they stand in for.
@@ -3354,7 +3041,15 @@ def validate_map(
                     f"{field_name}: {src.get(field_name)!r} != {dst.get(field_name)!r}"
                 )
 
-    # 6. Every rule pattern matches at least one real file (spot checks)
+    # 6. Model-owned diff refinements must resolve to at least one known model.
+    for spec in imap.model_owned_diff_rules:
+        if not _model_owned_scope_models(spec, imap):
+            errors.append(
+                f"Model-owned impact rule '{spec.name}' in '{spec.owner}' "
+                "does not resolve to any E2E models"
+            )
+
+    # 7. Every rule pattern matches at least one real file (spot checks)
     spot_checks = {
         "families_dir": families_dir.is_dir(),
         "models_dir": (repo_root / "tests" / "e2e" / "models").is_dir(),

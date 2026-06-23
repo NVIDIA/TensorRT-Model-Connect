@@ -5,6 +5,7 @@
   "bundle": "internvl3-8b-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "reference_backend": "golden_snapshot",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
@@ -17,7 +18,11 @@
   "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
   "metadata": {
-    "golden_snapshot_path": "data/internvl3_8b_golden.json"
+    "golden_snapshot_path": "data/internvl3_8b_golden.json",
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true
+    }
   },
   "notes": "InternVL3 HF reference emits EOS-only text for this fixture under the CI Transformers stack. Nightly scale coverage validates the stable one-word VL answer against a golden snapshot while internvl3-2b keeps the smaller InternVL path in PR L0."
 }

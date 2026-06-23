@@ -3,9 +3,9 @@
 Recurrent/stateful decode implementations.
 
 Key files:
-- `mamba_*`: Mamba state types, single-step runtime, and generate loop.
-- `rwkv_*`: RWKV state types, single-step runtime, and generate loop.
-- `hybrid_backend.*`: hybrid Mamba+attention runtime path.
+- `two_state_*`: two-tensor recurrent state types, single-step runtime, and generate loop.
+- `multi_state_*`: multi-tensor recurrent state types, single-step runtime, and generate loop.
+- `hybrid_backend.*`: hybrid recurrent+attention runtime path.
 
 How to understand:
 1. Start with `*_backend.cpp` (`generate`).

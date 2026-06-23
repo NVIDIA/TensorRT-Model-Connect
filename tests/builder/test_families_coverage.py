@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-import sys
 import types
 
 import pytest
@@ -44,11 +43,11 @@ def test_find_diffusion_plugin_returns_first_pipeline_class_match(monkeypatch):
     Preconditions: registry contains multiple plugins that declare pipeline_classes.
     Postconditions: the first plugin listing the requested class is returned.
     """
-    first = _DummyFamilyPlugin(name="first", pipeline_classes=["FluxPipeline"])
-    second = _DummyFamilyPlugin(name="second", pipeline_classes=["FluxPipeline"])
+    first = _DummyFamilyPlugin(name="first", pipeline_classes=["SyntheticPipeline"])
+    second = _DummyFamilyPlugin(name="second", pipeline_classes=["SyntheticPipeline"])
     monkeypatch.setattr(families, "_ALL_PLUGINS", [first, second])
 
-    resolved = families.find_diffusion_plugin("FluxPipeline")
+    resolved = families.find_diffusion_plugin("SyntheticPipeline")
 
     assert resolved is first
 
@@ -61,11 +60,11 @@ def test_find_diffusion_plugin_returns_none_when_no_plugin_declares_class(monkey
     plugins = [
         _DummyFamilyPlugin(name="no_attr", pipeline_classes=None),
         _DummyFamilyPlugin(name="empty", pipeline_classes=[]),
-        _DummyFamilyPlugin(name="other", pipeline_classes=["StableDiffusionPipeline"]),
+        _DummyFamilyPlugin(name="other", pipeline_classes=["OtherSyntheticPipeline"]),
     ]
     monkeypatch.setattr(families, "_ALL_PLUGINS", plugins)
 
-    assert families.find_diffusion_plugin("FluxPipeline") is None
+    assert families.find_diffusion_plugin("SyntheticPipeline") is None
 
 
 def test_family_module_discovery_skips_private_base_import_errors_and_missing_plugin_attr(monkeypatch):
@@ -122,30 +121,38 @@ def test_find_plugin_returns_none_when_registry_has_no_match(monkeypatch):
     assert families.find_plugin("baz") is None
 
 
-def test_find_plugin_imports_only_candidate_family_for_qwen():
+def test_find_plugin_imports_only_candidate_family(monkeypatch):
     """Intent: normal lookup imports the target family, not every family package."""
     reloaded = importlib.reload(families)
-    for name in list(sys.modules):
-        if (
-            name.startswith("tensorrt_model_connect.families.")
-            and name != "tensorrt_model_connect.families.base"
-        ):
-            sys.modules.pop(name, None)
+    plugin = _DummyFamilyPlugin(
+        name="example_family",
+        matched_types=("example_model",),
+    )
+    loaded_families = []
+
+    def fake_load_plugin_from_module(module_name: str):
+        loaded_families.append(module_name)
+        return plugin if module_name == "example_family" else None
+
+    monkeypatch.setattr(reloaded, "load_plugin_by_id", lambda _model_type: None)
+    monkeypatch.setattr(
+        reloaded,
+        "_candidate_module_names",
+        lambda _model_type: ["example_family"],
+    )
+    monkeypatch.setattr(
+        reloaded,
+        "_load_plugin_from_module",
+        fake_load_plugin_from_module,
+    )
+    monkeypatch.setattr(reloaded, "_ensure_discovered", lambda: None)
     reloaded._PLUGIN_CACHE.clear()
 
-    resolved = reloaded.find_plugin("qwen3")
+    resolved = reloaded.find_plugin("example_model")
 
-    loaded_families = {
-        name.split(".")[2]
-        for name in sys.modules
-        if (
-            name.startswith("tensorrt_model_connect.families.")
-            and name != "tensorrt_model_connect.families.base"
-        )
-    }
     assert resolved is not None
-    assert resolved.name == "qwen"
-    assert loaded_families == {"qwen"}
+    assert resolved.name == "example_family"
+    assert loaded_families == ["example_family"]
 
 
 def test_base_protocol_required_method_bodies_are_executable_defaults():

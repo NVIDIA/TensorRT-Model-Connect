@@ -1,4 +1,15 @@
 id = "magpie"
 runtime_library = "libtrtmc_model_magpie.so"
 runtime_plugins = ["plugin.cpp|register_magpie_plugin"]
+runtime_config_schemas = ["config_schema.cpp|register_audio_magpie_schema"]
 runtime_strategies = ["text_to_audio_magpie"]
+legacy_runtime_strategy_aliases = ["text_to_audio|truthy|magpie_tts|_|text_to_audio_magpie"]
+gnu_warning_suppressed_sources = ["pipeline.cpp"]
+runtime_tests = [
+  "test_magpie_config_schema|test_magpie_config_schema.cpp|trtmc_model_magpie|_|_",
+  "test_magpie_decode_policy|test_magpie_decode_policy.cpp|_|_|_",
+  "test_magpie_decoder_plan|test_magpie_decoder_plan.cpp|_|_|_",
+  "test_magpie_text_completion_policy|test_magpie_text_completion_policy.cpp|_|_|_",
+  "test_magpie_codec_plan|test_magpie_codec_plan.cpp|_|_|_",
+  "test_magpie_pipeline|test_magpie_pipeline.cpp|trtmc_model_magpie|_|REQUIRES_TRT",
+]

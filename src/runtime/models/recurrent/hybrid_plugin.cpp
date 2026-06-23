@@ -2,8 +2,8 @@
 // Nemotron-H style models with interleaved attention and Mamba layers,
 // using KvCache for attention layers and RecurrentState for SSM layers.
 
-#include "runtime/models/recurrent/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/recurrent/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/hybrid_state.h"
 #include "trtmc/runtime/pipeline_registry.h"

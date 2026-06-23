@@ -1,8 +1,7 @@
 #pragma once
 
 // PixArtPipeline: TRT API PixArt diffusion pipeline.
-// Same engine format as WanPipeline (preprocessor_weights, T5 text encoder,
-// DiT denoiser, VAE decoder). Standalone copy — no delegation to WanPipeline.
+// Uses preprocessor weights, a T5 text encoder, DiT denoiser, and VAE decoder.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
 #include "trtmc/pipeline.h"
@@ -27,6 +26,7 @@ class PixArtPipeline final : public IPipeline {
 
     ~PixArtPipeline() override;
 
+    bool supports_image_generation() const override { return true; }
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }

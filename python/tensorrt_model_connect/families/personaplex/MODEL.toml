@@ -9,3 +9,6 @@ aliases = [
 prefixes = [
   "personaplex",
 ]
+hf_warm_dependencies = [
+  "personaplex-mimi-codec|kyutai/mimi",
+]

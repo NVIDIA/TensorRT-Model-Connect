@@ -487,11 +487,15 @@ class MagpieTTSPlugin:
         # audio_magpie.max_source_positions — build-time cap on the encoder
         # position embedding (smaller = proportionally less cross-attention
         # compute, e.g. 256 vs 2048 ≈ 8× less). Supplied through --set or a
-        # config profile; the engine builder stashes the resolved value on
-        # config.raw["_audio_magpie_max_source_positions"] before dispatching
-        # to this family. 0 means "keep the model default".
-        override_max_pos = int(config.raw.get(
-            "_audio_magpie_max_source_positions", 0))
+        # config profile. The shared builder only forwards opaque
+        # family_build_options; this family owns the audio_magpie namespace.
+        # 0 means "keep the model default".
+        family_options = config.raw.get("_family_build_options", {})
+        audio_options = (
+            family_options.get("audio_magpie", {})
+            if isinstance(family_options, dict) else {}
+        )
+        override_max_pos = int(audio_options.get("max_source_positions", 0) or 0)
         if 0 < override_max_pos < max_positions:
             print(f"[trtmc build]   Shrinking max_source_positions: "
                   f"{max_positions} -> {override_max_pos}", file=sys.stderr)

@@ -1,6 +1,7 @@
 id = "phi_moe"
 plugin = "phi_moe"
 module = "plugin"
+capabilities = ["disable_dual_profile_decoder"]
 aliases = [
   "phi_moe",
   "phimoe",

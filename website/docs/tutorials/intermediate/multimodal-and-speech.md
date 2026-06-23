@@ -62,7 +62,7 @@ Key ideas:
   --precision fp16
 
 ./build/trtmc transcribe /tmp/whisper.trtfb \
-  --audio tests/e2e/data/Recording.wav \
+  --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
 
@@ -84,7 +84,7 @@ The important beginner mistake is to treat audio as if it were text. Speech mode
 
 ```bash
 ./build/trtmc transcribe /tmp/nemotron-rnnt.trtfb \
-  --audio tests/e2e/data/Recording.wav \
+  --audio tests/e2e/models/whisper/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
   --att-context-size 70,13

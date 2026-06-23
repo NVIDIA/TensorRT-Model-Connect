@@ -840,7 +840,7 @@ class Qwen3OmniPlugin:
             "fixed_image_size": fixed_image_size,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
-            "preprocessor_type": "qwen_merge_group",
+            "preprocessor_type": "merge_group_chw",
             "vl_prompt_template": (
                 "<|im_start|>user\n"
                 "<|vision_start|>{image_pads}<|vision_end|>\n"

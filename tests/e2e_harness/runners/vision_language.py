@@ -1,6 +1,6 @@
 """Vision-language strategy runner — TRT inference for VL models.
 
-Handles Qwen2.5-VL, Qwen3-VL (DeepStack), and generic VL models.
+Handles generic vision-language model cases.
 Uses subprocess isolation for all GPU-intensive operations.
 
 Stages:

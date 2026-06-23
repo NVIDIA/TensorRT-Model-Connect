@@ -11,12 +11,13 @@ from tools.e2e_origin_main_parity import compare_results, result_signature
 
 def _result(
     *,
+    case_name: str = "decoder-small",
     status: str = "pass",
     metric_passed: bool = True,
-    artifact_path: str = "/tmp/current/qwen/output.txt",
+    artifact_path: str = "/tmp/current/decoder_family/output.txt",
 ) -> dict:
     return {
-        "case_name": "qwen3-0.6b-fp16",
+        "case_name": case_name,
         "status": status,
         "failure_type": None,
         "oracle_level": "L1_external_reference",
@@ -37,9 +38,44 @@ def _result(
     }
 
 
+def _make_repo(tmp_path: Path) -> Path:
+    repo_root = tmp_path / "repo"
+    family_dir = repo_root / "tests" / "e2e" / "models" / "decoder_family"
+    manifests_dir = family_dir / "manifests"
+    manifests_dir.mkdir(parents=True)
+    (family_dir / "test_decoder_family_e2e.py").write_text(
+        "def test_model_e2e():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    def write_manifest(name: str, *, ci_tier: str = "default") -> None:
+        (manifests_dir / f"{name}.json").write_text(
+            json.dumps({
+                "name": name,
+                "family": "decoder_family",
+                "runtime_strategy": "decoder_kv_cache",
+                "bundle": f"{name}.trtfb",
+                "ci_tier": ci_tier,
+            }),
+            encoding="utf-8",
+        )
+
+    write_manifest("decoder-small")
+    write_manifest("decoder-small-tp2", ci_tier="multi_device")
+
+    runtime_dir = repo_root / "src" / "runtime" / "models" / "text_generation"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "MODEL.toml").write_text(
+        'id = "text_generation"\n'
+        'runtime_strategies = ["decoder_kv_cache"]\n',
+        encoding="utf-8",
+    )
+    return repo_root
+
+
 def test_result_signature_ignores_artifact_directory_prefix() -> None:
-    current = _result(artifact_path="/tmp/current/qwen/output.txt")
-    baseline = _result(artifact_path="/tmp/origin-main/qwen/output.txt")
+    current = _result(artifact_path="/tmp/current/decoder_family/output.txt")
+    baseline = _result(artifact_path="/tmp/origin-main/decoder_family/output.txt")
 
     assert result_signature(current) == result_signature(baseline)
 
@@ -82,7 +118,7 @@ def test_run_cli_requires_model_plugin_dir() -> None:
         e2e_origin_main_parity.main([
             "run",
             "--model",
-            "qwen3-0.6b-fp16",
+            "decoder-small",
             "--origin-main-dir",
             "/tmp/origin-main",
             "--current-trtmc-binary",
@@ -114,14 +150,17 @@ def test_run_cli_uses_isolated_current_and_origin_main_baseline(
         result_dir = artifacts_dir / model
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "result.json").write_text(
-            json.dumps(_result(artifact_path=str(result_dir / "output.txt"))),
+            json.dumps(_result(
+                case_name=model,
+                artifact_path=str(result_dir / "output.txt"),
+            )),
             encoding="utf-8",
         )
         return 0
 
     monkeypatch.setattr(e2e_origin_main_parity, "_run_pytest", fake_run_pytest)
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     origin_main = tmp_path / "origin-main"
     current_artifacts = tmp_path / "current-artifacts"
     baseline_artifacts = tmp_path / "baseline-artifacts"
@@ -130,7 +169,7 @@ def test_run_cli_uses_isolated_current_and_origin_main_baseline(
     assert e2e_origin_main_parity.main([
         "run",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -160,14 +199,14 @@ def test_run_cli_uses_isolated_current_and_origin_main_baseline(
     assert current_cwd == repo_root
     assert baseline_cwd == origin_main
     assert any(
-        "tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b-fp16]"
+        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]"
         in arg
         for arg in current_cmd
     )
     assert "--model-plugin-dir" in current_cmd
     assert current_cmd[current_cmd.index("--model-plugin-dir") + 1] == str(plugin_dir)
     assert any(
-        "tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16]" in arg
+        "tests/test_e2e.py::test_e2e[decoder-small]" in arg
         for arg in baseline_cmd
     )
     assert "--model-plugin-dir" not in baseline_cmd
@@ -187,20 +226,23 @@ def test_run_cli_passes_multi_device_selection_for_tp_cases(
         result_dir = artifacts_dir / model
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "result.json").write_text(
-            json.dumps(_result(artifact_path=str(result_dir / "output.txt"))),
+            json.dumps(_result(
+                case_name=model,
+                artifact_path=str(result_dir / "output.txt"),
+            )),
             encoding="utf-8",
         )
         return 0
 
     monkeypatch.setattr(e2e_origin_main_parity, "_run_pytest", fake_run_pytest)
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     origin_main = tmp_path / "origin-main"
 
     assert e2e_origin_main_parity.main([
         "run",
         "--model",
-        "convbert-base-tp2",
+        "decoder-small-tp2",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -244,21 +286,24 @@ def test_run_cli_can_set_baseline_pythonpath_only(
         result_dir = artifacts_dir / model
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "result.json").write_text(
-            json.dumps(_result(artifact_path=str(result_dir / "output.txt"))),
+            json.dumps(_result(
+                case_name=model,
+                artifact_path=str(result_dir / "output.txt"),
+            )),
             encoding="utf-8",
         )
         return 0
 
     monkeypatch.setattr(e2e_origin_main_parity, "_run_pytest", fake_run_pytest)
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     origin_main = tmp_path / "origin-main"
     baseline_pythonpath = origin_main / "python"
 
     assert e2e_origin_main_parity.main([
         "run",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -300,7 +345,7 @@ def test_run_cli_accepts_matching_pytest_level_skips_without_result_json(
 
     monkeypatch.setattr(e2e_origin_main_parity, "_run_pytest", fake_run_pytest)
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     origin_main = tmp_path / "origin-main"
     current_artifacts = tmp_path / "current-artifacts"
     baseline_artifacts = tmp_path / "baseline-artifacts"
@@ -308,7 +353,7 @@ def test_run_cli_accepts_matching_pytest_level_skips_without_result_json(
     assert e2e_origin_main_parity.main([
         "run",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -331,12 +376,12 @@ def test_run_cli_accepts_matching_pytest_level_skips_without_result_json(
 
     assert len(calls) == 2
     current_result = json.loads(
-        (current_artifacts / "qwen3-0.6b-fp16" / "result.json").read_text(
+        (current_artifacts / "decoder-small" / "result.json").read_text(
             encoding="utf-8"
         )
     )
     baseline_result = json.loads(
-        (baseline_artifacts / "qwen3-0.6b-fp16" / "result.json").read_text(
+        (baseline_artifacts / "decoder-small" / "result.json").read_text(
             encoding="utf-8"
         )
     )
@@ -359,14 +404,17 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
         result_dir = artifacts_dir / model
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "result.json").write_text(
-            json.dumps(_result(artifact_path=str(result_dir / "output.txt"))),
+            json.dumps(_result(
+                case_name=model,
+                artifact_path=str(result_dir / "output.txt"),
+            )),
             encoding="utf-8",
         )
         return 0
 
     monkeypatch.setattr(e2e_origin_main_parity, "_run_pytest", fake_run_pytest)
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     build_dir = tmp_path / "build"
     plugin_lib = (
         build_dir
@@ -384,7 +432,7 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
     assert e2e_origin_main_parity.main([
         "batch",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -413,7 +461,7 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
 
     isolated_lib = (
         plugin_work_dir
-        / "qwen3-0.6b-fp16"
+        / "decoder-small"
         / "text_generation"
         / "libtrtmc_model_text_generation.so"
     )
@@ -424,7 +472,7 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
     baseline_cmd, baseline_cwd = calls[1]
     assert "--model-plugin-dir" in current_cmd
     assert current_cmd[current_cmd.index("--model-plugin-dir") + 1] == str(
-        plugin_work_dir / "qwen3-0.6b-fp16"
+        plugin_work_dir / "decoder-small"
     )
     assert baseline_cwd == origin_main
     assert "--model-plugin-dir" not in baseline_cmd
@@ -433,16 +481,16 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
     assert summary["total"] == 1
     assert summary["passed"] == 1
     assert summary["failed"] == 0
-    assert summary["models"][0]["model"] == "qwen3-0.6b-fp16"
+    assert summary["models"][0]["model"] == "decoder-small"
     assert summary["models"][0]["status"] == "pass"
 
-    stale_file = plugin_work_dir / "qwen3-0.6b-fp16" / "stale.txt"
+    stale_file = plugin_work_dir / "decoder-small" / "stale.txt"
     stale_file.write_text("stale", encoding="utf-8")
 
     assert e2e_origin_main_parity.main([
         "batch",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--origin-main-dir",
@@ -471,7 +519,7 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
 
 
 def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     build_dir = tmp_path / "build"
     current_engines = tmp_path / "current-engines"
     baseline_engines = tmp_path / "baseline-engines"
@@ -488,13 +536,13 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
     plugin_lib.write_bytes(b"fake-so")
     current_engines.mkdir()
     baseline_engines.mkdir()
-    (current_engines / "qwen3-0.6b-fp16.trtfb").write_bytes(b"current")
-    (baseline_engines / "qwen3-0.6b-fp16.trtfb").write_bytes(b"baseline")
+    (current_engines / "decoder-small.trtfb").write_bytes(b"current")
+    (baseline_engines / "decoder-small.trtfb").write_bytes(b"baseline")
 
     assert e2e_origin_main_parity.main([
         "plan",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--current-build-dir",
@@ -513,14 +561,14 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
     assert report["total"] == 1
     assert report["ready"] == 1
     assert report["not_ready"] == 0
-    assert report["ready_models"] == ["qwen3-0.6b-fp16"]
+    assert report["ready_models"] == ["decoder-small"]
     assert ready_models.read_text(encoding="utf-8").splitlines() == [
-        "qwen3-0.6b-fp16"
+        "decoder-small"
     ]
 
     entry = report["models"][0]
-    assert entry["model"] == "qwen3-0.6b-fp16"
-    assert entry["bundle"] == "qwen3-0.6b-fp16.trtfb"
+    assert entry["model"] == "decoder-small"
+    assert entry["bundle"] == "decoder-small.trtfb"
     assert entry["current_bundle_exists"] is True
     assert entry["baseline_bundle_exists"] is True
     assert entry["ready"] is True
@@ -536,7 +584,7 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
 def test_plan_cli_fails_when_requested_and_baseline_bundle_is_missing(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _make_repo(tmp_path)
     build_dir = tmp_path / "build"
     current_engines = tmp_path / "current-engines"
     baseline_engines = tmp_path / "baseline-engines"
@@ -552,12 +600,12 @@ def test_plan_cli_fails_when_requested_and_baseline_bundle_is_missing(
     plugin_lib.write_bytes(b"fake-so")
     current_engines.mkdir()
     baseline_engines.mkdir()
-    (current_engines / "qwen3-0.6b-fp16.trtfb").write_bytes(b"current")
+    (current_engines / "decoder-small.trtfb").write_bytes(b"current")
 
     assert e2e_origin_main_parity.main([
         "plan",
         "--model",
-        "qwen3-0.6b-fp16",
+        "decoder-small",
         "--repo-root",
         str(repo_root),
         "--current-build-dir",

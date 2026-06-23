@@ -523,8 +523,6 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `diff_layers.py` | Per-layer hidden state comparison |
 | `diff_vl.py` | VL diff testing (vision features, generation) |
 | `diff_audio.py` | Audio diff testing |
-| `diff_segmentation.py` | Segmentation diff testing |
-| `diff_personaplex.py` | PersonaPlex diff testing |
 | `diff_t5.py` | T5 encoder diff testing |
 | `diff.py` | Generic diff entry point |
 | `diff_framework/` | Diff framework infrastructure (DiffResult, registry, runner) |
@@ -565,10 +563,6 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `generate_e2e_report.py` | E2E test report generator |
 | `run_e2e_parallel.sh` | Parallel E2E test runner |
 | `schedule_e2e.py` | E2E test scheduler |
-| `build_wan14b.py` | Wan 14B model builder |
-| `magpie_codec_bridge.py` | Magpie codec bridge utility |
-| `magpie_tokenizer.py` | Magpie tokenizer utility |
-| `profile_magpie_tts.py` | Magpie TTS profiler |
 
 ---
 

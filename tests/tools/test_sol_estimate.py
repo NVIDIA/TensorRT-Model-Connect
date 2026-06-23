@@ -29,10 +29,10 @@ import pytest
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def qwen_1_5b():
-    """Qwen2.5-1.5B architecture."""
+def example_decoder_1_5b():
+    """Example decoder 1.5B architecture."""
     return ModelArch(
-        name="Qwen/Qwen2.5-1.5B",
+        name="example-org/example-decoder-1.5b",
         hidden_size=1536,
         num_layers=28,
         num_heads=12,
@@ -68,9 +68,9 @@ def b200():
 # ---------------------------------------------------------------------------
 
 class TestModelArch:
-    def test_total_params_reasonable(self, qwen_1_5b):
+    def test_total_params_reasonable(self, example_decoder_1_5b):
         """Parameter count should be in the right ballpark for 1.5B model."""
-        params = qwen_1_5b.total_params
+        params = example_decoder_1_5b.total_params
         assert 1.0e9 < params < 3.0e9, f"Expected ~1.5-2B, got {params/1e9:.2f}B"
 
     def test_total_params_tiny(self, tiny_model):
@@ -91,8 +91,8 @@ class TestModelArch:
         total = L * per_layer + V * h + V * h + h  # embed + lm_head + final_norm
         assert params == total
 
-    def test_head_dim_property(self, qwen_1_5b):
-        assert qwen_1_5b.head_dim == 128
+    def test_head_dim_property(self, example_decoder_1_5b):
+        assert example_decoder_1_5b.head_dim == 128
 
     def test_gqa_params_less_than_mha(self):
         """GQA (fewer KV heads) should have fewer params than MHA."""
@@ -108,14 +108,14 @@ class TestModelArch:
 # ---------------------------------------------------------------------------
 
 class TestFlops:
-    def test_flops_positive(self, qwen_1_5b):
-        flops = _compute_flops_per_token(qwen_1_5b, cache_length=256)
+    def test_flops_positive(self, example_decoder_1_5b):
+        flops = _compute_flops_per_token(example_decoder_1_5b, cache_length=256)
         assert flops > 0
 
-    def test_flops_scale_with_cache(self, qwen_1_5b):
+    def test_flops_scale_with_cache(self, example_decoder_1_5b):
         """Attention FLOPS should grow with cache length."""
-        f128 = _compute_flops_per_token(qwen_1_5b, cache_length=128)
-        f2048 = _compute_flops_per_token(qwen_1_5b, cache_length=2048)
+        f128 = _compute_flops_per_token(example_decoder_1_5b, cache_length=128)
+        f2048 = _compute_flops_per_token(example_decoder_1_5b, cache_length=2048)
         assert f2048 > f128
 
     def test_flops_zero_cache(self, tiny_model):
@@ -123,10 +123,10 @@ class TestFlops:
         flops = _compute_flops_per_token(tiny_model, cache_length=0)
         assert flops > 0
 
-    def test_flops_dominated_by_matmul(self, qwen_1_5b):
+    def test_flops_dominated_by_matmul(self, example_decoder_1_5b):
         """For small cache, weight matmuls dominate (not attention)."""
-        f_small = _compute_flops_per_token(qwen_1_5b, cache_length=1)
-        f_large = _compute_flops_per_token(qwen_1_5b, cache_length=1)
+        f_small = _compute_flops_per_token(example_decoder_1_5b, cache_length=1)
+        f_large = _compute_flops_per_token(example_decoder_1_5b, cache_length=1)
         # With cache=1, attention FLOPS are tiny relative to projections
         # So both should be essentially the same
         assert f_small == f_large
@@ -137,54 +137,54 @@ class TestFlops:
 # ---------------------------------------------------------------------------
 
 class TestEstimateSol:
-    def test_bandwidth_bound(self, qwen_1_5b, b200):
+    def test_bandwidth_bound(self, example_decoder_1_5b, b200):
         """Batch=1 decode should be bandwidth-bound, not compute-bound."""
-        est = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=256)
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=256)
         assert est.bottleneck == "bandwidth"
         assert est.bw_sol_tps < est.compute_sol_tps
 
-    def test_sol_positive(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32")
+    def test_sol_positive(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32")
         assert est.sol_tps > 0
         assert est.bw_sol_tps > 0
         assert est.compute_sol_tps > 0
 
-    def test_fp16_faster_than_fp32(self, qwen_1_5b, b200):
+    def test_fp16_faster_than_fp32(self, example_decoder_1_5b, b200):
         """FP16 halves weight bytes → ~2x bandwidth SOL."""
-        est32 = estimate_sol(qwen_1_5b, b200, "fp32")
-        est16 = estimate_sol(qwen_1_5b, b200, "fp16")
+        est32 = estimate_sol(example_decoder_1_5b, b200, "fp32")
+        est16 = estimate_sol(example_decoder_1_5b, b200, "fp16")
         assert est16.bw_sol_tps > est32.bw_sol_tps * 1.5
 
-    def test_larger_cache_slower_sol(self, qwen_1_5b, b200):
+    def test_larger_cache_slower_sol(self, example_decoder_1_5b, b200):
         """More KV cache reads → lower bandwidth SOL."""
-        est_small = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=128)
-        est_large = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=4096)
+        est_small = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=128)
+        est_large = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=4096)
         assert est_large.bw_sol_tps < est_small.bw_sol_tps
 
-    def test_utilization_with_actual(self, qwen_1_5b, b200):
+    def test_utilization_with_actual(self, example_decoder_1_5b, b200):
         """Utilization should be calculated when actual_tps provided."""
-        est = estimate_sol(qwen_1_5b, b200, "fp32",
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32",
                            cache_length=256, actual_tps=265.7)
         assert 0 < est.utilization_pct < 100
         assert est.actual_tps == 265.7
 
-    def test_utilization_zero_without_actual(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32")
+    def test_utilization_zero_without_actual(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32")
         assert est.utilization_pct == 0
         assert est.actual_tps == 0
 
-    def test_model_bytes(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32")
-        expected = qwen_1_5b.total_params * 4  # FP32 = 4 bytes
+    def test_model_bytes(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32")
+        expected = example_decoder_1_5b.total_params * 4  # FP32 = 4 bytes
         assert est.model_bytes == expected
 
-    def test_kv_bytes_with_cache(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=256)
+    def test_kv_bytes_with_cache(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=256)
         assert est.kv_bytes_per_token > 0
         assert est.total_read_bytes > est.weight_read_bytes
 
-    def test_kv_bytes_zero_without_cache(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=0)
+    def test_kv_bytes_zero_without_cache(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=0)
         assert est.kv_bytes_per_token == 0
         assert est.total_read_bytes == est.weight_read_bytes
 
@@ -219,8 +219,8 @@ class TestEstimateSol:
 # ---------------------------------------------------------------------------
 
 class TestJson:
-    def test_to_json_keys(self, qwen_1_5b, b200):
-        est = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=256, actual_tps=265.7)
+    def test_to_json_keys(self, example_decoder_1_5b, b200):
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=256, actual_tps=265.7)
         j = to_json(est)
         required_keys = [
             "model", "gpu", "dtype", "total_params", "model_bytes",
@@ -230,10 +230,10 @@ class TestJson:
         for k in required_keys:
             assert k in j, f"Missing key: {k}"
 
-    def test_to_json_serializable(self, qwen_1_5b, b200):
+    def test_to_json_serializable(self, example_decoder_1_5b, b200):
         """JSON output should be serializable."""
         import json
-        est = estimate_sol(qwen_1_5b, b200, "fp32")
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32")
         j = to_json(est)
         s = json.dumps(j)
         assert len(s) > 0
@@ -246,9 +246,9 @@ class TestJson:
 class TestPhase0Regression:
     """Verify SOL estimates match Phase 0 known data points."""
 
-    def test_qwen_1_5b_fp32_b200(self, qwen_1_5b, b200):
-        """Qwen2.5-1.5B FP32 on B200: measured 265.7 tok/s → ~28% utilization."""
-        est = estimate_sol(qwen_1_5b, b200, "fp32",
+    def test_example_decoder_1_5b_fp32_b200(self, example_decoder_1_5b, b200):
+        """Example decoder 1.5B FP32 on B200: measured 265.7 tok/s → ~28% utilization."""
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32",
                            cache_length=256, actual_tps=265.7)
         # SOL should be in 800-1200 range for ~1.5B FP32 model on B200
         assert 500 < est.sol_tps < 2000
@@ -296,18 +296,18 @@ class TestClosedLoop:
         with pytest.raises(ValueError, match="No throughput field"):
             parse_benchmark_json(str(p))
 
-    def test_closed_loop_integration(self, tmp_path, qwen_1_5b, b200):
+    def test_closed_loop_integration(self, tmp_path, example_decoder_1_5b, b200):
         """Parse benchmark JSON + estimate_sol in one flow."""
         data = {"trt": {"throughput_tps": {"mean": 265.7}}}
         p = tmp_path / "bench.json"
         p.write_text(json.dumps(data))
         tps = parse_benchmark_json(str(p))
-        est = estimate_sol(qwen_1_5b, b200, "fp32",
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32",
                            cache_length=256, actual_tps=tps)
         assert est.actual_tps == 265.7
         assert est.utilization_pct > 0
 
-    def test_benchmark_json_overrides_actual_tps(self, tmp_path, qwen_1_5b, b200):
+    def test_benchmark_json_overrides_actual_tps(self, tmp_path, example_decoder_1_5b, b200):
         """benchmark-json value should win over manual actual_tps."""
         data = {"throughput_tps": 500.0}
         p = tmp_path / "bench.json"
@@ -316,7 +316,7 @@ class TestClosedLoop:
         manual_tps = 100.0
         # Simulate CLI precedence: benchmark-json wins
         actual = bench_tps  # this is what main() does
-        est = estimate_sol(qwen_1_5b, b200, "fp32",
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32",
                            cache_length=256, actual_tps=actual)
         assert est.actual_tps == 500.0
         assert est.actual_tps != manual_tps
@@ -364,20 +364,20 @@ class TestPerLayerRoofline:
         utils = [r.utilization_pct for r in results]
         assert utils == sorted(utils), "Should be sorted by utilization ascending"
 
-    def test_per_layer_theoretical_matches_total(self, qwen_1_5b, b200):
+    def test_per_layer_theoretical_matches_total(self, example_decoder_1_5b, b200):
         """Sum of per-layer theoretical times should approximately match
         the total SOL theoretical time."""
         timing = {
             "layers": [{"name": f"layer_{i}", "time_ms": 1.0}
-                        for i in range(qwen_1_5b.num_layers)],
+                        for i in range(example_decoder_1_5b.num_layers)],
             "lm_head_ms": 0.5,
         }
         results = per_layer_roofline(
-            qwen_1_5b, b200, "fp32", timing, cache_length=256)
+            example_decoder_1_5b, b200, "fp32", timing, cache_length=256)
         sum_theoretical = sum(r.theoretical_ms for r in results)
 
         # Compare with overall SOL estimate's total bytes
-        est = estimate_sol(qwen_1_5b, b200, "fp32", cache_length=256)
+        est = estimate_sol(example_decoder_1_5b, b200, "fp32", cache_length=256)
         practical_bw = b200.hbm_bandwidth_gb_s * b200.practical_bw_ratio * 1e9
         total_theoretical_ms = (est.total_read_bytes / practical_bw) * 1000
 

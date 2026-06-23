@@ -12,3 +12,6 @@ diffusion_pipeline_classes = [
   "Flux2Pipeline",
   "FluxPipeline",
 ]
+hf_warm_files = [
+  "flux-clip-metrics-openclip|laion/CLIP-ViT-B-32-laion2B-s34B-b79K|open_clip_pytorch_model.bin",
+]

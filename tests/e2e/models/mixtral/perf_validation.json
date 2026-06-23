@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "ggml-org/stories15M_MOE",
+      "pipeline_type": "decoder_moe",
+      "label": "A4-decode-moe",
+      "benchmark": {
+        "label": "CPU argmax",
+        "gpu_argmax_label": "GPU argmax",
+        "metric": "tok/s",
+        "command": ["{binary}", "run", "{bundle}", "--prompt", "{prompt}", "--max-new-tokens", "{max_tokens}", "{hf_python_args}", "{config_args}"]
+      }
+    }
+  ]
+}

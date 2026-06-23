@@ -130,7 +130,7 @@ class TestFindSentencePieceModel:
         assert _find_sentencepiece_model(tmp_path) == source
 
     def test_falls_back_to_spiece_model(self, tmp_path):
-        """PixArt/T5 tokenizer directories commonly ship spiece.model."""
+        """SentencePiece tokenizer directories commonly ship spiece.model."""
         spiece = tmp_path / "spiece.model"
         spiece.write_bytes(b"spiece")
 
@@ -241,8 +241,12 @@ def build_standard_decoder_engine(config, weights, max_cache_length, *, verbose=
     return f"{_decoder_engine_role}:{profile_mode}".encode()
 
 
+EXAMPLE_DECODER_TYPE = "example_decoder"
+EXAMPLE_DECODER_FAMILY = "example_family"
+
+
 class _SplitDecoderPlugin:
-    name = "qwen"
+    name = EXAMPLE_DECODER_FAMILY
     runtime_strategy = "decoder_kv_cache"
 
     def load_weights(self, model_dir, config, *, precision="fp32"):
@@ -266,7 +270,7 @@ class _SplitDecoderPlugin:
 
 
 class TestBuildBundleOrchestration:
-    def _make_model_dir(self, tmp_path, model_type="qwen3"):
+    def _make_model_dir(self, tmp_path, model_type=EXAMPLE_DECODER_TYPE):
         """Create a minimal model directory with config.json."""
         config = {
             "model_type": model_type,
@@ -304,12 +308,12 @@ class TestBuildBundleOrchestration:
 
     def test_orchestration_flow(self, tmp_path):
         """Verify the correct flow: config -> plugin -> weights -> engine -> bundle."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         # Create a mock plugin
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {
             "embedding": b"fake",
@@ -338,7 +342,7 @@ class TestBuildBundleOrchestration:
 
                             # Verify plugin was called with correct arguments
                             mock_plugin.load_weights.assert_called_once()
-                            mock_plugin.build_engine.assert_called_once()
+                            assert mock_plugin.build_engine.call_count == 2
 
                             # Verify write_bundle was called
                             mock_write.assert_called_once()
@@ -347,8 +351,8 @@ class TestBuildBundleOrchestration:
 
                             # Verify BundleInfo fields
                             info = call_args[0][1]
-                            assert info.model_type == "qwen3"
-                            assert info.family == "qwen"
+                            assert info.model_type == EXAMPLE_DECODER_TYPE
+                            assert info.family == EXAMPLE_DECODER_FAMILY
                             assert info.trt_version == "10.3.0"
                             assert info.trt_abi == "10.3"
                             assert info.gpu_name == "NVIDIA H100"
@@ -358,11 +362,11 @@ class TestBuildBundleOrchestration:
 
     def test_engine_plan_in_sections(self, tmp_path):
         """Verify engine_plan is the first section."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"FAKE_ENGINE_PLAN_DATA"
@@ -392,11 +396,11 @@ class TestBuildBundleOrchestration:
 
     def test_max_cache_length_forwarded(self, tmp_path):
         """max_cache_length is forwarded to plugin.build_engine."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -426,11 +430,11 @@ class TestBuildBundleOrchestration:
 
     def test_config_json_embedded_in_sections(self, tmp_path):
         """config.json from model dir is embedded in bundle sections."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -459,14 +463,14 @@ class TestBuildBundleOrchestration:
 
     def test_processor_config_embedded_in_sections(self, tmp_path):
         """processor_config.json from model dir is embedded in bundle sections."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         (model_dir / "processor_config.json").write_text(
             json.dumps({"image_processor": {"image_mean": [0.5, 0.5, 0.5]}})
         )
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -493,140 +497,13 @@ class TestBuildBundleOrchestration:
                             section_names = [s.name for s in sections]
                             assert "processor_config.json" in section_names
 
-    def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(
-        self, tmp_path
-    ):
-        """SAM3 prompted segmentation needs tokenizer provisioning and all TRT plans."""
-        model_dir = self._make_model_dir(tmp_path, model_type="sam3")
-        output_path = str(tmp_path / "sam3.trtfb")
-
-        class _Sam3Plugin:
-            name = "sam3"
-            runtime_strategy = "prompted_segmentation"
-            requires_tokenizer = True
-
-            def load_weights(self, model_dir, config):
-                return {}
-
-            def build_engine(self, config, weights, max_cache_length, *, verbose=False):
-                return b"SAM3_TEXT_PLAN"
-
-            def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
-                return b"SAM3_VISION_PLAN"
-
-            def build_extra_engines(
-                self, config, weights, max_cache_length, *, verbose=False
-            ):
-                return {"sam3_core_engine_plan": b"SAM3_CORE_PLAN"}
-
-            def get_segmentation_config(self, config):
-                return {
-                    "prompted_segmentation_variant": "sam3_text_prompt_pcs",
-                    "sam3_text_max_position_embeddings": 32,
-                    "sam3_num_queries": 200,
-                }
-
-            def get_bundle_config_overrides(self, config):
-                return {
-                    "model_type": "sam3",
-                    "runtime_strategy": "prompted_segmentation",
-                    "prompted_segmentation_variant": "sam3_text_prompt_pcs",
-                }
-
-        with patch("tensorrt_model_connect.engine_builder.find_plugin",
-                   return_value=_Sam3Plugin()):
-            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
-                       return_value="10.0"):
-                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
-                           return_value=""):
-                    with patch(
-                        "tensorrt_model_connect.engine_builder._ensure_tokenizer_json"
-                    ) as mock_ensure:
-                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
-                            build_bundle(str(model_dir), output_path)
-
-        mock_ensure.assert_called_once_with(model_dir)
-        sections = mock_write.call_args[0][2]
-        section_map = {section.name: section.data for section in sections}
-        assert section_map["engine_plan"] == b"SAM3_TEXT_PLAN"
-        assert section_map["vision_engine_plan"] == b"SAM3_VISION_PLAN"
-        assert section_map["sam3_core_engine_plan"] == b"SAM3_CORE_PLAN"
-
-        cfg = json.loads(section_map["config.json"].decode("utf-8"))
-        assert cfg["prompted_segmentation_variant"] == "sam3_text_prompt_pcs"
-        assert cfg["has_vision_engine"] is True
-        assert cfg["sam3_num_queries"] == 200
-
-    def test_yaml_only_elf_synthesizes_config_json_section(self, tmp_path):
-        """GitHub ELF YAML-only directories still get runtime config.json."""
-        (tmp_path / "train_owt_ELF-B.yml").write_text(
-            "\n".join([
-                "model: ELF-B",
-                "max_length: 1024",
-                "encoder_model_name: t5-small",
-                "num_time_tokens: 4",
-                "num_self_cond_cfg_tokens: 4",
-                "num_model_mode_tokens: 4",
-                "denoiser_p_mean: -1.5",
-                "denoiser_p_std: 0.8",
-                "denoiser_noise_scale: 2.0",
-                "self_cond_prob: 0.5",
-            ]),
-            encoding="utf-8",
-        )
-        output_path = str(tmp_path / "output.trtfb")
-
-        mock_plugin = MagicMock()
-        mock_plugin.name = "elf"
-        mock_plugin.runtime_strategy = "elf_flow"
-        mock_plugin.load_weights.return_value = {}
-        mock_plugin.build_engine.return_value = b"PLAN"
-        mock_plugin.get_bundle_config_overrides.return_value = {
-            "runtime_strategy": "elf_flow",
-            "model_type": "elf",
-            "elf_max_length": 1024,
-            "elf_max_input_length": 0,
-            "elf_text_encoder_dim": 512,
-            "elf_input_dim": 1024,
-            "elf_denoiser_noise_scale": 2.0,
-        }
-
-        del mock_plugin.build_vision_engine
-        del mock_plugin.build_extra_engines
-        del mock_plugin.embed_input
-        del mock_plugin.get_vl_config
-        del mock_plugin.get_segmentation_config
-        del mock_plugin.get_audio_config
-
-        with patch("tensorrt_model_connect.engine_builder.find_plugin",
-                   return_value=mock_plugin):
-            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
-                       return_value="10.0"):
-                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
-                           return_value=""):
-                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
-                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
-                            build_bundle(str(tmp_path), output_path)
-
-        sections = mock_write.call_args[0][2]
-        section_map = {section.name: section.data for section in sections}
-        cfg = json.loads(section_map["config.json"].decode("utf-8"))
-        assert cfg["runtime_strategy"] == "elf_flow"
-        assert cfg["model_type"] == "elf"
-        assert cfg["model"] == "ELF-B"
-        assert cfg["elf_max_length"] == 1024
-        assert cfg["elf_max_input_length"] == 0
-        assert cfg["elf_text_encoder_dim"] == 512
-        assert cfg["elf_input_dim"] == 1024
-        assert cfg["elf_denoiser_noise_scale"] == 2.0
-
     def test_runtime_strategy_injected(self, tmp_path):
         """runtime_strategy from plugin is injected into config.json section."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = "decoder_moe"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -662,11 +539,11 @@ class TestBuildBundleOrchestration:
 
     def test_bundle_info_max_cache_length(self, tmp_path):
         """BundleInfo records the max_cache_length."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = ""
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -696,11 +573,11 @@ class TestBuildBundleOrchestration:
 
     def test_triattention_embeds_stats_and_config(self, tmp_path):
         """TriAttention build options add config and stats sections."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = "decoder_kv_cache"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -760,11 +637,11 @@ class TestBuildBundleOrchestration:
         assert cfg["dynamic_kv_profile_rows"] == [96, 192, 256]
 
     def test_large_triattention_budget_adds_lower_warmup_profile(self, tmp_path):
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         mock_plugin = MagicMock()
-        mock_plugin.name = "qwen"
+        mock_plugin.name = EXAMPLE_DECODER_FAMILY
         mock_plugin.runtime_strategy = "decoder_kv_cache"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
@@ -808,12 +685,12 @@ class TestBuildBundleOrchestration:
 
     def test_load_weights_precision_forwarded_when_supported(self, tmp_path):
         """build_bundle forwards precision to load_weights when supported."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
         seen = {}
 
         class _Plugin:
-            name = "qwen"
+            name = EXAMPLE_DECODER_FAMILY
             runtime_strategy = ""
 
             def load_weights(self, model_dir, config, *, precision="fp32"):
@@ -840,7 +717,7 @@ class TestBuildBundleOrchestration:
 
     def test_split_decoder_builds_use_role_scoped_timing_caches(self, tmp_path, monkeypatch):
         """Split prefill/decode builds should not share the global timing cache."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
         scopes = []
 
@@ -877,23 +754,20 @@ class TestBuildBundleOrchestration:
         assert sections[0].data == b"decode:dual_profile"
         assert sections[1].data == b"prefill:prefill"
         assert scopes == [
-            "split-qwen3-h64-l2-bf16-noquant-prefill",
-            "split-qwen3-h64-l2-bf16-noquant-decode",
+            "split-example_decoder-h64-l2-bf16-noquant-prefill",
+            "split-example_decoder-h64-l2-bf16-noquant-decode",
         ]
 
     @pytest.mark.parametrize(
         ("pipeline_class", "plugin_name", "runtime_strategy"),
         [
-            ("FluxPipeline", "flux", "diffusion_flux"),
-            ("Flux2Pipeline", "flux", "diffusion_flux"),
-            ("PixArtSigmaPipeline", "pixart", "diffusion_pixart"),
-            ("WanPipeline", "wan_t2v", "diffusion_wan"),
+            ("SyntheticDiffusionPipeline", "example_diffusion", "diffusion_example"),
         ],
     )
     def test_supported_diffusion_tensor_parallel_builds_rank_denoisers(
         self, tmp_path, pipeline_class, plugin_name, runtime_strategy,
     ):
-        """Supported diffusion TP families reach build_components and package rank plans."""
+        """Diffusion TP plugins reach build_components and package rank plans."""
         from tensorrt_model_connect.parallel_config import ParallelConfig
 
         model_dir = tmp_path / f"{plugin_name}_diffusers"
@@ -919,7 +793,7 @@ class TestBuildBundleOrchestration:
             ):
                 seen["parallel"] = parallel_config
                 return {
-                    "text_encoders": [("t5", b"t5")],
+                    "text_encoders": [("text_encoder", b"text")],
                     "denoiser_ranks": {
                         0: b"denoiser0",
                         1: b"denoiser1",
@@ -976,11 +850,11 @@ class TestBuildBundleOrchestration:
 
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""
-        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        model_dir = self._make_model_dir(tmp_path)
         output_path = str(tmp_path / "output.trtfb")
 
         class _Plugin:
-            name = "qwen"
+            name = EXAMPLE_DECODER_FAMILY
             runtime_strategy = ""
 
             def load_weights(self, model_dir, config):

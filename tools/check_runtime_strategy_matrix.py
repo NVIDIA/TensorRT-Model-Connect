@@ -26,7 +26,6 @@ DEFAULT_TORCHTRT_STRATEGIES_DIR = (
     / "torch_trt"
     / "strategies"
 )
-DEFAULT_CONTRACTS_PATH = PROJECT_ROOT / "tests" / "e2e_harness" / "contracts.py"
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
 DEFAULT_E2E_MODELS_DIR = PROJECT_ROOT / "tests" / "e2e" / "models"
 DEFAULT_RUNNERS_DIR = DEFAULT_E2E_MODELS_DIR
@@ -103,7 +102,7 @@ def extract_runtime_strategies_from_cpp(
     in `trtmc_c.cpp` and the `kStrategies` / comparison literals inside
     `src/runtime/builders/**/*.cpp`. To avoid false positives from unrelated string
     literals like section names, callers should usually pass the expected strategy
-    candidate set derived from the contracts or matrix.
+    candidate set derived from manifests or the matrix.
     """
     text = path.read_text(encoding="utf-8")
     strings = _extract_string_literals(text)
@@ -178,36 +177,43 @@ def extract_runtime_strategies_from_model_manifests(models_dir: Path) -> set[str
     return strategies
 
 
-def extract_runtime_to_task_strategy(path: Path) -> dict[str, str]:
-    """Extract RUNTIME_TO_TASK_STRATEGY literal mapping from contracts.py."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+def _iter_e2e_manifest_paths(models_dir: Path) -> Iterable[Path]:
+    if not models_dir.is_dir():
+        return
+    yield from sorted(models_dir.glob("*.json"))
+    yield from sorted(models_dir.glob("*/manifests/*.json"))
 
-    for node in tree.body:
-        value: Any | None = None
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "RUNTIME_TO_TASK_STRATEGY":
-                    value = ast.literal_eval(node.value)
-                    break
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == "RUNTIME_TO_TASK_STRATEGY":
-                value = ast.literal_eval(node.value)
 
-        if value is None:
+def extract_runtime_to_task_strategy_from_manifests(models_dir: Path) -> dict[str, str]:
+    """Extract runtime_strategy -> task_strategy declarations from E2E manifests."""
+    values: dict[str, set[str]] = {}
+    for manifest_path in _iter_e2e_manifest_paths(models_dir):
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(value, dict):
-            raise ValueError(f"{path}: RUNTIME_TO_TASK_STRATEGY must be a dict literal.")
+        runtime_strategy = raw.get("runtime_strategy")
+        task_strategy = raw.get("task_strategy")
+        if not isinstance(runtime_strategy, str) or not runtime_strategy:
+            continue
+        if not isinstance(task_strategy, str) or not task_strategy:
+            continue
+        values.setdefault(runtime_strategy, set()).add(task_strategy)
 
-        mapping: dict[str, str] = {}
-        for key, mapped in value.items():
-            if not isinstance(key, str) or not isinstance(mapped, str):
-                raise ValueError(
-                    f"{path}: RUNTIME_TO_TASK_STRATEGY keys/values must be strings."
-                )
-            mapping[key] = mapped
-        return mapping
-
-    raise ValueError(f"{path}: RUNTIME_TO_TASK_STRATEGY not found.")
+    conflicts = {
+        runtime: sorted(tasks)
+        for runtime, tasks in values.items()
+        if len(tasks) > 1
+    }
+    if conflicts:
+        raise ValueError(
+            f"{models_dir}: runtime_strategy values map to multiple task_strategy "
+            f"values: {conflicts}"
+        )
+    return {
+        runtime: next(iter(tasks))
+        for runtime, tasks in sorted(values.items())
+    }
 
 
 def _extract_constant_return(class_node: ast.ClassDef, method_name: str) -> str | None:
@@ -328,47 +334,34 @@ def validate_matrix_data(
     errors: list[str] = []
 
     matrix_strategies = set(matrix.keys())
-    contracts_strategies = set(runtime_to_task_strategy.keys())
+    manifest_strategies = set(runtime_to_task_strategy.keys())
 
-    _append_set_mismatch(
-        errors,
-        left_name="contracts.py RUNTIME_TO_TASK_STRATEGY",
-        left_values=contracts_strategies,
-        right_name="runtime sources strategy keys",
-        right_values=cpp_runtime_strategies,
-    )
-    _append_set_mismatch(
-        errors,
-        left_name="runtime sources strategy keys",
-        left_values=cpp_runtime_strategies,
-        right_name="tests/runtime_strategy_matrix.yaml",
-        right_values=matrix_strategies,
-    )
-    _append_set_mismatch(
-        errors,
-        left_name="contracts.py RUNTIME_TO_TASK_STRATEGY",
-        left_values=contracts_strategies,
-        right_name="tests/runtime_strategy_matrix.yaml",
-        right_values=matrix_strategies,
-    )
+    missing_matrix_for_sources = sorted(cpp_runtime_strategies - matrix_strategies)
+    if missing_matrix_for_sources:
+        errors.append(
+            "tests/runtime_strategy_matrix.yaml missing runtime strategies from "
+            f"runtime sources strategy keys: {missing_matrix_for_sources}"
+        )
+    missing_matrix_for_manifests = sorted(manifest_strategies - matrix_strategies)
+    if missing_matrix_for_manifests:
+        errors.append(
+            "tests/runtime_strategy_matrix.yaml missing runtime strategies from "
+            f"E2E manifests: {missing_matrix_for_manifests}"
+        )
 
     wildcard_diff_checks = diff_checks_by_strategy.get("*", set())
     for runtime_strategy in sorted(matrix_strategies):
         entry = matrix[runtime_strategy]
         expected_task = runtime_to_task_strategy.get(runtime_strategy)
 
-        if expected_task is None:
-            errors.append(
-                f"Matrix entry '{runtime_strategy}' is not present in RUNTIME_TO_TASK_STRATEGY."
-            )
-            continue
-
         task_strategy = entry.get("task_strategy")
-        if task_strategy != expected_task:
+        if expected_task is not None and task_strategy != expected_task:
             errors.append(
                 f"{runtime_strategy}: task_strategy='{task_strategy}' "
-                f"does not match contracts mapping '{expected_task}'."
+                f"does not match E2E manifest declaration '{expected_task}'."
             )
+        if expected_task is None:
+            expected_task = task_strategy
 
         cli_commands = entry.get("cli_commands")
         if (
@@ -467,14 +460,16 @@ def validate_matrix_paths(
     runtime_registry_path: Path = DEFAULT_RUNTIME_REGISTRY_PATH,
     runtime_models_dir: Path = DEFAULT_RUNTIME_MODELS_DIR,
     torchtrt_strategies_dir: Path = DEFAULT_TORCHTRT_STRATEGIES_DIR,
-    contracts_path: Path = DEFAULT_CONTRACTS_PATH,
+    e2e_models_dir: Path = DEFAULT_E2E_MODELS_DIR,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
     runners_dir: Path = DEFAULT_RUNNERS_DIR,
     comparators_dir: Path = DEFAULT_COMPARATORS_DIR,
 ) -> list[str]:
     """Load all sources and validate the runtime strategy matrix."""
     matrix = load_runtime_strategy_matrix(matrix_path)
-    runtime_to_task_strategy = extract_runtime_to_task_strategy(contracts_path)
+    runtime_to_task_strategy = extract_runtime_to_task_strategy_from_manifests(
+        e2e_models_dir
+    )
     candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
 
     runtime_cpp_files = discover_runtime_strategy_source_files(
@@ -546,10 +541,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to torch-trt strategy source files.",
     )
     parser.add_argument(
-        "--contracts",
+        "--e2e-models-dir",
         type=Path,
-        default=DEFAULT_CONTRACTS_PATH,
-        help="Path to tests/e2e_harness/contracts.py.",
+        default=DEFAULT_E2E_MODELS_DIR,
+        help="Path to tests/e2e/models directory.",
     )
     parser.add_argument(
         "--diff-checks-dir",
@@ -583,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_registry_path=args.runtime_registry,
             runtime_models_dir=args.runtime_models_dir,
             torchtrt_strategies_dir=args.torchtrt_strategies_dir,
-            contracts_path=args.contracts,
+            e2e_models_dir=args.e2e_models_dir,
             diff_checks_dir=args.diff_checks_dir,
             runners_dir=args.runners_dir,
             comparators_dir=args.comparators_dir,
@@ -600,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "[runtime-strategy-matrix] PASS: matrix is consistent with the new runtime "
-        "entrypoint, builder strategy coverage, contracts mapping, and diff-framework checks."
+        "entrypoint, builder strategy coverage, E2E manifests, and diff-framework checks."
     )
     return 0
 

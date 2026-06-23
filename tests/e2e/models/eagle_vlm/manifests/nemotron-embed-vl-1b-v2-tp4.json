@@ -5,6 +5,7 @@
   "bundle": "nemotron-embed-vl-1b-v2-tp4.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "embedding",
+  "task_strategy": "embedding",
   "reference_family": "vl_embed_retrieval",
   "user_contract": "embedding_vector",
   "ci_tier": "multi_device",

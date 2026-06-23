@@ -1,9 +1,9 @@
 // WanPlugin: handles "diffusion_wan" strategy only.
 // Uses WanPipeline with a single text encoder, denoiser, and VAE.
 
-#include "runtime/models/wan/pipeline.h"
 #include "diffusion_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/models/wan/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

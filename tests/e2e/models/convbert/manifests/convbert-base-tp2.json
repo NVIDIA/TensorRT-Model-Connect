@@ -5,6 +5,9 @@
   "bundle": "convbert-base-tp2.trtfb",
   "family": "convbert",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
@@ -51,5 +54,10 @@
       },
       "gating": true
     }
-  ]
+  ],
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

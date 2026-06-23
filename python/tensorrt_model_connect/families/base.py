@@ -16,7 +16,7 @@ class FamilyPlugin(Protocol):
     """Interface for a model family plugin.
 
     Required attributes:
-        name: Human-readable family name (e.g. "qwen", "llama").
+        name: Human-readable family name.
 
     Optional attributes:
         runtime_strategy: Backend dispatch key for C++ runtime.
@@ -24,6 +24,9 @@ class FamilyPlugin(Protocol):
             "vision_language".
         embed_input: If True, the text decoder takes input_embed instead of
             token_id during VL prefill. Only meaningful for VL models.
+        supports_split_decoder_roles: Optional callable or attribute. If true,
+            the family build_engine() honors the internal prefill/decode role
+            passed through config.raw["_decoder_engine_role"].
     """
 
     name: str
@@ -67,6 +70,10 @@ class FamilyPlugin(Protocol):
         """Return a family-specific calibration adapter when needed."""
         return None
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        """Return True if build_engine() can build role-specific decoder plans."""
+        return False
+
     # ------------------------------------------------------------------
     # Optional: Vision-Language support
     # ------------------------------------------------------------------
@@ -91,12 +98,12 @@ class FamilyPlugin(Protocol):
             image_token_id, fixed_image_size, num_image_pad_tokens,
             vision_output_dim, vl_prompt_template, image_token_str,
             preprocessor_type  — image preprocessing strategy:
-                "qwen_merge_group": merge-group patch permutation + temporal
-                    duplication (Qwen2.5-VL)
+                "merge_group_chw": merge-group patch permutation + temporal
+                    duplication
                 "simple_chw": standard resize + normalize to [C, H, W]
-                    (LLaVA, InternVL, Phi-3-Vision, etc.)
+                    for generic vision-language encoders
                 "center_crop_chw": center-crop to square, then resize + normalize
-                    (CLIP, DINOv2-based models)
+                    for classification-style vision encoders
                 "aspect_preserve_chw": aspect-ratio-preserving resize + zero-pad
                     (InternVL v2 and similar)
             interpolation  — resize interpolation mode:

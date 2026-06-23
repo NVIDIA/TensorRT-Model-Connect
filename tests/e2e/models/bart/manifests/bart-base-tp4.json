@@ -4,6 +4,9 @@
   "bundle": "bart-base-tp4.trtfb",
   "family": "bart",
   "runtime_strategy": "seq2seq_encoder_decoder",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_base_weak",
+  "user_contract": "continuation_parity",
   "max_cache_length": 256,
   "prompt": "The quick brown fox jumps over the lazy dog.",
   "max_new_tokens": 20,
@@ -48,5 +51,11 @@
       "gating": true
     }
   ],
-  "notes": "BART-base TP4 repro using the same checkpoint, prompt, generation length, and thresholds as bart-base."
+  "notes": "BART-base TP4 repro using the same checkpoint, prompt, generation length, and thresholds as bart-base.",
+  "metadata": {
+    "contract_config": {
+      "preserve_prompt_echo": true,
+      "seq2seq_reconstruction": true
+    }
+  }
 }

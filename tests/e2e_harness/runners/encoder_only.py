@@ -1,6 +1,6 @@
 """Encoder-only NLP strategy runner — TRT inference for encoder-only models.
 
-Runs the C++ binary for encoder-only forward pass (e.g. BERT) and
+Runs the C++ binary for encoder-only forward pass and
 captures hidden states / CLS embedding.
 """
 

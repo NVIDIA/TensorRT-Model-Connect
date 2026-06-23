@@ -37,7 +37,7 @@ def test_warning_preamble_before_prompt_does_not_fail_ned() -> None:
     )
     warning = (
         "You are using the default legacy behaviour of the "
-        "<class 'transformers.models.llama.tokenization_llama_fast.LlamaTokenizerFast'>."
+        "<class 'transformers.models.example.tokenization_example_fast.ExampleTokenizerFast'>."
     )
     trt_text = f"{warning}\n{prompt} {continuation}"
     ref_text = continuation

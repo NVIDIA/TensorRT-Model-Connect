@@ -1,6 +1,13 @@
 id = "nemotron_speech_streaming"
 plugin = "nemotron_speech_streaming"
 module = "plugin"
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_model_type = "nemotron_speech_streaming"
+nemo_target_patterns = [
+  "EncDecRNNT",
+  "Transducer",
+  "rnnt",
+]
 aliases = [
   "enc_dec_rnnt_bpe",
   "fastconformer_cacheaware_rnnt",

@@ -4,9 +4,9 @@
 // Trace ID:       UT-TOK-CPP-03
 // Architecture:   ARCH-TOK-001
 // Unit Design:    UD-TOK-01
-// Intent:         IPA tokenizer: encode known words, heteronyms as graphemes, OOV fallback, punctuation
-// Preconditions:  Synthetic mini-data mimicking NeMo IPA format
-// Postconditions: Known words tokenized via IPA, OOV/heteronyms fall back to graphemes, punctuation handled
+// Intent:         IPA tokenizer: encode known words, heteronyms as graphemes, OOV fallback,
+// punctuation Preconditions:  Synthetic mini-data mimicking NeMo IPA format Postconditions: Known
+// words tokenized via IPA, OOV/heteronyms fall back to graphemes, punctuation handled
 // =============================================================================
 
 // =============================================================================
@@ -14,8 +14,8 @@
 // =============================================================================
 //
 // Purpose:
-//   Validates the native C++ IPA tokenizer for MagpieTTS. Tests use synthetic
-//   mini-data mimicking NeMo's character-level IPA format: each pronunciation
+//   Validates the native C++ IPA tokenizer. Tests use synthetic mini-data
+//   mimicking a character-level IPA format: each pronunciation
 //   is a string of IPA characters (each character = a token), graphemes are
 //   uppercase letters (no prefix by default).
 //
@@ -36,10 +36,8 @@
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -77,8 +75,7 @@ static void check(bool condition, const char* test_name)
 //  24:     (space)
 //  25: <pad>
 //  26: <oov>
-static const char* make_test_vocab()
-{
+static const char* make_test_vocab() {
     return "!\n"
            ",\n"
            ".\n"
@@ -114,48 +111,41 @@ static const char* make_test_vocab()
 // "the" → "de"
 // "cat" → "kat"
 // "dog" has two pronunciations (ambiguous)
-static const char* make_test_dict()
-{
+static const char* make_test_dict() {
     return "hello\thelo\n"
            "the\tde\n"
            "cat\tkat\n"
            "dog\tkat\n"
-           "dog\tde\n";    // second pronunciation makes "dog" ambiguous
+           "dog\tde\n"; // second pronunciation makes "dog" ambiguous
 }
 
 // Heteronyms: "read" is a heteronym
-static const char* make_test_heteronyms()
-{
+static const char* make_test_heteronyms() {
     return "read\n"
            "live\n";
 }
 
 // Config JSON: no grapheme prefix (NeMo default), EOS = 2379 (beyond vocab)
-static const char* make_test_config()
-{
+static const char* make_test_config() {
     return "{\"grapheme_prefix\": \"\", \"eos_id\": 99, \"ignore_ambiguous_words\": 0}";
 }
 
-static std::unique_ptr<trtmc::ITokenizer> make_test_tokenizer()
-{
+static std::unique_ptr<trtmc::ITokenizer> make_test_tokenizer() {
     const auto* vocab = make_test_vocab();
     const auto* dict = make_test_dict();
     const auto* het = make_test_heteronyms();
     const auto* cfg = make_test_config();
 
-    return trtmc::CreateIpaTokenizer(
-        dict, std::string(dict).size(),
-        het, std::string(het).size(),
-        vocab, std::string(vocab).size(),
-        cfg, std::string(cfg).size());
+    return trtmc::CreateIpaTokenizer(dict, std::string(dict).size(), het, std::string(het).size(),
+                                     vocab, std::string(vocab).size(), cfg,
+                                     std::string(cfg).size());
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-static void test_encode_known_word()
-{
+static void test_encode_known_word() {
     auto tok = make_test_tokenizer();
     // "hello" → pronunciation "helo" → chars: h(18), e(17), l(20), o(21) + EOS(99)
     const auto ids = tok->encode("hello");
@@ -167,8 +157,7 @@ static void test_encode_known_word()
     check(ids[4] == 99, "encode hello [4] == 99 (EOS)");
 }
 
-static void test_encode_heteronym_as_graphemes()
-{
+static void test_encode_heteronym_as_graphemes() {
     auto tok = make_test_tokenizer();
     // "read" is a heteronym → uppercase graphemes: R(11), E(7), A(3), D(6) + EOS
     const auto ids = tok->encode("read");
@@ -180,8 +169,7 @@ static void test_encode_heteronym_as_graphemes()
     check(ids[4] == 99, "encode read [4] == 99 (EOS)");
 }
 
-static void test_encode_oov_as_graphemes()
-{
+static void test_encode_oov_as_graphemes() {
     auto tok = make_test_tokenizer();
     // "box" is OOV → uppercase graphemes: B(4), O(10), X(14) + EOS
     const auto ids = tok->encode("box");
@@ -192,8 +180,7 @@ static void test_encode_oov_as_graphemes()
     check(ids[3] == 99, "encode box [3] == 99 (EOS)");
 }
 
-static void test_encode_with_punctuation()
-{
+static void test_encode_with_punctuation() {
     auto tok = make_test_tokenizer();
     // "hello." → h(18) e(17) l(20) o(21) .(2) + EOS(99)
     const auto ids = tok->encode("hello.");
@@ -202,8 +189,7 @@ static void test_encode_with_punctuation()
     check(ids[5] == 99, "encode hello. [5] == 99 (EOS)");
 }
 
-static void test_encode_multiple_words()
-{
+static void test_encode_multiple_words() {
     auto tok = make_test_tokenizer();
     // "the cat" → d(16) e(17) <space>(24) k(19) a(15) t(22) + EOS
     const auto ids = tok->encode("the cat");
@@ -217,8 +203,7 @@ static void test_encode_multiple_words()
     check(ids[6] == 99, "encode the cat [6] == 99 (EOS)");
 }
 
-static void test_encode_case_insensitive()
-{
+static void test_encode_case_insensitive() {
     auto tok = make_test_tokenizer();
     // "Hello" should match "hello" in dict (lowercased lookup)
     const auto ids = tok->encode("Hello");
@@ -226,28 +211,25 @@ static void test_encode_case_insensitive()
     check(ids[0] == 18, "encode Hello [0] == 18 (h)");
 }
 
-static void test_encode_empty()
-{
+static void test_encode_empty() {
     auto tok = make_test_tokenizer();
     const auto ids = tok->encode("");
     check(ids.size() == 1, "encode empty size == 1");
     check(ids[0] == 99, "encode empty [0] == 99 (EOS)");
 }
 
-static void test_encode_consecutive_spaces_dedup()
-{
+static void test_encode_consecutive_spaces_dedup() {
     auto tok = make_test_tokenizer();
     const auto ids = tok->encode("the  cat");
     int space_count = 0;
-    for (const auto id : ids)
-    {
-        if (id == 24) ++space_count;
+    for (const auto id : ids) {
+        if (id == 24)
+            ++space_count;
     }
     check(space_count == 1, "encode double space dedup: only 1 space token");
 }
 
-static void test_encode_ambiguous_first_pronunciation()
-{
+static void test_encode_ambiguous_first_pronunciation() {
     // With ignore_ambiguous=false (our test config), use first pronunciation
     auto tok = make_test_tokenizer();
     // "dog" has 2 pronunciations: "kat" and "de". First = "kat"
@@ -259,22 +241,19 @@ static void test_encode_ambiguous_first_pronunciation()
     check(ids[3] == 99, "encode dog [3] == 99 (EOS)");
 }
 
-static void test_decode_basic()
-{
+static void test_decode_basic() {
     auto tok = make_test_tokenizer();
     const std::string text = tok->decode({18, 17, 20, 21});
     check(text == "helo", "decode helo");
 }
 
-static void test_decode_stops_at_eos()
-{
+static void test_decode_stops_at_eos() {
     auto tok = make_test_tokenizer();
     const std::string text = tok->decode({18, 17, 99, 20, 21});
     check(text == "he", "decode stops at EOS");
 }
 
-static void test_id_for_token()
-{
+static void test_id_for_token() {
     auto tok = make_test_tokenizer();
     check(tok->id_for_token("h") == 18, "id_for_token h == 18");
     check(tok->id_for_token("<pad>") == 25, "id_for_token <pad> == 25");
@@ -282,8 +261,7 @@ static void test_id_for_token()
     check(tok->id_for_token("nonexistent") == -1, "id_for_token nonexistent == -1");
 }
 
-static void test_token_for_id()
-{
+static void test_token_for_id() {
     auto tok = make_test_tokenizer();
     check(tok->token_for_id(0) == "!", "token_for_id 0 == !");
     check(tok->token_for_id(25) == "<pad>", "token_for_id 25 == <pad>");
@@ -292,45 +270,40 @@ static void test_token_for_id()
     check(tok->token_for_id(-1) == "", "token_for_id -1 == empty");
 }
 
-static void test_empty_dict_throws()
-{
+static void test_empty_dict_throws() {
     bool threw = false;
-    try
-    {
+    try {
         const auto* vocab = make_test_vocab();
-        trtmc::CreateIpaTokenizer(nullptr, 0, nullptr, 0,
-            vocab, std::string(vocab).size(), nullptr, 0);
+        trtmc::CreateIpaTokenizer(nullptr, 0, nullptr, 0, vocab, std::string(vocab).size(), nullptr,
+                                  0);
+    } catch (const std::invalid_argument&) {
+        threw = true;
     }
-    catch (const std::invalid_argument&) { threw = true; }
     check(threw, "empty dict throws invalid_argument");
 }
 
-static void test_empty_vocab_throws()
-{
+static void test_empty_vocab_throws() {
     bool threw = false;
-    try
-    {
+    try {
         const auto* dict = make_test_dict();
-        trtmc::CreateIpaTokenizer(dict, std::string(dict).size(),
-            nullptr, 0, nullptr, 0, nullptr, 0);
+        trtmc::CreateIpaTokenizer(dict, std::string(dict).size(), nullptr, 0, nullptr, 0, nullptr,
+                                  0);
+    } catch (const std::invalid_argument&) {
+        threw = true;
     }
-    catch (const std::invalid_argument&) { threw = true; }
     check(threw, "empty vocab throws invalid_argument");
 }
 
-static void test_trailing_space_stripped()
-{
+static void test_trailing_space_stripped() {
     auto tok = make_test_tokenizer();
     const auto ids = tok->encode("hello ");
     check(ids.back() == 99, "encode trailing space: last is EOS");
-    if (ids.size() >= 2)
-    {
+    if (ids.size() >= 2) {
         check(ids[ids.size() - 2] != 24, "encode trailing space: no space before EOS");
     }
 }
 
-int main()
-{
+int main() {
     test_encode_known_word();
     test_encode_heteronym_as_graphemes();
     test_encode_oov_as_graphemes();
@@ -348,8 +321,7 @@ int main()
     test_empty_vocab_throws();
     test_trailing_space_stripped();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

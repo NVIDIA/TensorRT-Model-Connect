@@ -32,6 +32,7 @@ class LTXVideoPipeline final : public IPipeline {
 
     ~LTXVideoPipeline() override;
 
+    bool supports_image_generation() const override { return true; }
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }

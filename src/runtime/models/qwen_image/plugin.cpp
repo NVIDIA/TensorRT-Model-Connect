@@ -9,10 +9,10 @@
 //
 // Trace: ARCH-FAM-001, UD-FAM-QWEN-IMAGE-01.
 
-#include "runtime/domains/diffusion/qwen_image_types.h"
-#include "runtime/models/qwen_image/pipeline.h"
 #include "diffusion_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/models/qwen_image/pipeline.h"
+#include "runtime/models/qwen_image/qwen_image_types.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 namespace trtmc {

@@ -13,7 +13,7 @@ Programmatic:
     from perfdb import PerfDB
     db = PerfDB("/path/to/perf.db")
     db.record_e2e(result, case, env, git_info)
-    db.query_history("qwen3-0.6b")
+    db.query_history("example-decoder")
 """
 from __future__ import annotations
 

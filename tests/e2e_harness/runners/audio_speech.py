@@ -1,9 +1,9 @@
 """Audio and speech strategy runners.
 
 Provides TRT inference runners for three audio/speech task strategies:
-- speech_to_text: Whisper-style transcription (audio in, text out)
-- text_to_audio: Bark-style audio generation (text in, audio out)
-- speech_to_speech: PersonaPlex-style speech transformation (audio in, audio out)
+- speech_to_text: transcription (audio in, text out)
+- text_to_audio: audio generation (text in, audio out)
+- speech_to_speech: speech transformation (audio in, audio out)
 
 All GPU work runs in subprocesses for memory isolation. The registry
 auto-discovers ONE plugin per module, so this module registers via
@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..runtime_config import runtime_config_get, runtime_config_set_tokens
+from ..runtime_config import runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ def _read_wav_rms(path: str) -> float:
 
 
 class SpeechToTextRunner:
-    """TRT strategy runner for speech-to-text (Whisper-style) transcription."""
+    """TRT strategy runner for speech-to-text transcription."""
 
     @property
     def strategy_name(self) -> str:
@@ -251,7 +251,7 @@ class SpeechToTextRunner:
 
 
 class TextToAudioRunner:
-    """TRT strategy runner for text-to-audio (Bark-style) generation."""
+    """TRT strategy runner for text-to-audio generation."""
 
     @property
     def strategy_name(self) -> str:
@@ -304,29 +304,13 @@ class TextToAudioRunner:
             runtime_tokens = runtime_config_set_tokens(case)
             for token in runtime_tokens:
                 cmd.extend(["--set", token])
-            # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
-            bark_seed = runtime_config_get(case, "audio_bark.seed")
-            if case.family == "bark" and bark_seed is None:
-                seed = case.determinism.get("seed")
-                if seed is not None:
-                    bark_seed = int(seed)
-                    cmd.extend(["--set", f"audio_bark.seed={int(seed)}"])
-            # Dump intermediate tokens for diversity/degeneration checks.
-            bark_dump_prefix = (
-                os.path.join(output_root, "rank_0", "bark_dump")
-                if distributed_runtime else os.path.join(tmpdir, "bark_dump")
-            )
             if distributed_runtime:
                 wrapper = (
                     'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
                     'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
                     'exec "$@" --output "$out/output.wav"'
                 )
-                if case.family == "bark":
-                    wrapper += ' --set "audio_bark.dump_path=$out/bark_dump"'
                 cmd = ["bash", "-lc", wrapper, "trtmc_rank_audio", output_root] + cmd
-            elif case.family == "bark":
-                cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
 
             cmd = _wrap_distributed_command(cmd, case)
 
@@ -343,8 +327,6 @@ class TextToAudioRunner:
                 "stdout": _strip_mpirun_tags(result.stdout),
                 "stderr": _strip_mpirun_tags(stderr_truncated),
             }
-            if case.family == "bark" and bark_seed is not None:
-                data["trt_seed"] = str(bark_seed)
             if stderr_log:
                 data["stderr_log"] = stderr_log
 
@@ -401,20 +383,6 @@ class TextToAudioRunner:
                 prompt_file = art_dir / "input_prompt.txt"
                 prompt_file.write_text(prompt, encoding="utf-8")
 
-            # Capture Bark token dump files for diversity and golden-token checks.
-            if case.family == "bark":
-                for suffix, key in [(".sem_tokens", "sem_tokens_path"),
-                                    (".coarse_tokens", "coarse_tokens_path")]:
-                    dump_file = bark_dump_prefix + suffix
-                    if os.path.exists(dump_file):
-                        if ctx.artifacts_dir:
-                            art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
-                            dst = str(art_dir / suffix.lstrip("."))
-                            shutil.copy2(dump_file, dst)
-                            data[key] = dst
-                        else:
-                            data[key] = dump_file
-
             return StageOutput(
                 stage_name=stage.name,
                 data=data,
@@ -439,7 +407,7 @@ class TextToAudioRunner:
 
 
 class SpeechToSpeechRunner:
-    """TRT strategy runner for speech-to-speech (PersonaPlex-style) pipelines."""
+    """TRT strategy runner for speech-to-speech pipelines."""
 
     @property
     def strategy_name(self) -> str:

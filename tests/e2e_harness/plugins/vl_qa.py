@@ -6,7 +6,12 @@ import string
 
 from ..contracts import MetricResult, OracleLevel, StageOutput
 from .base import (
-    normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail,
+    contract_config,
+    normalize_text,
+    extract_answer,
+    levenshtein_ned,
+    make_pass,
+    make_fail,
     make_skip,
 )
 
@@ -52,10 +57,7 @@ class VLQAPlugin:
     user_contract = "vl_answer"
 
     def configure_reference(self, case):
-        config = {"use_processor": True, "use_chat_template": True}
-        if case.reference_family == "ocr_markdown":
-            config["ocr_mode"] = True
-        return config
+        return contract_config(case)
 
     def verify(self, trt_output, ref_output, case, threshold):
         stage = trt_output.stage_name
@@ -104,7 +106,7 @@ class VLQAPlugin:
                 "TRT generation subprocess must exit cleanly",
                 f"TRT generation failed with return code {returncode}")
 
-        is_ocr = case.reference_family == "ocr_markdown"
+        is_ocr = bool(contract_config(case).get("ocr_mode"))
         required_substrings = ref_output.data.get("required_substrings", [])
         if is_ocr and required_substrings:
             if not ref_text:

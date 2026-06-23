@@ -6,6 +6,7 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation",
   "gated": true,
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "multi_device",
@@ -87,5 +88,10 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "FLUX.2-dev TP4 L0 repro. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract as flux-2-dev-l0, with the DiT denoiser split across four TensorRT 11 tensor-parallel ranks."
+  "notes": "FLUX.2-dev TP4 L0 repro. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract as flux-2-dev-l0, with the DiT denoiser split across four TensorRT 11 tensor-parallel ranks.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

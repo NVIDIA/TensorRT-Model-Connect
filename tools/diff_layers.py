@@ -6,11 +6,11 @@ forward pass, and compares per-layer hidden states against HF transformers.
 
 Usage:
     python3 tools/diff_layers.py \
-      --model Qwen/Qwen3-0.6B \
+      --model org/model-name \
       --prompt "Hello" --atol 0.05
 
     python3 tools/diff_layers.py \
-      --model models/hf/Qwen__Qwen3-0.6B --atol 0.05
+      --model models/hf/example-model --atol 0.05
 """
 import argparse
 import sys
@@ -24,14 +24,17 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine with debug layer outputs marked."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import find_plugin
-    from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine
+    from tensorrt_model_connect.families import family_has_capability, find_plugin
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
     plugin = find_plugin(config.model_type)
     if plugin is None:
         raise ValueError(f"No plugin for model_type={config.model_type!r}")
+    if not family_has_capability(config, "debug_layer_outputs"):
+        raise ValueError(
+            f"Family for model_type={config.model_type!r} does not declare "
+            "debug_layer_outputs support")
 
     print(f"[diff-layers] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size})",
@@ -40,10 +43,10 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     print("[diff-layers] Loading weights ...", file=sys.stderr)
     weights = plugin.load_weights(model_dir, config)
 
-    # Build with debug outputs — call the builder directly with the flag
+    # Build with debug outputs through the family-owned plugin hook.
     print(f"[diff-layers] Building debug TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
-    engine_plan = build_standard_decoder_engine(
+    engine_plan = plugin.build_engine(
         config, weights, max_cache_length,
         verbose=verbose, debug_layer_outputs=True)
     print(f"[diff-layers] Debug engine built ({len(engine_plan) / 1e6:.1f} MB)",

@@ -4,8 +4,16 @@
   "bundle": "marian-en-ru.trtfb",
   "family": "marian",
   "runtime_strategy": "marian_translation",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_translation",
+  "user_contract": "translation",
   "max_cache_length": 256,
   "prompt": "The house is wonderful.",
   "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModelForSeq2SeqLM"
+    }
+  }
 }

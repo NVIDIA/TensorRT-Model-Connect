@@ -10,7 +10,7 @@ namespace trtmc {
 namespace {
 
 // Periodic Hann window: w[n] = 0.5 * (1 - cos(2*pi*n / N))
-// Matches np.hanning(N+1)[:-1] used by HF WhisperFeatureExtractor.
+// Matches the periodic Hann window convention used by HF feature extractors.
 std::vector<float> make_hann_window(int32_t length) {
     std::vector<float> window(length);
     const double pi2 = 2.0 * 3.14159265358979323846;
@@ -62,12 +62,20 @@ void rfft_power_direct(const float* x, int32_t n, int32_t n_out, float* power_ou
 
 std::vector<float> build_center_padded_audio(const float* samples, int32_t n_samples,
                                              int32_t chunk_length_s, int32_t sample_rate,
-                                             int32_t n_fft) {
+                                             int32_t n_fft, float preemphasis = 0.0F) {
     const int32_t audio_length = chunk_length_s * sample_rate;
     std::vector<float> audio_padded(audio_length, 0.0F);
     const int32_t copy_len = std::min(n_samples, audio_length);
     if (copy_len > 0) {
-        std::memcpy(audio_padded.data(), samples, copy_len * sizeof(float));
+        if (preemphasis != 0.0F) {
+            audio_padded[0] = samples[0];
+            for (int32_t i = 1; i < copy_len; ++i) {
+                audio_padded[static_cast<std::size_t>(i)] =
+                    samples[i] - preemphasis * samples[i - 1];
+            }
+        } else {
+            std::memcpy(audio_padded.data(), samples, copy_len * sizeof(float));
+        }
     }
 
     const int32_t pad_size = n_fft / 2;
@@ -77,53 +85,9 @@ std::vector<float> build_center_padded_audio(const float* samples, int32_t n_sam
     return padded;
 }
 
-std::vector<float> build_nemo_center_padded_audio(const float* samples, int32_t n_samples,
-                                                  int32_t chunk_length_s, int32_t sample_rate,
-                                                  int32_t n_fft, float preemph) {
-    const int32_t audio_length = chunk_length_s * sample_rate;
-    std::vector<float> audio(audio_length, 0.0F);
-    const int32_t copy_len = std::min(n_samples, audio_length);
-    if (copy_len > 0) {
-        audio[0] = samples[0];
-        for (int32_t i = 1; i < copy_len; ++i)
-            audio[static_cast<std::size_t>(i)] = samples[i] - preemph * samples[i - 1];
-    }
-
-    const int32_t pad_size = n_fft / 2;
-    std::vector<float> padded(static_cast<std::size_t>(audio_length + 2 * pad_size), 0.0F);
-    std::memcpy(padded.data() + pad_size, audio.data(),
-                static_cast<std::size_t>(audio_length) * sizeof(float));
-    return padded;
-}
-
 int32_t resolve_num_freq_bins(int32_t n_freq_bins, int32_t n_fft) {
     const int32_t expected_freq_bins = n_fft / 2 + 1;
     return (n_freq_bins == expected_freq_bins) ? n_freq_bins : expected_freq_bins;
-}
-
-std::vector<float> compute_power_spectrogram(const std::vector<float>& padded, int32_t n_fft,
-                                             int32_t hop_length, int32_t n_freq_bins,
-                                             int32_t& n_frames_raw) {
-    n_frames_raw = 1 + (static_cast<int32_t>(padded.size()) - n_fft) / hop_length;
-    std::vector<float> power(static_cast<std::size_t>(n_freq_bins) * n_frames_raw, 0.0F);
-    std::vector<float> window = make_hann_window(n_fft);
-    std::vector<float> windowed(n_fft);
-    std::vector<float> frame_power(n_freq_bins);
-
-    for (int32_t t = 0; t < n_frames_raw; ++t) {
-        const int32_t start = t * hop_length;
-        for (int32_t i = 0; i < n_fft; ++i) {
-            windowed[i] = padded[start + i] * window[i];
-        }
-
-        rfft_power_direct(windowed.data(), n_fft, n_freq_bins, frame_power.data());
-
-        for (int32_t f = 0; f < n_freq_bins; ++f) {
-            power[static_cast<std::size_t>(f) * n_frames_raw + t] = frame_power[f];
-        }
-    }
-
-    return power;
 }
 
 std::vector<float> compute_power_spectrogram_with_window(const std::vector<float>& padded,
@@ -188,14 +152,14 @@ void normalize_log_mel_inplace(std::vector<float>& mel_spec) {
     }
 }
 
-void nemo_log_mel_inplace(std::vector<float>& mel_spec) {
+void natural_log_mel_inplace(std::vector<float>& mel_spec) {
     constexpr float kLogGuard = 5.960464477539063e-08F; // 2**-24
     for (float& value : mel_spec)
         value = std::log(value + kLogGuard);
 }
 
-void normalize_nemo_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_mel_bins,
-                                        int32_t n_frames_raw, int32_t valid_frames) {
+void normalize_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_mel_bins,
+                                   int32_t n_frames_raw, int32_t valid_frames) {
     if (n_mel_bins <= 0 || n_frames_raw <= 0) {
         return;
     }
@@ -206,7 +170,7 @@ void normalize_nemo_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_
         return;
     }
 
-    constexpr float kStdGuard = 1e-5F; // NeMo preprocessing CONSTANT.
+    constexpr float kStdGuard = 1e-5F;
     for (int32_t m = 0; m < n_mel_bins; ++m) {
         const std::size_t base = static_cast<std::size_t>(m) * n_frames_raw;
 
@@ -255,53 +219,62 @@ std::vector<float> trim_last_frame_if_needed(std::vector<float> mel_spec, int32_
     return trimmed;
 }
 
+std::vector<float> make_stft_window(const MelSpectrogramOptions& options) {
+    const int32_t win_length = options.win_length > 0 ? options.win_length : options.n_fft;
+    if (options.center_window_in_fft) {
+        return make_centered_stft_window(options.n_fft, win_length);
+    }
+    if (options.symmetric_window) {
+        return make_symmetric_hann_window(options.n_fft);
+    }
+    return make_hann_window(options.n_fft);
+}
+
+void apply_log_scale_inplace(std::vector<float>& mel_spec, MelLogScale log_scale) {
+    switch (log_scale) {
+    case MelLogScale::kNaturalLog:
+        natural_log_mel_inplace(mel_spec);
+        break;
+    case MelLogScale::kLog10Normalized:
+        normalize_log_mel_inplace(mel_spec);
+        break;
+    }
+}
+
 } // anonymous namespace
 
 MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const float* mel_filters,
                                   int32_t n_freq_bins, int32_t n_mel_bins, int32_t n_fft,
                                   int32_t hop_length, int32_t chunk_length_s, int32_t sample_rate) {
-    const std::vector<float> padded =
-        build_center_padded_audio(samples, n_samples, chunk_length_s, sample_rate, n_fft);
-    const int32_t freq_bins = resolve_num_freq_bins(n_freq_bins, n_fft);
-
-    int32_t n_frames_raw = 0;
-    const std::vector<float> power =
-        compute_power_spectrogram(padded, n_fft, hop_length, freq_bins, n_frames_raw);
-    std::vector<float> mel_spec =
-        project_power_to_mel(power, mel_filters, freq_bins, n_mel_bins, n_frames_raw);
-    normalize_log_mel_inplace(mel_spec);
-
-    int32_t n_frames_out = 0;
-    mel_spec =
-        trim_last_frame_if_needed(std::move(mel_spec), n_mel_bins, n_frames_raw, n_frames_out);
-
-    MelResult result;
-    result.data = std::move(mel_spec);
-    result.n_mels = n_mel_bins;
-    result.n_frames = n_frames_out;
-    return result;
+    MelSpectrogramOptions options;
+    options.n_fft = n_fft;
+    options.hop_length = hop_length;
+    options.chunk_length_s = chunk_length_s;
+    options.sample_rate = sample_rate;
+    options.log_scale = MelLogScale::kLog10Normalized;
+    return extract_configured_mel_spectrogram(samples, n_samples, mel_filters, n_freq_bins,
+                                              n_mel_bins, options);
 }
 
-MelResult extract_nemo_mel_spectrogram(const float* samples, int32_t n_samples,
-                                       const float* mel_filters, int32_t n_freq_bins,
-                                       int32_t n_mel_bins, int32_t n_fft, int32_t win_length,
-                                       int32_t hop_length, int32_t chunk_length_s,
-                                       int32_t sample_rate, float preemph,
-                                       bool normalize_per_feature) {
-    const std::vector<float> padded = build_nemo_center_padded_audio(
-        samples, n_samples, chunk_length_s, sample_rate, n_fft, preemph);
-    const int32_t freq_bins = resolve_num_freq_bins(n_freq_bins, n_fft);
+MelResult extract_configured_mel_spectrogram(const float* samples, int32_t n_samples,
+                                             const float* mel_filters, int32_t n_freq_bins,
+                                             int32_t n_mel_bins,
+                                             const MelSpectrogramOptions& options) {
+    const std::vector<float> padded =
+        build_center_padded_audio(samples, n_samples, options.chunk_length_s, options.sample_rate,
+                                  options.n_fft, options.preemphasis);
+    const int32_t freq_bins = resolve_num_freq_bins(n_freq_bins, options.n_fft);
 
     int32_t n_frames_raw = 0;
-    const auto window = make_centered_stft_window(n_fft, win_length);
+    const auto window = make_stft_window(options);
     const std::vector<float> power = compute_power_spectrogram_with_window(
-        padded, window, n_fft, hop_length, freq_bins, n_frames_raw);
+        padded, window, options.n_fft, options.hop_length, freq_bins, n_frames_raw);
     std::vector<float> mel_spec =
         project_power_to_mel(power, mel_filters, freq_bins, n_mel_bins, n_frames_raw);
-    nemo_log_mel_inplace(mel_spec);
-    if (normalize_per_feature) {
-        const int32_t valid_frames = (hop_length > 0) ? (n_samples / hop_length) : 0;
-        normalize_nemo_per_feature_inplace(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
+    apply_log_scale_inplace(mel_spec, options.log_scale);
+    if (options.normalize_per_feature) {
+        const int32_t valid_frames = (options.hop_length > 0) ? (n_samples / options.hop_length) : 0;
+        normalize_per_feature_inplace(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
     }
 
     int32_t n_frames_out = 0;

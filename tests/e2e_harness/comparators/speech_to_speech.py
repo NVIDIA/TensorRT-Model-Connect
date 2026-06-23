@@ -1,6 +1,6 @@
 """Speech-to-speech comparator.
 
-Compares TRT PersonaPlex-style speech output against reference with metrics:
+Compares TRT speech-to-speech output against reference with metrics:
 - Depth token match rate
 - Audio token match rate
 - Frame exact match rate

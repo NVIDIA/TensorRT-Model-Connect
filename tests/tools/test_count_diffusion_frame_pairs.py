@@ -38,21 +38,21 @@ def _write_frame_pair(model_dir, reference_dir: str) -> None:
 
 
 def test_counts_frames_plus_hf_frames(tmp_path) -> None:
-    model_dir = tmp_path / "artifacts" / "wan"
-    _write_result(model_dir, case_name="wan")
+    model_dir = tmp_path / "artifacts" / "video-diffusion"
+    _write_result(model_dir, case_name="video-diffusion")
     _write_frame_pair(model_dir, "hf_frames")
 
     pairs = discover_diffusion_frame_pairs(tmp_path / "artifacts")
 
     assert count_diffusion_frame_pairs(tmp_path / "artifacts") == 1
-    assert pairs[0]["case_name"] == "wan"
+    assert pairs[0]["case_name"] == "video-diffusion"
     assert pairs[0]["trt_image"].endswith("frames/frame_0000.png")
     assert pairs[0]["hf_image"].endswith("hf_frames/frame_0000.png")
 
 
 def test_counts_frames_plus_ref_frames(tmp_path) -> None:
-    model_dir = tmp_path / "artifacts" / "pixart"
-    _write_result(model_dir, case_name="pixart")
+    model_dir = tmp_path / "artifacts" / "image-diffusion"
+    _write_result(model_dir, case_name="image-diffusion")
     _write_frame_pair(model_dir, "ref_frames")
 
     pairs = discover_diffusion_frame_pairs(tmp_path / "artifacts")
@@ -72,8 +72,12 @@ def test_malformed_result_json_is_ignored(tmp_path) -> None:
 
 
 def test_non_diffusion_result_is_ignored(tmp_path) -> None:
-    model_dir = tmp_path / "artifacts" / "qwen"
-    _write_result(model_dir, task_strategy="text_generation_causal", case_name="qwen")
+    model_dir = tmp_path / "artifacts" / "example-decoder"
+    _write_result(
+        model_dir,
+        task_strategy="text_generation_causal",
+        case_name="example-decoder",
+    )
     _write_frame_pair(model_dir, "hf_frames")
 
     assert discover_diffusion_frame_pairs(tmp_path / "artifacts") == []

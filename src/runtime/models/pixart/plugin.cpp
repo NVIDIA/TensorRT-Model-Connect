@@ -1,11 +1,9 @@
 // PixArtPlugin: handles "diffusion_pixart" strategy.
-// PixArt-Sigma/Alpha via TRT Network API. Same engine format as Wan
-// (preprocessor_weights, T5 text encoder, DiT denoiser, VAE decoder).
-// Standalone plugin — no delegation to WanPlugin.
+// PixArt-Sigma/Alpha via TRT Network API.
 
-#include "runtime/models/pixart/pipeline.h"
 #include "diffusion_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/models/pixart/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

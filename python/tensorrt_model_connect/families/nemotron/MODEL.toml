@@ -1,6 +1,7 @@
 id = "nemotron"
 plugin = "nemotron"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "nemotron",
 ]

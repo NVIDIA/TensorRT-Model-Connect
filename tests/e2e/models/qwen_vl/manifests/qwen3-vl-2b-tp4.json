@@ -5,6 +5,9 @@
   "bundle": "qwen3-vl-2b-tp4.trtfb",
   "family": "qwen_vl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
@@ -52,5 +55,11 @@
       "gating": true
     }
   ],
-  "notes": "Tensor-parallel TP=4 Qwen3-VL coverage on four GPUs."
+  "notes": "Tensor-parallel TP=4 Qwen3-VL coverage on four GPUs.",
+  "metadata": {
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true
+    }
+  }
 }

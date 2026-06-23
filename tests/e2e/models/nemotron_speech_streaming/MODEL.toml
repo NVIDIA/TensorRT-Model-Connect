@@ -3,4 +3,11 @@ plugin = "nemotron_speech_streaming"
 test_manifests = [
   "manifests/nemotron-speech-streaming-en-0.6b-tp4.json",
   "manifests/nemotron-speech-streaming-en-0.6b.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe01.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe02.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe03.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe04.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe05.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe06.json",
+  "manifests/nemotron-speech-streaming-en-0.6b-asr-probe08.json",
 ]

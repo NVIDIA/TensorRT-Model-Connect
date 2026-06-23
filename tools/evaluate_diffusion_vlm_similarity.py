@@ -20,7 +20,6 @@ except ModuleNotFoundError:
     from count_diffusion_frame_pairs import discover_diffusion_frame_pairs
 
 
-DEFAULT_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _SCORED_NUMERIC_KEYS = (
     "semantic_similarity_0_to_5",
@@ -50,6 +49,35 @@ _NON_PHOTO_DESCRIPTION_TERMS = (
     "silhouette",
 )
 _INVALID_REFERENCE_SCORE_CAP = 2.0
+
+
+def _default_assessment_config_path() -> Path:
+    repo_root = Path(__file__).resolve().parents[1]
+    configs = sorted(
+        (repo_root / "tests" / "e2e" / "models").glob(
+            "*/diffusion_vlm_assessment.json"
+        )
+    )
+    defaults = []
+    for path in configs:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("default") is True:
+            defaults.append(path)
+    if len(defaults) != 1:
+        listed = ", ".join(str(path) for path in defaults) or "none"
+        raise SystemExit(
+            "Expected exactly one default diffusion VLM assessment config under "
+            f"tests/e2e/models/*/diffusion_vlm_assessment.json; found {listed}"
+        )
+    return defaults[0]
+
+
+def _load_assessment_config(path: Path | None) -> dict[str, Any]:
+    config_path = path or _default_assessment_config_path()
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit(f"{config_path} must contain a JSON object")
+    return data
 
 
 def _load_image(path: Path, max_side: int) -> Any:
@@ -308,11 +336,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
+    parser.add_argument("--config", type=Path,
+                        help="Model-owned diffusion VLM assessment config.")
+    parser.add_argument("--model-id")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--max-side", type=int, default=512)
-    parser.add_argument("--max-new-tokens", type=int, default=384)
+    parser.add_argument("--max-side", type=int)
+    parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--case", action="append", default=[],
                         help="Optional case name filter. May be passed more than once.")
     parser.add_argument("--waives", type=Path,
@@ -320,6 +350,17 @@ def main() -> int:
     args = parser.parse_args()
     if args.waives:
         print("Ignoring deprecated --waives; diffusion VLM gate failures fail CI.")
+
+    assessment_config = _load_assessment_config(args.config)
+    model_id = args.model_id or assessment_config.get("model_id")
+    if not model_id:
+        raise SystemExit(
+            "Diffusion VLM assessment requires --model-id or a config model_id"
+        )
+    max_side = int(args.max_side or assessment_config.get("max_side", 512))
+    max_new_tokens = int(
+        args.max_new_tokens or assessment_config.get("max_new_tokens", 384)
+    )
 
     pairs = _discover_pairs(args.artifacts_dir)
     if args.case:
@@ -330,17 +371,17 @@ def main() -> int:
 
     dtype = torch.bfloat16 if args.device.startswith("cuda") else torch.float32
     model = AutoModelForImageTextToText.from_pretrained(
-        args.model_id,
+        model_id,
         local_files_only=args.local_files_only,
         dtype=dtype,
         trust_remote_code=True,
     ).to(args.device)
     processor = AutoProcessor.from_pretrained(
-        args.model_id,
+        model_id,
         local_files_only=args.local_files_only,
         trust_remote_code=True,
         min_pixels=224 * 224,
-        max_pixels=args.max_side * args.max_side,
+        max_pixels=max_side * max_side,
     )
 
     results = []
@@ -348,7 +389,7 @@ def main() -> int:
     for pair in pairs:
         result = _judge_pair(
             model, processor, args.device, pair,
-            max_side=args.max_side, max_new_tokens=args.max_new_tokens)
+            max_side=max_side, max_new_tokens=max_new_tokens)
         results.append(result)
         judgment = result["vlm_judgment"]
         gate = judgment.get("vlm_gate", {})
@@ -364,7 +405,7 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
-        "model_id": args.model_id,
+        "model_id": model_id,
         "artifacts_dir": str(args.artifacts_dir),
         "results": results,
     }, indent=2), encoding="utf-8")

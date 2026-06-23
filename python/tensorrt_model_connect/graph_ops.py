@@ -387,12 +387,12 @@ def make_rope_table(
     """Build cos or sin RoPE table of shape [max_cache_length, hidden_size].
 
     Args:
-        partial_rotary_factor: Fraction of head dimensions that get RoPE
-            (e.g. 0.25 for StableLM-2). Default 1.0 = full RoPE.
+        partial_rotary_factor: Fraction of head dimensions that get RoPE.
+            Default 1.0 = full RoPE.
         interleaved: If True, use interleaved frequency assignment where
-            adjacent dims (d, d+1) share the same frequency (CodeGen/GPT-J).
+            adjacent dims (d, d+1) share the same frequency.
             If False (default), use rotated-half where dims (d, d+half) share
-            the same frequency (LLaMA/Qwen/GPT-NeoX).
+            the same frequency.
     """
     table = np.full(
         (max_cache_length, hidden_size),
@@ -539,14 +539,14 @@ def make_yarn_rope_table_half_dim(
     return table
 
 
-def make_llama4_attention_scale_table(
+def make_rope_query_scale_table(
     max_cache_length: int,
     beta: float,
     original_max_position_embeddings: int,
 ) -> np.ndarray:
-    """Build the per-position query scale used by Llama-4-style RoPE.
+    """Build a per-position query scale for extended-context RoPE variants.
 
-    HF Nemotron-Labs-Diffusion applies this after RoPE:
+    Some HF models apply this after RoPE:
       1 + beta * log(1 + floor(position / original_max_position_embeddings))
 
     Returns [max_cache_length, 1] so TensorRT can gather by position_id and
@@ -898,10 +898,10 @@ def add_windowed_self_attention_with_rope(
 ) -> trt.ITensor:
     """Windowed self-attention with precomputed RoPE.
 
-    Splits the already window-ordered sequence into windows. Most Qwen-VL
-    builds have equal-sized windows and use one batched attention op; HF
-    smart-resized images can produce partial edge windows, which are handled
-    by static per-window slices when ``window_patch_counts`` is provided.
+    Splits the already window-ordered sequence into windows. Equal-sized
+    windows use one batched attention op; smart-resized images can produce
+    partial edge windows, which are handled by static per-window slices when
+    ``window_patch_counts`` is provided.
 
     Input hidden: [seq_length, hidden_size]
     cos_table/sin_table: [seq_length, hidden_size]
@@ -1085,8 +1085,7 @@ def add_spatial_merge(
     Input: [seq_length, input_dim]
     Output: [seq_length // (merge_size^2), output_dim]
 
-    Note: This is a simplified version. For Qwen2.5-VL, the merge
-    concatenates merge_size^2 adjacent patches, then applies layernorm + MLP.
+    Concatenates merge_size^2 adjacent patches, then applies layernorm + MLP.
     """
     # LayerNorm on the merged representation
     norm = add_layer_norm(
@@ -1112,7 +1111,7 @@ def add_spatial_merge(
 
 
 # ---------------------------------------------------------------------------
-# Diffusion graph ops — used by DiT, T5, VAE builders
+# Diffusion graph ops — used by denoiser, text-encoder, and decoder builders
 # ---------------------------------------------------------------------------
 
 def add_group_norm(
@@ -1472,7 +1471,8 @@ def add_spatial_upsample_with_conv(
 ) -> trt.ITensor:
     """Spatial nearest-neighbor 2x upsample + Conv3D(1,3,3) smoothing.
 
-    Matches HF WanResample's nn.Sequential(Upsample(2x), Conv3d(1,3,3)).
+    Matches the common HF upsample-then-smooth block:
+    nn.Sequential(Upsample(2x), Conv3d(1,3,3)).
 
     Input: [B, C_in, T, H, W]
     Weight: [C_out, C_in, 1, 3, 3]  (C_out detected from weight shape)
@@ -1754,16 +1754,16 @@ def add_cross_attention(
     return out
 
 
-def make_t5_relative_position_bias(
+def make_bucketed_relative_position_bias(
     num_heads: int,
     max_seq_len: int,
     num_buckets: int = 32,
     max_distance: int = 128,
 ) -> np.ndarray:
-    """Compute T5-style relative position bias table.
+    """Compute bucketed relative position bias indices.
 
-    Returns: [num_heads, max_seq_len, max_seq_len] float32 bias table.
-    This is baked as a constant into the TRT graph.
+    Returns: [max_seq_len, max_seq_len] int32 bucket indices.
+    Family-owned builders can use this to bake relative-position constants.
     """
     def _relative_position_bucket(
         relative_position: np.ndarray,
@@ -1771,7 +1771,7 @@ def make_t5_relative_position_bias(
         num_bkts: int = 32,
         max_dist: int = 128,
     ) -> np.ndarray:
-        """Map relative position to bucket index (T5 algorithm)."""
+        """Map relative position to a logarithmic bucket index."""
         ret = np.zeros_like(relative_position, dtype=np.int32)
         n = -relative_position
         if bidirectional:
@@ -2336,8 +2336,8 @@ def make_rope_table_half_dim(
         rope_theta:       Base frequency for inverse-frequency computation.
         cosine:           True → cos table, False → sin table.
         partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
-        interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
-                          If False, half-split frequencies (LLaMA/Qwen).
+        interleaved:      If True, adjacent-pair frequencies.
+                          If False, half-split frequencies.
 
     Returns:
         Float32 array [max_cache_length, rotary_ndims // 2].
@@ -2556,8 +2556,8 @@ def add_apply_rope_native(
       cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       position_id:     [Sq] int32, reshaped to [1, Sq] internally
-      interleaved:     False → rotate-half (LLaMA/Qwen)
-                       True  → adjacent-pair (CodeGen/GPT-J)
+      interleaved:     False -> rotate-half
+                       True  -> adjacent-pair
 
     Args:
         inp:                  [Sq, num_heads * head_dim].

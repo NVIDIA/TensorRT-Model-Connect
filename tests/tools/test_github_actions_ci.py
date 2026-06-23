@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _single_default_model_config(filename: str) -> tuple[Path, dict]:
+    configs = sorted((REPO_ROOT / "tests" / "e2e" / "models").glob(f"*/{filename}"))
+    defaults = []
+    for path in configs:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("default") is True:
+            defaults.append((path, data))
+    assert len(defaults) == 1
+    return defaults[0]
 
 
 def test_workflows_define_shared_hf_cache_env() -> None:
@@ -42,18 +54,26 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
+def test_github_stage_wrapper_exports_diffusion_vlm_config() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    assert "-e DIFFUSION_VLM_CONFIG" in text
+    assert "DIFFUSION_VLM_CONFIG" in start_text
+
+
 def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     for name in (
         "TRTMC_PACKAGE_PYTHON_TAGS",
         "TRTMC_PACKAGE_WHEEL_ARCH",
         "TRTMC_PACKAGE_BUILD_ROOT",
-        "TRTMC_WHEEL_QWEN_MODEL_ID",
-        "TRTMC_WHEEL_QWEN_MAX_CACHE",
-        "TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS",
-        "TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL",
-        "TRTMC_WHEEL_QWEN_BUILD_TIMEOUT",
-        "TRTMC_WHEEL_QWEN_RUN_TIMEOUT",
+        "TRTMC_WHEEL_SMOKE_CONFIG",
+        "TRTMC_WHEEL_SMOKE_MODEL_ID",
+        "TRTMC_WHEEL_SMOKE_MAX_CACHE",
+        "TRTMC_WHEEL_SMOKE_MAX_NEW_TOKENS",
+        "TRTMC_WHEEL_SMOKE_OPTIMIZATION_LEVEL",
+        "TRTMC_WHEEL_SMOKE_BUILD_TIMEOUT",
+        "TRTMC_WHEEL_SMOKE_RUN_TIMEOUT",
     ):
         assert f"-e {name}" in text
 
@@ -76,7 +96,33 @@ def test_diffusion_vlm_pair_count_uses_helper() -> None:
         maxsplit=1,
     )[0]
     assert "tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts" in vlm_block
+    assert "--config \"$vlm_config\"" in vlm_block
     assert "python3 -c" not in vlm_block
+
+
+def test_diffusion_vlm_assessment_default_is_model_owned() -> None:
+    path, data = _single_default_model_config("diffusion_vlm_assessment.json")
+    assert path.parent.parent == REPO_ROOT / "tests" / "e2e" / "models"
+    for key in ("model_id", "max_side", "max_new_tokens", "timeout"):
+        assert data.get(key)
+
+
+def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
+    shared_paths = (
+        REPO_ROOT / ".github" / "workflows" / "nightly.yml",
+        REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
+        REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh",
+        REPO_ROOT / "tools" / "evaluate_diffusion_vlm_similarity.py",
+    )
+    _, data = _single_default_model_config("diffusion_vlm_assessment.json")
+    forbidden = (str(data["model_id"]),)
+    violations = [
+        (path, needle)
+        for path in shared_paths
+        for needle in forbidden
+        if needle in path.read_text(encoding="utf-8")
+    ]
+    assert not violations
 
 
 def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
@@ -181,14 +227,14 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
         assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
 
 
-def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
+def test_nightly_runs_wheel_model_smoke_before_upload_and_release() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package_index = text.index("Build trtmc pip package")
-    smoke_index = text.index("Qwen smoke test from trtmc pip package")
+    smoke_index = text.index("Model smoke test from trtmc pip package")
     upload_index = text.index("Upload trtmc pip package artifact")
     publish_index = text.index("Publish trtmc pip package to GitHub Release")
     assert package_index < smoke_index < upload_index < publish_index
-    assert "run-gha-stage.sh wheel-qwen-smoke" in text
+    assert "run-gha-stage.sh wheel-model-smoke" in text
 
 
 def test_github_ci_uses_manylinux_image_and_builds_wheel_first() -> None:
@@ -213,8 +259,61 @@ def test_package_stage_builds_py310_and_py312_wheels() -> None:
     assert "python -m build --wheel --outdir \"$PWD/dist\"" in text
     assert 'build-dir=$package_build_root/$tag' in text
     assert "manylinux_2_39_aarch64" in text
-    assert "wheel-qwen-smoke)" in text
-    assert "Qwen smoke test from trtmc pip package" in text
+    assert "wheel-model-smoke)" in text
+    assert "Model smoke test from trtmc pip package" in text
+
+
+def test_package_smoke_default_is_model_owned() -> None:
+    path, data = _single_default_model_config("package_smoke.json")
+    assert path.parent.parent == REPO_ROOT / "tests" / "e2e" / "models"
+    for key in (
+        "name",
+        "model_id",
+        "bundle",
+        "timing_cache",
+        "max_cache",
+        "max_new_tokens",
+        "optimization_level",
+        "build_timeout",
+        "run_timeout",
+        "precision",
+        "prompt",
+    ):
+        assert data.get(key)
+    assert isinstance(data.get("run_args", []), list)
+
+
+def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
+    shared_paths = (
+        REPO_ROOT / ".github" / "workflows" / "nightly.yml",
+        REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh",
+        REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh",
+        REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh",
+    )
+    config_path, data = _single_default_model_config("package_smoke.json")
+    family = config_path.parent.name
+    model_name = str(data["name"])
+    model_prefix = model_name.split("-", maxsplit=1)[0]
+    family_tokens = {family, model_prefix}
+    forbidden = {
+        str(data[key])
+        for key in ("model_id", "name", "bundle", "timing_cache")
+        if data.get(key)
+    }
+    for token in family_tokens:
+        forbidden.update({
+            f"TRTMC_WHEEL_{token.upper()}",
+            f"wheel-{token}-smoke",
+            f"{token.title()} smoke test from trtmc pip package",
+            f"trtmc-wheel-{token}-smoke",
+        })
+    violations = [
+        (path, needle)
+        for path in shared_paths
+        for needle in forbidden
+        if needle in path.read_text(encoding="utf-8")
+    ]
+    assert not violations
 
 
 def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
@@ -240,6 +339,13 @@ def test_package_stage_uses_conan_py_build_inputs() -> None:
     assert 'TRTMC_CUDART_LIBRARY="$cudart_library"' in text
 
 
+def test_impact_stage_reuses_cached_json_for_summary() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'tools/test_impact.py "${impact_args[@]}" --json > impact.json' in text
+    assert "ImpactResult(**json.load(f))" in text
+    assert 'tools/test_impact.py "${impact_args[@]}" --verbose' not in text
+
+
 def test_release_wheel_build_disables_libtorch_linkage() -> None:
     text = (REPO_ROOT / "conanfile.py").read_text()
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
@@ -254,7 +360,10 @@ def test_model_plugins_are_staged_for_installed_trtmc() -> None:
 
     assert "install(TARGETS trtmc_model_${_trtmc_model}" in cmake
     assert "${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}" in cmake
+    assert 'cmake.build(target="trtmc_model_plugins")' in conanfile
     assert '"libtrtmc_model_*.so*"' in conanfile
+    assert 'rglob("libtrtmc_model_*.so*")' in conanfile
+    assert "src=str(model_plugin.parent)" in conanfile
     assert "model_plugins = sorted(package_bin.glob" in conanfile
     assert "TRTMC model plugin DSOs were not staged" in conanfile
     assert '"site-packages" / "tensorrt_model_connect" / "bin"' in loader
@@ -294,6 +403,13 @@ def test_cpp_coverage_builds_excluded_test_target() -> None:
     assert "--target trtmc_cpp_tests" in coverage
 
 
+def test_cpp_coverage_gate_excludes_model_owned_runtime_plugins() -> None:
+    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
+    assert "GCOVR_EXCLUDES" in coverage
+    assert '"${REPO_ROOT}/src/runtime/models"' in coverage
+    assert 'gcovr_base+=(--exclude "${exclude}")' in coverage
+
+
 def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text()
     backend_text = (REPO_ROOT / "_pyproject_backend.py").read_text()
@@ -306,15 +422,15 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     assert "[project.scripts]" not in text
 
 
-def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
+def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    smoke_block = text.split("run_wheel_qwen_smoke() {", maxsplit=1)[1].split(
+    smoke_block = text.split("run_wheel_model_smoke() {", maxsplit=1)[1].split(
         "\n}",
         maxsplit=1,
     )[0]
     assert "select_wheel_by_tag py312 dist" in smoke_block
     assert "sys.version_info[:2] != (3, 12)" in smoke_block
-    assert "TRTMC_WHEEL_QWEN_PYTHON" not in smoke_block
+    assert "TRTMC_WHEEL_SMOKE_PYTHON" not in smoke_block
     assert "select_compatible_wheel" not in smoke_block
     assert 'PATH="$smoke_venv/bin:$PATH"' not in smoke_block
     assert '"$smoke_venv/bin/trtmc" build "$model_id"' in smoke_block

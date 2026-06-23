@@ -7,8 +7,8 @@
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
-#include "trtmc/runtime/pipeline_plugin_loader.h"
 #include "trtmc/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_plugin_loader.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "utils/data_dir.h"
@@ -25,45 +25,23 @@ namespace trtmc {
 
 namespace {
 
-// Rewrite legacy ambiguous strategy strings from old bundles into their
-// unambiguous per-model equivalents. New bundles already use the split strings.
-bool json_field_is_truthy(const std::string& config_text, const char* key) {
-    auto pos = config_text.find(std::string("\"") + key + "\"");
-    if (pos == std::string::npos)
-        return false;
-    auto colon = config_text.find(':', pos);
-    if (colon == std::string::npos)
-        return false;
-    auto rest = config_text.substr(colon + 1, 20);
-    return rest.find("true") != std::string::npos || rest.find('1') != std::string::npos;
-}
-
-std::string json_field_substr(const std::string& config_text, const char* key) {
-    auto pos = config_text.find(std::string("\"") + key + "\"");
-    if (pos == std::string::npos)
-        return "";
-    auto colon = config_text.find(':', pos);
-    if (colon == std::string::npos)
-        return "";
-    return config_text.substr(colon, 40);
-}
-
 std::string normalize_legacy_strategy(const std::string& strategy, const std::string& config_text) {
-    if (strategy == "text_to_audio") {
-        return json_field_is_truthy(config_text, "magpie_tts") ? "text_to_audio_magpie"
-                                                               : "text_to_audio_bark";
+    auto alias = legacy_runtime_strategy_alias_target(strategy, config_text);
+    return alias.value_or(strategy);
+}
+
+std::string resolve_runtime_strategy(const std::string& config_text) {
+    std::string strategy = extract_json_string(config_text, "runtime_strategy", "");
+    if (strategy.empty()) {
+        auto fallback = default_runtime_strategy();
+        if (!fallback || fallback->empty()) {
+            throw std::runtime_error(
+                "Bundle config missing runtime_strategy and no runtime model manifest declares "
+                "default_runtime_strategy");
+        }
+        strategy = *fallback;
     }
-    if (strategy == "diffusion") {
-        auto bt = json_field_substr(config_text, "diffusion_backend_type");
-        if (bt.find("flux") != std::string::npos)
-            return "diffusion_flux";
-        if (bt.find("z_image") != std::string::npos)
-            return "diffusion_zimage";
-        if (bt.find("pixart") != std::string::npos)
-            return "diffusion_pixart";
-        return "diffusion_wan";
-    }
-    return strategy;
+    return normalize_legacy_strategy(strategy, config_text);
 }
 
 IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
@@ -222,11 +200,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         }
     }
 
-    // Parse runtime_strategy and normalize legacy strings
-    std::string strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
-    if (strategy.empty())
-        strategy = "decoder_kv_cache";
-    strategy = normalize_legacy_strategy(strategy, config_text);
+    // Parse runtime_strategy and normalize legacy strings.
+    std::string strategy = resolve_runtime_strategy(config_text);
 
     auto* plugin = lookup_plugin_or_throw(strategy, {});
 
@@ -281,10 +256,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         }
     }
 
-    std::string strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
-    if (strategy.empty())
-        strategy = "decoder_kv_cache";
-    strategy = normalize_legacy_strategy(strategy, config_text);
+    std::string strategy = resolve_runtime_strategy(config_text);
 
     auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
 

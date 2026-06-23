@@ -4,6 +4,9 @@
   "bundle": "marian-en-ru-tp4.trtfb",
   "family": "marian",
   "runtime_strategy": "marian_translation",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_translation",
+  "user_contract": "translation",
   "max_cache_length": 256,
   "prompt": "The house is wonderful.",
   "max_new_tokens": 20,
@@ -49,5 +52,10 @@
       "gating": true
     }
   ],
-  "notes": "Marian EN-RU TP4 repro using the same checkpoint, prompt, generation length, and thresholds as marian-en-ru."
+  "notes": "Marian EN-RU TP4 repro using the same checkpoint, prompt, generation length, and thresholds as marian-en-ru.",
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModelForSeq2SeqLM"
+    }
+  }
 }

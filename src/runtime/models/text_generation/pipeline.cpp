@@ -2,6 +2,7 @@
 
 #include "runtime/core/trt_common.h"
 #include "runtime/core/trt_engine_lifecycle.h"
+#include "runtime/models/text_generation/chat_templates.h"
 #include "trtmc/runtime/kv_cache.h"
 
 #include <algorithm>
@@ -290,6 +291,7 @@ TextGenerationPipeline::TextGenerationPipeline(
       state_(std::move(state)), config_(std::move(config)), stream_(stream),
       tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
+    register_text_generation_chat_templates();
     if (decoders_.empty()) {
         throw std::runtime_error("TextGenerationPipeline: no decoder modules");
     }
@@ -324,7 +326,7 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer, const Tex
                                           const std::string& prompt, const GenerateConfig& cfg) {
     std::string effective = prompt;
     bool templated = false;
-    if (cfg.use_chat_template && config.chat_template_format != ChatTemplateFormat::kNone) {
+    if (cfg.use_chat_template && !config.chat_template_format.empty()) {
         effective = apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking);
         templated = true;
     }

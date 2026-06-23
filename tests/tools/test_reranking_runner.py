@@ -17,7 +17,7 @@ def _case(inputs: dict) -> E2ECase:
     return E2ECase(
         name="rerank-test",
         hf_id="org/reranker",
-        family="eagle_vlm",
+        family="example_reranker",
         runtime_strategy="reranking",
         bundle="rerank.trtfb",
         inputs=inputs,

@@ -8,3 +8,7 @@ aliases = [
 prefixes = [
   "nemotron_labs_diffusion",
 ]
+hf_required_files = [
+  "nvidia/Nemotron-Labs-Diffusion-8B|linear_spec_lora/adapter_config.json",
+  "nvidia/Nemotron-Labs-Diffusion-8B|linear_spec_lora/adapter_model.safetensors",
+]

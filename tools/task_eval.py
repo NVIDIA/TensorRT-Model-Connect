@@ -25,11 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.e2e_harness.contracts import (  # noqa: E402
-    MODEL_REFERENCE_FAMILY,
-    REFERENCE_FAMILY_TO_USER_CONTRACT,
-    RUNTIME_TO_TASK_STRATEGY,
-)
+from tests.e2e_harness.manifest_loader import iter_manifest_paths  # noqa: E402
 
 
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
@@ -79,30 +75,19 @@ def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
     raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
 
 
-def _base_case_name(name: str) -> str:
-    return re.sub(r"-tp\d+$", "", name)
-
-
 def infer_reference_family(raw: dict[str, Any]) -> str:
-    if raw.get("reference_family"):
-        return str(raw["reference_family"])
-    name = str(raw.get("name", ""))
-    return MODEL_REFERENCE_FAMILY.get(name) or MODEL_REFERENCE_FAMILY.get(_base_case_name(name), "")
+    return str(raw.get("reference_family", "") or "")
 
 
 def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
-    if raw.get("user_contract"):
-        return str(raw["user_contract"])
-    return REFERENCE_FAMILY_TO_USER_CONTRACT.get(reference_family, "")
+    return str(raw.get("user_contract", "") or "")
 
 
 def manifest_record(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     build_args = raw.get("build_args", {})
     runtime_strategy = str(raw.get("runtime_strategy", "decoder_kv_cache"))
-    task_strategy = str(
-        raw.get("task_strategy") or RUNTIME_TO_TASK_STRATEGY.get(runtime_strategy, "")
-    )
+    task_strategy = str(raw.get("task_strategy") or runtime_strategy)
     reference_family = infer_reference_family(raw)
     user_contract = infer_user_contract(raw, reference_family)
     distributed = raw.get("distributed_runtime", {})
@@ -139,7 +124,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
 
 
 def load_manifest_records(models_dir: Path = DEFAULT_MODELS_DIR) -> list[dict[str, Any]]:
-    return [manifest_record(path) for path in sorted(models_dir.glob("*.json"))]
+    return [manifest_record(path) for path in iter_manifest_paths(models_dir)]
 
 
 def load_waives(path: Path = DEFAULT_WAIVES, platform: str = "") -> dict[str, tuple[str, str]]:

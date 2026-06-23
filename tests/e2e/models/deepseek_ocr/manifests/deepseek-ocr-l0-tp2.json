@@ -5,6 +5,7 @@
   "bundle": "deepseek-ocr-l0-tp2.trtfb",
   "family": "deepseek_ocr",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "ci_tier": "multi_device",
   "reference_family": "ocr_markdown",
   "user_contract": "ocr_text",
@@ -61,7 +62,12 @@
     }
   ],
   "metadata": {
-    "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json"
+    "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json",
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true,
+      "ocr_mode": true
+    }
   },
   "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, image input, prompt, cache length, golden snapshot, and OCR contract as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
 }

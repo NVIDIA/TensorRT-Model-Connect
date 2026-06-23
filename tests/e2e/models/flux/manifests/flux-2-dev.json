@@ -6,6 +6,9 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation",
+  "reference_family": "diffusers_image_gen",
+  "user_contract": "diffusion_image",
   "gated": true,
   "ci_tier": "nightly_only",
   "l0_replacement": "flux-2-dev-l0",
@@ -22,5 +25,10 @@
   "video_num_frames": 1,
   "num_inference_steps": 28,
   "skip_text_comparison": true,
-  "notes": "FLUX.2-dev: Mistral 3 text encoder, Flux2 DiT (8 joint + 48 single, 6144-dim), AutoencoderKLFlux2 (32ch, patch=[2,2])."
+  "notes": "FLUX.2-dev: Mistral 3 text encoder, Flux2 DiT (8 joint + 48 single, 6144-dim), AutoencoderKLFlux2 (32ch, patch=[2,2]).",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

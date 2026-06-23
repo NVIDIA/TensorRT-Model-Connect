@@ -7,3 +7,6 @@ aliases = [
 prefixes = [
   "bark",
 ]
+hf_warm_dependencies = [
+  "tts-asr-verifier|openai/whisper-large-v3-turbo",
+]

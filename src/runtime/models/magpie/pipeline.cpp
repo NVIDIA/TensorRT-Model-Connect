@@ -2,18 +2,17 @@
 
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/core/trt_engine_lifecycle.h"
-#include "runtime/domains/audio/audio_configs.h"
-#include "runtime/domains/audio/magpie_codec_plan.h"
-#include "runtime/domains/audio/magpie_decode_policy.h"
-#include "runtime/domains/audio/magpie_decoder_plan.h"
-#include "runtime/domains/audio/magpie_text_completion_policy.h"
+#include "runtime/models/magpie/magpie_codec_plan.h"
+#include "runtime/models/magpie/magpie_decode_policy.h"
+#include "runtime/models/magpie/magpie_decoder_plan.h"
+#include "runtime/models/magpie/magpie_text_completion_policy.h"
 
 #ifndef TRTMC_HAS_CUDA_KERNELS
 #define TRTMC_HAS_CUDA_KERNELS 0
 #endif
 
 #if TRTMC_HAS_CUDA_KERNELS
-#include "runtime/domains/audio/magpie_kernels.h"
+#include "runtime/models/magpie/magpie_kernels.h"
 #endif
 
 #include <algorithm>

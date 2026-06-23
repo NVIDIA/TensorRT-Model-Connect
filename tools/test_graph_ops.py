@@ -11,8 +11,8 @@ Tests every parameter combination of:
   - add_gelu_new: vs HF NewGELUActivation (tanh approx)
   - add_activation(silu): vs torch.nn.SiLU
   - add_activation(relu): vs torch.nn.ReLU
-  - add_apply_rope (rotated-half): vs HF LLaMA rotate_half
-  - add_apply_rope (interleaved): vs CodeGen rotate_every_two
+  - add_apply_rope (rotated-half): vs rotated-half reference
+  - add_apply_rope (interleaved): vs interleaved-pair reference
 
 Run inside the container:
     python3 tools/test_graph_ops.py
@@ -122,7 +122,7 @@ def _run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndar
 # ---------------------------------------------------------------
 
 def _hf_alibi_slopes(num_heads: int) -> np.ndarray:
-    """Reference: HF BloomModel.build_alibi_tensor slope computation."""
+    """Reference implementation for ALiBi slope computation."""
     closest_power_of_2 = 2 ** math.floor(math.log2(num_heads))
     base = 2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3)))
     powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
@@ -149,8 +149,8 @@ def test_alibi_slopes():
 # 2. make_rope_table — vs HF reference implementations
 # ---------------------------------------------------------------
 
-def _hf_rope_table_llama(max_len, hidden, num_heads, theta, cosine):
-    """Standard LLaMA-style RoPE: pairs (d, d+half_rotary)."""
+def _rotated_half_rope_table(max_len, hidden, num_heads, theta, cosine):
+    """Rotated-half RoPE: pairs (d, d+half_rotary)."""
     head_dim = hidden // num_heads
     half = head_dim // 2
     inv_freq = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
@@ -167,7 +167,7 @@ def _hf_rope_table_llama(max_len, hidden, num_heads, theta, cosine):
 
 def _hf_rope_table_interleaved(max_len, hidden, num_heads, theta, cosine,
                                 partial_factor=1.0):
-    """CodeGen/GPT-J style: repeat_interleave, pairs (d, d+1)."""
+    """Interleaved RoPE: repeat_interleave, pairs (d, d+1)."""
     head_dim = hidden // num_heads
     rotary_ndims = int(head_dim * partial_factor)
     half = rotary_ndims // 2
@@ -190,7 +190,7 @@ def test_rope_table():
     # Standard rotated-half, full RoPE
     for cosine in [True, False]:
         ours = graph_ops.make_rope_table(**params, cosine=cosine)
-        ref = _hf_rope_table_llama(16, 64, 4, 10000.0, cosine)
+        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, cosine)
         assert np.allclose(ours, ref, atol=1e-6), \
             f"rotated-half cos={cosine}: max diff {np.abs(ours - ref).max():.2e}"
 
@@ -217,7 +217,7 @@ def test_rope_table():
     assert np.allclose(ours_i, ref_i, atol=1e-6), \
         f"interleaved partial: max diff {np.abs(ours_i - ref_i).max():.2e}"
 
-    # Partial rotary (factor=0.25 — StableLM style)
+    # Partial rotary (factor=0.25)
     ours_025 = graph_ops.make_rope_table(
         8, 128, 2, 10000.0, True, partial_rotary_factor=0.25)
     hd = 64
@@ -234,14 +234,14 @@ def test_rope_table():
 # ---------------------------------------------------------------
 
 def _hf_rotate_half(x: np.ndarray) -> np.ndarray:
-    """HF LLaMA rotate_half: swap first/second halves with sign flip."""
+    """Rotated-half reference: swap first/second halves with sign flip."""
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
     return np.concatenate([-x2, x1], axis=-1)
 
 
 def _hf_rotate_every_two(x: np.ndarray) -> np.ndarray:
-    """HF CodeGen rotate_every_two: pair adjacent dims."""
+    """Interleaved-pair reference: pair adjacent dims."""
     x1 = x[..., ::2]
     x2 = x[..., 1::2]
     stacked = np.stack([-x2, x1], axis=-1)
@@ -265,7 +265,7 @@ def test_rotate_half_matrix():
         assert np.allclose(ours, ref, atol=1e-6), \
             f"rotated-half h={hidden} n={heads}: max diff {np.abs(ours - ref).max():.2e}"
 
-    # Interleaved (CodeGen style), full RoPE
+    # Interleaved, full RoPE
     for hidden, heads in [(64, 4), (128, 8)]:
         mat = graph_ops.make_rotate_half_matrix(hidden, heads, interleaved=True)
         x = rng.randn(1, hidden).astype(np.float32)
@@ -458,11 +458,11 @@ def test_activations():
 
 
 # ---------------------------------------------------------------
-# 9. add_apply_rope — rotated-half (LLaMA) and interleaved (CodeGen)
+# 9. add_apply_rope — rotated-half and interleaved
 # ---------------------------------------------------------------
 
-def _hf_apply_rope_llama(x, cos, sin, head_dim):
-    """LLaMA-style: rotate_half pairs (d, d+half)."""
+def _apply_rope_rotated_half_ref(x, cos, sin, head_dim):
+    """Rotated-half: pairs (d, d+half)."""
     half = head_dim // 2
     x1, x2 = x[..., :half], x[..., half:]
     rotated = np.concatenate([-x2, x1], axis=-1)
@@ -470,7 +470,7 @@ def _hf_apply_rope_llama(x, cos, sin, head_dim):
 
 
 def _hf_apply_rope_codegen(x, cos_interleaved, sin_interleaved):
-    """CodeGen-style: rotate_every_two pairs (d, d+1)."""
+    """Interleaved-pair: pairs (d, d+1)."""
     x1 = x[..., ::2]
     x2 = x[..., 1::2]
     rotated = np.stack([-x2, x1], axis=-1).reshape(x.shape)
@@ -518,7 +518,7 @@ def test_apply_rope():
                 if interleaved:
                     rh = _hf_apply_rope_codegen(xh, ch, sh)
                 else:
-                    rh = _hf_apply_rope_llama(xh, ch, sh, head_dim)
+                    rh = _apply_rope_rotated_half_ref(xh, ch, sh, head_dim)
                 ref_parts.append(rh)
             ref = np.concatenate(ref_parts)
 
@@ -557,7 +557,8 @@ def test_apply_rope():
         ch = cos_row_p[s:s+head_dim]
         sh = sin_row_p[s:s+head_dim]
         # RoPE applied to first rotary_nd dims
-        xr = _hf_apply_rope_llama(xh[:rotary_nd], ch[:rotary_nd], sh[:rotary_nd], rotary_nd)
+        xr = _apply_rope_rotated_half_ref(
+            xh[:rotary_nd], ch[:rotary_nd], sh[:rotary_nd], rotary_nd)
         ref_parts.append(np.concatenate([xr, xh[rotary_nd:]]))
     ref = np.concatenate(ref_parts)
     assert np.allclose(trt_out, ref, atol=1e-5), \

@@ -5,8 +5,16 @@
   "bundle": "roberta-large.trtfb",
   "family": "roberta",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 512,
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 0,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

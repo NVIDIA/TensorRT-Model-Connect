@@ -706,7 +706,7 @@ Examples:
       --input profile.nsys-rep --output layer_timing.json --model-layers 28
 
   # Feed into sol_estimate.py
-  python3 tools/sol_estimate.py --model Qwen/Qwen3-0.6B --gpu B200 --dtype fp32 \\
+  python3 tools/sol_estimate.py --model example-org/example-decoder --gpu B200 --dtype fp32 \\
       --cache-length 256 --layer-timing-json layer_timing.json
 """,
     )

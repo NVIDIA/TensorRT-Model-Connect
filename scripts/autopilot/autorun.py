@@ -40,9 +40,9 @@ DEFAULT_AGENT_ARGS = [
 # Architecture types that are vision/audio/exotic and unlikely to work
 # with the standard encoder/decoder scaffold without C++ runtime changes.
 SKIP_TYPES = {
-    "vit", "clip", "clap", "wav2vec2", "wav2vec2-bert", "blip", "siglip",
+    "vit", "clip", "clap", "wav2vec2", "wav2vec2-encoder", "blip", "siglip",
     "siglip2", "dinov2", "dinov3_vit", "vitpose", "mobilevit", "vitmatte",
-    "lightglue", "superpoint", "grounding-dino", "sam3_video", "rt_detr",
+    "lightglue", "superpoint", "grounding-dino", "rt_detr",
     "vision-encoder-decoder", "depth_anything", "zoedepth", "timm_wrapper",
     "yolos", "clipseg", "esm", "musicgen", "table-transformer", "moondream1",
     "llava", "h2ovl_chat", "florence2", "openvla",
@@ -143,7 +143,7 @@ WORKER_PROMPT = textwrap.dedent("""\
                   print(f'{{k:60s}} {{list(sf.get_tensor(k).shape)}}')
       "
       ```
-    - Read existing plugins for reference (BERT, Qwen, Phi, Mamba, etc.) at:
+    - Read existing family plugins for reference at:
       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
     - Read graph_ops.py and graph_blocks.py for available TRT operations.
     - Read the HF model's modeling code to understand the EXACT computation.
@@ -162,7 +162,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     1. Read an existing plugin for reference. Key files at:
        /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/src/runtime/plugins/
        - decoder_plugin.cpp (decoder-only text gen)
-       - whisper_plugin.cpp (encoder-decoder speech-to-text)
+       - a specialized encoder-decoder plugin
        - encoder_plugin.cpp (encoder-only)
        - shared/plugin_helpers.h (TrtModule loading, tokenizer, helpers)
     2. Create your plugin .cpp file with REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK.
@@ -234,7 +234,7 @@ WORKER_PROMPT = textwrap.dedent("""\
       Do NOT try to write directly to /workspace/users/yifeif/workspaces/{agent_id}/
       — that path is read-only from the sandbox. Always write via docker exec.
     - **Decoupling**: Create NEW files for your plugin — do NOT modify existing
-      plugins (decoder_plugin.cpp, whisper_plugin.cpp, encoder_plugin.cpp, etc.).
+      plugins (decoder, encoder, or modality-specific plugins, etc.).
       Each family gets its own isolated Python plugin and (if needed) its own
       C++ plugin .cpp file. You may ONLY share code through:
       - graph_ops.py / graph_blocks.py (Python TRT graph construction)
@@ -306,7 +306,7 @@ def select_tasks(
         mt = t["model_type"]
 
         # Skip exotic architectures that need C++ runtime plugins
-        if mt in SKIP_TYPES:
+        if mt in SKIP_TYPES or mt.startswith("wav2vec2"):
             continue
 
         # Optionally skip models needing trust_remote_code

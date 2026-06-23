@@ -2,3 +2,8 @@ id = "whisper"
 runtime_library = "libtrtmc_model_whisper.so"
 runtime_plugins = ["plugin.cpp|register_whisper_plugin"]
 runtime_strategies = ["speech_to_text"]
+runtime_tests = [
+  "test_whisper_host_plan|test_whisper_host_plan.cpp|_|_|_",
+  "test_whisper_decode_policy|test_whisper_decode_policy.cpp|_|_|_",
+  "test_whisper_pipeline|test_whisper_pipeline.cpp|trtmc_model_whisper|_|REQUIRES_TRT",
+]

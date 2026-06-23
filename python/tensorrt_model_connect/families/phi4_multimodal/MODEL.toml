@@ -1,6 +1,7 @@
 id = "phi4_multimodal"
 plugin = "phi4_multimodal"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "phi4mm",
   "phi4_multimodal",

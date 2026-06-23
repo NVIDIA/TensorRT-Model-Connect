@@ -2,3 +2,14 @@ id = "speech"
 runtime_library = "libtrtmc_model_speech.so"
 runtime_plugins = ["plugin.cpp|register_speech_plugin"]
 runtime_strategies = ["speech_to_speech"]
+gnu_warning_suppressed_sources = ["pipeline.cpp"]
+runtime_tests = [
+  "test_speech_subprocess_seam|test_speech_subprocess_seam.cpp|_|_|_",
+  "test_speech_decode_stop_policy|test_speech_decode_stop_policy.cpp|_|_|_",
+  "test_speech_generation_helpers|test_speech_generation_helpers.cpp|_|_|_",
+  "test_speech_depth_plan|test_speech_depth_plan.cpp|_|_|_",
+  "test_speech_runtime_plan|test_speech_runtime_plan.cpp|_|_|_",
+  "test_speech_temporal_embed_plan|test_speech_temporal_embed_plan.cpp|_|_|_",
+  "test_speech_mimi_decode_plan|test_speech_mimi_decode_plan.cpp|_|_|_",
+  "test_speech_pipeline|test_speech_pipeline.cpp|trtmc_model_speech|_|REQUIRES_TRT",
+]

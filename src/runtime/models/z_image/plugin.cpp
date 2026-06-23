@@ -3,10 +3,10 @@
 // and Z-Image-specific preprocessor weights (timestep embedder, caption
 // embedder, patch embedder).
 
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
-#include "runtime/models/z_image/pipeline.h"
 #include "diffusion_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "runtime/models/z_image/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

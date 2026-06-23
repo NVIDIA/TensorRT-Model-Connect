@@ -1,10 +1,10 @@
 """Extended tests for graph_ops -- pure NumPy helpers (no GPU).
 
 Covers _yarn_correction_dim, compute_alibi_slopes (extended cases),
-make_t5_relative_position_bias, and make_yarn_rope_table.
+make_bucketed_relative_position_bias, and make_yarn_rope_table.
 
 Trace: ARCH-GRP-001, UD-GRP-OPS-EXT
-Intent: Validate pure-NumPy graph op helpers (YaRN correction, T5 bias, ALiBi slopes, RoPE tables)
+Intent: Validate pure-NumPy graph op helpers (YaRN correction, bucketed relative-position bias, ALiBi slopes, RoPE tables)
 Preconditions: tensorrt_model_connect is importable; no GPU or TRT required
 Postconditions: Helper functions produce mathematically correct values matching hand-computed references
 """
@@ -152,20 +152,20 @@ class TestComputeAlibiSlopesExtended:
 
 
 # ===================================================================
-# 3. make_t5_relative_position_bias
+# 3. make_bucketed_relative_position_bias
 # ===================================================================
 
-class TestMakeT5RelativePositionBias:
-    """Tests for make_t5_relative_position_bias.
+class TestMakeBucketedRelativePositionBias:
+    """Tests for make_bucketed_relative_position_bias.
 
-    Despite the docstring claiming [num_heads, max_seq_len, max_seq_len],
-    the actual return is [max_seq_len, max_seq_len] int32 bucket indices.
-    The num_heads parameter is declared but unused in the function body.
+    The return is [max_seq_len, max_seq_len] int32 bucket indices.  The
+    num_heads parameter is retained for call-site symmetry with attention
+    helpers but is not needed for bucket construction.
     """
 
     def test_output_shape(self):
         """Verify output shape is [max_seq_len, max_seq_len]."""
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
         )
         assert result.shape == (16, 16)
@@ -174,7 +174,7 @@ class TestMakeT5RelativePositionBias:
     def test_values_in_range(self):
         """All bucket indices should be in [0, num_buckets)."""
         num_buckets = 32
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=32, num_buckets=num_buckets, max_distance=128
         )
         assert np.all(result >= 0)
@@ -182,7 +182,7 @@ class TestMakeT5RelativePositionBias:
 
     def test_diagonals_constant(self):
         """bias[i][j] depends only on j-i, so each diagonal should be constant."""
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
         )
         seq_len = 16
@@ -201,7 +201,7 @@ class TestMakeT5RelativePositionBias:
         - Zero offset (diagonal): bucket index for n=0
         """
         num_buckets = 32
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=16, num_buckets=num_buckets, max_distance=128
         )
         half_buckets = num_buckets // 2
@@ -224,7 +224,7 @@ class TestMakeT5RelativePositionBias:
 
     def test_max_seq_len_1(self):
         """max_seq_len=1 should return a single-element array."""
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=1, num_buckets=32, max_distance=128
         )
         assert result.shape == (1, 1)
@@ -237,10 +237,10 @@ class TestMakeT5RelativePositionBias:
 
         With bidirectional=True, num_bkts becomes 1, max_exact becomes 0,
         causing log(max_dist/0) → ZeroDivisionError. This is a known edge
-        case that doesn't occur in practice (T5 uses num_buckets=32).
+        case that does not occur for supported bucket counts.
         """
         with pytest.raises((ZeroDivisionError, FloatingPointError)):
-            graph_ops.make_t5_relative_position_bias(
+            graph_ops.make_bucketed_relative_position_bias(
                 num_heads=4, max_seq_len=8, num_buckets=2, max_distance=128
             )
 
@@ -251,7 +251,7 @@ class TestMakeT5RelativePositionBias:
         n = -0 = 0, n<0 is False => no offset. abs(0) = 0, is_small = True.
         ret = 0.
         """
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
         )
         diag = np.diag(result)
@@ -260,7 +260,7 @@ class TestMakeT5RelativePositionBias:
     @pytest.mark.parametrize("num_buckets", [8, 16, 32, 64])
     def test_various_num_buckets(self, num_buckets):
         """Values in range for different num_buckets settings."""
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=4, max_seq_len=16, num_buckets=num_buckets, max_distance=128
         )
         assert np.all(result >= 0)
@@ -273,7 +273,7 @@ class TestMakeT5RelativePositionBias:
         offsets in upper half), the bucket should be non-decreasing.
         Similarly for the lower half.
         """
-        result = graph_ops.make_t5_relative_position_bias(
+        result = graph_ops.make_bucketed_relative_position_bias(
             num_heads=8, max_seq_len=32, num_buckets=32, max_distance=128
         )
         # Upper triangle: row 0, columns 1..31
@@ -484,14 +484,14 @@ class TestMakeYarnRopeTable:
 
 
 # ===================================================================
-# 4b. make_llama4_attention_scale_table
+# 4b. make_rope_query_scale_table
 # ===================================================================
 
-class TestMakeLlama4AttentionScaleTable:
-    """Tests for the Llama-4-style per-position query scale table."""
+class TestMakeRopeQueryScaleTable:
+    """Tests for the per-position RoPE query scale table."""
 
     def test_values_match_hf_formula(self):
-        table = graph_ops.make_llama4_attention_scale_table(
+        table = graph_ops.make_rope_query_scale_table(
             max_cache_length=10,
             beta=0.1,
             original_max_position_embeddings=4,
@@ -501,7 +501,7 @@ class TestMakeLlama4AttentionScaleTable:
         np.testing.assert_allclose(table[:, 0], expected.astype(np.float32), atol=1e-7)
 
     def test_positions_before_original_window_are_unscaled(self):
-        table = graph_ops.make_llama4_attention_scale_table(
+        table = graph_ops.make_rope_query_scale_table(
             max_cache_length=4,
             beta=0.1,
             original_max_position_embeddings=4,
@@ -509,7 +509,7 @@ class TestMakeLlama4AttentionScaleTable:
         np.testing.assert_allclose(table, np.ones((4, 1), dtype=np.float32))
 
     def test_zero_beta_disables_scaling(self):
-        table = graph_ops.make_llama4_attention_scale_table(
+        table = graph_ops.make_rope_query_scale_table(
             max_cache_length=8,
             beta=0.0,
             original_max_position_embeddings=4,

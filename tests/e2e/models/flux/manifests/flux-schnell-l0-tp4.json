@@ -6,6 +6,7 @@
   "model_type": "flux",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation",
   "gated": true,
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "multi_device",
@@ -82,5 +83,10 @@
       "name": "end_to_end",
       "required": true
     }
-  ]
+  ],
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

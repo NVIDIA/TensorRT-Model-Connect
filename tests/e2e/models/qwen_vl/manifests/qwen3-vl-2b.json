@@ -5,9 +5,18 @@
   "bundle": "qwen3-vl-2b.trtfb",
   "family": "qwen_vl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
+  "reference_family": "vl_instruct_qa",
+  "user_contract": "vl_answer",
   "max_cache_length": 256,
   "prompt": "What color is the vehicle in this image? Answer in one word.",
   "max_new_tokens": 10,
   "test_image": "data/test_img.jpeg",
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "use_processor": true,
+      "use_chat_template": true
+    }
+  }
 }

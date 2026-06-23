@@ -4,8 +4,16 @@
   "bundle": "t5-small.trtfb",
   "family": "t5",
   "runtime_strategy": "text_to_text",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_text2text",
+  "user_contract": "seq2seq_output",
   "max_cache_length": 256,
   "prompt": "translate English to German: The house is wonderful.",
   "max_new_tokens": 20,
-  "notes": "Seq2seq model \u2014 text output perfect (ned=0.0) but debug runner produces garbage logits; relax logit gates"
+  "notes": "Seq2seq model \u2014 text output perfect (ned=0.0) but debug runner produces garbage logits; relax logit gates",
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModelForSeq2SeqLM"
+    }
+  }
 }

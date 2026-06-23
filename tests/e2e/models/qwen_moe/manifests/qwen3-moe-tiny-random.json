@@ -5,6 +5,7 @@
   "bundle": "qwen3-moe-tiny-random.trtfb",
   "family": "qwen_moe",
   "runtime_strategy": "decoder_moe",
+  "task_strategy": "text_generation_causal",
   "ci_tier": "l0_only",
   "precision": "fp16",
   "max_cache_length": 128,

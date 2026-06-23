@@ -1,9 +1,9 @@
-"""Self-tests for tools/diff_vl.py — preprocessor config, cosine similarity, sanity checks.
+"""Self-tests for tools/diff_vl.py - dispatch, cosine similarity, sanity checks.
 
 Trace: ARCH-TRT-001, UD-TRT-DIFF-VL
-Intent: Validate VL diff tool Qwen VL detection, cosine similarity computation, and preprocessor config
+Intent: Validate VL diff dispatch, cosine similarity computation, and preprocessor config
 Preconditions: diff_vl module is importable; numpy available
-Postconditions: Qwen VL model types are correctly identified and cosine similarity matches mathematical expectations
+Postconditions: Family-owned handlers are discovered and cosine similarity matches mathematical expectations
 """
 
 from __future__ import annotations
@@ -11,23 +11,15 @@ from __future__ import annotations
 import numpy as np
 
 
-class TestIsQwenVl:
-    """Test _is_qwen_vl() string matching — importable without GPU."""
+class TestFamilyHandlerDispatch:
+    """Test model-owned handler dispatch - importable without GPU."""
 
-    def test_qwen_vl_variants(self):
-        # Import the function from tools/diff_vl.py
+    def test_unowned_model_uses_generic_path(self):
         import importlib
-        mod = importlib.import_module("diff_vl")
-        assert mod._is_qwen_vl("qwen2_5_vl") is True
-        assert mod._is_qwen_vl("qwen_vl") is True
-        assert mod._is_qwen_vl("Qwen2_5_VL") is True
 
-    def test_non_vl_models(self):
-        import importlib
         mod = importlib.import_module("diff_vl")
-        assert mod._is_qwen_vl("qwen3") is False
-        assert mod._is_qwen_vl("llama") is False
-        assert mod._is_qwen_vl("mistral") is False
+        assert mod._find_family_diff_vl_handler("example_decoder") is None
+        assert mod._find_family_diff_vl_handler("generic_text") is None
 
 
 class TestCosineSimilarity:

@@ -392,8 +392,8 @@ class TextComparator:
             )
         )
         trt_text_for_ned = _strip_prompt_echo_normalized(trt_text_for_ned, prompt)
-        # Seq2seq models output text that may start with the prompt (e.g.
-        # BART reconstructing its input).  Strip the prompt prefix from ref
+        # Seq2seq models may output text that starts with the prompt.  Strip
+        # the prompt prefix from ref
         # only when it appears at the very start of the normalized text.
         # This avoids accidentally removing prompt substrings that appear
         # later in naturally generated text from causal models.

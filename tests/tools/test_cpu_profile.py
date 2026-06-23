@@ -25,28 +25,10 @@ class TestPhaseConstants:
         assert "d2h" in phases
         assert "argmax" in phases
 
-    def test_mamba_phases(self):
-        mod = _import()
-        phases = mod.MAMBA_PHASES
-        assert "h2d" in phases
-        assert "tensor_bind" in phases
-        assert "execute" in phases
-        assert "d2d_state" in phases
-        assert "d2h" in phases
-        assert "argmax" in phases
-        # Mamba has no mask_build or d2d_cache
-        assert "mask_build" not in phases
-        assert "d2d_cache" not in phases
-
     def test_decoder_phases_ordered_tuple(self):
         mod = _import()
         # Phases should be a tuple (immutable, ordered)
         assert isinstance(mod.DECODER_PHASES, tuple)
-        assert isinstance(mod.MAMBA_PHASES, tuple)
-
-    def test_decoder_has_more_phases_than_mamba(self):
-        mod = _import()
-        assert len(mod.DECODER_PHASES) > len(mod.MAMBA_PHASES)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +109,10 @@ class TestPrintTable:
 
     def test_model_name_in_output(self, capsys):
         mod = _import()
-        mod._print_table(self._make_rows(), "decoder", "Qwen/Qwen3-0.6B",
+        mod._print_table(self._make_rows(), "decoder", "example-org/example-decoder",
                          28, 6, 10)
         out = capsys.readouterr().out
-        assert "Qwen/Qwen3-0.6B" in out
+        assert "example-org/example-decoder" in out
 
     def test_runner_type_in_output(self, capsys):
         mod = _import()

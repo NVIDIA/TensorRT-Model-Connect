@@ -1,8 +1,8 @@
 // Seq2SeqPlugin: handles "seq2seq_encoder_decoder" strategy.
 // Encoder-decoder text-to-text pipeline for BART/Marian/M2M-100/NLLB translation models.
 
-#include "runtime/core/trt_decode_runtime.h"
 #include "plugin_helpers.h"
+#include "runtime/core/trt_decode_runtime.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/pipeline_plugin.h"

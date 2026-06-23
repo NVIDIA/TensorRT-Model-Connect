@@ -52,7 +52,7 @@ Vision-language families build a vision engine plus a text decoder and route thr
 $TRTMC build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precision fp16
 
 $TRTMC transcribe /tmp/whisper.trtfb \
-  --audio tests/e2e/data/Recording.wav \
+  --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
 

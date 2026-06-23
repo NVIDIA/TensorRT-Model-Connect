@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "black-forest-labs/FLUX.1-schnell",
+      "pipeline_type": "diffusion_flux",
+      "label": "B1-diffusion-flux",
+      "benchmark": {
+        "label": "generate",
+        "gpu_argmax_label": "generate",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "generate-video", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_dir}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

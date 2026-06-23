@@ -23,9 +23,8 @@ import importlib
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +46,7 @@ def _import_report():
 
 
 def _make_run(
-    model_name: str = "gpt2",
+    model_name: str = "decoder-small",
     throughput_tps: Optional[float] = 150.0,
     decode_ms_mean: Optional[float] = 6.5,
     trt_run_s: Optional[float] = None,
@@ -58,7 +57,7 @@ def _make_run(
     timestamp: str = "2026-03-17T10:00:00Z",
     source: str = "e2e_harness",
     e2e_status: str = "pass",
-    hf_id: str = "openai-community/gpt2",
+    hf_id: str = "example-org/decoder-small",
 ) -> Dict[str, Any]:
     """Return a synthetic perf_run row dict."""
     return {
@@ -76,7 +75,6 @@ def _make_run(
         "e2e_status": e2e_status,
         "hf_id": hf_id,
         "per_token_ms": None,
-        "throughput_tps": throughput_tps,
         "ref_run_s": None,
         "prefill_ms_mean": None,
         "prefill_ms_std": None,
@@ -254,9 +252,9 @@ class TestRenderSummaryDashboard:
         """UT-PERF-REPORT-014: Counter spans appear for each status."""
         mod = _import_report()
         rows = [
-            self._make_row("gpt2", "ok"),
-            self._make_row("llama", "regression"),
-            self._make_row("bloom", "no_baseline"),
+            self._make_row("decoder-small", "ok"),
+            self._make_row("decoder-regression", "regression"),
+            self._make_row("decoder-no-baseline", "no_baseline"),
         ]
         html_str = mod.render_summary_dashboard(rows)
         assert "1 Regression" in html_str
@@ -266,16 +264,16 @@ class TestRenderSummaryDashboard:
     def test_model_names_in_table(self):
         """UT-PERF-REPORT-015: Model names appear as links in table."""
         mod = _import_report()
-        rows = [self._make_row("gpt2", "ok"), self._make_row("opt-125m", "ok")]
+        rows = [self._make_row("decoder-small", "ok"), self._make_row("decoder-alt", "ok")]
         html_str = mod.render_summary_dashboard(rows)
-        assert "gpt2" in html_str
-        assert "opt-125m" in html_str
-        assert 'href="#model-gpt2"' in html_str
+        assert "decoder-small" in html_str
+        assert "decoder-alt" in html_str
+        assert 'href="#model-decoder-small"' in html_str
 
     def test_sparkline_in_row(self):
         """Trend sparkline SVG is embedded in each row with enough history."""
         mod = _import_report()
-        rows = [self._make_row("gpt2", "ok")]
+        rows = [self._make_row("decoder-small", "ok")]
         html_str = mod.render_summary_dashboard(rows)
         assert "<svg" in html_str
 
@@ -292,21 +290,21 @@ class TestRenderModelSection:
         """UT-PERF-REPORT-016: Section has <details id='model-NAME'>."""
         mod = _import_report()
         html_str = mod.render_model_section(
-            model_name="gpt2",
+            model_name="decoder-small",
             latest=_make_run(),
             history=[_make_run(), _make_run(timestamp="2026-03-16T10:00:00Z")],
             status="ok",
             detail="TPS 150 vs 140 (107%)",
         )
-        assert 'id="model-gpt2"' in html_str
-        assert "gpt2" in html_str
+        assert 'id="model-decoder-small"' in html_str
+        assert "decoder-small" in html_str
 
     def test_history_table_rendered(self):
         """UT-PERF-REPORT-017: History table is present when runs exist."""
         mod = _import_report()
         history = [_make_run(timestamp=f"2026-03-{17 - i:02d}T10:00:00Z") for i in range(3)]
         html_str = mod.render_model_section(
-            model_name="gpt2",
+            model_name="decoder-small",
             latest=history[0],
             history=history,
             status="ok",
@@ -319,7 +317,7 @@ class TestRenderModelSection:
         """Empty history renders a fallback message."""
         mod = _import_report()
         html_str = mod.render_model_section(
-            model_name="gpt2",
+            model_name="decoder-small",
             latest=None,
             history=[],
             status="no_data",
@@ -341,16 +339,16 @@ class TestRenderReport:
         mod = _import_report()
         rows = [
             {
-                "model_name": "gpt2",
-                "latest": _make_run("gpt2"),
-                "history": [_make_run("gpt2")],
+                "model_name": "decoder-small",
+                "latest": _make_run("decoder-small"),
+                "history": [_make_run("decoder-small")],
                 "status": "ok",
                 "detail": "TPS 150 vs 140",
                 "tps_history": [140.0, 145.0, 150.0],
             },
             {
-                "model_name": "opt-125m",
-                "latest": _make_run("opt-125m", throughput_tps=80.0),
+                "model_name": "decoder-alt",
+                "latest": _make_run("decoder-alt", throughput_tps=80.0),
                 "history": [],
                 "status": "regression",
                 "detail": "TPS 80 vs 100 (80%)",
@@ -373,8 +371,8 @@ class TestRenderReport:
         assert "<html" in html_str
         assert "Test Report" in html_str
         assert "NVIDIA B200" in html_str
-        assert "gpt2" in html_str
-        assert "opt-125m" in html_str
+        assert "decoder-small" in html_str
+        assert "decoder-alt" in html_str
         assert "REGRESSION" in html_str
         assert "<script>" in html_str
         # Self-contained: no external <link> or <script src>
@@ -439,7 +437,7 @@ def _make_inmemory_db() -> sqlite3.Connection:
          "2026-03-01T00:00:00Z"),
     )
 
-    # gpt2: 3 runs (tps improving)
+    # decoder-small: 3 runs (tps improving)
     for i, tps in enumerate([120.0, 135.0, 150.0]):
         conn.execute(
             "INSERT INTO perf_runs "
@@ -452,8 +450,8 @@ def _make_inmemory_db() -> sqlite3.Connection:
                 f"commit{i:04d}",
                 "main",
                 "e2e_harness",
-                "gpt2",
-                "openai-community/gpt2",
+                "decoder-small",
+                "example-org/decoder-small",
                 5.0 + i,
                 7.0 - i * 0.5,
                 tps,
@@ -462,7 +460,7 @@ def _make_inmemory_db() -> sqlite3.Connection:
             ),
         )
 
-    # opt-125m: 1 run, no tps (only trt_run_s)
+    # decoder-alt: 1 run, no tps (only trt_run_s)
     conn.execute(
         "INSERT INTO perf_runs "
         "(timestamp,env_id,git_commit,git_branch,source,model_name,hf_id,"
@@ -470,7 +468,7 @@ def _make_inmemory_db() -> sqlite3.Connection:
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             "2026-03-17T10:00:00Z", "env1", "commita", "main",
-            "e2e_harness", "opt-125m", "facebook/opt-125m",
+            "e2e_harness", "decoder-alt", "example-org/decoder-alt",
             4.0, 8.5, "pass",
         ),
     )
@@ -498,8 +496,8 @@ class TestLoadReportData:
         db_path = self._write_db_to_tempfile(tmp_path)
         rows, envs = mod.load_report_data(db_path)
         names = [r["model_name"] for r in rows]
-        assert "gpt2" in names
-        assert "opt-125m" in names
+        assert "decoder-small" in names
+        assert "decoder-alt" in names
 
     def test_env_loaded(self, tmp_path: Path):
         """Environment info is returned."""
@@ -509,25 +507,25 @@ class TestLoadReportData:
         assert len(envs) >= 1
         assert envs[0]["gpu_name"] == "NVIDIA B200"
 
-    def test_gpt2_history_newest_first(self, tmp_path: Path):
+    def test_model_history_newest_first(self, tmp_path: Path):
         """UT-PERF-REPORT-020: History is ordered newest-first."""
         mod = _import_report()
         db_path = self._write_db_to_tempfile(tmp_path)
         rows, _ = mod.load_report_data(db_path, history_limit=10)
-        gpt2 = next(r for r in rows if r["model_name"] == "gpt2")
-        history = gpt2["history"]
+        decoder_small = next(r for r in rows if r["model_name"] == "decoder-small")
+        history = decoder_small["history"]
         assert len(history) == 3
         # Newest first: 2026-03-17 > 2026-03-16 > 2026-03-15
         assert history[0]["timestamp"] > history[1]["timestamp"]
 
-    def test_gpt2_status_ok(self, tmp_path: Path):
+    def test_model_status_ok(self, tmp_path: Path):
         """Latest run (highest TPS) equals baseline → no regression."""
         mod = _import_report()
         db_path = self._write_db_to_tempfile(tmp_path)
         rows, _ = mod.load_report_data(db_path)
-        gpt2 = next(r for r in rows if r["model_name"] == "gpt2")
+        decoder_small = next(r for r in rows if r["model_name"] == "decoder-small")
         # Latest TPS=150 is also the best, so no regression
-        assert gpt2["status"] == "ok"
+        assert decoder_small["status"] == "ok"
 
     def test_report_end_to_end(self, tmp_path: Path):
         """Full report generation produces valid HTML with expected content."""
@@ -536,7 +534,7 @@ class TestLoadReportData:
         rows, envs = mod.load_report_data(db_path)
         html_str = mod.render_report(rows, envs, title="CI Perf Report")
         assert "<!DOCTYPE html>" in html_str
-        assert "gpt2" in html_str
-        assert "opt-125m" in html_str
+        assert "decoder-small" in html_str
+        assert "decoder-alt" in html_str
         assert "NVIDIA B200" in html_str
         assert "CI Perf Report" in html_str

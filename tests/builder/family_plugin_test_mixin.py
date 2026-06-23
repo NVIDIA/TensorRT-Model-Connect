@@ -10,12 +10,12 @@ Usage:
     from tests.builder.family_plugin_tester import FamilyPluginTester
     from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
-    class QwenPluginTester(FamilyPluginTester):
-        plugin_module = "tensorrt_model_connect.families.qwen"
-        model_type = "qwen3"
+    class ExamplePluginTester(FamilyPluginTester):
+        plugin_module = "tensorrt_model_connect.families.example"
+        model_type = "example_decoder"
 
-    class TestQwenEngine(FamilyPluginTestMixin):
-        tester_class = QwenPluginTester
+    class TestExampleEngine(FamilyPluginTestMixin):
+        tester_class = ExamplePluginTester
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import numpy as np
 import pytest
 
 try:
-    from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.checkpoint_mapper import WeightDict
+    from tensorrt_model_connect.config import ModelConfig  # noqa: F401
+    from tensorrt_model_connect.checkpoint_mapper import WeightDict  # noqa: F401
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -58,8 +58,8 @@ class FamilyPluginTestMixin:
     All test methods receive a ``tester`` fixture that instantiates the tester.
 
     Usage:
-        class TestQwenEngine(FamilyPluginTestMixin):
-            tester_class = QwenPluginTester
+        class TestExampleEngine(FamilyPluginTestMixin):
+            tester_class = ExamplePluginTester
     """
 
     tester_class = None  # subclasses must set this
@@ -87,7 +87,7 @@ class FamilyPluginTestMixin:
             during bundle building for models of this family.
 
             Example bug this catches: A plugin that checks
-            ``model_type.lower() == "qwen2"`` but the model_type is actually "qwen3"
+            ``model_type.lower() == "old_family"`` but the model_type is actually "new_family"
             would silently fall through to the wrong plugin or raise "no plugin found".
 
         Setup:
@@ -193,7 +193,7 @@ class FamilyPluginTestMixin:
             to "w_Q" instead of "w_q"), the engine builder will silently produce a
             broken TRT graph or crash with an opaque TensorRT error.
 
-            Example bug this catches: A new contributor copying the Qwen plugin template
+            Example bug this catches: A new contributor copying an existing plugin template
             to create a new family might miss renaming a weight key, producing a
             WeightDict missing the "w_o" key for every layer.
 
@@ -287,7 +287,7 @@ class FamilyPluginTestMixin:
             but plugins that do custom weight processing might forget the cast.
 
             Example bug this catches: A plugin that loads BF16 safetensors and
-            applies a custom transform (e.g., Gemma's gamma+1.0) but returns the
+            applies a custom transform but returns the
             result without casting back to float32.
 
         Setup:

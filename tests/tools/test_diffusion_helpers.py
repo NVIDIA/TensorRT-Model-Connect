@@ -181,7 +181,7 @@ class TestLoadBundleConfig:
     def test_complex_config(self, tmp_path):
         mod = _import_diffusion_helpers()
         config = {
-            "model_type": "flux",
+            "model_type": "synthetic_diffusion",
             "hidden_size": 3072,
             "num_layers": 24,
             "runtime_strategy": "diffusion",

@@ -12,8 +12,6 @@ set(TRTMC_CONFIG_SCHEMAS
   "triattention.cpp|register_triattention_schema"
   "text_trace.cpp|register_text_trace_schema"
   "runtime.cpp|register_runtime_schema"
-  "audio_bark.cpp|register_audio_bark_schema"
-  "audio_magpie.cpp|register_audio_magpie_schema"
   "platform.cpp|register_platform_schema"
 )
 

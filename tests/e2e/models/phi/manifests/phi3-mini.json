@@ -5,8 +5,17 @@
   "bundle": "phi3-mini.trtfb",
   "family": "phi",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
   "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
   "max_new_tokens": 10,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  }
 }

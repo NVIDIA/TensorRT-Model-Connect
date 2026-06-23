@@ -226,16 +226,16 @@ def test_scalability_claim_documented():
     list, that's a coupling point; update the design before adding.
     """
     expected_new_files_per_feature = [
-        "python/tensorrt_model_connect/runtime_config/schemas/<name>.py",
-        "include/trtmc/config/schemas/<name>.h",
-        "src/runtime/config/schemas/<name>.cpp",
+        "python/tensorrt_model_connect/families/<family>/runtime_config_schema.py",
+        "src/runtime/models/<model>/config_schema.h",
+        "src/runtime/models/<model>/config_schema.cpp",
         "tests/builder/test_config_<name>_or_similar.py",
     ]
     expected_modified_files_per_feature = [
-        # One manifest entry drives both compilation and generated registration calls.
-        "cmake/trtmc_config_schemas.cmake",
+        # One model manifest entry drives DSO compilation and generated registration calls.
+        "src/runtime/models/<model>/MODEL.toml",
     ]
-    # No runtime change outside the feature's own consumer code.
+    # No runtime change outside the model's own consumer code.
     # This is an assertion-as-documentation; keep these lists in sync
     # with the config-registry status doc.
     assert len(expected_new_files_per_feature) >= 3

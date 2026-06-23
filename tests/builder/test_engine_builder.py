@@ -10,11 +10,9 @@ Postconditions: Local directories with config.json resolve correctly, HF repo ID
 
 from __future__ import annotations
 
-import json
 import importlib
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -54,7 +52,7 @@ class TestResolveModel:
         """When both HF config and .nemo exist, keep HF path behavior."""
         dl_dir = tmp_path / "dl"
         dl_dir.mkdir()
-        (dl_dir / "config.json").write_text('{"model_type": "nemotron"}')
+        (dl_dir / "config.json").write_text('{"model_type": "example_decoder"}')
         (dl_dir / "model.nemo").write_text("placeholder")
 
         fake_hf = types.ModuleType("huggingface_hub")
@@ -70,7 +68,7 @@ class TestResolveModel:
         monkeypatch.setattr(
             engine_builder, "_resolve_nemo_archive", fake_resolve_nemo_archive)
 
-        result = _resolve_model("nvidia/Nemotron-4-Mini-Hindi-4B-Base")
+        result = _resolve_model("example-org/hf-config-model")
         assert result == str(dl_dir)
         assert called["nemo"] is False
 
@@ -91,46 +89,13 @@ class TestResolveModel:
         monkeypatch.setattr(
             engine_builder, "_resolve_nemo_archive", fake_resolve_nemo_archive)
 
-        result = _resolve_model("nvidia/Magpie-TTS")
+        result = _resolve_model("example-org/nemo-only-model")
         assert result == f"resolved:{nemo_path}"
 
 
 class TestFindPlugin:
-    def test_supported_model_types(self):
-        """Verify find_plugin returns non-None for all known model types."""
-        known_types = [
-            "qwen", "qwen2", "qwen3", "qwq",
-            "llama", "mistral", "gemma", "gemma2",
-            "phi", "phi3", "phimoe",
-            "granite", "internlm", "internlm2",
-            "starcoder2", "gpt2", "opt", "falcon", "stablelm",
-            "olmo", "xglm", "gpt_neox", "gpt_neo", "codegen",
-            "bloom", "mamba", "mixtral",
-            "qwen2_vl", "qwen2_5_vl",
-        ]
-        for model_type in known_types:
-            plugin = find_plugin(model_type)
-            assert plugin is not None, f"No plugin for {model_type}"
-
     def test_unsupported_model_type(self):
         assert find_plugin("nonexistent_model_type_12345") is None
-
-    def test_known_families(self):
-        """Verify key model types map to expected family names."""
-        known = {
-            "qwen3": "qwen",
-            "qwen2": "qwen",
-            "llama": "llama",
-            "mistral": "mistral",
-            "gemma": "gemma",
-            "gemma2": "gemma",
-            "phi3": "phi",
-        }
-        for model_type, expected_family in known.items():
-            plugin = find_plugin(model_type)
-            if plugin is not None:
-                assert plugin.name == expected_family, \
-                    f"{model_type} -> {plugin.name} (expected {expected_family})"
 
     def test_all_plugins_have_required_attributes(self):
         """Every plugin must have name, matches, load_weights, build_engine."""

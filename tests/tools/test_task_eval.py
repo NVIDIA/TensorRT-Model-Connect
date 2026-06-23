@@ -134,31 +134,156 @@ def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
 
 def test_plan_selects_chat_text_generation_manifests() -> None:
     suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    models = [
+        {
+            "name": "decoder-chat",
+            "hf_id": "example-org/decoder-chat",
+            "bundle": "decoder-chat.trtfb",
+            "runtime_strategy": "decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
+            "reference_family": "chat_instruct_template",
+            "user_contract": "chat_response",
+            "family": "decoder_family",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/decoder_family/decoder-chat.json",
+            "skip": "",
+        },
+        {
+            "name": "decoder-continuation",
+            "hf_id": "example-org/decoder-continuation",
+            "bundle": "decoder-continuation.trtfb",
+            "runtime_strategy": "decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
+            "reference_family": "causal_base_continuation",
+            "user_contract": "continuation_parity",
+            "family": "decoder_family",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/decoder_family/decoder-continuation.json",
+            "skip": "",
+        },
+    ]
 
     rows = task_eval.build_plan(suites, models, suite_id="mmlu_five_shot_mcq")
 
     selected = {row["model"]: row for row in rows}
-    assert "qwen3-0.6b-fp16" in selected
-    assert selected["qwen3-0.6b-fp16"]["runtime_strategy"] == "decoder_kv_cache"
-    assert selected["qwen3-0.6b-fp16"]["user_contract"] == "chat_response"
-    assert "gpt2-125m" not in selected
-    assert "codegen-350m" not in selected
+    assert any(
+        row["runtime_strategy"] == "decoder_kv_cache"
+        and row["user_contract"] == "chat_response"
+        for row in selected.values()
+    )
+    assert "decoder-chat" in selected
+    assert "decoder-continuation" not in selected
+
+
+def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -> None:
+    family_dir = tmp_path / "example_decoder"
+    manifest_dir = family_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (family_dir / "MODEL.toml").write_text(
+        'test_manifests = ["manifests/example-decoder.json"]\n',
+        encoding="utf-8",
+    )
+    (manifest_dir / "example-decoder.json").write_text(
+        json.dumps(
+            {
+                "name": "example-decoder",
+                "hf_id": "example-org/example-decoder",
+                "bundle": "example-decoder.trtfb",
+                "family": "example_decoder",
+                "runtime_strategy": "decoder_kv_cache",
+                "task_strategy": "text_generation_causal",
+                "reference_family": "chat_example",
+                "user_contract": "chat_response",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records = task_eval.load_manifest_records(tmp_path)
+
+    assert [record["name"] for record in records] == ["example-decoder"]
+    assert records[0]["manifest"].endswith(
+        "example_decoder/manifests/example-decoder.json"
+    )
 
 
 def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
     suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    suite = dict(task_eval.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
+    suite["selectors"] = {
+        **suite["selectors"],
+        "families": ["vl_family_primary", "vl_family_secondary"],
+        "exclude_families": ["excluded_vl_family"],
+    }
+    models = [
+        {
+            "name": "vl-primary",
+            "hf_id": "example-org/vl-primary",
+            "bundle": "vl-primary.trtfb",
+            "runtime_strategy": "vision_language",
+            "task_strategy": "vision_language_generation",
+            "reference_family": "vl_instruct_qa",
+            "user_contract": "vl_answer",
+            "family": "vl_family_primary",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/vl_family_primary/manifests/vl-primary.json",
+            "skip": "",
+        },
+        {
+            "name": "vl-secondary",
+            "hf_id": "example-org/vl-secondary",
+            "bundle": "vl-secondary.trtfb",
+            "runtime_strategy": "vision_language",
+            "task_strategy": "vision_language_generation",
+            "reference_family": "vl_instruct_qa",
+            "user_contract": "vl_answer",
+            "family": "vl_family_secondary",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/vl_family_secondary/manifests/vl-secondary.json",
+            "skip": "",
+        },
+        {
+            "name": "vl-excluded",
+            "hf_id": "example-org/vl-excluded",
+            "bundle": "vl-excluded.trtfb",
+            "runtime_strategy": "vision_language",
+            "task_strategy": "vision_language_generation",
+            "reference_family": "vl_instruct_qa",
+            "user_contract": "vl_answer",
+            "family": "excluded_vl_family",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/excluded_vl_family/manifests/vl-excluded.json",
+            "skip": "",
+        },
+        {
+            "name": "text-decoder",
+            "hf_id": "example-org/text-decoder",
+            "bundle": "text-decoder.trtfb",
+            "runtime_strategy": "decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
+            "reference_family": "chat_instruct_template",
+            "user_contract": "chat_response",
+            "family": "decoder_family",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/decoder_family/manifests/text-decoder.json",
+            "skip": "",
+        },
+    ]
 
-    rows = task_eval.build_plan(suites, models, suite_id="vlm_mmmu_pro_vision_mcq")
+    rows = task_eval.build_plan([suite], models)
 
     selected = {row["model"]: row for row in rows}
-    assert "qwen25vl-3b" in selected
-    assert selected["qwen25vl-3b"]["runtime_strategy"] == "vision_language"
-    assert "qwen3-vl-2b" in selected
-    assert "internvl3-2b" in selected
-    assert "deepseek-ocr-l0" not in selected
-    assert "locateanything-3b" not in selected
+    assert "vl-primary" in selected
+    assert selected["vl-primary"]["runtime_strategy"] == "vision_language"
+    assert "vl-secondary" in selected
+    assert "vl-excluded" not in selected
+    assert "text-decoder" not in selected
 
 
 def test_plan_selects_ocrbench_v2_unified_models() -> None:
@@ -383,7 +508,7 @@ def test_vlm_reference_prompt_uses_native_messages() -> None:
         FakeProcessor(),
         request,
         "flattened prompt",
-        "Qwen/Qwen3-VL-2B-Instruct",
+        "example-org/vision-chat",
     )
 
     messages = json.loads(rendered)
@@ -704,16 +829,31 @@ def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
 
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
     suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
-    models = task_eval.load_manifest_records()
+    models = [
+        {
+            "name": "decoder-chat",
+            "hf_id": "example-org/decoder-chat",
+            "bundle": "decoder-chat.trtfb",
+            "runtime_strategy": "decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
+            "reference_family": "chat_instruct_template",
+            "user_contract": "chat_response",
+            "family": "decoder_family",
+            "ci_tier": "default",
+            "requires_multi_device": False,
+            "manifest": "tests/e2e/models/decoder_family/decoder-chat.json",
+            "skip": "",
+        }
+    ]
 
     selected = task_eval.selected_models_for_suite(
         suite,
         models,
-        selectors=["qwen3-0.6b-fp16"],
+        selectors=["decoder-chat"],
         single_device_only=True,
     )
 
-    assert [model["name"] for model in selected] == ["qwen3-0.6b-fp16"]
+    assert [model["name"] for model in selected] == ["decoder-chat"]
 
 
 def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path: Path) -> None:
@@ -727,37 +867,37 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
     }
     models = [
         {
-            "name": "internlm2-1.8b",
-            "hf_id": "internlm/internlm2-math-plus-1_8b",
-            "bundle": "internlm2-1.8b.trtfb",
+            "name": "decoder-waived",
+            "hf_id": "example-org/decoder-waived",
+            "bundle": "decoder-waived.trtfb",
             "runtime_strategy": "decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
-            "family": "internlm",
+            "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/internlm2-1.8b.json",
+            "manifest": "tests/e2e/models/decoder-waived.json",
             "skip": "",
         },
         {
-            "name": "tinyllama-1.1b",
-            "hf_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            "bundle": "tinyllama-1.1b.trtfb",
+            "name": "decoder-active",
+            "hf_id": "example-org/decoder-active",
+            "bundle": "decoder-active.trtfb",
             "runtime_strategy": "decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
-            "family": "llama",
+            "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/tinyllama-1.1b.json",
+            "manifest": "tests/e2e/models/decoder-active.json",
             "skip": "",
         },
     ]
     waives_path = tmp_path / "waives.txt"
     waives_path.write_text(
-        "internlm2-1.8b  SKIP  (HF remote code incompatible)\n",
+        "decoder-waived  SKIP  (reference dependency unavailable)\n",
         encoding="utf-8",
     )
     waives = task_eval.load_waives(waives_path)
@@ -766,16 +906,16 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
     explicit = task_eval.selected_models_for_suite(
         suite,
         models,
-        selectors=["internlm2-1.8b"],
+        selectors=["decoder-waived"],
         waives=waives,
     )
     rows = task_eval.build_plan([suite], models, include_non_matching=True, waives=waives)
-    internlm_row = next(row for row in rows if row["model"] == "internlm2-1.8b")
+    decoder_family_row = next(row for row in rows if row["model"] == "decoder-waived")
 
-    assert [model["name"] for model in selected] == ["tinyllama-1.1b"]
-    assert [model["name"] for model in explicit] == ["internlm2-1.8b"]
-    assert internlm_row["selected"] is False
-    assert "waived SKIP" in internlm_row["reason"]
+    assert [model["name"] for model in selected] == ["decoder-active"]
+    assert [model["name"] for model in explicit] == ["decoder-waived"]
+    assert decoder_family_row["selected"] is False
+    assert "waived SKIP" in decoder_family_row["reason"]
 
 
 def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> None:
@@ -971,9 +1111,9 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
     _write_mmlu(dataset)
     suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
     model = {
-        "name": "gpt2-125m",
-        "hf_id": "openai-community/gpt2",
-        "bundle": "gpt2-125m.trtfb",
+        "name": "decoder-small",
+        "hf_id": "example-org/decoder-small",
+        "bundle": "decoder-small.trtfb",
         "max_cache_length": 256,
         "precision": "fp32",
         "trust_remote_code": False,
@@ -1039,7 +1179,7 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
         build_max_cache_length=None,
         skip_prompt_length_check=False,
         bundle="",
-        model=["gpt2-125m"],
+        model=["decoder-small"],
         engine_dir="",
         trtmc_binary="build/trtmc",
         extra_build_arg=[],
@@ -1085,9 +1225,9 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
     _write_vlm_mmmu_pro_vision(dataset)
     suite = task_eval.suite_by_id(task_eval.load_suites(), "vlm_mmmu_pro_vision_mcq")
     model = {
-        "name": "qwen25vl-3b",
-        "hf_id": "Qwen/Qwen2.5-VL-3B-Instruct",
-        "bundle": "qwen25vl-3b-vl.trtfb",
+        "name": "vl-primary",
+        "hf_id": "example-org/vl-primary",
+        "bundle": "vl-primary.trtfb",
         "max_cache_length": 512,
         "precision": "fp32",
         "trust_remote_code": False,
@@ -1137,7 +1277,7 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
         build_max_cache_length=None,
         skip_prompt_length_check=False,
         bundle="",
-        model=["qwen25vl-3b"],
+        model=["vl-primary"],
         engine_dir="",
         trtmc_binary="build/trtmc",
         extra_build_arg=[],

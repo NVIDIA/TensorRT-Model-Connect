@@ -14,12 +14,13 @@ cmake-build-*/
 /.ci/
 /coverage/
 /artifacts/
+/symphony_workspaces/
 
 # Stray inference output at repo root
 /*.wav
 /*.png
 /*.jpg
-/flux2-outputs/
+/*-outputs/
 
 # CMake/Ninja generated files
 CMakeFiles/
@@ -76,8 +77,7 @@ scripts/agents/prompts/
 *.swo
 
 # Downloaded HF model directories (heavyweight, not committed)
-# Only bundled demo assets (models/hf/qwen3/, etc.) are tracked.
-models/hf/Qwen__Qwen3-0.6B/
+# Checked-in family fixtures live under tests/e2e/models/<family>/data/.
 models/hf/TinyLlama__*/
 models/hf/tiny-random-*/
 models/hf/01-ai__*/

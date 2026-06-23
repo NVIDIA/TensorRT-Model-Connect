@@ -8,8 +8,8 @@
 //
 // Generate golden vectors with:
 //   python3 tests/tools/generate_wordpiece_golden.py \
-//       --model google-bert/bert-base-uncased \
-//       --output tests/data/bert_base_uncased_golden.txt
+//       --model example-org/wordpiece-encoder \
+//       --output tests/data/wordpiece_encoder_golden.txt
 //
 // Golden vector file format (one test per line):
 //   <text>\t<id1>,<id2>,<id3>,...
@@ -31,8 +31,7 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
+void check(bool condition, const std::string& name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
@@ -41,10 +40,8 @@ void check(bool condition, const std::string& name)
     }
 }
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -60,30 +57,43 @@ void check_ids(const std::vector<int32_t>& actual,
     size_t min_len = std::min(actual.size(), expected.size());
     for (size_t i = 0; i < min_len; ++i) {
         if (actual[i] != expected[i]) {
-            std::cerr << "  first mismatch at index " << i
-                      << ": expected " << expected[i] << " got " << actual[i] << "\n";
+            std::cerr << "  first mismatch at index " << i << ": expected " << expected[i]
+                      << " got " << actual[i] << "\n";
             break;
         }
     }
     if (actual.size() != expected.size()) {
-        std::cerr << "  length mismatch: expected " << expected.size()
-                  << " got " << actual.size() << "\n";
+        std::cerr << "  length mismatch: expected " << expected.size() << " got " << actual.size()
+                  << "\n";
     }
     failures++;
 }
 
-std::string unescape(const std::string& s)
-{
+std::string unescape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '\\' && i + 1 < s.size()) {
             switch (s[i + 1]) {
-                case 't': out.push_back('\t'); ++i; break;
-                case 'n': out.push_back('\n'); ++i; break;
-                case 'r': out.push_back('\r'); ++i; break;
-                case '\\': out.push_back('\\'); ++i; break;
-                default: out.push_back(s[i]); break;
+            case 't':
+                out.push_back('\t');
+                ++i;
+                break;
+            case 'n':
+                out.push_back('\n');
+                ++i;
+                break;
+            case 'r':
+                out.push_back('\r');
+                ++i;
+                break;
+            case '\\':
+                out.push_back('\\');
+                ++i;
+                break;
+            default:
+                out.push_back(s[i]);
+                break;
             }
         } else {
             out.push_back(s[i]);
@@ -93,28 +103,29 @@ std::string unescape(const std::string& s)
 }
 
 int parse_golden_line(const std::string& line, std::string& out_text,
-                      std::vector<int32_t>& out_ids)
-{
+                      std::vector<int32_t>& out_ids) {
     auto tab = line.find('\t');
-    if (tab == std::string::npos) return 0;
+    if (tab == std::string::npos)
+        return 0;
     out_text = unescape(line.substr(0, tab));
     out_ids.clear();
     std::string ids_str = line.substr(tab + 1);
-    if (ids_str.empty()) return 1;
+    if (ids_str.empty())
+        return 1;
     std::istringstream iss(ids_str);
     std::string tok;
     while (std::getline(iss, tok, ',')) {
-        if (!tok.empty()) out_ids.push_back(std::stoi(tok));
+        if (!tok.empty())
+            out_ids.push_back(std::stoi(tok));
     }
     return 1;
 }
 
-std::string read_file(const std::string& path)
-{
+std::string read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) return "";
-    return std::string(std::istreambuf_iterator<char>(f),
-                       std::istreambuf_iterator<char>());
+    if (!f)
+        return "";
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 }
 
 // ─── Built-in golden vectors ───
@@ -146,8 +157,7 @@ static const char* kSmallWordPieceJson = R"({
   ]
 })";
 
-void run_builtin_golden_tests()
-{
+void run_builtin_golden_tests() {
     std::cerr << "=== Built-in Golden Vectors (WordPiece) ===\n";
 
     std::string json(kSmallWordPieceJson);
@@ -186,8 +196,7 @@ void run_builtin_golden_tests()
         // Round-trip checks
         for (const auto& text : {"hello", "hello world", "unaffable", "testing"}) {
             auto decoded = tok->decode(tok->encode(text));
-            check(decoded == text,
-                  std::string("golden_roundtrip_") + text);
+            check(decoded == text, std::string("golden_roundtrip_") + text);
         }
     }
 
@@ -205,12 +214,10 @@ void run_builtin_golden_tests()
 // ─── File-based golden tests ───
 
 int run_file_golden_tests(const std::string& json_data, const std::string& golden_path,
-                          bool add_special)
-{
+                          bool add_special) {
     std::cerr << "\n=== File Golden Vectors: " << golden_path << " ===\n";
 
-    auto tok = trtmc::CreateWordPieceTokenizer(
-        json_data.data(), json_data.size(), add_special);
+    auto tok = trtmc::CreateWordPieceTokenizer(json_data.data(), json_data.size(), add_special);
     if (!tok) {
         std::cerr << "ERROR: failed to create tokenizer\n";
         return 1;
@@ -227,7 +234,8 @@ int run_file_golden_tests(const std::string& json_data, const std::string& golde
     std::string line;
     while (std::getline(golden_file, line)) {
         ++line_num;
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty() || line[0] == '#')
+            continue;
 
         std::string text;
         std::vector<int32_t> expected_ids;
@@ -245,7 +253,8 @@ int run_file_golden_tests(const std::string& json_data, const std::string& golde
         } else {
             check_ids(actual_ids, expected_ids, label);
             std::string display = text.substr(0, 60);
-            if (text.size() > 60) display += "...";
+            if (text.size() > 60)
+                display += "...";
             std::cerr << "  input: \"" << display << "\"\n";
         }
     }
@@ -254,8 +263,7 @@ int run_file_golden_tests(const std::string& json_data, const std::string& golde
     return 0;
 }
 
-int main()
-{
+int main() {
     std::cerr << "WordPiece Tokenizer Golden Correctness Tests\n\n";
 
     run_builtin_golden_tests();

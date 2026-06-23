@@ -28,6 +28,31 @@ _plugins: Dict[str, ContractTestPlugin] = {}
 _discovered = False
 
 
+def register_plugin(plugin: ContractTestPlugin, *, source: str = "") -> None:
+    """Register a contract plugin object.
+
+    Model-local E2E plugin activation uses this to add family-owned contract
+    checks before shared contract plugins are discovered.
+    """
+    if not isinstance(plugin, ContractTestPlugin):
+        raise TypeError(f"{plugin!r} is not a ContractTestPlugin")
+
+    for family in plugin.reference_families:
+        if family in _plugins:
+            logger.warning(
+                "Contract plugin for family %s already registered, "
+                "overwriting with %s",
+                family,
+                source or type(plugin).__module__,
+            )
+        _plugins[family] = plugin
+        logger.debug(
+            "Registered contract plugin %s for family %s",
+            source or type(plugin).__module__,
+            family,
+        )
+
+
 def _discover() -> None:
     """Scan this directory for contract test plugins."""
     global _discovered
@@ -61,16 +86,14 @@ def _discover() -> None:
 
         for family in plugin.reference_families:
             if family in _plugins:
-                logger.warning(
-                    "Contract plugin for family %s already registered, "
-                    "overwriting with %s",
-                    family, full_name,
+                logger.debug(
+                    "Keeping pre-registered contract plugin for family %s "
+                    "instead of shared plugin %s",
+                    family,
+                    full_name,
                 )
-            _plugins[family] = plugin
-            logger.debug(
-                "Registered contract plugin %s for family %s",
-                full_name, family,
-            )
+                continue
+            register_plugin(plugin, source=full_name)
 
 
 def find_plugin(reference_family: str) -> Optional[ContractTestPlugin]:

@@ -111,11 +111,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     # Resolve the registry-backed build-time config up front (before build),
     # so build-time namespaces can feed kwargs directly. Importing
-    # runtime_config triggers registration of any schema modules declared
-    # under tensorrt_model_connect.runtime_config.schemas.
+    # runtime_config triggers registration of shared schemas plus any
+    # model-owned family runtime_config_schema.py sidecars.
     cli_cfg = getattr(args, "config", None)
     cli_sets = getattr(args, "set_flags", None) or []
     resolved_bundle = None
+    family_build_options = {}
     if cli_cfg or cli_sets:
         from .runtime_config import resolve_cli_config
         from .runtime_config.schemas import load_all as _load_schemas
@@ -126,13 +127,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         except (ValueError, FileNotFoundError, KeyError) as exc:
             print(f"Error resolving config: {exc}", file=sys.stderr)
             return 1
-        try:
-            audio_magpie_max_source_positions = int(resolved_bundle.get(
-                "audio_magpie", "max_source_positions"))
-        except KeyError:
-            audio_magpie_max_source_positions = 0
-    else:
-        audio_magpie_max_source_positions = 0
+        family_build_options = _resolved_config_values(resolved_bundle)
 
     try:
         build(
@@ -161,7 +156,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_protect_prefill=getattr(args, "triattention_protect_prefill", True),
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
-            audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+            family_build_options=family_build_options,
             parallel_config=parallel_config,
             build_timing_path=getattr(args, "build_timing_json", None),
             max_batch_size=int(getattr(args, "max_batch_size", 1) or 1),
@@ -190,6 +185,17 @@ def _cmd_build(args: argparse.Namespace) -> int:
         path = write_effective_config_next_to(resolved_bundle, args.output)
         print(f"[trtmc build] Wrote effective config: {path}", file=sys.stderr)
     return 0
+
+
+def _resolved_config_values(bundle) -> dict:
+    """Return resolved config values without layer/source metadata."""
+    return {
+        namespace: {
+            field: resolved.value
+            for field, resolved in fields.items()
+        }
+        for namespace, fields in bundle.all().items()
+    }
 
 
 def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
@@ -479,7 +485,7 @@ def main() -> None:
     # trtmc build <model> -o <out.trtfb>
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
-                         help="HF repo ID (e.g. Qwen/Qwen3-0.6B) or local directory")
+                         help="HF repo ID (for example, org/model-name) or local directory")
     build_p.add_argument("-o", "--output", required=True,
                          help="Output .trtfb file path")
     build_p.add_argument("--trust-remote-code", action="store_true",

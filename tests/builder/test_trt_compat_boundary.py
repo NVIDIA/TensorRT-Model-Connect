@@ -259,10 +259,10 @@ def test_trt_compat_scoped_timing_cache_uses_separate_path(monkeypatch, tmp_path
     cache_path = tmp_path / "tensorrt-opt1.cache"
     monkeypatch.setenv("TRTMC_TRT_TIMING_CACHE_PATH", str(cache_path))
 
-    with trt_compat.scoped_timing_cache("split qwen/decode"):
+    with trt_compat.scoped_timing_cache("split example/decode"):
         assert (
             trt_compat._timing_cache_path()
-            == tmp_path / "tensorrt-opt1.split_qwen_decode.cache"
+            == tmp_path / "tensorrt-opt1.split_example_decode.cache"
         )
 
     assert trt_compat._timing_cache_path() == cache_path

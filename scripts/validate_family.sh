@@ -2,11 +2,11 @@
 # Validate a model family end-to-end: build bundle, diff logits, diff layers, runner parity.
 #
 # Usage:
-#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B                       # HF repo ID
-#   ./scripts/validate_family.sh models/hf/Qwen__Qwen3-0.6B            # local dir
-#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --max-cache-length 512
-#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --binary ./build/trtmc
-#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --isolate-model-plugin
+#   ./scripts/validate_family.sh org/example-decoder                  # HF repo ID
+#   ./scripts/validate_family.sh models/hf/org__example-decoder       # local dir
+#   ./scripts/validate_family.sh org/example-decoder --max-cache-length 512
+#   ./scripts/validate_family.sh org/example-decoder --binary ./build/trtmc
+#   ./scripts/validate_family.sh org/example-decoder --isolate-model-plugin
 #
 # Requirements: torch, tensorrt_model_connect installed, C++ binary built.
 
@@ -104,6 +104,35 @@ print(out_dir)
 PY
 }
 
+runtime_strategy_has_validation_profile() {
+    local runtime_strategy="$1"
+    local profile="$2"
+
+    "$HF_PYTHON" - "$PROJECT_DIR" "$runtime_strategy" "$profile" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+project = Path(sys.argv[1])
+strategy = sys.argv[2]
+profile = sys.argv[3]
+
+for manifest_path in sorted((project / "src" / "runtime" / "models").glob("*/MODEL.toml")):
+    raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    profiles = raw.get("validation_profiles") or {}
+    strategies = profiles.get(profile) if isinstance(profiles, dict) else None
+    if isinstance(strategies, list) and strategy in strategies:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 # Derive a safe bundle filename from the model ID.
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
 BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
@@ -183,14 +212,10 @@ if [[ "$ISOLATE_MODEL_PLUGIN" == "true" ]]; then
         fi
     fi
 fi
-DECODER_STRATEGIES="decoder_kv_cache decoder_moe ssm_recurrent rwkv_recurrent hybrid_mamba_attention"
 IS_DECODER=false
-for s in $DECODER_STRATEGIES; do
-    if [[ "$RUNTIME_STRATEGY" == "$s" ]]; then
-        IS_DECODER=true
-        break
-    fi
-done
+if runtime_strategy_has_validation_profile "$RUNTIME_STRATEGY" "decoder_debug"; then
+    IS_DECODER=true
+fi
 
 if [[ "$IS_DECODER" == "true" ]]; then
     # Steps 2-4: decoder-only validation (diff_logits, diff_layers, runner parity)

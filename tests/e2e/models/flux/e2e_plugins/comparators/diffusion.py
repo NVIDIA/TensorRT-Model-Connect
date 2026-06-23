@@ -281,6 +281,60 @@ class DiffusionComparator:
                 if not ssim_ok:
                     all_pass = False
 
+            from .clip_metrics import compute_clip_metrics
+
+            prompt = trt.data.get("prompt")
+            clip = (
+                compute_clip_metrics(frames_dir, ref_frames_dir, prompt)
+                if trt.data.get("num_frames", 1) <= 1
+                else None
+            )
+            if clip is not None:
+                eps = thresholds.get("max_prompt_clipscore_drop", 3.0)
+                delta_ok = clip.prompt_clipscore_delta >= -eps
+                metrics["prompt_clipscore_delta"] = MetricResult(
+                    value=clip.prompt_clipscore_delta,
+                    threshold=-eps,
+                    operator=">=",
+                    passed=delta_ok,
+                    note=(
+                        f"trt={clip.trt_prompt_clipscore:.2f}, "
+                        f"hf={clip.hf_prompt_clipscore:.2f}"
+                        + (" [prompt truncated]" if clip.prompt_truncated else "")
+                    ),
+                )
+                if not delta_ok:
+                    all_pass = False
+
+                img_thr = thresholds.get("min_trt_hf_image_clip_cosine", 0.0)
+                img_ok = img_thr <= 0.0 or clip.trt_hf_image_clip_cosine >= img_thr
+                metrics["trt_hf_image_clip_cosine"] = MetricResult(
+                    value=clip.trt_hf_image_clip_cosine,
+                    threshold=img_thr if img_thr > 0.0 else None,
+                    operator=">=",
+                    passed=img_ok,
+                )
+                if not img_ok:
+                    all_pass = False
+
+                hf_floor = thresholds.get("min_hf_prompt_clipscore", 20.0)
+                hf_ok = clip.hf_prompt_clipscore >= hf_floor
+                metrics["hf_prompt_clipscore"] = MetricResult(
+                    value=clip.hf_prompt_clipscore,
+                    threshold=hf_floor,
+                    operator=">=",
+                    passed=hf_ok,
+                )
+                if not hf_ok:
+                    all_pass = False
+
+                metrics["trt_prompt_clipscore"] = MetricResult(
+                    value=clip.trt_prompt_clipscore,
+                    threshold=None,
+                    operator="info",
+                    passed=True,
+                )
+
         n_gated = sum(1 for m in metrics.values() if m.threshold is not None)
         n_passed = sum(1 for m in metrics.values() if m.threshold is not None and m.passed)
         return CompareResult(

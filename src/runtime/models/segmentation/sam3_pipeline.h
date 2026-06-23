@@ -4,7 +4,7 @@
 // Runs native tokenization plus SAM3 text, vision, and DETR/mask/scoring TRT
 // plans, then postprocesses into model-card masks, boxes, and scores.
 
-#include "runtime/domains/perception/perception_types.h"
+#include "runtime/models/segmentation/sam3_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"

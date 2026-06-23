@@ -4,8 +4,16 @@
   "bundle": "nllb-200-distilled-600m.trtfb",
   "family": "m2m_100",
   "runtime_strategy": "seq2seq_encoder_decoder",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_translation",
+  "user_contract": "translation",
   "max_cache_length": 256,
   "prompt": "The house is wonderful.",
   "max_new_tokens": 20,
-  "skip": "M2M-100 encoder-decoder weight mapping needs debugging (cosine=0.30)"
+  "skip": "M2M-100 encoder-decoder weight mapping needs debugging (cosine=0.30)",
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModelForSeq2SeqLM"
+    }
+  }
 }

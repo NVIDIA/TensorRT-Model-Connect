@@ -8,28 +8,28 @@ token), so SOL ≈ GPU_bandwidth / model_bytes_per_token.
 
 Usage:
     # From HuggingFace model config
-    python3 tools/sol_estimate.py --model Qwen/Qwen3-0.6B
+    python3 tools/sol_estimate.py --model org/model
 
     # With specific GPU and precision
-    python3 tools/sol_estimate.py --model Qwen/Qwen2.5-1.5B --gpu B200 --dtype fp16
+    python3 tools/sol_estimate.py --model org/model --gpu B200 --dtype fp16
 
     # With actual measured throughput for utilization %
-    python3 tools/sol_estimate.py --model Qwen/Qwen2.5-1.5B --actual-tps 265.7
+    python3 tools/sol_estimate.py --model org/model --actual-tps 265.7
 
     # Closed-loop: auto-extract TPS from benchmark JSON
-    python3 tools/sol_estimate.py --model Qwen/Qwen2.5-1.5B --benchmark-json results.json
+    python3 tools/sol_estimate.py --model org/model --benchmark-json results.json
 
     # From bundle metadata
-    python3 tools/sol_estimate.py --bundle /tmp/qwen3.trtfb
+    python3 tools/sol_estimate.py --bundle /tmp/model.trtfb
 
     # JSON output
-    python3 tools/sol_estimate.py --model Qwen/Qwen3-0.6B --json
+    python3 tools/sol_estimate.py --model org/model --json
 
     # With KV cache size for attention bandwidth
-    python3 tools/sol_estimate.py --model Qwen/Qwen2.5-1.5B --cache-length 2048
+    python3 tools/sol_estimate.py --model org/model --cache-length 2048
 
     # Per-layer roofline analysis (requires profiler JSON)
-    python3 tools/sol_estimate.py --model Qwen/Qwen2.5-1.5B --gpu B200 --dtype fp16 \\
+    python3 tools/sol_estimate.py --model org/model --gpu B200 --dtype fp16 \\
         --cache-length 256 --layer-timing-json profile.json
 """
 from __future__ import annotations
@@ -38,6 +38,13 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tests.e2e_harness.runtime_strategy_metadata import runtime_strategy_performance_mode  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -377,40 +384,6 @@ def _compute_flops_per_token(arch: ModelArch, cache_length: int) -> float:
 # Workload-Aware SOL Estimation
 # ---------------------------------------------------------------------------
 
-# Pipeline type → performance mode mapping
-PIPELINE_MODES: dict[str, str] = {
-    # A. Autoregressive decode
-    "decoder_kv_cache": "decode",
-    "decoder_moe": "decode",
-    "ssm_recurrent": "decode",
-    "rwkv_recurrent": "decode",
-    "hybrid_mamba_attention": "decode",
-    # B. Iterative denoising
-    "diffusion_flux": "diffusion",
-    "diffusion_wan": "diffusion",
-    "diffusion_zimage": "diffusion",
-    "diffusion_pixart": "diffusion",
-    # C. Encoder + Decoder
-    "speech_to_text": "enc_dec",
-    "text_to_text": "enc_dec",
-    "vision_language": "enc_dec",
-    "seq2seq": "enc_dec",
-    # D. Single forward pass
-    "encoder_only": "single_pass",
-    "embedding": "single_pass",
-    "reranking": "single_pass",
-    "segmentation": "single_pass",
-    "prompted_segmentation": "single_pass",
-    "object_detection": "single_pass",
-    "neural_operator": "single_pass",
-    # E. Multi-stage pipeline
-    "text_to_audio_bark": "multi_stage",
-    "text_to_audio_magpie": "multi_stage",
-    "speech_to_speech": "multi_stage",
-    "omni_multimodal": "multi_stage",
-}
-
-
 def estimate_sol_for_workload(
     arch: ModelArch,
     gpu: GpuSpec,
@@ -437,7 +410,7 @@ def estimate_sol_for_workload(
         sequence_length: Input sequence length (for encoder/single-pass modes).
         num_denoising_steps: Number of denoising steps (diffusion mode).
     """
-    mode = PIPELINE_MODES.get(pipeline_type, "decode")
+    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     bpp = BYTES_PER_PARAM[dtype]
 
     if mode == "decode":
@@ -598,7 +571,7 @@ def _estimate_sol_single_pass(
     sequence_length: int,
     actual_throughput: float,
 ) -> dict:
-    """SOL for single-pass models (BERT, SegFormer, etc.).
+    """SOL for single-pass encoder/perception models.
 
     Full sequence processed in one forward pass. Typically compute-bound
     for moderate sequence lengths, bandwidth-bound for very short sequences.

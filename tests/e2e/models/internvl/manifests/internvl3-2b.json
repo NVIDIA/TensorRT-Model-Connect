@@ -5,6 +5,7 @@
   "bundle": "internvl3-2b-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "ci_tier": "l0_only",
   "max_cache_length": 384,
   "prompt": "What color is the vehicle in this image? Answer in one word.",

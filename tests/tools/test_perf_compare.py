@@ -124,10 +124,10 @@ class TestBuildJsonOutput:
         trt = _make_bench_result([10.0], [40.0], 20, [1])
         hf = _make_bench_result([8.0], [80.0], 20, [1])
         result = mod.build_json_output(
-            "Qwen/Qwen3-0.6B", "Hello world", 5, 20, 3, 2, "float16", trt, hf)
+            "example-org/example-decoder", "Hello world", 5, 20, 3, 2, "float16", trt, hf)
 
         meta = result["metadata"]
-        assert meta["model"] == "Qwen/Qwen3-0.6B"
+        assert meta["model"] == "example-org/example-decoder"
         assert meta["prompt"] == "Hello world"
         assert meta["num_input_tokens"] == 5
         assert meta["max_new_tokens"] == 20
@@ -279,7 +279,6 @@ class TestBenchHfCompiled:
                 "gen_ids": [1, 2, 3],
             }
 
-        import torch as _torch  # noqa: F401
         monkeypatch.setattr(mod, "bench_hf", fake_bench_hf)
 
         # Patch torch.compile to return model unchanged
@@ -474,19 +473,18 @@ class TestPrintReport:
         mod = _import_perf_compare()
         trt = _make_bench_result([10.0], [50.0], 5, [1])
         hf = _make_bench_result([8.0], [80.0], 5, [1])
-        mod.print_report("m", "p", 1, 5, 1, 0, "float16", trt, hf,
-                         is_mamba=False)
+        mod.print_report("m", "p", 1, 5, 1, 0, "float16", trt, hf)
         out = capsys.readouterr().out
         assert "KV cache" in out
 
-    def test_report_mamba_footnote(self, capsys):
+    def test_report_family_runtime_footnote(self, capsys):
         mod = _import_perf_compare()
         trt = _make_bench_result([10.0], [50.0], 5, [1])
         hf = _make_bench_result([8.0], [80.0], 5, [1])
         mod.print_report("m", "p", 1, 5, 1, 0, "float16", trt, hf,
-                         is_mamba=True)
+                         runtime_note="family runtime note")
         out = capsys.readouterr().out
-        assert "recurrent state" in out
+        assert "family runtime note" in out
         assert "KV cache" not in out
 
     def test_report_shows_dtype(self, capsys):
@@ -525,7 +523,7 @@ def _fake_bench_result():
 class TestSerialGpuExecution:
     """Verify main() runs TRT before HF and frees GPU between them."""
 
-    def _run_main_with_mocks(self, monkeypatch, is_mamba=False,
+    def _run_main_with_mocks(self, monkeypatch, has_family_handler=False,
                              extra_argv=None):
         """Patch all heavy deps in main() and return the call log."""
         mod = _import_perf_compare()
@@ -561,21 +559,23 @@ class TestSerialGpuExecution:
                             "transformers", fake_transformers)
 
         # Patch load_trt_from_bundle
+        fake_handler = mock.MagicMock() if has_family_handler else None
+
         def fake_load_bundle(path):
             call_log.append("load_bundle")
-            return (b"fake_plan", 2, 128, {}, is_mamba)
+            return (b"fake_plan", 2, 128, {}, fake_handler)
         monkeypatch.setattr(mod, "load_trt_from_bundle", fake_load_bundle)
 
-        # Patch bench_trt / bench_trt_mamba
+        # Patch bench_trt / family dispatch
         def fake_bench_trt(*args, **kwargs):
             call_log.append("bench_trt")
             return _fake_bench_result()
         monkeypatch.setattr(mod, "bench_trt", fake_bench_trt)
 
-        def fake_bench_trt_mamba(*args, **kwargs):
-            call_log.append("bench_trt_mamba")
+        def fake_bench_trt_family(*args, **kwargs):
+            call_log.append("bench_trt_family")
             return _fake_bench_result()
-        monkeypatch.setattr(mod, "bench_trt_mamba", fake_bench_trt_mamba)
+        monkeypatch.setattr(mod, "bench_trt_family", fake_bench_trt_family)
 
         # Patch gc.collect and torch.cuda.empty_cache to track calls
         real_gc_mod = __import__("gc")
@@ -645,10 +645,10 @@ class TestSerialGpuExecution:
         assert "empty_cache" in remaining, (
             f"torch.cuda.empty_cache() missing after bench_hf: {log}")
 
-    def test_mamba_path_serial_execution(self, monkeypatch):
-        """Mamba/SSM path also runs TRT before HF with GPU cleanup."""
-        log = self._run_main_with_mocks(monkeypatch, is_mamba=True)
-        trt_idx = log.index("bench_trt_mamba")
+    def test_family_handler_path_serial_execution(self, monkeypatch):
+        """Family-owned path also runs TRT before HF with GPU cleanup."""
+        log = self._run_main_with_mocks(monkeypatch, has_family_handler=True)
+        trt_idx = log.index("bench_trt_family")
         hf_load_idx = log.index("load_hf")
         assert trt_idx < hf_load_idx
 
@@ -671,7 +671,7 @@ class TestSerialGpuExecution:
         log = self._run_main_with_mocks(monkeypatch)
         # bench_hf (eager) must appear before bench_hf_compiled
         if "bench_hf_compiled" not in log:
-            return  # Mamba path or torch.compile unavailable — skip check
+            return  # family handler path or torch.compile unavailable
         hf_idx = log.index("bench_hf")
         compile_idx = log.index("bench_hf_compiled")
         assert hf_idx < compile_idx, (

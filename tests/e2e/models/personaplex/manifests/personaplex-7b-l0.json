@@ -5,6 +5,7 @@
   "bundle": "personaplex-7b-l0.trtfb",
   "family": "personaplex",
   "runtime_strategy": "speech_to_speech",
+  "task_strategy": "speech_to_speech",
   "gated": true,
   "ci_tier": "l0_only",
   "reference_family": "s2s_personaplex",
@@ -17,5 +18,8 @@
   "prompt": "",
   "max_new_tokens": 300,
   "trust_remote_code": true,
+  "metadata": {
+    "runtime_cli_requires_hf_python": true
+  },
   "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
 }

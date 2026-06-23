@@ -45,9 +45,7 @@ class TriAttentionBundleConfig:
 
 
 def _default_rope_style(config: ModelConfig) -> str:
-    model_type = (config.model_type or "").lower()
-    if "llama" in model_type:
-        return "half"
+    del config
     return "half"
 
 

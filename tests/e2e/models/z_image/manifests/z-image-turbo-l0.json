@@ -6,6 +6,7 @@
   "model_type": "z_image",
   "family": "z_image",
   "runtime_strategy": "diffusion_zimage",
+  "task_strategy": "diffusion_media_generation",
   "ci_tier": "l0_only",
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
@@ -27,5 +28,10 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "PR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, guidance_scale=0.0, and the 9-step Turbo recipe. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
+  "notes": "PR L0 repro for Z-Image-Turbo. Uses the same checkpoint, Qwen3 text encoder, ZImage DiT/VAE path, runner, comparator, full 256-token cache shape, guidance_scale=0.0, and the 9-step Turbo recipe. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

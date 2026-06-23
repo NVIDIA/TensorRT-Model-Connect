@@ -3,9 +3,9 @@
 // MagpiePipeline: Magpie TTS encoder-decoder pipeline with optional CFG.
 // Uses TrtModule(encoder) + TrtModule(decoder) + KvCache + TrtModule(codec).
 
-#include "runtime/core/trt_common.h"
-#include "runtime/domains/audio/audio_configs.h"
 #include "plugin_helpers.h"
+#include "runtime/core/trt_common.h"
+#include "runtime/models/magpie/magpie_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

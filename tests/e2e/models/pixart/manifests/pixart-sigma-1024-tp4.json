@@ -6,6 +6,7 @@
   "model_type": "pixart",
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
+  "task_strategy": "diffusion_media_generation",
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "multi_device",
   "reference_family": "diffusers_image_gen",
@@ -76,5 +77,10 @@
       "name": "end_to_end",
       "required": true
     }
-  ]
+  ],
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

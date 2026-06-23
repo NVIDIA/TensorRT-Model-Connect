@@ -3,6 +3,7 @@
 // OmniPipeline: omni multimodal pipeline with thinker + talker + code2wav.
 // Uses TrtModule(thinker) + KvCache + TrtModule(talker) + KvCache + TrtModule(code2wav).
 
+#include "runtime/models/omni/omni_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"
@@ -16,8 +17,6 @@
 #include <vector>
 
 namespace trtmc {
-
-struct OmniConfig;
 
 class OmniPipeline final : public IPipeline {
   public:

@@ -1,6 +1,15 @@
 id = "internlm"
 plugin = "internlm"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
+python_profile_specs = [
+  "internlm|families/internlm/python_profile_requirements/internlm.lock.txt|families/internlm/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|internlm",
+  "runtime|internlm",
+  "reference|internlm",
+]
 aliases = [
   "internlm",
   "internlm2",

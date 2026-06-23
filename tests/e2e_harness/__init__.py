@@ -33,11 +33,7 @@ def save_full_stderr(stderr: str, artifacts_dir: str, stage_name: str, case_name
         f.write(stderr)
     return truncated, path
 
-from .contracts import (
-    MODEL_REFERENCE_FAMILY,
-    REFERENCE_FAMILY_TO_COMPARISON_MODE,
-    REFERENCE_FAMILY_TO_USER_CONTRACT,
-    RUNTIME_TO_TASK_STRATEGY,
+from .contracts import (  # noqa: E402
     ArtifactSink,
     ArtifactType,
     CILane,
@@ -91,11 +87,6 @@ __all__ = [
     "Comparator",
     "ArtifactSink",
     "DeterminismPolicy",
-    # Constants
-    "RUNTIME_TO_TASK_STRATEGY",
-    "MODEL_REFERENCE_FAMILY",
-    "REFERENCE_FAMILY_TO_USER_CONTRACT",
-    "REFERENCE_FAMILY_TO_COMPARISON_MODE",
     # Helpers
     "save_full_stderr",
     "_case_artifact_dir",

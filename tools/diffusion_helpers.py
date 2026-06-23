@@ -1,6 +1,6 @@
 """Shared utilities for diffusion pipeline tools.
 
-Used by: debug_diffusion_pipeline.py, validate_dit.py, validate_t5.py
+Used by diffusion debug and component validation tools.
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def compute_timestep_embedding(timestep: float, pp: dict,
 
 
 def project_text(text_emb: np.ndarray, pp: dict):
-    """Project T5 text embeddings to DiT dimension."""
+    """Project text embeddings to denoiser hidden dimension."""
     seq_len = text_emb.shape[0] if text_emb.ndim == 2 else text_emb.shape[1]
     flat = text_emb.reshape(seq_len, -1)
     out = flat @ pp["condition_embedder.text_embedding.weight"] + pp["condition_embedder.text_embedding.bias"]

@@ -5,6 +5,7 @@
   "bundle": "nemotron-h-nano-9b-tp4.trtfb",
   "family": "nemotron_h",
   "runtime_strategy": "hybrid_mamba_attention",
+  "task_strategy": "text_generation_causal",
   "reference_backend": "golden_snapshot",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",
@@ -54,7 +55,11 @@
     }
   ],
   "metadata": {
-    "golden_snapshot_path": "data/nemotron_h_nano_9b_golden.json"
+    "golden_snapshot_path": "data/nemotron_h_nano_9b_golden.json",
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
   },
   "notes": "Nemotron-H Nano 9B TP4 repro using the same prompt, golden snapshot, generation length, and thresholds as nemotron-h-nano-9b."
 }

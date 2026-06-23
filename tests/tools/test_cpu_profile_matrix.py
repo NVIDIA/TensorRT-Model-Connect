@@ -57,7 +57,7 @@ def _make_result(strategy: str, bottleneck: str = "execute",
     }
 
 
-def _make_mamba_result(strategy: str = "ssm_recurrent") -> dict:
+def _make_family_result(strategy: str = "family_recurrent") -> dict:
     phases = [
         {"phase": "h2d",        "mean_ms": 0.08, "std_ms": 0.01, "pct": 3.0, "samples": 20},
         {"phase": "tensor_bind","mean_ms": 0.20, "std_ms": 0.03, "pct": 8.0, "samples": 20},
@@ -69,7 +69,7 @@ def _make_mamba_result(strategy: str = "ssm_recurrent") -> dict:
     return {
         "strategy": strategy,
         "model": f"org/{strategy}-model",
-        "runner_type": "mamba",
+        "runner_type": "family",
         "num_layers": 24,
         "phases": phases,
         "total_ms": 2.6,
@@ -88,27 +88,29 @@ class TestStrategySpec:
             assert spec.strategy
             assert spec.hf_id
             assert spec.bundle
-            assert spec.runner in ("decoder", "mamba")
+            assert spec.runner in ("decoder", "family")
 
     def test_all_strategies_are_unique(self):
         mod = _import_matrix()
         strategies = [s.strategy for s in mod._DEFAULT_SPECS]
         assert len(strategies) == len(set(strategies))
 
-    def test_decoder_strategies_use_decoder_runner(self):
+    def test_default_specs_are_loaded_from_family_hooks(self):
         mod = _import_matrix()
-        decoder_strategies = {"decoder_kv_cache", "decoder_moe",
-                               "hybrid_mamba_attention"}
-        for spec in mod._DEFAULT_SPECS:
-            if spec.strategy in decoder_strategies:
-                assert spec.runner == "decoder", spec.strategy
+        assert mod._DEFAULT_SPECS
 
-    def test_recurrent_strategies_use_mamba_runner(self):
+    def test_spec_mapping_rejects_unknown_runner(self):
         mod = _import_matrix()
-        recurrent = {"ssm_recurrent", "rwkv_recurrent"}
-        for spec in mod._DEFAULT_SPECS:
-            if spec.strategy in recurrent:
-                assert spec.runner == "mamba", spec.strategy
+        raw = {
+            "strategy": "custom_runtime",
+            "label": "custom",
+            "hf_id": "org/model",
+            "bundle": "model.trtfb",
+            "runner": "custom",
+        }
+        import pytest
+        with pytest.raises(ValueError, match="unsupported runner"):
+            mod._strategy_spec_from_mapping(raw, "test")
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +123,13 @@ class TestPrintMatrix:
         results = [
             _make_result("decoder_kv_cache"),
             _make_result("decoder_moe"),
-            _make_mamba_result("ssm_recurrent"),
+            _make_family_result("family_recurrent"),
         ]
         mod._print_matrix(results, "TestGPU", "10.0", "Hello", 10)
         out = capsys.readouterr().out
         assert "decoder_kv_cache" in out
         assert "decoder_moe" in out
-        assert "ssm_recurrent" in out
+        assert "family_recurrent" in out
 
     def test_shows_bottleneck_row(self, capsys):
         mod = _import_matrix()
@@ -144,9 +146,9 @@ class TestPrintMatrix:
         out = capsys.readouterr().out
         assert "TOTAL" in out
 
-    def test_mamba_phases_shown_for_ssm(self, capsys):
+    def test_family_phases_shown_for_family_runtime(self, capsys):
         mod = _import_matrix()
-        results = [_make_mamba_result()]
+        results = [_make_family_result()]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         assert "d2d_state" in out
@@ -161,13 +163,13 @@ class TestPrintMatrix:
 
     def test_mixed_strategies_shows_union_of_phases(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache"), _make_mamba_result()]
+        results = [_make_result("decoder_kv_cache"), _make_family_result()]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         # Decoder phases
         assert "mask_build" in out
         assert "d2d_cache" in out
-        # Mamba phases
+        # Family-owned recurrent phases
         assert "d2d_state" in out
 
     def test_empty_results_does_not_crash(self, capsys):
@@ -191,7 +193,7 @@ class TestPrintMatrix:
 class TestBuildHtml:
     def test_returns_valid_html(self):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache"), _make_mamba_result()]
+        results = [_make_result("decoder_kv_cache"), _make_family_result()]
         html = mod._build_html(results, "H100", "10.0", "Hello", 10, 3, 20)
         assert html.startswith("<!DOCTYPE html>")
         assert "<table>" in html
@@ -202,12 +204,12 @@ class TestBuildHtml:
         results = [
             _make_result("decoder_kv_cache"),
             _make_result("decoder_moe"),
-            _make_mamba_result("ssm_recurrent"),
+            _make_family_result("family_recurrent"),
         ]
         html = mod._build_html(results, "H100", "10.0", "test", 10, 3, 20)
         assert "decoder_kv_cache" in html
         assert "decoder_moe" in html
-        assert "ssm_recurrent" in html
+        assert "family_recurrent" in html
 
     def test_chart_json_embedded(self):
         mod = _import_matrix()

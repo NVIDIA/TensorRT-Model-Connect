@@ -1,6 +1,7 @@
 id = "gpt2"
 plugin = "gpt2"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "gpt2",
 ]

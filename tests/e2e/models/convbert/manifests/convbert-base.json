@@ -5,10 +5,18 @@
   "bundle": "convbert-base.trtfb",
   "family": "convbert",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 256,
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 1,
   "trust_remote_code": false,
   "notes": "Encoder-only model with hybrid attention + span-based dynamic convolution. Outputs hidden states, not logits.",
-  "core": false
+  "core": false,
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

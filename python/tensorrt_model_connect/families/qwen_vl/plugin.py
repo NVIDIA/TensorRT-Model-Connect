@@ -145,7 +145,7 @@ class QwenVLPlugin:
         num_merged = num_patches // (merge_size * merge_size)
 
         # Both Qwen2.5-VL and Qwen3-VL use merge-group pixel ordering
-        preproc = "qwen_merge_group"
+        preproc = "merge_group_chw"
 
         vl_cfg = {
             "image_token_id": 151655,

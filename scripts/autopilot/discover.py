@@ -28,19 +28,20 @@ def get_supported_model_types() -> set[str]:
     project_root = Path(__file__).resolve().parent.parent.parent
     sys.path.insert(0, str(project_root / "python"))
     try:
-        from tensorrt_model_connect.families import find_plugin
-        return _probe_with_find_plugin(find_plugin)
+        from tensorrt_model_connect.families import (
+            family_probe_model_types,
+            find_plugin,
+        )
+        return _probe_with_find_plugin(find_plugin, family_probe_model_types())
     except ImportError:
         pass
 
-    # Fallback: scan source files for matches() patterns
+    # Fallback: scan family metadata directly.
     return _scan_plugin_sources(project_root)
 
 
-def _probe_with_find_plugin(find_plugin) -> set[str]:
-    """Probe find_plugin with a comprehensive list of model_type strings."""
-    # We don't hardcode the list — we probe dynamically by testing common
-    # patterns + anything we've seen from HF.
+def _probe_with_find_plugin(find_plugin, seed_model_types: list[str]) -> set[str]:
+    """Probe find_plugin with metadata-declared and previously discovered types."""
     supported = set()
 
     # Load the known types cache if it exists
@@ -50,18 +51,7 @@ def _probe_with_find_plugin(find_plugin) -> set[str]:
     if cache_path.exists():
         probe_types.update(json.loads(cache_path.read_text()))
 
-    # Always probe common types
-    common = [
-        "llama", "qwen", "qwen2", "qwen3", "mistral", "phi", "phi3",
-        "gemma", "gemma2", "gpt2", "gpt_neo", "gpt_neox", "bloom", "opt",
-        "falcon", "starcoder2", "mamba", "rwkv", "mixtral", "bert",
-        "roberta", "whisper", "bark", "sam", "segformer", "internlm",
-        "internvl", "codegen", "stablelm", "granite", "olmo", "xglm",
-        "glm", "nemotron", "phimoe", "phi4mm", "deepseek_v2", "deepseek_v3",
-        "mpnet", "distilbert", "qwen2_moe", "qwen3_moe", "flux", "wan",
-        "z_image", "pixart", "canary", "personaplex", "moshi",
-    ]
-    probe_types.update(common)
+    probe_types.update(seed_model_types)
 
     for t in probe_types:
         if find_plugin(t) is not None:
@@ -71,26 +61,26 @@ def _probe_with_find_plugin(find_plugin) -> set[str]:
 
 
 def _scan_plugin_sources(project_root: Path) -> set[str]:
-    """Extract supported model_types by scanning plugin source code."""
-    import re
+    """Extract supported model_types by scanning family MODEL.toml metadata."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+        tomllib = None
 
     families_dir = project_root / "python" / "tensorrt_model_connect" / "families"
     supported = set()
 
-    for py_file in families_dir.glob("*.py"):
-        if py_file.name.startswith("_") or py_file.name == "base.py":
+    for model_toml in families_dir.glob("*/MODEL.toml"):
+        if tomllib is None:
             continue
-        source = py_file.read_text()
-
-        # Extract exact matches: == "xyz" or in ("xyz", "abc")
-        for m in re.finditer(r'["\'](\w+)["\']', source):
-            candidate = m.group(1).lower()
-            # Heuristic: if it appears near matches() or model_type
-            if len(candidate) > 2 and candidate not in (
-                "self", "str", "bool", "true", "false", "none",
-                "model_type", "return", "lower",
-            ):
-                supported.add(candidate)
+        raw = tomllib.loads(model_toml.read_text(encoding="utf-8"))
+        for value in (
+            raw.get("aliases", [])
+            + raw.get("prefixes", [])
+            + [raw.get("id", ""), raw.get("plugin", ""), model_toml.parent.name]
+        ):
+            if isinstance(value, str) and value:
+                supported.add(value.lower().replace("-", "_").replace(".", "_"))
 
     return supported
 

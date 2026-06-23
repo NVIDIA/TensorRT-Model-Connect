@@ -34,7 +34,7 @@ from ...parallel_config import (
     _slice_last_dim,
     add_all_reduce_sum,
     normalize_parallel_config,
-    validate_flux_dit_tp,
+    validate_dit_tp,
 )
 
 trt = trt_compat.get_trt()
@@ -62,8 +62,13 @@ def build_flux_dit_engine(
     ffn_dim = int(dim * mlp_ratio)  # For GELU-approximate FFN
     total_seq = text_seq_len + num_img_tokens
     parallel = normalize_parallel_config(parallel_config)
-    validate_flux_dit_tp(
-        dim=dim, num_heads=num_heads, ffn_dim=ffn_dim, parallel=parallel)
+    validate_dit_tp(
+        dim=dim,
+        num_heads=num_heads,
+        ffn_dim=ffn_dim,
+        parallel=parallel,
+        feature="FLUX DiT tensor parallel",
+    )
     local_num_heads = num_heads // parallel.tp_size
     local_dim = dim // parallel.tp_size
     local_ffn_dim = ffn_dim // parallel.tp_size

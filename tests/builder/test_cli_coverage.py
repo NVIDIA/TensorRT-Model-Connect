@@ -72,8 +72,8 @@ def test_cmd_inspect_valid_bundle_without_sections(tmp_path, capsys):
     bundle_path = tmp_path / "minimal.trtfb"
     header = {
         "model_id": "minimal-model",
-        "model_type": "qwen3",
-        "family": "qwen",
+        "model_type": "example_decoder",
+        "family": "example_family",
     }
     payload = json.dumps(header).encode("utf-8")
     with open(bundle_path, "wb") as f:
@@ -250,7 +250,10 @@ def test_auto_select_build_backend_prefers_raw_trt(tmp_path, monkeypatch):
     """
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "config.json").write_text(json.dumps({"model_type": "qwen2"}), encoding="utf-8")
+    (model_dir / "config.json").write_text(
+        json.dumps({"model_type": "synthetic_native"}),
+        encoding="utf-8",
+    )
 
     import tensorrt_model_connect.engine_builder as engine_builder
     import tensorrt_model_connect.engine_defs as engine_defs

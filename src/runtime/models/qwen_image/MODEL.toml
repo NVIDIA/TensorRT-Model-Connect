@@ -2,3 +2,7 @@ id = "qwen_image"
 runtime_library = "libtrtmc_model_qwen_image.so"
 runtime_plugins = ["plugin.cpp|register_qwen_image_plugin"]
 runtime_strategies = ["diffusion_qwen_image"]
+legacy_runtime_strategy_aliases = ["diffusion|contains|diffusion_backend_type|qwen_image|diffusion_qwen_image"]
+runtime_tests = [
+  "test_qwen_image_cfg_renorm|test_qwen_image_cfg_renorm.cpp|trtmc_model_qwen_image|_|_",
+]

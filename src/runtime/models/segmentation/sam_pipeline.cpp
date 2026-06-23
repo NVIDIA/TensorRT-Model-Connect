@@ -1,8 +1,8 @@
 #include "runtime/models/segmentation/sam_pipeline.h"
 
-#include "runtime/domains/perception/sam_output_selection.h"
-#include "runtime/domains/perception/sam_postprocess_seam.h"
-#include "runtime/domains/perception/sam_prompt_seam.h"
+#include "runtime/models/segmentation/sam_output_selection.h"
+#include "runtime/models/segmentation/sam_postprocess_seam.h"
+#include "runtime/models/segmentation/sam_prompt_seam.h"
 
 #include <algorithm>
 #include <array>

@@ -48,8 +48,8 @@ def _make_result(
     name: str = "test-model",
     status: str = "pass",
     task_strategy: str = "text_generation_causal",
-    family: str = "qwen",
-    hf_id: str = "Qwen/Qwen3-0.6B",
+    family: str = "example_decoder",
+    hf_id: str = "example-org/example-decoder",
     prompt: str = "Hello world",
     trt_text: str = "Hello world! The",
     ref_text: str = "Hello world! The",
@@ -284,9 +284,9 @@ class TestLoadAllResults:
         artifacts_dir = e2e_root / "artifacts"
         _write_result(
             artifacts_dir,
-            "fnet-base",
+            "encoder-base",
             _make_result(
-                name="fnet-base",
+                name="encoder-base",
                 status="fail",
                 failure_type="compare_fail",
             ),
@@ -294,7 +294,7 @@ class TestLoadAllResults:
         _write_junit(
             e2e_root,
             """
-            <testcase classname="tests.test_e2e" name="test_e2e[fnet-base]">
+            <testcase classname="tests.test_e2e" name="test_e2e[encoder-base]">
               <skipped type="pytest.xfail" message="(known representation parity gap)" />
             </testcase>
             """,
@@ -386,9 +386,9 @@ class TestRenderReport:
 
     def test_single_text_model(self):
         mod = _import_report()
-        r = _make_result(name="qwen3-0.6b", prompt="Test prompt")
+        r = _make_result(name="example-decoder", prompt="Test prompt")
         html = mod.render_report([r], title="Test Report")
-        assert "qwen3-0.6b" in html
+        assert "example-decoder" in html
         assert "Test prompt" in html
         assert "PASS" in html
         assert "logit_cosine_p5" in html
@@ -512,23 +512,23 @@ class TestRenderReport:
         r = _make_result(
             detailed_timing={
                 "weights_loading_s": 13.0,
-                "weights_loading_qwen3_encoder_s": 8.0,
-                "weights_loading_z_image_dit_s": 5.0,
+                "weights_loading_decoder_block_s": 8.0,
+                "weights_loading_denoiser_s": 5.0,
                 "trt_compile_s": 88.0,
-                "trt_compile_qwen3_encoder_s": 30.0,
-                "trt_compile_z_image_dit_s": 50.0,
+                "trt_compile_decoder_block_s": 30.0,
+                "trt_compile_denoiser_s": 50.0,
             },
         )
         html = mod.render_report([r])
         assert "<summary>Weights loading</summary>" in html
-        assert "qwen3 encoder" in html
+        assert "decoder block" in html
         assert "8.00s" in html
-        assert "z image dit" in html
+        assert "denoiser" in html
         assert "5.00s" in html
         assert "<summary>TRT compile</summary>" in html
-        assert "qwen3 encoder" in html
+        assert "decoder block" in html
         assert "30.00s" in html
-        assert "z image dit" in html
+        assert "denoiser" in html
         assert "50.00s" in html
         assert "unattributed" in html
         assert "8.00s" in html
@@ -808,7 +808,7 @@ class TestRenderGenericModel:
         mod = _import_report()
         r = _make_result(
             task_strategy="encoder_only_nlp",
-            family="albert",
+            family="encoder_family",
             stage_outputs={
                 "trt_full_inference": {
                     "stage_name": "full_inference",
@@ -935,7 +935,7 @@ class TestRenderDiffusionModel:
             task_strategy="diffusion_media_generation",
         )
         r["vlm_assessment"] = {
-            "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+            "model_id": "example-org/example-vl-judge",
             "vlm_judgment": {
                 "trt_description": "a clear cat image",
                 "hf_description": "a cat image",
@@ -952,7 +952,7 @@ class TestRenderDiffusionModel:
         }
         html = mod.render_diffusion_model(r)
         assert "VLM Semantic Assessment" in html
-        assert "Qwen/Qwen2.5-VL-3B-Instruct" in html
+        assert "example-org/example-vl-judge" in html
         assert "Semantic similarity" in html
         assert "4.5000" in html
         assert "same main subject" in html
@@ -964,7 +964,7 @@ class TestRenderDiffusionModel:
             task_strategy="diffusion_media_generation",
         )
         r["vlm_assessment"] = {
-            "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+            "model_id": "example-org/example-vl-judge",
             "vlm_judgment": {
                 "semantic_similarity_0_to_5": 4,
                 "trt_prompt_alignment_0_to_5": 4,
@@ -997,7 +997,7 @@ class TestRenderDiffusionModel:
         _write_result(artifacts_dir, "model-diff", result)
         (tmp_path / "diffusion_vlm_assessment.json").write_text(
             json.dumps({
-                "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+                "model_id": "example-org/example-vl-judge",
                 "results": [{
                     "case_name": "model-diff",
                     "vlm_judgment": {
@@ -1010,7 +1010,7 @@ class TestRenderDiffusionModel:
         )
         loaded = mod.load_all_results(artifacts_dir)
         assert loaded[0]["vlm_assessment"]["model_id"] == (
-            "Qwen/Qwen2.5-VL-3B-Instruct")
+            "example-org/example-vl-judge")
         assert loaded[0]["vlm_assessment"]["vlm_judgment"][
             "semantic_similarity_0_to_5"] == 4.25
 
@@ -1020,14 +1020,14 @@ class TestRenderAudioModel:
 
     def test_embeds_wav(self, tmp_path):
         mod = _import_report()
-        model_dir = tmp_path / "bark"
+        model_dir = tmp_path / "audio-model"
         model_dir.mkdir()
         trt_wav_path = model_dir / "trt_output.wav"
         ref_wav_path = model_dir / "ref_output.wav"
         _make_tiny_wav(trt_wav_path)
         _make_tiny_wav(ref_wav_path)
         r = _make_result(
-            name="bark",
+            name="audio-model",
             task_strategy="text_to_audio",
             artifacts={"trt_wav": "trt_output.wav", "ref_wav": "ref_output.wav"},
         )
@@ -1040,12 +1040,12 @@ class TestRenderAudioModel:
 
     def test_missing_reference_audio_failure_is_visible(self, tmp_path):
         mod = _import_report()
-        model_dir = tmp_path / "magpie"
+        model_dir = tmp_path / "audio-reference-failure"
         model_dir.mkdir()
         trt_wav_path = model_dir / "trt_output.wav"
         _make_tiny_wav(trt_wav_path)
         r = _make_result(
-            name="magpie",
+            name="audio-reference-failure",
             task_strategy="text_to_audio",
             artifacts={"trt_wav": "trt_output.wav"},
             stage_outputs={
@@ -1059,7 +1059,7 @@ class TestRenderAudioModel:
                     "data": {
                         "returncode": 1,
                         "stderr_truncated": "missing offline cache",
-                        "stderr_log": "nemo_magpie_ref_stderr.log",
+                        "stderr_log": "reference_stderr.log",
                     },
                     "metadata": {"returncode": 1},
                 },
@@ -1075,12 +1075,12 @@ class TestRenderAudioModel:
         mod = _import_report()
         r = _make_result(
             task_strategy="speech_to_text",
-            trt_text="Hello from Whisper",
-            ref_text="Hello from Whisper",
+            trt_text="Hello from speech model",
+            ref_text="Hello from speech model",
         )
         html = mod.render_audio_model(r)
         assert "Transcript Comparison" in html
-        assert "Hello from Whisper" in html
+        assert "Hello from speech model" in html
 
 
 class TestRenderSegmentationModel:
@@ -1088,12 +1088,12 @@ class TestRenderSegmentationModel:
 
     def test_embeds_seg_map(self, tmp_path):
         mod = _import_report()
-        model_dir = tmp_path / "segformer"
+        model_dir = tmp_path / "segmentation-model"
         model_dir.mkdir()
         seg_png = model_dir / "trt_seg.png"
         _make_tiny_png(seg_png)
         r = _make_result(
-            name="segformer",
+            name="segmentation-model",
             task_strategy="segmentation",
             artifacts={"trt_segmentation_map": "trt_seg.png"},
         )
@@ -1104,19 +1104,19 @@ class TestRenderSegmentationModel:
 
     def test_embeds_prompted_segmentation_overlay(self, tmp_path):
         mod = _import_report()
-        model_dir = tmp_path / "sam"
+        model_dir = tmp_path / "prompted-segmentation-model"
         model_dir.mkdir()
         trt_overlay = model_dir / "masks" / "segmented.png"
-        ref_overlay = model_dir / "hf_sam_segmented.png"
+        ref_overlay = model_dir / "ref_segmented.png"
         trt_overlay.parent.mkdir()
         _make_tiny_png(trt_overlay)
         _make_tiny_png(ref_overlay)
         r = _make_result(
-            name="sam",
+            name="prompted-segmentation-model",
             task_strategy="prompted_segmentation",
             artifacts={
                 "trt_segmented_image": "masks/segmented.png",
-                "ref_segmented_image": "hf_sam_segmented.png",
+                "ref_segmented_image": "ref_segmented.png",
             },
         )
         r["_artifact_dir"] = str(model_dir)
@@ -1127,11 +1127,11 @@ class TestRenderSegmentationModel:
 
     def test_prompted_segmentation_shows_text_prompt(self, tmp_path):
         mod = _import_report()
-        model_dir = tmp_path / "sam3"
+        model_dir = tmp_path / "prompted-text-segmentation-model"
         model_dir.mkdir()
         r = _make_result(
-            name="sam3",
-            family="sam3",
+            name="prompted-text-segmentation-model",
+            family="prompted_text_segmentation_family",
             task_strategy="prompted_segmentation",
             prompt="car",
         )

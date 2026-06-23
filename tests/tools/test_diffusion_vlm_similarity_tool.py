@@ -5,6 +5,7 @@ import json
 from tools.evaluate_diffusion_vlm_similarity import (
     _apply_gate,
     _discover_pairs,
+    _load_assessment_config,
     _normalize_judgment_consistency,
     _parse_json,
 )
@@ -139,14 +140,14 @@ def test_parse_json_recovers_scores_from_truncated_vlm_json():
 
 
 def test_discover_pairs_accepts_ref_frames_alias(tmp_path):
-    model_dir = tmp_path / "artifacts" / "pixart"
+    model_dir = tmp_path / "artifacts" / "image-diffusion"
     (model_dir / "frames").mkdir(parents=True)
     (model_dir / "ref_frames").mkdir()
     (model_dir / "frames" / "frame_0000.png").write_bytes(b"trt")
     (model_dir / "ref_frames" / "frame_0000.png").write_bytes(b"ref")
     (model_dir / "result.json").write_text(
         json.dumps({
-            "case_name": "pixart",
+            "case_name": "image-diffusion",
             "case_config": {
                 "task_strategy": "diffusion_media_generation",
                 "inputs": {"prompt": "a cat"},
@@ -158,5 +159,24 @@ def test_discover_pairs_accepts_ref_frames_alias(tmp_path):
     pairs = _discover_pairs(tmp_path / "artifacts")
 
     assert len(pairs) == 1
-    assert pairs[0]["case_name"] == "pixart"
+    assert pairs[0]["case_name"] == "image-diffusion"
     assert pairs[0]["hf_image"].endswith("ref_frames/frame_0000.png")
+
+
+def test_vlm_assessment_config_loader_uses_explicit_config(tmp_path):
+    config = tmp_path / "assessment.json"
+    config.write_text(
+        json.dumps({
+            "model_id": "example/vlm-judge",
+            "max_side": 256,
+            "max_new_tokens": 128,
+            "timeout": "5m",
+        }),
+        encoding="utf-8",
+    )
+
+    loaded = _load_assessment_config(config)
+
+    assert loaded["model_id"] == "example/vlm-judge"
+    assert loaded["max_side"] == 256
+    assert loaded["max_new_tokens"] == 128

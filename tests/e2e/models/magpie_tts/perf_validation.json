@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "nvidia/magpie_tts_multilingual_357m",
+      "pipeline_type": "text_to_audio_magpie",
+      "label": "E2-magpie",
+      "benchmark": {
+        "label": "generate-audio",
+        "gpu_argmax_label": "generate-audio",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "generate-audio", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_wav}", "--max-new-tokens", "{max_tokens}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

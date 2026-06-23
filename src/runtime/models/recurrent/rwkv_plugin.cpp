@@ -1,8 +1,8 @@
 // RwkvPlugin: handles "rwkv_recurrent" strategy.
 // RWKV models with 5 recurrent state vectors per layer.
 
-#include "runtime/models/recurrent/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/recurrent/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

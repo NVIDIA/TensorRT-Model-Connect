@@ -1,6 +1,6 @@
 """Speech-to-text comparator.
 
-Compares TRT Whisper-style transcription output against reference with metrics:
+Compares TRT transcription output against reference with metrics:
 - Decoder token agreement rate
 - Word Error Rate (WER)
 - Character Error Rate (CER)

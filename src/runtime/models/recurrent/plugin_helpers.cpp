@@ -1,5 +1,6 @@
 #include "plugin_helpers.h"
 
+#include "runtime/models/recurrent/chat_templates.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
@@ -317,6 +318,7 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
 }
 
 void apply_recurrent_chat_template_format(const BundleFile& bundle, RecurrentGenConfig& rgc) {
+    register_recurrent_chat_templates();
     std::string chat_tpl;
     auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
     if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {

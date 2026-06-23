@@ -13,36 +13,55 @@ Postconditions: Each plugin matches its declared model_types and rejects foreign
 from __future__ import annotations
 
 import ast
+import io
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip(
+    "tensorrt",
+    reason="family plugin registry tests import TensorRT-backed plugin modules",
+)
 
 from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
 from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 
-def test_load_plugin_by_id_does_not_scan_family_metadata(monkeypatch):
+def test_load_plugin_by_id_does_not_scan_family_metadata(monkeypatch, tmp_path):
     import tensorrt_model_connect.families as families
 
     class DummyPlugin:
-        name = "qwen"
+        name = "example_family"
 
     def fail_metadata_scan():
         raise AssertionError("metadata scan should not run for direct plugin id")
 
+    family_dir = tmp_path / "families" / "example_family"
+    family_dir.mkdir(parents=True)
+    (family_dir / "MODEL.toml").write_text(
+        'id = "example_family"\nplugin = "example_family"\n',
+        encoding="utf-8",
+    )
+
     families._PLUGIN_CACHE.clear()
+    monkeypatch.setattr(
+        families,
+        "__file__",
+        str(tmp_path / "families" / "__init__.py"),
+    )
     monkeypatch.setattr(families, "_load_family_metadata", fail_metadata_scan)
     monkeypatch.setattr(
         families,
         "_load_plugin_from_module",
-        lambda module_name: DummyPlugin() if module_name == "qwen" else None,
+        lambda module_name: DummyPlugin() if module_name == "example_family" else None,
     )
 
-    plugin = families.load_plugin_by_id("qwen")
+    plugin = families.load_plugin_by_id("example_family")
 
     assert plugin is not None
-    assert plugin.name == "qwen"
+    assert plugin.name == "example_family"
 
 
 def test_candidate_module_names_uses_cached_metadata_index(monkeypatch):
@@ -50,37 +69,129 @@ def test_candidate_module_names_uses_cached_metadata_index(monkeypatch):
 
     metadata = [
         families._FamilyMetadata(
-            id="qwen",
-            import_module="qwen",
-            aliases=frozenset({"qwen"}),
-            compact_aliases=frozenset({"qwen"}),
-            prefixes=frozenset({"qwen"}),
-            compact_prefixes=frozenset({"qwen"}),
+            id="alpha",
+            import_module="alpha",
+            aliases=frozenset({"alpha"}),
+            compact_aliases=frozenset({"alpha"}),
+            prefixes=frozenset({"alpha"}),
+            compact_prefixes=frozenset({"alpha"}),
+            capabilities=frozenset(),
+            architecture_patterns=frozenset(),
             diffusion_pipeline_classes=frozenset(),
+            nemo_target_patterns=frozenset(),
+            nemo_model_type="",
         ),
         families._FamilyMetadata(
-            id="qwen_vl",
-            import_module="qwen_vl",
-            aliases=frozenset({"qwen_vl"}),
-            compact_aliases=frozenset({"qwenvl"}),
-            prefixes=frozenset({"qwen_vl"}),
-            compact_prefixes=frozenset({"qwenvl"}),
+            id="alpha_vl",
+            import_module="alpha_vl",
+            aliases=frozenset({"alpha_vl"}),
+            compact_aliases=frozenset({"alphavl"}),
+            prefixes=frozenset({"alpha_vl"}),
+            compact_prefixes=frozenset({"alphavl"}),
+            capabilities=frozenset(),
+            architecture_patterns=frozenset(),
             diffusion_pipeline_classes=frozenset(),
+            nemo_target_patterns=frozenset(),
+            nemo_model_type="",
         ),
     ]
     monkeypatch.setattr(families, "_METADATA_CACHE", metadata)
     monkeypatch.setattr(families, "_METADATA_INDEX_CACHE", None)
 
-    assert families._candidate_module_names("qwen3") == ["qwen"]
-    assert families._candidate_module_names("qwen_vl") == ["qwen_vl", "qwen"]
+    assert families._candidate_module_names("alpha3") == ["alpha"]
+    assert families._candidate_module_names("alpha_vl") == ["alpha_vl", "alpha"]
 
     def fail_metadata_scan():
         raise AssertionError("candidate lookup should use the metadata index cache")
 
     monkeypatch.setattr(families, "_load_family_metadata", fail_metadata_scan)
 
-    assert families._candidate_module_names("qwen3") == ["qwen"]
-    assert families._candidate_module_names("qwen_vl") == ["qwen_vl", "qwen"]
+    assert families._candidate_module_names("alpha3") == ["alpha"]
+    assert families._candidate_module_names("alpha_vl") == ["alpha_vl", "alpha"]
+
+
+def test_family_metadata_owns_builder_capabilities_and_nemo_resolution():
+    import tensorrt_model_connect.families as families
+
+    for meta in families._load_family_metadata():
+        alias = next(iter(sorted(meta.aliases)), None)
+        if alias is None:
+            continue
+        for capability in meta.capabilities:
+            assert families.family_has_capability(alias, capability)
+        for pattern in meta.nemo_target_patterns:
+            assert families.resolve_nemo_model_type({
+                "target": f"example.{pattern}.Model",
+            }) == meta.nemo_model_type
+
+    assert families.resolve_nemo_model_type({
+        "model_type": "custom_nemo_model",
+    }) == "custom_nemo_model"
+
+
+def _write_nemo_config(path: Path, payload: dict) -> None:
+    data = json.dumps(payload).encode("utf-8")
+    info = tarfile.TarInfo("model_config.yaml")
+    info.size = len(data)
+    with tarfile.open(path, "w") as tar:
+        tar.addfile(info, io.BytesIO(data))
+
+
+def test_nemo_archive_resolution_uses_family_owned_adapters(tmp_path, monkeypatch):
+    import tensorrt_model_connect.families as families
+
+    metadata = [
+        families._FamilyMetadata(
+            id="example_nemo",
+            import_module="example_nemo",
+            aliases=frozenset({"example_nemo"}),
+            compact_aliases=frozenset({"examplenemo"}),
+            prefixes=frozenset({"example_nemo"}),
+            compact_prefixes=frozenset({"examplenemo"}),
+            capabilities=frozenset(),
+            architecture_patterns=frozenset(),
+            diffusion_pipeline_classes=frozenset(),
+            nemo_target_patterns=frozenset(),
+            nemo_model_type="",
+            nemo_archive_adapter="adapter.py|resolve",
+        ),
+    ]
+
+    def fake_adapter(path: Path) -> Path:
+        resolved_dir = tmp_path / "resolved"
+        resolved_dir.mkdir()
+        (resolved_dir / "config.json").write_text(json.dumps({
+            "model_type": "example_nemo",
+            "_nemo_archive_path": str(path),
+        }))
+        return resolved_dir
+
+    monkeypatch.setattr(families, "_load_family_metadata", lambda: metadata)
+    monkeypatch.setattr(
+        families,
+        "_load_metadata_callable_from_file",
+        lambda _meta, _spec: fake_adapter,
+    )
+
+    nemo_path = tmp_path / "example.nemo"
+    _write_nemo_config(nemo_path, {"target": "example.Target"})
+    resolved = families.resolve_nemo_archive_model_dir(nemo_path)
+
+    assert resolved is not None
+    config = json.loads((Path(resolved) / "config.json").read_text())
+    assert config == {
+        "model_type": "example_nemo",
+        "_nemo_archive_path": str(nemo_path),
+    }
+
+
+def test_unknown_nemo_archive_has_no_family_adapter(tmp_path):
+    import tensorrt_model_connect.families as families
+
+    nemo_path = tmp_path / "unknown.nemo"
+    _write_nemo_config(nemo_path, {"target": "example.UnknownModel"})
+
+    assert families.resolve_nemo_archive_model_dir(nemo_path) is None
 
 
 def test_repo_family_builders_use_model_local_helpers():
@@ -259,34 +370,8 @@ class TestPluginDiscovery:
         assert len(names) == len(set(names)), (
             f"Duplicate plugin names: {names}")
 
-    def test_all_plugins_matches_returns_bool(self):
-        """Every plugin's matches() should return a bool, not just a truthy value."""
-        # Build a mapping: plugin_name -> one known model_type that should match.
-        name_to_type: dict[str, str] = {}
-        for model_type, plugin_name in _POSITIVE_MATCH_CASES:
-            if plugin_name not in name_to_type:
-                name_to_type[plugin_name] = model_type
-
-        for plugin in _ALL_PLUGINS:
-            model_type = name_to_type.get(plugin.name)
-            if model_type is None:
-                continue  # no known positive case; covered by test_all_plugins_have_match_case
-            result = plugin.matches(model_type)
-            assert isinstance(result, bool), (
-                f"Plugin {plugin.name!r}.matches({model_type!r}) returned "
-                f"{type(result).__name__}, expected bool")
-            assert result is True, (
-                f"Plugin {plugin.name!r}.matches({model_type!r}) returned "
-                f"{result!r}, expected True")
-
-    def test_all_plugins_matches_own_type(self):
-        """Every plugin matches its known model_type and rejects a nonsense type."""
-        # Build a mapping: plugin_name -> one known model_type that should match.
-        name_to_type: dict[str, str] = {}
-        for model_type, plugin_name in _POSITIVE_MATCH_CASES:
-            if plugin_name not in name_to_type:
-                name_to_type[plugin_name] = model_type
-
+    def test_all_plugins_reject_unknown_types_with_bool(self):
+        """Every plugin should return a bool and reject unrelated model types."""
         nonsense_types = [
             "zzzz_nonexistent_model_xyz_42",
             "__bogus__",
@@ -294,14 +379,6 @@ class TestPluginDiscovery:
         ]
 
         for plugin in _ALL_PLUGINS:
-            model_type = name_to_type.get(plugin.name)
-            if model_type is None:
-                continue  # no known positive case
-            # Positive: must match own type
-            assert plugin.matches(model_type), (
-                f"Plugin {plugin.name!r} did not match its own type "
-                f"{model_type!r}")
-            # Negative: must reject nonsense types
             for bad_type in nonsense_types:
                 result = plugin.matches(bad_type)
                 assert result is False, (
@@ -310,15 +387,6 @@ class TestPluginDiscovery:
                 assert isinstance(result, bool), (
                     f"Plugin {plugin.name!r}.matches({bad_type!r}) returned "
                     f"{type(result).__name__}, expected bool")
-
-    def test_all_plugins_have_match_case(self):
-        """Every discovered plugin should have at least one positive match case."""
-        matched_names = {name for _, name in _POSITIVE_MATCH_CASES}
-        plugin_names = {p.name for p in _ALL_PLUGINS}
-        untested = plugin_names - matched_names
-        assert not untested, (
-            f"Plugins without positive match cases: {untested}. "
-            f"Add entries to _POSITIVE_MATCH_CASES.")
 
     def test_all_plugins_have_e2e_manifest(self):
         """Validate that every family plugin has at least one E2E test manifest.
@@ -372,223 +440,6 @@ class TestPluginDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# match() positive cases
-# ---------------------------------------------------------------------------
-
-# (model_type, expected_plugin_name)
-_POSITIVE_MATCH_CASES = [
-    # Qwen family
-    ("qwen", "qwen"),
-    ("qwen2", "qwen"),
-    ("qwen3", "qwen"),
-    ("qwq", "qwen"),
-    ("Qwen2", "qwen"),
-    # LLaMA
-    ("llama", "llama"),
-    ("LLaMA", "llama"),
-    # Mistral
-    ("mistral", "mistral"),
-    ("Mistral", "mistral"),
-    # Gemma
-    ("gemma", "gemma"),
-    ("gemma2", "gemma"),
-    # Phi (not phimoe)
-    ("phi", "phi"),
-    ("phi3", "phi"),
-    ("Phi3", "phi"),
-    # Phi-MoE
-    ("phimoe", "phi_moe"),
-    # Qwen3 MoE
-    ("qwen3_moe", "qwen_moe"),
-    ("qwen2_moe", "qwen_moe"),
-    # Granite
-    ("granite", "granite"),
-    # InternLM
-    ("internlm", "internlm"),
-    ("internlm2", "internlm"),
-    # StarCoder2
-    ("starcoder2", "starcoder2"),
-    # GPT-2
-    ("gpt2", "gpt2"),
-    # OPT
-    ("opt", "opt"),
-    # Falcon
-    ("falcon", "falcon"),
-    ("refinedweb", "falcon"),
-    ("refinedwebmodel", "falcon"),
-    # StableLM
-    ("stablelm", "stablelm"),
-    # Mamba
-    ("mamba", "mamba"),
-    # Qwen-VL
-    ("qwen2_vl", "qwen_vl"),
-    ("qwen2_5_vl", "qwen_vl"),
-    ("qwen3_vl", "qwen_vl"),
-    # Lance (staged with model_type stamped "lance"; understanding path)
-    ("lance", "lance"),
-    # OLMo
-    ("olmo", "olmo"),
-    # XGLM
-    ("xglm", "xglm"),
-    # GPT-NeoX
-    ("gpt_neox", "gpt_neox"),
-    ("gptneox", "gpt_neox"),
-    # GPT-Neo
-    ("gpt_neo", "gpt_neo"),
-    # CodeGen
-    ("codegen", "codegen"),
-    # BLOOM
-    ("bloom", "bloom"),
-    # Mixtral
-    ("mixtral", "mixtral"),
-    # Nemotron
-    ("nemotron", "nemotron"),
-    # Nemotron Labs Diffusion
-    ("nemotron_labs_diffusion", "nemotron_labs_diffusion"),
-    # Wan T2V (diffusion)
-    ("wan_t2v", "wan_t2v"),
-    ("wan", "wan_t2v"),
-    ("wan2.1", "wan_t2v"),
-    # LTX-Video (diffusion T2V)
-    ("ltx_video", "ltx_video"),
-    ("ltx", "ltx_video"),
-    ("ltx-video", "ltx_video"),
-    ("ltxpipeline", "ltx_video"),
-    # Bark (text-to-audio)
-    ("bark", "bark"),
-    # SegFormer (segmentation)
-    ("segformer", "segformer"),
-    # Whisper (speech-to-text)
-    ("whisper", "whisper"),
-    # RWKV
-    ("rwkv", "rwkv"),
-    # DeepSeek-V2
-    ("deepseek_v2", "deepseek_v2"),
-    ("deepseek_v3", "deepseek_v2"),
-    # InternVL
-    ("internvl_chat", "internvl"),
-    ("internvl3", "internvl"),
-    # LocateAnything
-    ("locateanything", "locateanything"),
-    # BERT (encoder-only)
-    ("bert", "bert"),
-    # RoBERTa / XLM-RoBERTa (encoder-only)
-    ("roberta", "roberta"),
-    ("xlm-roberta", "roberta"),
-    # DistilBERT (encoder-only)
-    ("distilbert", "distilbert"),
-    # MPNet (encoder-only)
-    ("mpnet", "mpnet"),
-    # Eagle VLM (embedding/reranking)
-    ("llama_nemotron_vl", "eagle_vlm"),
-    # Qwen3-Omni (omni multimodal)
-    ("qwen3_omni", "qwen3_omni"),
-    ("qwen3omni", "qwen3_omni"),
-    ("qwen3_omni_moe", "qwen3_omni"),
-    # PersonaPlex (speech-to-speech)
-    ("personaplex", "personaplex"),
-    ("moshi", "personaplex"),
-    ("personaplex_7b", "personaplex"),
-    # NemotronH (hybrid Mamba-Attention)
-    ("nemotron_h", "nemotron_h"),
-    ("nemotron_hybrid", "nemotron_h"),
-    # SAM (prompted segmentation)
-    ("sam", "sam"),
-    # SAM3 (text-prompt prompted segmentation)
-    ("sam3", "sam3"),
-    ("sam3_video", "sam3"),
-    # timm Vision Transformer (image classification)
-    ("vit_base_patch16_224", "timm_vit"),
-    ("timm_vit", "timm_vit"),
-    ("vision_transformer", "timm_vit"),
-    # Phi-4 Multimodal
-    ("phi4_multimodal", "phi4_multimodal"),
-    # FLUX (diffusion T2I)
-    ("flux", "flux"),
-    ("flux.2", "flux"),
-    # Z-Image (diffusion T2I)
-    ("z_image", "z_image"),
-    ("zimage", "z_image"),
-    ("z-image", "z_image"),
-    ("zimagepipeline", "z_image"),
-    # Qwen-Image (diffusion T2I/Edit)
-    ("qwen_image", "qwen_image"),
-    ("qwenimage", "qwen_image"),
-    ("qwen-image", "qwen_image"),
-    ("qwen_image_edit", "qwen_image"),
-    ("qwenimageedit", "qwen_image"),
-    ("qwen-image-edit", "qwen_image"),
-    # PixArt (diffusion T2I)
-    ("pixart", "pixart"),
-    ("pixart_sigma", "pixart"),
-    ("pixart_alpha", "pixart"),
-    ("pixartsigma", "pixart"),
-    ("pixartalpha", "pixart"),
-    # ELF Flow (diffusion text generation)
-    ("elf", "elf_flow"),
-    ("embedded_language_flow", "elf_flow"),
-    # DeepSeek OCR (matches deepseek_vl_v2 model_type)
-    ("deepseek_vl_v2", "deepseek_ocr"),
-    # MagpieTTS (encoder-decoder TTS)
-    ("magpie_tts", "magpie_tts"),
-    ("decoder_ce", "magpie_tts"),
-    # Qwen3.5 (hybrid DeltaNet + Attention)
-    ("qwen3_5", "qwen3_5"),
-    ("qwen3.5", "qwen3_5"),
-    # GPT-OSS (OpenAI MoE)
-    ("gpt_oss", "gpt_oss"),
-    # GLM-4
-    ("glm", "glm"),
-    # Canary (FastConformer ASR)
-    ("canary", "canary"),
-    ("canary_asr", "canary"),
-    ("enc_dec_multi_task", "canary"),
-    # Nemotron Speech Streaming (FastConformer cache-aware RNNT ASR)
-    ("nemotron_speech_streaming", "nemotron_speech_streaming"),
-    ("nemotron_asr_streaming", "nemotron_speech_streaming"),
-    ("fastconformer_cacheaware_rnnt", "nemotron_speech_streaming"),
-    ("enc_dec_rnnt_bpe", "nemotron_speech_streaming"),
-    ("rnnt_bpe", "nemotron_speech_streaming"),
-    # Autopilot-generated families
-    ("electra", "electra"),
-    ("modernbert", "modernbert"),
-    ("deberta", "deberta"),
-    ("t5", "t5"),
-    ("bart", "bart"),
-    ("mbart", "bart"),
-    ("marian", "marian"),
-    ("albert", "albert"),
-    ("olmo2", "olmo2"),
-    ("fnet", "fnet"),
-    ("xlnet", "xlnet"),
-    ("convbert", "convbert"),
-    ("dpr", "dpr"),
-    # M2M-100 / NLLB (encoder-decoder seq2seq)
-    ("m2m_100", "m2m_100"),
-    ("nllb", "m2m_100"),
-    # Time-series neural operators
-    ("patchtst", "patchtst"),
-    ("patchtsmixer", "patchtsmixer"),
-    ("timesfm", "timesfm"),
-    ("chronos_bolt", "chronos_bolt"),
-    ("chronos-bolt", "chronos_bolt"),
-    ("chronosbolt", "chronos_bolt"),
-]
-
-
-class TestMatchPositive:
-    """Each known model_type resolves to the correct plugin."""
-
-    @pytest.mark.parametrize("model_type,expected_name", _POSITIVE_MATCH_CASES)
-    def test_match(self, model_type, expected_name):
-        plugin = find_plugin(model_type)
-        assert plugin is not None, f"No plugin matched model_type={model_type!r}"
-        assert plugin.name == expected_name, (
-            f"model_type={model_type!r} matched {plugin.name!r}, "
-            f"expected {expected_name!r}")
-
-
-# ---------------------------------------------------------------------------
 # match() negative cases
 # ---------------------------------------------------------------------------
 
@@ -608,217 +459,21 @@ class TestMatchNegative:
             f"model_type={model_type!r} should not match any plugin")
 
 
-# ---------------------------------------------------------------------------
-# Qwen vs Qwen-VL disambiguation
-# ---------------------------------------------------------------------------
+class TestPluginAttributeShape:
+    """Generic protocol checks for optional plugin attributes."""
 
-class TestQwenVLDisambiguation:
-    """Qwen-VL should match VL plugin; plain Qwen should not."""
+    def test_runtime_strategy_attribute_is_string_when_declared(self):
+        for plugin in _ALL_PLUGINS:
+            runtime_strategy = getattr(plugin, "runtime_strategy", None)
+            assert runtime_strategy is None or isinstance(runtime_strategy, str), (
+                f"Plugin {plugin.name!r} runtime_strategy should be a string "
+                f"or absent, got {runtime_strategy!r}")
 
-    def test_qwen_vl_matches_vl_plugin(self):
-        plugin = find_plugin("qwen2_vl")
-        assert plugin is not None
-        assert plugin.name == "qwen_vl"
-
-    def test_plain_qwen_does_not_match_vl(self):
-        plugin = find_plugin("qwen3")
-        assert plugin is not None
-        assert plugin.name == "qwen"
-
-    def test_qwen_vl_does_not_match_plain_qwen(self):
-        """The plain Qwen plugin should reject VL model types."""
-        qwen_plugin = None
-        for p in _ALL_PLUGINS:
-            if p.name == "qwen":
-                qwen_plugin = p
-                break
-        assert qwen_plugin is not None
-        assert not qwen_plugin.matches("qwen2_vl")
-
-
-# ---------------------------------------------------------------------------
-# Phi vs Phi-MoE disambiguation
-# ---------------------------------------------------------------------------
-
-class TestPhiDisambiguation:
-    """Phi should not match phimoe, and vice versa."""
-
-    def test_phi_rejects_phimoe(self):
-        phi_plugin = None
-        for p in _ALL_PLUGINS:
-            if p.name == "phi":
-                phi_plugin = p
-                break
-        assert phi_plugin is not None
-        assert not phi_plugin.matches("phimoe")
-
-    def test_phimoe_rejects_phi3(self):
-        moe_plugin = None
-        for p in _ALL_PLUGINS:
-            if p.name == "phi_moe":
-                moe_plugin = p
-                break
-        assert moe_plugin is not None
-        assert not moe_plugin.matches("phi3")
-
-
-# ---------------------------------------------------------------------------
-# Special attributes
-# ---------------------------------------------------------------------------
-
-class TestRuntimeStrategy:
-    """Plugins with non-default runtime_strategy."""
-
-    def test_mamba_strategy(self):
-        plugin = find_plugin("mamba")
-        assert getattr(plugin, "runtime_strategy", None) == "ssm_recurrent"
-
-    def test_mixtral_strategy(self):
-        plugin = find_plugin("mixtral")
-        assert getattr(plugin, "runtime_strategy", None) == "decoder_moe"
-
-    def test_gpt_oss_strategy(self):
-        plugin = find_plugin("gpt_oss")
-        assert getattr(plugin, "runtime_strategy", None) == "decoder_moe"
-
-    def test_qwen_vl_strategy(self):
-        plugin = find_plugin("qwen2_vl")
-        assert getattr(plugin, "runtime_strategy", None) == "vision_language"
-
-    def test_internvl_strategy(self):
-        plugin = find_plugin("internvl_chat")
-        assert getattr(plugin, "runtime_strategy", None) == "vision_language"
-
-    def test_locateanything_strategy(self):
-        plugin = find_plugin("locateanything")
-        assert getattr(plugin, "runtime_strategy", None) == "vision_language"
-
-    def test_omni_strategy(self):
-        plugin = find_plugin("qwen3_omni")
-        assert getattr(plugin, "runtime_strategy", None) == "omni_multimodal"
-
-    def test_personaplex_strategy(self):
-        plugin = find_plugin("personaplex")
-        assert getattr(plugin, "runtime_strategy", None) == "speech_to_speech"
-
-    def test_personaplex_bundle_overrides(self):
-        from tensorrt_model_connect.config import ModelConfig
-
-        plugin = find_plugin("personaplex")
-        overrides = plugin.get_bundle_config_overrides(
-            ModelConfig(model_type="personaplex"))
-        assert overrides["eos_token_id"] == 2
-        assert overrides["speech_depth_temperature"] == pytest.approx(0.0)
-        assert overrides["speech_depth_top_k"] == 0
-        assert overrides["speech_system_prompt"] == ""
-        assert overrides["speech_text_prompt_ids"] == []
-
-    def test_nemotron_h_strategy(self):
-        plugin = find_plugin("nemotron_h")
-        assert getattr(plugin, "runtime_strategy", None) == "hybrid_mamba_attention"
-
-    def test_canary_strategy(self):
-        plugin = find_plugin("canary")
-        assert getattr(plugin, "runtime_strategy", None) == "speech_to_text"
-
-    def test_nemotron_speech_streaming_strategy(self):
-        plugin = find_plugin("nemotron_speech_streaming")
-        assert getattr(plugin, "runtime_strategy", None) == "speech_to_text_rnnt"
-
-    def test_time_series_strategies(self):
-        expected = {
-            "patchtst": "patchtst_trt",
-            "patchtsmixer": "patchtsmixer_trt",
-            "timesfm": "timesfm_trt",
-            "chronos_bolt": "chronos_bolt_trt",
-        }
-        for model_type, runtime_strategy in expected.items():
-            plugin = find_plugin(model_type)
-            assert plugin is not None
-            assert getattr(plugin, "runtime_strategy", None) == runtime_strategy
-
-    def test_chronos_bolt_matches_official_t5_config(self):
-        from tensorrt_model_connect.config import ModelConfig
-
-        plugin = find_plugin(ModelConfig(
-            model_type="t5",
-            architectures=["ChronosBoltModelForForecasting"],
-            raw={
-                "model_type": "t5",
-                "architectures": ["ChronosBoltModelForForecasting"],
-                "chronos_config": {"context_length": 16},
-            },
-        ))
-        assert plugin is not None
-        assert plugin.name == "chronos_bolt"
-
-    def test_standard_decoder_no_strategy(self):
-        """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""
-        for name in ("qwen", "llama", "mistral", "gemma", "phi", "gpt2", "opt"):
-            plugin = find_plugin(name)
-            assert plugin is not None
-            strategy = getattr(plugin, "runtime_strategy", None)
-            assert strategy is None, (
-                f"Plugin {plugin.name} should not have runtime_strategy, "
-                f"got {strategy!r}")
-
-
-class TestEmbedInput:
-    """Only VL plugins should have embed_input=True."""
-
-    def test_qwen_vl_has_embed_input(self):
-        plugin = find_plugin("qwen2_vl")
-        assert getattr(plugin, "embed_input", False) is True
-
-    def test_internvl_has_embed_input(self):
-        plugin = find_plugin("internvl_chat")
-        assert getattr(plugin, "embed_input", False) is True
-
-    def test_locateanything_has_embed_input(self):
-        plugin = find_plugin("locateanything")
-        assert getattr(plugin, "embed_input", False) is True
-
-    def test_omni_has_embed_input(self):
-        plugin = find_plugin("qwen3_omni")
-        assert getattr(plugin, "embed_input", False) is True
-
-    def test_standard_plugins_no_embed_input(self):
-        for name in ("qwen", "llama", "mistral", "mamba", "mixtral"):
-            plugin = find_plugin(name)
-            assert plugin is not None
-            assert not getattr(plugin, "embed_input", False), (
-                f"Plugin {plugin.name} should not have embed_input")
-
-
-class TestVLMethods:
-    """VL plugins should have build_vision_engine and get_vl_config methods."""
-
-    def test_qwen_vl_has_vl_methods(self):
-        plugin = find_plugin("qwen2_vl")
-        assert callable(getattr(plugin, "build_vision_engine", None))
-        assert callable(getattr(plugin, "get_vl_config", None))
-
-    def test_internvl_has_vl_methods(self):
-        plugin = find_plugin("internvl_chat")
-        assert callable(getattr(plugin, "build_vision_engine", None))
-        assert callable(getattr(plugin, "get_vl_config", None))
-
-    def test_locateanything_has_vl_methods(self):
-        plugin = find_plugin("locateanything")
-        assert callable(getattr(plugin, "build_vision_engine", None))
-        assert callable(getattr(plugin, "get_vl_config", None))
-
-    def test_omni_has_vl_methods(self):
-        plugin = find_plugin("qwen3_omni")
-        assert callable(getattr(plugin, "build_vision_engine", None))
-        assert callable(getattr(plugin, "get_vl_config", None))
-        assert callable(getattr(plugin, "build_extra_engines", None))
-
-    def test_standard_plugins_vl_methods_return_none(self):
-        """Non-VL plugins should return None from get_vl_config if they have it."""
-        for name in ("qwen", "llama", "gpt2"):
-            plugin = find_plugin(name)
-            vl_config = getattr(plugin, "get_vl_config", None)
-            if vl_config is not None and callable(vl_config):
-                # Would need a ModelConfig, but default protocol returns None
-                pass  # Can't call without a real config
+    def test_embed_input_plugins_expose_vl_entrypoints(self):
+        for plugin in _ALL_PLUGINS:
+            if not getattr(plugin, "embed_input", False):
+                continue
+            assert callable(getattr(plugin, "build_vision_engine", None)), (
+                f"Plugin {plugin.name!r} has embed_input but no vision builder")
+            assert callable(getattr(plugin, "get_vl_config", None)), (
+                f"Plugin {plugin.name!r} has embed_input but no VL config hook")

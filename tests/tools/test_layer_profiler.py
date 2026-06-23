@@ -195,9 +195,9 @@ class TestLayerProfilerMetadata:
         mod = _import()
         p = mod.LayerProfiler()
         p.report_layer_time("A", 1.0)
-        meta = {"model": "Qwen/Qwen3-0.6B", "gpu": "H100"}
+        meta = {"model": "example-org/example-decoder", "gpu": "H100"}
         data = p.to_dict(metadata=meta)
-        assert data["metadata"]["model"] == "Qwen/Qwen3-0.6B"
+        assert data["metadata"]["model"] == "example-org/example-decoder"
         assert data["metadata"]["gpu"] == "H100"
 
     def test_no_metadata_defaults_empty(self):

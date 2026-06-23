@@ -2,7 +2,7 @@
 
 // IInferenceState: unified interface for autoregressive inference state.
 //
-// Both KV-cache (attention models) and recurrent state (SSM/RWKV) implement
+// Both KV-cache attention state and recurrent state implementations expose
 // this interface. Pipelines and plugins program against it — never against
 // concrete state classes.
 //
@@ -15,7 +15,7 @@
 //
 // Implementations:
 //   KvCache          — dense append-only (current default)
-//   RecurrentState   — SSM/RWKV conv+ssm state
+//   RecurrentState   — recurrent tensor state
 //   HybridState      — KvCache + RecurrentState composed
 //   (future: RingKvCache, PagedKvCache, MlaCache, SlidingWindowCache)
 

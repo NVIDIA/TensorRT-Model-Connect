@@ -28,7 +28,7 @@ struct TextGenConfig {
     int32_t id_bos{0};
     int32_t id_eos{0};
     bool has_position_input{true};
-    ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
+    ChatTemplateFormat chat_template_format{};
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
     // runtime.* namespace (replaces TRTMC_DISABLE_CUDA_GRAPH, TRTMC_GPU_ARGMAX).

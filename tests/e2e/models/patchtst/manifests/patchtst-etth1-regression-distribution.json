@@ -4,6 +4,7 @@
   "bundle": "patchtst-etth1-regression-distribution.trtfb",
   "family": "patchtst",
   "runtime_strategy": "patchtst_trt",
+  "task_strategy": "neural_operator",
   "reference_backend": "torch_reference",
   "reference_family": "time_series_regression",
   "user_contract": "time_series_regression",

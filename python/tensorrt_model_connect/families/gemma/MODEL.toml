@@ -1,6 +1,7 @@
 id = "gemma"
 plugin = "gemma"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "gemma",
   "gemma2",

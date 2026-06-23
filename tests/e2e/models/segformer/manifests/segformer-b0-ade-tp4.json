@@ -5,6 +5,9 @@
   "bundle": "segformer-b0-ade-tp4.trtfb",
   "family": "segformer",
   "runtime_strategy": "segmentation",
+  "task_strategy": "segmentation",
+  "reference_family": "semantic_segmentation",
+  "user_contract": "segmentation_mask",
   "test_type": "segmentation",
   "max_cache_length": 1,
   "prompt": "",
@@ -48,6 +51,13 @@
       "kind": "gpu_count_min",
       "args": {
         "count": 4
+      },
+      "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "data/test_img.jpeg"
       },
       "gating": true
     }

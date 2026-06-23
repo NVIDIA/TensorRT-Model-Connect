@@ -1,0 +1,31 @@
+[
+  {
+    "name": "dpr_reference_context_encoder",
+    "path": "tests/e2e_harness/references/hf_transformers.py",
+    "scope": {
+      "models": [
+        "dpr-ctx-encoder"
+      ]
+    },
+    "allowed_tokens": [
+      "autotokenizer.from_pretrained",
+      "automodel.from_pretrained",
+      "bert_model",
+      "context",
+      "ctx_encoder",
+      "dpr",
+      "dprcontextencoder",
+      "dprcontextencodertokenizerfast",
+      "dprquestionencoder",
+      "model_ref",
+      "model_type",
+      "question_classes",
+      "same_token_ids",
+      "tokenizer",
+      "tokenizer.json",
+      "trust_remote_code",
+      "trt_artifact",
+      "wrong_class"
+    ]
+  }
+]

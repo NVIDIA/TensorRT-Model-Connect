@@ -4,10 +4,10 @@
 // Uses TrtModule(mimi_encoder) + TrtModule(temporal) + KvCache +
 // TrtModule(depth)[] + TrtModule(mimi_decoder).
 
-#include "runtime/domains/audio/audio_configs.h"
-#include "runtime/domains/audio/speech_delay_cache.h"
-#include "runtime/domains/audio/speech_generation_policy.h"
-#include "runtime/domains/audio/speech_runtime_plan.h"
+#include "runtime/models/speech/speech_config.h"
+#include "runtime/models/speech/speech_delay_cache.h"
+#include "runtime/models/speech/speech_generation_policy.h"
+#include "runtime/models/speech/speech_runtime_plan.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

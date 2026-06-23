@@ -1,5 +1,5 @@
 {
-  "description": "Default thresholds for text-to-audio (Bark-style)",
+  "description": "Default thresholds for text-to-audio models",
   "metrics": {
     "logit_atol": 0.01,
     "codec_token_match": 0.7,

@@ -33,28 +33,36 @@ def _test_id(name: str) -> str:
 
 
 def test_diffusion_family_strategies_are_large() -> None:
-    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_flux"}) == "large"
-    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_ltx"}) == "large"
-    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_pixart"}) == "large"
+    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion"}) == "large"
+    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_primary"}) == "large"
+    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_secondary"}) == "large"
+
+
+def test_manifest_size_override_is_authoritative() -> None:
+    assert schedule_e2e.classify_size({"e2e_size": "large"}) == "large"
+    assert schedule_e2e.classify_size({
+        "runtime_strategy": "diffusion_primary",
+        "e2e_size": "small",
+    }) == "small"
 
 
 def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
     _write_manifest(
         tmp_path,
-        "flux-2-dev-fp8-l0",
-        runtime_strategy="diffusion_flux",
+        "exclusive-media-a",
+        runtime_strategy="diffusion_primary",
         e2e_parallel_resource="exclusive_gpu",
     )
     _write_manifest(
         tmp_path,
-        "flux-schnell-l0",
-        runtime_strategy="diffusion_flux",
+        "exclusive-media-b",
+        runtime_strategy="diffusion_primary",
         e2e_parallel_resource="exclusive_gpu",
     )
     _write_manifest(
         tmp_path,
-        "flux-2-dev-l0",
-        runtime_strategy="diffusion_flux",
+        "exclusive-media-c",
+        runtime_strategy="diffusion_primary",
         e2e_parallel_resource="exclusive_gpu",
     )
     _write_manifest(tmp_path, "small-a")
@@ -63,9 +71,9 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
 
     assignments = schedule_e2e.schedule(
         [
-            _test_id("flux-2-dev-fp8-l0"),
-            _test_id("flux-schnell-l0"),
-            _test_id("flux-2-dev-l0"),
+            _test_id("exclusive-media-a"),
+            _test_id("exclusive-media-b"),
+            _test_id("exclusive-media-c"),
             _test_id("small-a"),
             _test_id("small-b"),
             _test_id("large-a"),
@@ -75,9 +83,9 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
         workers_per_gpu=2,
     )
 
-    assert assignments["0"] == [[_test_id("flux-2-dev-fp8-l0")]]
-    assert assignments["1"] == [[_test_id("flux-schnell-l0")]]
-    assert assignments["2"] == [[_test_id("flux-2-dev-l0")]]
+    assert assignments["0"] == [[_test_id("exclusive-media-a")]]
+    assert assignments["1"] == [[_test_id("exclusive-media-b")]]
+    assert assignments["2"] == [[_test_id("exclusive-media-c")]]
     assert assignments["3"]
     shared_tests = [test for worker in assignments["3"] for test in worker]
     assert sorted(shared_tests) == sorted([
@@ -88,26 +96,26 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
 
 
 def test_same_bundle_exclusive_tests_stay_in_one_worker_queue(tmp_path: Path) -> None:
-    for mode in ("ar", "diffusion", "linear-spec", "linear-spec-lora"):
+    for mode in ("mode-a", "mode-b", "mode-c", "mode-d"):
         _write_manifest(
             tmp_path,
-            f"nemotron-labs-diffusion-8b-{mode}",
-            runtime_strategy="nemotron_labs_diffusion",
+            f"shared-exclusive-{mode}",
+            runtime_strategy="diffusion_text_experiment",
             e2e_parallel_resource="exclusive_gpu",
-            bundle="nemotron-labs-diffusion-8b.trtfb",
+            bundle="shared-exclusive-bundle.trtfb",
         )
     _write_manifest(
         tmp_path,
         "other-exclusive",
-        runtime_strategy="diffusion_flux",
+        runtime_strategy="diffusion_primary",
         e2e_parallel_resource="exclusive_gpu",
     )
 
     grouped_ids = [
-        _test_id("nemotron-labs-diffusion-8b-ar"),
-        _test_id("nemotron-labs-diffusion-8b-diffusion"),
-        _test_id("nemotron-labs-diffusion-8b-linear-spec"),
-        _test_id("nemotron-labs-diffusion-8b-linear-spec-lora"),
+        _test_id("shared-exclusive-mode-a"),
+        _test_id("shared-exclusive-mode-b"),
+        _test_id("shared-exclusive-mode-c"),
+        _test_id("shared-exclusive-mode-d"),
     ]
     assignments = schedule_e2e.schedule(
         [*grouped_ids, _test_id("other-exclusive")],
@@ -161,7 +169,7 @@ def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path
         _write_manifest(
             tmp_path,
             name,
-            runtime_strategy="diffusion_flux",
+            runtime_strategy="diffusion_primary",
             e2e_parallel_resource="exclusive_gpu",
         )
     for name in ("small-a", "small-b", "small-c", "small-d", "small-e", "small-f"):
@@ -217,7 +225,7 @@ def test_phase_schedule_offsets_large_shared_work_by_exclusive_load(tmp_path: Pa
         _write_manifest(
             tmp_path,
             f"exclusive-{idx}",
-            runtime_strategy="diffusion_flux",
+            runtime_strategy="diffusion_primary",
             e2e_parallel_resource="exclusive_gpu",
         )
     for idx in range(9):
@@ -292,23 +300,7 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
             if args and args[0] == "-":
                 sys.stdin.read()
                 if len(args) == 2:
-                    families = {
-                        "flux-2-dev-l0": "flux",
-                        "flux-schnell-l0": "flux",
-                        "albert-base": "albert",
-                        "bert-base-uncased": "bert",
-                        "gpt2-125m": "gpt2",
-                        "opt-125m": "opt",
-                    }
-                    for raw in Path(args[1]).read_text(encoding="utf-8").splitlines():
-                        model = raw.strip()
-                        if not model:
-                            continue
-                        family = families[model]
-                        print(
-                            f"tests/e2e/models/{family}/test_{family}_e2e.py"
-                            f"::test_model_e2e[{model}]"
-                        )
+                    raise SystemExit("models-file collection is not used by this test")
                 raise SystemExit(0)
 
             if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
@@ -347,15 +339,37 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
     )
     fake_python.chmod(0o755)
 
-    models_file = tmp_path / "models.txt"
-    models_file.write_text(
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    _write_manifest(
+        manifest_dir,
+        "exclusive-media-a",
+        runtime_strategy="diffusion_primary",
+        e2e_parallel_resource="exclusive_gpu",
+    )
+    _write_manifest(
+        manifest_dir,
+        "exclusive-media-b",
+        runtime_strategy="diffusion_primary",
+        e2e_parallel_resource="exclusive_gpu",
+    )
+    for name, family in {
+        "encoder-a": "encoder_family",
+        "encoder-b": "encoder_family",
+        "decoder-a": "decoder_family",
+        "decoder-b": "decoder_family",
+    }.items():
+        _write_manifest(manifest_dir, name, family=family)
+
+    tests_file = tmp_path / "tests.txt"
+    tests_file.write_text(
         "\n".join([
-            "flux-2-dev-l0",
-            "flux-schnell-l0",
-            "albert-base",
-            "bert-base-uncased",
-            "gpt2-125m",
-            "opt-125m",
+            "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
+            "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
+            "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
+            "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
+            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
+            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
             "",
         ]),
         encoding="utf-8",
@@ -365,6 +379,7 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["TRTMC_E2E_EXCLUDE_GPU0"] = "0"
+    env["TRTMC_E2E_MANIFEST_DIR"] = str(manifest_dir)
 
     completed = subprocess.run(
         [
@@ -381,8 +396,8 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
             "2",
             "--workers-per-gpu",
             "2",
-            "--models-file",
-            str(models_file),
+            "--tests-file",
+            str(tests_file),
         ],
         cwd=repo_root,
         env=env,
@@ -417,25 +432,16 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
         for test in worker_tests
     }
     assert exclusive_tests == {
-        "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-2-dev-l0]",
-        "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-schnell-l0]",
+        "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
+        "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
     }
     assert shared_tests == {
-        "tests/e2e/models/albert/test_albert_e2e.py::test_model_e2e[albert-base]",
-        "tests/e2e/models/bert/test_bert_e2e.py::test_model_e2e[bert-base-uncased]",
-        "tests/e2e/models/gpt2/test_gpt2_e2e.py::test_model_e2e[gpt2-125m]",
-        "tests/e2e/models/opt/test_opt_e2e.py::test_model_e2e[opt-125m]",
+        "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
+        "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
+        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
+        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
     }
     assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
-
-
-def test_qwen35_is_marked_exclusive_gpu() -> None:
-    models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
-    manifest_path = find_manifest_path("qwen35-9b", models_dir)
-    assert manifest_path is not None
-    manifest = json.loads(manifest_path.read_text())
-
-    assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"
 
 
 def test_gpt_oss_20b_is_marked_exclusive_gpu() -> None:

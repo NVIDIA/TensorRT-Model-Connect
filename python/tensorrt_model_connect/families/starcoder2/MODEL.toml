@@ -1,6 +1,7 @@
 id = "starcoder2"
 plugin = "starcoder2"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "starcoder2",
 ]

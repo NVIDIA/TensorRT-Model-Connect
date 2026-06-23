@@ -62,6 +62,7 @@ class ZImagePipeline final : public IPipeline {
 
     ~ZImagePipeline() override;
 
+    bool supports_image_generation() const override { return true; }
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     std::vector<ImageResult>

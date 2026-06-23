@@ -96,23 +96,31 @@ def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
         'runtime_strategies = ["decoder_kv_cache", "decoder_moe"]\n',
         encoding="utf-8",
     )
-    (model_dir / "flux").mkdir(parents=True)
-    (model_dir / "flux" / "MODEL.toml").write_text(
-        'runtime_strategy = "diffusion_flux"\n',
+    (model_dir / "media_runtime").mkdir(parents=True)
+    (model_dir / "media_runtime" / "MODEL.toml").write_text(
+        'runtime_strategy = "diffusion_primary"\n',
         encoding="utf-8",
     )
 
     assert mod.extract_runtime_strategies_from_model_manifests(model_dir) == {
         "decoder_kv_cache",
         "decoder_moe",
-        "diffusion_flux",
+        "diffusion_primary",
     }
 
 
 def test_model_local_e2e_plugin_discovery(tmp_path: Path):
     mod = _import_checker()
 
-    runners_dir = tmp_path / "tests" / "e2e" / "models" / "qwen" / "e2e_plugins" / "runners"
+    runners_dir = (
+        tmp_path
+        / "tests"
+        / "e2e"
+        / "models"
+        / "example_decoder"
+        / "e2e_plugins"
+        / "runners"
+    )
     runners_dir.mkdir(parents=True)
     (runners_dir / "text_generation.py").write_text(
         """
@@ -127,7 +135,7 @@ class TextGenerationCausalRunner:
         / "tests"
         / "e2e"
         / "models"
-        / "qwen"
+        / "example_decoder"
         / "e2e_plugins"
         / "comparators"
     )
@@ -154,7 +162,7 @@ def test_validate_matrix_data_requires_exemption_when_no_diff_check():
     mod = _import_checker()
     errors = mod.validate_matrix_data(
         matrix={
-            "rwkv_recurrent": {
+            "unit_recurrent": {
                 "task_strategy": "text_generation_causal",
                 "cli_commands": ["run"],
                 "runner_class": "TextGenerationCausalRunner",
@@ -162,8 +170,8 @@ def test_validate_matrix_data_requires_exemption_when_no_diff_check():
                 "diff_framework_check_classes": [],
             }
         },
-        cpp_runtime_strategies={"rwkv_recurrent"},
-        runtime_to_task_strategy={"rwkv_recurrent": "text_generation_causal"},
+        cpp_runtime_strategies={"unit_recurrent"},
+        runtime_to_task_strategy={"unit_recurrent": "text_generation_causal"},
         diff_checks_by_strategy={},
         runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
         comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
@@ -184,14 +192,14 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
                 "diff_framework_check_classes": ["VLPipelineTest"],
             }
         },
-        cpp_runtime_strategies=set(),
+        cpp_runtime_strategies={"vision_language", "future_runtime_strategy"},
         runtime_to_task_strategy={"vision_language": "vision_language_generation"},
         diff_checks_by_strategy={"vision_language": {"VLPipelineTest"}},
         runner_classes_by_task={"vision_language_generation": {"VisionLanguageRunner"}},
         comparator_classes_by_task={"vision_language_generation": {"VisionLanguageComparator"}},
     )
 
-    assert any("runtime sources strategy keys missing" in message for message in errors)
+    assert any("missing runtime strategies from runtime sources" in message for message in errors)
 
 
 def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path):
@@ -223,13 +231,31 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
         encoding="utf-8",
     )
 
-    contracts_path = tmp_path / "tests" / "e2e_harness" / "contracts.py"
-    contracts_path.parent.mkdir(parents=True)
-    contracts_path.write_text(
+    e2e_models_dir = tmp_path / "tests" / "e2e" / "models"
+    text_manifest_dir = e2e_models_dir / "text" / "manifests"
+    text_manifest_dir.mkdir(parents=True)
+    (text_manifest_dir / "text.json").write_text(
         """
-RUNTIME_TO_TASK_STRATEGY = {
-    "decoder_kv_cache": "text_generation_causal",
-    "vision_language": "vision_language_generation",
+{
+  "name": "text",
+  "hf_id": "unit/text",
+  "family": "text",
+  "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    vl_manifest_dir = e2e_models_dir / "vl" / "manifests"
+    vl_manifest_dir.mkdir(parents=True)
+    (vl_manifest_dir / "vl.json").write_text(
+        """
+{
+  "name": "vl",
+  "hf_id": "unit/vl",
+  "family": "vl",
+  "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation"
 }
         """,
         encoding="utf-8",
@@ -325,7 +351,7 @@ class VLPipelineTest:
         runtime_registry_path=tmp_path / "missing_pipeline_factory.cpp",
         runtime_models_dir=tmp_path / "missing_runtime_models",
         torchtrt_strategies_dir=tmp_path / "missing_torchtrt_strategies",
-        contracts_path=contracts_path,
+        e2e_models_dir=e2e_models_dir,
         diff_checks_dir=diff_checks_dir,
         runners_dir=runners_dir,
         comparators_dir=comparators_dir,

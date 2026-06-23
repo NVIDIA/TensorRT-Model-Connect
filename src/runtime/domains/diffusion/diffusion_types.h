@@ -21,18 +21,18 @@ struct DiffusionConfig {
     int32_t max_image_seq_len{4096};
     float shift_terminal{0.0F};
 
-    int32_t video_height{480};
-    int32_t video_width{832};
-    int32_t video_num_frames{81};
+    int32_t video_height{0};
+    int32_t video_width{0};
+    int32_t video_num_frames{0};
 
-    int32_t z_dim{16};
-    int32_t scale_factor_temporal{4};
-    int32_t scale_factor_spatial{8};
-    int32_t dit_dim{1536};
-    int32_t dit_num_heads{12};
-    int32_t freq_dim{256};
-    int32_t text_seq_len{512};
-    int32_t text_encoder_dim{4096};
+    int32_t z_dim{0};
+    int32_t scale_factor_temporal{0};
+    int32_t scale_factor_spatial{0};
+    int32_t dit_dim{0};
+    int32_t dit_num_heads{0};
+    int32_t freq_dim{0};
+    int32_t text_seq_len{0};
+    int32_t text_encoder_dim{0};
 
     int32_t num_vae_caches{0};
     std::vector<float> latents_mean;
@@ -46,7 +46,7 @@ struct DiffusionConfig {
     bool use_rope{true};
     float vae_scaling_factor{0.0F};
 
-    std::string diffusion_backend_type{"wan_3d"};
+    std::string diffusion_backend_type;
 
     // Per-call requested batch size. Defaults to 1 = today's behavior.
     // Pipelines clamp/chunk against the per-component caps below.
@@ -84,17 +84,17 @@ struct PreprocessorWeights {
     std::vector<float> text_proj_2_weight; // [dim, dim]
     std::vector<float> text_proj_2_bias;   // [dim]
 
-    // Context embedder (FLUX)
+    // Context embedder
     std::vector<float> context_embed_weight; // [text_encoder_dim, dit_dim]
     std::vector<float> context_embed_bias;   // [dit_dim]
 
-    // Guidance embedding MLP (FLUX)
+    // Guidance embedding MLP
     std::vector<float> guidance_emb_0_weight;
     std::vector<float> guidance_emb_0_bias;
     std::vector<float> guidance_emb_2_weight;
     std::vector<float> guidance_emb_2_bias;
 
-    // VAE BN denormalization (FLUX.2)
+    // VAE BN denormalization
     std::vector<float> vae_bn_mean;
     std::vector<float> vae_bn_var;
 

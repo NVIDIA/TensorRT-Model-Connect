@@ -15,5 +15,27 @@
   "precision": "fp32",
   "trust_remote_code": false,
   "test_image": "data/test_img.jpeg",
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "data/test_img.jpeg"
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "timm",
+        "phase": "reference"
+      },
+      "gating": true
+    }
+  ],
   "core": true
 }

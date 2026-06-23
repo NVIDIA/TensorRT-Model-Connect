@@ -5,8 +5,17 @@
   "bundle": "internlm2-1.8b.trtfb",
   "family": "internlm",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
   "prompt": "The capital of France is",
   "max_new_tokens": 20,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  }
 }

@@ -141,7 +141,7 @@ def load_standard_weights(
         layer[f"{prefix}.w_v"] = v_t
         layer[f"{prefix}.w_o"] = o_t
 
-        # Optional QKV biases (Qwen2 style)
+        # Optional separate QKV projection biases.
         q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias", model_prefix)
         k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias", model_prefix)
         v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias", model_prefix)
@@ -155,7 +155,7 @@ def load_standard_weights(
             layer[f"{prefix}.v_bias"] = _load_tensor(
                 readers, v_bias_key).astype(target_dtype)
 
-        # Optional per-head q/k norm (Qwen3 style)
+        # Optional per-head q/k normalization.
         q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight", model_prefix)
         k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight", model_prefix)
         if _has_tensor(readers, q_norm_key):

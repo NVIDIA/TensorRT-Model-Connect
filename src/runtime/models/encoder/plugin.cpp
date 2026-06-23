@@ -1,8 +1,8 @@
 // EncoderPlugin: handles "encoder_only", "embedding", "reranking", and
 // "neural_operator" strategies. Single-pass encoder models (BERT, Eagle, etc.).
 
-#include "runtime/models/encoder/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/encoder/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

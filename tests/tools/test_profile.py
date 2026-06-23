@@ -89,7 +89,7 @@ class TestSpeedup:
 class TestPrintCombinedReport:
     def _make_args(self):
         return dict(
-            model_name="Qwen/Qwen3-0.6B",
+            model_name="example-org/example-decoder",
             prompt="The capital of France is",
             num_input_tokens=6,
             max_new_tokens=20,
@@ -109,7 +109,7 @@ class TestPrintCombinedReport:
             trt_res=trt, hf_res=hf, compile_res=None, layer_data=None,
             **self._make_args())
         out = capsys.readouterr().out
-        assert "Qwen/Qwen3-0.6B" in out
+        assert "example-org/example-decoder" in out
 
     def test_gpu_info_in_output(self, capsys):
         mod = _import()

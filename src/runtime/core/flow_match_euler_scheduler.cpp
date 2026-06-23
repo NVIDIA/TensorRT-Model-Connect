@@ -10,7 +10,7 @@ namespace trtmc {
 
 namespace {
 
-// Mirrors diffusers/pipelines/flux/pipeline_flux.py:calculate_shift().
+// Mirrors the common dynamic-shift formula used by flow-match schedulers.
 // Linear interpolation: mu = image_seq_len * m + b where
 //   m = (max_shift - base_shift) / (max_seq - base_seq)
 //   b = base_shift - m * base_seq
@@ -72,8 +72,8 @@ FlowMatchEulerScheduler::FlowMatchEulerScheduler(float shift, int32_t num_train_
 FlowMatchEulerScheduler::FlowMatchEulerScheduler(const FlowMatchEulerConfig& cfg) : cfg_(cfg) {}
 
 void FlowMatchEulerScheduler::set_timesteps(int32_t num_steps) {
-    // Static-shift path (FLUX / Z-Image). Match diffusers
-    // FlowMatchEulerDiscreteScheduler when use_dynamic_shifting=False:
+    // Static-shift path. Match diffusers FlowMatchEulerDiscreteScheduler
+    // when use_dynamic_shifting=False:
     // 1. timesteps = linspace(1, N, N)[::-1] then take linspace(t_max, t_min, K)
     // 2. sigmas = timesteps / N
     // 3. sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
@@ -140,7 +140,7 @@ void FlowMatchEulerScheduler::set_timesteps(int32_t num_steps, int32_t image_seq
         throw std::runtime_error("FlowMatchEulerScheduler::set_timesteps: num_steps must be > 0");
     }
 
-    // Mirror QwenImageDebugRunner._generate exactly:
+    // Mirror the Python debug runner schedule exactly:
     //   sigmas = np.linspace(1.0, 1.0/N, N)
     //   mu = calculate_shift(image_seq_len, base, max, base_shift, max_shift)
     //   scheduler.set_timesteps(sigmas=sigmas, mu=mu)

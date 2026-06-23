@@ -24,7 +24,7 @@ struct RecurrentGenConfig {
     int32_t id_bos{0};
     int32_t id_eos{0};
     bool has_position_input{false};
-    ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
+    ChatTemplateFormat chat_template_format{};
 };
 
 class RecurrentPipeline final : public IPipeline {

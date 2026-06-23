@@ -62,9 +62,12 @@ def classify_size(manifest: dict) -> str:
     """
     strategy = str(manifest.get("runtime_strategy", "") or "")
     hf_id = str(manifest.get("hf_id", "") or "")
+    size_override = str(manifest.get("e2e_size", "") or "").strip().lower()
+    if size_override in {"large", "small"}:
+        return size_override
 
-    # Heavy strategies are always large. Diffusion strategies are named by
-    # backend family, e.g. diffusion_flux and diffusion_ltx.
+    # Heavy strategies are always large. Diffusion strategies may carry
+    # backend-specific suffixes.
     if strategy == "diffusion" or strategy.startswith("diffusion_") or strategy in _HEAVY_STRATEGIES:
         return "large"
 
@@ -74,18 +77,9 @@ def classify_size(manifest: dict) -> str:
         if params is not None and params >= 1.0:
             return "large"
 
-    # Hybrid models (Nemotron-H)
-    if strategy == "hybrid_mamba_attention":
-        return "large"
-
     # Check param count from HF ID
     params = _param_billions(hf_id)
     if params is not None and params >= 3.0:
-        return "large"
-
-    # bark-large has "bark" in the name but no size suffix — treat as large
-    name = str(manifest.get("name", "") or "")
-    if "bark-large" in name:
         return "large"
 
     return "small"

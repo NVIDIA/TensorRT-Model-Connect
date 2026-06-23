@@ -5,6 +5,9 @@
   "bundle": "all-mpnet-base-v2-tp4.trtfb",
   "family": "mpnet",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "sentence_transformer_embed",
+  "user_contract": "embedding_vector",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
@@ -50,5 +53,10 @@
       "gating": true
     }
   ],
-  "notes": "MPNet TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as all-mpnet-base-v2."
+  "notes": "MPNet TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as all-mpnet-base-v2.",
+  "metadata": {
+    "contract_config": {
+      "use_sentence_transformers": true
+    }
+  }
 }

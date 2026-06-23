@@ -1,8 +1,8 @@
 // SsmPlugin: handles "ssm_recurrent" strategy.
 // Mamba/SSM models with conv_state + ssm_state recurrent state.
 
-#include "runtime/models/recurrent/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/recurrent/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

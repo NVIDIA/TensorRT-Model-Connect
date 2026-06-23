@@ -54,6 +54,21 @@
         "count": 4
       },
       "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "data/test_img.jpeg"
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "timm",
+        "phase": "reference"
+      },
+      "gating": true
     }
   ],
   "notes": "timm ViT-base TP4 repro. Uses the same checkpoint, image, image-classification comparator, and thresholds as timm-vit-base-p16-224-augreg-in21k-ft-in1k."

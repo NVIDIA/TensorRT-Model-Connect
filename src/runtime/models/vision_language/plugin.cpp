@@ -1,10 +1,10 @@
 // VLPlugin: handles "vision_language" strategy.
 // Two-engine pipeline: vision encoder + text decoder with KV cache.
 
+#include "plugin_helpers.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/domains/multimodal/image_preprocessor.h"
 #include "runtime/models/vision_language/pipeline.h"
-#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

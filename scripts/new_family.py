@@ -8,7 +8,7 @@ python/tensorrt_model_connect/families/<family>/.
 Usage:
     python3 scripts/new_family.py \
       --model-type phi3 \
-      --hf-repo microsoft/Phi-3-mini-4k-instruct \
+      --hf-repo example-org/example-decoder \
       --family-name phi
 
     python3 scripts/new_family.py \
@@ -53,7 +53,7 @@ def detect_features(cfg: dict) -> dict[str, bool | int | float | str]:
     features["num_hidden_layers"] = cfg.get("num_hidden_layers", 0)
     features["vocab_size"] = cfg.get("vocab_size", 0)
 
-    # Explicit head_dim (non-standard, e.g. Qwen3, Phi-3)
+    # Explicit head_dim (non-standard decoder variants)
     features["explicit_head_dim"] = "head_dim" in cfg
 
     # Tied embeddings
@@ -171,7 +171,7 @@ def main():
     parser.add_argument("--model-type", required=True,
                         help="HF model_type string (e.g. phi3, yi, starcoder2)")
     parser.add_argument("--hf-repo", required=True,
-                        help="HuggingFace repo ID (e.g. microsoft/Phi-3-mini-4k-instruct)")
+                        help="HuggingFace repo ID (e.g. example-org/example-decoder)")
     parser.add_argument("--family-name", required=True,
                         help="Plugin family name (e.g. phi, yi)")
     args = parser.parse_args()

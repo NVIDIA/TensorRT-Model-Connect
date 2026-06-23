@@ -1,0 +1,19 @@
+id = "chronos_bolt"
+plugin = "chronos_bolt"
+python_profile_specs = [
+  "chronos|families/chronos_bolt/python_profile_requirements/chronos.lock.txt|families/chronos_bolt/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|chronos",
+  "reference|chronos",
+]
+aliases = [
+  "chronos_bolt",
+  "chronos-bolt",
+  "chronosbolt",
+]
+prefixes = [
+  "chronos_bolt",
+  "chronos-bolt",
+  "chronosbolt",
+]

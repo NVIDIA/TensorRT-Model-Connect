@@ -52,7 +52,7 @@ class TestScaleMapJsonRoundTrip:
 
     def test_family_scoped_keys_resolve_by_suffix(self):
         m = QuantScaleMap(scales={
-            "qwen/layer.0.w_q": LayerScales(input_scale=0.25, weight_scale=0.5),
+            "unit_family/layer.0.w_q": LayerScales(input_scale=0.25, weight_scale=0.5),
         })
         entry = m.get("layer.0.w_q")
         assert entry is not None
@@ -105,7 +105,7 @@ class TestPreQuantizedCheckpointProvider:
         from tensorrt_model_connect.config import ModelConfig
 
         config = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "prequantized_decoder",
             "hidden_size": 4096,
             "num_hidden_layers": 32,
             "num_attention_heads": 32,
@@ -130,7 +130,7 @@ class _FakeAdapter:
     def map_layer_name(self, layer_name: str) -> str | None:
         if layer_name == "skip.this":
             return None
-        return f"qwen/{layer_name}"
+        return f"unit_family/{layer_name}"
 
 
 class TestModelOptScaleMapping:
@@ -153,9 +153,9 @@ class TestModelOptScaleMapping:
             maxbound=448.0,
         )
 
-        assert "qwen/layer.0.w_q" in scale_map.scales
-        assert "qwen/skip.this" not in scale_map.scales
-        assert abs(scale_map.scales["qwen/layer.0.w_q"].input_scale - 0.1) < 1e-6
+        assert "unit_family/layer.0.w_q" in scale_map.scales
+        assert "unit_family/skip.this" not in scale_map.scales
+        assert abs(scale_map.scales["unit_family/layer.0.w_q"].input_scale - 0.1) < 1e-6
 
     def test_family_adapter_exclude_patterns_apply_after_mapping(self):
         from tensorrt_model_connect.quantization.scale_providers import ModelOptCalibrationProvider
@@ -171,25 +171,25 @@ class TestModelOptScaleMapping:
         from tensorrt_model_connect.quantization.adapters import StandardDecoderCalibrationAdapter
         scale_map = provider._build_scale_map(
             state_dict,
-            adapter=StandardDecoderCalibrationAdapter(family="qwen"),
+            adapter=StandardDecoderCalibrationAdapter(family="unit_family"),
             exclude_re=None,
             exclude_patterns=["layer.*.w_o"],
             maxbound=448.0,
         )
 
-        assert "qwen/layer.0.w_q" in scale_map.scales
-        assert "qwen/layer.0.w_o" not in scale_map.scales
+        assert "unit_family/layer.0.w_q" in scale_map.scales
+        assert "unit_family/layer.0.w_o" not in scale_map.scales
 
-    def test_standard_decoder_adapter_maps_qwen_names(self):
+    def test_standard_decoder_adapter_maps_standard_decoder_names(self):
         from tensorrt_model_connect.quantization.adapters import StandardDecoderCalibrationAdapter
 
-        adapter = StandardDecoderCalibrationAdapter(family="qwen")
+        adapter = StandardDecoderCalibrationAdapter(family="unit_family")
 
-        assert adapter.map_layer_name("model.layers.0.self_attn.q_proj") == "qwen/layer.0.w_q"
-        assert adapter.map_layer_name("model.layers.12.self_attn.o_proj") == "qwen/layer.12.w_o"
-        assert adapter.map_layer_name("model.layers.7.mlp.gate_proj") == "qwen/layer.7.w_gate"
-        assert adapter.map_layer_name("model.layers.7.mlp.up_proj") == "qwen/layer.7.w_up"
-        assert adapter.map_layer_name("model.layers.7.mlp.down_proj") == "qwen/layer.7.w_down"
+        assert adapter.map_layer_name("model.layers.0.self_attn.q_proj") == "unit_family/layer.0.w_q"
+        assert adapter.map_layer_name("model.layers.12.self_attn.o_proj") == "unit_family/layer.12.w_o"
+        assert adapter.map_layer_name("model.layers.7.mlp.gate_proj") == "unit_family/layer.7.w_gate"
+        assert adapter.map_layer_name("model.layers.7.mlp.up_proj") == "unit_family/layer.7.w_up"
+        assert adapter.map_layer_name("model.layers.7.mlp.down_proj") == "unit_family/layer.7.w_down"
         assert adapter.map_layer_name("model.layers.0.input_layernorm") is None
 
 
@@ -198,9 +198,9 @@ class TestQuantProfileExclusions:
         profile = QuantProfile(
             format=get_format("fp8"),
             scale_map=QuantScaleMap(scales={
-                "qwen/layer.0.w_o": LayerScales(input_scale=0.25, weight_scale=0.5),
+                "unit_family/layer.0.w_o": LayerScales(input_scale=0.25, weight_scale=0.5),
             }),
             exclude_patterns=["layer.*.w_o"],
         )
 
-        assert profile.should_quantize("qwen/layer.0.w_o") is False
+        assert profile.should_quantize("unit_family/layer.0.w_o") is False

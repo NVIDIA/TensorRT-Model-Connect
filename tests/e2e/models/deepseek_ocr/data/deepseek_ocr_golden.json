@@ -8,5 +8,5 @@
     "Layers 1-11:MoE",
     "Vision: SAM ViT-B + Qwen2 encoder"
   ],
-  "source_image": "tests/e2e/data/orc_test_img.jpeg"
+  "source_image": "tests/e2e/models/deepseek_ocr/data/orc_test_img.jpeg"
 }

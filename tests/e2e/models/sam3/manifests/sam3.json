@@ -1,0 +1,24 @@
+{
+  "name": "sam3",
+  "trace_id": "IT-E2E-SAM3-01",
+  "hf_id": "facebook/sam3",
+  "bundle": "sam3.trtfb",
+  "family": "sam3",
+  "runtime_strategy": "prompted_segmentation",
+  "task_strategy": "prompted_segmentation",
+  "test_type": "prompted_segmentation",
+  "reference_family": "prompted_segmentation_sam3",
+  "user_contract": "prompted_mask",
+  "precision": "fp32",
+  "max_cache_length": 1,
+  "prompt": "car",
+  "test_image": "data/test_img.jpeg",
+  "trust_remote_code": false,
+  "gated": true,
+  "inputs": {
+    "image": "data/test_img.jpeg",
+    "prompt": "car"
+  },
+  "core": false,
+  "notes": "SAM3 PR L0 proof uses the checked-in image asset and text prompt `car`; the CI report should show the prompt and SAM3 text-prompt repro command."
+}

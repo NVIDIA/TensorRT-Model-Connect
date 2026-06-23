@@ -1,6 +1,7 @@
 id = "bloom"
 plugin = "bloom"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "bloom",
 ]

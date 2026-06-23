@@ -25,6 +25,61 @@ from .config import ModelConfig
 from .checkpoint_mapper import WeightDict
 
 
+def _register_flux2_attention_quantizers() -> None:
+    """Register family-specific Diffusers attention modules with ModelOpt."""
+    try:
+        from diffusers.models.transformers.transformer_flux2 import (
+            Flux2Attention,
+            Flux2ParallelSelfAttention,
+        )
+        from modelopt.torch.quantization.nn import QuantModuleRegistry
+    except Exception as exc:  # pragma: no cover - optional Diffusers/ModelOpt deps
+        print(
+            "[fp8-calibrate] Skipping FLUX.2 MHA quantizer registration: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        try:
+            from modelopt.torch.quantization.plugins.diffusion.diffusers import (
+                _QuantAttention,
+            )
+        except ModuleNotFoundError:
+            from modelopt.torch.quantization.plugins.diffusers import _QuantAttention
+    except Exception as exc:  # pragma: no cover - private ModelOpt API drift
+        print(
+            "[fp8-calibrate] ModelOpt Diffusers MHA quantizer is unavailable: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        from diffusers.models.attention_dispatch import (
+            AttentionBackendName,
+            attention_backend,
+        )
+    except Exception:  # pragma: no cover - older Diffusers fallback
+        AttentionBackendName = None
+        attention_backend = None
+
+    class _QuantFlux2Attention(_QuantAttention):
+        def forward(self, *args, **kwargs):
+            if attention_backend is None or AttentionBackendName is None:
+                return super().forward(*args, **kwargs)
+            with attention_backend(AttentionBackendName.NATIVE):
+                return super().forward(*args, **kwargs)
+
+    for module_cls, key in (
+        (Flux2Attention, "Flux2Attention"),
+        (Flux2ParallelSelfAttention, "Flux2ParallelSelfAttention"),
+    ):
+        if module_cls not in QuantModuleRegistry:
+            QuantModuleRegistry.register({module_cls: key})(_QuantFlux2Attention)
+
+
 class FluxPlugin:
     name = "flux"
     runtime_strategy = "diffusion_flux"
@@ -927,7 +982,8 @@ class FluxPlugin:
 
         return run_fp8_calibration(
             model, calibration_loop, self._FP8_EXCLUDE,
-            config=FP8_MHA_CONFIG)
+            config=FP8_MHA_CONFIG,
+            pre_quantize_hook=_register_flux2_attention_quantizers)
 
 
 def _is_flux2(tc: dict) -> bool:

@@ -85,13 +85,13 @@ bool test_extract_json_string_absent() {
 // Intention: Verify that the parser correctly handles JSON with nested brace
 //            structures (inner objects) before the target key.
 // Setup:     JSON with a nested object "config": {"inner": 1} preceding the
-//            target key "model_type": "llama".
-// Mechanism: Calls extract_json_string and verifies "llama" is returned,
+//            target key "model_type": "decoder".
+// Mechanism: Calls extract_json_string and verifies "decoder" is returned,
 //            confirming the parser is not confused by nested braces.
 bool test_extract_json_string_nested_braces() {
-    const std::string json = R"({"config": {"inner": 1}, "model_type": "llama"})";
+    const std::string json = R"({"config": {"inner": 1}, "model_type": "decoder"})";
     const std::string result = trtmc::extract_json_string(json, "model_type", "");
-    if (result != "llama") {
+    if (result != "decoder") {
         std::cerr << "extract_json_string_nested: got '" << result << "'" << std::endl;
         return false;
     }

@@ -18,27 +18,27 @@ accurate per-phase attribution.
 
 Supported runtime strategies:
   decoder_kv_cache / decoder_moe  -- uses TrtRunner (standard KV-cache decoder)
-  ssm_recurrent                   -- uses MambaTrtRunner (recurrent SSM state)
+  family-owned runtimes           -- use model-owned CPU profiling hooks
 
 Usage:
     # Standard decoder
     python tools/cpu_profile.py \\
-      --model Qwen/Qwen3-0.6B \\
+      --model example-org/example-decoder \\
       --prompt "The capital of France is" \\
       --max-new-tokens 10 \\
       --warmup 3 --iterations 20 \\
       --json cpu_profile.json
 
-    # Mamba/SSM model
+    # Family-owned runtime model
     python tools/cpu_profile.py \\
-      --model state-spaces/mamba-370m \\
-      --runner mamba \\
+      --model example-org/example-family-runtime \\
+      --runner family \\
       --max-new-tokens 10 \\
-      --json cpu_profile_mamba.json
+      --json cpu_profile_family.json
 
     # Use a pre-built bundle (skips engine build)
     python tools/cpu_profile.py \\
-      --model Qwen/Qwen3-0.6B \\
+      --model example-org/example-decoder \\
       --bundle /path/to/model.trtfb \\
       --max-new-tokens 10
 """
@@ -66,8 +66,6 @@ except ImportError:
 
 DECODER_PHASES = ("mask_build", "h2d", "tensor_bind", "execute",
                   "d2d_cache", "d2h", "argmax")
-
-MAMBA_PHASES = ("h2d", "tensor_bind", "execute", "d2d_state", "d2h", "argmax")
 
 
 # ---------------------------------------------------------------------------
@@ -221,108 +219,6 @@ class _TimedDecoderRunner:
 
 
 # ---------------------------------------------------------------------------
-# Timed runner — Mamba/SSM (MambaTrtRunner subclass)
-# ---------------------------------------------------------------------------
-
-class _TimedMambaRunner:
-    """Wraps MambaTrtRunner and provides timed_step() with per-phase measurements."""
-
-    PHASES = MAMBA_PHASES
-
-    def __init__(self, engine_plan: bytes, num_layers: int):
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-        self._runner = MambaTrtRunner(
-            engine_plan=engine_plan,
-            num_layers=num_layers,
-        )
-        self._phase_times: dict[str, list[float]] = {p: [] for p in self.PHASES}
-
-    def reset(self) -> None:
-        self._runner.reset()
-
-    def reset_timing(self) -> None:
-        for p in self.PHASES:
-            self._phase_times[p].clear()
-
-    def step(self, token_id: int) -> np.ndarray:
-        return self._runner.step(token_id)["logits"].flatten()
-
-    def timed_step(self, token_id: int) -> np.ndarray:
-        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
-        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
-        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
-
-        r = self._runner
-        stream = r.stream
-        conv_state_bytes = r.d_inner * r.conv_kernel * 4
-        ssm_state_bytes = r.d_inner * r.state_size * 4
-
-        # Phase 1: h2d
-        t = time.perf_counter()
-        r._h_token_id[0] = token_id
-        cudart.cudaMemcpyAsync(
-            r._d_token_id, r._h_token_id.ctypes.data, 4, H2D, stream)
-        cudart.cudaStreamSynchronize(stream)
-        self._phase_times["h2d"].append((time.perf_counter() - t) * 1000)
-
-        # Phase 2: tensor_bind
-        t = time.perf_counter()
-        r.context.set_tensor_address("token_id", r._d_token_id)
-        r.context.set_tensor_address("logits", r._d_logits)
-        for i in range(r.num_layers):
-            r.context.set_tensor_address(f"conv_state_{i}", r._d_conv_state[i])
-            r.context.set_tensor_address(f"ssm_state_{i}", r._d_ssm_state[i])
-            r.context.set_tensor_address(
-                f"present_conv_{i}", r._d_present_conv[i])
-            r.context.set_tensor_address(
-                f"present_ssm_{i}", r._d_present_ssm[i])
-        for name in r._debug_output_names:
-            r.context.set_tensor_address(name, r._d_debug[name])
-        self._phase_times["tensor_bind"].append(
-            (time.perf_counter() - t) * 1000)
-
-        # Phase 3: execute
-        t = time.perf_counter()
-        r.context.execute_async_v3(stream)
-        cudart.cudaStreamSynchronize(stream)
-        self._phase_times["execute"].append((time.perf_counter() - t) * 1000)
-
-        # Phase 4: d2d_state
-        t = time.perf_counter()
-        for i in range(r.num_layers):
-            cudart.cudaMemcpyAsync(
-                r._d_conv_state[i], r._d_present_conv[i],
-                conv_state_bytes, D2D, stream)
-            cudart.cudaMemcpyAsync(
-                r._d_ssm_state[i], r._d_present_ssm[i],
-                ssm_state_bytes, D2D, stream)
-        cudart.cudaStreamSynchronize(stream)
-        self._phase_times["d2d_state"].append(
-            (time.perf_counter() - t) * 1000)
-
-        # Phase 5: d2h
-        t = time.perf_counter()
-        cudart.cudaMemcpyAsync(
-            r._h_logits.ctypes.data, r._d_logits,
-            r._logits_numel * 4, D2H, stream)
-        cudart.cudaStreamSynchronize(stream)
-        self._phase_times["d2h"].append((time.perf_counter() - t) * 1000)
-
-        logits = r._h_logits.flatten()
-
-        # Phase 6: argmax
-        t = time.perf_counter()
-        int(np.argmax(logits))
-        self._phase_times["argmax"].append((time.perf_counter() - t) * 1000)
-
-        return logits
-
-    @property
-    def phase_times(self) -> dict[str, list[float]]:
-        return self._phase_times
-
-
-# ---------------------------------------------------------------------------
 # Profiling loop
 # ---------------------------------------------------------------------------
 
@@ -464,7 +360,7 @@ def main():
                         help="Warmup iterations (not timed)")
     parser.add_argument("--iterations", type=int, default=20,
                         help="Timed iterations")
-    parser.add_argument("--runner", choices=["decoder", "mamba"],
+    parser.add_argument("--runner", choices=["decoder", "family"],
                         default="decoder",
                         help="Runner type matching the model's runtime strategy")
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -486,27 +382,38 @@ def main():
     print(f"[cpu_profile] Prompt: {len(input_ids)} tokens", file=sys.stderr)
 
     # -- Build or load TRT engine --
-    from perf_compare import build_trt_engine, load_trt_from_bundle
+    from perf_compare import (
+        _handler_attr,
+        build_trt_engine,
+        load_trt_from_bundle,
+    )
 
     if args.bundle:
         print(f"[cpu_profile] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, is_mamba = \
+        engine_plan, num_layers, max_cache_length, _, perf_handler = \
             load_trt_from_bundle(args.bundle)
-        runner_type = "mamba" if is_mamba else "decoder"
+        runner_type = _handler_attr(
+            perf_handler, "cpu_profile_runner_type", "decoder")
         if args.runner != runner_type:
             print(f"[cpu_profile] Note: bundle is {runner_type!r}, "
                   f"ignoring --runner={args.runner!r}", file=sys.stderr)
     else:
-        engine_plan, config, _, is_mamba = build_trt_engine(
+        engine_plan, config, _, perf_handler = build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
-        runner_type = "mamba" if is_mamba else args.runner
+        runner_type = _handler_attr(
+            perf_handler, "cpu_profile_runner_type", args.runner)
 
     # -- Build timed runner --
     print(f"[cpu_profile] Building {runner_type} runner ...", file=sys.stderr)
-    if runner_type == "mamba":
-        runner = _TimedMambaRunner(engine_plan, num_layers)
+    make_family_runner = getattr(perf_handler, "make_cpu_profile_runner", None)
+    if callable(make_family_runner):
+        runner = make_family_runner(
+            engine_plan=engine_plan,
+            num_layers=num_layers,
+            max_cache_length=max_cache_length,
+        )
     else:
         runner = _TimedDecoderRunner(engine_plan, max_cache_length, num_layers)
     del engine_plan

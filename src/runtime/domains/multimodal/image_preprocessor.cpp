@@ -266,14 +266,14 @@ load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& imag
 }
 
 // ---------------------------------------------------------------------------
-// Strategy: qwen_merge_group
+// Strategy: merge_group_chw
 // ---------------------------------------------------------------------------
 
-static PreprocessedImage preprocess_qwen_merge_group(const LoadedImage& loaded,
-                                                     const VLPreprocessConfig& config) {
+static PreprocessedImage preprocess_merge_group_chw(const LoadedImage& loaded,
+                                                    const VLPreprocessConfig& config) {
     PreprocessedImage result;
     ImageTransformParams params;
-    params.layout = ImageTransformLayout::kQwenMergeGroup;
+    params.layout = ImageTransformLayout::kMergeGroupChw;
     params.target_size = loaded.target_size;
     params.channels = loaded.channels;
     params.patch_size = config.patch_size;
@@ -307,18 +307,18 @@ static PreprocessedImage preprocess_simple_chw(const LoadedImage& loaded,
 }
 
 // ---------------------------------------------------------------------------
-// Strategy: locateanything_patchify
+// Strategy: patchify_chw
 // ---------------------------------------------------------------------------
 
-static PreprocessedImage preprocess_locateanything_patchify(const LoadedImage& loaded,
-                                                            const VLPreprocessConfig& config) {
+static PreprocessedImage preprocess_patchify_chw(const LoadedImage& loaded,
+                                                 const VLPreprocessConfig& config) {
     PreprocessedImage result;
     const int patch = config.patch_size;
     const int channels = loaded.channels;
     const int height = loaded.target_size;
     const int width = loaded.target_size;
     if (patch <= 0 || height % patch != 0 || width % patch != 0 || channels <= 0) {
-        std::cerr << "[trtmc] Invalid LocateAnything patchify shape" << std::endl;
+        std::cerr << "[trtmc] Invalid patchify shape" << std::endl;
         return result;
     }
 
@@ -380,11 +380,11 @@ static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preproc
         return {load_pad_center_resize_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "simple_chw")
         return {load_resize_normalize, preprocess_simple_chw, false};
-    if (preprocessor_type == "locateanything_patchify")
-        return {load_resize_normalize, preprocess_locateanything_patchify, false};
+    if (preprocessor_type == "patchify_chw")
+        return {load_resize_normalize, preprocess_patchify_chw, false};
 
-    const bool warn_unknown = (preprocessor_type != "qwen_merge_group");
-    return {load_resize_normalize, preprocess_qwen_merge_group, warn_unknown};
+    const bool warn_unknown = (preprocessor_type != "merge_group_chw");
+    return {load_resize_normalize, preprocess_merge_group_chw, warn_unknown};
 }
 
 static PreprocessedImage run_preprocess_dispatch(const runtime::adapters::io::DecodedImage& image,
@@ -426,7 +426,7 @@ PreprocessedImage preprocess_decoded_image(const runtime::adapters::io::DecodedI
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
     if (dispatch.warn_unknown_type) {
         std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \"" << config.preprocessor_type
-                  << "\", falling back to qwen_merge_group" << std::endl;
+                  << "\", falling back to merge_group_chw" << std::endl;
     }
 
     return run_preprocess_dispatch(image, config, dispatch);
@@ -483,7 +483,7 @@ static void unescape_newline_sequences(std::string& text) {
 
 static void parse_base_vl_config(const std::string& config_text, VLPreprocessConfig& cfg) {
     cfg.preprocessor_type =
-        extract_json_string(config_text, "preprocessor_type", "qwen_merge_group");
+        extract_json_string(config_text, "preprocessor_type", "merge_group_chw");
     cfg.image_token_id = extract_json_int(config_text, "image_token_id", -1);
     cfg.fixed_image_size = extract_json_int(config_text, "fixed_image_size", 448);
     cfg.patch_size = extract_json_int(config_text, "patch_size", cfg.patch_size);

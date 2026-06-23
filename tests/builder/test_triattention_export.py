@@ -53,7 +53,7 @@ def test_export_rkv_stats_embeds_inv_freq_and_layer_stats(tmp_path, monkeypatch)
     config = ModelConfig.from_json(
         json.dumps(
             {
-                "model_type": "qwen3",
+                "model_type": "triattention_decoder",
                 "hidden_size": 16,
                 "num_hidden_layers": 2,
                 "num_attention_heads": 4,

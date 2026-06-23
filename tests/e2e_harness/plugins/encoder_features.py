@@ -1,9 +1,9 @@
-"""Contract test plugin for encoder-only models (BERT, RoBERTa, etc)."""
+"""Contract test plugin for encoder-only models."""
 from __future__ import annotations
 import numpy as np
 
 from ..contracts import MetricResult
-from .base import make_pass, make_fail, make_error
+from .base import contract_config, make_pass, make_fail, make_error
 
 
 _MIN_CONTRACT_COSINE = 0.80
@@ -14,7 +14,7 @@ class EncoderFeaturesPlugin:
     user_contract = "representation_parity"
 
     def configure_reference(self, case):
-        return {"auto_class": "AutoModel"}
+        return contract_config(case)
 
     def verify(self, trt_output, ref_output, case, threshold):
         # Extract embeddings from data

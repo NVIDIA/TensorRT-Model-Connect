@@ -5,6 +5,7 @@
   "bundle": "nemotron-rerank-vl-1b-v2-tp4.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "reranking",
+  "task_strategy": "reranking",
   "reference_family": "vl_rerank",
   "user_contract": "ranking_order",
   "ci_tier": "multi_device",

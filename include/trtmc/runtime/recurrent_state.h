@@ -1,9 +1,9 @@
 #pragma once
 
-// RecurrentState: generic SSM/RWKV state manager.
-// Replaces MambaStepState and RwkvStepState with a single config-driven class.
+// RecurrentState: generic recurrent tensor state manager.
+// Replaces model-specific step state implementations with a config-driven class.
 //
-// HF equivalent: MambaCache (manages conv + ssm state per layer).
+// Equivalent to recurrent cache layouts that manage per-layer state tensors.
 //
 // Usage:
 //   RecurrentState state(num_layers, {{"conv", {d_inner*3}}, {"ssm", {state*d_inner}}}, stream);
@@ -35,9 +35,11 @@ class RecurrentState : public IInferenceState {
     };
 
     // Allocate state buffers for all layers.
-    // For Mamba: specs = {{"conv_state", {d_inner*conv_kernel}, "present_conv"},
-    //                     {"ssm_state", {state_size*d_inner}, "present_ssm"}}
-    // For RWKV:  specs = {{"attn_state", {hidden}, "present_attn"}, ...}
+    // Example two-state layout:
+    //   specs = {{"conv_state", {d_inner*conv_kernel}, "present_conv"},
+    //            {"ssm_state", {state_size*d_inner}, "present_ssm"}}
+    // Example multi-state layout:
+    //   specs = {{"attn_state", {hidden}, "present_attn"}, ...}
     RecurrentState(int32_t num_layers, std::vector<TensorSpec> specs, cudaStream_t stream);
 
     // --- IInferenceState overrides ---

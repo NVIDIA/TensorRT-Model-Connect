@@ -41,10 +41,10 @@ struct AudioResult {
 };
 
 struct TranscriptionStreamConfig {
-    // NeMo cache-aware streaming contract for FastConformer-RNNT:
+    // Cache-aware streaming transcription contract:
     // att_context_size=[left,right], measured in 80 ms encoder frames.
-    // Supported Nemotron right contexts are {0, 1, 6, 13}, giving
-    // chunk sizes of 80 ms, 160 ms, 560 ms, and 1120 ms respectively.
+    // Common right-context presets {0, 1, 6, 13} give chunk sizes of
+    // 80 ms, 160 ms, 560 ms, and 1120 ms respectively.
     int32_t input_sample_rate{16000};
     int32_t max_new_tokens{224};
     int32_t att_context_left{70};
@@ -129,7 +129,7 @@ struct GenerateConfig {
     float confidence_threshold{-1.0f}; // <0 uses mode default
     int32_t tail_frames{0};            // speech-to-speech: extra frames after input
     bool use_chat_template{false};     ///< Apply chat template before tokenization
-    bool enable_thinking{true};        ///< Qwen3: if false, disable thinking mode
+    bool enable_thinking{true};        ///< If false, disable reasoning/thinking mode
     bool stop_on_boxed_answer{false};  ///< Stop once generated text contains a full \boxed{...}
     int32_t stop_check_interval{16};   ///< Token interval for answer-stop checks
 };
@@ -158,14 +158,16 @@ class IPipeline {
   public:
     virtual ~IPipeline() = default;
 
-    // -- Text generation (decoder, mamba, rwkv, VL) --
+    virtual int32_t default_max_new_tokens() const { return 20; }
+
+    // -- Text generation --
     virtual TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) {
         (void)prompt;
         (void)cfg;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support generate()");
     }
 
-    // -- Text generation with image (VL models) --
+    // -- Text generation with image --
     virtual TextResult generate(const std::string& prompt, const float* image_pixels,
                                 int32_t image_height, int32_t image_width,
                                 const GenerateConfig& cfg = {}) {
@@ -182,6 +184,8 @@ class IPipeline {
     }
 
     // -- Image generation (diffusion) --
+    virtual bool supports_image_generation() const { return false; }
+
     virtual ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) {
         (void)prompt;
         (void)cfg;
@@ -213,8 +217,8 @@ class IPipeline {
     //
     // Default implementation is a sequential ``generate_image`` loop with
     // ``cfg.seed`` overridden per sample. Pipelines that can actually batch
-    // (FLUX, Z-Image, Qwen Image, …) override this for the speed win;
-    // pipelines that can't get correctness for free without an override.
+    // override this for the speed win; pipelines that can't get correctness
+    // for free without an override.
     virtual std::vector<ImageResult>
     generate_image_batch(const std::vector<std::string>& prompts,
                          const std::vector<std::uint32_t>& per_sample_seeds,
@@ -233,7 +237,7 @@ class IPipeline {
         return out;
     }
 
-    // -- Audio generation (bark, magpie) --
+    // -- Audio generation --
     virtual AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) {
         (void)prompt;
         (void)cfg;
@@ -241,7 +245,7 @@ class IPipeline {
                                  " does not support generate_audio()");
     }
 
-    // -- Streaming audio generation (magpie) --
+    // -- Streaming audio generation --
     // Callback receives (pcm_samples, num_samples, sample_rate) per chunk.
     using AudioChunkCallback = std::function<void(const float*, int32_t, int32_t)>;
     virtual int32_t generate_audio_streaming(const std::string& prompt, const GenerateConfig& cfg,
@@ -254,7 +258,7 @@ class IPipeline {
         throw std::runtime_error(std::string(pipeline_type()) + " does not support streaming");
     }
 
-    // -- Transcription (whisper, canary) --
+    // -- Transcription --
     // input_sample_rate: source audio sample rate. 0 = assume already at model rate.
     // When non-zero and different from the model's expected rate, the pipeline
     // resamples the audio before mel extraction.
@@ -357,7 +361,7 @@ class IPipeline {
         throw std::runtime_error(std::string(pipeline_type()) + " does not support classify()");
     }
 
-    // -- Encoder-only hidden states (BERT) --
+    // -- Encoder-only hidden states --
     virtual EmbeddingResult encode(const std::string& text) {
         (void)text;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support encode()");
@@ -395,10 +399,10 @@ struct LoadOptions {
     std::string hf_python;
     std::string runtime_cache_path;
     bool cuda_graphs{false};
-    std::uint64_t kv_cache_size_bytes{0};          // 0 = use bundle's max_cache_length
-    std::string config_path;                       // --config <file> (empty = none)
-    std::vector<std::string> set_tokens;           // --set ns.field=value (repeatable)
-    std::vector<std::string> backend_search_paths; // Extra directories for backend DSOs
+    std::uint64_t kv_cache_size_bytes{0};               // 0 = use bundle's max_cache_length
+    std::string config_path;                            // --config <file> (empty = none)
+    std::vector<std::string> set_tokens;                // --set ns.field=value (repeatable)
+    std::vector<std::string> backend_search_paths;      // Extra directories for backend DSOs
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
 };
 

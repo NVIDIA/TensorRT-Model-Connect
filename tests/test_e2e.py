@@ -2,8 +2,8 @@
 
 Usage:
     # Single model:
-    pytest tests/test_e2e.py::test_e2e[qwen3-0.6b]
-    pytest tests/test_e2e.py --e2e-model qwen
+    pytest tests/test_e2e.py::test_e2e[example-decoder]
+    pytest tests/test_e2e.py --e2e-model example_family
 
     # All models:
     pytest tests/test_e2e.py

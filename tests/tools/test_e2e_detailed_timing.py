@@ -129,8 +129,8 @@ def test_diffusion_compile_time_excludes_component_weight_loading():
     timing = {
         "phases": {
             "weights_loading_s": 13.0,
-            "weights_loading_qwen3_encoder_s": 8.0,
-            "weights_loading_z_image_dit_s": 5.0,
+            "weights_loading_decoder_block_s": 8.0,
+            "weights_loading_denoiser_s": 5.0,
         },
     }
 
@@ -147,8 +147,8 @@ def test_diffusion_compile_time_adds_only_untracked_compile_residual():
     timing = {
         "phases": {
             "trt_compile_s": 80.0,
-            "trt_compile_qwen3_encoder_s": 30.0,
-            "trt_compile_z_image_dit_s": 50.0,
+            "trt_compile_decoder_block_s": 30.0,
+            "trt_compile_denoiser_s": 50.0,
         },
     }
 
@@ -168,22 +168,22 @@ def test_component_weight_timings_are_preserved_in_detailed_timing():
             "timing": {
                 "phases": {
                     "weights_loading_s": 13.0,
-                    "weights_loading_qwen3_encoder_s": 8.0,
-                    "weights_loading_z_image_dit_s": 5.0,
+                    "weights_loading_decoder_block_s": 8.0,
+                    "weights_loading_denoiser_s": 5.0,
                     "trt_compile_s": 88.0,
-                    "trt_compile_qwen3_encoder_s": 30.0,
-                    "trt_compile_z_image_dit_s": 50.0,
+                    "trt_compile_decoder_block_s": 30.0,
+                    "trt_compile_denoiser_s": 50.0,
                 },
             },
         },
     )
 
     assert details["weights_loading_s"] == 13.0
-    assert details["weights_loading_qwen3_encoder_s"] == 8.0
-    assert details["weights_loading_z_image_dit_s"] == 5.0
+    assert details["weights_loading_decoder_block_s"] == 8.0
+    assert details["weights_loading_denoiser_s"] == 5.0
     assert details["trt_compile_s"] == 88.0
-    assert details["trt_compile_qwen3_encoder_s"] == 30.0
-    assert details["trt_compile_z_image_dit_s"] == 50.0
+    assert details["trt_compile_decoder_block_s"] == 30.0
+    assert details["trt_compile_denoiser_s"] == 50.0
 
 
 def test_component_runtime_timings_are_preserved_in_detailed_timing():

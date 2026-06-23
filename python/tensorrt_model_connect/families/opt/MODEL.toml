@@ -1,6 +1,7 @@
 id = "opt"
 plugin = "opt"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "opt",
 ]

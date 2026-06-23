@@ -1,6 +1,7 @@
 id = "gpt_neox"
 plugin = "gpt_neox"
 module = "plugin"
+capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 aliases = [
   "gpt_neox",
   "gptneox",

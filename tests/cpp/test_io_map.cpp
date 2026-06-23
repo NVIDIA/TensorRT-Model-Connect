@@ -90,8 +90,7 @@ static void test_parse_io_map_absent() {
         "vocab_size": 32000,
         "hidden_size": 1024,
         "num_hidden_layers": 4,
-        "num_attention_heads": 8,
-        "runtime_strategy": "decoder_kv_cache"
+        "num_attention_heads": 8
     })";
     auto cfg = trtmc::parse_base_config(config, 128);
     check(cfg.io_map.logits == "logits", "absent io_map: logits default");
@@ -104,7 +103,6 @@ static void test_parse_io_map_present() {
         "hidden_size": 1024,
         "num_hidden_layers": 4,
         "num_attention_heads": 8,
-        "runtime_strategy": "decoder_kv_cache",
         "io_map": {
             "logits": "output0",
             "cache_k": "cache_kv_{2i}",

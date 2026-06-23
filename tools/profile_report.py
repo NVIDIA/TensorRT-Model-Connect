@@ -23,7 +23,7 @@ Usage:
 
     # One-shot from profile.py JSON artifacts
     python tools/profile_report.py \\
-      --output-dir /tmp/qwen_profile \\
+      --output-dir /tmp/model_profile \\
       -o report.html
 """
 from __future__ import annotations

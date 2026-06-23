@@ -10,9 +10,9 @@
 
 #include "runtime/core/gpu_matmul.h"
 #include "runtime/domains/diffusion/batch_utils.h"
-#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/flux/flux_denoising_step_seam.h"
+#include "runtime/models/flux/flux_generation_plan.h"
 
 #include <algorithm>
 #include <chrono>

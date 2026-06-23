@@ -56,7 +56,7 @@ def load_tokenizer(model_dir: str):
             raise
 
     # Verify byte-level BPE decode round-trips correctly. Some tokenizers
-    # (e.g. LlamaTokenizer loading a Qwen2 tokenizer.json) lose spaces or
+    # (e.g. a mismatched slow tokenizer loading tokenizer.json) lose spaces or
     # produce raw byte tokens (Ġ for space). Fall back to PreTrainedTokenizerFast.
     if os.path.exists(tokenizer_json):
         test_ids = tok.encode("Hello world")

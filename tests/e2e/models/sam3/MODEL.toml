@@ -1,0 +1,5 @@
+id = "sam3"
+plugin = "sam3"
+test_manifests = [
+  "manifests/sam3.json",
+]

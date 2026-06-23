@@ -1,97 +1,70 @@
 #include "runtime/core/chat_template.h"
 
-#include <array>
-#include <utility>
+#include <vector>
 
 namespace trtmc {
 
-// Detection table: each entry maps a marker string to a format.
-// Order matters — first match wins.
-struct FormatMarker {
-    const char* marker;
-    ChatTemplateFormat format;
+namespace {
+
+struct RegisteredChatTemplate {
+    std::string id;
+    std::vector<std::string> markers;
+    ChatTemplateApplyFn apply{nullptr};
 };
 
-static constexpr std::array<FormatMarker, 10> kDetectTable = {{
-    {"truncate_history_thinking", ChatTemplateFormat::kNemotronLabsDiffusion},
-    {"enable_thinking if enable_thinking is defined else False",
-     ChatTemplateFormat::kNemotronLabsDiffusion},
-    {"<|im_start|>", ChatTemplateFormat::kChatML},
-    {"[INST]", ChatTemplateFormat::kMistral},
-    {"<|user|>", ChatTemplateFormat::kPhi},
-    {"<start_of_turn>", ChatTemplateFormat::kGemma},
-    {"<|start_header_id|>", ChatTemplateFormat::kLlama3},
-    {"<extra_id_0>", ChatTemplateFormat::kNemotron},
-    {"<SPECIAL_10>", ChatTemplateFormat::kNemotronH},
-    // Phi variant: template constructs <|user|> dynamically from role
-    {"<|assistant|>", ChatTemplateFormat::kPhi},
-}};
+std::vector<RegisteredChatTemplate>& registry() {
+    static std::vector<RegisteredChatTemplate> entries;
+    return entries;
+}
+
+} // namespace
+
+void register_chat_template_format(const std::string& id,
+                                   std::initializer_list<const char*> markers,
+                                   ChatTemplateApplyFn apply) {
+    if (id.empty() || apply == nullptr)
+        return;
+
+    std::vector<std::string> marker_values;
+    marker_values.reserve(markers.size());
+    for (const char* marker : markers) {
+        if (marker != nullptr && marker[0] != '\0')
+            marker_values.emplace_back(marker);
+    }
+    if (marker_values.empty())
+        return;
+
+    for (auto& entry : registry()) {
+        if (entry.id == id) {
+            entry.markers = std::move(marker_values);
+            entry.apply = apply;
+            return;
+        }
+    }
+    registry().push_back({id, std::move(marker_values), apply});
+}
 
 ChatTemplateFormat detect_chat_template_format(const std::string& tpl) {
     if (tpl.empty())
-        return ChatTemplateFormat::kNone;
-    for (const auto& entry : kDetectTable) {
-        if (tpl.find(entry.marker) != std::string::npos)
-            return entry.format;
+        return {};
+    for (const auto& entry : registry()) {
+        for (const auto& marker : entry.markers) {
+            if (tpl.find(marker) != std::string::npos)
+                return entry.id;
+        }
     }
-    return ChatTemplateFormat::kNone;
+    return {};
 }
 
-// Per-format apply helpers (keep switch CCN low).
-
-static std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!enable_thinking)
-        r += "<think>\n\n</think>\n\n";
-    return r;
-}
-
-static std::string apply_llama3(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|begin_of_text|>";
-    if (!enable_thinking)
-        r += "<|start_header_id|>system<|end_header_id|>\n\ndetailed thinking off<|eot_id|>";
-    r += "<|start_header_id|>user<|end_header_id|>\n\n" + prompt +
-         "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-    return r;
-}
-
-static std::string apply_nemotron_h(const std::string& prompt, bool enable_thinking) {
-    std::string r =
-        "<SPECIAL_10>System\n\n<SPECIAL_11>User\n" + prompt + "\n<SPECIAL_11>Assistant\n";
-    r += enable_thinking ? "<think>\n" : "<think></think>";
-    return r;
-}
-
-static std::string apply_nemotron_labs_diffusion(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|im_start|>system\n<|im_end|>\n<|im_start|>user\n" + prompt +
-                    "<|im_end|>\n<|im_start|>assistant\n";
-    r += enable_thinking ? "<think>\n" : "<think></think>";
-    return r;
-}
-
-std::string apply_chat_template(ChatTemplateFormat format, const std::string& prompt,
+std::string apply_chat_template(const ChatTemplateFormat& format, const std::string& prompt,
                                 bool enable_thinking) {
-    switch (format) {
-    case ChatTemplateFormat::kChatML:
-        return apply_chatml(prompt, enable_thinking);
-    case ChatTemplateFormat::kMistral:
-        return "[INST] " + prompt + " [/INST]";
-    case ChatTemplateFormat::kPhi:
-        return "<|user|>\n" + prompt + "<|end|>\n<|assistant|>\n";
-    case ChatTemplateFormat::kGemma:
-        return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
-    case ChatTemplateFormat::kLlama3:
-        return apply_llama3(prompt, enable_thinking);
-    case ChatTemplateFormat::kNemotron:
-        return "<extra_id_0>System\n\n<extra_id_1>User\n" + prompt + "\n<extra_id_1>Assistant\n";
-    case ChatTemplateFormat::kNemotronH:
-        return apply_nemotron_h(prompt, enable_thinking);
-    case ChatTemplateFormat::kNemotronLabsDiffusion:
-        return apply_nemotron_labs_diffusion(prompt, enable_thinking);
-    case ChatTemplateFormat::kNone:
-    default:
+    if (format.empty())
         return prompt;
+    for (const auto& entry : registry()) {
+        if (entry.id == format && entry.apply != nullptr)
+            return entry.apply(prompt, enable_thinking);
     }
+    return prompt;
 }
 
 } // namespace trtmc

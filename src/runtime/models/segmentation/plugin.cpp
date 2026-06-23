@@ -1,10 +1,10 @@
 // SegmentationPlugin: handles "segmentation" and "prompted_segmentation"
 // strategies. SegFormer (single encoder) and SAM (encoder + mask decoder).
 
+#include "plugin_helpers.h"
 #include "runtime/models/segmentation/sam3_pipeline.h"
 #include "runtime/models/segmentation/sam_pipeline.h"
 #include "runtime/models/segmentation/segment_pipeline.h"
-#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

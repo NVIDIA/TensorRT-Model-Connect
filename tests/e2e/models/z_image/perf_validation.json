@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "Tongyi-MAI/Z-Image-Turbo",
+      "pipeline_type": "diffusion_zimage",
+      "label": "B3-diffusion-zimage",
+      "benchmark": {
+        "label": "generate",
+        "gpu_argmax_label": "generate",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "generate-video", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_dir}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

@@ -22,9 +22,9 @@ struct VLPreprocessConfig {
     int32_t vision_output_dim{0};
     std::string vl_prompt_template;
     std::string image_token_str;
-    // Preprocessing strategy: "qwen_merge_group", "simple_chw",
+    // Preprocessing strategy: "merge_group_chw", "simple_chw",
     // "center_crop_chw", "aspect_preserve_chw", or "pad_center_chw"
-    std::string preprocessor_type{"qwen_merge_group"};
+    std::string preprocessor_type{"merge_group_chw"};
     // Interpolation mode for resize: "bicubic", "bilinear", or "nearest"
     std::string interpolation{"bicubic"};
 };
@@ -33,7 +33,7 @@ struct VLPreprocessConfig {
 struct PreprocessedImage {
     std::vector<float> pixel_values;     // Layout depends on preprocessor_type
     std::vector<int32_t> image_grid_hws; // [height, width] patch grid for patchified inputs
-    int32_t channels{0};                 // C*T for qwen_merge_group, C for simple_chw
+    int32_t channels{0};                 // C*T for merge_group_chw, C for simple_chw
     int32_t height{0};
     int32_t width{0};
     bool ok{false};
@@ -41,12 +41,12 @@ struct PreprocessedImage {
 
 // Load and preprocess a single image for the vision encoder.
 // Dispatches to the appropriate strategy based on config.preprocessor_type:
-//   "qwen_merge_group":    [C*T, H, W] with merge-group patch permutation
+//   "merge_group_chw":    [C*T, H, W] with merge-group patch permutation
 //   "simple_chw":          [C, H, W] standard resize + normalize
 //   "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
 //   "aspect_preserve_chw": [C, H, W] aspect-ratio-preserving resize + zero-pad
 //   "pad_center_chw":      [C, H, W] aspect-ratio-preserving resize + center-pad with mean color
-//   "locateanything_patchify": [num_patches, C, patch_size, patch_size]
+//   "patchify_chw": [num_patches, C, patch_size, patch_size]
 //
 // NOTE: Only single-image input is supported. Multi-image batching
 // is not yet implemented; callers must process one image at a time.

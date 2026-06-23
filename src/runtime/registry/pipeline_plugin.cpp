@@ -57,7 +57,7 @@ void parse_cache_and_tokens(const std::string& config_text, int32_t max_cache_le
 }
 
 void parse_strategy_and_tokenizer_flags(const std::string& config_text, BaseConfig& cfg) {
-    cfg.runtime_strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
+    cfg.runtime_strategy = extract_json_string(config_text, "runtime_strategy", "");
 
     cfg.precision = extract_json_string(config_text, "precision", "fp32");
 

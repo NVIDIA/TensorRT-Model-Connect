@@ -1,5 +1,7 @@
 #include "runtime/models/recurrent/pipeline.h"
 
+#include "runtime/models/recurrent/chat_templates.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -26,6 +28,7 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<TrtModule> decoder,
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)) {
+    register_recurrent_chat_templates();
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
 }
@@ -35,7 +38,7 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
                                           const std::string& prompt, const GenerateConfig& cfg) {
     std::string effective = prompt;
     bool templated = false;
-    if (cfg.use_chat_template && config.chat_template_format != ChatTemplateFormat::kNone) {
+    if (cfg.use_chat_template && !config.chat_template_format.empty()) {
         effective = apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking);
         templated = true;
     }

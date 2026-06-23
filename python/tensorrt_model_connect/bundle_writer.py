@@ -17,16 +17,6 @@ from typing import Any
 
 BUNDLE_MAGIC = b"TRTFB\x00\x01\x00"
 
-# Section names are part of the .trtfb external schema. Define as constants
-# so downstream code references them by symbol — a typo or rename becomes
-# an import error rather than a silent miss at bundle load.
-QWEN_IMAGE_TEXT_ENGINE_SECTION = "qwen_image_text_engine_plan"
-QWEN_IMAGE_DENOISER_SECTION = "qwen_image_denoiser_engine_plan"
-QWEN_IMAGE_VAE_DECODER_SECTION = "qwen_image_vae_decoder_plan"
-QWEN_IMAGE_VAE_ENCODER_SECTION = "qwen_image_vae_encoder_plan"
-QWEN_IMAGE_VISION_ENGINE_SECTION = "qwen_image_vision_engine_plan"
-QWEN_IMAGE_PREPROCESSOR_WEIGHTS_SECTION = "qwen_image_preprocessor_weights"
-
 
 @dataclass
 class BundleInfo:

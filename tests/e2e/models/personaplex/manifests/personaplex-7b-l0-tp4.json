@@ -5,6 +5,7 @@
   "bundle": "personaplex-7b-l0-tp4.trtfb",
   "family": "personaplex",
   "runtime_strategy": "speech_to_speech",
+  "task_strategy": "speech_to_speech",
   "gated": true,
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
@@ -18,6 +19,9 @@
   "prompt": "",
   "max_new_tokens": 300,
   "trust_remote_code": true,
+  "metadata": {
+    "runtime_cli_requires_hf_python": true
+  },
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",

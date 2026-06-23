@@ -5,7 +5,7 @@
 // and joint network. Build-time Python may parse NeMo checkpoints, but
 // runtime inference does not call Python.
 
-#include "runtime/domains/audio/rnnt_config.h"
+#include "runtime/models/rnnt/rnnt_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"

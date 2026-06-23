@@ -1,8 +1,8 @@
 #include "runtime/models/rnnt/pipeline.h"
 
+#include "audio_helpers.h"
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
-#include "runtime/domains/audio/mel_spectrogram.h"
 #include "plugin_helpers.h"
 #include "utils/wav_reader.h"
 
@@ -216,7 +216,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
             samples_count = static_cast<int32_t>(resampled.size());
         }
 
-        MelResult mel = extract_nemo_mel_spectrogram(
+        MelResult mel = rnnt::extract_rnnt_mel_spectrogram(
             samples_ptr, samples_count, pipeline_.mel_fb_->data.data(),
             pipeline_.mel_fb_->n_freq_bins, pipeline_.mel_fb_->n_mel_bins,
             pipeline_.config_.mel_n_fft, pipeline_.config_.mel_win_length,
@@ -470,7 +470,7 @@ std::vector<float> RnntPipeline::extract_padded_mel(const float* audio_data, int
         samples_count = static_cast<int32_t>(resampled.size());
     }
 
-    MelResult mel = extract_nemo_mel_spectrogram(
+    MelResult mel = rnnt::extract_rnnt_mel_spectrogram(
         samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins, mel_fb_->n_mel_bins,
         config_.mel_n_fft, config_.mel_win_length, config_.mel_hop_length, config_.mel_chunk_length,
         config_.sample_rate, config_.mel_preemph);

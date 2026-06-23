@@ -4,7 +4,8 @@
 //
 // Purpose:
 //   Validates BaseConfig parsing for decoder strategies across the C++ runtime:
-//   - BaseConfig parsing with runtime_strategy="decoder_kv_cache"
+//   - BaseConfig parsing with an explicit runtime_strategy
+//   - Missing runtime_strategy stays empty for manifest-owned fallback handling
 //   - GQA vs MHA attention_size computation
 //   - Tokenizer config fields
 //   - Cache length override and cap
@@ -40,9 +41,9 @@ static void check(bool condition, const char* test_name) {
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that runtime_strategy="decoder_kv_cache" is parsed correctly
+// Intention: Verify that runtime_strategy is parsed correctly
 //            and all standard decoder fields are populated.
-// Setup:     JSON config mimicking a Qwen3-0.6B bundle.
+// Setup:     JSON config with representative decoder dimensions.
 // Mechanism: parse_base_config, assert strategy and architecture fields.
 // -----------------------------------------------------------------------------
 static void test_decoder_config_basic() {
@@ -53,12 +54,12 @@ static void test_decoder_config_basic() {
         "num_attention_heads": 16,
         "num_key_value_heads": 2,
         "head_dim": 64,
-        "runtime_strategy": "decoder_kv_cache",
+        "runtime_strategy": "unit_runtime_strategy",
         "max_position_embeddings": 32768
     })";
 
     const auto cfg = trtmc::parse_base_config(config, 256);
-    check(cfg.runtime_strategy == "decoder_kv_cache", "decoder: runtime_strategy parsed");
+    check(cfg.runtime_strategy == "unit_runtime_strategy", "decoder: runtime_strategy parsed");
     check(cfg.vocab_size == 151936, "decoder: vocab_size");
     check(cfg.hidden_size == 1024, "decoder: hidden_size");
     check(cfg.num_layers == 28, "decoder: num_layers");
@@ -84,8 +85,7 @@ static void test_decoder_gqa_attention_size() {
         "num_hidden_layers": 4,
         "num_attention_heads": 16,
         "num_key_value_heads": 2,
-        "head_dim": 64,
-        "runtime_strategy": "decoder_kv_cache"
+        "head_dim": 64
     })";
 
     const auto cfg = trtmc::parse_base_config(config, 128);
@@ -107,8 +107,7 @@ static void test_decoder_mha() {
         "num_hidden_layers": 24,
         "num_attention_heads": 16,
         "num_key_value_heads": 16,
-        "head_dim": 128,
-        "runtime_strategy": "decoder_kv_cache"
+        "head_dim": 128
     })";
 
     const auto cfg = trtmc::parse_base_config(config, 512);
@@ -130,7 +129,6 @@ static void test_decoder_tokenizer_config() {
         "num_attention_heads": 8,
         "num_key_value_heads": 2,
         "head_dim": 128,
-        "runtime_strategy": "decoder_kv_cache",
         "tokenizer_add_special_tokens": 1,
         "bos_token_id": 151643,
         "eos_token_id": [151645, 151643]
@@ -158,8 +156,7 @@ static void test_decoder_cache_length_override() {
         "num_hidden_layers": 4,
         "num_attention_heads": 8,
         "num_key_value_heads": 8,
-        "max_position_embeddings": 32768,
-        "runtime_strategy": "decoder_kv_cache"
+        "max_position_embeddings": 32768
     })";
 
     // Override = 256 (from bundle config's max_cache_length)
@@ -180,12 +177,28 @@ static void test_decoder_cache_length_cap() {
         "num_hidden_layers": 4,
         "num_attention_heads": 8,
         "num_key_value_heads": 8,
-        "max_position_embeddings": 131072,
-        "runtime_strategy": "decoder_kv_cache"
+        "max_position_embeddings": 131072
     })";
 
     const auto cfg = trtmc::parse_base_config(config, -1);
     check(cfg.max_cache_length == 4096, "decoder: cache_length capped at 4096");
+}
+
+// -----------------------------------------------------------------------------
+// Intention: Verify parse_base_config does not provide a model-owned default.
+// Setup:     Config omits runtime_strategy.
+// Mechanism: Assert runtime_strategy stays empty; factory fallback is manifest-owned.
+// -----------------------------------------------------------------------------
+static void test_missing_runtime_strategy_stays_empty() {
+    const std::string config = R"({
+        "vocab_size": 32000,
+        "hidden_size": 1024,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 8
+    })";
+
+    const auto cfg = trtmc::parse_base_config(config, 128);
+    check(cfg.runtime_strategy.empty(), "base_config: missing runtime_strategy stays empty");
 }
 
 int main() {
@@ -196,6 +209,7 @@ int main() {
     test_decoder_tokenizer_config();
     test_decoder_cache_length_override();
     test_decoder_cache_length_cap();
+    test_missing_runtime_strategy_stays_empty();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

@@ -24,6 +24,14 @@ import argparse
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tests.e2e_harness.runtime_strategy_metadata import runtime_strategy_performance_mode  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -107,24 +115,6 @@ TECHNIQUE_PRIORITY_BY_MODE: dict[str, dict[str, list[str]]] = {
 
 # Backward-compatible default
 TECHNIQUE_PRIORITY = TECHNIQUE_PRIORITY_BY_MODE["decode"]
-
-# Pipeline type → mode mapping (same as sol_estimate.PIPELINE_MODES)
-PIPELINE_MODES: dict[str, str] = {
-    "decoder_kv_cache": "decode", "decoder_moe": "decode",
-    "ssm_recurrent": "decode", "rwkv_recurrent": "decode",
-    "hybrid_mamba_attention": "decode",
-    "diffusion_flux": "diffusion", "diffusion_wan": "diffusion",
-    "diffusion_zimage": "diffusion", "diffusion_pixart": "diffusion",
-    "speech_to_text": "enc_dec", "text_to_text": "enc_dec",
-    "vision_language": "enc_dec", "seq2seq": "enc_dec",
-    "encoder_only": "single_pass", "embedding": "single_pass",
-    "reranking": "single_pass", "segmentation": "single_pass",
-    "prompted_segmentation": "single_pass", "object_detection": "single_pass",
-    "neural_operator": "single_pass",
-    "text_to_audio_bark": "multi_stage", "text_to_audio_magpie": "multi_stage",
-    "speech_to_speech": "multi_stage", "omni_multimodal": "multi_stage",
-}
-
 
 # ---------------------------------------------------------------------------
 # Nsys-based classification
@@ -287,7 +277,7 @@ def classify_from_nsys(
         confidence = "high" if best_score >= 3 else "medium"
 
     # Build technique recommendations (mode-aware)
-    mode = PIPELINE_MODES.get(pipeline_type, "decode")
+    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     mode_priorities = TECHNIQUE_PRIORITY_BY_MODE.get(mode, TECHNIQUE_PRIORITY)
     techniques = []
     for tech_key in mode_priorities.get(classification, ["fp16"]):
@@ -361,7 +351,7 @@ def classify_from_l1(
         classification = best
         confidence = "high" if best_score >= 3 else "medium"
 
-    mode = PIPELINE_MODES.get(pipeline_type, "decode")
+    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     mode_priorities = TECHNIQUE_PRIORITY_BY_MODE.get(mode, TECHNIQUE_PRIORITY)
     techniques = []
     for tech_key in mode_priorities.get(classification, ["fp16"]):
@@ -465,8 +455,7 @@ def main():
     parser.add_argument("--l1-json",
                         help="Path to L1 CPU profile JSON")
     parser.add_argument("--pipeline-type", default="decoder_kv_cache",
-                        help="Runtime strategy (e.g., decoder_kv_cache, diffusion_flux, "
-                        "speech_to_text, encoder_only, text_to_audio_bark)")
+                        help="Runtime strategy declared in tests/runtime_strategy_matrix.yaml")
     parser.add_argument("--engine-section", default="all",
                         help="Which engine to analyze: 'all' (default), 'primary', "
                              "'secondary', or a specific CUDA graph ID number")

@@ -5,6 +5,7 @@
   "bundle": "internvl3-2b-tp2-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,

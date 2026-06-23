@@ -4,8 +4,16 @@
   "bundle": "albert-base.trtfb",
   "family": "albert",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 256,
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 0,
-  "notes": "ALBERT cross-layer sharing and embedding factorization; C++ Unigram tokenization must match HF lowercasing"
+  "notes": "ALBERT cross-layer sharing and embedding factorization; C++ Unigram tokenization must match HF lowercasing",
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

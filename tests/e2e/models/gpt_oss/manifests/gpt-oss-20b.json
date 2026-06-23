@@ -5,6 +5,9 @@
   "bundle": "gpt-oss-20b.trtfb",
   "family": "gpt_oss",
   "runtime_strategy": "decoder_moe",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "nightly_only",
   "l0_replacement": "gpt-oss-20b-l0",
@@ -12,5 +15,11 @@
   "max_cache_length": 256,
   "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
   "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": false,
+      "enable_thinking": false
+    }
+  }
 }

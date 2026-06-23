@@ -43,7 +43,7 @@ struct BaseConfig {
     int32_t max_cache_length{32};
     int32_t id_bos{-1};
     int32_t id_eos{-1};
-    std::string runtime_strategy{"decoder_kv_cache"};
+    std::string runtime_strategy;
     std::string precision{"fp32"};
     bool tokenizer_add_special_tokens{false};
     bool tokenizer_add_special_tokens_present{false};

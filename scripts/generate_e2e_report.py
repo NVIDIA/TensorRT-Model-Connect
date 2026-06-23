@@ -730,17 +730,15 @@ def _split_stage_component_label(prefix: str, key: str) -> Tuple[str, str]:
         candidate = "_".join(parts[:idx])
         if candidate in {
             "audio_encode",
-            "crossover_ref_t5_trt_dit",
-            "crossover_trt_t5_ref_dit",
             "debug_pipeline",
-            "dit_step",
             "full_generation",
             "full_inference",
             "end_to_end",
             "end_to_end_video",
             "frame_quality",
             "generate",
-            "t5_encode",
+            "denoising_step",
+            "text_encode",
             "talker_decode",
             "thinker_decode",
             "vae_decode",
@@ -1289,7 +1287,7 @@ def _render_missing_reference_audio_notice(stage_outputs: Dict[str, Any]) -> str
 
 
 def render_audio_model(result: Dict[str, Any]) -> str:
-    """Render detail section for an audio model (Whisper, Bark, etc.)."""
+    """Render detail section for an audio model."""
     art_dir = Path(result.get("_artifact_dir", ""))
     artifacts = result.get("artifacts", {})
     stage_outputs = result.get("stage_outputs", {})
@@ -1404,7 +1402,7 @@ def render_segmentation_model(
 
 
 def render_generic_model(result: Dict[str, Any]) -> str:
-    """Render detail section for generic models (BERT, embedding, etc.)."""
+    """Render detail section for generic embedding models."""
     cc = result.get("case_config", {})
     prompt = (cc.get("inputs") or {}).get("prompt", "")
     stage_outputs = result.get("stage_outputs", {})

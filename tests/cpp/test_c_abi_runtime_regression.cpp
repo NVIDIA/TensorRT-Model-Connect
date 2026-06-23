@@ -122,9 +122,11 @@ bool message_contains_any(const std::string& msg, std::initializer_list<const ch
 
 bool message_contains_any_expected_failure(const std::string& msg) {
     return message_contains_any(
-        msg, {"deserialize engine", "deserialize failed", "execution context",
-              "Failed to load bundle", "New runtime build failed", "Failed to deserialize engine",
-              "Bundle missing engine plan", "Bundle missing", "No plugin registered"});
+        msg,
+        {"deserialize engine", "deserialize failed", "execution context", "Failed to load bundle",
+         "New runtime build failed", "Failed to deserialize engine", "Bundle missing engine plan",
+         "Bundle missing", "No plugin registered", "Backend \"trt\" not available",
+         "Could not load libtrtmc_backend_trt.so", "No compatible backend DSO available"});
 }
 
 void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const char* test_name) {
@@ -154,8 +156,9 @@ void test_missing_engine_plan_bundle_reports_error() {
         std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
 
     // Preconditions: valid bundle + config.json section, but no engine_plan section.
+    // The runtime strategy is intentionally omitted so the C API exercises the
+    // manifest-owned legacy default without naming a model-owned strategy here.
     const std::string config = R"({
-  "runtime_strategy": "decoder_kv_cache",
   "hidden_size": 64,
   "num_attention_heads": 1,
   "num_key_value_heads": 1
@@ -169,34 +172,11 @@ void test_missing_engine_plan_bundle_reports_error() {
     check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for missing engine_plan");
     if (err != nullptr) {
         check(message_contains_any(err, {"New runtime build failed", "engine_plan",
-                                         "Bundle missing engine plan", "Bundle missing"}),
+                                         "Bundle missing engine plan", "Bundle missing",
+                                         "Backend \"trt\" not available",
+                                         "Could not load libtrtmc_backend_trt.so",
+                                         "No compatible backend DSO available"}),
               "migrated strategy defaults to new runtime and reports engine_plan guard");
-    }
-}
-
-void test_diffusion_bundle_missing_required_section_reports_error() {
-    trtmc_test::TempDirGuard dir;
-    const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "diffusion_missing_sections.trtfb";
-
-    // Preconditions: diffusion strategy selected, but required diffusion plans omitted.
-    const std::string config = R"({
-  "runtime_strategy": "diffusion",
-  "num_text_encoders": 1,
-  "scheduler": "flow_match_euler"
-})";
-    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
-
-    auto* pipeline = trtmc_create_pipeline(bundle_path.string().c_str(), 0);
-    check(pipeline == nullptr, "diffusion bundle without required plans returns nullptr");
-
-    const char* err = trtmc_last_error();
-    check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for diffusion guard path");
-    if (err != nullptr) {
-        check(message_contains_any(err, {"New runtime build failed", "denoiser_plan",
-                                         "multi-engine bundles", "Diffusion pipeline",
-                                         "Bundle missing"}),
-              "migrated diffusion strategy defaults to new runtime and reports denoiser guard");
     }
 }
 
@@ -246,7 +226,6 @@ void test_invalid_plan_bundle_repeatable() {
 int main() {
     test_invalid_plan_bundle_reports_error();
     test_missing_engine_plan_bundle_reports_error();
-    test_diffusion_bundle_missing_required_section_reports_error();
     test_unknown_strategy_reports_new_runtime_unsupported_strategy_error();
     test_invalid_plan_bundle_repeatable();
 

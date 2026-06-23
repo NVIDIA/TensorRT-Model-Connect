@@ -95,6 +95,12 @@ class ContractTestPlugin(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def contract_config(case: E2ECase) -> Dict[str, Any]:
+    """Return model-owned contract configuration for shared plugins."""
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
+
+
 def normalize_text(text: str) -> str:
     """Lightweight text normalization: collapse whitespace, lowercase, strip."""
     if not text:

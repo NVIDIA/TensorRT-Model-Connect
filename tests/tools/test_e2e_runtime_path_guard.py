@@ -8,10 +8,15 @@ Postconditions: New runtime markers pass validation; legacy runtime markers trig
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput
 from tests.e2e_harness.orchestrator import _validate_trt_runtime_path
+from tests.e2e_harness.runtime_strategy_metadata import (
+    runtime_strategy_performance_mode,
+    runtime_strategy_requires_new_runtime_guard,
+)
 
 
 def _make_case(strategy: str) -> E2ECase:
@@ -35,6 +40,31 @@ def _make_ctx(tmp_path: Path) -> RunContext:
     )
 
 
+def _write_runtime_matrix(tmp_path: Path) -> Path:
+    matrix = tmp_path / "runtime_strategy_matrix.json"
+    matrix.write_text(
+        json.dumps({
+            "new_runtime_guard_strategies": ["unit_new_runtime"],
+            "runtime_strategies": {
+                "unit_new_runtime": {
+                    "task_strategy": "text_generation_causal",
+                },
+                "unit_diffusion_runtime": {
+                    "task_strategy": "diffusion_media_generation",
+                },
+                "unit_enc_dec_runtime": {
+                    "task_strategy": "speech_to_text",
+                },
+                "unit_multistage_runtime": {
+                    "task_strategy": "text_to_audio",
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    return matrix
+
+
 def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) -> None:
     case = _make_case("decoder_kv_cache")
     ctx = _make_ctx(tmp_path)
@@ -47,6 +77,21 @@ def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) ->
     )
 
     assert _validate_trt_runtime_path(case, ctx, output) is None
+
+
+def test_runtime_guard_strategy_ownership_is_declarative(tmp_path: Path) -> None:
+    matrix = _write_runtime_matrix(tmp_path)
+    assert runtime_strategy_requires_new_runtime_guard("unit_new_runtime", matrix)
+    assert not runtime_strategy_requires_new_runtime_guard("future_unknown_strategy", matrix)
+
+
+def test_runtime_strategy_performance_mode_comes_from_metadata(tmp_path: Path) -> None:
+    matrix = _write_runtime_matrix(tmp_path)
+    assert runtime_strategy_performance_mode("unit_new_runtime", matrix) == "decode"
+    assert runtime_strategy_performance_mode("unit_diffusion_runtime", matrix) == "diffusion"
+    assert runtime_strategy_performance_mode("unit_enc_dec_runtime", matrix) == "enc_dec"
+    assert runtime_strategy_performance_mode("unit_multistage_runtime", matrix) == "multi_stage"
+    assert runtime_strategy_performance_mode("future_unknown_strategy", matrix) == "decode"
 
 
 def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:

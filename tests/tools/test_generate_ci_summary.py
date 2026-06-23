@@ -21,7 +21,7 @@ def _result(name: str, status: str = "pass") -> dict:
         "status": status,
         "failure_type": "compare_fail" if status == "fail" else None,
         "case_config": {
-            "family": "qwen",
+            "family": "example_decoder",
             "task_strategy": "text_generation_causal",
         },
         "stages": {
@@ -104,12 +104,12 @@ def test_summary_adds_junit_only_skips(tmp_path: Path) -> None:
     mod = _import_summary()
     e2e_root = tmp_path / "e2e_artifacts"
     artifacts_dir = e2e_root / "artifacts"
-    _write_result(artifacts_dir, "qwen3-0.6b", "pass")
+    _write_result(artifacts_dir, "example-decoder", "pass")
     _write_junit(
         e2e_root,
         """
-        <testcase classname="tests.test_e2e" name="test_e2e[qwen3-0.6b]" />
-        <testcase classname="tests.test_e2e" name="test_e2e[gemma-2-2b]">
+        <testcase classname="tests.test_e2e" name="test_e2e[example-decoder]" />
+        <testcase classname="tests.test_e2e" name="test_e2e[decoder-gated]">
           <skipped type="pytest.skip" message="(gated model, needs HF_TOKEN)" />
         </testcase>
         """,
@@ -133,7 +133,7 @@ def test_summary_adds_junit_only_skips(tmp_path: Path) -> None:
 
     assert "| skip | 1 |" in summary
     assert "| pass | 1 |" in summary
-    assert "| gemma-2-2b |  |  | skip |  |  |" in summary
+    assert "| decoder-gated |  |  | skip |  |  |" in summary
     assert "SKIPPED: gated model, needs HF_TOKEN" in summary
 
 
@@ -141,10 +141,10 @@ def test_summary_surfaces_xpass_from_console_logs(tmp_path: Path) -> None:
     mod = _import_summary()
     e2e_root = tmp_path / "e2e_artifacts"
     artifacts_dir = e2e_root / "artifacts"
-    _write_result(artifacts_dir, "z-image-turbo", "pass")
+    _write_result(artifacts_dir, "image-diffusion-xpass", "pass")
     e2e_root.mkdir(parents=True, exist_ok=True)
     (e2e_root / "console-gpu0-shared-w0.log").write_text(
-        "tests/test_e2e.py::test_e2e[z-image-turbo] "
+        "tests/test_e2e.py::test_e2e[image-diffusion-xpass] "
         "XPASS ((HF diffusion reference quality should be gated)) [100%]\n",
         encoding="utf-8",
     )
@@ -164,7 +164,7 @@ def test_summary_surfaces_xpass_from_console_logs(tmp_path: Path) -> None:
     )
 
     assert "### Pytest Waive Outcomes" in summary
-    assert "| z-image-turbo | XPASS | pass | HF diffusion reference quality should be gated |" in summary
+    assert "| image-diffusion-xpass | XPASS | pass | HF diffusion reference quality should be gated |" in summary
 
 
 def test_summary_treats_xfail_result_as_waived_not_active_failure(
@@ -173,11 +173,11 @@ def test_summary_treats_xfail_result_as_waived_not_active_failure(
     mod = _import_summary()
     e2e_root = tmp_path / "e2e_artifacts"
     artifacts_dir = e2e_root / "artifacts"
-    _write_result(artifacts_dir, "fnet-base", "fail")
+    _write_result(artifacts_dir, "encoder-base", "fail")
     _write_junit(
         e2e_root,
         """
-        <testcase classname="tests.test_e2e" name="test_e2e[fnet-base]">
+        <testcase classname="tests.test_e2e" name="test_e2e[encoder-base]">
           <skipped type="pytest.xfail" message="(known representation parity gap)" />
         </testcase>
         """,
@@ -199,4 +199,4 @@ def test_summary_treats_xfail_result_as_waived_not_active_failure(
 
     assert "| skip | 1 |" in summary
     assert "### Failures" not in summary
-    assert "| fnet-base | XFAIL | skip | known representation parity gap |" in summary
+    assert "| encoder-base | XFAIL | skip | known representation parity gap |" in summary

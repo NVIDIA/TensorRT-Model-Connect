@@ -4,9 +4,10 @@
 // Trace ID:       UT-TOK-CPP-04
 // Architecture:   ARCH-TOK-001
 // Unit Design:    UD-TOK-01
-// Intent:         BPE tokenizer performance: init time, encode/decode latency, throughput, round-trip
-// Preconditions:  Built-in small vocab or external tokenizer.json via TOKENIZER_JSON env var
-// Postconditions: Encode/decode execute within measured latency; round-trip verified for real vocabs
+// Intent:         BPE tokenizer performance: init time, encode/decode latency, throughput,
+// round-trip Preconditions:  Built-in small vocab or external tokenizer.json via TOKENIZER_JSON env
+// var Postconditions: Encode/decode execute within measured latency; round-trip verified for real
+// vocabs
 // =============================================================================
 
 // BPE Tokenizer performance benchmark.
@@ -68,17 +69,15 @@ const char* kBuiltinJson = R"({
   }
 })";
 
-std::string read_file(const std::string& path)
-{
+std::string read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) return "";
-    return std::string(std::istreambuf_iterator<char>(f),
-                       std::istreambuf_iterator<char>());
+    if (!f)
+        return "";
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 }
 
 // Test strings of varying length
-std::vector<std::string> make_test_strings()
-{
+std::vector<std::string> make_test_strings() {
     return {
         // Short (1-5 words)
         "hello",
@@ -100,7 +99,7 @@ std::vector<std::string> make_test_strings()
         // Very long (~1500 chars)
         "The Transformer architecture was introduced in 2017 by Vaswani et al. "
         "in the paper Attention Is All You Need. It has since become the "
-        "foundation for modern language models including GPT, BERT, and LLaMA. "
+        "foundation for modern language models including GPT, encoder, and SentencePiece. "
         "These models have revolutionized natural language processing and enabled "
         "applications like machine translation, text generation, and question "
         "answering. The key innovation is the self-attention mechanism which "
@@ -133,32 +132,25 @@ struct BenchResult {
     int iterations;
 };
 
-void print_results(const std::vector<BenchResult>& results)
-{
+void print_results(const std::vector<BenchResult>& results) {
     std::cerr << "\n" << std::string(75, '=') << "\n";
-    std::cerr << std::left << std::setw(35) << "Benchmark"
-              << std::right << std::setw(10) << "Mean(us)"
-              << std::setw(10) << "Min(us)"
-              << std::setw(10) << "Max(us)"
+    std::cerr << std::left << std::setw(35) << "Benchmark" << std::right << std::setw(10)
+              << "Mean(us)" << std::setw(10) << "Min(us)" << std::setw(10) << "Max(us)"
               << std::setw(10) << "Iters"
               << "\n";
     std::cerr << std::string(75, '-') << "\n";
 
     for (const auto& r : results) {
-        std::cerr << std::left << std::setw(35) << r.label
-                  << std::right << std::setw(10) << std::fixed << std::setprecision(1) << r.mean_us
-                  << std::setw(10) << r.min_us
-                  << std::setw(10) << r.max_us
-                  << std::setw(10) << r.iterations
-                  << "\n";
+        std::cerr << std::left << std::setw(35) << r.label << std::right << std::setw(10)
+                  << std::fixed << std::setprecision(1) << r.mean_us << std::setw(10) << r.min_us
+                  << std::setw(10) << r.max_us << std::setw(10) << r.iterations << "\n";
     }
     std::cerr << std::string(75, '=') << "\n";
 }
 
 } // namespace
 
-int main()
-{
+int main() {
     std::cerr << "BPE Tokenizer Performance Benchmark\n\n";
 
     // Load tokenizer JSON
@@ -170,8 +162,8 @@ int main()
             std::cerr << "ERROR: cannot read " << json_path << "\n";
             return 1;
         }
-        std::cerr << "Using real tokenizer: " << json_path
-                  << " (" << json_data.size() / 1024 << " KB)\n";
+        std::cerr << "Using real tokenizer: " << json_path << " (" << json_data.size() / 1024
+                  << " KB)\n";
     } else {
         json_data = kBuiltinJson;
         std::cerr << "Using built-in small vocab (set TOKENIZER_JSON for real benchmark)\n";
@@ -231,8 +223,8 @@ int main()
             double mn = *std::min_element(times.begin(), times.end());
             double mx = *std::max_element(times.begin(), times.end());
 
-            std::string label = "Encode (" + std::to_string(text.size()) + " chars, "
-                + std::to_string(total_tokens / N) + " toks)";
+            std::string label = "Encode (" + std::to_string(text.size()) + " chars, " +
+                                std::to_string(total_tokens / N) + " toks)";
             results.push_back({label, mean, mn, mx, N});
         }
     }
@@ -282,16 +274,17 @@ int main()
                 ++total_calls;
             }
             auto elapsed = std::chrono::duration_cast<Ms>(Clock::now() - t0).count();
-            if (elapsed >= 1000) break;
+            if (elapsed >= 1000)
+                break;
         }
         auto t1 = Clock::now();
         double elapsed_s = std::chrono::duration_cast<Us>(t1 - t0).count() / 1e6;
         double toks_per_sec = total_tokens / elapsed_s;
 
-        std::cerr << "\nThroughput: " << std::fixed << std::setprecision(0)
-                  << toks_per_sec << " tokens/sec"
-                  << " (" << total_calls << " calls in "
-                  << std::setprecision(2) << elapsed_s << "s)\n";
+        std::cerr << "\nThroughput: " << std::fixed << std::setprecision(0) << toks_per_sec
+                  << " tokens/sec"
+                  << " (" << total_calls << " calls in " << std::setprecision(2) << elapsed_s
+                  << "s)\n";
     }
 
     print_results(results);
@@ -310,13 +303,14 @@ int main()
                 ++warn;
                 if (json_path) {
                     // Real vocab: round-trip failure is an error
-                    std::cerr << "ROUND-TRIP FAIL: '" << text.substr(0, 40)
-                              << "' -> '" << decoded.substr(0, 40) << "'\n";
+                    std::cerr << "ROUND-TRIP FAIL: '" << text.substr(0, 40) << "' -> '"
+                              << decoded.substr(0, 40) << "'\n";
                 }
             }
         }
         std::cerr << "\nRound-trip: " << pass << " pass, " << warn << " warn\n";
-        if (warn > 0 && json_path) return 1; // Only fail with real vocab
+        if (warn > 0 && json_path)
+            return 1; // Only fail with real vocab
     }
 
     std::cerr << "\nBenchmark complete.\n";

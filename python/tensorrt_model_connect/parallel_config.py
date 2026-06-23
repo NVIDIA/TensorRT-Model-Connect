@@ -147,23 +147,6 @@ def validate_dit_tp(
             f"{feature} requires FFN size divisible by tp_size ({ffn_dim} vs {tp})")
 
 
-def validate_flux_dit_tp(
-    *,
-    dim: int,
-    num_heads: int,
-    ffn_dim: int,
-    parallel: ParallelConfig,
-) -> None:
-    """Validate FLUX.1 DiT tensor-parallel dimensions."""
-    validate_dit_tp(
-        dim=dim,
-        num_heads=num_heads,
-        ffn_dim=ffn_dim,
-        parallel=parallel,
-        feature="Flux tensor parallel",
-    )
-
-
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
     parts = np.array_split(arr, tp_size, axis=-1)
     return np.ascontiguousarray(parts[rank])

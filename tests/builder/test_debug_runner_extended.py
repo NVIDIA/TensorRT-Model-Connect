@@ -1,6 +1,6 @@
 """Extended unit tests for tensorrt_model_connect.debug_runner — bundle section utilities,
-runner cleanup for RwkvTrtRunner / WhisperTrtRunner / VisionTrtRunner /
-SegmentationTrtRunner, VLTrtRunner config loading, image preprocessing dispatch,
+runner cleanup for shared vision/segmentation runners, VLTrtRunner config loading,
+image preprocessing dispatch,
 and generate() sequencing.
 
 Mock-based where possible (no TRT/GPU needed). TRT-requiring tests are marked
@@ -126,9 +126,9 @@ class TestLoadConfigFromBundleExtended:
         from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         config_data = json.dumps({
-            "model_type": "llama",
+            "model_type": "example_decoder",
             "hidden_size": 256,
-            "eos_token_id": [2, 151645],
+            "eos_token_id": [2, 3],
             "nested": {"a": 1, "b": [2, 3]},
         }).encode("utf-8")
 
@@ -143,9 +143,9 @@ class TestLoadConfigFromBundleExtended:
         path.write_bytes(bundle)
 
         cfg = load_config_from_bundle(str(path))
-        assert cfg["model_type"] == "llama"
+        assert cfg["model_type"] == "example_decoder"
         assert cfg["hidden_size"] == 256
-        assert cfg["eos_token_id"] == [2, 151645]
+        assert cfg["eos_token_id"] == [2, 3]
         assert cfg["nested"]["a"] == 1
         assert cfg["nested"]["b"] == [2, 3]
 
@@ -210,7 +210,7 @@ class TestMultiSectionBundle:
 
     def _build_multi_section_bundle(self, tmp_path):
         """Build a bundle with engine_plan + config.json + tokenizer.json."""
-        config_data = json.dumps({"model_type": "gpt2"}).encode("utf-8")
+        config_data = json.dumps({"model_type": "example_decoder"}).encode("utf-8")
         tokenizer_data = json.dumps({"tokens": ["a", "b"]}).encode("utf-8")
 
         header = {"num_layers": 4, "max_cache_length": 128}
@@ -242,7 +242,7 @@ class TestMultiSectionBundle:
 
         path, _, _, _ = self._build_multi_section_bundle(tmp_path)
         cfg = load_config_from_bundle(path)
-        assert cfg["model_type"] == "gpt2"
+        assert cfg["model_type"] == "example_decoder"
 
     def test_arbitrary_section_extracted(self, tmp_path):
         """load_section_from_bundle can extract tokenizer.json from bundle."""
@@ -278,126 +278,6 @@ class TestLoadSectionInvalidBundle:
 
         with pytest.raises(ValueError, match="Not a valid .trtfb bundle"):
             load_section_from_bundle(str(path), "engine_plan")
-
-
-# ---------------------------------------------------------------------------
-# RwkvTrtRunner.__del__ cleanup
-# ---------------------------------------------------------------------------
-
-class TestRwkvTrtRunnerCleanup:
-    """Verify RwkvTrtRunner.__del__ frees device buffers and stream."""
-
-    def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
-
-        runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
-        runner.num_layers = 1
-        runner.hidden_size = 4
-        runner._d_token_id = 100
-        runner._d_logits = 101
-        runner._d_attn = [200]
-        runner._d_ff = [201]
-        runner._d_num = [202]
-        runner._d_den = [203]
-        runner._d_max = [204]
-        runner._d_p_attn = [300]
-        runner._d_p_ff = [301]
-        runner._d_p_num = [302]
-        runner._d_p_den = [303]
-        runner._d_p_max = [304]
-        runner._d_debug = {}
-        runner.stream = 7777
-
-        mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.__del__()
-            # Prevent GC from calling __del__ again with real cudart
-            del runner._d_logits
-            runner.stream = None
-
-        freed = [c.args[0] for c in mock_cudart.cudaFree.call_args_list]
-        expected = [100, 101, 200, 201, 202, 203, 204, 300, 301, 302, 303, 304]
-        assert sorted(freed) == sorted(expected)
-        mock_cudart.cudaStreamDestroy.assert_called_once_with(7777)
-
-    def test_del_with_debug_buffers(self):
-        """Debug output buffers are also freed."""
-        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
-
-        runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
-        runner.num_layers = 1
-        runner.hidden_size = 4
-        runner._d_token_id = 100
-        runner._d_logits = 101
-        runner._d_attn = [200]
-        runner._d_ff = [201]
-        runner._d_num = [202]
-        runner._d_den = [203]
-        runner._d_max = [204]
-        runner._d_p_attn = [300]
-        runner._d_p_ff = [301]
-        runner._d_p_num = [302]
-        runner._d_p_den = [303]
-        runner._d_p_max = [304]
-        runner._d_debug = {"debug_hidden_0": 500}
-        runner.stream = 7777
-
-        mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.__del__()
-            del runner._d_logits
-
-        freed = [c.args[0] for c in mock_cudart.cudaFree.call_args_list]
-        assert 500 in freed
-
-    def test_del_noop_before_init(self):
-        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
-
-        runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
-        runner.__del__()  # Should not raise
-
-
-# ---------------------------------------------------------------------------
-# WhisperTrtRunner.__del__ cleanup
-# ---------------------------------------------------------------------------
-
-class TestWhisperTrtRunnerCleanup:
-    """Verify WhisperTrtRunner.__del__ frees device buffers and stream."""
-
-    def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
-
-        runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
-        runner.num_layers = 1
-        runner._d_token_id = 10
-        runner._d_position_id = 11
-        runner._d_mask = 12
-        runner._d_logits = 13
-        runner._d_mel = 14
-        runner._d_enc_out = 15
-        runner._d_cache_k = [20]
-        runner._d_cache_v = [21]
-        runner._d_present_k = [30]
-        runner._d_present_v = [31]
-        runner._d_cross_k = [40]
-        runner._d_cross_v = [41]
-        runner.stream = 5555
-
-        mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.__del__()
-            del runner._d_logits
-
-        freed = [c.args[0] for c in mock_cudart.cudaFree.call_args_list]
-        expected = [10, 11, 12, 13, 14, 15, 20, 21, 30, 31, 40, 41]
-        assert sorted(freed) == sorted(expected)
-        mock_cudart.cudaStreamDestroy.assert_called_once_with(5555)
-
-    def test_del_noop_before_init(self):
-        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
-
-        runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
-        runner.__del__()  # Should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -538,69 +418,6 @@ class TestTrtRunnerGenerate:
 
 
 # ---------------------------------------------------------------------------
-# MambaTrtRunner.generate() sequencing (mock step)
-# ---------------------------------------------------------------------------
-
-class TestMambaTrtRunnerGenerate:
-    """Verify MambaTrtRunner.generate() calls step() correctly."""
-
-    def test_generate_calls_step_in_order(self):
-        from tensorrt_model_connect.debug_runner import MambaTrtRunner
-
-        runner = MambaTrtRunner.__new__(MambaTrtRunner)
-        call_log = []
-
-        def mock_step(token_id):
-            call_log.append(token_id)
-            logits = np.zeros((1, 16), dtype=np.float32)
-            logits[0, 7] = 5.0  # argmax = 7
-            return {"logits": logits}
-
-        runner.step = mock_step
-
-        results = runner.generate([10, 20], max_new_tokens=3)
-        assert len(results) == 5  # 2 prefill + 3 decode
-        assert call_log[:2] == [10, 20]
-        assert call_log[2:] == [7, 7, 7]
-
-
-# ---------------------------------------------------------------------------
-# RwkvTrtRunner.reset() device-side
-# ---------------------------------------------------------------------------
-
-class TestRwkvStateReset:
-    """Test that RwkvTrtRunner.reset() calls memset/memcpy for all states."""
-
-    def test_reset_zeros_four_states_and_sets_max_neg_inf(self):
-        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
-
-        runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
-        runner.num_layers = 2
-        runner.hidden_size = 4
-        runner._d_attn = [100, 101]
-        runner._d_ff = [200, 201]
-        runner._d_num = [300, 301]
-        runner._d_den = [400, 401]
-        runner._d_max = [500, 501]
-        runner.stream = MagicMock()
-        runner._d_logits = None  # Prevent __del__ from crashing
-
-        mock_cudart = MagicMock()
-        success = mock_cudart.cudaError_t.cudaSuccess
-        mock_cudart.cudaMemsetAsync.return_value = (success,)
-        mock_cudart.cudaMemcpyKind.cudaMemcpyHostToDevice = 1
-
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.reset()
-
-        # 4 states x 2 layers = 8 cudaMemsetAsync calls
-        assert mock_cudart.cudaMemsetAsync.call_count == 8
-        # 1 max_state x 2 layers = 2 cudaMemcpyAsync calls (for -1e38 init)
-        assert mock_cudart.cudaMemcpyAsync.call_count == 2
-        mock_cudart.cudaStreamSynchronize.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
 # preprocess_image_for_trt dispatch
 # ---------------------------------------------------------------------------
 
@@ -609,7 +426,7 @@ class TestPreprocessImageDispatch:
 
     def test_unknown_type_warns_and_falls_back(self, tmp_path):
         """Unknown preprocessor_type emits a warning and falls back to
-        qwen_merge_group."""
+        merge_group_chw."""
         from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         # Create a tiny test image
@@ -667,8 +484,8 @@ class TestPreprocessImageDispatch:
         # 3 channels * 2 temporal = 6 channels
         assert result.shape == (6, 28, 28)
 
-    def test_locateanything_patchify_inputs(self, tmp_path):
-        """locateanything_patchify returns pixel_values and image_grid_hws."""
+    def test_patchify_chw_inputs(self, tmp_path):
+        """patchify_chw returns pixel_values and image_grid_hws."""
         from tensorrt_model_connect.debug_runner import (
             preprocess_image_for_trt,
             preprocess_image_inputs_for_trt,
@@ -681,7 +498,7 @@ class TestPreprocessImageDispatch:
 
         inputs = preprocess_image_inputs_for_trt(
             img_path,
-            preprocessor_type="locateanything_patchify",
+            preprocessor_type="patchify_chw",
             fixed_image_size=4,
             patch_size=2,
             image_mean=(0.0, 0.0, 0.0),
@@ -695,7 +512,7 @@ class TestPreprocessImageDispatch:
         assert inputs["image_grid_hws"].tolist() == [[2, 2]]
         assert preprocess_image_for_trt(
             img_path,
-            preprocessor_type="locateanything_patchify",
+            preprocessor_type="patchify_chw",
             fixed_image_size=4,
             patch_size=2,
             image_mean=(0.0, 0.0, 0.0),
@@ -818,13 +635,13 @@ class TestVLTrtRunnerConfigLoading:
         from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         config = {
-            "image_token_id": 151655,
+            "image_token_id": 42001,
             "num_image_pad_tokens": 512,
-            "vl_prompt_template": "<|im_start|>user\n{image_pads}{prompt}<|im_end|>",
-            "image_token_str": "<|image_pad|>",
+            "vl_prompt_template": "USER:{image_pads} {prompt}",
+            "image_token_str": "IMG",
             "fixed_image_size": 224,
             "preprocessor_type": "simple_chw",
-            "eos_token_id": [151643, 151645],
+            "eos_token_id": [2, 3],
         }
         preproc = {
             "temporal_patch_size": 1,
@@ -840,7 +657,7 @@ class TestVLTrtRunnerConfigLoading:
              patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(path)
 
-        assert runner.image_token_id == 151655
+        assert runner.image_token_id == 42001
         assert runner.num_image_pad_tokens == 512
         assert runner.fixed_image_size == 224
         assert runner.preprocessor_type == "simple_chw"
@@ -883,7 +700,7 @@ class TestVLTrtRunnerConfigLoading:
         assert runner.vl_prompt_template == ""
         assert runner.image_token_str == ""
         assert runner.fixed_image_size == 448
-        assert runner.preprocessor_type == "qwen_merge_group"
+        assert runner.preprocessor_type == "merge_group_chw"
         assert runner.temporal_patch_size == 2
         assert runner.patch_size == 14
 
@@ -986,60 +803,6 @@ class TestTrtRunnerCleanupExtended:
         assert 7001 in freed, "deepstack_embed_1 not freed"
         assert 7002 in freed, "deepstack_active not freed"
         assert 8000 in freed, "debug output not freed"
-
-
-# ---------------------------------------------------------------------------
-# WhisperTrtRunner.generate() sequencing
-# ---------------------------------------------------------------------------
-
-class TestWhisperTrtRunnerGenerate:
-    """Verify WhisperTrtRunner.generate() calls step() correctly."""
-
-    def test_generate_prefill_then_decode(self):
-        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
-
-        runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
-        call_log = []
-
-        def mock_step(token_id):
-            call_log.append(token_id)
-            logits = np.zeros((1, 32), dtype=np.float32)
-            logits[0, 9] = 10.0  # argmax = 9
-            return {"logits": logits}
-
-        runner.step = mock_step
-        results = runner.generate([50258, 50259], max_new_tokens=3)
-
-        assert len(results) == 5  # 2 prefill + 3 decode
-        assert call_log[:2] == [50258, 50259]
-        assert call_log[2:] == [9, 9, 9]
-
-
-# ---------------------------------------------------------------------------
-# RwkvTrtRunner.generate() sequencing
-# ---------------------------------------------------------------------------
-
-class TestRwkvTrtRunnerGenerate:
-    """Verify RwkvTrtRunner.generate() calls step() correctly."""
-
-    def test_generate_prefill_then_decode(self):
-        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
-
-        runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
-        call_log = []
-
-        def mock_step(token_id):
-            call_log.append(token_id)
-            logits = np.zeros((1, 20), dtype=np.float32)
-            logits[0, 3] = 8.0
-            return {"logits": logits}
-
-        runner.step = mock_step
-        results = runner.generate([1, 2, 3], max_new_tokens=2)
-
-        assert len(results) == 5  # 3 prefill + 2 decode
-        assert call_log[:3] == [1, 2, 3]
-        assert call_log[3:] == [3, 3]
 
 
 # ---------------------------------------------------------------------------

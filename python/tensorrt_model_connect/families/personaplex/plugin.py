@@ -19,7 +19,7 @@ Bring-up CLI reference (used for PersonaPlex TRT/C++ iteration):
   docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && .venv/bin/python <inline script calling _build_mimi_decoder_engine(..., num_input_codebooks=8, num_frames=320) and replacing mimi_decoder_plan in an existing .trtfb>'
 
   # Run speech inference (long-form test using tail frame extension)
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && ./build/trtmc speak /tmp/trtmc-ci/engines/personaplex-7b-ropefix2-dec320.trtfb --audio-in tests/e2e/data/Recording.wav --audio-out /workspace/tensorrt-model-connect/personaplex_recording_ropefix2_dec320_tail300_max1000.wav --max-new-tokens 1000 --tail-frames 300'
+  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && ./build/trtmc speak /tmp/trtmc-ci/engines/personaplex-7b-ropefix2-dec320.trtfb --audio-in tests/e2e/models/personaplex/data/Recording.wav --audio-out /workspace/tensorrt-model-connect/personaplex_recording_ropefix2_dec320_tail300_max1000.wav --max-new-tokens 1000 --tail-frames 300'
 
 Real weight key structure (nvidia/personaplex-7b-v1):
   Temporal Transformer (32 layers, hidden=4096):

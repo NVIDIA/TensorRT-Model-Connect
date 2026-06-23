@@ -81,11 +81,11 @@ def build_standard_decoder_engine(
             or "alibi" (attention with linear biases, no position embeddings).
         activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu", "relu2").
         partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
-        interleaved_rope: If True, use interleaved RoPE (CodeGen/GPT-J) where
+        interleaved_rope: If True, use interleaved RoPE where
             adjacent dims (d, d+1) share frequencies. Default False uses
-            rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
+            rotated-half layout where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
-            Most models use this (True, default). GPT-Neo does NOT scale (False).
+            Most models use this (True, default); some architectures do not.
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -112,9 +112,9 @@ def build_standard_decoder_engine(
     # The legacy single-profile graph below stays in place for paths the
     # dual-profile builder does not yet cover:
     #
-    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
+    #   - embed_input=True             (prefill replacement and embedded-input sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
-    #   - hidden_state_output=True     (speech / Bark hidden output)
+    #   - hidden_state_output=True     (hidden output sub-engines)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
     #
     # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
@@ -382,7 +382,7 @@ def build_standard_decoder_engine(
     if hidden_state.dtype != work_trt_dtype:
         hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 
-    # Optional embedding LayerNorm (e.g. BLOOM) — use native INormalizationLayer
+    # Optional embedding LayerNorm — use native INormalizationLayer
     embed_norm = weights.get("embedding_norm")
     if embed_norm is not None:
         embed_norm_beta = weights.get("embedding_norm_beta")
@@ -472,13 +472,13 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     # LM head (logits)
     # ---------------------------------------------------------------
-    # Output vocab may differ from input vocab (e.g. Bark semantic: 129600 in, 10048 out).
+    # Output vocab may differ from input vocab for decoder sub-engines.
     # Derive from w_out shape if available.
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, out_vocab, weights["w_out"],
         dtype=work_np_dtype)
-    # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
+    # LM head bias if present, or zero bias for C++ parity.
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias,

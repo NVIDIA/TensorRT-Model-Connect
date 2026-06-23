@@ -5,6 +5,7 @@
   "bundle": "locateanything-3b.trtfb",
   "family": "locateanything",
   "runtime_strategy": "vision_language",
+  "task_strategy": "vision_language_generation",
   "ci_tier": "l0_only",
   "max_cache_length": 384,
   "prompt": "Find the red vehicle in this image.",

@@ -1,6 +1,7 @@
 id = "qwen"
 plugin = "qwen"
 module = "plugin"
+capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 aliases = [
   "qwen",
   "Qwen2",

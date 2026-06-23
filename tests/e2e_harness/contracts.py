@@ -7,8 +7,7 @@ It contains only stdlib imports (dataclasses, enum, typing) and defines:
   StageOutput, CompareResult, E2EResult, RunContext
 - Enums: FailureType, OracleLevel, E2EStatus
 - Protocols: TaskStrategyRunner, ReferenceBackendRunner, Comparator,
-  ArtifactSink, DeterminismPolicy
-- Constants: RUNTIME_TO_TASK_STRATEGY mapping
+  ReproCommandProvider, ArtifactSink, DeterminismPolicy
 
 The orchestrator imports ONLY these types and protocols. Concrete
 implementations live in strategy runners, reference backends, and comparators.
@@ -83,10 +82,7 @@ class ReferenceFamily(enum.Enum):
     CAUSAL_BASE_CONTINUATION = "causal_base_continuation"
     CODE_BASE_COMPLETION = "code_base_completion"
     CHAT_INSTRUCT_TEMPLATE = "chat_instruct_template"
-    CHAT_QWEN3_POSTTRAINED = "chat_qwen3_posttrained"
-    MULTIMODAL_CHAT_QWEN35 = "multimodal_chat_qwen35"
     TRANSLATION_CHAT_TEMPLATE = "translation_chat_template"
-    NEMOTRON_LABS_DIFFUSION_MODEL_CARD = "nemotron_labs_diffusion_model_card"
 
     # --- Seq2seq ---
     SEQ2SEQ_TEXT2TEXT = "seq2seq_text2text"
@@ -95,7 +91,6 @@ class ReferenceFamily(enum.Enum):
 
     # --- Encoder / embedding / rerank ---
     ENCODER_BASE_FEATURES = "encoder_base_features"
-    DPR_CONTEXT_EMBED = "dpr_context_embed"
     SENTENCE_TRANSFORMER_EMBED = "sentence_transformer_embed"
     BGE_RETRIEVAL_EMBED = "bge_retrieval_embed"
     VL_EMBED_RETRIEVAL = "vl_embed_retrieval"
@@ -106,16 +101,9 @@ class ReferenceFamily(enum.Enum):
     OCR_MARKDOWN = "ocr_markdown"
 
     # --- Speech / audio ---
-    ASR_WHISPER = "asr_whisper"
-    ASR_CANARY = "asr_canary"
-    TTS_BARK = "tts_bark"
-    TTS_MAGPIE = "tts_magpie"
-    S2S_PERSONAPLEX = "s2s_personaplex"
 
     # --- Segmentation ---
-    SEGMENTATION_SEGFORMER = "segmentation_segformer"
-    PROMPTED_SEGMENTATION_SAM = "prompted_segmentation_sam"
-    PROMPTED_SEGMENTATION_SAM3 = "prompted_segmentation_sam3"
+    SEMANTIC_SEGMENTATION = "semantic_segmentation"
 
     # --- Image classification ---
     IMAGE_CLASSIFICATION = "image_classification"
@@ -283,7 +271,7 @@ class StageSpec:
     For composite pipelines (diffusion, omni), there can be many.
 
     Attributes:
-        name: Stage identifier (e.g. "generate", "t5_encode", "vae_decode").
+        name: Stage identifier (e.g. "generate", "preprocess", "vae_decode").
         required: If True, stage failure causes overall case failure.
         runner_override: Optional strategy runner name to use instead of the
             default for this case's task_strategy.
@@ -361,16 +349,16 @@ class E2ECase:
     build, run, compare, and report for a single model.
 
     Attributes:
-        name: Unique case identifier (e.g. "qwen3-0.6b").
+        name: Unique case identifier (e.g. "example-model").
         hf_id: HuggingFace model ID or local path.
-        family: Family plugin name (e.g. "qwen", "llama").
+        family: Family plugin name (e.g. "example_family").
         runtime_strategy: C++ runtime backend selector (e.g. "decoder_kv_cache").
-        task_strategy: Logical task type derived from runtime_strategy
-            (e.g. "text_generation_causal"). See RUNTIME_TO_TASK_STRATEGY.
+        task_strategy: Logical task type declared by the model manifest
+            (e.g. "text_generation_causal").
         reference_backend: Which reference implementation to compare against
             (e.g. "hf_transformers", "torch_reference", "golden_snapshot").
         oracle_level: Strength of the reference oracle. See OracleLevel.
-        bundle: Bundle filename (e.g. "qwen3-0.6b.trtfb").
+        bundle: Bundle filename (e.g. "example-model.trtfb").
         inputs: Task-specific inputs (prompt, image path, audio path, etc.).
         preflight: List of prerequisites to check before running.
         stages: Ordered list of stages to execute.
@@ -405,11 +393,9 @@ class E2ECase:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Derive task_strategy from runtime_strategy if not set."""
+        """Use the runtime selector as a generic fallback if not set."""
         if not self.task_strategy:
-            self.task_strategy = RUNTIME_TO_TASK_STRATEGY.get(
-                self.runtime_strategy, self.runtime_strategy
-            )
+            self.task_strategy = self.runtime_strategy
 
 
 @dataclass
@@ -570,7 +556,7 @@ class RunContext:
 
     def runtime_cli_hf_python(self) -> str:
         """Optional --hf-python value for the C++ CLI."""
-        if str(self.case.runtime_strategy or "") not in {"speech_to_speech"}:
+        if not bool(self.case.metadata.get("runtime_cli_requires_hf_python")):
             return ""
         return self.runtime_python_path()
 
@@ -674,6 +660,30 @@ class Comparator(Protocol):
 
 
 @runtime_checkable
+class ReproCommandProvider(Protocol):
+    """Builds model-owned repro commands for E2E result artifacts.
+
+    Implementations should return argv-style tokens for the TRT inference
+    command, or ``None`` when the provider does not handle the case. The
+    orchestrator handles generic wrapping and string rendering.
+    """
+
+    @property
+    def family_name(self) -> str:
+        """Model family this provider owns."""
+        ...
+
+    def build_trt_inference_command(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+        bundle_path: str,
+    ) -> Optional[List[str]]:
+        """Build the TRT inference repro command for this case."""
+        ...
+
+
+@runtime_checkable
 class ArtifactSink(Protocol):
     """Persists commands, stage outputs, comparison results, and final report.
 
@@ -717,274 +727,3 @@ class DeterminismPolicy(Protocol):
     ) -> CompareResult:
         """Evaluate determinism across multiple stage outputs."""
         ...
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# Per-model reference family classification.
-# Keys are manifest "name" values; values are ReferenceFamily enum values.
-# Derived from the E2E contract documentation in this module.
-MODEL_REFERENCE_FAMILY: Dict[str, str] = {
-    # 5.1 CAUSAL_BASE_CONTINUATION
-    "gpt2-125m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "gpt-neo-125m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "pythia-70m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "bloom-560m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "opt-125m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "granite-3.1-2b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "glm-4-9b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "deepseek-v2-lite": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "falcon-rw-1b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "stablelm2-1.6b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "xglm-564m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "mamba-130m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "rwkv-169m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "olmo-1b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "olmo2-1b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "minitron-4b-depth": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "minitron-4b-width": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "nemotron-hindi-4b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "falcon3-1b": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "deepseek-v2-tiny": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "mixtral-stories-15m": ReferenceFamily.CAUSAL_BASE_CONTINUATION.value,
-    "nemotron-h-nano-9b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    # 5.2 CODE_BASE_COMPLETION
-    "codegen-350m": ReferenceFamily.CODE_BASE_COMPLETION.value,
-    "starcoder2-3b": ReferenceFamily.CODE_BASE_COMPLETION.value,
-    # 5.3 CHAT_INSTRUCT_TEMPLATE
-    "gemma-2-2b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "mistral-7b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "phi3-mini": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "phi-moe": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "gpt-oss-20b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "nemotron-mini-4b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "tinyllama-1.1b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "internlm2-1.8b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    "nemotron-nano-4b": ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value,
-    # 5.4 CHAT_QWEN3_POSTTRAINED
-    "qwen3-0.6b": ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value,
-    "qwen3-0.6b-fp16": ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value,
-    "qwen3-4b-instruct-2507": ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value,
-    "qwen3-moe-30b-a3b": ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value,
-    # 5.5 MULTIMODAL_CHAT_QWEN35
-    "qwen35-9b": ReferenceFamily.MULTIMODAL_CHAT_QWEN35.value,
-    # 5.6 TRANSLATION_CHAT_TEMPLATE
-    "riva-translate-4b": ReferenceFamily.TRANSLATION_CHAT_TEMPLATE.value,
-    # 5.7 SEQ2SEQ_TEXT2TEXT
-    "t5-small": ReferenceFamily.SEQ2SEQ_TEXT2TEXT.value,
-    # 5.8 SEQ2SEQ_TRANSLATION
-    "marian-en-ru": ReferenceFamily.SEQ2SEQ_TRANSLATION.value,
-    "nllb-200": ReferenceFamily.SEQ2SEQ_TRANSLATION.value,
-    "nllb-200-distilled-600m": ReferenceFamily.SEQ2SEQ_TRANSLATION.value,
-    # 5.9 SEQ2SEQ_BASE_WEAK
-    "bart-base": ReferenceFamily.SEQ2SEQ_BASE_WEAK.value,
-    # 5.10 ENCODER_BASE_FEATURES
-    "albert-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "bert-base-uncased": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "roberta-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "roberta-large": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "xlm-roberta-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "camembert-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "deberta-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "distilbert-base-uncased": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "modernbert-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "convbert-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "fnet-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "xlnet-base": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    "electra-base-discriminator": ReferenceFamily.ENCODER_BASE_FEATURES.value,
-    # 5.11 DPR_CONTEXT_EMBED
-    "dpr-ctx-encoder": ReferenceFamily.DPR_CONTEXT_EMBED.value,
-    # 5.12 SENTENCE_TRANSFORMER_EMBED
-    "all-minilm-l6-v2": ReferenceFamily.SENTENCE_TRANSFORMER_EMBED.value,
-    "all-mpnet-base-v2": ReferenceFamily.SENTENCE_TRANSFORMER_EMBED.value,
-    "paraphrase-multilingual-minilm-l12-v2": ReferenceFamily.SENTENCE_TRANSFORMER_EMBED.value,
-    # 5.13 BGE_RETRIEVAL_EMBED
-    "bge-small-en-v1.5": ReferenceFamily.BGE_RETRIEVAL_EMBED.value,
-    # 5.14 VL_EMBED_RETRIEVAL
-    "eagle-embed-vl-1b-v2": ReferenceFamily.VL_EMBED_RETRIEVAL.value,
-    "nemotron-embed-vl-1b-v2": ReferenceFamily.VL_EMBED_RETRIEVAL.value,
-    # 5.15 VL_RERANK
-    "eagle-rerank-vl-1b-v2": ReferenceFamily.VL_RERANK.value,
-    # 5.16 VL_INSTRUCT_QA
-    "qwen25vl-3b": ReferenceFamily.VL_INSTRUCT_QA.value,
-    "qwen3-vl-2b": ReferenceFamily.VL_INSTRUCT_QA.value,
-    "internvl3-8b": ReferenceFamily.VL_INSTRUCT_QA.value,
-    "phi4-multimodal": ReferenceFamily.VL_INSTRUCT_QA.value,
-    # 5.17 OCR_MARKDOWN
-    "deepseek-ocr": ReferenceFamily.OCR_MARKDOWN.value,
-    # 5.18 ASR_WHISPER
-    "whisper-tiny-fp16": ReferenceFamily.ASR_WHISPER.value,
-    "whisper-large-v3-turbo": ReferenceFamily.ASR_WHISPER.value,
-    # 5.19 ASR_CANARY
-    "canary-1b-v2": ReferenceFamily.ASR_CANARY.value,
-    "nemotron-speech-streaming-en-0.6b": ReferenceFamily.ASR_CANARY.value,
-    # 5.20 TTS_BARK
-    "bark-small": ReferenceFamily.TTS_BARK.value,
-    "bark-large": ReferenceFamily.TTS_BARK.value,
-    # 5.21 TTS_MAGPIE
-    "magpie-tts-357m": ReferenceFamily.TTS_MAGPIE.value,
-    # 5.22 S2S_PERSONAPLEX
-    "personaplex-7b": ReferenceFamily.S2S_PERSONAPLEX.value,
-    # 5.23 SEGMENTATION_SEGFORMER
-    "segformer-b0-ade": ReferenceFamily.SEGMENTATION_SEGFORMER.value,
-    # 5.24 PROMPTED_SEGMENTATION_SAM
-    "sam-vit-base": ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value,
-    # 5.24b PROMPTED_SEGMENTATION_SAM3
-    "sam3": ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value,
-    # 5.24a IMAGE_CLASSIFICATION
-    "timm-vit-base-p16-224-augreg-in21k-ft-in1k": ReferenceFamily.IMAGE_CLASSIFICATION.value,
-    # 5.25 DIFFUSERS_IMAGE_GEN
-    "flux-schnell": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
-    "flux-2-dev": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
-    "pixart-sigma-1024": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
-    "z-image-turbo": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
-    # 5.26 DIFFUSERS_VIDEO_GEN
-    "wan21-t2v-1.3b": ReferenceFamily.DIFFUSERS_VIDEO_GEN.value,
-    # 5.27 ELF diffusion text generation
-    "elf-b-owt-l0": ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value,
-    "elf-b-xsum-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
-    "elf-b-de-en-l0": ReferenceFamily.ELF_CONDITIONAL_TEXT.value,
-    # 5.28 TIME_SERIES_POINT_FORECAST
-    "patchtst-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    "patchtsmixer-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    "timesfm-2.0-500m-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
-    # 5.29 TIME_SERIES_QUANTILE_FORECAST
-    "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
-    # 5.30 TIME_SERIES_REGRESSION
-    "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
-    # 5.31 NEMOTRON_LABS_DIFFUSION_MODEL_CARD
-    "nemotron-labs-diffusion-8b-ar": ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value,
-    "nemotron-labs-diffusion-8b-diffusion": (
-        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
-    ),
-    "nemotron-labs-diffusion-8b-linear-spec": (
-        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
-    ),
-    "nemotron-labs-diffusion-8b-linear-spec-lora": (
-        ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value
-    ),
-}
-
-# Reference family -> user contract mapping.
-# Derived from the E2E contract documentation in this module.
-REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
-    ReferenceFamily.CAUSAL_BASE_CONTINUATION.value: UserContract.CONTINUATION_PARITY.value,
-    ReferenceFamily.CODE_BASE_COMPLETION.value: UserContract.CODE_COMPLETION.value,
-    ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value: UserContract.CHAT_RESPONSE.value,
-    ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value: UserContract.CHAT_RESPONSE.value,
-    ReferenceFamily.MULTIMODAL_CHAT_QWEN35.value: UserContract.CHAT_RESPONSE.value,
-    ReferenceFamily.TRANSLATION_CHAT_TEMPLATE.value: UserContract.TRANSLATION.value,
-    ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value: (
-        UserContract.MODEL_CARD_GENERATION_PARITY.value
-    ),
-    ReferenceFamily.SEQ2SEQ_TEXT2TEXT.value: UserContract.SEQ2SEQ_OUTPUT.value,
-    ReferenceFamily.SEQ2SEQ_TRANSLATION.value: UserContract.TRANSLATION.value,
-    ReferenceFamily.SEQ2SEQ_BASE_WEAK.value: UserContract.CONTINUATION_PARITY.value,
-    ReferenceFamily.ENCODER_BASE_FEATURES.value: UserContract.REPRESENTATION_PARITY.value,
-    ReferenceFamily.DPR_CONTEXT_EMBED.value: UserContract.EMBEDDING_VECTOR.value,
-    ReferenceFamily.SENTENCE_TRANSFORMER_EMBED.value: UserContract.EMBEDDING_VECTOR.value,
-    ReferenceFamily.BGE_RETRIEVAL_EMBED.value: UserContract.EMBEDDING_VECTOR.value,
-    ReferenceFamily.VL_EMBED_RETRIEVAL.value: UserContract.EMBEDDING_VECTOR.value,
-    ReferenceFamily.VL_RERANK.value: UserContract.RANKING_ORDER.value,
-    ReferenceFamily.VL_INSTRUCT_QA.value: UserContract.VL_ANSWER.value,
-    ReferenceFamily.OCR_MARKDOWN.value: UserContract.OCR_TEXT.value,
-    ReferenceFamily.ASR_WHISPER.value: UserContract.EXACT_TRANSCRIPT.value,
-    ReferenceFamily.ASR_CANARY.value: UserContract.EXACT_TRANSCRIPT.value,
-    ReferenceFamily.TTS_BARK.value: UserContract.TTS_AUDIO.value,
-    ReferenceFamily.TTS_MAGPIE.value: UserContract.TTS_AUDIO.value,
-    ReferenceFamily.S2S_PERSONAPLEX.value: UserContract.SPEECH_RESPONSE.value,
-    ReferenceFamily.SEGMENTATION_SEGFORMER.value: UserContract.SEGMENTATION_MASK.value,
-    ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
-    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: UserContract.PROMPTED_MASK.value,
-    ReferenceFamily.IMAGE_CLASSIFICATION.value: UserContract.IMAGE_CLASSIFICATION.value,
-    ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: UserContract.DIFFUSION_IMAGE.value,
-    ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: UserContract.DIFFUSION_VIDEO.value,
-    ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: UserContract.DIFFUSION_TEXT_GENERATION.value,
-    ReferenceFamily.ELF_CONDITIONAL_TEXT.value: UserContract.DIFFUSION_TEXT_GENERATION.value,
-    ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: UserContract.TIME_SERIES_POINT_FORECAST.value,
-    ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: UserContract.TIME_SERIES_QUANTILE_FORECAST.value,
-    ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: UserContract.TIME_SERIES_CLASSIFICATION.value,
-    ReferenceFamily.TIME_SERIES_REGRESSION.value: UserContract.TIME_SERIES_REGRESSION.value,
-}
-
-# Reference family -> default comparison mode mapping.
-# Derived from the E2E contract documentation in this module.
-REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
-    ReferenceFamily.CAUSAL_BASE_CONTINUATION.value: ComparisonMode.PREFIX_TEXT.value,
-    ReferenceFamily.CODE_BASE_COMPLETION.value: ComparisonMode.PREFIX_TEXT.value,
-    ReferenceFamily.CHAT_INSTRUCT_TEMPLATE.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.CHAT_QWEN3_POSTTRAINED.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.MULTIMODAL_CHAT_QWEN35.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.TRANSLATION_CHAT_TEMPLATE.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.NEMOTRON_LABS_DIFFUSION_MODEL_CARD.value: ComparisonMode.TOKEN_EXACT.value,
-    ReferenceFamily.SEQ2SEQ_TEXT2TEXT.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.SEQ2SEQ_TRANSLATION.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.SEQ2SEQ_BASE_WEAK.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.ENCODER_BASE_FEATURES.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.DPR_CONTEXT_EMBED.value: ComparisonMode.STRUCTURED_RANKING.value,
-    ReferenceFamily.SENTENCE_TRANSFORMER_EMBED.value: ComparisonMode.STRUCTURED_RANKING.value,
-    ReferenceFamily.BGE_RETRIEVAL_EMBED.value: ComparisonMode.STRUCTURED_RANKING.value,
-    ReferenceFamily.VL_EMBED_RETRIEVAL.value: ComparisonMode.STRUCTURED_RANKING.value,
-    ReferenceFamily.VL_RERANK.value: ComparisonMode.STRUCTURED_RANKING.value,
-    ReferenceFamily.VL_INSTRUCT_QA.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.OCR_MARKDOWN.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.ASR_WHISPER.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.ASR_CANARY.value: ComparisonMode.EXACT_TEXT.value,
-    ReferenceFamily.TTS_BARK.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
-    ReferenceFamily.TTS_MAGPIE.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
-    ReferenceFamily.S2S_PERSONAPLEX.value: ComparisonMode.SEMANTIC_JUDGMENT.value,
-    ReferenceFamily.SEGMENTATION_SEGFORMER.value: ComparisonMode.MASK_OVERLAP.value,
-    ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
-    ReferenceFamily.PROMPTED_SEGMENTATION_SAM3.value: ComparisonMode.MASK_OVERLAP.value,
-    ReferenceFamily.IMAGE_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
-    ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
-    ReferenceFamily.ELF_UNCONDITIONAL_TEXT.value: ComparisonMode.TEXT_QUALITY_METRICS.value,
-    ReferenceFamily.ELF_CONDITIONAL_TEXT.value: ComparisonMode.TEXT_QUALITY_METRICS.value,
-    ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
-    ReferenceFamily.TIME_SERIES_REGRESSION.value: ComparisonMode.NUMERIC_TENSOR.value,
-}
-
-RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
-    "decoder_kv_cache": "text_generation_causal",
-    "decoder_moe": "text_generation_causal",
-    "ssm_recurrent": "text_generation_causal",
-    "rwkv_recurrent": "text_generation_causal",
-    "hybrid_mamba_attention": "text_generation_causal",
-    "nemotron_labs_diffusion": "text_generation_causal",
-    "vision_language": "vision_language_generation",
-    "speech_to_text": "speech_to_text",
-    "speech_to_text_rnnt": "speech_to_text",
-    "text_to_audio": "text_to_audio",              # legacy alias
-    "text_to_audio_bark": "text_to_audio",
-    "text_to_audio_magpie": "text_to_audio",
-    "speech_to_speech": "speech_to_speech",
-    "segmentation": "segmentation",
-    "prompted_segmentation": "prompted_segmentation",
-    "image_classification": "image_classification",
-    "object_detection": "object_detection",
-    "embedding": "embedding",
-    "reranking": "reranking",
-    "encoder_only": "encoder_only_nlp",
-    "neural_operator": "neural_operator",
-    "patchtst_trt": "neural_operator",
-    "patchtsmixer_trt": "neural_operator",
-    "timesfm_trt": "neural_operator",
-    "chronos_bolt_trt": "neural_operator",
-    "elf_flow": "diffusion_text_generation",
-    "diffusion": "diffusion_media_generation",      # legacy alias
-    "diffusion_flux": "diffusion_media_generation",
-    "diffusion_ltx": "diffusion_media_generation",
-    "diffusion_wan": "diffusion_media_generation",
-    "diffusion_zimage": "diffusion_media_generation",
-    "diffusion_qwen_image": "diffusion_media_generation",
-    "diffusion_pixart": "diffusion_media_generation",
-    "omni_multimodal": "omni_multimodal",
-    "text_to_text": "text_generation_causal",
-    "marian_translation": "text_generation_causal",
-    "seq2seq_encoder_decoder": "text_generation_causal",
-}

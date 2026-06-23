@@ -6,6 +6,7 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation",
   "gated": true,
   "ci_tier": "nightly_only",
   "precision": "fp16",
@@ -31,5 +32,10 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "FLUX.2-dev FP8: uses pre-computed scales (data/flux2-fp8-scales.json) to skip calibration. All preprocessor ops baked into TRT DiT engine. The human contract is the end-to-end TRT image artifact against the HF Diffusers reference image plus the VLM assessment. The generic diffusion debug substages are not declared here because the current debug pipeline is Wan-specific and is not a FLUX.2 reference oracle."
+  "notes": "FLUX.2-dev FP8: uses pre-computed scales (data/flux2-fp8-scales.json) to skip calibration. All preprocessor ops baked into TRT DiT engine. The human contract is the end-to-end TRT image artifact against the HF Diffusers reference image plus the VLM assessment. The generic diffusion debug substages are not declared here because the current debug pipeline is Wan-specific and is not a FLUX.2 reference oracle.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

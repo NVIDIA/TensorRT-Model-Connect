@@ -7,8 +7,8 @@
 //
 // Generate golden vectors with:
 //   python3 tests/tools/generate_bpe_golden.py \
-//       --model Qwen/Qwen3-0.6B \
-//       --output tests/data/qwen3_golden.txt
+//       --model example-org/bpe-decoder \
+//       --output tests/data/newline_aware_golden.txt
 //
 // Trace: ARCH-TOK-BPE, UD-TOK-BPE-02
 // Intent: Verify native tokenizer produces identical token sequences to HF.
@@ -26,10 +26,8 @@
 
 static int failures = 0;
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -45,29 +43,41 @@ void check_ids(const std::vector<int32_t>& actual,
     size_t min_len = std::min(actual.size(), expected.size());
     for (size_t i = 0; i < min_len; ++i) {
         if (actual[i] != expected[i]) {
-            std::cerr << "  first mismatch at index " << i
-                      << ": expected " << expected[i] << " got " << actual[i] << "\n";
+            std::cerr << "  first mismatch at index " << i << ": expected " << expected[i]
+                      << " got " << actual[i] << "\n";
             break;
         }
     }
     if (actual.size() != expected.size())
-        std::cerr << "  length: expected " << expected.size()
-                  << " got " << actual.size() << "\n";
+        std::cerr << "  length: expected " << expected.size() << " got " << actual.size() << "\n";
     failures++;
 }
 
-std::string unescape(const std::string& s)
-{
+std::string unescape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '\\' && i + 1 < s.size()) {
             switch (s[i + 1]) {
-                case 't': out.push_back('\t'); ++i; break;
-                case 'n': out.push_back('\n'); ++i; break;
-                case 'r': out.push_back('\r'); ++i; break;
-                case '\\': out.push_back('\\'); ++i; break;
-                default: out.push_back(s[i]); break;
+            case 't':
+                out.push_back('\t');
+                ++i;
+                break;
+            case 'n':
+                out.push_back('\n');
+                ++i;
+                break;
+            case 'r':
+                out.push_back('\r');
+                ++i;
+                break;
+            case '\\':
+                out.push_back('\\');
+                ++i;
+                break;
+            default:
+                out.push_back(s[i]);
+                break;
             }
         } else {
             out.push_back(s[i]);
@@ -77,54 +87,65 @@ std::string unescape(const std::string& s)
 }
 
 int parse_golden_line(const std::string& line, std::string& out_text,
-                      std::vector<int32_t>& out_ids)
-{
+                      std::vector<int32_t>& out_ids) {
     auto tab = line.find('\t');
-    if (tab == std::string::npos) return 0;
+    if (tab == std::string::npos)
+        return 0;
     out_text = unescape(line.substr(0, tab));
     out_ids.clear();
     std::string ids_str = line.substr(tab + 1);
-    if (ids_str.empty()) return 1;
+    if (ids_str.empty())
+        return 1;
     std::istringstream iss(ids_str);
     std::string tok;
     while (std::getline(iss, tok, ',')) {
-        if (!tok.empty()) out_ids.push_back(std::stoi(tok));
+        if (!tok.empty())
+            out_ids.push_back(std::stoi(tok));
     }
     return 1;
 }
 
-std::string read_file(const std::string& path)
-{
+std::string read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) return "";
-    return std::string(std::istreambuf_iterator<char>(f),
-                       std::istreambuf_iterator<char>());
+    if (!f)
+        return "";
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 }
 
 // Try BPE → WordPiece → Unigram (mirrors try_create_native_tokenizer)
-std::unique_ptr<trtmc::ITokenizer> create_tokenizer(
-    const char* data, size_t size, bool add_special)
-{
+std::unique_ptr<trtmc::ITokenizer> create_tokenizer(const char* data, size_t size,
+                                                    bool add_special) {
     try {
         auto tok = trtmc::CreateBpeTokenizer(data, size, add_special);
-        if (tok) { std::cerr << "  [type: BPE]\n"; return tok; }
-    } catch (...) {}
+        if (tok) {
+            std::cerr << "  [type: BPE]\n";
+            return tok;
+        }
+    } catch (...) {
+    }
 
     try {
         auto tok = trtmc::CreateWordPieceTokenizer(data, size, add_special);
-        if (tok) { std::cerr << "  [type: WordPiece]\n"; return tok; }
-    } catch (...) {}
+        if (tok) {
+            std::cerr << "  [type: WordPiece]\n";
+            return tok;
+        }
+    } catch (...) {
+    }
 
     try {
         auto tok = trtmc::CreateUnigramTokenizer(data, size, add_special);
-        if (tok) { std::cerr << "  [type: Unigram]\n"; return tok; }
-    } catch (...) {}
+        if (tok) {
+            std::cerr << "  [type: Unigram]\n";
+            return tok;
+        }
+    } catch (...) {
+    }
 
     return nullptr;
 }
 
-int main()
-{
+int main() {
     std::cerr << "Native Tokenizer Golden Correctness Tests\n\n";
 
     const char* json_path = std::getenv("TOKENIZER_JSON");
@@ -162,11 +183,13 @@ int main()
     std::string line;
     while (std::getline(golden_file, line)) {
         ++line_num;
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty() || line[0] == '#')
+            continue;
 
         std::string text;
         std::vector<int32_t> expected_ids;
-        if (!parse_golden_line(line, text, expected_ids)) continue;
+        if (!parse_golden_line(line, text, expected_ids))
+            continue;
 
         ++total;
         auto actual_ids = tok->encode(text);
@@ -178,7 +201,8 @@ int main()
         } else {
             check_ids(actual_ids, expected_ids, label);
             std::string display = text.substr(0, 60);
-            if (text.size() > 60) display += "...";
+            if (text.size() > 60)
+                display += "...";
             std::cerr << "  input: \"" << display << "\"\n";
         }
     }

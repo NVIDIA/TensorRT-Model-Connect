@@ -2,3 +2,8 @@ id = "ltx_video"
 runtime_library = "libtrtmc_model_ltx_video.so"
 runtime_plugins = ["plugin.cpp|register_ltx_video_plugin"]
 runtime_strategies = ["diffusion_ltx"]
+legacy_runtime_strategy_aliases = ["diffusion|contains|diffusion_backend_type|ltx|diffusion_ltx"]
+runtime_tests = [
+  "test_ltx_video_scheduler|test_ltx_video_scheduler.cpp|_|_|_",
+  "test_ltx_video_pipeline|test_ltx_video_pipeline.cpp|trtmc_model_ltx_video|plugin_helpers.cpp,diffusion_helpers.cpp|_",
+]

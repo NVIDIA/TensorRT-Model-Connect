@@ -730,7 +730,7 @@ The first full hybrid-bundle benchmark replay later showed a new regression on
 regression.
 
 HF reference generation in
-`tools/benchmark_qwen3_8b_aime25_vs_hf.py`
+`python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py`
 already reseeded per sample:
 
 - `torch.manual_seed(seed + row_idx)` for the single-GPU case

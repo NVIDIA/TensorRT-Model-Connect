@@ -8,6 +8,6 @@
     "Layers 1-11:MoE",
     "Norm:RMS"
   ],
-  "source_image": "tests/e2e/data/orc_test_img.jpeg",
+  "source_image": "tests/e2e/models/deepseek_ocr/data/orc_test_img.jpeg",
   "contract_scope": "L0 short decode validates the visible Architecture section of the OCR fixture."
 }

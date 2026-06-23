@@ -65,72 +65,6 @@ _ATTENTION_REQUIRED_SCALE_FIELDS = {
 }
 
 
-def _config_requests_mha_quantizers(config: dict) -> bool:
-    quant_cfg = config.get("quant_cfg", {})
-    return any("bmm_quantizer" in str(pattern) for pattern in quant_cfg)
-
-
-def _register_diffusers_flux2_attention_quantizers() -> None:
-    """Register FLUX.2 Diffusers attention modules with ModelOpt's MHA wrapper.
-
-    ModelOpt has the FP8 attention quantizer implementation, but some releases
-    only register it for FLUX.1's ``FluxAttention`` class. FLUX.2 uses separate
-    ``Flux2Attention`` and ``Flux2ParallelSelfAttention`` classes, so register
-    those classes before ModelOpt recursively replaces modules.
-    """
-    try:
-        from diffusers.models.transformers.transformer_flux2 import (
-            Flux2Attention,
-            Flux2ParallelSelfAttention,
-        )
-        from modelopt.torch.quantization.nn import QuantModuleRegistry
-    except Exception as exc:  # pragma: no cover - optional Diffusers/ModelOpt deps
-        print(
-            "[fp8-calibrate] Skipping FLUX.2 MHA quantizer registration: "
-            f"{exc}",
-            file=sys.stderr,
-        )
-        return
-
-    try:
-        try:
-            from modelopt.torch.quantization.plugins.diffusion.diffusers import (
-                _QuantAttention,
-            )
-        except ModuleNotFoundError:
-            from modelopt.torch.quantization.plugins.diffusers import _QuantAttention
-    except Exception as exc:  # pragma: no cover - private ModelOpt API drift
-        print(
-            "[fp8-calibrate] ModelOpt Diffusers MHA quantizer is unavailable: "
-            f"{exc}",
-            file=sys.stderr,
-        )
-        return
-
-    try:
-        from diffusers.models.attention_dispatch import (
-            AttentionBackendName,
-            attention_backend,
-        )
-    except Exception:  # pragma: no cover - older Diffusers fallback
-        AttentionBackendName = None
-        attention_backend = None
-
-    class _QuantFlux2Attention(_QuantAttention):
-        def forward(self, *args, **kwargs):
-            if attention_backend is None or AttentionBackendName is None:
-                return super().forward(*args, **kwargs)
-            with attention_backend(AttentionBackendName.NATIVE):
-                return super().forward(*args, **kwargs)
-
-    for module_cls, key in (
-        (Flux2Attention, "Flux2Attention"),
-        (Flux2ParallelSelfAttention, "Flux2ParallelSelfAttention"),
-    ):
-        if module_cls not in QuantModuleRegistry:
-            QuantModuleRegistry.register({module_cls: key})(_QuantFlux2Attention)
-
-
 def _maxbound_from_config(config: dict) -> float:
     """Derive maxbound from a ModelOpt quantization config."""
     # FP8_DEFAULT_CFG uses num_bits=(4,3) for E4M3
@@ -149,6 +83,7 @@ def run_fp8_calibration(
     exclude_pattern: re.Pattern | None = None,
     *,
     config: dict | None = None,
+    pre_quantize_hook: Callable[[], None] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Run ModelOpt calibration and extract per-layer scales.
 
@@ -160,6 +95,8 @@ def run_fp8_calibration(
             from quantization (kept in BF16/FP32).
         config: ModelOpt quantization config. Defaults to ``FP8_DEFAULT_CFG``
             (FP8 E4M3, per-tensor, max calibration on both weights and activations).
+        pre_quantize_hook: Optional model-owned hook for registering ModelOpt
+            compatibility shims before recursive module replacement.
 
     Returns:
         ``{layer_name: {"input_scale": float, "weight_scale": float}}``
@@ -173,8 +110,8 @@ def run_fp8_calibration(
     if config is None:
         config = mtq.FP8_DEFAULT_CFG
 
-    if _config_requests_mha_quantizers(config):
-        _register_diffusers_flux2_attention_quantizers()
+    if pre_quantize_hook is not None:
+        pre_quantize_hook()
 
     maxbound = _maxbound_from_config(config)
 

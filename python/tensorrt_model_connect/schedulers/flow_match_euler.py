@@ -1,6 +1,6 @@
 """Flow Matching Euler Discrete Scheduler.
 
-Used by Wan2.1, FLUX, SD3. Implements the Euler method for flow matching
+Implements the Euler method for flow matching
 (continuous normalizing flows) as in the diffusers FlowMatchEulerDiscreteScheduler.
 
 Pure numpy — no TRT or torch dependency.
@@ -20,7 +20,7 @@ class FlowMatchEulerScheduler:
     The model predicts the velocity v = noise - x.
     The Euler step: z_{t-dt} = z_t - dt * v
 
-    With shift parameter for timestep adjustment (used by Wan2.1).
+    Includes an optional shift parameter for timestep adjustment.
     """
 
     def __init__(

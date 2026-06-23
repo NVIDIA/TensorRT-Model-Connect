@@ -3,7 +3,7 @@
 // SamPipeline: two-stage segmentation (SAM -- encoder + decoder).
 // Uses TrtModule(image_encoder) + TrtModule(mask_decoder).
 
-#include "runtime/domains/perception/perception_types.h"
+#include "runtime/models/segmentation/sam_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 

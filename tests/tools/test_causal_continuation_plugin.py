@@ -7,6 +7,14 @@ from tests.e2e_harness.plugins.causal_continuation import CausalContinuationPlug
 
 
 def _case(reference_family: str = "causal_base_continuation") -> E2ECase:
+    metadata = {}
+    if reference_family == "seq2seq_base_weak":
+        metadata = {
+            "contract_config": {
+                "preserve_prompt_echo": True,
+                "seq2seq_reconstruction": True,
+            }
+        }
     return E2ECase(
         name="model",
         hf_id="hf/model",
@@ -14,6 +22,7 @@ def _case(reference_family: str = "causal_base_continuation") -> E2ECase:
         runtime_strategy="decoder_kv_cache",
         reference_family=reference_family,
         inputs={"prompt": "The capital of France is"},
+        metadata=metadata,
     )
 
 

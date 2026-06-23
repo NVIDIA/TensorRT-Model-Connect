@@ -5,6 +5,8 @@
   "bundle": "gemma-2-2b-tp4.trtfb",
   "family": "gemma",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "user_contract": "chat_response",
   "reference_family": "chat_instruct_template",
   "max_cache_length": 256,
   "prompt": "What is 2 + 2? Answer with just the number.",
@@ -52,5 +54,11 @@
       "gating": true
     }
   ],
-  "notes": "Tensor-parallel TP=4 Gemma decoder coverage on four GPUs."
+  "notes": "Tensor-parallel TP=4 Gemma decoder coverage on four GPUs.",
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  }
 }

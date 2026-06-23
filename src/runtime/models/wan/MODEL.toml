@@ -2,3 +2,11 @@ id = "wan"
 runtime_library = "libtrtmc_model_wan.so"
 runtime_plugins = ["plugin.cpp|register_wan_plugin"]
 runtime_strategies = ["diffusion_wan"]
+legacy_runtime_strategy_aliases = ["diffusion|default|_|_|diffusion_wan"]
+gnu_warning_suppressed_sources = ["pipeline.cpp"]
+runtime_tests = [
+  "test_wan_pipeline|test_wan_pipeline.cpp|trtmc_model_wan|_|_",
+  "test_wan_c_abi_runtime_regression|test_wan_c_abi_runtime_regression.cpp|trtmc_model_wan|_|_",
+  "test_wan_generation_plan|test_wan_generation_plan.cpp|_|_|_",
+  "test_wan_generation_conditioning|test_wan_generation_conditioning.cpp|_|_|_",
+]

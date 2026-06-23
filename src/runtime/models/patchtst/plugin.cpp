@@ -1,8 +1,8 @@
 // PatchTSTPlugin: handles "patchtst_trt" strategy.
 // Numeric time-series models compiled from the PatchTST HF family.
 
-#include "runtime/models/patchtst/pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/models/patchtst/pipeline.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

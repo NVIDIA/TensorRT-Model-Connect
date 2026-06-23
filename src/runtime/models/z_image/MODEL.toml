@@ -2,3 +2,7 @@ id = "z_image"
 runtime_library = "libtrtmc_model_z_image.so"
 runtime_plugins = ["plugin.cpp|register_zimage_plugin"]
 runtime_strategies = ["diffusion_zimage"]
+legacy_runtime_strategy_aliases = ["diffusion|contains|diffusion_backend_type|z_image|diffusion_zimage"]
+runtime_tests = [
+  "test_z_image_pipeline|test_z_image_pipeline.cpp|trtmc_model_z_image|_|_",
+]

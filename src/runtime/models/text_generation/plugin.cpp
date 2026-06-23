@@ -1,10 +1,11 @@
 // DecoderPlugin: handles "decoder_kv_cache" and "decoder_moe" strategies.
 // Standard attention-based decoder with device-resident KV cache.
 
+#include "plugin_helpers.h"
 #include "runtime/core/chat_template.h"
 #include "runtime/core/trt_engine_lifecycle.h"
+#include "runtime/models/text_generation/chat_templates.h"
 #include "runtime/models/text_generation/pipeline.h"
-#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -387,8 +388,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.mask_token_id = extract_json_int(ctx.config_json, "mask_token_id", 100);
         tgc.diffusion_block_length = extract_json_int(ctx.config_json, "block_size", 32);
         tgc.supports_text_diffusion = true;
-        if (tgc.chat_template_format == ChatTemplateFormat::kNone)
-            tgc.chat_template_format = ChatTemplateFormat::kNemotronLabsDiffusion;
+        if (tgc.chat_template_format.empty())
+            tgc.chat_template_format = "nemotron_labs_diffusion";
     }
 
     static void apply_text_trace_from_registry(const config::ConfigBundle* cfg) {
@@ -577,6 +578,7 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 
     static void apply_chat_template_format(const BundleFile& bundle, TextGenConfig& tgc) {
+        register_text_generation_chat_templates();
         std::string chat_tpl;
         auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
         if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {

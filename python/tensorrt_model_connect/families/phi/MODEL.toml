@@ -1,6 +1,7 @@
 id = "phi"
 plugin = "phi"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "phi",
   "Phi3",

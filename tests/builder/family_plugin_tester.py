@@ -5,12 +5,12 @@ Provides TinyModelSpec (tiny model dimensions for testing) and FamilyPluginTeste
 and family-specific weight layouts).
 
 Usage in per-family test files:
-    class QwenPluginTester(FamilyPluginTester):
-        plugin_module = "tensorrt_model_connect.families.qwen"
-        model_type = "qwen3"
+    class ExamplePluginTester(FamilyPluginTester):
+        plugin_module = "tensorrt_model_connect.families.example"
+        model_type = "example_decoder"
 
-    class TestQwenEngine(FamilyPluginTestMixin):
-        tester_class = QwenPluginTester
+    class TestExampleEngine(FamilyPluginTestMixin):
+        tester_class = ExamplePluginTester
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class TinyModelSpec:
 
     All sizes are deliberately small so TRT engine builds complete in seconds.
     The head_dim is derived from hidden_size // num_attention_heads by default,
-    but can be overridden for families with explicit head_dim configs (e.g. Phi).
+    but can be overridden for families with explicit head_dim configs.
     """
 
     vocab_size: int = 32
@@ -71,8 +71,8 @@ class FamilyPluginTester:
     """Base class for per-family plugin testers.
 
     Subclasses MUST set:
-        plugin_module: str  -- importable module path (e.g. "tensorrt_model_connect.families.qwen")
-        model_type: str     -- HF model_type string (e.g. "qwen3")
+        plugin_module: str  -- importable module path (e.g. "tensorrt_model_connect.families.example")
+        model_type: str     -- HF model_type string (e.g. "example_decoder")
 
     Subclasses MAY override:
         spec: TinyModelSpec -- custom dimensions for non-standard families
@@ -103,7 +103,7 @@ class FamilyPluginTester:
         """Return a minimal HF config.json dict for this family.
 
         The base implementation returns a standard decoder config compatible with
-        Qwen, LLaMA, Mistral, and other families that use the standard
+        decoder families that use the standard
         model_type + dimensions layout.
 
         Subclasses can override for families that require additional config keys
@@ -127,7 +127,7 @@ class FamilyPluginTester:
         """Return synthetic weight tensors matching the HF safetensors layout.
 
         The base implementation creates the standard decoder weight layout used by
-        Qwen, LLaMA, Mistral, and similar families:
+        standard decoder families:
           - model.embed_tokens.weight [vocab, hidden]
           - model.layers.{i}.self_attn.{q,k,v,o}_proj.weight
           - model.layers.{i}.mlp.{gate,up,down}_proj.weight
@@ -136,7 +136,7 @@ class FamilyPluginTester:
           - lm_head.weight [vocab, hidden]
 
         Subclasses should override for families with different HF weight key names
-        (e.g. Phi with fused QKV, GPT-2 with c_attn/c_proj/c_fc, etc.).
+        (for example, fused-QKV or split-projection layouts).
         """
         s = self.spec
         kv_hidden = s.num_key_value_heads * s.head_dim

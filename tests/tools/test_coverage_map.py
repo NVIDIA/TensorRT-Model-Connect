@@ -307,12 +307,12 @@ class TestSelectTests:
     def test_direct_python_test_file_runs_directly_without_fallback(self, sample_map):
         """Changed Python tests should run directly without forcing full-tier fallback."""
         result = select_tests([
-            "tests/builder/test_family_timm_vit.py",
+            "tests/builder/test_unit_family.py",
             "tests/tools/test_test_impact.py",
             "tests/e2e_harness/test_orchestrator_phases.py",
         ], sample_map)
 
-        assert result.builder_tests == ["tests/builder/test_family_timm_vit.py"]
+        assert result.builder_tests == ["tests/builder/test_unit_family.py"]
         assert result.tools_tests == [
             "tests/e2e_harness/test_orchestrator_phases.py",
             "tests/tools/test_test_impact.py",

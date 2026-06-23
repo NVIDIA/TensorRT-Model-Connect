@@ -1,9 +1,8 @@
 // OmniPlugin: handles "omni_multimodal" strategy.
 // Omni pipeline with thinker (MoE decoder), optional talker, and optional code2wav.
 
-#include "runtime/models/omni/pipeline.h"
-#include "audio_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/models/omni/pipeline.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/recurrent_state.h"
 #include "utils/json_helpers.h"
@@ -49,8 +48,8 @@ class OmniPlugin final : public IPipelinePlugin {
                 int32_t talker_cache_len = omni_talker_max_cache_length;
                 int32_t talker_layers =
                     omni_talker_num_layers > 0 ? omni_talker_num_layers : ctx.config.num_layers;
-                talker_state = std::make_unique<KvCache>(
-                    talker_layers, talker_cache_len, talker_kv_dim, stream, cache_dtype);
+                talker_state = std::make_unique<KvCache>(talker_layers, talker_cache_len,
+                                                         talker_kv_dim, stream, cache_dtype);
             } else {
                 talker_state = std::make_unique<RecurrentState>(
                     0, std::vector<RecurrentState::TensorSpec>{}, stream);

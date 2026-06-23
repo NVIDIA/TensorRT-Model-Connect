@@ -74,14 +74,33 @@ def load_python_profile_registry() -> dict[str, Any]:
         registry = tomllib.load(f)
     if not isinstance(registry, dict):
         raise ValueError("python_profiles.toml must decode to an object")
+    registry = dict(registry)
+    profiles = dict(registry.get("profiles", {}))
+    if not isinstance(profiles, dict):
+        raise ValueError("python_profiles.toml is missing a [profiles] table")
+
+    from .families import family_python_profile_specs
+
+    for name, spec in family_python_profile_specs().items():
+        if name in profiles:
+            raise ValueError(
+                f"Execution profile {name!r} is declared in both "
+                "python_profiles.toml and family metadata"
+            )
+        profiles[name] = spec
+    registry["profiles"] = profiles
     return registry
 
 
-def _read_requirements_text(path_spec: str) -> str:
+def _read_package_text(path_spec: str) -> str:
     path = Path(path_spec)
     if path.is_absolute():
         return path.read_text(encoding="utf-8")
     return (_PACKAGE_DIR / path_spec).read_text(encoding="utf-8")
+
+
+def _read_requirements_text(path_spec: str) -> str:
+    return _read_package_text(path_spec)
 
 
 def _profile_spec(profile_name: str) -> dict[str, Any]:
@@ -124,6 +143,15 @@ def default_execution_profiles(
     """Return declarative default profile selections for a model case."""
     profiles = {phase: DEFAULT_PROFILE for phase in PROFILE_PHASES}
     registry = load_python_profile_registry()
+
+    if family:
+        from .families import family_default_execution_profiles
+
+        _apply_declared_defaults(
+            profiles,
+            family_default_execution_profiles(family),
+            source=f"family metadata {family}",
+        )
 
     sections = (
         ("family_defaults", str(family or "").strip()),
@@ -238,6 +266,16 @@ def _materialize_venv_profile(
         )
     requirements_text = _read_requirements_text(requirements_spec)
     verification_script = str(spec.get("verification_script", "") or "").strip()
+    verification_script_file = str(
+        spec.get("verification_script_file", "") or ""
+    ).strip()
+    if verification_script_file:
+        if verification_script:
+            raise ValueError(
+                f"Execution profile {profile_name!r} declares both "
+                "verification_script and verification_script_file"
+            )
+        verification_script = _read_package_text(verification_script_file).strip()
     system_site_packages = bool(spec.get("system_site_packages", True))
 
     hash_input = "\n".join(

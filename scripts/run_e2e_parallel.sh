@@ -29,7 +29,7 @@
 #
 # Environment variables (lower priority than CLI):
 #   ENGINE_DIR, RESULT_DIR, NUM_GPUS, WORKERS_PER_GPU, TRTMC_BINARY, HF_PYTHON
-#   TRTMC_E2E_EXCLUDE_GPU0, TRTMC_E2E_DEPRIORITIZE_GPU0
+#   TRTMC_E2E_EXCLUDE_GPU0, TRTMC_E2E_DEPRIORITIZE_GPU0, TRTMC_E2E_MANIFEST_DIR
 
 set -euo pipefail
 
@@ -41,6 +41,7 @@ TRTMC_BINARY="${TRTMC_BINARY:-./build/trtmc}"
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+MANIFEST_DIR="${TRTMC_E2E_MANIFEST_DIR:-tests/e2e/models}"
 
 # Auto-detect GPUs if not specified
 if [ -z "${NUM_GPUS:-}" ]; then
@@ -172,6 +173,7 @@ echo "  Progress every:  ${PROGRESS_INTERVAL}s"
 echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
 echo "  Collect args:    ${COLLECT_ARGS[*]:-none}"
+echo "  Manifests:       $MANIFEST_DIR"
 echo "  Models file:     ${MODELS_FILE:-none (collect all)}"
 echo "  Tests file:      ${TESTS_FILE:-none}"
 echo ""
@@ -243,6 +245,7 @@ SCHEDULE_ARGS=(
     --num-gpus "$NUM_GPUS"
     --workers-per-gpu "$WORKERS_PER_GPU"
     --split-exclusive-phases
+    --manifest-dir "$MANIFEST_DIR"
 )
 echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" "${SCHEDULE_ARGS[@]}" \
     > "$SCHEDULE_JSON"

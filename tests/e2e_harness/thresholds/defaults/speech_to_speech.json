@@ -1,5 +1,5 @@
 {
-  "description": "Default thresholds for speech-to-speech (PersonaPlex-style)",
+  "description": "Default thresholds for speech-to-speech models",
   "metrics": {
     "speech_min_token_match": 0.8,
     "speech_min_frame_exact": 0.7,

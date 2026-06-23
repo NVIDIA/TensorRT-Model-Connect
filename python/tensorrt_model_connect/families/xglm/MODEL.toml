@@ -1,6 +1,7 @@
 id = "xglm"
 plugin = "xglm"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "xglm",
 ]

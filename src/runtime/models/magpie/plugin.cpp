@@ -1,9 +1,9 @@
 // MagpiePlugin: handles "text_to_audio_magpie" strategy.
 // Magpie TTS encoder-decoder pipeline with IPA tokenizer and optional CFG.
 
-#include "runtime/models/magpie/pipeline.h"
 #include "audio_helpers.h"
 #include "plugin_helpers.h"
+#include "runtime/models/magpie/pipeline.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

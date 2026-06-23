@@ -1,4 +1,30 @@
 {
+  "new_runtime_guard_strategies": [
+    "decoder_kv_cache",
+    "decoder_moe",
+    "ssm_recurrent",
+    "rwkv_recurrent",
+    "hybrid_mamba_attention",
+    "encoder_only",
+    "embedding",
+    "reranking",
+    "vision_language",
+    "segmentation",
+    "prompted_segmentation",
+    "image_classification",
+    "object_detection",
+    "neural_operator",
+    "text_to_audio",
+    "speech_to_text",
+    "speech_to_text_rnnt",
+    "speech_to_speech",
+    "omni_multimodal",
+    "diffusion",
+    "patchtst_trt",
+    "patchtsmixer_trt",
+    "timesfm_trt",
+    "chronos_bolt_trt"
+  ],
   "runtime_strategies": {
     "decoder_kv_cache": {
       "task_strategy": "text_generation_causal",
@@ -246,6 +272,7 @@
     },
     "marian_translation": {
       "task_strategy": "text_generation_causal",
+      "performance_mode": "enc_dec",
       "cli_commands": ["run"],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
@@ -254,6 +281,7 @@
     },
     "seq2seq_encoder_decoder": {
       "task_strategy": "text_generation_causal",
+      "performance_mode": "enc_dec",
       "cli_commands": ["run"],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
@@ -286,6 +314,7 @@
     },
     "text_to_text": {
       "task_strategy": "text_generation_causal",
+      "performance_mode": "enc_dec",
       "cli_commands": ["run"],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",

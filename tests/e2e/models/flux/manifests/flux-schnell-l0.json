@@ -6,6 +6,7 @@
   "model_type": "flux",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation",
   "gated": true,
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "l0_only",
@@ -28,5 +29,10 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "PR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps."
+  "notes": "PR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

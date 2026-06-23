@@ -31,6 +31,9 @@ Environment:
                          (default: /usr/local/cuda/lib64/libcudart.so)
   GCOVR_FILTERS          Space-separated gcovr --filter values
                          (default: "<repo>/src <repo>/include")
+  GCOVR_EXCLUDES         Space-separated gcovr --exclude values
+                         (default excludes tests, build outputs, compiler IDs,
+                         and model-owned runtime plugins)
   CPP_COVERAGE_MIN_LINE
                          Minimum required line coverage percent (default: 100)
   CPP_COVERAGE_MIN_FUNCTION
@@ -104,6 +107,18 @@ else
   FILTERS=("${REPO_ROOT}/src" "${REPO_ROOT}/include")
 fi
 
+if [[ -n "${GCOVR_EXCLUDES:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXCLUDES=(${GCOVR_EXCLUDES})
+else
+  EXCLUDES=(
+    "${REPO_ROOT}/tests"
+    "${REPO_ROOT}/build.*"
+    "${REPO_ROOT}/src/runtime/models"
+    ".*/CMakeFiles/.*/CompilerIdCXX/.*"
+  )
+fi
+
 mkdir -p "${BUILD_DIR}" "${REPORT_ROOT}"
 
 cmake_args=(
@@ -138,6 +153,7 @@ echo "[cpp-coverage] Repo root: ${REPO_ROOT}"
 echo "[cpp-coverage] Build dir: ${BUILD_DIR}"
 echo "[cpp-coverage] Report root: ${REPORT_ROOT}"
 echo "[cpp-coverage] gcovr filters: ${FILTERS[*]}"
+echo "[cpp-coverage] gcovr excludes: ${EXCLUDES[*]}"
 echo "[cpp-coverage] Gate thresholds: line>=${CPP_COVERAGE_MIN_LINE}% function>=${CPP_COVERAGE_MIN_FUNCTION}% branch>=${CPP_COVERAGE_MIN_BRANCH}%"
 
 cmake "${cmake_args[@]}"
@@ -160,14 +176,14 @@ ctest --test-dir "${BUILD_DIR}" --output-on-failure "$@"
 gcovr_base=(
   --root "${REPO_ROOT}"
   --object-directory "${BUILD_DIR}"
-  --exclude "${REPO_ROOT}/tests"
-  --exclude "${REPO_ROOT}/build.*"
-  --exclude ".*/CMakeFiles/.*/CompilerIdCXX/.*"
   --gcov-ignore-errors source_not_found
   --gcov-ignore-errors no_working_dir_found
 )
 for filter in "${FILTERS[@]}"; do
   gcovr_base+=(--filter "${filter}")
+done
+for exclude in "${EXCLUDES[@]}"; do
+  gcovr_base+=(--exclude "${exclude}")
 done
 
 gcovr "${gcovr_base[@]}" \

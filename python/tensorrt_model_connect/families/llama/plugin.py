@@ -22,11 +22,12 @@ class LlamaPlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, debug_layer_outputs: bool = False,
     ) -> bytes:
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose)
+            quant_ctx=quant_ctx, verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs)
 
 
 plugin = LlamaPlugin()

@@ -1,154 +1,116 @@
 #!/usr/bin/env python3
-"""T5 encoder TRT vs HuggingFace comparison.
+"""Encoder diff entrypoint.
 
-Validates that the TRT T5 encoder engine produces the same text embeddings
-as the HuggingFace UMT5EncoderModel / T5EncoderModel.
-
-Usage:
-    python tools/diff_t5.py --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers --atol 1e-3
-
-Requires: torch, transformers, tensorrt, cuda-python
+Concrete encoder comparison behavior is owned by model-family modules under
+``python/tensorrt_model_connect/families/*/diff_t5.py``. This shared tool only
+discovers and dispatches to those handlers.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
+from functools import lru_cache
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
-import numpy as np
 
-
-def main():
-    parser = argparse.ArgumentParser(description="T5 encoder TRT vs HF comparison")
-    parser.add_argument("--model", required=True, help="HF model ID or local path (diffusers format)")
-    parser.add_argument("--atol", type=float, default=1e-3, help="Absolute tolerance")
-    parser.add_argument("--max-seq-len", type=int, default=64, help="Max sequence length for test")
-    parser.add_argument("--prompt", default="A cat on a beach", help="Test prompt")
-    args = parser.parse_args()
-
-    print(f"[diff-t5] Model: {args.model}", file=sys.stderr)
-    print(f"[diff-t5] Prompt: {args.prompt!r}", file=sys.stderr)
-
-    # 1. Load HF model
-    print("[diff-t5] Loading HF T5 encoder ...", file=sys.stderr)
-    import torch
-    from transformers import AutoTokenizer, T5EncoderModel
-
-    model_path = Path(args.model)
-    if model_path.is_dir() and (model_path / "text_encoder").is_dir():
-        te_path = str(model_path / "text_encoder")
-    else:
-        te_path = args.model
-
-    tokenizer = AutoTokenizer.from_pretrained(te_path)
-    hf_model = T5EncoderModel.from_pretrained(te_path, torch_dtype=torch.float32)
-    hf_model.eval()
-
-    # 2. Tokenize
-    encoding = tokenizer(
-        args.prompt,
-        max_length=args.max_seq_len,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    )
-    input_ids = encoding["input_ids"]  # [1, seq_len]
-
-    # 3. HF forward pass
-    with torch.no_grad():
-        hf_output = hf_model(input_ids=input_ids).last_hidden_state
-    hf_embeddings = hf_output.numpy()  # [1, seq_len, d_model]
-
-    print(f"[diff-t5] HF output shape: {hf_embeddings.shape}", file=sys.stderr)
-    print(f"[diff-t5] HF output range: [{hf_embeddings.min():.4f}, {hf_embeddings.max():.4f}]",
-          file=sys.stderr)
-
-    # 4. Build TRT engine
-    print("[diff-t5] Building TRT T5 engine ...", file=sys.stderr)
-    from tensorrt_model_connect.families.flux.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-
-    config = hf_model.config
-    t5_weights = load_t5_weights(
-        te_path,
-        d_model=config.d_model,
-        num_heads=config.num_heads,
-        d_kv=config.d_kv,
-        d_ff=config.d_ff,
-        num_layers=config.num_layers,
-        vocab_size=config.vocab_size,
-    )
-    engine_plan = build_t5_encoder_engine(
-        t5_weights,
-        d_model=config.d_model,
-        num_heads=config.num_heads,
-        d_kv=config.d_kv,
-        d_ff=config.d_ff,
-        num_layers=config.num_layers,
-        vocab_size=config.vocab_size,
-        max_seq_len=args.max_seq_len,
+def _family_root() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
     )
 
-    # 5. Run TRT engine
-    print("[diff-t5] Running TRT engine ...", file=sys.stderr)
-    import tensorrt as trt
-    from cuda import cudart
 
-    logger = trt.Logger(trt.Logger.WARNING)
-    runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(engine_plan)
-    context = engine.create_execution_context()
+@lru_cache(maxsize=1)
+def _family_encoder_diff_modules() -> tuple[ModuleType, ...]:
+    modules: list[ModuleType] = []
+    for handler_path in sorted(_family_root().glob("*/diff_t5.py")):
+        module_name = f"_trtmc_diff_t5_{handler_path.parent.name}"
+        spec = importlib.util.spec_from_file_location(module_name, handler_path)
+        if spec is None or spec.loader is None:
+            print(f"[diff_t5] WARN: cannot load family encoder diff handler "
+                  f"{handler_path}", file=sys.stderr)
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            print(f"[diff_t5] WARN: failed to import family encoder diff handler "
+                  f"{handler_path}: {exc}", file=sys.stderr)
+            continue
+        modules.append(module)
+    return tuple(modules)
 
-    # Allocate buffers and run
-    input_np = input_ids.numpy().astype(np.int32)
-    d_model = config.d_model
 
-    # Simple engine execution
-    stream = cudart.cudaStreamCreate()[1]
+def _select_family_from_argv(argv: list[str]) -> str | None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--family", default=None)
+    ns, _ = parser.parse_known_args(argv)
+    return ns.family
 
-    # Bind input
-    d_input = cudart.cudaMalloc(input_np.nbytes)[1]
-    cudart.cudaMemcpyAsync(d_input, input_np.ctypes.data, input_np.nbytes,
-                           cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, stream)
-    context.set_tensor_address("input_ids", d_input)
 
-    # Bind output
-    output_shape = (1, args.max_seq_len, d_model)
-    output_np = np.empty(output_shape, dtype=np.float32)
-    d_output = cudart.cudaMalloc(output_np.nbytes)[1]
-    context.set_tensor_address("text_embeddings", d_output)
+def _find_family_encoder_diff_handler(argv: list[str] | None = None) -> ModuleType:
+    args = list(sys.argv[1:] if argv is None else argv)
+    requested_family = _select_family_from_argv(args)
+    modules = _family_encoder_diff_modules()
 
-    # Execute
-    context.execute_async_v3(stream)
-    cudart.cudaStreamSynchronize(stream)
+    if requested_family:
+        for module in modules:
+            if Path(str(module.__file__)).parent.name == requested_family:
+                return module
+        raise SystemExit(f"No encoder diff handler for family {requested_family!r}")
 
-    # Copy output
-    cudart.cudaMemcpy(output_np.ctypes.data, d_output, output_np.nbytes,
-                      cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+    claimants = [
+        module for module in modules
+        if callable(getattr(module, "handles_diff_t5_args", None))
+        and module.handles_diff_t5_args(args)
+    ]
+    if len(claimants) == 1:
+        return claimants[0]
+    if len(claimants) > 1:
+        names = ", ".join(Path(str(module.__file__)).parent.name
+                          for module in claimants)
+        raise SystemExit(f"Multiple encoder diff handlers matched: {names}")
+    if len(modules) == 1:
+        return modules[0]
 
-    trt_embeddings = output_np  # [1, seq_len, d_model]
+    raise SystemExit("No encoder diff handler matched; pass --family <name>")
 
-    # Cleanup
-    cudart.cudaFree(d_input)
-    cudart.cudaFree(d_output)
-    cudart.cudaStreamDestroy(stream)
 
-    # 6. Compare
-    print(f"[diff-t5] TRT output shape: {trt_embeddings.shape}", file=sys.stderr)
-    print(f"[diff-t5] TRT output range: [{trt_embeddings.min():.4f}, {trt_embeddings.max():.4f}]",
-          file=sys.stderr)
+def _strip_wrapper_args(argv: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--family":
+            skip_next = True
+            continue
+        if arg.startswith("--family="):
+            continue
+        stripped.append(arg)
+    return stripped
 
-    max_diff = np.max(np.abs(hf_embeddings - trt_embeddings))
-    mean_diff = np.mean(np.abs(hf_embeddings - trt_embeddings))
 
-    print(f"[diff-t5] Max abs diff: {max_diff:.6f}", file=sys.stderr)
-    print(f"[diff-t5] Mean abs diff: {mean_diff:.6f}", file=sys.stderr)
+def __getattr__(name: str) -> Any:
+    return getattr(_find_family_encoder_diff_handler([]), name)
 
-    if max_diff <= args.atol:
-        print(f"PASS: T5 encoder match (max_diff={max_diff:.6f} <= atol={args.atol})")
-    else:
-        print(f"FAIL: T5 encoder mismatch (max_diff={max_diff:.6f} > atol={args.atol})")
-        sys.exit(1)
+
+def main() -> None:
+    argv = sys.argv[1:]
+    handler = _find_family_encoder_diff_handler(argv)
+    original_argv = sys.argv
+    sys.argv = [original_argv[0], *_strip_wrapper_args(argv)]
+    try:
+        raise SystemExit(handler.main())
+    finally:
+        sys.argv = original_argv
 
 
 if __name__ == "__main__":

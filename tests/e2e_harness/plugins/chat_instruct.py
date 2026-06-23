@@ -1,29 +1,26 @@
 """Contract test plugin for chat/instruct models."""
 from __future__ import annotations
 from ..contracts import MetricResult
-from .base import normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail
+from .base import (
+    contract_config,
+    normalize_text,
+    extract_answer,
+    levenshtein_ned,
+    make_pass,
+    make_fail,
+)
 
 class ChatInstructPlugin:
-    reference_families = ["chat_instruct_template", "chat_qwen3_posttrained"]
+    reference_families = ["chat_instruct_template"]
     user_contract = "chat_response"
 
-    # Markers that indicate the prompt already contains chat formatting.
-    _PRE_FORMATTED_MARKERS = (
-        "<|im_start|>", "[INST]", "<|start|>", "<|user|>",
-        "<start_of_turn>", "<|start_header_id|>", "<extra_id_0>", "<SPECIAL_10>",
-    )
-
     def configure_reference(self, case):
-        prompt = case.inputs.get("prompt", "")
-        # Skip chat template if the prompt already contains chat tokens
-        already_formatted = any(m in prompt for m in self._PRE_FORMATTED_MARKERS)
-        config = {"use_chat_template": not already_formatted, "enable_thinking": False}
-        return config
+        return contract_config(case)
 
     def verify(self, trt_output, ref_output, case, threshold):
         prompt = case.inputs.get("prompt", "")
-        contract_config = case.metadata.get("contract_config", {})
-        if contract_config.get("enable_thinking") is False:
+        config = contract_config(case)
+        if config.get("enable_thinking") is False:
             raw_trt = trt_output.text or ""
             if "<think>" in raw_trt:
                 return make_fail(

@@ -23,11 +23,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 from .contracts import (
     CILane,
     E2ECase,
-    MODEL_REFERENCE_FAMILY,
     OracleLevel,
     PreflightRequirement,
-    REFERENCE_FAMILY_TO_USER_CONTRACT,
-    RUNTIME_TO_TASK_STRATEGY,
     StageSpec,
 )
 from .python_profiles import PROFILE_PHASES, normalize_execution_profiles
@@ -325,8 +322,6 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
         {"name": "full_inference", "required": True},
     ],
     "diffusion_media_generation": [
-        {"name": "t5_encode", "required": False},
-        {"name": "dit_step", "required": False},
         {"name": "vae_decode", "required": False},
         {"name": "end_to_end", "required": True},
     ],
@@ -363,11 +358,10 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
 # ---------------------------------------------------------------------------
 
 def _infer_task_strategy(manifest: dict) -> str:
-    """Infer task_strategy from runtime_strategy."""
+    """Return the model-owned task_strategy field when declared."""
     if "task_strategy" in manifest:
-        return manifest["task_strategy"]
-    rs = manifest.get("runtime_strategy", "decoder_kv_cache")
-    return RUNTIME_TO_TASK_STRATEGY.get(rs, "text_generation_causal")
+        return str(manifest["task_strategy"])
+    return str(manifest.get("runtime_strategy", "decoder_kv_cache"))
 
 
 def _infer_reference_backend(manifest: dict, task_strategy: str) -> str:
@@ -386,19 +380,13 @@ def _infer_oracle_level(manifest: dict, reference_backend: str) -> str:
 
 
 def _infer_reference_family(manifest: dict) -> str:
-    """Infer reference_family from manifest name or explicit field."""
-    if "reference_family" in manifest:
-        return manifest["reference_family"]
-    return MODEL_REFERENCE_FAMILY.get(manifest.get("name", ""), "")
+    """Return the model-owned reference_family field when declared."""
+    return str(manifest.get("reference_family", "") or "")
 
 
 def _infer_user_contract(manifest: dict, reference_family: str) -> str:
-    """Infer user_contract from reference_family or explicit field."""
-    if "user_contract" in manifest:
-        return manifest["user_contract"]
-    if reference_family:
-        return REFERENCE_FAMILY_TO_USER_CONTRACT.get(reference_family, "")
-    return ""
+    """Return the model-owned user_contract field when declared."""
+    return str(manifest.get("user_contract", "") or "")
 
 
 def _infer_ci_lane(manifest: dict) -> str:
@@ -460,20 +448,6 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
         reqs.append(PreflightRequirement(
             kind="python_module_available",
             args={"module": "ftfy", "phase": "build"},
-            gating=True,
-        ))
-
-    if task_strategy == "image_classification":
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "timm", "phase": "reference"},
-            gating=True,
-        ))
-
-    if manifest.get("runtime_strategy") == "chronos_bolt_trt":
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "chronos", "phase": "build"},
             gating=True,
         ))
 
@@ -540,7 +514,7 @@ def _build_inputs(manifest: dict) -> dict:
     if manifest.get("test_input_audio"):
         inputs["audio"] = manifest["test_input_audio"]
 
-    # Point prompts for SAM
+    # Point prompts for prompted segmentation.
     if "point_x" in manifest:
         inputs["point_x"] = manifest["point_x"]
         inputs["point_y"] = manifest["point_y"]
@@ -571,7 +545,7 @@ def _build_inputs(manifest: dict) -> dict:
         inputs["image_height"] = manifest["image_height"]
         inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
 
-    # Qwen-Image (and other image-only diffusion) extras.
+    # Image-only diffusion extras.
     for key in ("negative_prompt", "cfg_scale", "height", "width",
                 "num_inference_steps"):
         if key in manifest and key not in inputs:
@@ -710,45 +684,56 @@ def _convert_skip_to_known_limitation(manifest: dict) -> dict | None:
 # Manifest schema validation
 # ---------------------------------------------------------------------------
 
-_KNOWN_RUNTIME_STRATEGIES = frozenset({
-    "decoder_kv_cache",
-    "decoder_moe",
-    "nemotron_labs_diffusion",
-    "ssm_recurrent",
-    "rwkv_recurrent",
-    "hybrid_mamba_attention",
-    "vision_language",
-    "speech_to_text",
-    "speech_to_text_rnnt",
-    "text_to_audio",              # legacy alias
-    "text_to_audio_bark",
-    "text_to_audio_magpie",
-    "speech_to_speech",
-    "diffusion",                  # legacy alias
-    "diffusion_flux",
-    "diffusion_ltx",
-    "diffusion_wan",
-    "diffusion_zimage",
-    "diffusion_qwen_image",
-    "diffusion_pixart",
-    "segmentation",
-    "prompted_segmentation",
-    "image_classification",
-    "encoder_only",
-    "embedding",
-    "reranking",
-    "text_to_text",
-    "marian_translation",
-    "seq2seq_encoder_decoder",
-    "object_detection",
-    "omni_multimodal",
-    "neural_operator",
-    "patchtst_trt",
-    "patchtsmixer_trt",
-    "timesfm_trt",
-    "chronos_bolt_trt",
-    "elf_flow",
+_LEGACY_RUNTIME_STRATEGY_ALIASES = frozenset({
+    "diffusion",
+    "text_to_audio",
 })
+_KNOWN_RUNTIME_STRATEGIES_CACHE: frozenset[str] | None = None
+
+
+def _runtime_model_manifests_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "src" / "runtime" / "models"
+
+
+def _read_runtime_model_manifest(path: Path) -> dict[str, Any]:
+    if tomllib is not None:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+
+    parsed: dict[str, Any] = {}
+    text = path.read_text(encoding="utf-8")
+    single = re.search(r'(?m)^\s*runtime_strategy\s*=\s*"([^"]+)"', text)
+    if single:
+        parsed["runtime_strategy"] = single.group(1)
+    multi = re.search(r"(?ms)^\s*runtime_strategies\s*=\s*\[([^\]]*)\]", text)
+    if multi:
+        parsed["runtime_strategies"] = re.findall(r'"([^"]+)"', multi.group(1))
+    return parsed
+
+
+def _known_runtime_strategies() -> frozenset[str]:
+    global _KNOWN_RUNTIME_STRATEGIES_CACHE
+    if _KNOWN_RUNTIME_STRATEGIES_CACHE is not None:
+        return _KNOWN_RUNTIME_STRATEGIES_CACHE
+
+    strategies = set(_LEGACY_RUNTIME_STRATEGY_ALIASES)
+    for manifest in sorted(_runtime_model_manifests_dir().glob("*/MODEL.toml")):
+        try:
+            raw = _read_runtime_model_manifest(manifest)
+        except Exception as exc:
+            logger.warning("Failed to read runtime model manifest %s: %s", manifest, exc)
+            continue
+        values = raw.get("runtime_strategies")
+        if values is None:
+            values = [raw.get("runtime_strategy")]
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        strategies.update(value for value in values if isinstance(value, str) and value)
+
+    _KNOWN_RUNTIME_STRATEGIES_CACHE = frozenset(strategies)
+    return _KNOWN_RUNTIME_STRATEGIES_CACHE
 
 
 def _validate_manifest(raw: dict, path: str) -> None:
@@ -791,11 +776,12 @@ def _validate_manifest(raw: dict, path: str) -> None:
 
     # 4. Warn on unknown runtime_strategy
     rs = raw.get("runtime_strategy")
-    if rs is not None and rs not in _KNOWN_RUNTIME_STRATEGIES:
+    known_runtime_strategies = _known_runtime_strategies()
+    if rs is not None and rs not in known_runtime_strategies:
         warnings.warn(
             f"Manifest {path!r} (name={raw.get('name')!r}): unknown "
             f"runtime_strategy {rs!r}. Known values: "
-            f"{sorted(_KNOWN_RUNTIME_STRATEGIES)}",
+            f"{sorted(known_runtime_strategies)}",
             stacklevel=2,
         )
 

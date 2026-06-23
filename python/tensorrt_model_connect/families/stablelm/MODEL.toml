@@ -1,6 +1,7 @@
 id = "stablelm"
 plugin = "stablelm"
 module = "plugin"
+capabilities = ["split_decoder_roles"]
 aliases = [
   "stablelm",
 ]

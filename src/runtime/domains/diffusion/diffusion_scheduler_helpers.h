@@ -52,7 +52,7 @@ inline double apply_flow_match_shift(double sigma, double shift) {
 
 inline double compute_dynamic_mu(const FlowMatchEulerConfig& config, int32_t num_steps) {
     if (config.use_empirical_mu) {
-        // FLUX.2 empirical mu formula (compute_empirical_mu in diffusers).
+        // Empirical dynamic-shift formula used by compatible schedulers.
         const double a1 = 8.73809524e-05;
         const double b1 = 1.89833333;
         const double a2 = 0.00016927;
@@ -68,8 +68,7 @@ inline double compute_dynamic_mu(const FlowMatchEulerConfig& config, int32_t num
         return a * static_cast<double>(num_steps) + b;
     }
 
-    // Diffusers linear mu formula. FLUX defaults to 256/4096, while
-    // LTX-Video uses 1024/4096.
+    // Diffusers linear mu formula parameterized by scheduler config.
     const double base_seq = static_cast<double>(config.base_image_seq_len);
     const double max_seq = static_cast<double>(config.max_image_seq_len);
     const double m =

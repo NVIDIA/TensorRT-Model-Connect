@@ -1,14 +1,15 @@
-# Perception Backends
+# Perception Domain Helpers
 
-Vision task runtimes for segmentation, prompted segmentation, detection, and neural operators.
+Shared domain helpers for generic perception preprocessing and postprocessing.
+Concrete model runtimes own their prompted segmentation, detection, and neural
+operator implementations under `src/runtime/models/<model>/`.
 
 Key files:
-- `segmentation_backend.*`: segmentation mask inference.
-- `sam_backend.*`: prompted segmentation (SAM).
-- `detection_backend.*`: object detection output path.
-- `neural_operator_backend.*`: DeepONet/FNO runtime support.
+- `segmentation_preprocess_seam.h`: generic segmentation image preprocessing.
+- `segmentation_postprocess_seam.h`: generic segmentation class-map postprocessing.
+- `perception_types.h`: generic perception value types.
 
 How to understand:
-1. Start from backend public method (`segment`, `detect`, `solve`).
-2. Trace preprocess -> TRT inference -> output postprocess helpers.
-3. Use `multimodal/image_preprocessor.*` when image normalization/cropping behavior matters.
+1. Start from the owning runtime model pipeline.
+2. Use this folder only for behavior shared by multiple perception model families.
+3. Keep single-family helpers beside their owning runtime model.

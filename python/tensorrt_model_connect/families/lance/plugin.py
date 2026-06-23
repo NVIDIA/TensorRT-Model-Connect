@@ -31,7 +31,8 @@ forwards ``precision`` so bf16/fp16 build true reduced-precision engines.
 
 Checkpoint layout: the Lance HF repo is not a flat HF checkpoint (it nests
 ``Lance_3B/llm_config.json`` and a separate ``Qwen2.5-VL-ViT/`` dir). Run
-``scripts/prepare_lance_model.py`` to stage a directory this plugin can build:
+``python -m tensorrt_model_connect.families.lance.prepare_model`` to stage a
+directory this plugin can build:
 ``config.json`` (model_type=lance), ``model.safetensors``, the tokenizer files,
 and the ViT at ``vision/model.safetensors``.
 """
@@ -68,8 +69,8 @@ class LancePlugin:
 
     def matches(self, model_type: str) -> bool:
         # Lance shares model_type "qwen2_5_vl" with real Qwen2.5-VL, so
-        # scripts/prepare_lance_model.py stamps model_type="lance" to route
-        # the checkpoint here instead of the qwen_vl plugin.
+        # The family-owned prepare_model tool stamps model_type="lance" to
+        # route the checkpoint here instead of the qwen_vl plugin.
         return model_type.lower() == "lance"
 
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
@@ -125,7 +126,7 @@ class LancePlugin:
             "fixed_image_size": fixed,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
-            "preprocessor_type": "qwen_merge_group",
+            "preprocessor_type": "merge_group_chw",
             "vl_prompt_template": (
                 "<|im_start|>user\n"
                 "<|vision_start|>{image_pads}<|vision_end|>\n"
@@ -143,7 +144,8 @@ def _load_lance_vision_weights(model_dir: str) -> WeightDict:
     if not (vit_dir / "model.safetensors").exists():
         raise FileNotFoundError(
             f"Lance ViT weights not found at {vit_dir}/model.safetensors. "
-            "Run scripts/prepare_lance_model.py to stage the model."
+            "Run python -m tensorrt_model_connect.families.lance.prepare_model "
+            "to stage the model."
         )
     readers = _open_safetensors(vit_dir)
     weights = WeightDict()

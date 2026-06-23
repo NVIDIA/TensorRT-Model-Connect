@@ -5,6 +5,9 @@
   "bundle": "roberta-large-tp4.trtfb",
   "family": "roberta",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 512,
@@ -50,5 +53,10 @@
       "gating": true
     }
   ],
-  "notes": "RoBERTa large TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as roberta-large."
+  "notes": "RoBERTa large TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as roberta-large.",
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

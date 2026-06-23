@@ -4,6 +4,7 @@
   "bundle": "chronos-bolt-tiny-official-tp4.trtfb",
   "family": "chronos_bolt",
   "runtime_strategy": "chronos_bolt_trt",
+  "task_strategy": "neural_operator",
   "reference_backend": "torch_reference",
   "reference_family": "time_series_quantile_forecast",
   "user_contract": "time_series_quantile_forecast",
@@ -47,6 +48,14 @@
       "kind": "gpu_count_min",
       "args": {
         "count": 4
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "chronos",
+        "phase": "build"
       },
       "gating": true
     }

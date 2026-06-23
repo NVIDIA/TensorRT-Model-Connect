@@ -27,7 +27,12 @@ from pathlib import Path
 import re
 from typing import Dict, Iterable, Optional
 
-from .contracts import Comparator, ReferenceBackendRunner, TaskStrategyRunner
+from .contracts import (
+    Comparator,
+    ReferenceBackendRunner,
+    ReproCommandProvider,
+    TaskStrategyRunner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ logger = logging.getLogger(__name__)
 _strategy_runners: Dict[str, TaskStrategyRunner] = {}
 _reference_backends: Dict[str, ReferenceBackendRunner] = {}
 _comparators: Dict[str, Comparator] = {}
+_repro_command_providers: Dict[str, ReproCommandProvider] = {}
 _discovered = False
 
 
@@ -70,6 +76,14 @@ def register_comparator(comp: Comparator) -> None:
     _comparators[name] = comp
 
 
+def register_repro_command_provider(provider: ReproCommandProvider) -> None:
+    """Register a ReproCommandProvider by its model family."""
+    name = provider.family_name
+    if name in _repro_command_providers:
+        logger.warning("Overwriting repro command provider for %s", name)
+    _repro_command_providers[name] = provider
+
+
 def _register_plugin_object(module_name: str, plugin: object) -> None:
     """Register one plugin object exposed by a shared or model-local module."""
     if isinstance(plugin, TaskStrategyRunner):
@@ -84,6 +98,32 @@ def _register_plugin_object(module_name: str, plugin: object) -> None:
         register_comparator(plugin)
         logger.debug("Registered comparator from %s: %s", module_name, plugin.task_strategy)
         return
+    if isinstance(plugin, ReproCommandProvider):
+        register_repro_command_provider(plugin)
+        logger.debug(
+            "Registered repro command provider from %s: %s",
+            module_name,
+            plugin.family_name,
+        )
+        return
+    try:
+        from .plugins import register_plugin as register_contract_plugin
+        from .plugins.base import ContractTestPlugin
+    except ImportError:
+        ContractTestPlugin = None  # type: ignore[assignment]
+        register_contract_plugin = None  # type: ignore[assignment]
+    if (
+        ContractTestPlugin is not None
+        and register_contract_plugin is not None
+        and isinstance(plugin, ContractTestPlugin)
+    ):
+        register_contract_plugin(plugin, source=module_name)
+        logger.debug(
+            "Registered contract plugin from %s: %s",
+            module_name,
+            plugin.reference_families,
+        )
+        return
     logger.warning(
         "Module %s exposed a plugin object that does not match a known E2E "
         "protocol: %r",
@@ -93,7 +133,7 @@ def _register_plugin_object(module_name: str, plugin: object) -> None:
 
 
 def _iter_module_plugins(mod) -> Iterable[object]:
-    for attr_name in ("runner", "reference", "comparator", "plugin"):
+    for attr_name in ("runner", "reference", "comparator", "repro_provider", "plugin"):
         plugin = getattr(mod, attr_name, None)
         if plugin is None:
             continue
@@ -267,6 +307,12 @@ def get_comparator(task_strategy: str) -> Optional[Comparator]:
     return _comparators.get(task_strategy)
 
 
+def get_repro_command_provider(family_name: str) -> Optional[ReproCommandProvider]:
+    """Look up a registered ReproCommandProvider by model family."""
+    _ensure_discovered()
+    return _repro_command_providers.get(family_name)
+
+
 def list_runners() -> Dict[str, TaskStrategyRunner]:
     """Return a copy of all registered strategy runners."""
     _ensure_discovered()
@@ -285,6 +331,12 @@ def list_comparators() -> Dict[str, Comparator]:
     return dict(_comparators)
 
 
+def list_repro_command_providers() -> Dict[str, ReproCommandProvider]:
+    """Return a copy of all registered repro command providers."""
+    _ensure_discovered()
+    return dict(_repro_command_providers)
+
+
 def get_contract_plugin(reference_family: str):
     """Look up a contract test plugin by reference family.
 
@@ -301,6 +353,7 @@ def reset() -> None:
     _strategy_runners.clear()
     _reference_backends.clear()
     _comparators.clear()
+    _repro_command_providers.clear()
     _discovered = False
     # Also reset contract plugins
     try:

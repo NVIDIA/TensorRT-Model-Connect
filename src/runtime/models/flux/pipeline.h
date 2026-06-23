@@ -3,8 +3,8 @@
 // FluxPipeline: FLUX diffusion pipeline with T5 + CLIP text encoders,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/flux/flux_generation_plan.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -28,6 +28,7 @@ class FluxPipeline final : public IPipeline {
 
     ~FluxPipeline() override;
 
+    bool supports_image_generation() const override { return true; }
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     // Batched generation override: per-sample seeds, internal chunking against

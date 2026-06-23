@@ -1,5 +1,5 @@
 {
-  "description": "Default thresholds for text generation causal (decoder_kv_cache, decoder_moe, ssm_recurrent, rwkv_recurrent, hybrid_mamba_attention)",
+  "description": "Default thresholds for text generation causal task strategies",
   "metrics": {
     "logit_atol": 0.001,
     "layer_atol": 0.05,

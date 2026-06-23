@@ -5,6 +5,7 @@
   "bundle": "nemotron-labs-diffusion-8b.trtfb",
   "family": "nemotron_labs_diffusion",
   "runtime_strategy": "nemotron_labs_diffusion",
+  "task_strategy": "text_generation_causal",
   "reference_family": "nemotron_labs_diffusion_model_card",
   "user_contract": "model_card_generation_parity",
   "ci_tier": "nightly_only",

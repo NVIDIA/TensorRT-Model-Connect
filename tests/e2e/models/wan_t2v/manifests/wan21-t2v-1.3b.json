@@ -6,6 +6,9 @@
   "model_type": "wan_t2v",
   "family": "wan_t2v",
   "runtime_strategy": "diffusion_wan",
+  "task_strategy": "diffusion_media_generation",
+  "reference_family": "diffusers_video_gen",
+  "user_contract": "diffusion_video",
   "ci_tier": "nightly_only",
   "l0_replacement": "wan21-t2v-1.3b-l0",
   "l0_replacement_reason": "Wan2.1 scale stays nightly; wan21-t2v-1.3b-l0 keeps the Wan video path at 384x672, 5 frames, and 15 steps for PR L0.",
@@ -20,5 +23,11 @@
   "video_width": 832,
   "num_inference_steps": 30,
   "skip_text_comparison": true,
-  "notes": "First diffusion model. Uses flow matching Euler scheduler with shift=3.0."
+  "notes": "First diffusion model. Uses flow matching Euler scheduler with shift=3.0.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true,
+      "video_mode": true
+    }
+  }
 }

@@ -1,0 +1,15 @@
+{
+  "default": true,
+  "name": "qwen3-0.6b",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b.trtfb",
+  "timing_cache": "qwen3-0.6b.timing.cache",
+  "max_cache": 64,
+  "max_new_tokens": 8,
+  "optimization_level": 1,
+  "build_timeout": "45m",
+  "run_timeout": "10m",
+  "precision": "fp16",
+  "prompt": "The capital of France is",
+  "run_args": ["--greedy"]
+}

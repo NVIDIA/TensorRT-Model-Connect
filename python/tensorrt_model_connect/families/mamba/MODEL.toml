@@ -1,9 +1,14 @@
 id = "mamba"
 plugin = "mamba"
 module = "plugin"
+capabilities = ["disable_dual_profile_decoder"]
 aliases = [
   "mamba",
 ]
 prefixes = [
   "mamba",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "ssm_recurrent",
 ]

@@ -706,7 +706,7 @@ def build_qwen3_vl_vision_engine(
 
     # ---------------------------------------------------------------
     # Stage 2: Learned position embedding (fast_pos_embed_interpolate)
-    # The qwen_merge_group preprocessor already reorders pixels so that
+    # The merge_group_chw preprocessor already reorders pixels so that
     # the conv output is in merge-group order (matching HF's patch ordering).
     # For exact integer grid (no interpolation needed), just index directly.
     # pos_embed.weight: [num_grid_per_side^2, embed_dim]
@@ -726,7 +726,7 @@ def build_qwen3_vl_vision_engine(
     dw = w_idxs - w_floor.astype(np.float32)
 
     # Bilinear interpolation of position embeddings in MERGE-GROUP order.
-    # Patches arrive in merge-group order from the conv (because qwen_merge_group
+    # Patches arrive in merge-group order from the conv (because merge_group_chw
     # preprocessor reorders pixels). The position embedding must match this order.
     merged_h_pos = grid_h // merge_size
     merged_w_pos = grid_w // merge_size

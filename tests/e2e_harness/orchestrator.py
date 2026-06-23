@@ -50,13 +50,15 @@ from .contracts import (
     StageStatus,
     ThresholdProfile,
 )
-from . import _case_artifact_dir, save_full_stderr
+from . import save_full_stderr
 from .python_profiles import profile_env_var
+from .runtime_strategy_metadata import runtime_strategy_requires_new_runtime_guard
 from .registry import (
     activate_model_plugins,
     get_comparator,
     get_contract_plugin,
     get_reference,
+    get_repro_command_provider,
     get_runner,
 )
 
@@ -80,32 +82,6 @@ _TRTMC_ENGINE_TIMING_RE = re.compile(
     re.MULTILINE,
 )
 
-_MIGRATED_RUNTIME_STRATEGIES = frozenset({
-    "decoder_kv_cache",
-    "decoder_moe",
-    "ssm_recurrent",
-    "rwkv_recurrent",
-    "hybrid_mamba_attention",
-    "encoder_only",
-    "embedding",
-    "reranking",
-    "vision_language",
-    "segmentation",
-    "prompted_segmentation",
-    "image_classification",
-    "object_detection",
-    "neural_operator",
-    "text_to_audio",
-    "speech_to_text",
-    "speech_to_text_rnnt",
-    "speech_to_speech",
-    "omni_multimodal",
-    "diffusion",
-    "patchtst_trt",
-    "patchtsmixer_trt",
-    "timesfm_trt",
-    "chronos_bolt_trt",
-})
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
 
@@ -389,18 +365,7 @@ def _resolve_bundle(
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()
     env = os.environ.copy()
-    edit_condition_image = build_args.get("edit_condition_image")
-    if (
-        not edit_condition_image
-        and case.family == "qwen_image"
-        and str(case.metadata.get("task_mode", "")).lower() == "edit"
-    ):
-        edit_condition_image = case.inputs.get("image")
-    if edit_condition_image:
-        edit_condition_path = Path(str(edit_condition_image))
-        if not edit_condition_path.is_absolute():
-            edit_condition_path = Path(__file__).resolve().parents[2] / edit_condition_path
-        env["TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE"] = str(edit_condition_path)
+    _apply_manifest_build_env(env, case)
     if ctx.build_profile and ctx.build_profile != "base":
         cmd.extend(["--active-python-profile", ctx.build_profile])
     build_timing_path: Path | None = None
@@ -614,8 +579,8 @@ def _validate_trt_runtime_path(
     ctx: RunContext,
     output: StageOutput,
 ) -> str | None:
-    """Ensure TRT E2E subprocesses for migrated strategies use the new runtime path."""
-    if case.runtime_strategy not in _MIGRATED_RUNTIME_STRATEGIES:
+    """Ensure TRT E2E subprocesses for opted-in strategies use the new runtime path."""
+    if not runtime_strategy_requires_new_runtime_guard(case.runtime_strategy):
         return None
 
     payloads = _collect_runtime_guard_payloads({
@@ -701,45 +666,21 @@ def _build_repro_commands(
         image = (case.inputs.get("image") or case.inputs.get("test_image")
                  or case.inputs.get("image_path"))
         task_strategy = case.task_strategy or ""
-        if task_strategy == "diffusion_text_generation":
-            infer_parts = [
-                ctx.binary_path, "run", bundle_path,
-                "--prompt", _shell_quote(
-                    case.inputs.get("prompt")
-                    or case.inputs.get("source_text")
-                    or case.inputs.get("condition_text")
-                    or ""
-                ),
-                "--output", "/tmp/trtmc_elf_samples.jsonl",
-            ]
-            if "max_new_tokens" in case.inputs:
-                infer_parts.extend(["--max-new-tokens", str(case.inputs["max_new_tokens"])])
-            if int(case.inputs.get("num_samples", 1)) > 1:
-                infer_parts.extend(["--num-samples", str(case.inputs["num_samples"])])
-            num_steps = case.inputs.get("num_sampling_steps", case.inputs.get("num_steps"))
-            if num_steps is not None:
-                infer_parts.extend(["--num-steps", str(num_steps)])
-            self_cond = case.inputs.get("self_cond_cfg_scale", case.inputs.get("guidance_scale"))
-            if self_cond is not None:
-                infer_parts.extend(["--guidance-scale", str(self_cond)])
-            if "cfg_scale" in case.inputs:
-                infer_parts.extend(["--cfg-scale", str(case.inputs["cfg_scale"])])
-            if "sde_gamma" in case.inputs:
-                infer_parts.extend(["--sde-gamma", str(case.inputs["sde_gamma"])])
-            if "seed" in case.inputs:
-                infer_parts.extend(["--seed", str(case.inputs["seed"])])
-            condition_latents = (
-                case.inputs.get("condition_latents_raw")
-                or case.inputs.get("condition_latents_path")
-            )
-            condition_mask = (
-                case.inputs.get("condition_mask_raw")
-                or case.inputs.get("condition_mask_path")
-            )
-            if condition_latents:
-                infer_parts.extend(["--condition-latents-raw", str(condition_latents)])
-            if condition_mask:
-                infer_parts.extend(["--condition-mask-raw", str(condition_mask)])
+        repro_provider = get_repro_command_provider(case.family)
+        model_owned_infer_parts: list[str] | None = None
+        if repro_provider is not None:
+            try:
+                model_owned_infer_parts = repro_provider.build_trt_inference_command(
+                    case, ctx, bundle_path)
+            except Exception:
+                logger.warning(
+                    "Model-local repro command provider failed for %s",
+                    case.family,
+                    exc_info=True,
+                )
+
+        if model_owned_infer_parts is not None:
+            infer_parts = model_owned_infer_parts
         elif task_strategy == "neural_operator":
             infer_parts = [ctx.binary_path, "solve", bundle_path]
             branch_input = case.inputs.get("branch_input")
@@ -754,91 +695,22 @@ def _build_repro_commands(
                 if field_input is not None:
                     infer_parts.extend(["--field-input", _csv_arg(field_input)])
         elif task_strategy == "diffusion_media_generation":
-            is_qwen_image = (
-                case.runtime_strategy == "diffusion_qwen_image"
-                or case.family == "qwen_image"
-            )
-            if is_qwen_image:
-                infer_parts = [
-                    ctx.binary_path, "run", bundle_path,
-                    "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
-                    "--output", "/tmp/trtmc_qwen_image/output.png",
-                    "--num-inference-steps", str(case.inputs.get("num_inference_steps", 20)),
-                ]
-                negative_prompt = case.inputs.get("negative_prompt")
-                if negative_prompt is not None:
-                    infer_parts.extend(["--negative-prompt", _shell_quote(str(negative_prompt))])
-                cfg_scale = case.inputs.get("cfg_scale")
-                if cfg_scale is None:
-                    cfg_scale = case.inputs.get("guidance_scale")
-                if cfg_scale is not None:
-                    infer_parts.extend(["--cfg-scale", str(cfg_scale)])
-                height = case.inputs.get("height") or case.inputs.get("image_height")
-                if height is not None:
-                    infer_parts.extend(["--height", str(height)])
-                width = case.inputs.get("width") or case.inputs.get("image_width")
-                if width is not None:
-                    infer_parts.extend(["--width", str(width)])
-                if "seed" in case.inputs:
-                    infer_parts.extend(["--seed", str(case.inputs["seed"])])
-                # Shared-initial-latents path: the runner pre-computes the same
-                # raw bytes the HF reference will consume. Mirrors the LTX
-                # plumbing immediately below.
-                if ctx.artifacts_dir:
-                    qi_latent_path = Path(
-                        _case_artifact_dir(ctx.artifacts_dir, case.name)
-                    ) / "initial_latents.raw"
-                    infer_parts.extend(["--initial-latents-raw", str(qi_latent_path)])
-            else:
-                infer_parts = [
-                    ctx.binary_path, "generate-video", bundle_path,
-                    "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
-                    "--output", "/tmp/trtmc_frames",
-                    "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
-                ]
-                guidance_scale = case.inputs.get("guidance_scale")
-                if guidance_scale is not None:
-                    infer_parts.extend(["--guidance-scale", str(guidance_scale)])
-                if "seed" in case.inputs:
-                    infer_parts.extend(["--seed", str(case.inputs["seed"])])
-                if case.family == "ltx_video" and ctx.artifacts_dir:
-                    latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
-                    infer_parts.extend(["--initial-latents-raw", str(latent_path)])
-        elif task_strategy == "prompted_segmentation":
-            is_sam3 = (
-                case.family == "sam3"
-                or case.reference_family == "prompted_segmentation_sam3"
-            )
             infer_parts = [
-                ctx.binary_path, "segment-sam", bundle_path,
-                "--image", str(image or ""),
-                "--output", "/tmp/trtmc_masks",
+                ctx.binary_path, "generate-video", bundle_path,
+                "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+                "--output", "/tmp/trtmc_frames",
+                "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
             ]
-            if is_sam3:
-                prompt = (
-                    case.inputs.get("prompt")
-                    or case.inputs.get("text_prompt")
-                    or case.metadata.get("text_prompt")
-                    or ""
-                )
-                infer_parts.extend(["--prompt", _shell_quote(str(prompt))])
-            else:
-                infer_parts.extend([
-                    "--point-x", str(case.inputs.get("point_x", 0.5)),
-                    "--point-y", str(case.inputs.get("point_y", 0.5)),
-                ])
-            if not is_sam3 and not case.inputs.get("is_foreground", True):
-                infer_parts.append("--background")
+            guidance_scale = case.inputs.get("guidance_scale")
+            if guidance_scale is not None:
+                infer_parts.extend(["--guidance-scale", str(guidance_scale)])
+            if "seed" in case.inputs:
+                infer_parts.extend(["--seed", str(case.inputs["seed"])])
         elif task_strategy == "segmentation":
             infer_parts = [
                 ctx.binary_path, "segment", bundle_path,
                 "--image", str(image or ""),
                 "--output", "/tmp/trtmc_segmentation.png",
-            ]
-        elif task_strategy == "image_classification":
-            infer_parts = [
-                ctx.binary_path, "classify", bundle_path,
-                "--image", str(image or ""),
             ]
         else:
             infer_parts = [
@@ -944,6 +816,36 @@ def _append_manifest_build_args(cmd: list[str], build_args: dict[str, Any]) -> N
     tp_size = _manifest_tensor_parallel_size(build_args)
     if tp_size is not None and tp_size > 1:
         cmd.extend(["--tp-size", str(tp_size)])
+
+
+def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
+    """Apply generic build-time environment entries declared by the manifest."""
+    build_env = case.metadata.get("build_env")
+    if not isinstance(build_env, dict):
+        return
+
+    project_root = Path(__file__).resolve().parents[2]
+    model_test_dir = Path(case.metadata.get("model_test_dir") or project_root)
+    for name, spec in build_env.items():
+        if not isinstance(name, str) or not name:
+            continue
+        value: object = spec
+        path_like = False
+        relative_to = "repo"
+        if isinstance(spec, dict):
+            value = spec.get("path", spec.get("value", ""))
+            path_like = "path" in spec or bool(spec.get("path_like", False))
+            relative_to = str(spec.get("relative_to", relative_to) or relative_to)
+        if value is None:
+            continue
+        text = str(value)
+        if path_like:
+            path = Path(text)
+            if not path.is_absolute():
+                base = model_test_dir if relative_to == "model" else project_root
+                path = base / path
+            text = str(path)
+        env[name] = text
 
 
 def _distributed_runtime_config(case: E2ECase) -> dict[str, Any]:

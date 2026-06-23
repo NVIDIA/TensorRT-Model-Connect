@@ -4,6 +4,7 @@
   "bundle": "patchtst-granite-official.trtfb",
   "family": "patchtst",
   "runtime_strategy": "patchtst_trt",
+  "task_strategy": "neural_operator",
   "reference_backend": "torch_reference",
   "reference_family": "time_series_point_forecast",
   "user_contract": "time_series_point_forecast",

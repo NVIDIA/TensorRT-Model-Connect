@@ -40,7 +40,7 @@ class TestLayerTensorName:
 # ===================================================================
 
 def _hf_alibi_slopes(num_heads: int) -> np.ndarray:
-    """Reference: HF BloomModel.build_alibi_tensor slope computation."""
+    """Reference implementation for ALiBi slope computation."""
     closest_power_of_2 = 2 ** math.floor(math.log2(num_heads))
     base = 2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3)))
     powers = np.arange(1, 1 + closest_power_of_2, dtype=np.int32)
@@ -66,8 +66,8 @@ class TestComputeAlibiSlopes:
 # 3. make_rope_table (pure numpy, no TRT)
 # ===================================================================
 
-def _hf_rope_table_llama(max_len, hidden, num_heads, theta, cosine):
-    """Standard LLaMA-style RoPE: pairs (d, d+half_rotary)."""
+def _rotated_half_rope_table(max_len, hidden, num_heads, theta, cosine):
+    """Rotated-half RoPE: pairs (d, d+half_rotary)."""
     head_dim = hidden // num_heads
     half = head_dim // 2
     inv_freq = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
@@ -84,7 +84,7 @@ def _hf_rope_table_llama(max_len, hidden, num_heads, theta, cosine):
 
 def _hf_rope_table_interleaved(max_len, hidden, num_heads, theta, cosine,
                                 partial_factor=1.0):
-    """CodeGen/GPT-J style: repeat_interleave, pairs (d, d+1)."""
+    """Interleaved RoPE: repeat_interleave, pairs (d, d+1)."""
     head_dim = hidden // num_heads
     rotary_ndims = int(head_dim * partial_factor)
     half = rotary_ndims // 2
@@ -104,12 +104,12 @@ def _hf_rope_table_interleaved(max_len, hidden, num_heads, theta, cosine,
 class TestMakeRopeTable:
     def test_rotated_half_cos(self):
         ours = graph_ops.make_rope_table(16, 64, 4, 10000.0, cosine=True)
-        ref = _hf_rope_table_llama(16, 64, 4, 10000.0, True)
+        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, True)
         np.testing.assert_allclose(ours, ref, atol=1e-6)
 
     def test_rotated_half_sin(self):
         ours = graph_ops.make_rope_table(16, 64, 4, 10000.0, cosine=False)
-        ref = _hf_rope_table_llama(16, 64, 4, 10000.0, False)
+        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, False)
         np.testing.assert_allclose(ours, ref, atol=1e-6)
 
     def test_interleaved_cos(self):

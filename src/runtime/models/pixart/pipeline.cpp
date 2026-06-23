@@ -1,15 +1,14 @@
-// PixArtPipeline — TrtModule-based PixArt diffusion pipeline.
-// Standalone copy of WanPipeline logic for full decoupling.
-// PixArt bundles use the same engine format as Wan (T5 + DiT + VAE).
+// PixArtPipeline - TrtModule-based PixArt diffusion pipeline.
+// PixArt bundles use T5 + DiT + VAE engines.
 // All CPU math (timestep embedding, RoPE, patchify, unpatchify, text projection)
 // is kept identical. Raw TRT calls replaced with TrtModule::forward(TensorMap).
 
 #include "runtime/models/pixart/pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/domains/diffusion/wan_generation_conditioning.h"
+#include "runtime/models/pixart/pixart_generation_conditioning.h"
+#include "runtime/models/pixart/pixart_generation_plan.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +22,7 @@ namespace trtmc {
 namespace {
 
 using diffusion::FlowMatchEulerState;
-using diffusion::WanLayout;
+using diffusion::PixArtLayout;
 
 // ---------------------------------------------------------------------------
 // DDIM Scheduler (epsilon-prediction models like PixArt)
@@ -139,8 +138,8 @@ float clamp_unit(float value) {
     return std::max(0.0F, std::min(1.0F, value));
 }
 
-void convert_wan_chw_to_hwc(const std::vector<float>& raw, int32_t h_out, int32_t w_out,
-                            VideoResult& result) {
+void convert_pixart_chw_to_hwc(const std::vector<float>& raw, int32_t h_out, int32_t w_out,
+                               VideoResult& result) {
     result.height = h_out;
     result.width = w_out;
     result.num_frames = 1;
@@ -163,8 +162,9 @@ void convert_wan_chw_to_hwc(const std::vector<float>& raw, int32_t h_out, int32_
 // VAE latent preparation helpers
 // ---------------------------------------------------------------------------
 
-std::vector<float> prepare_wan_vae_2d_input(const std::vector<float>& latents,
-                                            const DiffusionConfig& config, std::size_t input_size) {
+std::vector<float> prepare_pixart_vae_2d_input(const std::vector<float>& latents,
+                                               const DiffusionConfig& config,
+                                               std::size_t input_size) {
     std::vector<float> scaled_latents(latents.begin(),
                                       latents.begin() + static_cast<std::ptrdiff_t>(input_size));
     if (config.latents_mean.empty() && config.vae_scaling_factor > 0.0F) {
@@ -176,9 +176,9 @@ std::vector<float> prepare_wan_vae_2d_input(const std::vector<float>& latents,
     return scaled_latents;
 }
 
-void extract_wan_latent_frame(const std::vector<float>& latents, int32_t c, int32_t t_lat,
-                              int32_t h_lat, int32_t w_lat, int32_t t,
-                              std::vector<float>& frame_buf) {
+void extract_pixart_latent_frame(const std::vector<float>& latents, int32_t c, int32_t t_lat,
+                                 int32_t h_lat, int32_t w_lat, int32_t t,
+                                 std::vector<float>& frame_buf) {
     const auto spatial = static_cast<std::size_t>(h_lat) * static_cast<std::size_t>(w_lat);
     frame_buf.resize(static_cast<std::size_t>(c) * spatial);
     for (int32_t ci = 0; ci < c; ++ci) {
@@ -191,10 +191,10 @@ void extract_wan_latent_frame(const std::vector<float>& latents, int32_t c, int3
     }
 }
 
-void compose_wan_vae_video_frames(const std::vector<float>& all_raw_frames, int32_t t_lat,
-                                  int32_t t_out_per_frame, int32_t h_out, int32_t w_out,
-                                  int32_t scale_factor_temporal, int32_t max_video_frames,
-                                  VideoResult& result) {
+void compose_pixart_vae_video_frames(const std::vector<float>& all_raw_frames, int32_t t_lat,
+                                     int32_t t_out_per_frame, int32_t h_out, int32_t w_out,
+                                     int32_t scale_factor_temporal, int32_t max_video_frames,
+                                     VideoResult& result) {
     const int32_t total_out_frames = t_lat * t_out_per_frame;
     const int32_t trim = scale_factor_temporal - 1;
     const int32_t t_final = total_out_frames - trim;
@@ -245,8 +245,8 @@ void compose_wan_vae_video_frames(const std::vector<float>& all_raw_frames, int3
 // Positional embedding
 // ---------------------------------------------------------------------------
 
-void compute_wan_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim,
-                              std::vector<float>& pos_embed_2d) {
+void compute_pixart_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim,
+                                 std::vector<float>& pos_embed_2d) {
     const int32_t half_dim = dim / 2;
     const int32_t quarter_dim = half_dim / 2;
     const float interp_scale = 2.0F;
@@ -280,8 +280,8 @@ void compute_wan_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim,
     }
 }
 
-void add_wan_positional_embedding(std::vector<float>& hidden,
-                                  const std::vector<float>& pos_embed_2d) {
+void add_pixart_positional_embedding(std::vector<float>& hidden,
+                                     const std::vector<float>& pos_embed_2d) {
     if (pos_embed_2d.empty()) {
         return;
     }
@@ -295,13 +295,13 @@ void add_wan_positional_embedding(std::vector<float>& hidden,
 // ---------------------------------------------------------------------------
 
 template <typename RunDenoiserFn>
-bool predict_wan_noise(const std::vector<float>& hidden, const std::vector<float>& temb_6d,
-                       const std::vector<float>& time_embed,
-                       const std::vector<float>& text_projected,
-                       const std::vector<float>& null_text,
-                       const std::vector<float>& encoder_attn_mask, float guidance_scale,
-                       std::vector<float>& denoiser_output, std::string& error,
-                       RunDenoiserFn&& run_denoiser) {
+bool predict_pixart_noise(const std::vector<float>& hidden, const std::vector<float>& temb_6d,
+                          const std::vector<float>& time_embed,
+                          const std::vector<float>& text_projected,
+                          const std::vector<float>& null_text,
+                          const std::vector<float>& encoder_attn_mask, float guidance_scale,
+                          std::vector<float>& denoiser_output, std::string& error,
+                          RunDenoiserFn&& run_denoiser) {
     if (guidance_scale > 1.0F) {
         std::vector<float> cond_pred;
         std::vector<float> uncond_pred;
@@ -333,8 +333,8 @@ bool predict_wan_noise(const std::vector<float>& hidden, const std::vector<float
 // Output truncation (for models with out_channels=2*z_dim)
 // ---------------------------------------------------------------------------
 
-void maybe_truncate_wan_output(std::vector<float>& denoiser_output, int32_t num_patches,
-                               int32_t z_dim, int32_t pt, int32_t ph, int32_t pw) {
+void maybe_truncate_pixart_output(std::vector<float>& denoiser_output, int32_t num_patches,
+                                  int32_t z_dim, int32_t pt, int32_t ph, int32_t pw) {
     const int32_t expected_patch_out = z_dim * pt * ph * pw;
     const auto actual_patch_out =
         static_cast<int32_t>(denoiser_output.size() / static_cast<std::size_t>(num_patches));
@@ -369,10 +369,11 @@ void maybe_truncate_wan_output(std::vector<float>& denoiser_output, int32_t num_
 // Scheduler step dispatch
 // ---------------------------------------------------------------------------
 
-void apply_wan_scheduler_step(bool use_ddim, DDIMState& ddim_scheduler,
-                              FlowMatchEulerState& fm_scheduler,
-                              const std::vector<float>& noise_pred_spatial,
-                              std::vector<float>& latents, std::size_t latent_count, int32_t step) {
+void apply_pixart_scheduler_step(bool use_ddim, DDIMState& ddim_scheduler,
+                                 FlowMatchEulerState& fm_scheduler,
+                                 const std::vector<float>& noise_pred_spatial,
+                                 std::vector<float>& latents, std::size_t latent_count,
+                                 int32_t step) {
     if (use_ddim) {
         ddim_scheduler.step(noise_pred_spatial.data(), latents.data(), latents.data(), latent_count,
                             step);
@@ -386,8 +387,8 @@ void apply_wan_scheduler_step(bool use_ddim, DDIMState& ddim_scheduler,
 // Step logging
 // ---------------------------------------------------------------------------
 
-void maybe_log_wan_step(int32_t step, int32_t num_inference_steps, float timestep,
-                        const std::vector<float>& latents) {
+void maybe_log_pixart_step(int32_t step, int32_t num_inference_steps, float timestep,
+                           const std::vector<float>& latents) {
     if (step % 5 != 0 && step != num_inference_steps - 1) {
         return;
     }
@@ -404,7 +405,7 @@ void maybe_log_wan_step(int32_t step, int32_t num_inference_steps, float timeste
 // Layout logging
 // ---------------------------------------------------------------------------
 
-void log_wan_layout(const WanLayout& layout) {
+void log_pixart_layout(const PixArtLayout& layout) {
     std::cerr << "[diffusion] Latent shape: " << layout.z_dim << "x" << layout.t_lat << "x"
               << layout.h_lat << "x" << layout.w_lat << " (patches=" << layout.num_patches << ")\n";
 }
@@ -415,45 +416,43 @@ void log_wan_layout(const WanLayout& layout) {
 
 template <typename ComputeTembFn, typename PatchifyFn, typename EmbedHiddenFn,
           typename UnpatchifyFn, typename RunDenoiserFn>
-bool run_wan_denoising_loop(int32_t num_inference_steps, bool use_ddim, float guidance_scale,
-                            const WanLayout& layout, const std::vector<float>& step_timesteps,
-                            const std::vector<float>& pos_embed_2d,
-                            const std::vector<float>& text_projected,
-                            const std::vector<float>& null_text,
-                            const std::vector<float>& encoder_attn_mask, DDIMState& ddim_scheduler,
-                            FlowMatchEulerState& fm_scheduler, std::vector<float>& latents,
-                            std::string& error, ComputeTembFn&& compute_temb, PatchifyFn&& patchify,
-                            EmbedHiddenFn&& embed_hidden, UnpatchifyFn&& unpatchify,
-                            RunDenoiserFn&& run_denoiser) {
+bool run_pixart_denoising_loop(
+    int32_t num_inference_steps, bool use_ddim, float guidance_scale, const PixArtLayout& layout,
+    const std::vector<float>& step_timesteps, const std::vector<float>& pos_embed_2d,
+    const std::vector<float>& text_projected, const std::vector<float>& null_text,
+    const std::vector<float>& encoder_attn_mask, DDIMState& ddim_scheduler,
+    FlowMatchEulerState& fm_scheduler, std::vector<float>& latents, std::string& error,
+    ComputeTembFn&& compute_temb, PatchifyFn&& patchify, EmbedHiddenFn&& embed_hidden,
+    UnpatchifyFn&& unpatchify, RunDenoiserFn&& run_denoiser) {
     std::vector<float> patches;
-    return diffusion::run_wan_denoising_steps(
+    return diffusion::run_video_denoising_steps(
         num_inference_steps, step_timesteps, latents, error, compute_temb,
         [&](const std::vector<float>& current_latents, std::vector<float>& hidden) {
             patchify(current_latents, patches);
             hidden.resize(static_cast<std::size_t>(layout.num_patches) *
                           static_cast<std::size_t>(layout.dim));
             embed_hidden(patches, hidden);
-            add_wan_positional_embedding(hidden, pos_embed_2d);
+            add_pixart_positional_embedding(hidden, pos_embed_2d);
         },
         [&](const std::vector<float>& hidden, const std::vector<float>& temb_6d,
             const std::vector<float>& time_embed, std::vector<float>& denoiser_output,
             std::string& err) {
-            return predict_wan_noise(hidden, temb_6d, time_embed, text_projected, null_text,
-                                     encoder_attn_mask, guidance_scale, denoiser_output, err,
-                                     run_denoiser);
+            return predict_pixart_noise(hidden, temb_6d, time_embed, text_projected, null_text,
+                                        encoder_attn_mask, guidance_scale, denoiser_output, err,
+                                        run_denoiser);
         },
         [&](std::vector<float>& denoiser_output, std::vector<float>& noise_pred_spatial) {
-            maybe_truncate_wan_output(denoiser_output, layout.num_patches, layout.z_dim, layout.pt,
-                                      layout.ph, layout.pw);
+            maybe_truncate_pixart_output(denoiser_output, layout.num_patches, layout.z_dim,
+                                         layout.pt, layout.ph, layout.pw);
             unpatchify(denoiser_output, noise_pred_spatial);
         },
         [&](const std::vector<float>& noise_pred_spatial, std::vector<float>& current_latents,
             int32_t step) {
-            apply_wan_scheduler_step(use_ddim, ddim_scheduler, fm_scheduler, noise_pred_spatial,
-                                     current_latents, current_latents.size(), step);
+            apply_pixart_scheduler_step(use_ddim, ddim_scheduler, fm_scheduler, noise_pred_spatial,
+                                        current_latents, current_latents.size(), step);
         },
         [&](int32_t step, float timestep, const std::vector<float>& current_latents) {
-            maybe_log_wan_step(step, num_inference_steps, timestep, current_latents);
+            maybe_log_pixart_step(step, num_inference_steps, timestep, current_latents);
         });
 }
 
@@ -461,8 +460,8 @@ bool run_wan_denoising_loop(int32_t num_inference_steps, bool use_ddim, float gu
 // Latent denormalization
 // ---------------------------------------------------------------------------
 
-void denormalize_wan_latents(const DiffusionConfig& config, int32_t z_dim, int32_t t_lat,
-                             int32_t h_lat, int32_t w_lat, std::vector<float>& latents) {
+void denormalize_pixart_latents(const DiffusionConfig& config, int32_t z_dim, int32_t t_lat,
+                                int32_t h_lat, int32_t w_lat, std::vector<float>& latents) {
     if (config.latents_mean.empty() || config.latents_std.empty()) {
         return;
     }
@@ -797,7 +796,7 @@ void PixArtPipeline::compute_3d_rope(int32_t nt, int32_t nh, int32_t nw,
     const int32_t num_patches = nt * nh * nw;
     const double theta = 10000.0;
 
-    // Wan uses: h_dim = w_dim = 2*(head_dim//6), t_dim = head_dim - h_dim - w_dim
+    // PixArt uses: h_dim = w_dim = 2*(head_dim//6), t_dim = head_dim - h_dim - w_dim
     const int32_t h_dim = 2 * (head_dim / 6);
     const int32_t w_dim = h_dim;
     const int32_t t_dim = head_dim - h_dim - w_dim;
@@ -884,7 +883,7 @@ bool PixArtPipeline::decode_vae_2d(const std::vector<float>& latents, int32_t c,
     const int32_t w_out = w_lat * config_.scale_factor_spatial;
     const auto input_size = static_cast<std::size_t>(c) * static_cast<std::size_t>(h_lat) *
                             static_cast<std::size_t>(w_lat);
-    auto scaled_latents = prepare_wan_vae_2d_input(latents, config_, input_size);
+    auto scaled_latents = prepare_pixart_vae_2d_input(latents, config_, input_size);
 
     // Forward through VAE: latent_input -> decoder_output
     TensorMap inputs;
@@ -900,7 +899,7 @@ bool PixArtPipeline::decode_vae_2d(const std::vector<float>& latents, int32_t c,
     auto* raw_data = static_cast<float*>(outputs["decoder_output"].data);
     std::vector<float> raw(raw_data, raw_data + out_size);
 
-    convert_wan_chw_to_hwc(raw, h_out, w_out, result);
+    convert_pixart_chw_to_hwc(raw, h_out, w_out, result);
     return true;
 }
 
@@ -986,7 +985,7 @@ void PixArtPipeline::decode_vae_single_frame(const std::vector<float>& latents, 
                                              std::vector<float>& all_raw_frames) {
     // Extract single latent frame [c, h, w] from [c, t, h, w]
     std::vector<float> frame_buf;
-    extract_wan_latent_frame(latents, c, t_lat, h_lat, w_lat, t, frame_buf);
+    extract_pixart_latent_frame(latents, c, t_lat, h_lat, w_lat, t, frame_buf);
 
     // Forward through VAE with latent_frame input
     // Cache tensors are already bound via bind_external
@@ -1054,8 +1053,9 @@ bool PixArtPipeline::decode_vae_3d(const std::vector<float>& latents, int32_t c,
                                 all_raw_frames);
     }
 
-    compose_wan_vae_video_frames(all_raw_frames, t_lat, vae_output_t, h_out, w_out,
-                                 config_.scale_factor_temporal, config_.video_num_frames, result);
+    compose_pixart_vae_video_frames(all_raw_frames, t_lat, vae_output_t, h_out, w_out,
+                                    config_.scale_factor_temporal, config_.video_num_frames,
+                                    result);
     return true;
 }
 
@@ -1069,14 +1069,14 @@ bool PixArtPipeline::run_pixart_text_conditioning(const std::vector<int32_t>& in
                                                   std::vector<float>& null_text,
                                                   std::string& error) {
     // Build conditioning inputs (null IDs needed for null-text encoding)
-    const diffusion::WanConditioningInputs conditioning_inputs =
-        diffusion::make_wan_conditioning_inputs(config_, diffusion::make_wan_layout(config_),
-                                                input_ids);
+    const diffusion::PixArtConditioningInputs conditioning_inputs =
+        diffusion::make_pixart_conditioning_inputs(config_, diffusion::make_pixart_layout(config_),
+                                                   input_ids);
 
     std::cerr << "[diffusion] Encoding text (" << input_ids.size() << " tokens) ...\n";
 
-    diffusion::WanTextConditioning text_conditioning;
-    if (!diffusion::build_wan_text_conditioning(
+    diffusion::PixArtTextConditioning text_conditioning;
+    if (!diffusion::build_pixart_text_conditioning(
             input_ids, conditioning_inputs, seq_len, error,
             [this](const std::vector<int32_t>& ids, std::vector<float>& embeddings,
                    std::string& /*encoder_error*/) { return run_t5_encoder(ids, embeddings); },
@@ -1114,7 +1114,7 @@ bool PixArtPipeline::run_pixart_vae_decode(int32_t z_dim, int32_t t_lat, int32_t
 ImageResult PixArtPipeline::finish_pixart_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat,
                                                      int32_t w_lat, std::vector<float>& latents,
                                                      VideoResult& result) {
-    denormalize_wan_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
+    denormalize_pixart_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
 
     if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
         std::cerr << "[pixart] TP rank " << tensor_parallel_rank_
@@ -1150,7 +1150,7 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     const float requested_guidance = (cfg.guidance_scale >= 0.0f) ? cfg.guidance_scale : -1.0f;
 
     const auto plan =
-        diffusion::make_wan_generation_plan(config_, requested_steps, requested_guidance);
+        diffusion::make_pixart_generation_plan(config_, requested_steps, requested_guidance);
 
     VideoResult result;
     result.height = config_.video_height;
@@ -1161,8 +1161,8 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
         return video_to_image(result, config_.video_height, config_.video_width);
     }
 
-    const WanLayout& layout = plan.layout;
-    log_wan_layout(layout);
+    const PixArtLayout& layout = plan.layout;
+    log_pixart_layout(layout);
 
     // Encode text: run T5 for both real and null prompts, project both
     std::string error;
@@ -1174,19 +1174,19 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     }
 
     // Build conditioning inputs for denoising (need encoder_attn_mask)
-    const diffusion::WanConditioningInputs conditioning_inputs =
-        diffusion::make_wan_conditioning_inputs(config_, layout, input_ids);
+    const diffusion::PixArtConditioningInputs conditioning_inputs =
+        diffusion::make_pixart_conditioning_inputs(config_, layout, input_ids);
 
     // Compute positional embeddings (RoPE 3D or 2D)
     std::vector<float> rope_cos, rope_sin, pos_embed_2d;
     if (config_.use_rope) {
         compute_3d_rope(layout.nt, layout.nh_p, layout.nw_p, rope_cos, rope_sin);
     } else {
-        compute_wan_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim, pos_embed_2d);
+        compute_pixart_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim, pos_embed_2d);
     }
 
     // Initialize random latents
-    std::vector<float> latents = diffusion::make_wan_initial_latents(plan.latent_count);
+    std::vector<float> latents = diffusion::make_pixart_initial_latents(plan.latent_count);
 
     // Set up scheduler
     FlowMatchEulerState fm_scheduler;
@@ -1197,7 +1197,7 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
         ddim_scheduler.set_timesteps(plan.num_inference_steps);
         step_timesteps = ddim_scheduler.timesteps;
     } else {
-        fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
+        fm_scheduler = diffusion::make_pixart_flow_match_scheduler(plan);
         step_timesteps = fm_scheduler.timesteps;
     }
 
@@ -1231,11 +1231,11 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
         };
 
     // Run denoising loop
-    if (!run_wan_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.guidance_scale,
-                                layout, step_timesteps, pos_embed_2d, text_projected, null_text,
-                                conditioning_inputs.encoder_attn_mask, ddim_scheduler, fm_scheduler,
-                                latents, error, compute_temb, patchify_fn, embed_hidden,
-                                unpatchify_fn, run_denoiser_fn)) {
+    if (!run_pixart_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.guidance_scale,
+                                   layout, step_timesteps, pos_embed_2d, text_projected, null_text,
+                                   conditioning_inputs.encoder_attn_mask, ddim_scheduler,
+                                   fm_scheduler, latents, error, compute_temb, patchify_fn,
+                                   embed_hidden, unpatchify_fn, run_denoiser_fn)) {
         std::cerr << "[diffusion] Denoiser failed: " << error << "\n";
         return video_to_image(result, config_.video_height, config_.video_width);
     }

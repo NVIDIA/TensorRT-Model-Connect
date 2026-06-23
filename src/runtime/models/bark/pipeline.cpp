@@ -1,7 +1,7 @@
 #include "runtime/models/bark/pipeline.h"
 
 #include "runtime/core/trt_decode_runtime.h"
-#include "runtime/domains/audio/bark_generation_plan.h"
+#include "runtime/models/bark/bark_generation_plan.h"
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>

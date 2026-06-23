@@ -77,11 +77,67 @@ foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)
     endif()
     list(APPEND TRTMC_MODEL_${_trtmc_model_var}_PLUGINS "${_trtmc_source}|${_trtmc_symbol}")
   endforeach()
+
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "runtime_config_schemas"
+    _trtmc_runtime_config_schemas)
+  foreach(_trtmc_schema_entry IN LISTS _trtmc_runtime_config_schemas)
+    string(REPLACE "|" ";" _trtmc_schema_fields "${_trtmc_schema_entry}")
+    list(LENGTH _trtmc_schema_fields _trtmc_schema_field_count)
+    if(NOT _trtmc_schema_field_count EQUAL 2)
+      message(FATAL_ERROR
+        "Invalid runtime_config_schemas entry '${_trtmc_schema_entry}' in "
+        "${_trtmc_model_manifest}")
+    endif()
+    list(GET _trtmc_schema_fields 0 _trtmc_schema_source)
+    list(GET _trtmc_schema_fields 1 _trtmc_schema_symbol)
+    set(_trtmc_schema_source_path
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_schema_source}")
+    if(NOT EXISTS "${_trtmc_schema_source_path}")
+      message(FATAL_ERROR "Runtime config schema source does not exist: ${_trtmc_schema_source_path}")
+    endif()
+    list(APPEND TRTMC_MODEL_${_trtmc_model_var}_CONFIG_SCHEMAS
+      "${_trtmc_schema_source}|${_trtmc_schema_symbol}")
+  endforeach()
+
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "runtime_tests"
+    _trtmc_runtime_tests)
+  foreach(_trtmc_test_entry IN LISTS _trtmc_runtime_tests)
+    string(REPLACE "|" ";" _trtmc_test_fields "${_trtmc_test_entry}")
+    list(LENGTH _trtmc_test_fields _trtmc_test_field_count)
+    if(NOT _trtmc_test_field_count EQUAL 5)
+      message(FATAL_ERROR
+        "Invalid runtime_tests entry '${_trtmc_test_entry}' in ${_trtmc_model_manifest}; "
+        "expected name|source|link_targets|extra_sources|options")
+    endif()
+    list(GET _trtmc_test_fields 1 _trtmc_test_source)
+    set(_trtmc_test_source_path
+      "${PROJECT_SOURCE_DIR}/tests/cpp/models/${_trtmc_model}/${_trtmc_test_source}")
+    if(NOT EXISTS "${_trtmc_test_source_path}")
+      message(FATAL_ERROR "Runtime model test source does not exist: ${_trtmc_test_source_path}")
+    endif()
+    list(APPEND TRTMC_MODEL_${_trtmc_model_var}_TESTS "${_trtmc_test_entry}")
+  endforeach()
+
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "gnu_warning_suppressed_sources"
+    _trtmc_gnu_warning_suppressed_sources)
+  foreach(_trtmc_suppressed_source IN LISTS _trtmc_gnu_warning_suppressed_sources)
+    set(_trtmc_suppressed_source_path
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_suppressed_source}")
+    if(NOT EXISTS "${_trtmc_suppressed_source_path}")
+      message(FATAL_ERROR
+        "Warning-suppressed runtime source does not exist: ${_trtmc_suppressed_source_path}")
+    endif()
+    list(APPEND TRTMC_MODEL_${_trtmc_model_var}_GNU_WARNING_SUPPRESSED_SOURCES
+      "${_trtmc_suppressed_source}")
+  endforeach()
 endforeach()
 list(SORT TRTMC_RUNTIME_MODEL_IDS)
 
 set(TRTMC_MODEL_PLUGIN_INDEX_ENTRIES)
+set(TRTMC_LEGACY_STRATEGY_ALIAS_ENTRIES)
 set(TRTMC_RUNTIME_STRATEGY_IDS)
+set(TRTMC_DEFAULT_RUNTIME_STRATEGY_MODEL)
+set(TRTMC_DEFAULT_RUNTIME_STRATEGY_RETURN "return std::nullopt;")
 foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   set(_trtmc_model_manifest "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/MODEL.toml")
   if(NOT EXISTS "${_trtmc_model_manifest}")
@@ -104,8 +160,10 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     message(FATAL_ERROR "No runtime_strategies in ${_trtmc_model_manifest}")
   endif()
   string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
+  set(_trtmc_strategy_values)
   foreach(_trtmc_quoted_strategy IN LISTS _trtmc_strategy_tokens)
     string(REPLACE "\"" "" _trtmc_strategy "${_trtmc_quoted_strategy}")
+    list(APPEND _trtmc_strategy_values "${_trtmc_strategy}")
     list(FIND TRTMC_RUNTIME_STRATEGY_IDS "${_trtmc_strategy}" _trtmc_existing_strategy)
     string(MAKE_C_IDENTIFIER "${_trtmc_strategy}" _trtmc_strategy_var)
     set(_trtmc_strategy_owner_var "TRTMC_RUNTIME_STRATEGY_OWNER_${_trtmc_strategy_var}")
@@ -119,6 +177,51 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     string(APPEND TRTMC_MODEL_PLUGIN_INDEX_ENTRIES
       "        {\"${_trtmc_model}\", \"${_trtmc_strategy}\", \"${TRTMC_MODEL_${_trtmc_model_var}_LIBRARY}\"},\n")
   endforeach()
+
+  _trtmc_model_manifest_string("${_trtmc_model_manifest_text}" "default_runtime_strategy"
+    _trtmc_default_runtime_strategy)
+  if(_trtmc_default_runtime_strategy)
+    list(FIND _trtmc_strategy_values "${_trtmc_default_runtime_strategy}"
+      _trtmc_default_strategy_index)
+    if(_trtmc_default_strategy_index EQUAL -1)
+      message(FATAL_ERROR
+        "default_runtime_strategy '${_trtmc_default_runtime_strategy}' in "
+        "${_trtmc_model_manifest} is not owned by model '${_trtmc_model}'")
+    endif()
+    if(TRTMC_DEFAULT_RUNTIME_STRATEGY_MODEL)
+      message(FATAL_ERROR
+        "Multiple runtime model manifests declare default_runtime_strategy: "
+        "${TRTMC_DEFAULT_RUNTIME_STRATEGY_MODEL} and ${_trtmc_model}")
+    endif()
+    set(TRTMC_DEFAULT_RUNTIME_STRATEGY_MODEL "${_trtmc_model}")
+    set(TRTMC_DEFAULT_RUNTIME_STRATEGY_RETURN
+      "return std::string(\"${_trtmc_default_runtime_strategy}\");")
+  endif()
+
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "legacy_runtime_strategy_aliases"
+    _trtmc_legacy_aliases)
+  foreach(_trtmc_alias_entry IN LISTS _trtmc_legacy_aliases)
+    string(REPLACE "|" ";" _trtmc_alias_fields "${_trtmc_alias_entry}")
+    list(LENGTH _trtmc_alias_fields _trtmc_alias_field_count)
+    if(NOT _trtmc_alias_field_count EQUAL 5)
+      message(FATAL_ERROR
+        "Invalid legacy_runtime_strategy_aliases entry '${_trtmc_alias_entry}' "
+        "in ${_trtmc_model_manifest}; expected legacy|op|key|value|target")
+    endif()
+    list(GET _trtmc_alias_fields 0 _trtmc_alias_legacy)
+    list(GET _trtmc_alias_fields 1 _trtmc_alias_op)
+    list(GET _trtmc_alias_fields 2 _trtmc_alias_key)
+    list(GET _trtmc_alias_fields 3 _trtmc_alias_value)
+    list(GET _trtmc_alias_fields 4 _trtmc_alias_target)
+    list(FIND _trtmc_strategy_values "${_trtmc_alias_target}" _trtmc_alias_target_index)
+    if(_trtmc_alias_target_index EQUAL -1)
+      message(FATAL_ERROR
+        "legacy_runtime_strategy_aliases target '${_trtmc_alias_target}' in "
+        "${_trtmc_model_manifest} is not owned by model '${_trtmc_model}'")
+    endif()
+    string(APPEND TRTMC_LEGACY_STRATEGY_ALIAS_ENTRIES
+      "        {\"${_trtmc_model}\", \"${_trtmc_alias_legacy}\", \"${_trtmc_alias_op}\", \"${_trtmc_alias_key}\", \"${_trtmc_alias_value}\", \"${_trtmc_alias_target}\"},\n")
+  endforeach()
 endforeach()
 
 set(TRTMC_MODEL_PLUGIN_INDEX_SOURCE
@@ -131,6 +234,16 @@ set(TRTMC_MODEL_PLUGIN_REGISTRATION_SOURCES)
 foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
   set(TRTMC_MODEL_PLUGIN_ID "${_trtmc_model}")
+  set(TRTMC_MODEL_CONFIG_SCHEMA_REGISTRATION_DECLS)
+  set(TRTMC_MODEL_CONFIG_SCHEMA_REGISTRATION_CALLS)
+  foreach(_trtmc_schema_manifest IN LISTS TRTMC_MODEL_${_trtmc_model_var}_CONFIG_SCHEMAS)
+    string(REPLACE "|" ";" _trtmc_schema_fields "${_trtmc_schema_manifest}")
+    list(GET _trtmc_schema_fields 1 _trtmc_schema_symbol)
+    string(APPEND TRTMC_MODEL_CONFIG_SCHEMA_REGISTRATION_DECLS
+      "void ${_trtmc_schema_symbol}(::trtmc::config::SchemaRegistry& registry);\n")
+    string(APPEND TRTMC_MODEL_CONFIG_SCHEMA_REGISTRATION_CALLS
+      "    ::trtmc::config::schemas::${_trtmc_schema_symbol}(::trtmc::config::SchemaRegistry::instance());\n")
+  endforeach()
   set(TRTMC_MODEL_PLUGIN_REGISTRATION_DECLS)
   set(TRTMC_MODEL_PLUGIN_REGISTRATION_CALLS)
   foreach(_trtmc_manifest IN LISTS TRTMC_MODEL_${_trtmc_model_var}_PLUGINS)

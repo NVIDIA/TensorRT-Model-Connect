@@ -4,7 +4,7 @@
 // Uses TrtModule(encoder) + TrtModule(decoder) + IInferenceState.
 
 #include "runtime/core/trt_common.h"
-#include "runtime/domains/audio/whisper_config.h"
+#include "runtime/models/whisper/whisper_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

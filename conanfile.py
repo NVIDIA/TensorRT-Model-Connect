@@ -59,6 +59,7 @@ class TensorRTModelConnectConan(ConanFile):
                 cmake.build(target=target)
         else:
             cmake.build()
+            cmake.build(target="trtmc_model_plugins")
 
     def package(self) -> None:
         package_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"
@@ -76,13 +77,16 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(package_bin),
             keep_path=False,
         )
-        copy(
-            self,
-            "libtrtmc_model_*.so*",
-            src=str(Path(self.build_folder) / "models"),
-            dst=str(package_bin),
-            keep_path=False,
-        )
+        for model_plugin in sorted(
+            (Path(self.build_folder) / "models").rglob("libtrtmc_model_*.so*")
+        ):
+            copy(
+                self,
+                model_plugin.name,
+                src=str(model_plugin.parent),
+                dst=str(package_bin),
+                keep_path=False,
+            )
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"

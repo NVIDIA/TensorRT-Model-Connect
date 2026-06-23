@@ -25,6 +25,7 @@ class ElfFlowPipeline final : public IPipeline {
                     float latent_std = 1.0F, int32_t encoder_pad_token_id = 0);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+    int32_t default_max_new_tokens() const override { return 0; }
 
     EmbeddingResult solve(const float* branch_input, int32_t branch_len, const float* trunk_input,
                           int32_t trunk_len) override;

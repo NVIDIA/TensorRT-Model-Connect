@@ -1,0 +1,170 @@
+"""Qwen Image model-owned HF diffusers reference tests."""
+
+from __future__ import annotations
+
+import subprocess
+
+from tests.e2e.models.qwen_image.e2e_plugins.references import (
+    hf_diffusers as qwen_image_hf_diffusers,
+)
+from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+
+
+def _make_qwen_image_case(inputs: dict | None = None) -> E2ECase:
+    return E2ECase(
+        name="qwen-image-case",
+        hf_id="Qwen/Qwen-Image-2512",
+        family="qwen_image",
+        runtime_strategy="diffusion_qwen_image",
+        bundle="qwen-image-case.trtfb",
+        inputs=inputs or {},
+    )
+
+
+def _make_ctx(case: E2ECase, tmp_path) -> RunContext:
+    binary_path = tmp_path / "trtmc"
+    binary_path.write_text("", encoding="utf-8")
+    return RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path),
+        binary_path=str(binary_path),
+        engine_dir=str(tmp_path),
+    )
+
+
+def _capture_subprocess(monkeypatch):
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="Generated 1 frames\n", stderr="")
+
+    monkeypatch.setattr(qwen_image_hf_diffusers.subprocess, "run", _fake_run)
+    return captured
+
+
+def _extract_script(cmd: list[str]) -> str:
+    assert "-c" in cmd, f"expected python -c invocation, got {cmd!r}"
+    idx = cmd.index("-c")
+    return cmd[idx + 1]
+
+
+def test_qwen_image_reference_uses_qwen_image_pipeline(monkeypatch, tmp_path):
+    case = _make_qwen_image_case(
+        inputs={
+            "prompt": "A red apple on a wooden table",
+            "negative_prompt": " ",
+            "num_inference_steps": 20,
+            "cfg_scale": 4.0,
+            "height": 1024,
+            "width": 1024,
+            "seed": 42,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    script = _extract_script(captured["cmd"])
+    assert "QwenImagePipeline" in script
+    assert 'family in ("qwen_image",)' in script
+    assert "true_cfg_scale=qi_cfg_scale" in script
+    assert "qi_cfg_scale = 4.0" in script
+    assert "torch.bfloat16" in script
+    assert "qi_height = 1024" in script
+    assert "qi_width = 1024" in script
+    assert "num_steps = 20" in script
+    assert "seed = 42" in script
+    assert "qi_negative_prompt = ' '" in script
+    assert "prompt = 'A red apple on a wooden table'" in script
+
+
+def test_qwen_image_reference_falls_back_to_guidance_scale(monkeypatch, tmp_path):
+    case = _make_qwen_image_case(
+        inputs={
+            "prompt": "scene",
+            "guidance_scale": 3.5,
+            "num_inference_steps": 8,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    script = _extract_script(captured["cmd"])
+    assert "true_cfg_scale=qi_cfg_scale" in script
+    assert "qi_cfg_scale = 3.5" in script
+
+
+def test_qwen_image_reference_image_height_width_alias(monkeypatch, tmp_path):
+    case = _make_qwen_image_case(
+        inputs={
+            "prompt": "scene",
+            "image_height": 768,
+            "image_width": 512,
+            "num_inference_steps": 8,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    script = _extract_script(captured["cmd"])
+    assert "qi_height = 768" in script
+    assert "qi_width = 512" in script
+
+
+def test_qwen_image_reference_writes_frames_dir(monkeypatch, tmp_path):
+    case = _make_qwen_image_case(
+        inputs={
+            "prompt": "scene",
+            "num_inference_steps": 4,
+            "seed": 7,
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    script = _extract_script(captured["cmd"])
+    assert 'frame_{i:04d}.png' in script or 'frame_{{i:04d}}.png' in script
+    assert "hf_frames" in script
+
+
+def test_qwen_image_reference_forward_compat_edit_variants(monkeypatch, tmp_path):
+    case_no_image = _make_qwen_image_case(
+        inputs={"prompt": "scene", "num_inference_steps": 4},
+    )
+    ctx = _make_ctx(case_no_image, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case_no_image, StageSpec(name="end_to_end"), ctx)
+    script = _extract_script(captured["cmd"])
+    assert "QwenImageEditPlusPipeline" in script
+    assert "QwenImageEditPipeline" in script
+    assert "QwenImagePipeline" in script
+    assert 'if "Edit" in cls_name and not bool(qi_image_path)' in script
+    assert "qi_image_path = ''" in script
+
+    case_with_image = _make_qwen_image_case(
+        inputs={"prompt": "scene", "num_inference_steps": 4,
+                "image": "/tmp/x.png"},
+    )
+    ctx2 = _make_ctx(case_with_image, tmp_path)
+    captured2 = _capture_subprocess(monkeypatch)
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case_with_image, StageSpec(name="end_to_end"), ctx2)
+    script2 = _extract_script(captured2["cmd"])
+    assert "qi_image_path = '/tmp/x.png'" in script2
+    assert "qi_input_image = Image.open(qi_image_path).convert(\"RGB\")" in script2
+    assert 'qi_call_kwargs["image"] = qi_input_image' in script2

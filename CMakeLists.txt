@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX)
 
-# Enable CUDA for GPU kernels (magpie_kernels.cu)
+# Enable CUDA for runtime GPU kernels when a CUDA compiler is available.
 include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
@@ -169,10 +169,8 @@ add_library(trtmc_core SHARED
   src/runtime/domains/multimodal/vision_engine.cpp
   src/runtime/domains/audio/audio_types.cpp
   src/runtime/domains/audio/mel_spectrogram.cpp
-  src/runtime/domains/audio/audio_bundle_validation.cpp
   src/runtime/domains/diffusion/batch_utils.cpp
   src/runtime/domains/diffusion/diffusion_preprocessor.cpp
-  src/runtime/domains/diffusion/qwen_image_types.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
@@ -206,25 +204,14 @@ set_source_files_properties(src/runtime/core/stb_impl.cpp
   PROPERTIES
     COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-pedantic>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-missing-field-initializers>"
 )
-set_source_files_properties(
-  src/runtime/models/magpie/pipeline.cpp
-  src/runtime/models/pixart/pipeline.cpp
-  src/runtime/models/speech/pipeline.cpp
-  src/runtime/models/wan/pipeline.cpp
-  PROPERTIES
-    COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
-)
-
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
   target_sources(trtmc_core PRIVATE
-    src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
     src/runtime/core/sparse_multinomial_kernel.cu
     src/runtime/core/triattention_kernels.cu
   )
   set_source_files_properties(
-    src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
     src/runtime/core/sparse_multinomial_kernel.cu
     src/runtime/core/triattention_kernels.cu
@@ -394,8 +381,26 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
   file(GLOB _trtmc_model_sources CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/*.cpp")
+  if(CMAKE_CUDA_COMPILER)
+    file(GLOB _trtmc_model_cuda_sources CONFIGURE_DEPENDS
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/*.cu")
+    if(_trtmc_model_cuda_sources)
+      set_source_files_properties(${_trtmc_model_cuda_sources} PROPERTIES LANGUAGE CUDA)
+    endif()
+  else()
+    set(_trtmc_model_cuda_sources)
+  endif()
+  foreach(_trtmc_suppressed_source
+      IN LISTS TRTMC_MODEL_${_trtmc_model_var}_GNU_WARNING_SUPPRESSED_SOURCES)
+    set_source_files_properties(
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_suppressed_source}"
+      PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
+    )
+  endforeach()
   add_library(trtmc_model_${_trtmc_model} SHARED
     ${_trtmc_model_sources}
+    ${_trtmc_model_cuda_sources}
     ${TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE}
   )
   add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
@@ -580,12 +585,21 @@ add_custom_target(trtmc_cpp_tests)
 #   trtmc_add_test(test_name)               -- links trtmc_core, adds src/ include
 #   trtmc_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
 function(trtmc_add_test TEST_NAME)
-  cmake_parse_arguments(ARG "NO_SRC_INCLUDE;REQUIRES_TRT" "" "EXTRA_INCLUDES" ${ARGN})
+  cmake_parse_arguments(ARG "NO_SRC_INCLUDE;REQUIRES_TRT" "SOURCE" "EXTRA_INCLUDES" ${ARGN})
   if(ARG_REQUIRES_TRT AND NOT _trtmc_can_build_trt_backend)
     message(STATUS "Skipping ${TEST_NAME}: TensorRT SDK not available")
     return()
   endif()
-  add_executable(${TEST_NAME} EXCLUDE_FROM_ALL tests/cpp/${TEST_NAME}.cpp)
+  if(ARG_SOURCE)
+    if(IS_ABSOLUTE "${ARG_SOURCE}")
+      set(_trtmc_test_source "${ARG_SOURCE}")
+    else()
+      set(_trtmc_test_source "${PROJECT_SOURCE_DIR}/${ARG_SOURCE}")
+    endif()
+  else()
+    set(_trtmc_test_source "${PROJECT_SOURCE_DIR}/tests/cpp/${TEST_NAME}.cpp")
+  endif()
+  add_executable(${TEST_NAME} EXCLUDE_FROM_ALL "${_trtmc_test_source}")
   add_dependencies(trtmc_cpp_tests ${TEST_NAME})
   target_link_libraries(${TEST_NAME} PRIVATE trtmc_core)
   if(NOT ARG_NO_SRC_INCLUDE)
@@ -600,10 +614,65 @@ function(trtmc_add_test TEST_NAME)
     target_compile_definitions(${TEST_NAME} PRIVATE TRTMC_HAS_TRT=1)
     target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${TRTMC_TRT_INCLUDE_DIR})
     target_link_libraries(${TEST_NAME} PRIVATE ${TRTMC_TRT_LIBRARY})
+    if(TARGET trtmc_backend_trt)
+      target_link_libraries(${TEST_NAME} PRIVATE trtmc_backend_trt)
+    endif()
   else()
     target_compile_definitions(${TEST_NAME} PRIVATE TRTMC_HAS_TRT=0)
   endif()
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endfunction()
+
+function(_trtmc_manifest_csv_to_list VALUE OUTPUT_VAR)
+  if(NOT VALUE OR VALUE STREQUAL "_")
+    set(${OUTPUT_VAR} "" PARENT_SCOPE)
+    return()
+  endif()
+  string(REPLACE "," ";" _trtmc_values "${VALUE}")
+  set(${OUTPUT_VAR} ${_trtmc_values} PARENT_SCOPE)
+endfunction()
+
+function(trtmc_add_model_manifest_tests)
+  foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
+    string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
+    foreach(_trtmc_test_entry IN LISTS TRTMC_MODEL_${_trtmc_model_var}_TESTS)
+      string(REPLACE "|" ";" _trtmc_test_fields "${_trtmc_test_entry}")
+      list(LENGTH _trtmc_test_fields _trtmc_test_field_count)
+      if(NOT _trtmc_test_field_count EQUAL 5)
+        message(FATAL_ERROR
+          "Invalid runtime_tests entry '${_trtmc_test_entry}' for model '${_trtmc_model}'; "
+          "expected name|source|link_targets|extra_sources|options")
+      endif()
+      list(GET _trtmc_test_fields 0 _trtmc_test_name)
+      list(GET _trtmc_test_fields 1 _trtmc_test_source)
+      list(GET _trtmc_test_fields 2 _trtmc_link_targets_csv)
+      list(GET _trtmc_test_fields 3 _trtmc_extra_sources_csv)
+      list(GET _trtmc_test_fields 4 _trtmc_options_csv)
+
+      _trtmc_manifest_csv_to_list("${_trtmc_options_csv}" _trtmc_test_options)
+      trtmc_add_test(
+        ${_trtmc_test_name}
+        SOURCE "tests/cpp/models/${_trtmc_model}/${_trtmc_test_source}"
+        ${_trtmc_test_options}
+      )
+      if(NOT TARGET ${_trtmc_test_name})
+        continue()
+      endif()
+
+      _trtmc_manifest_csv_to_list("${_trtmc_link_targets_csv}" _trtmc_link_targets)
+      if(_trtmc_link_targets)
+        target_link_libraries(${_trtmc_test_name} PRIVATE ${_trtmc_link_targets})
+      endif()
+
+      _trtmc_manifest_csv_to_list("${_trtmc_extra_sources_csv}" _trtmc_extra_sources)
+      foreach(_trtmc_extra_source IN LISTS _trtmc_extra_sources)
+        target_sources(
+          ${_trtmc_test_name}
+          PRIVATE "src/runtime/models/${_trtmc_model}/${_trtmc_extra_source}"
+        )
+      endforeach()
+    endforeach()
+  endforeach()
 endfunction()
 
 # --- Tests ---
@@ -614,7 +683,7 @@ trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader)
-add_dependencies(test_model_plugin_loader trtmc_model_text_generation)
+add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
 
@@ -637,10 +706,6 @@ trtmc_add_test(test_config_schemas_triattention)
 # TRT runtime core
 trtmc_add_test(test_decode_runtime REQUIRES_TRT)
 trtmc_add_test(test_sampler)
-trtmc_add_test(test_plugin_helpers)
-target_sources(test_plugin_helpers PRIVATE
-  src/runtime/models/text_generation/plugin_helpers.cpp
-)
 trtmc_add_test(test_trt_logger REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtmc_backend_trt)
@@ -675,55 +740,7 @@ trtmc_add_test(test_recurrent_state)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
-trtmc_add_test(test_text_generation_pipeline REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_text_generation_pipeline PRIVATE trtmc_backend_trt)
-endif()
-if(TARGET test_text_generation_pipeline)
-  target_link_libraries(test_text_generation_pipeline PRIVATE trtmc_model_text_generation)
-endif()
-trtmc_add_test(test_elf_flow_pipeline)
-target_link_libraries(test_elf_flow_pipeline PRIVATE trtmc_model_elf_flow)
-trtmc_add_test(test_recurrent_pipeline REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_backend_trt)
-endif()
-if(TARGET test_recurrent_pipeline)
-  target_link_libraries(test_recurrent_pipeline PRIVATE trtmc_model_recurrent)
-endif()
-trtmc_add_test(test_encoder_pipeline REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_encoder_pipeline PRIVATE trtmc_backend_trt)
-endif()
-if(TARGET test_encoder_pipeline)
-  target_link_libraries(test_encoder_pipeline PRIVATE trtmc_model_encoder trtmc_model_segmentation)
-endif()
-trtmc_add_test(test_vl_pipeline REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_vl_pipeline PRIVATE trtmc_backend_trt)
-endif()
-if(TARGET test_vl_pipeline)
-  target_link_libraries(test_vl_pipeline PRIVATE trtmc_model_vision_language)
-endif()
-trtmc_add_test(test_diffusion_pipeline_new)
-target_link_libraries(test_diffusion_pipeline_new PRIVATE
-  trtmc_model_flux
-  trtmc_model_wan
-  trtmc_model_z_image
-)
-trtmc_add_test(test_audio_pipeline_new REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_audio_pipeline_new PRIVATE trtmc_backend_trt)
-endif()
-if(TARGET test_audio_pipeline_new)
-  target_link_libraries(test_audio_pipeline_new PRIVATE
-    trtmc_model_bark
-    trtmc_model_magpie
-    trtmc_model_omni
-    trtmc_model_speech
-    trtmc_model_whisper
-  )
-endif()
+trtmc_add_model_manifest_tests()
 
 # Tokenizers
 trtmc_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
@@ -747,62 +764,22 @@ trtmc_add_test(test_vl_decode_policy)
 trtmc_add_test(test_vision_execution_plan)
 
 # Diffusion
-trtmc_add_test(test_diffusion_generation_plan)
 trtmc_add_test(test_diffusion_denoising_step_seam)
 trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
 trtmc_add_test(test_diffusion_batch_utils)
-# PR 2 of diffusion batch-inference: bundle-free combiner-level unit that
-# proves combine_cfg_with_renorm reduces per-token (no cross-sample leak).
-# Full batch-vs-sequential parity lands as E2E tests in PR 3.
-trtmc_add_test(test_qwen_image_cfg_renorm)
-trtmc_add_test(test_ltx_video_pipeline)
-target_sources(test_ltx_video_pipeline PRIVATE
-  src/runtime/models/ltx_video/plugin_helpers.cpp
-  src/runtime/models/ltx_video/diffusion_helpers.cpp
-)
-target_link_libraries(test_ltx_video_pipeline PRIVATE trtmc_model_ltx_video)
 
-# Recurrent (Mamba / RWKV)
+# Recurrent contracts
 trtmc_add_test(test_recurrent_step_contracts)
 
-# Audio — Whisper
-trtmc_add_test(test_audio_bundle_validation)
-trtmc_add_test(test_whisper_host_plan)
-trtmc_add_test(test_whisper_decode_policy)
-trtmc_add_test(test_rnnt_decode_policy)
-trtmc_add_test(test_rnnt_streaming_contract)
+# Audio — transcription and shared preprocessing
 trtmc_add_test(test_wav_reader)
 trtmc_add_test(test_audio_types)
 trtmc_add_test(test_mel_spectrogram)
 
-# Audio — Bark
-trtmc_add_test(test_bark_generation_plan)
-
-# Audio — Speech (PersonaPlex / Magpie)
-trtmc_add_test(test_speech_subprocess_seam      NO_SRC_INCLUDE)
-trtmc_add_test(test_speech_decode_stop_policy   NO_SRC_INCLUDE)
-trtmc_add_test(test_speech_generation_helpers)
-trtmc_add_test(test_speech_depth_plan)
-trtmc_add_test(test_speech_runtime_plan)
-trtmc_add_test(test_speech_temporal_embed_plan)
-trtmc_add_test(test_speech_mimi_decode_plan)
-trtmc_add_test(test_magpie_decode_policy)
-trtmc_add_test(test_magpie_decoder_plan)
-trtmc_add_test(test_magpie_text_completion_policy)
-trtmc_add_test(test_magpie_codec_plan)
-
-# Audio — Omni
-trtmc_add_test(test_omni_audio_plan)
-
-# Perception (segmentation, SAM, neural operator)
+# Perception and neural operator
 trtmc_add_test(test_neural_operator_config)
-trtmc_add_test(test_sam_prompt_seam)
-trtmc_add_test(test_sam3_pipeline)
 trtmc_add_test(test_perception_preprocess_seams)
-
-# Diffusion — conditioning
-trtmc_add_test(test_wan_generation_conditioning)
 
 # IoMap tensor name mapping
 trtmc_add_test(test_io_map)

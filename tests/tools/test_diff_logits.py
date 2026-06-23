@@ -39,6 +39,15 @@ class TestStandardPrompts:
         assert len(labels) == len(set(labels))
 
 
+class TestFamilyHandlerDispatch:
+    """Model-owned logit diff hook dispatch sanity checks."""
+
+    def test_unowned_model_uses_default_paths(self):
+        mod = _import_diff_logits()
+        assert mod._find_family_diff_logits_handler("example_decoder") is None
+        assert mod._find_family_diff_logits_handler("generic_text") is None
+
+
 class TestCompareLogits:
     """Tests for compare_logits() — pure numpy, no GPU."""
 

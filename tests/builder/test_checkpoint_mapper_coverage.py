@@ -30,7 +30,7 @@ def _save_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:
 
 def _base_config(hidden: int = 8) -> dict:
     return {
-        "model_type": "qwen3",
+        "model_type": "standard_decoder",
         "vocab_size": 16,
         "hidden_size": hidden,
         "num_hidden_layers": 1,

@@ -5,10 +5,18 @@
   "bundle": "fnet-base.trtfb",
   "family": "fnet",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 256,
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 1,
   "trust_remote_code": false,
   "notes": "FNet with 2D DFT via matrix multiplication; larger TRT-HF delta expected due to DFT approximation",
-  "core": false
+  "core": false,
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

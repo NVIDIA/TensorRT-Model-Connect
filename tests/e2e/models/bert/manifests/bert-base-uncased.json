@@ -5,10 +5,18 @@
   "bundle": "bert-base-uncased.trtfb",
   "family": "bert",
   "runtime_strategy": "encoder_only",
+  "task_strategy": "encoder_only_nlp",
+  "reference_family": "encoder_base_features",
+  "user_contract": "representation_parity",
   "max_cache_length": 128,
   "prompt": "The capital of France is Paris.",
   "max_new_tokens": 1,
   "trust_remote_code": false,
   "notes": "Encoder-only model \u2014 outputs hidden states, not logits for next token. E2E test validates bundle build + inference without text comparison.",
-  "core": true
+  "core": true,
+  "metadata": {
+    "contract_config": {
+      "auto_class": "AutoModel"
+    }
+  }
 }

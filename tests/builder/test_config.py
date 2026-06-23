@@ -1,9 +1,9 @@
 """Tests for config.py — ModelConfig parsing from HF config.json.
 
 Trace: ARCH-CFG-002, UD-CFG-01
-Intent: Validate ModelConfig parsing from HF config.json across all supported model families, including field aliases, VL text_config merge, and edge cases.
+Intent: Validate ModelConfig parsing from HF config.json across supported schema shapes, including field aliases, VL text_config merge, and edge cases.
 Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
-Postconditions: All parsed fields (model_type, hidden_size, num_heads, etc.) match expected values for each model family's config format.
+Postconditions: Parsed fields (model_type, hidden_size, num_heads, etc.) match expected values for each generic config format.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from tensorrt_model_connect.config import ModelConfig
 
 
 class TestModelConfigFromJson:
-    def test_qwen3(self):
+    def test_standard_decoder_keys(self):
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "qwen3",
-            "architectures": ["Qwen3ForCausalLM"],
+            "model_type": "standard_decoder",
+            "architectures": ["StandardDecoderForCausalLM"],
             "vocab_size": 151936,
             "hidden_size": 1024,
             "intermediate_size": 3072,
@@ -29,7 +29,7 @@ class TestModelConfigFromJson:
             "rms_norm_eps": 1e-6,
             "rope_theta": 1000000.0,
         }))
-        assert cfg.model_type == "qwen3"
+        assert cfg.model_type == "standard_decoder"
         assert cfg.vocab_size == 151936
         assert cfg.hidden_size == 1024
         assert cfg.intermediate_size == 3072
@@ -39,10 +39,10 @@ class TestModelConfigFromJson:
         assert cfg.rms_norm_eps == 1e-6
         assert cfg.rope_theta == 1000000.0
 
-    def test_llama(self):
+    def test_standard_decoder_with_kv_heads(self):
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
-            "architectures": ["LlamaForCausalLM"],
+            "model_type": "kv_decoder",
+            "architectures": ["KVDecoderForCausalLM"],
             "vocab_size": 32000,
             "hidden_size": 2048,
             "intermediate_size": 5632,
@@ -51,15 +51,15 @@ class TestModelConfigFromJson:
             "num_key_value_heads": 4,
             "rms_norm_eps": 1e-5,
         }))
-        assert cfg.model_type == "llama"
+        assert cfg.model_type == "kv_decoder"
         assert cfg.hidden_size == 2048
         assert cfg.num_key_value_heads == 4
         assert cfg.rms_norm_eps == 1e-5
 
-    def test_gpt2_nonstandard_keys(self):
-        """GPT-2 uses n_embd, n_head, n_layer, n_inner."""
+    def test_n_embd_nonstandard_keys(self):
+        """Some configs use n_embd, n_head, n_layer, n_inner."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "gpt2",
+            "model_type": "n_embd_decoder",
             "n_embd": 768,
             "n_head": 12,
             "n_layer": 12,
@@ -73,10 +73,10 @@ class TestModelConfigFromJson:
         assert cfg.intermediate_size == 3072
         assert cfg.rms_norm_eps == 1e-5
 
-    def test_bloom_nonstandard_keys(self):
-        """BLOOM uses d_model, attention_heads, num_layers."""
+    def test_d_model_nonstandard_keys(self):
+        """Some configs use d_model, attention_heads, num_layers."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "bloom",
+            "model_type": "d_model_decoder",
             "d_model": 2560,
             "attention_heads": 32,
             "num_layers": 30,
@@ -90,10 +90,10 @@ class TestModelConfigFromJson:
         # intermediate_size fallback: hidden * 4
         assert cfg.intermediate_size == 2560 * 4
 
-    def test_opt_layer_norm_eps(self):
-        """OPT uses layer_norm_eps (no 'ilon' suffix)."""
+    def test_layer_norm_eps_alias(self):
+        """layer_norm_eps is accepted as an epsilon alias."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "opt",
+            "model_type": "layer_norm_eps_decoder",
             "hidden_size": 768,
             "num_attention_heads": 12,
             "num_hidden_layers": 12,
@@ -104,10 +104,10 @@ class TestModelConfigFromJson:
         assert cfg.rms_norm_eps == 1e-5
         assert cfg.intermediate_size == 3072
 
-    def test_falcon_norm_epsilon(self):
-        """Falcon uses norm_epsilon."""
+    def test_norm_epsilon_alias(self):
+        """norm_epsilon is accepted as an epsilon alias."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "falcon",
+            "model_type": "norm_epsilon_decoder",
             "hidden_size": 4544,
             "num_attention_heads": 71,
             "num_hidden_layers": 32,
@@ -200,15 +200,15 @@ class TestEdgeCases:
         assert cfg.hidden_act == "gelu_new"
 
     def test_rope_theta_from_rope_parameters(self):
-        """Llama-3.1 variants store rope_theta inside rope_parameters."""
+        """Some configs store rope_theta inside rope_parameters."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "rope_parameters_decoder",
             "hidden_size": 3072,
             "num_attention_heads": 32,
             "num_hidden_layers": 32,
             "vocab_size": 128256,
             "rope_parameters": {
-                "rope_type": "llama3",
+                "rope_type": "long_context",
                 "rope_theta": 500000.0,
             },
         }))
@@ -217,7 +217,7 @@ class TestEdgeCases:
     def test_rope_theta_top_level_takes_precedence(self):
         """Top-level rope_theta takes precedence over rope_parameters."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "rope_parameters_decoder",
             "hidden_size": 1024,
             "num_attention_heads": 16,
             "rope_theta": 1000000.0,
@@ -230,16 +230,16 @@ class TestEdgeCases:
     def test_rope_theta_default_no_rope_parameters(self):
         """Default rope_theta when neither top-level nor rope_parameters present."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "rope_parameters_decoder",
             "hidden_size": 1024,
             "num_attention_heads": 16,
         }))
         assert cfg.rope_theta == 10000.0
 
     def test_rope_theta_from_rope_scaling(self):
-        """Qwen3-style configs may store rope_theta inside rope_scaling."""
+        """Some configs store rope_theta inside rope_scaling."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "qwen3",
+            "model_type": "rope_scaling_decoder",
             "hidden_size": 4096,
             "num_attention_heads": 32,
             "rope_scaling": {
@@ -268,8 +268,8 @@ class TestModelConfigExtended:
     def test_text_config_merged_into_top_level(self):
         """VL models nest text model config under text_config; fields merge to top."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "qwen2_vl",
-            "architectures": ["Qwen2VLForConditionalGeneration"],
+            "model_type": "vision_language_decoder",
+            "architectures": ["VisionLanguageForConditionalGeneration"],
             "text_config": {
                 "hidden_size": 1024,
                 "num_hidden_layers": 24,
@@ -281,7 +281,7 @@ class TestModelConfigExtended:
                 "rope_theta": 1000000.0,
             },
         }))
-        assert cfg.model_type == "qwen2_vl"
+        assert cfg.model_type == "vision_language_decoder"
         assert cfg.hidden_size == 1024
         assert cfg.num_hidden_layers == 24
         assert cfg.num_attention_heads == 16
@@ -294,7 +294,7 @@ class TestModelConfigExtended:
     def test_text_config_overrides_top_level(self):
         """text_config fields override top-level fields (merged second)."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "qwen2_vl",
+            "model_type": "vision_language_decoder",
             "hidden_size": 512,
             "text_config": {
                 "hidden_size": 1024,
@@ -308,7 +308,7 @@ class TestModelConfigExtended:
     def test_no_text_config_uses_top_level(self):
         """Without text_config, top-level fields are used directly."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "standard_decoder",
             "hidden_size": 2048,
             "num_hidden_layers": 22,
             "num_attention_heads": 32,
@@ -319,7 +319,7 @@ class TestModelConfigExtended:
     def test_text_config_preserves_raw_as_original(self):
         """raw dict should be the original JSON dict, not the merged one."""
         original = {
-            "model_type": "qwen2_vl",
+            "model_type": "vision_language_decoder",
             "vision_config": {"image_size": 224},
             "text_config": {
                 "hidden_size": 1024,
@@ -350,7 +350,7 @@ class TestModelConfigExtended:
     def test_rope_theta_explicit_none_falls_back_to_default(self):
         """Config with rope_theta=None falls back to default 10000.0."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "rope_parameters_decoder",
             "hidden_size": 1024,
             "num_attention_heads": 16,
             "rope_theta": None,
@@ -362,7 +362,7 @@ class TestModelConfigExtended:
     def test_intermediate_size_takes_priority_over_n_inner(self):
         """When both intermediate_size and n_inner are present, intermediate_size wins."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "gpt2",
+            "model_type": "n_embd_decoder",
             "hidden_size": 768,
             "num_attention_heads": 12,
             "num_hidden_layers": 12,
@@ -375,7 +375,7 @@ class TestModelConfigExtended:
     def test_n_inner_used_when_no_intermediate_size(self):
         """n_inner is used as fallback when intermediate_size is absent."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "gpt2",
+            "model_type": "n_embd_decoder",
             "hidden_size": 768,
             "num_attention_heads": 12,
             "n_inner": 3072,
@@ -385,13 +385,13 @@ class TestModelConfigExtended:
     def test_rope_scaling_with_nested_rope_type_and_factor(self):
         """Config with rope_scaling dict — verify raw dict captures it."""
         raw_config = {
-            "model_type": "llama",
+            "model_type": "rope_scaling_decoder",
             "hidden_size": 4096,
             "num_attention_heads": 32,
             "num_hidden_layers": 32,
             "rope_theta": 500000.0,
             "rope_scaling": {
-                "rope_type": "llama3",
+                "rope_type": "long_context",
                 "factor": 8.0,
                 "low_freq_factor": 1.0,
                 "high_freq_factor": 4.0,
@@ -402,13 +402,13 @@ class TestModelConfigExtended:
         assert cfg.rope_theta == 500000.0
         # rope_scaling should be preserved in raw dict
         assert "rope_scaling" in cfg.raw
-        assert cfg.raw["rope_scaling"]["rope_type"] == "llama3"
+        assert cfg.raw["rope_scaling"]["rope_type"] == "long_context"
         assert cfg.raw["rope_scaling"]["factor"] == 8.0
 
     def test_head_dim_from_config_json(self):
         """Explicit head_dim in config.json overrides computed value."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "phi3",
+            "model_type": "head_dim_decoder",
             "hidden_size": 3072,
             "num_attention_heads": 32,
             "head_dim": 96,
@@ -434,7 +434,7 @@ class TestModelConfigExtended:
     def test_num_key_value_heads_defaults_to_num_heads(self):
         """When num_key_value_heads is missing, defaults to num_attention_heads."""
         cfg = ModelConfig.from_json(json.dumps({
-            "model_type": "llama",
+            "model_type": "kv_decoder",
             "hidden_size": 1024,
             "num_attention_heads": 16,
         }))

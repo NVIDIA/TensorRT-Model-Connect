@@ -183,7 +183,8 @@ write_safetensors_index(const std::filesystem::path& path,
 }
 
 // Creates a standard decoder model checkpoint (embedding, per-layer attention+MLP, final_norm,
-// lm_head). Suitable for LLaMA, Mistral, Yi, etc. Pass include_qk_norm=true for Qwen3.
+// lm_head). Suitable for standard decoder variants. Use include_qk_norm=true for QK-normalized
+// variants.
 inline void write_standard_decoder_checkpoint(const std::filesystem::path& dir, int32_t vocab,
                                               int32_t hidden, int32_t q_hidden, int32_t kv_hidden,
                                               int32_t mlp, int32_t layers, bool include_qk_norm) {

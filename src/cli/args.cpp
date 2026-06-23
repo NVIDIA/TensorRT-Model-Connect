@@ -191,13 +191,12 @@ void print_usage() {
            "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
            "[--condition-mask-raw PATH] [--sampling-steps-raw PATH] [--sde-noise-raw PATH] "
            "[--output samples.jsonl]\n"
-           "                        Diffusion text-to-image extras (Qwen-Image, FLUX, "
-           "Z-Image): [--negative-prompt \"text\"] "
+           "                        Image-generation extras: [--negative-prompt \"text\"] "
            "[--num-inference-steps N] [--height N] [--width N] "
            "[--num-images N] [--prompts-file PATH] [--seed s0,s1,...]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
-           "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
+           "  trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH] "
@@ -260,9 +259,10 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     static const char* known_cmds[] = {
-        "run",    "inspect",        "generate-video", "segment", "segment-sam", "classify",
-        "detect", "generate-audio", "serve-audio",    "encode",  "embed",       "rerank",
-        "solve",  "speak",          "transcribe",     nullptr};
+        "run",      "inspect", "generate-video", "segment",     "segment-prompted",
+        "classify", "detect",  "generate-audio", "serve-audio", "encode",
+        "embed",    "rerank",  "solve",          "speak",       "transcribe",
+        nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {

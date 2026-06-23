@@ -1,0 +1,7 @@
+{
+  "default": true,
+  "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "max_side": 512,
+  "max_new_tokens": 384,
+  "timeout": "45m"
+}

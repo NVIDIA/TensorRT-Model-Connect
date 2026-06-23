@@ -4,7 +4,7 @@
 // Uses TrtModule(semantic) + TrtModule(coarse) + TrtModule(codec) + TrtModule(fine) +
 // KvCaches + embeddings.
 
-#include "runtime/domains/audio/bark_config.h"
+#include "runtime/models/bark/bark_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

@@ -5,6 +5,7 @@
   "bundle": "phi-moe-l0-tp4.trtfb",
   "family": "phi_moe",
   "runtime_strategy": "decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "reference_family": "chat_instruct_template",
@@ -53,5 +54,11 @@
       "gating": true
     }
   ],
-  "notes": "Phi-MoE TP4 repro using the same checkpoint, prompt, generation length, and thresholds as phi-moe-l0."
+  "notes": "Phi-MoE TP4 repro using the same checkpoint, prompt, generation length, and thresholds as phi-moe-l0.",
+  "metadata": {
+    "contract_config": {
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  }
 }

@@ -23,7 +23,7 @@ class TestBuildArgs:
     def test_build_with_all_args(self):
         """Verify build command parses all arguments."""
         test_args = [
-            "trtmc", "build", "Qwen/Qwen3-0.6B",
+            "trtmc", "build", "example-org/example-model",
             "-o", "/tmp/out.trtfb",
             "--max-cache-length", "512",
             "--verbose",
@@ -39,7 +39,7 @@ class TestBuildArgs:
 
             args = parser.parse_args(test_args[1:])
             assert args.command == "build"
-            assert args.model == "Qwen/Qwen3-0.6B"
+            assert args.model == "example-org/example-model"
             assert args.output == "/tmp/out.trtfb"
             assert args.max_cache_length == 512
             assert args.verbose is True
@@ -102,7 +102,7 @@ class TestMainParser:
             [
                 "trtmc",
                 "build",
-                "Qwen/Qwen3.5-9B",
+                "example-org/remote-code-model",
                 "-o",
                 str(tmp_path / "out.trtfb"),
                 "--max-cache-length",
@@ -170,8 +170,8 @@ class TestCmdInspect:
         bundle_path = tmp_path / "test.trtfb"
         header = {
             "model_id": "test-model",
-            "model_type": "qwen3",
-            "family": "qwen",
+            "model_type": "example_decoder",
+            "family": "example_family",
             "trt_version": "10.0.0",
             "gpu_name": "A100",
             "created_at": "2025-01-01T00:00:00Z",
@@ -198,9 +198,9 @@ class TestCmdInspect:
         assert result == 0
 
         captured = capsys.readouterr()
-        assert "qwen3" in captured.out
+        assert "example_decoder" in captured.out
         assert "test-model" in captured.out
-        assert "qwen" in captured.out
+        assert "example_family" in captured.out
         assert "engine_plan" in captured.out
 
     def test_list_engine_sections_marks_split_decoder_roles(self, tmp_path):
@@ -211,8 +211,8 @@ class TestCmdInspect:
         bundle_path = tmp_path / "split.trtfb"
         header = {
             "model_id": "test-model",
-            "model_type": "qwen3",
-            "family": "qwen",
+            "model_type": "example_decoder",
+            "family": "example_family",
             "trt_version": "10.0.0",
             "gpu_name": "A100",
             "created_at": "2025-01-01T00:00:00Z",
@@ -526,12 +526,17 @@ class TestCmdBuildMocked:
         monkeypatch.setattr(
             cli,
             "_resolve_build_model_metadata",
-            lambda model_ref, method_name: ("/tmp/resolved-model", "internlm"),
+            lambda model_ref, method_name: ("/tmp/resolved-model", "example_profile"),
+        )
+        monkeypatch.setattr(
+            cli,
+            "_resolve_build_profile_name",
+            lambda family_name: "example_profile",
         )
         monkeypatch.setattr(
             profile_mod,
             "resolve_profile_python",
-            lambda profile_name, base_python: "/tmp/internlm-profile/bin/python",
+            lambda profile_name, base_python: "/tmp/example-profile/bin/python",
         )
 
         def _fake_run(cmd, env=None, **kwargs):
@@ -542,7 +547,7 @@ class TestCmdBuildMocked:
         monkeypatch.setattr(cli.subprocess, "run", _fake_run)
 
         args = argparse.Namespace(
-            model="internlm/internlm-test",
+            model="example-org/profiled-model",
             output=str(tmp_path / "out.trtfb"),
             max_cache_length=256,
             precision="fp32",
@@ -558,20 +563,26 @@ class TestCmdBuildMocked:
         with patch.object(
             sys,
             "argv",
-            ["trtmc", "build", "internlm/internlm-test", "-o", str(tmp_path / "out.trtfb")],
+            [
+                "trtmc",
+                "build",
+                "example-org/profiled-model",
+                "-o",
+                str(tmp_path / "out.trtfb"),
+            ],
         ):
             assert cli._cmd_build(args) == 0
 
         assert captured["cmd"] == [
-            "/tmp/internlm-profile/bin/python",
+            "/tmp/example-profile/bin/python",
             "-m",
             "tensorrt_model_connect.__main__",
             "build",
-            "internlm/internlm-test",
+            "example-org/profiled-model",
             "-o",
             str(tmp_path / "out.trtfb"),
             "--active-python-profile",
-            "internlm",
+            "example_profile",
         ]
         assert all("ACTIVE_PYTHON_PROFILE" not in key for key in captured["env"])
 
@@ -594,7 +605,7 @@ class TestFriendlyDownloadErrors:
 
         exc = RepositoryNotFoundError("404 Client Error")
         with pytest.raises(RuntimeError, match="not found on HuggingFace"):
-            _raise_friendly_download_error("Qwen/nonexistent-model", exc)
+            _raise_friendly_download_error("example-org/missing-model", exc)
 
     def test_gated_repo(self):
         """GatedRepoError → tells user to accept license and login."""
@@ -605,7 +616,7 @@ class TestFriendlyDownloadErrors:
 
         exc = GatedRepoError("Access to model is restricted")
         with pytest.raises(RuntimeError, match="gated.*license"):
-            _raise_friendly_download_error("meta-llama/Llama-3-8B", exc)
+            _raise_friendly_download_error("gated-org/gated-model", exc)
 
     def test_connection_error(self):
         """ConnectionError → tells user to check network."""
@@ -613,7 +624,7 @@ class TestFriendlyDownloadErrors:
 
         exc = ConnectionError("Name resolution failed")
         with pytest.raises(RuntimeError, match="Network error"):
-            _raise_friendly_download_error("Qwen/Qwen3-0.6B", exc)
+            _raise_friendly_download_error("example-org/example-model", exc)
 
     def test_entry_not_found(self):
         """EntryNotFoundError → tells user about missing files."""
@@ -646,17 +657,22 @@ class TestFriendlyDownloadErrors:
             _raise_friendly_download_error("org/model", original)
         assert exc_info.value.__cause__ is original
 
-    def test_resolve_model_wraps_download_error(self):
+    def test_resolve_model_wraps_download_error(self, monkeypatch):
         """_resolve_model wraps snapshot_download failures with friendly messages."""
         from tensorrt_model_connect.engine_builder import _resolve_model
 
         class RepositoryNotFoundError(Exception):
             pass
 
-        with patch("huggingface_hub.snapshot_download",
-                    side_effect=RepositoryNotFoundError("404")):
-            with pytest.raises(RuntimeError, match="not found on HuggingFace"):
-                _resolve_model("nonexistent/repo-id")
+        class _FakeHuggingFaceHub:
+            @staticmethod
+            def snapshot_download(*_args, **_kwargs):
+                raise RepositoryNotFoundError("404")
+
+        monkeypatch.setitem(sys.modules, "huggingface_hub", _FakeHuggingFaceHub)
+
+        with pytest.raises(RuntimeError, match="not found on HuggingFace"):
+            _resolve_model("nonexistent/repo-id")
 
     def test_disk_error(self):
         """OSError with 'disk' in message → tells user to check disk space."""

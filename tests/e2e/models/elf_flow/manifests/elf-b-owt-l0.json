@@ -5,6 +5,7 @@
   "bundle": "elf-b-owt-l0.trtfb",
   "family": "elf_flow",
   "runtime_strategy": "elf_flow",
+  "task_strategy": "diffusion_text_generation",
   "reference_backend": "invariant_only",
   "oracle_level": "L4_invariants",
   "reference_family": "elf_unconditional_text",

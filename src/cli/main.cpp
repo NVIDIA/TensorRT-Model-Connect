@@ -9,7 +9,7 @@
 //                        [--initial-latents-raw PATH] [--condition-latents-raw PATH]
 //                        [--condition-mask-raw PATH] [--sampling-steps-raw PATH]
 //                        [--sde-noise-raw PATH] [--output samples.jsonl] [--hf-python PATH]
-//                        Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image):
+//                        Image-generation extras:
 //                        [--negative-prompt "text"] [--num-inference-steps N]
 //                        [--height N] [--width N]
 //   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
@@ -27,6 +27,7 @@
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/pipeline_plugin_loader.h"
 #include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
@@ -91,6 +92,26 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     options.backend_search_paths = args.backend_search_paths;
     options.model_plugin_search_paths = args.model_plugin_search_paths;
     return options;
+}
+
+void preload_cli_config_schema_owner(const CliArgs& args) {
+    if (args.bundle_path.empty())
+        return;
+    if (!trtmc::IsBundle(args.bundle_path))
+        return;
+
+    const auto info = trtmc::InspectBundle(args.bundle_path);
+    std::string strategy = info.runtime_strategy;
+    if (strategy.empty()) {
+        auto fallback = trtmc::default_runtime_strategy();
+        if (!fallback || fallback->empty())
+            return;
+        strategy = *fallback;
+    }
+    if (auto alias = trtmc::legacy_runtime_strategy_alias_target(strategy, ""))
+        strategy = *alias;
+
+    trtmc::load_model_plugin_for_strategy(strategy, args.model_plugin_search_paths);
 }
 
 std::filesystem::path current_executable_path() {
@@ -323,11 +344,10 @@ int cmd_run(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    const std::string ptype = pipeline->pipeline_type();
     const std::string prompt = args.prompt;
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens =
-        args.max_new_tokens > 0 ? args.max_new_tokens : (ptype == "ElfFlowPipeline" ? 0 : 20);
+        args.max_new_tokens > 0 ? args.max_new_tokens : pipeline->default_max_new_tokens();
     cfg.num_samples = args.num_samples;
     cfg.block_length = args.block_length;
     cfg.confidence_threshold = args.conf_threshold;
@@ -399,15 +419,12 @@ int cmd_run(const CliArgs& args) {
         cfg.guidance_scale = args.cfg_scale;
     }
 
-    // Detect diffusion pipelines — they use generate_image(), not generate().
-    const bool is_diffusion =
-        (ptype.find("Diffusion") != std::string::npos || ptype.find("Flux") != std::string::npos ||
-         ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos ||
-         ptype.find("LTX") != std::string::npos || ptype.find("QwenImage") != std::string::npos);
+    // Image-generation pipelines use generate_image(), not generate().
+    const bool is_image_generation = pipeline->supports_image_generation();
 
     // Diffusion pipelines may consume shared initial latents from a raw fp32
     // file (E2E shared-latents path; mirrors the cmd_generate_video plumbing).
-    if (is_diffusion && !args.initial_latents_raw.empty()) {
+    if (is_image_generation && !args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);
         if (!latents) {
@@ -452,7 +469,7 @@ int cmd_run(const CliArgs& args) {
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
-    } else if (is_diffusion) {
+    } else if (is_image_generation) {
         // Image-conditioned diffusion (img2img) keeps the single-image path —
         // batched img2img is out of scope for the PR-3 CLI wiring.
         if (!args.image_path.empty()) {
@@ -877,8 +894,9 @@ int cmd_detect(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
-int write_sam_overlay(const trtmc::PromptedSegmentationResult& result,
-                      const trtmc::io::LoadedImage& image, const std::string& path) {
+int write_prompted_segmentation_overlay(const trtmc::PromptedSegmentationResult& result,
+                                        const trtmc::io::LoadedImage& image,
+                                        const std::string& path) {
     if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty() ||
         image.empty())
         return EXIT_FAILURE;
@@ -923,9 +941,9 @@ int write_sam_overlay(const trtmc::PromptedSegmentationResult& result,
                : EXIT_FAILURE;
 }
 
-int cmd_segment_sam(const CliArgs& args) {
+int cmd_segment_prompted(const CliArgs& args) {
     if (args.bundle_path.empty() || args.image_path.empty()) {
-        std::cerr << "Error: segment-sam requires bundle + --image\n";
+        std::cerr << "Error: segment-prompted requires bundle + --image\n";
         return EXIT_FAILURE;
     }
 
@@ -948,14 +966,14 @@ int cmd_segment_sam(const CliArgs& args) {
                                             args.point_x, args.point_y, args.is_foreground);
     }
     if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty()) {
-        std::cerr << "Error: SAM produced no masks\n";
+        std::cerr << "Error: prompted segmentation produced no masks\n";
         return EXIT_FAILURE;
     }
 
     const auto mask_area =
         static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width);
     if (result.masks.size() < static_cast<std::size_t>(result.num_masks) * mask_area) {
-        std::cerr << "Error: SAM mask payload is incomplete\n";
+        std::cerr << "Error: prompted segmentation mask payload is incomplete\n";
         return EXIT_FAILURE;
     }
 
@@ -995,12 +1013,12 @@ int cmd_segment_sam(const CliArgs& args) {
     }
 
     const std::string overlay_path = out_dir + "/segmented.png";
-    if (write_sam_overlay(result, image, overlay_path) != EXIT_SUCCESS) {
+    if (write_prompted_segmentation_overlay(result, image, overlay_path) != EXIT_SUCCESS) {
         std::cerr << "Warning: failed to write " << overlay_path << '\n';
     }
 
-    std::cout << "SAM segmentation saved: " << out_dir << " (" << result.num_masks << " masks, "
-              << result.width << "x" << result.height << ")\n";
+    std::cout << "Prompted segmentation saved: " << out_dir << " (" << result.num_masks
+              << " masks, " << result.width << "x" << result.height << ")\n";
     return EXIT_SUCCESS;
 }
 
@@ -1415,6 +1433,7 @@ int apply_cli_config(const CliArgs& args) {
         return EXIT_SUCCESS;
     if (args.config_path.empty() && args.set_tokens.empty())
         return EXIT_SUCCESS;
+    preload_cli_config_schema_owner(args);
     if (trtmc::config::SchemaRegistry::instance().registered_namespaces().empty()) {
         std::cerr << "[trtmc] --config/--set accepted but no config schemas are "
                      "registered yet; values have no effect."
@@ -1461,8 +1480,8 @@ int main(int argc, char** argv) {
             return cmd_encode(args);
         if (args.command == "segment")
             return cmd_segment(args);
-        if (args.command == "segment-sam")
-            return cmd_segment_sam(args);
+        if (args.command == "segment-prompted")
+            return cmd_segment_prompted(args);
         if (args.command == "classify")
             return cmd_classify(args);
         if (args.command == "detect")

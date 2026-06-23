@@ -6,6 +6,7 @@
   "model_type": "pixart",
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
+  "task_strategy": "diffusion_media_generation",
   "ci_tier": "l0_only",
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
@@ -26,5 +27,10 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "PR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, and 20-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage."
+  "notes": "PR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, and 20-step denoising loop. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage.",
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  }
 }

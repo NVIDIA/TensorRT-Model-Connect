@@ -122,15 +122,15 @@ static void test_helper_transform_simple_chw_branch() {
     check(out_values == input_chw, "helper simple transform: values unchanged");
 }
 
-// Pure helper test: qwen merge-group branch reorders patch positions and duplicates T channels.
-static void test_helper_transform_qwen_merge_group_branch() {
+// Pure helper test: merge-group branch reorders patch positions and duplicates T channels.
+static void test_helper_transform_merge_group_chw_branch() {
     std::vector<float> input_chw(16);
     for (int i = 0; i < 16; ++i) {
         input_chw[static_cast<std::size_t>(i)] = static_cast<float>(i);
     }
 
     trtmc::ImageTransformParams params;
-    params.layout = trtmc::ImageTransformLayout::kQwenMergeGroup;
+    params.layout = trtmc::ImageTransformLayout::kMergeGroupChw;
     params.target_size = 4;
     params.channels = 1;
     params.patch_size = 1;
@@ -140,9 +140,9 @@ static void test_helper_transform_qwen_merge_group_branch() {
     std::vector<float> out_values;
     int32_t out_channels = 0;
     const bool ok = trtmc::transform_chw_layout(input_chw, params, out_values, out_channels);
-    check(ok, "helper qwen transform: returns true");
-    check(out_channels == 2, "helper qwen transform: out_channels=C*T=2");
-    check(out_values.size() == 32, "helper qwen transform: output size=2*4*4");
+    check(ok, "helper merge-group transform: returns true");
+    check(out_channels == 2, "helper merge-group transform: out_channels=C*T=2");
+    check(out_values.size() == 32, "helper merge-group transform: output size=2*4*4");
 
     const std::vector<float> expected_channel = {0.0F,  1.0F,  4.0F,  5.0F, 2.0F,  3.0F,
                                                  6.0F,  7.0F,  8.0F,  9.0F, 12.0F, 13.0F,
@@ -155,7 +155,7 @@ static void test_helper_transform_qwen_merge_group_branch() {
             break;
         }
     }
-    check(first_channel_ok, "helper qwen transform: merge-group reorder matches expected");
+    check(first_channel_ok, "helper merge-group transform: reorder matches expected");
 
     bool second_channel_ok = true;
     const std::size_t offset = 16;
@@ -165,7 +165,7 @@ static void test_helper_transform_qwen_merge_group_branch() {
             break;
         }
     }
-    check(second_channel_ok, "helper qwen transform: temporal channel duplicated");
+    check(second_channel_ok, "helper merge-group transform: temporal channel duplicated");
 }
 
 // Write a tiny 4x4 PPM image (binary format) to a file.
@@ -186,8 +186,8 @@ static std::string write_test_ppm(const std::string& dir) {
     return path;
 }
 
-// Test: qwen_merge_group strategy — default, produces [C*T, H, W] with permutation.
-static void test_qwen_merge_group_strategy() {
+// Test: merge_group_chw strategy — default, produces [C*T, H, W] with permutation.
+static void test_merge_group_chw_strategy() {
     trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
 
@@ -199,7 +199,7 @@ static void test_qwen_merge_group_strategy() {
     config.fixed_image_size = 8; // small for testing
     config.temporal_patch_size = 2;
     config.in_channels = 3;
-    config.preprocessor_type = "qwen_merge_group";
+    config.preprocessor_type = "merge_group_chw";
     config.image_mean[0] = 0.5F;
     config.image_mean[1] = 0.5F;
     config.image_mean[2] = 0.5F;
@@ -209,14 +209,14 @@ static void test_qwen_merge_group_strategy() {
 
     auto result = trtmc::load_and_preprocess_image(image_path, config);
 
-    check(result.ok, "qwen_merge_group: image loaded successfully");
-    check(result.channels == 6, "qwen_merge_group: channels = T*C = 2*3 = 6");
-    check(result.height == 8, "qwen_merge_group: height = fixed_image_size = 8");
-    check(result.width == 8, "qwen_merge_group: width = fixed_image_size = 8");
+    check(result.ok, "merge_group_chw: image loaded successfully");
+    check(result.channels == 6, "merge_group_chw: channels = T*C = 2*3 = 6");
+    check(result.height == 8, "merge_group_chw: height = fixed_image_size = 8");
+    check(result.width == 8, "merge_group_chw: width = fixed_image_size = 8");
 
     const std::size_t expected_size = 6 * 8 * 8;
     check(result.pixel_values.size() == expected_size,
-          "qwen_merge_group: pixel_values size = channels * H * W");
+          "merge_group_chw: pixel_values size = channels * H * W");
 
     // Check normalization range: (pixel/255 - 0.5) / 0.5 is in [-1, 1]
     bool in_range = true;
@@ -226,7 +226,7 @@ static void test_qwen_merge_group_strategy() {
             break;
         }
     }
-    check(in_range, "qwen_merge_group: all normalized values in [-1.1, 1.1]");
+    check(in_range, "merge_group_chw: all normalized values in [-1.1, 1.1]");
 }
 
 // Test: simple_chw strategy — produces [C, H, W] without permutation.
@@ -269,8 +269,8 @@ static void test_simple_chw_strategy() {
     check(in_range, "simple_chw: all normalized values in [-1.1, 1.1]");
 }
 
-// Test: locateanything_patchify strategy produces [patches, C, pH, pW] plus grid metadata.
-static void test_locateanything_patchify_strategy() {
+// Test: patchify_chw strategy produces [patches, C, pH, pW] plus grid metadata.
+static void test_patchify_chw_strategy() {
     trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm(dir);
@@ -279,7 +279,7 @@ static void test_locateanything_patchify_strategy() {
     config.fixed_image_size = 4;
     config.patch_size = 2;
     config.in_channels = 3;
-    config.preprocessor_type = "locateanything_patchify";
+    config.preprocessor_type = "patchify_chw";
     config.interpolation = "nearest";
     config.image_mean[0] = 0.5F;
     config.image_mean[1] = 0.5F;
@@ -290,19 +290,19 @@ static void test_locateanything_patchify_strategy() {
 
     auto result = trtmc::load_and_preprocess_image(image_path, config);
 
-    check(result.ok, "locateanything_patchify: image loaded successfully");
-    check(result.channels == 3, "locateanything_patchify: channels = C = 3");
-    check(result.height == 4, "locateanything_patchify: height = fixed_image_size = 4");
-    check(result.width == 4, "locateanything_patchify: width = fixed_image_size = 4");
-    check(result.image_grid_hws.size() == 2, "locateanything_patchify: grid has two entries");
-    check(result.image_grid_hws[0] == 2, "locateanything_patchify: grid height = 2");
-    check(result.image_grid_hws[1] == 2, "locateanything_patchify: grid width = 2");
+    check(result.ok, "patchify_chw: image loaded successfully");
+    check(result.channels == 3, "patchify_chw: channels = C = 3");
+    check(result.height == 4, "patchify_chw: height = fixed_image_size = 4");
+    check(result.width == 4, "patchify_chw: width = fixed_image_size = 4");
+    check(result.image_grid_hws.size() == 2, "patchify_chw: grid has two entries");
+    check(result.image_grid_hws[0] == 2, "patchify_chw: grid height = 2");
+    check(result.image_grid_hws[1] == 2, "patchify_chw: grid width = 2");
 
     const std::size_t expected_size = 4 * 3 * 2 * 2;
     check(result.pixel_values.size() == expected_size,
-          "locateanything_patchify: pixel_values size = patches * C * pH * pW");
+          "patchify_chw: pixel_values size = patches * C * pH * pW");
     check_near(result.pixel_values[0], -1.0F, 1e-5F,
-               "locateanything_patchify: first patch first red pixel normalized");
+               "patchify_chw: first patch first red pixel normalized");
 }
 
 // Test: load non-existent image returns ok=false.
@@ -343,7 +343,7 @@ static void test_parse_vl_config() {
         "vision_output_dim": 2048,
         "vl_prompt_template": "test {image_pads} {prompt}",
         "image_token_str": "<|image_pad|>",
-        "preprocessor_type": "qwen_merge_group"
+        "preprocessor_type": "merge_group_chw"
     })";
 
     const std::string preproc_json = R"({
@@ -364,7 +364,7 @@ static void test_parse_vl_config() {
     check(cfg.merge_size == 2, "merge_size = 2");
     check(cfg.temporal_patch_size == 2, "temporal_patch_size = 2");
     check(cfg.image_token_str == "<|image_pad|>", "image_token_str parsed");
-    check(cfg.preprocessor_type == "qwen_merge_group", "preprocessor_type parsed");
+    check(cfg.preprocessor_type == "merge_group_chw", "preprocessor_type parsed");
 
     // Check float array parsing
     check(std::abs(cfg.image_mean[0] - 0.48145466F) < 1e-5F, "image_mean[0]");
@@ -372,15 +372,15 @@ static void test_parse_vl_config() {
     check(std::abs(cfg.image_std[2] - 0.27577711F) < 1e-5F, "image_std[2]");
 }
 
-// Test: preprocessor_type defaults to "qwen_merge_group" when absent.
+// Test: preprocessor_type defaults to "merge_group_chw" when absent.
 static void test_parse_vl_config_default_preprocessor_type() {
     const std::string config_json = R"({
         "image_token_id": 100
     })";
 
     auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
-    check(cfg.preprocessor_type == "qwen_merge_group",
-          "preprocessor_type defaults to qwen_merge_group");
+    check(cfg.preprocessor_type == "merge_group_chw",
+          "preprocessor_type defaults to merge_group_chw");
 }
 
 // Test: preprocessor_type = "simple_chw" round-trips through parse.
@@ -411,7 +411,7 @@ static std::string write_test_ppm_nonsquare(const std::string& dir) {
     return path;
 }
 
-// Test Gap 1: unknown preprocessor_type falls back to qwen_merge_group with ok=true.
+// Test Gap 1: unknown preprocessor_type falls back to merge_group_chw with ok=true.
 static void test_unknown_preprocessor_type_fallback() {
     trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
@@ -432,7 +432,7 @@ static void test_unknown_preprocessor_type_fallback() {
     auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "unknown type fallback: ok=true");
-    // Should produce qwen_merge_group output (C*T channels)
+    // Should produce merge_group_chw output (C*T channels)
     check(result.channels == 6, "unknown type fallback: channels = C*T = 6");
     check(result.height == 8, "unknown type fallback: height = 8");
     check(result.width == 8, "unknown type fallback: width = 8");
@@ -685,8 +685,8 @@ static void test_parse_missing_fields_defaults() {
     check(cfg.fixed_image_size == 448, "defaults: fixed_image_size=448");
     check(cfg.num_image_pad_tokens == 256, "defaults: num_image_pad_tokens=256");
     check(cfg.vision_output_dim == 0, "defaults: vision_output_dim=0");
-    check(cfg.preprocessor_type == "qwen_merge_group",
-          "defaults: preprocessor_type=qwen_merge_group");
+    check(cfg.preprocessor_type == "merge_group_chw",
+          "defaults: preprocessor_type=merge_group_chw");
     check(cfg.interpolation == "bicubic", "defaults: interpolation=bicubic");
     check(cfg.vl_prompt_template.empty(), "defaults: vl_prompt_template empty");
     check(cfg.image_token_str.empty(), "defaults: image_token_str empty");
@@ -703,7 +703,7 @@ static void test_parse_empty_json() {
     check(cfg.image_token_id == -1, "empty: image_token_id=-1");
     check(cfg.fixed_image_size == 448, "empty: fixed_image_size=448");
     check(cfg.num_image_pad_tokens == 256, "empty: num_image_pad_tokens=256");
-    check(cfg.preprocessor_type == "qwen_merge_group", "empty: preprocessor_type=qwen_merge_group");
+    check(cfg.preprocessor_type == "merge_group_chw", "empty: preprocessor_type=merge_group_chw");
     check(cfg.interpolation == "bicubic", "empty: interpolation=bicubic");
     check(cfg.patch_size == 14, "empty: patch_size=14 (struct default)");
     check(cfg.merge_size == 2, "empty: merge_size=2 (struct default)");
@@ -793,11 +793,11 @@ int main() {
     test_helper_normalize_hwc_to_chw();
     test_helper_normalize_std_floor_branch();
     test_helper_transform_simple_chw_branch();
-    test_helper_transform_qwen_merge_group_branch();
+    test_helper_transform_merge_group_chw_branch();
 
-    test_qwen_merge_group_strategy();
+    test_merge_group_chw_strategy();
     test_simple_chw_strategy();
-    test_locateanything_patchify_strategy();
+    test_patchify_chw_strategy();
     test_load_missing_image();
     test_format_vl_prompt();
     test_parse_vl_config();

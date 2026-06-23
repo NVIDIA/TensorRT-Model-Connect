@@ -6,19 +6,19 @@ Usage:
     python tools/diff.py list
 
     # List tests for a specific model
-    python tools/diff.py list --model Qwen/Qwen3-0.6B
+    python tools/diff.py list --model example-org/example-decoder
 
     # Run all applicable tests
-    python tools/diff.py run --model Qwen/Qwen3-0.6B
+    python tools/diff.py run --model example-org/example-decoder
 
     # Run specific tests
-    python tools/diff.py run --model Qwen/Qwen3-0.6B --test logit_diff --test layer_diff
+    python tools/diff.py run --model example-org/example-decoder --test logit_diff --test layer_diff
 
     # Save JSON results
-    python tools/diff.py run --model Qwen/Qwen3-0.6B --json result.json
+    python tools/diff.py run --model example-org/example-decoder --json result.json
 
     # VL model with bundle + image
-    python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
+    python tools/diff.py run --model example-org/example-vl \
       --bundle /path/vl.trtfb --image test.jpg --json result.json
 """
 from __future__ import annotations

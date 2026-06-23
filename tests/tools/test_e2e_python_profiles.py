@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import tensorrt_model_connect.python_profiles as shared_profiles
-from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+from tests.e2e_harness.contracts import E2ECase, RunContext
 from tests.e2e_harness.orchestrator import _build_repro_commands
 from tests.e2e_harness.python_profiles import (
     profile_env_var,
     resolve_case_profile_names,
     resolve_case_python_profiles,
 )
-from tests.e2e_harness.references.torch_reference import TorchReference
 
 
 def _make_case(runtime_strategy: str = "decoder_kv_cache", **kwargs) -> E2ECase:
@@ -42,40 +40,35 @@ def test_resolve_case_python_profiles_defaults_to_base():
     }
 
 
-def test_resolve_case_profile_names_apply_family_defaults():
+def test_resolve_case_profile_names_apply_manifest_profiles():
     case = _make_case(
-        family="internlm",
         runtime_strategy="decoder_kv_cache",
         reference_backend="torch_reference",
+        execution_profiles={
+            "build": "specialized",
+            "runtime": "specialized",
+            "reference": "specialized",
+        },
     )
     assert resolve_case_profile_names(case) == {
-        "build": "internlm",
-        "runtime": "internlm",
-        "reference": "internlm",
+        "build": "specialized",
+        "runtime": "specialized",
+        "reference": "specialized",
     }
 
 
-def test_resolve_case_profile_names_apply_chronos_family_defaults():
-    case = _make_case(
-        family="chronos_bolt",
-        runtime_strategy="chronos_bolt_trt",
-        reference_backend="torch_reference",
-    )
-    assert resolve_case_profile_names(case) == {
-        "build": "chronos",
-        "runtime": "base",
-        "reference": "chronos",
-    }
-
-
-def test_resolve_case_python_profiles_uses_family_default_named_env(monkeypatch, tmp_path):
-    wrapper = tmp_path / "internlm-python"
+def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatch, tmp_path):
+    wrapper = tmp_path / "specialized-python"
     wrapper.write_text("", encoding="utf-8")
-    monkeypatch.setenv(profile_env_var("internlm"), str(wrapper))
+    monkeypatch.setenv(profile_env_var("specialized"), str(wrapper))
     case = _make_case(
-        family="internlm",
         runtime_strategy="decoder_kv_cache",
         reference_backend="torch_reference",
+        execution_profiles={
+            "build": "specialized",
+            "runtime": "specialized",
+            "reference": "specialized",
+        },
     )
     profiles = resolve_case_python_profiles(case, "/usr/bin/python3")
     assert profiles["build"] == str(wrapper)
@@ -110,23 +103,24 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
     assert shared_profiles.resolve_profile_python("custom", sys.executable) == python
 
 
-def test_runtime_cli_hf_python_only_applies_to_speech_to_speech(tmp_path):
+def test_runtime_cli_hf_python_is_manifest_metadata_controlled(tmp_path):
     base_ctx = RunContext(
-        case=_make_case(runtime_strategy="decoder_kv_cache"),
+        case=_make_case(runtime_strategy="speech_to_speech", task_strategy="speech_to_speech"),
         hf_python="/usr/bin/python3",
         runtime_python="/tmp/runtime-python",
     )
     assert base_ctx.runtime_cli_hf_python() == ""
 
-    speech_ctx = RunContext(
+    opted_in_ctx = RunContext(
         case=_make_case(
             runtime_strategy="speech_to_speech",
             task_strategy="speech_to_speech",
+            metadata={"runtime_cli_requires_hf_python": True},
         ),
         hf_python="/usr/bin/python3",
         runtime_python="/tmp/runtime-python",
     )
-    assert speech_ctx.runtime_cli_hf_python() == "/tmp/runtime-python"
+    assert opted_in_ctx.runtime_cli_hf_python() == "/tmp/runtime-python"
 
 
 def test_repro_commands_record_profile_exports(tmp_path):
@@ -139,53 +133,19 @@ def test_repro_commands_record_profile_exports(tmp_path):
         artifacts_dir=str(tmp_path),
         binary_path="./build/trtmc",
         hf_python="/usr/bin/python3",
-        build_python="/tmp/internlm-python",
-        runtime_python="/tmp/internlm-python",
-        reference_python="/tmp/internlm-python",
-        build_profile="internlm",
-        runtime_profile="internlm",
-        reference_profile="internlm",
+        build_python="/tmp/specialized-python",
+        runtime_python="/tmp/specialized-python",
+        reference_python="/tmp/specialized-python",
+        build_profile="specialized",
+        runtime_profile="specialized",
+        reference_profile="specialized",
         engine_dir="/tmp/engines",
     )
     repro = _build_repro_commands(case, ctx, "/tmp/engines/case-a.trtfb", {})
-    assert repro["build_bundle"].startswith("/tmp/internlm-python -m tensorrt_model_connect.__main__ build")
-    assert "TRTMC_PYTHON_PROFILE_INTERNLM_PYTHON=/tmp/internlm-python" in repro["profile_env"]
-
-
-def test_torch_reference_time_series_uses_reference_python_subprocess(monkeypatch, tmp_path):
-    case = _make_case(
-        runtime_strategy="chronos_bolt_trt",
-        task_strategy="neural_operator",
-        family="chronos_bolt",
-        inputs={"branch_input": [1.0, 2.0, 3.0]},
+    assert repro["build_bundle"].startswith(
+        "/tmp/specialized-python -m tensorrt_model_connect.__main__ build"
     )
-    ctx = RunContext(
-        case=case,
-        artifacts_dir=str(tmp_path),
-        hf_python="/usr/bin/python3",
-        reference_python="/tmp/chronos-python",
+    assert (
+        "TRTMC_PYTHON_PROFILE_SPECIALIZED_PYTHON=/tmp/specialized-python"
+        in repro["profile_env"]
     )
-    captured: dict[str, object] = {}
-
-    def _fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout=(
-                '{"output_field":[1.0,2.0,3.0],"output_shape":[1,3],'
-                '"reference_output_name":"quantile_preds","model_path":"dummy/model"}'
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        "tests.e2e_harness.references.torch_reference.subprocess.run",
-        _fake_run,
-    )
-
-    out = TorchReference().run_stage(case, StageSpec(name="full_inference"), ctx)
-
-    assert captured["cmd"][0] == "/tmp/chronos-python"
-    assert out.data["reference_output_name"] == "quantile_preds"
-    assert out.data["output_field"] == [1.0, 2.0, 3.0]

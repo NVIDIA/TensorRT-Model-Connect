@@ -1,8 +1,7 @@
 #pragma once
 
 // HybridState: composes KvCache + RecurrentState behind IInferenceState.
-// Used by hybrid models (e.g. Nemotron-H) that have interleaved attention
-// and SSM/Mamba layers.
+// Used by hybrid models that interleave attention and recurrent layers.
 
 #include "trtmc/runtime/inference_state.h"
 #include "trtmc/runtime/kv_cache.h"

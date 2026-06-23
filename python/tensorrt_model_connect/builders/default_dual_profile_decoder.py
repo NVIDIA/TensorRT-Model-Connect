@@ -17,7 +17,7 @@ Scope: covers the same architectural variants the legacy
 ``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
 GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
-QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
+QKV/output/MLP biases, and optional embedding LayerNorm. Quantized
 builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
 projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
 debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
@@ -126,10 +126,9 @@ def _gelu_fc_mlp(
 
 def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
     """Reject configs the dual-profile builder cannot handle."""
-    model_type = getattr(config, "model_type", "").lower()
-    if "moe" in model_type or "mamba" in model_type or "rwkv" in model_type:
+    if bool(config.raw.get("_disable_dual_profile_decoder", False)):
         raise NotImplementedError(
-            f"dual_profile_decoder_builder does not support model_type={model_type!r}")
+            "dual_profile_decoder_builder is disabled by family metadata")
     if "embedding" not in weights:
         raise NotImplementedError("missing embedding weight")
     if "final_norm" not in weights:
@@ -360,7 +359,7 @@ def build_dual_profile_decoder_engine(
             network, sin_half_np.shape, sin_half_np,
             work_np_dtype, work_trt_dtype)
 
-    # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
+    # Learned absolute position embeddings.
     position_embed_table: trt.ITensor | None = None
     if position_type == "learned":
         pos_embed_np = weights["position_embedding"]
@@ -418,7 +417,7 @@ def build_dual_profile_decoder_engine(
     if hidden_state.dtype != work_trt_dtype:
         hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 
-    # Optional embedding LayerNorm (Bloom).
+    # Optional embedding LayerNorm.
     embed_norm = weights.get("embedding_norm")
     if embed_norm is not None:
         embed_norm_beta = weights.get(
@@ -458,7 +457,7 @@ def build_dual_profile_decoder_engine(
         v = matmul(normed, hidden, kv_attention_size,
                    weights[f"{prefix}.w_v"], f"{prefix}.w_v")
 
-        # Optional QKV biases (Qwen2 / GPT-2 / OPT / Bloom / Falcon / etc.).
+        # Optional QKV projection biases.
         q_bias = weights.get(f"{prefix}.q_bias")
         if q_bias is not None:
             q = graph_ops.add_bias_sum(
@@ -472,7 +471,7 @@ def build_dual_profile_decoder_engine(
             v = graph_ops.add_bias_sum(
                 network, v, kv_attention_size, v_bias, dtype=work_np_dtype)
 
-        # Optional per-head q/k norm (Qwen3).
+        # Optional per-head query/key norm.
         q_norm = weights.get(f"{prefix}.q_norm")
         if q_norm is not None:
             q = graph_ops.add_rms_norm_per_head(
@@ -524,8 +523,7 @@ def build_dual_profile_decoder_engine(
             attn_out = graph_ops.add_bias_sum(
                 network, attn_out, hidden, o_bias, dtype=work_np_dtype)
 
-        # Residual structure: parallel (GPT-NeoX / CodeGen / Falcon-3) vs
-        # sequential (everything else).
+        # Residual structure: parallel vs standard sequential residuals.
         if parallel_residual:
             post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
             if post_attn_norm_w is not None:
@@ -545,7 +543,7 @@ def build_dual_profile_decoder_engine(
                 weights.get(f"{prefix}.post_attn_norm_beta"),
                 eps_tensor, norm_type, work_np_dtype)
 
-        # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
+        # MLP: gated activation or dense activation variants.
         if mlp_type == "gelu_fc":
             mlp_out = _gelu_fc_mlp(
                 network, norm2,

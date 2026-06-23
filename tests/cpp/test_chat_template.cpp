@@ -4,10 +4,10 @@
 // Trace ID:       UT-CHAT-TPL-01
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-CHAT-01
-// Intent:         Chat template detection and application for known formats
+// Intent:         Chat template registry detection and application
 // Preconditions:  None (pure string logic, no GPU or TRT required)
-// Postconditions: Detected formats match expected enum, applied templates
-//                 produce correct formatted strings
+// Postconditions: Registered template IDs match markers and apply callbacks
+//                 are used; unknown templates pass through unchanged.
 // =============================================================================
 
 #include "runtime/core/chat_template.h"
@@ -25,163 +25,71 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-// --- Detection tests ---
+static std::string apply_unit_basic(const std::string& prompt, bool enable_thinking) {
+    return std::string("basic:") + (enable_thinking ? "think:" : "plain:") + prompt;
+}
+
+static std::string apply_unit_specific(const std::string& prompt, bool enable_thinking) {
+    return std::string("specific:") + (enable_thinking ? "think:" : "plain:") + prompt;
+}
+
+static void register_unit_templates() {
+    trtmc::register_chat_template_format("unit_specific", {"UNIT_SPECIFIC"}, apply_unit_specific);
+    trtmc::register_chat_template_format("unit_basic", {"UNIT_BASIC"}, apply_unit_basic);
+}
 
 static void test_detect_empty() {
     auto fmt = trtmc::detect_chat_template_format("");
-    check(fmt == trtmc::ChatTemplateFormat::kNone, "empty -> kNone");
+    check(fmt.empty(), "empty -> no template");
 }
 
-static void test_detect_chatml() {
-    std::string tpl = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ "
-                      "message.content }}<|im_end|>\n{% endfor %}";
+static void test_detect_registered_template() {
+    std::string tpl = "before UNIT_BASIC after";
     auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kChatML, "chatml detection");
+    check(fmt == "unit_basic", "registered template detection");
 }
 
-static void test_detect_mistral() {
-    std::string tpl = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' "
-                      "%}[INST] {{ message['content'] }} [/INST]{% endif %}{% endfor %}";
+static void test_specific_marker_wins_by_registration_order() {
+    std::string tpl = "before UNIT_SPECIFIC and UNIT_BASIC after";
     auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kMistral, "mistral detection");
-}
-
-static void test_detect_phi() {
-    std::string tpl = "{% for message in messages %}<|user|>\n{{ message.content "
-                      "}}<|end|>\n<|assistant|>\n{% endfor %}";
-    auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kPhi, "phi detection");
-}
-
-static void test_detect_gemma() {
-    std::string tpl = "{% for message in messages %}<start_of_turn>{{ message.role }}\n{{ "
-                      "message.content }}<end_of_turn>\n{% endfor %}";
-    auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kGemma, "gemma detection");
-}
-
-static void test_detect_llama3() {
-    std::string tpl = "{% for message in messages %}<|start_header_id|>{{ message.role "
-                      "}}<|end_header_id|>\n{{ message.content }}<|eot_id|>{% endfor %}";
-    auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kLlama3, "llama3 detection");
-}
-
-static void test_detect_nemotron_h() {
-    std::string tpl = "{% if add_generation_prompt %}<SPECIAL_10>System\n"
-                      "<SPECIAL_11>User\n{{ message.content }}\n"
-                      "<SPECIAL_11>Assistant\n<think>{% endif %}";
-    auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kNemotronH, "nemotron-h detection");
-}
-
-static void test_detect_nemotron_labs_diffusion() {
-    std::string tpl = "{%- set truncate_history_thinking = truncate_history_thinking if "
-                      "truncate_history_thinking is defined else True %}"
-                      "{%- set enable_thinking = enable_thinking if enable_thinking is defined "
-                      "else False %}";
-    auto fmt = trtmc::detect_chat_template_format(tpl);
-    check(fmt == trtmc::ChatTemplateFormat::kNemotronLabsDiffusion,
-          "nemotron-labs-diffusion detection");
+    check(fmt == "unit_specific", "registered order detection");
 }
 
 static void test_detect_unknown() {
     auto fmt = trtmc::detect_chat_template_format("some random jinja template");
-    check(fmt == trtmc::ChatTemplateFormat::kNone, "unknown -> kNone");
+    check(fmt.empty(), "unknown -> no template");
 }
-
-// --- Application tests ---
 
 static void test_apply_none() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNone, "hello");
-    check(result == "hello", "kNone passthrough");
+    auto result = trtmc::apply_chat_template("", "hello");
+    check(result == "hello", "empty template passthrough");
 }
 
-static void test_apply_chatml() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kChatML, "What is 2+2?");
-    check(result == "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
-          "chatml application");
+static void test_apply_registered_template() {
+    auto result = trtmc::apply_chat_template("unit_basic", "hello", false);
+    check(result == "basic:plain:hello", "registered template application");
 }
 
-static void test_apply_chatml_no_thinking() {
-    auto result =
-        trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kChatML, "What is 2+2?", false);
-    check(result == "<|im_start|>user\nWhat is "
-                    "2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-          "chatml no-thinking application");
-}
-
-static void test_apply_mistral() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kMistral, "hello");
-    check(result == "[INST] hello [/INST]", "mistral application");
-}
-
-static void test_apply_phi() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kPhi, "hello");
-    check(result == "<|user|>\nhello<|end|>\n<|assistant|>\n", "phi application");
-}
-
-static void test_apply_gemma() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kGemma, "hello");
-    check(result == "<start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n",
-          "gemma application");
-}
-
-static void test_apply_llama3() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kLlama3, "hello");
-    check(result == "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nhello<|eot_id|><|"
-                    "start_header_id|>assistant<|end_header_id|>\n\n",
-          "llama3 application");
-}
-
-static void test_apply_nemotron_h_no_thinking() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronH, "hello", false);
-    check(result == "<SPECIAL_10>System\n\n<SPECIAL_11>User\nhello\n"
-                    "<SPECIAL_11>Assistant\n<think></think>",
-          "nemotron-h no-thinking application");
-}
-
-static void test_apply_nemotron_labs_diffusion_no_thinking() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kNemotronLabsDiffusion,
-                                             "hello", false);
-    check(result == "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n"
-                    "<|im_start|>assistant\n<think></think>",
-          "nemotron-labs-diffusion no-thinking application");
-}
-
-static void test_apply_mistral_no_thinking_ignored() {
-    auto result = trtmc::apply_chat_template(trtmc::ChatTemplateFormat::kMistral, "hello", false);
-    check(result == "[INST] hello [/INST]", "mistral no-thinking ignored");
+static void test_apply_unknown_template() {
+    auto result = trtmc::apply_chat_template("__missing__", "hello");
+    check(result == "hello", "unknown template passthrough");
 }
 
 int main() {
-    // Detection
-    test_detect_empty();
-    test_detect_chatml();
-    test_detect_mistral();
-    test_detect_phi();
-    test_detect_gemma();
-    test_detect_llama3();
-    test_detect_nemotron_h();
-    test_detect_nemotron_labs_diffusion();
-    test_detect_unknown();
+    register_unit_templates();
 
-    // Application
+    test_detect_empty();
+    test_detect_registered_template();
+    test_specific_marker_wins_by_registration_order();
+    test_detect_unknown();
     test_apply_none();
-    test_apply_chatml();
-    test_apply_chatml_no_thinking();
-    test_apply_mistral();
-    test_apply_phi();
-    test_apply_gemma();
-    test_apply_llama3();
-    test_apply_nemotron_h_no_thinking();
-    test_apply_nemotron_labs_diffusion_no_thinking();
-    test_apply_mistral_no_thinking_ignored();
+    test_apply_registered_template();
+    test_apply_unknown_template();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }
-    std::cerr << "All chat_template tests passed.\n";
+    std::cerr << "All chat_template registry tests passed.\n";
     return 0;
 }

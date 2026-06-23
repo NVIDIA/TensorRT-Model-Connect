@@ -414,7 +414,7 @@ def add_gated_mlp(
 ) -> trt.ITensor:
     """Gated MLP: activation(fc1(x)) * fc1_gate(x), then fc2.
 
-    Used by T5 encoder (gated GELU) and DiT FFN. Two parallel projections
+    Used by gated encoder and denoiser FFN blocks. Two parallel projections
     where one is gated by activation.
 
     Weight keys: {prefix}.w_fc1, {prefix}.w_fc1_gate, {prefix}.w_fc2

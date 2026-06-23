@@ -12,7 +12,7 @@ float16 (default) to reduce HF memory usage.
 Usage:
     # Build TRT engine on the fly from HF model
     python3 tools/perf_compare.py \
-      --model Qwen/Qwen3-0.6B \
+      --model example-org/example-decoder \
       --prompt "The capital of France is" \
       --max-new-tokens 20 \
       --max-cache-length 256 \
@@ -20,26 +20,30 @@ Usage:
 
     # Use a pre-built bundle (skips engine build)
     python3 tools/perf_compare.py \
-      --model Qwen/Qwen3-0.6B \
-      --bundle /path/to/qwen3.trtfb \
+      --model example-org/example-decoder \
+      --bundle /path/to/model.trtfb \
       --prompt "The capital of France is" \
       --max-new-tokens 20
 
     # Save results as JSON
     python3 tools/perf_compare.py \
-      --model Qwen/Qwen3-0.6B \
+      --model example-org/example-decoder \
       --prompt "Hello" --max-new-tokens 20 \
       --json results.json
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import statistics
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 
@@ -81,6 +85,55 @@ def _get_peak_memory_mb() -> float | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def _family_perf_modules() -> tuple[ModuleType, ...]:
+    """Load optional model-owned performance hooks from family folders."""
+    family_root = (
+        Path(__file__).resolve().parents[1]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+    )
+    modules: list[ModuleType] = []
+    for handler_path in sorted(family_root.glob("*/perf_hooks.py")):
+        module_name = f"_trtmc_perf_hooks_{handler_path.parent.name}"
+        spec = importlib.util.spec_from_file_location(module_name, handler_path)
+        if spec is None or spec.loader is None:
+            print(f"[perf] WARN: cannot load family perf hook "
+                  f"{handler_path}", file=sys.stderr)
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            print(f"[perf] WARN: failed to import family perf hook "
+                  f"{handler_path}: {exc}", file=sys.stderr)
+            continue
+        if callable(getattr(module, "handles_runtime_strategy", None)):
+            modules.append(module)
+    return tuple(modules)
+
+
+def find_family_perf_handler(runtime_strategy: str) -> ModuleType | None:
+    """Return the model-owned performance hook for a runtime strategy."""
+    for module in _family_perf_modules():
+        handles = getattr(module, "handles_runtime_strategy")
+        if handles(runtime_strategy):
+            return module
+    return None
+
+
+def _handler_attr(handler: ModuleType | None, name: str, default):
+    if handler is None:
+        return default
+    value = getattr(handler, name, default)
+    return value() if callable(value) else value
+
+
+def _handler_supports(handler: ModuleType | None, name: str, default: bool) -> bool:
+    return bool(_handler_attr(handler, name, default))
+
+
 def build_trt_engine(model_id_or_path: str, max_cache_length: int,
                      verbose: bool):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
@@ -110,15 +163,15 @@ def build_trt_engine(model_id_or_path: str, max_cache_length: int,
     print(f"[perf] Engine built ({len(engine_plan) / 1e6:.1f} MB)",
           file=sys.stderr)
 
-    is_mamba = rt == "ssm_recurrent"
-    return engine_plan, config, model_dir, is_mamba
+    perf_handler = find_family_perf_handler(rt or "")
+    return engine_plan, config, model_dir, perf_handler
 
 
 def load_trt_from_bundle(bundle_path: str):
     """Load TRT engine from a pre-built bundle.
 
     Returns (engine_plan_bytes, num_layers, max_cache_length, bundle_config,
-             is_mamba).
+             family_perf_handler).
     """
     from tensorrt_model_connect.debug_runner import load_engine_from_bundle, \
         load_config_from_bundle
@@ -132,9 +185,9 @@ def load_trt_from_bundle(bundle_path: str):
         raise SystemExit(
             "ERROR: VL bundles are not supported. Use tools/diff_vl.py.")
 
-    is_mamba = rt == "ssm_recurrent"
+    perf_handler = find_family_perf_handler(rt)
     return (engine_plan, header["num_layers"],
-            header.get("max_cache_length", 0), bundle_config, is_mamba)
+            header.get("max_cache_length", 0), bundle_config, perf_handler)
 
 
 def load_hf_model(model_dir: str, dtype: str, trust_remote_code: bool):
@@ -246,73 +299,35 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
     }
 
 
-def bench_trt_mamba(engine_plan: bytes, num_layers: int,
-                    input_ids: list[int], max_new_tokens: int,
-                    warmup: int, iterations: int, eos_token_id: int | None,
-                    verbose: bool) -> dict:
-    """Benchmark TRT inference for Mamba/SSM via MambaTrtRunner.
-
-    Returns dict with timing lists and generated token IDs.
-    """
-    from tensorrt_model_connect.debug_runner import MambaTrtRunner
-
-    # Create runner once (deserialization outside timing)
-    runner = MambaTrtRunner(
+def bench_trt_family(
+    handler: ModuleType,
+    engine_plan: bytes,
+    num_layers: int,
+    max_cache_length: int,
+    input_ids: list[int],
+    max_new_tokens: int,
+    warmup: int,
+    iterations: int,
+    eos_token_id: int | None,
+    verbose: bool,
+) -> dict:
+    """Benchmark TRT inference using a model-owned family performance hook."""
+    bench = getattr(handler, "bench_trt", None)
+    if not callable(bench):
+        raise TypeError(
+            f"Family perf hook {handler.__file__} does not define bench_trt()"
+        )
+    return bench(
         engine_plan=engine_plan,
         num_layers=num_layers,
+        max_cache_length=max_cache_length,
+        input_ids=input_ids,
+        max_new_tokens=max_new_tokens,
+        warmup=warmup,
+        iterations=iterations,
+        eos_token_id=eos_token_id,
+        verbose=verbose,
     )
-
-    prefill_times: list[float] = []
-    decode_times: list[float] = []
-    decode_token_counts: list[int] = []
-    gen_ids: list[int] = []
-
-    total_runs = warmup + iterations
-    for run_idx in range(total_runs):
-        is_warmup = run_idx < warmup
-
-        # Reset device-side recurrent state
-        runner.reset()
-
-        # -- Prefill --
-        t0 = time.perf_counter()
-        for tid in input_ids:
-            result = runner.step(tid)
-        logits = result["logits"].flatten()
-        prefill_ms = (time.perf_counter() - t0) * 1000
-
-        # -- Decode --
-        tokens_generated = 0
-        run_gen_ids: list[int] = []
-        t0 = time.perf_counter()
-        for _ in range(max_new_tokens):
-            next_token = int(np.argmax(logits))
-            run_gen_ids.append(next_token)
-            if eos_token_id is not None and next_token == eos_token_id:
-                break
-            result = runner.step(next_token)
-            logits = result["logits"].flatten()
-            tokens_generated += 1
-        decode_ms = (time.perf_counter() - t0) * 1000
-
-        if not is_warmup:
-            prefill_times.append(prefill_ms)
-            decode_times.append(decode_ms)
-            decode_token_counts.append(tokens_generated)
-            gen_ids = run_gen_ids
-
-        if verbose:
-            tag = "warmup" if is_warmup else f"iter {run_idx - warmup + 1}"
-            print(f"  [trt {tag}] prefill={prefill_ms:.2f}ms "
-                  f"decode={decode_ms:.2f}ms ({tokens_generated} tokens)",
-                  file=sys.stderr)
-
-    return {
-        "prefill_times": prefill_times,
-        "decode_times": decode_times,
-        "decode_token_counts": decode_token_counts,
-        "gen_ids": gen_ids,
-    }
 
 
 def bench_trtmc_cpp(
@@ -419,9 +434,9 @@ def bench_hf(model, input_ids: list[int], max_new_tokens: int,
             torch.cuda.synchronize()
             prefill_ms = (time.perf_counter() - t0) * 1000
 
-            # HF decoders use past_key_values; Mamba uses cache_params.
-            is_mamba_hf = hasattr(outputs, "cache_params")
-            if is_mamba_hf:
+            # HF decoders use past_key_values; some recurrent models use cache_params.
+            uses_recurrent_cache = hasattr(outputs, "cache_params")
+            if uses_recurrent_cache:
                 past = outputs.cache_params
                 seq_len = ids_tensor.shape[1]
             else:
@@ -442,7 +457,7 @@ def bench_hf(model, input_ids: list[int], max_new_tokens: int,
                     [[next_token]], dtype=torch.long, device="cuda")
                 if _cudagraph_mark:
                     torch.compiler.cudagraph_mark_step_begin()
-                if is_mamba_hf:
+                if uses_recurrent_cache:
                     cache_pos = torch.tensor(
                         [seq_len + step], dtype=torch.long, device="cuda")
                     outputs = model(
@@ -515,7 +530,8 @@ def _speedup(hf_mean: float, trt_mean: float) -> str:
 def print_report(model_name: str, prompt: str, num_input_tokens: int,
                  max_new_tokens: int, iterations: int, warmup: int,
                  hf_dtype: str, trt_res: dict, hf_res: dict,
-                 is_mamba: bool = False, compile_res: dict | None = None,
+                 runtime_note: str | None = None,
+                 compile_res: dict | None = None,
                  compile_mode: str = "reduce-overhead"):
     """Print formatted comparison table to stdout."""
     gpu = _get_gpu_name()
@@ -667,9 +683,8 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
             print(f"  {label:>18s}:  {trt_val:>16s}  {hf_val:>16s}  {sp:>8s}")
 
     print()
-    if is_mamba:
-        print("* Prefill: HF processes full sequence; TRT is token-by-token")
-        print("  Decode: both token-by-token with recurrent state")
+    if runtime_note:
+        print(runtime_note)
     else:
         print("* Prefill: HF batches all tokens; TRT processes token-by-token")
         print("  Decode: both token-by-token with KV cache (apples-to-apples)")
@@ -884,21 +899,21 @@ def main():
     # -- Load / build TRT engine --
     if args.bundle:
         print(f"[perf] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, is_mamba = \
+        engine_plan, num_layers, max_cache_length, _, perf_handler = \
             load_trt_from_bundle(args.bundle)
     else:
-        engine_plan, config, _, is_mamba = build_trt_engine(
+        engine_plan, config, _, perf_handler = build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
 
     # -- Bench TRT (GPU-exclusive) --
-    backend_label = "TRT-Mamba" if is_mamba else "TRT"
+    backend_label = _handler_attr(perf_handler, "backend_label", "TRT")
     print(f"[perf] Benchmarking {backend_label} ({args.warmup} warmup + "
           f"{args.iterations} iterations) ...", file=sys.stderr)
-    if is_mamba:
-        trt_res = bench_trt_mamba(
-            engine_plan, num_layers,
+    if perf_handler is not None:
+        trt_res = bench_trt_family(
+            perf_handler, engine_plan, num_layers, max_cache_length,
             input_ids, args.max_new_tokens,
             args.warmup, args.iterations, eos_token_id, args.verbose)
     else:
@@ -1016,7 +1031,9 @@ def main():
 
     # -- Bench HF compiled (optional) --
     compile_res = None
-    if not args.no_compile and not is_mamba:
+    if not args.no_compile and _handler_supports(
+        perf_handler, "supports_hf_compile", True
+    ):
         print("[perf] Loading HF model for torch.compile ...", file=sys.stderr)
         hf_model2 = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
         print(f"[perf] Benchmarking HF compiled ({args.warmup} warmup + "
@@ -1054,7 +1071,8 @@ def main():
     print_report(
         args.model, args.prompt, len(input_ids),
         args.max_new_tokens, args.iterations, args.warmup,
-        args.dtype, trt_res, hf_res, is_mamba=is_mamba,
+        args.dtype, trt_res, hf_res,
+        runtime_note=_handler_attr(perf_handler, "perf_report_note", None),
         compile_res=compile_res, compile_mode=args.compile_mode)
 
     # -- JSON output (full TRT+HF+CPP) --
@@ -1114,18 +1132,18 @@ def run_as_diff_test(ctx, include_compile: bool = False):
 
         # Build or load TRT engine
         if ctx.bundle_path:
-            engine_plan, num_layers, max_cache_length, _, is_mamba = \
+            engine_plan, num_layers, max_cache_length, _, perf_handler = \
                 load_trt_from_bundle(ctx.bundle_path)
         else:
-            engine_plan, config, _, is_mamba = build_trt_engine(
+            engine_plan, config, _, perf_handler = build_trt_engine(
                 ctx.model, ctx.max_cache_length, ctx.verbose)
             num_layers = config.num_hidden_layers
             max_cache_length = ctx.max_cache_length
 
         warmup, iterations = 1, 3
-        if is_mamba:
-            trt_res = bench_trt_mamba(
-                engine_plan, num_layers,
+        if perf_handler is not None:
+            trt_res = bench_trt_family(
+                perf_handler, engine_plan, num_layers, max_cache_length,
                 input_ids, ctx.max_new_tokens,
                 warmup, iterations, eos_token_id, ctx.verbose)
         else:

@@ -247,6 +247,38 @@ class TestEnsureTokenizerJson:
         _ensure_tokenizer_json(tmp_path)
         assert (tmp_path / "tokenizer.json").read_text() == "{}"
 
+    def test_missing_fast_tokenizer_delegates_to_family_plugin(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, use_fast=False):
+                assert Path(path) == tmp_path
+                assert use_fast is False
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+        captured = {}
+
+        class FakePlugin:
+            def ensure_tokenizer_json(self, model_dir, *, previous_error=None):
+                captured["model_dir"] = Path(model_dir)
+                captured["previous_error"] = previous_error
+                (Path(model_dir) / "tokenizer.json").write_text("{}")
+                return True
+
+        _ensure_tokenizer_json(tmp_path, plugin=FakePlugin())
+
+        assert captured["model_dir"] == tmp_path
+        assert "slow tokenizer conversion failed" in captured["previous_error"]
+        assert (tmp_path / "tokenizer.json").exists()
+
 
 class TestBuildBundleErrors:
     """Test build_bundle error handling."""

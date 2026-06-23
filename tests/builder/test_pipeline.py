@@ -252,7 +252,7 @@ class TestPipelineInspect:
         pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "Model ID:  qwen3\nLayers: 28\n"
+        mock_result.stdout = "Model ID:  example-model\nLayers: 28\n"
 
         with patch("tensorrt_model_connect.pipeline.subprocess.run",
                     return_value=mock_result) as mock_run:
@@ -263,7 +263,7 @@ class TestPipelineInspect:
                 text=True,
                 timeout=30,
             )
-            assert out == "Model ID:  qwen3\nLayers: 28"
+            assert out == "Model ID:  example-model\nLayers: 28"
 
     def test_inspect_failure_raises(self):
         """Non-zero exit code in inspect raises RuntimeError."""

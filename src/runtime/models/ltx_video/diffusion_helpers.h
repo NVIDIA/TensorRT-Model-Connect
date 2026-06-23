@@ -1,7 +1,7 @@
 #pragma once
+#include "plugin_helpers.h"
 #include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "plugin_helpers.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {

@@ -87,8 +87,8 @@ static void test_read_valid_bundle() {
 
     const std::string json = R"({
   "model_id": "test-model",
-  "model_type": "qwen3",
-  "family": "qwen",
+  "model_type": "decoder",
+  "family": "generic_text",
   "trt_version": "10.15.0",
   "trt_abi": "10.15",
   "gpu_name": "GeForce RTX 4090",
@@ -111,8 +111,8 @@ static void test_read_valid_bundle() {
 
     const auto loaded = trtmc::ReadBundleFile(path);
     check(loaded.info.model_id == "test-model", "read model_id");
-    check(loaded.info.model_type == "qwen3", "read model_type");
-    check(loaded.info.family == "qwen", "read family");
+    check(loaded.info.model_type == "decoder", "read model_type");
+    check(loaded.info.family == "generic_text", "read family");
     check(loaded.info.trt_version == "10.15.0", "read trt_version");
     check(loaded.info.trt_abi == "10.15", "read trt_abi");
     check(loaded.info.vocab_size == 151936, "read vocab_size");
@@ -264,7 +264,7 @@ static void test_max_batch_size_parse_and_back_compat() {
 
     const auto new_path = (tmp / "new.trtfb").string();
     write_bundle_with_sections(new_path, R"({
-  "model_id": "flux-bs4", "family": "diffusion_flux",
+  "model_id": "diffusion-bs4", "family": "diffusion",
   "max_batch_size": {"dit": 4, "text_encoder": 8, "vae": 1},
   "sections": {"engine_plan": {"offset": 0, "size": 4}}
 })",
@@ -277,7 +277,7 @@ static void test_max_batch_size_parse_and_back_compat() {
 
     const auto legacy_path = (tmp / "legacy.trtfb").string();
     write_bundle_with_sections(legacy_path, R"({
-  "model_id": "legacy", "family": "qwen",
+  "model_id": "legacy", "family": "generic",
   "sections": {"engine_plan": {"offset": 0, "size": 4}}
 })",
                                {plan_data});

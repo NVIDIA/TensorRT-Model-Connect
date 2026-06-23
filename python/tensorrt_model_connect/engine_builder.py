@@ -16,7 +16,15 @@ from .build_timing import (
     write_build_timing as _write_build_timing,
 )
 from .config import ModelConfig
-from .families import available_plugin_ids, find_plugin, find_diffusion_plugin
+from .families import (
+    available_plugin_ids,
+    family_hf_allow_patterns,
+    family_has_capability,
+    find_plugin,
+    find_diffusion_plugin,
+    resolve_config_from_model_dir,
+    resolve_nemo_archive_model_dir,
+)
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from . import trt_compat
 from .triattention_export import (
@@ -81,12 +89,6 @@ _HF_ALLOW_PATTERNS = [
     "model.safetensors-*.safetensors",
     "model.safetensors.index.json",
     "pytorch_model.bin",
-    "*.yml",
-    "*.yaml",
-    "checkpoint_*",
-    "checkpoint_*/**",
-    "model.npz",
-    "elf_params.npz",
     "tokenizer.json",
     "tokenizer_config.json",
     "chat_template.jinja",
@@ -285,35 +287,25 @@ def _plugin_supports_parallel_quantization(plugin, quant_ctx) -> bool:
     return bool(supports(_quant_format_name(quant_ctx)))
 
 
-def _plugin_uses_standard_decoder_builder(plugin) -> bool:
-    """Best-effort check for family plugins routed through the standard decoder."""
-    try:
-        source = inspect.getsource(plugin.build_engine)
-    except (OSError, TypeError):
-        return False
-    return "build_standard_decoder_engine" in source
+def _plugin_supports_split_decoder_roles(plugin, config: ModelConfig) -> bool:
+    """Return True when a family explicitly opts into split decoder roles."""
+    supports = getattr(plugin, "supports_split_decoder_roles", None)
+    if callable(supports):
+        return bool(supports(config))
+    if isinstance(supports, bool):
+        return supports
+    return family_has_capability(config, "split_decoder_roles")
 
 
-def _plugin_supports_split_decoder_roles(plugin) -> bool:
-    """Return True when the family's standard builder honors split roles."""
-    if not _plugin_uses_standard_decoder_builder(plugin):
-        return False
-    build_globals = getattr(plugin.build_engine, "__globals__", {})
-    standard_builder = build_globals.get("build_standard_decoder_engine")
-    if standard_builder is None:
-        return False
-    try:
-        source = inspect.getsource(standard_builder)
-    except (OSError, TypeError):
-        return False
-    return (
-        "_decoder_engine_role" in source
-        and "profile_mode" in source
-    )
+def _apply_family_builder_capabilities(config: ModelConfig) -> None:
+    """Thread family-owned builder capabilities through generic config flags."""
+    if family_has_capability(config, "disable_dual_profile_decoder"):
+        config.raw["_disable_dual_profile_decoder"] = True
 
 
 def _can_build_split_decoder_engines(
     plugin,
+    config: ModelConfig,
     runtime_strategy: str,
     *,
     dynamic_kv_cache: bool,
@@ -332,7 +324,7 @@ def _can_build_split_decoder_engines(
         return False
     if bool(getattr(plugin, "embed_input", False)):
         return False
-    return _plugin_supports_split_decoder_roles(plugin)
+    return _plugin_supports_split_decoder_roles(plugin, config)
 
 
 def _load_plugin_weights(
@@ -354,29 +346,9 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
-def _is_elf_model_dir(path: Path) -> bool:
-    """Return True for the official ELF YAML + checkpoint directory layout."""
-    if not path.is_dir():
-        return False
-    has_checkpoint = any(path.glob("checkpoint_*")) or any(
-        (path / name).exists() for name in ("model.npz", "elf_params.npz")
-    )
-    if not has_checkpoint:
-        return False
-    for yaml_path in [*path.glob("*.yaml"), *path.glob("*.yml")]:
-        try:
-            import yaml  # type: ignore[import-untyped]
-
-            data = yaml.safe_load(yaml_path.read_text()) or {}
-        except Exception:
-            continue
-        if isinstance(data, dict) and str(data.get("model", "")).upper().replace("_", "-") in {
-            "ELF-B",
-            "ELF-M",
-            "ELF-L",
-        }:
-            return True
-    return False
+def _is_family_model_dir(path: Path) -> bool:
+    """Return True when a family-owned config adapter can parse the directory."""
+    return path.is_dir() and resolve_config_from_model_dir(path) is not None
 
 
 def _resolve_model(model_id_or_path: str) -> str:
@@ -384,13 +356,13 @@ def _resolve_model(model_id_or_path: str) -> str:
 
     If model_id_or_path is an existing directory with config.json, returns it
     directly. Otherwise, downloads via huggingface_hub.snapshot_download().
-    Handles .nemo archives by extracting config and creating a synthetic dir.
+    Handles .nemo archives through family-owned adapters.
     """
     local = Path(model_id_or_path)
-    if local.is_dir() and (_is_hf_model_dir(local) or _is_elf_model_dir(local)):
+    if local.is_dir() and (_is_hf_model_dir(local) or _is_family_model_dir(local)):
         return str(local)
 
-    # Handle .nemo archives (NeMo models like MagpieTTS)
+    # Handle NeMo archive snapshots.
     if local.is_file() and local.suffix == ".nemo":
         return _resolve_nemo_archive(local)
 
@@ -413,7 +385,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         local_dir = snapshot_download(
             repo_id=model_id_or_path,
-            allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
+            allow_patterns=_HF_ALLOW_PATTERNS + family_hf_allow_patterns() + ["*.nemo"],
         )
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)
@@ -434,80 +406,13 @@ def _resolve_model(model_id_or_path: str) -> str:
 
 
 def _resolve_nemo_archive(nemo_path: Path) -> str:
-    """Extract a .nemo archive and create a synthetic HF-compatible directory.
-
-    NeMo .nemo files are tar archives containing model_config.yaml and
-    model_weights.ckpt. We extract the YAML config, generate a synthetic
-    config.json with model_type for plugin dispatch, and store the .nemo
-    path for the plugin's load_weights() to use.
-    """
-    import json
-    import tempfile
-
-    print(f"[trtmc build] Resolving NeMo archive: {nemo_path}", file=sys.stderr)
-
-    # Extract model_config.yaml from the tar
-    import tarfile
-    cfg = {}
-    with tarfile.open(str(nemo_path), "r") as tar:
-        for member in tar.getmembers():
-            if member.name.endswith("model_config.yaml"):
-                import yaml
-                f = tar.extractfile(member)
-                if f is not None:
-                    cfg = yaml.safe_load(f)
-                break
-
-    # Determine model_type from NeMo config
-    target = cfg.get("target", "") or cfg.get("_target_", "")
-    model_type = "unknown"
-    if "MagpieTTS" in target or "magpietts" in target.lower():
-        model_type = "magpie_tts"
-    elif ("EncDecRNNT" in target or "Transducer" in target
-          or "rnnt" in target.lower()):
-        model_type = "nemotron_speech_streaming"
-    elif "EncDecMultiTaskModel" in target or "canary" in target.lower():
-        model_type = "canary"
-    elif cfg.get("model_type", ""):
-        model_type = cfg["model_type"]
-
-    # Create a temp dir that looks like an HF model dir
-    tmp_dir = tempfile.mkdtemp(prefix="trtmc_nemo_")
-    tmp_path = Path(tmp_dir)
-
-    # Write synthetic config.json for ModelConfig.from_dir()
-    enc_cfg = cfg.get("encoder", {})
-    dec_cfg = cfg.get("decoder", cfg.get("transf_decoder", {}))
-    hidden = enc_cfg.get("d_model", 768)
-    # Decoder fields vary by NeMo model type
-    dec_layers = dec_cfg.get("n_layers",
-                             dec_cfg.get("num_layers", 12))
-    dec_heads = dec_cfg.get("sa_n_heads",
-                            dec_cfg.get("num_attention_heads", 12))
-    dec_ffn = dec_cfg.get("d_ffn",
-                          dec_cfg.get("inner_size", 3072))
-    synthetic_config = {
-        "model_type": model_type,
-        "hidden_size": hidden,
-        "num_hidden_layers": dec_layers,
-        "num_attention_heads": dec_heads,
-        "intermediate_size": dec_ffn,
-        "vocab_size": 2380,  # Will be overridden from weights
-        "rms_norm_eps": 1e-5,
-        "_nemo_archive_path": str(nemo_path),
-    }
-    with open(tmp_path / "config.json", "w") as f:
-        json.dump(synthetic_config, f, indent=2)
-
-    # Symlink the .nemo file into the temp dir for easy access
-    nemo_link = tmp_path / nemo_path.name
-    if not nemo_link.exists():
-        import os
-        os.symlink(str(nemo_path.resolve()), str(nemo_link))
-
-    print(f"[trtmc build] NeMo resolved: model_type={model_type}, "
-          f"tmp_dir={tmp_dir}", file=sys.stderr)
-    return tmp_dir
+    """Resolve a .nemo archive through family-owned archive adapters."""
+    resolved = resolve_nemo_archive_model_dir(nemo_path)
+    if resolved is None:
+        raise RuntimeError(
+            f"No family-owned NeMo archive adapter recognized {nemo_path}"
+        )
+    return resolved
 
 
 def _get_trt_version() -> str:
@@ -571,7 +476,7 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
 def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[int]] | None:
     """Return exact HF add-special prefix/suffix IDs when they are representable.
 
-    Some SentencePiece tokenizers add BOS by default but not EOS. A single
+    Some tokenizers add BOS by default but not EOS. A single
     add-special boolean is not enough for the native C++ tokenizer to mirror
     that behavior, so bundle the exact frame when HF exposes it as a simple
     prefix/suffix around the no-special tokenization.
@@ -606,34 +511,10 @@ def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return _detect_tokenizer_add_special_tokens(model_dir)
 
 
-def _find_sentencepiece_model(model_dir: Path) -> Path | None:
-    """Return the best SentencePiece model file for tokenizer.json conversion."""
-    preferred = (
-        model_dir / "source.spm",
-        model_dir / "spiece.model",
-        model_dir / "tokenizer.model",
-    )
-    for path in preferred:
-        if path.exists():
-            return path
-
-    candidates = sorted(
-        {
-            *model_dir.glob("*.spm"),
-            *model_dir.glob("*.model"),
-        }
-    )
-    return candidates[0] if candidates else None
-
-
-def _ensure_tokenizer_json(model_dir: Path) -> None:
+def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
-    always load the tokenizer natively (BPE / WordPiece / Unigram).
-
-    Fallback chain:
-      1. AutoTokenizer(use_fast=False).save_pretrained() — works for most models
-      2. SentencePiece .spm → tokenizers.Unigram conversion — for Marian / NLLB
+    always load the tokenizer natively.
     """
     if (model_dir / "tokenizer.json").exists():
         return
@@ -653,71 +534,13 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
     except Exception as e:
         slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
-    # --- Attempt 2: build from SentencePiece model + optional vocab.json ---
-    # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
-    # vocab.json (combined source+target vocabulary with IDs).  We build a
-    # Unigram tokenizer.json using the full combined vocab (so IDs match the
-    # TRT engine) with scores from the SPM model for source tokens and a
-    # default low score for target-only tokens.
-    #
-    # Diffusers T5 tokenizers, including PixArt, commonly ship spiece.model
-    # instead of a .spm file.
-    spm_path = _find_sentencepiece_model(model_dir)
-    vocab_json_path = model_dir / "vocab.json"
-    if spm_path is not None:
-        try:
-            import sentencepiece as spm_lib
-            from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders
-            from tokenizers.models import Unigram
-
-            sp = spm_lib.SentencePieceProcessor()
-            sp.Load(str(spm_path))
-            # Build score lookup from SPM model
-            spm_scores = {}
-            for i in range(sp.GetPieceSize()):
-                spm_scores[sp.IdToPiece(i)] = sp.GetScore(i)
-            min_score = min(spm_scores.values()) if spm_scores else 0.0
-            default_score = min_score - 10.0  # worse than any real token
-
-            # Build combined vocab with correct IDs from vocab.json
-            if vocab_json_path.exists():
-                with open(vocab_json_path) as f:
-                    combined_vocab = json.load(f)
-                # combined_vocab is {token_str: id_int}, build id-ordered list
-                max_id = max(combined_vocab.values())
-                vocab = [("", default_score)] * (max_id + 1)
-                for token, tid in combined_vocab.items():
-                    score = spm_scores.get(token, default_score)
-                    vocab[tid] = (token, score)
-            else:
-                # Fallback: use SPM vocab only
-                vocab = [(sp.IdToPiece(i), sp.GetScore(i)) for i in range(sp.GetPieceSize())]
-
-            unk_id = combined_vocab.get("<unk>", 0) if vocab_json_path.exists() else 0
-
-            tokenizer = Tokenizer(Unigram(vocab, unk_id))
-            tokenizer.normalizer = normalizers.Sequence([
-                normalizers.Prepend(prepend="\u2581"),
-                normalizers.Replace(" ", "\u2581"),
-            ])
-            tokenizer.pre_tokenizer = pre_tokenizers.Sequence([])
-            tokenizer.decoder = decoders.Metaspace()
-
-            out_path = str(model_dir / "tokenizer.json")
-            tokenizer.save(out_path)
-            print(f"[trtmc build] Generated tokenizer.json from {spm_path.name} "
-                  f"({len(vocab)} tokens)", file=sys.stderr)
+    family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
+    if callable(family_ensure):
+        kwargs = {}
+        if _call_supports_kwarg(family_ensure, "previous_error"):
+            kwargs["previous_error"] = slow_tokenizer_error
+        if bool(family_ensure(model_dir, **kwargs)):
             return
-        except Exception as e:
-            detail = (
-                f"{slow_tokenizer_error}; SentencePiece conversion failed: {e}"
-                if slow_tokenizer_error
-                else f"SentencePiece conversion failed: {e}"
-            )
-            raise RuntimeError(
-                f"could not generate tokenizer.json for {model_dir}; {detail}. "
-                "Install sentencepiece for SentencePiece tokenizers or provide tokenizer.json."
-            ) from e
 
     print("[trtmc build] Warning: could not generate tokenizer.json "
           "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
@@ -747,10 +570,7 @@ def build_bundle(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
-    # audio_magpie.* build-time fields. max_source_positions replaces
-    # the TRTMC_MAGPIE_MAX_SOURCE_POS env var; passed to families via
-    # config.raw, same passthrough pattern.
-    audio_magpie_max_source_positions: int = 0,
+    family_build_options: dict | None = None,
     parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
@@ -811,7 +631,8 @@ def build_bundle(
     config = ModelConfig.from_dir(model_dir_path)
     config.raw["_model_dir"] = str(model_dir_path)
     config.raw["_decoder_engine_layout"] = decoder_engine_layout
-    config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
+    config.raw["_family_build_options"] = dict(family_build_options or {})
+    _apply_family_builder_capabilities(config)
     print(f"[trtmc build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
           f"vocab={config.vocab_size})", file=sys.stderr)
@@ -1012,6 +833,7 @@ def build_bundle(
         decoder_engine_layout == "split" and
         _can_build_split_decoder_engines(
             plugin,
+            config,
             runtime_strategy,
             dynamic_kv_cache=enable_dynamic_kv_cache,
             triattention_enabled=triattention_cfg is not None,
@@ -1116,7 +938,7 @@ def build_bundle(
                   f"({len(vision_plan) / (1024 * 1024):.1f} MB)",
                   file=sys.stderr)
 
-    # 4c. Build extra engines (optional, multi-engine models like Bark)
+    # 4c. Build extra engines (optional for multi-engine model families)
     extra_engines = {}
     build_extra = getattr(plugin, 'build_extra_engines', None)
     if build_extra is not None:
@@ -1207,7 +1029,7 @@ def build_bundle(
     if vision_plan is not None:
         sections.append(BundleSection("vision_engine_plan", vision_plan))
 
-    # Add extra engine sections (coarse, fine, codec for Bark, etc.)
+    # Add extra engine sections owned by the active family plugin.
     for ename, eplan in extra_engines.items():
         sections.append(BundleSection(ename, eplan))
 
@@ -1229,7 +1051,7 @@ def build_bundle(
         "image_classification",
     ):
         tokenizer_json_t0 = time.monotonic()
-        _ensure_tokenizer_json(model_dir_path)
+        _ensure_tokenizer_json(model_dir_path, plugin=plugin)
         _add_build_timing(
             build_timing, "tokenizer_json_ensure_s",
             time.monotonic() - tokenizer_json_t0)
@@ -1311,8 +1133,7 @@ def build_bundle(
         # Build the final dict so overrides appear FIRST in the
         # serialized JSON.  The C++ fast_path_config parser uses
         # flat text search (text.find) which picks up the first
-        # occurrence of a key.  For models with nested configs
-        # (e.g. Qwen3-Omni thinker_config.text_config) the nested
+        # occurrence of a key.  For models with nested configs, a nested
         # copy of "hidden_size" etc. would otherwise shadow the
         # top-level value.
         get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
@@ -1329,9 +1150,9 @@ def build_bundle(
                 cfg_dict = merged
         return json.dumps(cfg_dict, indent=2).encode("utf-8")
 
-    # Embed tokenizer + config files. If the source model is a GitHub ELF
-    # directory with only train_*.yml, synthesize config.json for the C++
-    # runtime from the parsed ModelConfig.
+    # Embed tokenizer + config files. If the source model uses a family-owned
+    # non-HF config adapter, synthesize config.json for the C++ runtime from
+    # the parsed ModelConfig.
     embedded_config_json = False
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "chat_template.jinja", "vocab.json", "merges.txt",
@@ -1597,11 +1418,8 @@ def _build_diffusion_bundle(
     _write_build_timing(build_timing)
 
     # Build config.json. Plugins that need a variant-specific schema can
-    # return a pre-rendered JSON blob via components["config_json"] (e.g.
-    # Qwen-Image, which has its own bundle schema built by
-    # qwen_image_bundle_config.build_bundle_config()). Existing plugins
-    # (Z-Image / FLUX / Wan / PixArt) don't return config_json and fall
-    # through to the inline construction below.
+    # return a pre-rendered JSON blob via components["config_json"]; other
+    # diffusion plugins fall through to the generic construction below.
     if "config_json" in components:
         cfg_data = components["config_json"]
         if not isinstance(cfg_data, (bytes, bytearray)):
@@ -1638,23 +1456,21 @@ def _build_diffusion_bundle(
     sections.append(BundleSection("config.json", cfg_data))
 
     # Ensure tokenizer.json exists for diffusion tokenizer directories.
-    # SentencePiece-only tokenizers (T5, PixArt) may lack tokenizer.json
-    # which the native C++ tokenizer needs.
     tokenizer_json_t0 = time.monotonic()
     for tok_subdir in ("tokenizer_2", "tokenizer"):
         tok_dir = model_dir_path / tok_subdir
         if tok_dir.is_dir() and not (tok_dir / "tokenizer.json").exists():
-            _ensure_tokenizer_json(tok_dir)
+            _ensure_tokenizer_json(tok_dir, plugin=plugin)
     _add_build_timing(
         build_timing, "tokenizer_json_ensure_s",
         time.monotonic() - tokenizer_json_t0)
     _write_build_timing(build_timing)
 
     # Embed tokenizer files from tokenizer subdirectories.
-    # Multi-encoder models (FLUX, SD3) have tokenizer/ (CLIP) and
-    # tokenizer_2/ (T5).  Prefer tokenizer_2/ if it has tokenizer.json
-    # (fast tokenizer format) since T5 provides the main text conditioning.
-    # Fall back to tokenizer/ for single-tokenizer models (Wan, Z-Image).
+    # Multi-encoder diffusion models have tokenizer/ and tokenizer_2/.
+    # Prefer tokenizer_2/ if it has tokenizer.json (fast tokenizer format)
+    # because it typically provides the main text conditioning. Fall back to
+    # tokenizer/ for single-tokenizer models.
     _tok_filenames = ("tokenizer.json", "tokenizer_config.json",
                       "special_tokens_map.json", "vocab.json",
                       "merges.txt", "spiece.model", "tokenizer.model")
@@ -1672,9 +1488,9 @@ def _build_diffusion_bundle(
                 sections.append(BundleSection(filename, file_path.read_bytes()))
                 _tok_embedded.add(filename)
 
-    # For dual-tokenizer models (FLUX): also embed CLIP tokenizer files
-    # under prefixed names so the C++ runtime can create a separate CLIP
-    # tokenizer.  CLIP lives in tokenizer/ (BPE with vocab.json + merges.txt).
+    # For dual-tokenizer models, also embed the secondary tokenizer files
+    # under prefixed names so the C++ runtime can create a separate tokenizer.
+    # The secondary tokenizer lives in tokenizer/ with BPE vocab/merges files.
     _clip_file_map = {
         "tokenizer.json": "clip_tokenizer.json",
         "vocab.json": "clip_vocab.json",
@@ -1754,7 +1570,7 @@ def build(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
-    audio_magpie_max_source_positions: int = 0,
+    family_build_options: dict | None = None,
     parallel_config: ParallelConfig | None = None,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
@@ -1763,8 +1579,8 @@ def build(
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
     Like HF transformers, accepts either:
-    - A HuggingFace repo ID: ``"Qwen/Qwen3-0.6B"`` (auto-downloads)
-    - A local directory: ``"models/hf/Qwen__Qwen3-0.6B"``
+    - A HuggingFace repo ID such as ``"org/model-name"`` (auto-downloads)
+    - A local directory such as ``"models/hf/org__model-name"``
 
     Args:
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
@@ -1798,7 +1614,7 @@ def build(
                  triattention_protect_prefill=triattention_protect_prefill,
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
-                 audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+                 family_build_options=family_build_options,
                  parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path,

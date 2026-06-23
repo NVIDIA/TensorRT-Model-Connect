@@ -4,7 +4,7 @@
 //
 // These are reusable device-side building blocks for GPU-resident decode loops.
 // They are independent of TRT engine execution (TrtModule handles that).
-// Currently wraps the Magpie CUDA kernels; can be extended for other pipelines.
+// Model pipelines choose whether to call these kernels from their owned loops.
 
 #include <cstdint>
 #include <cuda_runtime_api.h>

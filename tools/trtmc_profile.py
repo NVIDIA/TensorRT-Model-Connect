@@ -4,7 +4,7 @@
 Runs all profiling passes in one command and produces a combined console
 report plus optional JSON artifacts:
 
-    python tools/profile.py --model Qwen/Qwen3-0.6B
+    python tools/profile.py --model example-org/example-decoder
 
 Passes executed (all in-process, serial to avoid GPU memory contention):
   1. TRT + IProfiler    — e2e latency AND per-layer kernel timing in one run
@@ -17,23 +17,23 @@ Artifacts saved to --output-dir when --json is passed:
 
 Usage:
     # Minimal: builds engine on the fly, all passes
-    python tools/profile.py --model Qwen/Qwen3-0.6B
+    python tools/profile.py --model example-org/example-decoder
 
     # Pre-built bundle, custom prompt, save JSONs
     python tools/profile.py \\
-      --model Qwen/Qwen3-0.6B \\
-      --bundle /path/to/qwen3.trtfb \\
+      --model example-org/example-decoder \\
+      --bundle /path/to/model.trtfb \\
       --prompt "The capital of France is" \\
       --max-new-tokens 20 \\
       --warmup 3 --iterations 10 \\
-      --output-dir /tmp/qwen_profile \\
+      --output-dir /tmp/model_profile \\
       --json
 
     # Skip torch.compile (e.g. on environments without inductor)
-    python tools/profile.py --model Qwen/Qwen3-0.6B --no-compile
+    python tools/profile.py --model example-org/example-decoder --no-compile
 
     # Skip per-layer profiling (faster — just e2e perf compare)
-    python tools/profile.py --model Qwen/Qwen3-0.6B --no-layer-profile
+    python tools/profile.py --model example-org/example-decoder --no-layer-profile
 """
 from __future__ import annotations
 
@@ -391,18 +391,20 @@ def main():
     # -- Build / load TRT engine --
     if args.bundle:
         print(f"[profile] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, is_mamba = \
+        engine_plan, num_layers, max_cache_length, _, perf_handler = \
             pc.load_trt_from_bundle(args.bundle)
     else:
-        engine_plan, config, _, is_mamba = pc.build_trt_engine(
+        engine_plan, config, _, perf_handler = pc.build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
 
-    if is_mamba:
-        print("[profile] Mamba model detected — "
-              "per-layer IProfiler not supported for SSM; skipping.",
-              file=sys.stderr)
+    if not pc._handler_supports(perf_handler, "supports_layer_profile", True):
+        print(pc._handler_attr(
+            perf_handler,
+            "layer_profile_skip_message",
+            "[profile] Family runtime does not support per-layer IProfiler; skipping.",
+        ), file=sys.stderr)
         args.no_layer_profile = True
 
     # -- Pass 0: C++ binary (optional) --
@@ -431,9 +433,10 @@ def main():
     print(f"[profile] TRT pass ({args.warmup} warmup + "
           f"{args.iterations} iters) ...", file=sys.stderr)
 
-    if is_mamba:
-        trt_res = pc.bench_trt_mamba(
-            engine_plan, num_layers, input_ids, args.max_new_tokens,
+    if perf_handler is not None:
+        trt_res = pc.bench_trt_family(
+            perf_handler, engine_plan, num_layers, max_cache_length,
+            input_ids, args.max_new_tokens,
             args.warmup, args.iterations, eos_token_id, args.verbose)
     else:
         trt_res = pc.bench_trt(
@@ -443,7 +446,9 @@ def main():
 
     # -- Pass 1b: TRT per-layer profiling (IProfiler attached — timing discarded) --
     layer_data = None
-    if not args.no_layer_profile and not is_mamba:
+    if not args.no_layer_profile and pc._handler_supports(
+        perf_handler, "supports_layer_profile", True
+    ):
         print("[profile] Per-layer profiling pass (IProfiler) ...",
               file=sys.stderr)
         _discard_res, layer_data = bench_trt_with_layer_profile(
@@ -469,7 +474,9 @@ def main():
 
     # -- Pass 3: HF torch.compile --
     compile_res = None
-    if not args.no_compile and not is_mamba:
+    if not args.no_compile and pc._handler_supports(
+        perf_handler, "supports_hf_compile", True
+    ):
         print(f"[profile] HF torch.compile({args.compile_mode!r}) pass ...",
               file=sys.stderr)
         hf_model2 = pc.load_hf_model(
@@ -510,7 +517,9 @@ def main():
 
     # -- Pass 4: CPU phase breakdown (optional) --
     cpu_profile_data: dict | None = None
-    if getattr(args, "cpu_profile", False) and not is_mamba:
+    if getattr(args, "cpu_profile", False) and pc._handler_supports(
+        perf_handler, "supports_cpu_phase_profile", True
+    ):
         print("[profile] CPU phase breakdown pass ...", file=sys.stderr)
         import subprocess as _sp
         import tempfile as _tf

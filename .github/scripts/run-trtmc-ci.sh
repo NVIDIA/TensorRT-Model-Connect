@@ -264,7 +264,14 @@ impact_analysis() {
 
   echo "--- Impact Analysis ---"
   cat impact.json
-  python3 tools/test_impact.py "${impact_args[@]}" --verbose
+  python3 - <<'PY'
+import json
+
+from tools.test_impact import ImpactResult, format_human
+
+with open("impact.json", encoding="utf-8") as f:
+    print(format_human(ImpactResult(**json.load(f))))
+PY
 }
 
 load_wheel_build_metadata() {
@@ -670,6 +677,59 @@ run_e2e_with_diffusion_vlm() {
   return "$vlm_rc"
 }
 
+select_diffusion_vlm_config() {
+  python - "${DIFFUSION_VLM_CONFIG:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+requested = sys.argv[1]
+if requested:
+    path = Path(requested)
+    if not path.is_file():
+        raise SystemExit(f"DIFFUSION_VLM_CONFIG does not exist: {path}")
+    print(path)
+    raise SystemExit(0)
+
+configs = sorted(Path("tests/e2e/models").glob("*/diffusion_vlm_assessment.json"))
+defaults = []
+for path in configs:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"Invalid diffusion VLM assessment config {path}: {exc}") from exc
+    if data.get("default") is True:
+        defaults.append(path)
+
+if len(defaults) != 1:
+    listed = ", ".join(str(path) for path in defaults) or "none"
+    raise SystemExit(
+        "Expected exactly one default diffusion VLM assessment config under "
+        f"tests/e2e/models/*/diffusion_vlm_assessment.json; found {listed}"
+    )
+print(defaults[0])
+PY
+}
+
+load_diffusion_vlm_config() {
+  local config_path="$1"
+  python - "$config_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+required = ("model_id", "max_side", "max_new_tokens", "timeout")
+missing = [key for key in required if not data.get(key)]
+if missing:
+    raise SystemExit(f"{path} missing required diffusion VLM fields: {missing}")
+
+for key in required:
+    print(f"{key}\t{data[key]}")
+PY
+}
+
 run_diffusion_vlm_assessment() {
   if [ "${DIFFUSION_VLM_ASSESSMENT:-true}" != "true" ]; then
     echo "Skipping: diffusion VLM assessment disabled"
@@ -687,14 +747,37 @@ run_diffusion_vlm_assessment() {
     return 0
   fi
 
+  local vlm_config
+  vlm_config="$(select_diffusion_vlm_config)"
+  local config_model_id=""
+  local config_max_side=""
+  local config_max_new_tokens=""
+  local config_timeout=""
+  local key value
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      model_id) config_model_id="$value" ;;
+      max_side) config_max_side="$value" ;;
+      max_new_tokens) config_max_new_tokens="$value" ;;
+      timeout) config_timeout="$value" ;;
+    esac
+  done < <(load_diffusion_vlm_config "$vlm_config")
+
+  local vlm_model_id="${DIFFUSION_VLM_MODEL_ID:-$config_model_id}"
+  local vlm_max_side="${DIFFUSION_VLM_MAX_SIDE:-$config_max_side}"
+  local vlm_max_new_tokens="${DIFFUSION_VLM_MAX_NEW_TOKENS:-$config_max_new_tokens}"
+  local vlm_timeout="${DIFFUSION_VLM_TIMEOUT:-$config_timeout}"
+
   echo "=== Phase 3: diffusion VLM semantic assessment (${pair_count} pairs) ==="
-  run_with_timeout "${DIFFUSION_VLM_TIMEOUT:-45m}" env -u HF_HUB_OFFLINE \
+  echo "Using diffusion VLM assessment config ${vlm_config}"
+  run_with_timeout "$vlm_timeout" env -u HF_HUB_OFFLINE \
     python tools/evaluate_diffusion_vlm_similarity.py \
       --artifacts-dir e2e_artifacts/artifacts \
       --output e2e_artifacts/diffusion_vlm_assessment.json \
-      --model-id "${DIFFUSION_VLM_MODEL_ID:-Qwen/Qwen2.5-VL-3B-Instruct}" \
-      --max-side "${DIFFUSION_VLM_MAX_SIDE:-512}" \
-      --max-new-tokens "${DIFFUSION_VLM_MAX_NEW_TOKENS:-384}"
+      --config "$vlm_config" \
+      --model-id "$vlm_model_id" \
+      --max-side "$vlm_max_side" \
+      --max-new-tokens "$vlm_max_new_tokens"
 }
 
 generate_coverage_map() {
@@ -1010,7 +1093,80 @@ for backend in backends:
 PY
 }
 
-run_wheel_qwen_smoke() {
+select_wheel_smoke_config() {
+  python - "${TRTMC_WHEEL_SMOKE_CONFIG:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+requested = sys.argv[1]
+if requested:
+    path = Path(requested)
+    if not path.is_file():
+        raise SystemExit(f"TRTMC_WHEEL_SMOKE_CONFIG does not exist: {path}")
+    print(path)
+    raise SystemExit(0)
+
+configs = sorted(Path("tests/e2e/models").glob("*/package_smoke.json"))
+defaults = []
+for path in configs:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"Invalid package smoke config {path}: {exc}") from exc
+    if data.get("default") is True:
+        defaults.append(path)
+
+if len(defaults) != 1:
+    listed = ", ".join(str(path) for path in defaults) or "none"
+    raise SystemExit(
+        "Expected exactly one default package smoke config under "
+        f"tests/e2e/models/*/package_smoke.json; found {listed}"
+    )
+print(defaults[0])
+PY
+}
+
+load_wheel_smoke_config() {
+  local config_path="$1"
+  python - "$config_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+
+required = ("name", "model_id", "bundle", "timing_cache", "prompt", "precision")
+missing = [key for key in required if not data.get(key)]
+if missing:
+    raise SystemExit(f"{path} missing required package smoke fields: {missing}")
+
+for key in (
+    "name",
+    "model_id",
+    "bundle",
+    "timing_cache",
+    "max_cache",
+    "max_new_tokens",
+    "optimization_level",
+    "build_timeout",
+    "run_timeout",
+    "precision",
+    "prompt",
+):
+    value = data.get(key, "")
+    print(f"{key}\t{value}")
+
+run_args = data.get("run_args", [])
+if not isinstance(run_args, list) or not all(isinstance(item, str) for item in run_args):
+    raise SystemExit(f"{path} field run_args must be a list of strings")
+for value in run_args:
+    print(f"run_arg\t{value}")
+PY
+}
+
+run_wheel_model_smoke() {
   local wheel
   wheel="$(select_wheel_by_tag py312 dist)"
 
@@ -1019,18 +1175,56 @@ import sys
 
 if sys.version_info[:2] != (3, 12):
     raise SystemExit(
-        "Python 3.12 is required for the py312 wheel Qwen smoke test; "
+        "Python 3.12 is required for the py312 wheel model smoke test; "
         f"got {sys.version.split()[0]} from {sys.executable}"
     )
 PY
 
-  local smoke_root="/tmp/trtmc-wheel-qwen-smoke-${GITHUB_RUN_ID:-local}"
+  local smoke_config
+  smoke_config="$(select_wheel_smoke_config)"
+
+  local smoke_name=""
+  local config_model_id=""
+  local config_bundle=""
+  local config_timing_cache=""
+  local config_max_cache=""
+  local config_max_new_tokens=""
+  local config_optimization_level=""
+  local config_build_timeout=""
+  local config_run_timeout=""
+  local config_precision=""
+  local config_prompt=""
+  local -a config_run_args=()
+  local key value
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      name) smoke_name="$value" ;;
+      model_id) config_model_id="$value" ;;
+      bundle) config_bundle="$value" ;;
+      timing_cache) config_timing_cache="$value" ;;
+      max_cache) config_max_cache="$value" ;;
+      max_new_tokens) config_max_new_tokens="$value" ;;
+      optimization_level) config_optimization_level="$value" ;;
+      build_timeout) config_build_timeout="$value" ;;
+      run_timeout) config_run_timeout="$value" ;;
+      precision) config_precision="$value" ;;
+      prompt) config_prompt="$value" ;;
+      run_arg) config_run_args+=("$value") ;;
+    esac
+  done < <(load_wheel_smoke_config "$smoke_config")
+
+  local smoke_root="/tmp/trtmc-wheel-model-smoke-${GITHUB_RUN_ID:-local}"
   local smoke_venv="${smoke_root}/venv"
-  local bundle="${smoke_root}/qwen3-0.6b.trtfb"
-  local timing_cache="${smoke_root}/qwen3-0.6b.timing.cache"
-  local model_id="${TRTMC_WHEEL_QWEN_MODEL_ID:-Qwen/Qwen3-0.6B}"
-  local max_cache="${TRTMC_WHEEL_QWEN_MAX_CACHE:-64}"
-  local max_new_tokens="${TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS:-8}"
+  local bundle="${smoke_root}/${config_bundle}"
+  local timing_cache="${smoke_root}/${config_timing_cache}"
+  local model_id="${TRTMC_WHEEL_SMOKE_MODEL_ID:-$config_model_id}"
+  local max_cache="${TRTMC_WHEEL_SMOKE_MAX_CACHE:-$config_max_cache}"
+  local max_new_tokens="${TRTMC_WHEEL_SMOKE_MAX_NEW_TOKENS:-$config_max_new_tokens}"
+  local optimization_level="${TRTMC_WHEEL_SMOKE_OPTIMIZATION_LEVEL:-$config_optimization_level}"
+  local build_timeout="${TRTMC_WHEEL_SMOKE_BUILD_TIMEOUT:-$config_build_timeout}"
+  local run_timeout="${TRTMC_WHEEL_SMOKE_RUN_TIMEOUT:-$config_run_timeout}"
+
+  echo "Running wheel model smoke '${smoke_name}' from ${smoke_config}"
 
   rm -rf "$smoke_root"
   mkdir -p "$smoke_root"
@@ -1049,24 +1243,24 @@ PY
   env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
     "$smoke_venv/bin/trtmc" version
 
-  run_with_timeout "${TRTMC_WHEEL_QWEN_BUILD_TIMEOUT:-45m}" \
+  run_with_timeout "$build_timeout" \
     env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
       TRTMC_TRT_TIMING_CACHE_PATH="$timing_cache" \
-      TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL:-1}" \
+      TRTMC_BUILDER_OPTIMIZATION_LEVEL="$optimization_level" \
       "$smoke_venv/bin/trtmc" build "$model_id" \
         -o "$bundle" \
         --max-cache-length "$max_cache" \
-        --precision fp16
+        --precision "$config_precision"
 
   env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
     "$smoke_venv/bin/trtmc" inspect --list-engines "$bundle"
 
-  run_with_timeout "${TRTMC_WHEEL_QWEN_RUN_TIMEOUT:-10m}" \
+  run_with_timeout "$run_timeout" \
     env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
       "$smoke_venv/bin/trtmc" run "$bundle" \
-        --prompt "The capital of France is" \
+        --prompt "$config_prompt" \
         --max-new-tokens "$max_new_tokens" \
-        --greedy
+        "${config_run_args[@]}"
 }
 
 run_stage() {
@@ -1128,9 +1322,9 @@ run_stage() {
       run_step "Build trtmc pip package" build_pip_package
       run_step "Install trtmc pip package" install_built_wheel_once
       ;;
-    wheel-qwen-smoke)
+    wheel-model-smoke)
       run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
-      run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
+      run_step "Model smoke test from trtmc pip package" run_wheel_model_smoke
       ;;
     *)
       echo "ERROR: Unknown CI stage: $stage" >&2
@@ -1159,4 +1353,4 @@ run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
 run_step "Generate coverage map" generate_coverage_map
-run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
+run_step "Model smoke test from trtmc pip package" run_wheel_model_smoke

@@ -228,15 +228,14 @@ class DiffusionRunner:
                 raise RuntimeError("Text encoder engine has no outputs")
             embeddings = results[output_names[0]]
 
-        # Wan-style diffusion paths have no text attention mask in the DiT and
-        # benefit from zeroing padding rows.
+        # Diffusion paths without a text attention mask in the DiT benefit
+        # from zeroing padding rows.
         out_seq_len = embeddings.shape[1]
         valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
         valid_mask = valid_mask.reshape(1, out_seq_len, 1)
         embeddings = embeddings * valid_mask
 
-        # Truncate to actual content length + padding matching HF's convention.
-        # HF WanPipeline uses max_sequence_length=226 by default.
+        # Truncate to actual content length + padding matching HF conventions.
         # The DiT cross-attention has no mask, so sequence length affects
         # softmax normalization.
         max_text_len = self.config.get("text_seq_len", 512)
@@ -496,7 +495,7 @@ class DiffusionRunner:
         """Convert [num_patches, pt*ph*pw*C] to [1, C, T, H, W].
 
         The DiT proj_out produces output ordered as [pt, ph, pw, C]
-        (matching HF's WanTransformer3DModel convention).
+        (matching the common 3D transformer convention).
         """
         pt, ph, pw = patch_size
         nt, nh, nw = t // pt, h // ph, w // pw
@@ -538,7 +537,7 @@ class DiffusionRunner:
         Returns (cos, sin) each of shape [num_patches, head_dim].
         """
         # Split head_dim into temporal, height, width components
-        # Wan uses: t_dim = head_dim - 2*(head_dim//6), h_dim = w_dim = head_dim//6
+        # Common 3D split: t_dim = head_dim - 2*(head_dim//6), h_dim = w_dim = head_dim//6
         h_dim = w_dim = 2 * (head_dim // 6)
         t_dim = head_dim - h_dim - w_dim
 

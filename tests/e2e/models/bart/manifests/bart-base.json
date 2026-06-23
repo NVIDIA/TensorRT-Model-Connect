@@ -4,7 +4,16 @@
   "bundle": "bart-base.trtfb",
   "family": "bart",
   "runtime_strategy": "seq2seq_encoder_decoder",
+  "task_strategy": "text_generation_causal",
+  "reference_family": "seq2seq_base_weak",
+  "user_contract": "continuation_parity",
   "max_cache_length": 256,
   "prompt": "The quick brown fox jumps over the lazy dog.",
-  "max_new_tokens": 20
+  "max_new_tokens": 20,
+  "metadata": {
+    "contract_config": {
+      "preserve_prompt_echo": true,
+      "seq2seq_reconstruction": true
+    }
+  }
 }

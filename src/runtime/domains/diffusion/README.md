@@ -1,15 +1,15 @@
-# Diffusion Backends
+# Diffusion Domain Helpers
 
-Diffusion model runtime pipelines and shared base utilities.
+Shared diffusion math, scheduler, batching, and preprocessing utilities.
+Model-specific runtime pipelines live under `src/runtime/models/<model>/`.
 
 Key files:
-- `diffusion_backend.*`: abstract diffusion backend interface + factory entry.
-- `diffusion_backend_base.cpp`: shared text/conditioning/denoiser plumbing.
-- `wan_diffusion_backend.*`: Wan video diffusion implementation.
-- `flux_diffusion_backend.*`: FLUX diffusion implementation.
-- `z_image_diffusion_backend.*`: Z-Image diffusion implementation.
+- `batch_utils.*`: tensor and batch-shape helper functions.
+- `diffusion_math.h`: numeric helpers used by diffusion runtimes.
+- `diffusion_preprocessor.*`: generic preprocessor weight loading.
+- `diffusion_scheduler_helpers.h`: scheduler configuration helpers.
+- `diffusion_types.h`: shared diffusion runtime value types.
 
 How to understand:
-1. Start at each backend `generate_video` method.
-2. Follow conditioning + scheduler/denoise loop helpers.
-3. Inspect VAE decode/patchify helpers for output-frame reconstruction details.
+1. Start at the owning model pipeline in `src/runtime/models/<model>/`.
+2. Follow calls into this folder for shared helper behavior only.

@@ -6,29 +6,37 @@ No agent needed — pure Python orchestration.
 
 Usage:
     # Single model
-    python3 tools/auto_perf_tune.py --model Qwen/Qwen3-0.6B
+    python3 tools/auto_perf_tune.py --model org/model
 
     # With specific pipeline type and precision
-    python3 tools/auto_perf_tune.py --model Qwen/Qwen2.5-7B-Instruct --precision fp16
+    python3 tools/auto_perf_tune.py --model org/model --precision fp16
 
-    # Diffusion model
-    python3 tools/auto_perf_tune.py --model black-forest-labs/FLUX.1-schnell \
-        --pipeline-type diffusion_flux
+    # Non-default runtime strategy
+    python3 tools/auto_perf_tune.py --model org/model --pipeline-type runtime_strategy
 
     # Batch validation across models
     python3 tools/auto_perf_tune.py --batch models.json --output results/
 
     # Dry run (show what would be done)
-    python3 tools/auto_perf_tune.py --model Qwen/Qwen3-0.6B --dry-run
+    python3 tools/auto_perf_tune.py --model org/model --dry-run
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shlex
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tests.e2e_harness.runtime_strategy_metadata import runtime_strategy_performance_mode  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -39,24 +47,7 @@ NSYS_DEB_URL = (
     "https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/"
     "NsightSystems-linux-cli-public-2026.2.1.210-3763964.deb"
 )
-
-# Pipeline type → performance mode (same as sol_estimate.PIPELINE_MODES)
-PIPELINE_MODES = {
-    "decoder_kv_cache": "decode", "decoder_moe": "decode",
-    "ssm_recurrent": "decode", "rwkv_recurrent": "decode",
-    "hybrid_mamba_attention": "decode",
-    "diffusion_flux": "diffusion", "diffusion_wan": "diffusion",
-    "diffusion_zimage": "diffusion", "diffusion_pixart": "diffusion",
-    "speech_to_text": "enc_dec", "text_to_text": "enc_dec",
-    "vision_language": "enc_dec", "seq2seq": "enc_dec",
-    "seq2seq_encoder_decoder": "enc_dec", "marian_translation": "enc_dec",
-    "encoder_only": "single_pass", "embedding": "single_pass",
-    "reranking": "single_pass", "segmentation": "single_pass",
-    "prompted_segmentation": "single_pass", "object_detection": "single_pass",
-    "neural_operator": "single_pass",
-    "text_to_audio_bark": "multi_stage", "text_to_audio_magpie": "multi_stage",
-    "speech_to_speech": "multi_stage", "omni_multimodal": "multi_stage",
-}
+DEFAULT_PERF_VALIDATION_ROOT = PROJECT_ROOT / "tests" / "e2e" / "models"
 
 # Default prompts by mode
 DEFAULT_PROMPTS = {
@@ -137,148 +128,84 @@ def step_build(model: str, output: str, precision: str = "fp32",
     return True
 
 
-def _generate_test_image(path: str, width: int = 512, height: int = 512):
-    """Generate a simple test PNG for segmentation benchmarking."""
-    try:
-        import numpy as np
-        # Random RGB image
-        img = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
-        # Write as raw PPM then convert — or just use PIL if available
-        from PIL import Image
-        Image.fromarray(img).save(path)
-    except ImportError:
-        # Fallback: write a minimal 1x1 PNG
-        import struct
-        import zlib
-        def _png_chunk(tag, data):
-            c = tag + data
-            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
-        with open(path, "wb") as f:
-            f.write(b"\x89PNG\r\n\x1a\n")
-            f.write(_png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
-            raw = b""
-            for _ in range(height):
-                raw += b"\x00" + b"\x80\x80\x80" * width  # gray
-            f.write(_png_chunk(b"IDAT", zlib.compress(raw)))
-            f.write(_png_chunk(b"IEND", b""))
-    print(f"[bench] Generated test image: {path} ({width}x{height})")
+DEFAULT_BENCHMARK = {
+    "label": "run",
+    "gpu_argmax_label": "run",
+    "metric": "tok/s",
+    "command": [
+        "{binary}",
+        "run",
+        "{bundle}",
+        "--prompt",
+        "{prompt}",
+        "--max-new-tokens",
+        "{max_tokens}",
+        "{hf_python_args}",
+        "{config_args}",
+    ],
+}
 
 
-def _generate_test_wav(path: str, duration_s: float = 2.0, sample_rate: int = 16000):
-    """Generate a short sine-wave WAV for Whisper benchmarking."""
-    import math
-    import struct
-    n_samples = int(duration_s * sample_rate)
-    # 440Hz sine wave
-    samples = [math.sin(2 * math.pi * 440 * i / sample_rate) * 0.5
-               for i in range(n_samples)]
-    # Write WAV
-    with open(path, "wb") as f:
-        data = struct.pack(f"<{n_samples}h",
-                           *[int(s * 32767) for s in samples])
-        f.write(b"RIFF")
-        f.write(struct.pack("<I", 36 + len(data)))
-        f.write(b"WAVE")
-        f.write(b"fmt ")
-        f.write(struct.pack("<IHHIIHH", 16, 1, 1, sample_rate,
-                            sample_rate * 2, 2, 16))
-        f.write(b"data")
-        f.write(struct.pack("<I", len(data)))
-        f.write(data)
-    print(f"[bench] Generated test WAV: {path} ({duration_s}s)")
+def _benchmark_context(
+    bundle: str,
+    prompt: str,
+    max_tokens: int,
+    gpu_argmax: bool,
+) -> dict[str, object]:
+    pid = os.getpid()
+    return {
+        "binary": "/tmp/build/trtmc",
+        "repo_root": str(PROJECT_ROOT),
+        "bundle": bundle,
+        "prompt": prompt,
+        "max_tokens": str(max_tokens),
+        "hf_python_args": ["--hf-python", "/opt/venv/bin/python"],
+        "config_args": (
+            ["--set", "platform.trt_log_stderr=true"]
+            + (["--set", "runtime.prefer_gpu_greedy=true"] if gpu_argmax else [])
+        ),
+        "generated_output_wav": f"/tmp/bench_audio_out_{pid}.wav",
+        "generated_output_image": f"/tmp/bench_image_out_{pid}.png",
+        "generated_output_dir": f"/tmp/bench_media_out_{pid}",
+    }
+
+
+def _expand_command_template(command: list[str], context: dict[str, object]) -> list[str]:
+    expanded: list[str] = []
+    for token in command:
+        if token in {"{hf_python_args}", "{config_args}"}:
+            expanded.extend(str(value) for value in context[token[1:-1]])
+            continue
+        try:
+            expanded.append(token.format(**context))
+        except KeyError as exc:
+            raise ValueError(f"Unknown benchmark command placeholder {exc.args[0]!r}") from exc
+    return [token for token in expanded if token]
 
 
 def _build_bench_cmd(
-    bundle: str, prompt: str, mode: str, pipeline_type: str,
-    max_tokens: int, gpu_argmax: bool,
-) -> tuple[str, str]:
-    """Build the trtmc CLI command and output dir for the given mode.
+    bundle: str,
+    prompt: str,
+    max_tokens: int,
+    gpu_argmax: bool,
+    benchmark: dict | None = None,
+) -> tuple[str, str, str]:
+    """Build a benchmark command from a model-owned template.
 
-    Returns (shell_command, metric_name).
-    metric_name is 'tok/s', 'pipeline_ms', or 'rtf'.
+    Returns (shell_command, metric_name, label).
     """
-    config_flags = "--set platform.trt_log_stderr=true"
-    if gpu_argmax:
-        config_flags += " --set runtime.prefer_gpu_greedy=true"
-    binary = "/tmp/build/trtmc"
-    hf = "--hf-python /opt/venv/bin/python"
-    env = ""
+    spec = benchmark or DEFAULT_BENCHMARK
+    command = spec.get("command", DEFAULT_BENCHMARK["command"])
+    if not isinstance(command, list) or not all(isinstance(token, str) for token in command):
+        raise ValueError("benchmark.command must be a list of strings")
 
-    if mode == "decode" or pipeline_type in (
-        "text_to_text", "vision_language", "seq2seq_encoder_decoder", "marian_translation"):
-        # Autoregressive: trtmc run → tok/s
-        cmd = (f'{binary} run {bundle} '
-               f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} {config_flags} 2>&1')
-        return cmd, "tok/s"
-
-    elif pipeline_type == "speech_to_text":
-        # Whisper: trtmc transcribe --audio <wav>
-        # Generate a short test WAV if none exists
-        test_wav = "/tmp/bench_whisper_test.wav"
-        if not os.path.exists(test_wav):
-            _generate_test_wav(test_wav)
-        cmd = (f'{env} {binary} transcribe {bundle} '
-               f'--audio {test_wav} --max-new-tokens {max_tokens} {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif pipeline_type in ("segmentation", "prompted_segmentation"):
-        # Segmentation: trtmc segment --image <img> --output <out>
-        test_img = "/tmp/bench_seg_test.png"
-        if not os.path.exists(test_img):
-            _generate_test_image(test_img)
-        out_path = f"/tmp/bench_seg_out_{os.getpid()}.png"
-        cmd = (f'{env} {binary} segment {bundle} '
-               f'--image {test_img} --output {out_path} {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif pipeline_type == "embedding":
-        # Embedding: trtmc embed → measure latency
-        cmd = (f'{env} {binary} embed {bundle} '
-               f'--prompt "{prompt}" {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif pipeline_type == "reranking":
-        # Reranking: trtmc rerank → measure latency
-        cmd = (f'{env} {binary} rerank {bundle} '
-               f'--prompt "query" --document "{prompt}" {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif mode == "single_pass":
-        # Encoder-only (BERT, etc.): trtmc encode → measure latency
-        cmd = (f'{env} {binary} encode {bundle} '
-               f'--prompt "{prompt}" {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif pipeline_type == "speech_to_speech":
-        # Speech-to-speech: trtmc speak --audio-in <wav> --audio-out <wav>
-        test_wav = "/tmp/bench_whisper_test.wav"
-        if not os.path.exists(test_wav):
-            _generate_test_wav(test_wav)
-        out_wav = f"/tmp/bench_speak_out_{os.getpid()}.wav"
-        cmd = (f'{env} {binary} speak {bundle} '
-               f'--audio-in {test_wav} --audio-out {out_wav} {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif mode == "multi_stage":
-        # Audio generation: trtmc generate-audio → RTF and pipeline_ms
-        out_wav = f"/tmp/bench_{os.getpid()}.wav"
-        cmd = (f'{env} {binary} generate-audio {bundle} '
-               f'--prompt "{prompt}" --output {out_wav} '
-               f'--max-new-tokens {max_tokens} {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    elif mode == "diffusion":
-        # Diffusion: trtmc generate-video/generate-image → pipeline_ms
-        out_dir = f"/tmp/bench_diff_{os.getpid()}"
-        cmd = (f'{env} {binary} generate-video {bundle} '
-               f'--prompt "{prompt}" --output {out_dir} {hf} 2>&1')
-        return cmd, "pipeline_ms"
-
-    else:
-        # Fallback: trtmc run
-        cmd = (f'{env} {binary} run {bundle} '
-               f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} 2>&1')
-        return cmd, "tok/s"
+    context = _benchmark_context(bundle, prompt, max_tokens, gpu_argmax)
+    argv = _expand_command_template(command, context)
+    cmd = " ".join(shlex.quote(arg) for arg in argv) + " 2>&1"
+    metric = str(spec.get("metric", DEFAULT_BENCHMARK["metric"]))
+    label_key = "gpu_argmax_label" if gpu_argmax else "label"
+    label = str(spec.get(label_key, spec.get("label", DEFAULT_BENCHMARK["label"])))
+    return cmd, metric, label
 
 
 def _parse_metric(out: str, metric_name: str) -> float:
@@ -300,7 +227,7 @@ def _parse_metric(out: str, metric_name: str) -> float:
                     except (ValueError, IndexError):
                         pass
 
-        # pipeline_ms: "[magpie-tts]   Total pipeline: 867.361 ms"
+        # pipeline_ms: "[model]   Total pipeline: 867.361 ms"
         # or "[trtmc] Inference: X ms"
         if metric_name == "pipeline_ms" and "Total pipeline:" in line:
             try:
@@ -322,22 +249,16 @@ def _parse_metric(out: str, metric_name: str) -> float:
 def step_benchmark(bundle: str, prompt: str, max_tokens: int = 100,
                    gpu_argmax: bool = False, dry_run: bool = False,
                    mode: str = "decode",
-                   pipeline_type: str = "decoder_kv_cache") -> float:
+                   pipeline_type: str = "decoder_kv_cache",
+                   benchmark: dict | None = None) -> float:
     """Benchmark with C++ binary, return performance metric.
 
     Returns tok/s for decode/enc_dec, or pipeline_ms for others.
     The metric type depends on the mode.
     """
-    cmd, metric_name = _build_bench_cmd(
-        bundle, prompt, mode, pipeline_type, max_tokens, gpu_argmax)
+    cmd, metric_name, label = _build_bench_cmd(
+        bundle, prompt, max_tokens, gpu_argmax, benchmark)
 
-    label = "GPU argmax" if gpu_argmax else "CPU argmax"
-    if mode == "single_pass":
-        label = "encode"
-    elif mode == "multi_stage":
-        label = "generate-audio"
-    elif mode == "diffusion":
-        label = "generate"
     print(f"[bench] {label}")
 
     # For pipeline_ms: measure wall-clock time if output doesn't contain timing
@@ -380,7 +301,8 @@ def step_benchmark(bundle: str, prompt: str, max_tokens: int = 100,
 def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
                       max_tokens: int = 50, dry_run: bool = False,
                       mode: str = "decode",
-                      pipeline_type: str = "decoder_kv_cache") -> str | None:
+                      pipeline_type: str = "decoder_kv_cache",
+                      benchmark: dict | None = None) -> str | None:
     """Run nsys profile, return path to .sqlite or None."""
     nsys = "/tmp/nsys_install/opt/nvidia/nsight-systems-cli/2026.2.1/target-linux-x64/nsys"
 
@@ -390,8 +312,8 @@ def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
         return None
 
     # Build the trtmc command for profiling (same logic as benchmark)
-    trtmc_cmd, _ = _build_bench_cmd(
-        bundle, prompt, mode, pipeline_type, max_tokens, gpu_argmax=False)
+    trtmc_cmd, _, _ = _build_bench_cmd(
+        bundle, prompt, max_tokens, gpu_argmax=False, benchmark=benchmark)
     # Strip the "2>&1" from the end and env prefix — nsys wraps the command
     # Extract just the trtmc binary + args part
     trtmc_part = trtmc_cmd
@@ -496,9 +418,10 @@ def auto_tune_model(
     output_dir: str = "/tmp/auto_perf",
     engine_section: str = "all",
     dry_run: bool = False,
+    benchmark: dict | None = None,
 ) -> TuneResult:
     """Run full auto-tune loop for one model."""
-    mode = PIPELINE_MODES.get(pipeline_type, "decode")
+    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     prompt = DEFAULT_PROMPTS.get(mode, "Hello")
     safe_name = model.split("/")[-1].lower().replace("-", "_")
 
@@ -519,14 +442,14 @@ def auto_tune_model(
         return result
 
     # Determine metric name for this mode
-    _, metric_name = _build_bench_cmd(
-        fp32_bundle, prompt, mode, pipeline_type, max_tokens, False)
+    _, metric_name, _ = _build_bench_cmd(
+        fp32_bundle, prompt, max_tokens, False, benchmark)
     metric_unit = metric_name  # "tok/s" or "pipeline_ms"
 
     # --- Step 2: Baseline benchmark ---
     result.baseline_tps = step_benchmark(
         fp32_bundle, prompt, max_tokens, gpu_argmax=False, dry_run=dry_run,
-        mode=mode, pipeline_type=pipeline_type)
+        mode=mode, pipeline_type=pipeline_type, benchmark=benchmark)
     result.baseline_precision = "fp32"
     print(f"[baseline] FP32: {result.baseline_tps:.1f} {metric_unit}")
 
@@ -534,7 +457,7 @@ def auto_tune_model(
     nsys_prefix = f"{output_dir}/{safe_name}_nsys"
     sqlite = step_nsys_profile(
         fp32_bundle, prompt, nsys_prefix, max_tokens=50, dry_run=dry_run,
-        mode=mode, pipeline_type=pipeline_type)
+        mode=mode, pipeline_type=pipeline_type, benchmark=benchmark)
 
     # --- Step 4: Classify bottleneck ---
     classification = step_classify(sqlite, pipeline_type,
@@ -570,7 +493,7 @@ def auto_tune_model(
     if mode in ("decode", "enc_dec", "multi_stage"):
         argmax_tps = step_benchmark(
             fp32_bundle, prompt, max_tokens, gpu_argmax=True, dry_run=dry_run,
-            mode=mode, pipeline_type=pipeline_type)
+            mode=mode, pipeline_type=pipeline_type, benchmark=benchmark)
         if argmax_tps > result.baseline_tps:
             pct = (argmax_tps / result.baseline_tps - 1) * 100 if result.baseline_tps > 0 else 0
             print(f"[optimize] GPU argmax: {argmax_tps:.1f} {metric_unit} (+{pct:.0f}%)")
@@ -589,14 +512,14 @@ def auto_tune_model(
 
         tps = step_benchmark(
             bundle, prompt, max_tokens, gpu_argmax=False, dry_run=dry_run,
-            mode=mode, pipeline_type=pipeline_type)
+            mode=mode, pipeline_type=pipeline_type, benchmark=benchmark)
         all_results.append((precision, False, tps))
         print(f"[optimize] {precision.upper()}: {tps:.1f} {metric_unit}")
 
         if mode in ("decode", "enc_dec", "multi_stage"):
             argmax_tps = step_benchmark(
                 bundle, prompt, max_tokens, gpu_argmax=True, dry_run=dry_run,
-                mode=mode, pipeline_type=pipeline_type)
+                mode=mode, pipeline_type=pipeline_type, benchmark=benchmark)
             all_results.append((precision, True, argmax_tps))
             print(f"[optimize] {precision.upper()} + GPU argmax: {argmax_tps:.1f} {metric_unit}")
 
@@ -704,71 +627,25 @@ def auto_tune_model(
 # Batch mode
 # ---------------------------------------------------------------------------
 
-VALIDATION_MODELS = [
-    # === A. Autoregressive Decode ===
-    # Small decoder (<1B) — sync-bound, GPU argmax high ROI
-    {"model": "Qwen/Qwen3-0.6B", "pipeline_type": "decoder_kv_cache",
-     "label": "A1-decode-small"},
-    # Medium decoder (1-4B)
-    {"model": "microsoft/Phi-3-mini-4k-instruct", "pipeline_type": "decoder_kv_cache",
-     "label": "A2-decode-medium"},
-    # Large decoder (7B+) — compute-bound, GEMM dominant
-    {"model": "Qwen/Qwen2.5-7B-Instruct", "pipeline_type": "decoder_kv_cache",
-     "label": "A3-decode-large"},
-    # MoE decoder — sparse routing, different kernel mix
-    {"model": "ggml-org/stories15M_MOE", "pipeline_type": "decoder_moe",
-     "label": "A4-decode-moe"},
-    # SSM — recurrent state, no KV cache
-    {"model": "state-spaces/mamba-130m-hf", "pipeline_type": "ssm_recurrent",
-     "label": "A5-ssm"},
-    # RWKV — another recurrent variant
-    {"model": "RWKV/rwkv-4-169m-pile", "pipeline_type": "rwkv_recurrent",
-     "label": "A6-rwkv"},
-
-    # === B. Iterative Denoising (Diffusion) ===
-    # FLUX — flow matching, image generation
-    {"model": "black-forest-labs/FLUX.1-schnell", "pipeline_type": "diffusion_flux",
-     "label": "B1-diffusion-flux"},
-    # Wan — video generation, 3D latent
-    {"model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", "pipeline_type": "diffusion_wan",
-     "label": "B2-diffusion-wan"},
-    # Z-Image — image generation
-    {"model": "Tongyi-MAI/Z-Image-Turbo", "pipeline_type": "diffusion_zimage",
-     "label": "B3-diffusion-zimage"},
-
-    # === C. Encoder + Decoder ===
-    # Whisper — speech-to-text (mel → encoder → decoder)
-    {"model": "openai/whisper-tiny", "pipeline_type": "speech_to_text",
-     "label": "C1-whisper"},
-    # T5 — text-to-text (encoder-decoder seq2seq)
-    {"model": "google-t5/t5-small", "pipeline_type": "text_to_text",
-     "label": "C2-t5"},
-    # Vision-Language — image encoder + text decoder
-    {"model": "Qwen/Qwen2.5-VL-3B-Instruct", "pipeline_type": "vision_language",
-     "label": "C3-vision-language"},
-
-    # === D. Single Forward Pass ===
-    # BERT — classic encoder-only
-    {"model": "google-bert/bert-base-uncased", "pipeline_type": "encoder_only",
-     "label": "D1-bert"},
-    # Sentence embedding
-    {"model": "sentence-transformers/all-MiniLM-L6-v2", "pipeline_type": "encoder_only",
-     "label": "D2-embedding"},
-    # Segmentation — image → mask
-    {"model": "nvidia/segformer-b0-finetuned-ade-512-512", "pipeline_type": "segmentation",
-     "label": "D3-segmentation"},
-    # SAM — prompted segmentation
-    {"model": "facebook/sam-vit-base", "pipeline_type": "prompted_segmentation",
-     "label": "D4-sam"},
-
-    # === E. Multi-Stage Pipeline ===
-    # Bark — 3-stage audio generation
-    {"model": "suno/bark-small", "pipeline_type": "text_to_audio_bark",
-     "label": "E1-bark"},
-    # Magpie TTS — multi-codebook + CFG
-    {"model": "nvidia/magpie_tts_multilingual_357m", "pipeline_type": "text_to_audio_magpie",
-     "label": "E2-magpie"},
-]
+def load_default_validation_models(
+    root: Path = DEFAULT_PERF_VALIDATION_ROOT,
+) -> list[dict]:
+    """Load model-owned default performance validation entries."""
+    models: list[dict] = []
+    for path in sorted(root.glob("*/perf_validation.json")):
+        with path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+        entries = raw.get("models", raw) if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            raise ValueError(f"{path}: expected a list or object with 'models'")
+        for index, entry in enumerate(entries, 1):
+            if not isinstance(entry, dict) or not entry.get("model"):
+                raise ValueError(f"{path}: entry {index} must be an object with 'model'")
+            item = dict(entry)
+            item.setdefault("pipeline_type", "decoder_kv_cache")
+            item.setdefault("label", f"{path.parent.name}-{index}")
+            models.append(item)
+    return models
 
 
 def run_batch(models: list[dict], output_dir: str, dry_run: bool) -> list[TuneResult]:
@@ -780,6 +657,7 @@ def run_batch(models: list[dict], output_dir: str, dry_run: bool) -> list[TuneRe
                 model=entry["model"],
                 pipeline_type=entry.get("pipeline_type", "decoder_kv_cache"),
                 output_dir=f"{output_dir}/{entry.get('label', 'model')}",
+                benchmark=entry.get("benchmark"),
                 dry_run=dry_run,
             )
             results.append(r)
@@ -788,7 +666,10 @@ def run_batch(models: list[dict], output_dir: str, dry_run: bool) -> list[TuneRe
             r = TuneResult(
                 model=entry["model"],
                 pipeline_type=entry.get("pipeline_type", ""),
-                mode=PIPELINE_MODES.get(entry.get("pipeline_type", ""), ""),
+                mode=runtime_strategy_performance_mode(
+                    entry.get("pipeline_type", ""),
+                    default="",
+                ),
                 status="failed", error=str(e))
             results.append(r)
 
@@ -830,7 +711,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100)
     parser.add_argument("--output-dir", default="/tmp/auto_perf")
     parser.add_argument("--batch", action="store_true",
-                        help="Run validation across all 5 representative models")
+                        help="Run model-owned default performance validation entries")
     parser.add_argument("--batch-json",
                         help="Custom batch config JSON file")
     parser.add_argument("--engine-section", default="all",
@@ -843,15 +724,20 @@ def main():
 
     if args.batch or args.batch_json:
         if args.batch_json:
-            with open(args.batch_json) as f:
+            with open(args.batch_json, encoding="utf-8") as f:
                 models = json.load(f)
         else:
-            models = VALIDATION_MODELS
+            models = load_default_validation_models()
+            if not models:
+                parser.error(
+                    "No model-owned perf_validation.json files found; "
+                    "pass --batch-json to provide an explicit batch."
+                )
         results = run_batch(models, args.output_dir, args.dry_run)
         # Save results
         out_path = f"{args.output_dir}/batch_results.json"
         os.makedirs(args.output_dir, exist_ok=True)
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump([vars(r) for r in results], f, indent=2)
         print(f"\nResults saved: {out_path}")
     elif args.model:
@@ -866,7 +752,7 @@ def main():
         )
         # Save result
         out_path = f"{args.output_dir}/result.json"
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(vars(result), f, indent=2)
         print(f"\nResult saved: {out_path}")
     else:

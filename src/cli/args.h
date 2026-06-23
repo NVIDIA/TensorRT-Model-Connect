@@ -49,7 +49,7 @@ struct CliArgs {
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
     std::string generation_mode;
-    // Diffusion text-to-image extras (Qwen-Image, FLUX, Z-Image, ...)
+    // Image-generation extras.
     std::string negative_prompt;
     int diffusion_height{0}; // 0 = use bundle default
     int diffusion_width{0};  // 0 = use bundle default

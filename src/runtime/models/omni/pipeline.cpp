@@ -1,7 +1,6 @@
 #include "runtime/models/omni/pipeline.h"
 
-#include "runtime/domains/audio/audio_configs.h"
-#include "runtime/domains/audio/omni_audio_plan.h"
+#include "runtime/models/omni/omni_audio_plan.h"
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>
@@ -145,8 +144,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
         output_ids.push_back(token);
         std::vector<float> hidden_state;
         run_thinker_step(token, logits, &hidden_state);
-        hidden_states_out.insert(
-            hidden_states_out.end(), hidden_state.begin(), hidden_state.end());
+        hidden_states_out.insert(hidden_states_out.end(), hidden_state.begin(), hidden_state.end());
     }
 
     std::cerr << "[trtmc] Omni Thinker: generated " << output_ids.size() << " text tokens"

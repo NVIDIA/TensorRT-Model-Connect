@@ -1,16 +1,14 @@
-# Audio and Speech Backends
+# Audio Domain Helpers
 
-Speech/audio generation and transcription runtimes.
+Shared audio-domain primitives used by model-owned runtime plugins.
 
 Key files:
-- `whisper_backend.*`: speech-to-text.
-- `bark_backend.*`: text-to-audio (Bark).
-- `magpie_tts_backend.*`: Magpie TTS generation.
-- `omni_backend.*`: omni multimodal audio path.
-- `speech_backend.*`: speech-to-speech pipeline.
+- `audio_types.*`: common audio result/value types.
 - `mel_spectrogram.*`: mel feature extraction helpers.
 
 How to understand:
-1. Enter the backend class `generate_*`/`transcribe`/`speak` API.
-2. Trace prefill/decode helper stages and codec/post-processing.
-3. Use `core/device_kv_cache.*` and `core/trt_decode_runtime.*` for shared decode behavior.
+1. Start in `src/runtime/models/<model>` for model-specific runtime behavior.
+2. Use this directory only for reusable audio primitives that are not owned by a
+   single model family.
+3. Use `core/device_kv_cache.*` and `core/trt_decode_runtime.*` for shared
+   decode behavior.
