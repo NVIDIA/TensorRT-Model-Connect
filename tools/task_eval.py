@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import json
 import os
@@ -33,6 +34,58 @@ DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 
+DEFAULT_BUILTIN_SUITES = [
+    {
+        "id": "ocrbench_v2_unified",
+        "description": (
+            "Local OCRBench v2 evaluation on the unified VLM dataset format. "
+            "This validates image-conditioned OCR / visual QA bundles against "
+            "dataset gold answers without requiring dataset-local TRTMC config."
+        ),
+        "user_contract": "ocr_text",
+        "dataset": {
+            "kind": "vlm_unified_json",
+            "default_path": "/mnt/data/OCRBench_v2/unified/dataset.json",
+            "answer_field": "answer.primary",
+            "subject_field": "category",
+            "prompt_source": "messages",
+            "image_source": "media",
+            "max_images_per_sample": 1,
+        },
+        "selectors": {
+            "task_strategies": ["vision_language_generation"],
+            "runtime_strategies": ["vision_language"],
+            "families": ["deepseek_ocr"],
+            "exclude_families": ["locateanything", "lance"],
+        },
+        "generation": {
+            "max_new_tokens": 32,
+            "temperature": 1.0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "min_p": 0.0,
+            "seed": -1,
+            "apply_chat_template": True,
+            "enable_thinking": False,
+            "do_sample": False,
+        },
+        "scoring": {
+            "scorer": "exact_or_alias",
+        },
+        "build": {
+            "min_max_cache_length": 1024,
+        },
+        "ci": {
+            "eligible": False,
+            "lane": "local_only",
+            "notes": (
+                "Intended for local/p2021 validation first. Pass --dataset for "
+                "machine-specific data roots such as /localhome/.../updated_datasets."
+            ),
+        },
+    },
+]
+
 
 def load_structured_file(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
@@ -49,10 +102,14 @@ def load_structured_file(path: Path) -> dict[str, Any]:
 
 
 def load_suites(path: Path = DEFAULT_SUITES) -> list[dict[str, Any]]:
+    path = Path(path)
     data = load_structured_file(path)
     suites = data.get("suites", [])
     if not isinstance(suites, list):
         raise ValueError(f"{path}: 'suites' must be a list")
+    suites = copy.deepcopy(suites)
+    if path.resolve() == DEFAULT_SUITES.resolve():
+        suites.extend(copy.deepcopy(DEFAULT_BUILTIN_SUITES))
     seen: set[str] = set()
     for suite in suites:
         suite_id = suite.get("id")
@@ -111,6 +168,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "runtime_strategy": runtime_strategy,
         "task_strategy": task_strategy,
         "reference_family": reference_family,
+        "reference_backend": raw.get("reference_backend", "hf_transformers"),
         "user_contract": user_contract,
         "ci_tier": raw.get("ci_tier", "default"),
         "core": bool(raw.get("core", False)),
@@ -275,7 +333,7 @@ def _request_prompt(request: dict[str, Any]) -> str:
 
 
 def _copy_dataset_header(data: dict[str, Any], requests: list[dict[str, Any]]) -> dict[str, Any]:
-    out = {k: v for k, v in data.items() if k != "requests"}
+    out = {k: v for k, v in data.items() if k not in {"requests", "samples"}}
     out["requests"] = requests
     return out
 
@@ -380,10 +438,103 @@ def _message_image_refs(message: dict[str, Any]) -> list[str]:
     for item in content:
         if not isinstance(item, dict) or item.get("type") != "image":
             continue
-        value = item.get("image")
+        value = item.get("image") or item.get("path")
         if isinstance(value, str):
             refs.append(value)
     return refs
+
+
+def _unified_image_ref(item: dict[str, Any]) -> str:
+    value = item.get("image") or item.get("path")
+    return value if isinstance(value, str) else ""
+
+
+def _normalize_unified_message(message: dict[str, Any]) -> dict[str, Any]:
+    normalized = {key: value for key, value in message.items() if key != "content"}
+    content = message.get("content")
+    if not isinstance(content, list):
+        normalized["content"] = content
+        return normalized
+
+    normalized_content: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "image":
+            image_ref = _unified_image_ref(item)
+            if image_ref:
+                image_item = {key: value for key, value in item.items() if key != "path"}
+                image_item["image"] = image_ref
+                normalized_content.append(image_item)
+            continue
+        normalized_content.append(item)
+    normalized["content"] = normalized_content
+    return normalized
+
+
+def _unified_sample_media_refs(sample: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    media = sample.get("media")
+    if isinstance(media, list):
+        for item in media:
+            if isinstance(item, dict) and item.get("type") == "image":
+                image_ref = _unified_image_ref(item)
+                if image_ref:
+                    refs.append(image_ref)
+    return refs
+
+
+def _unified_answer(sample: dict[str, Any]) -> tuple[str, list[str]]:
+    raw_answer = sample.get("answer")
+    if isinstance(raw_answer, dict):
+        primary = str(raw_answer.get("primary", ""))
+        raw_aliases = raw_answer.get("aliases", [])
+        aliases = [str(alias) for alias in raw_aliases] if isinstance(raw_aliases, list) else []
+    else:
+        primary = str(raw_answer or "")
+        aliases = []
+    if primary and primary not in aliases:
+        aliases.insert(0, primary)
+    return primary, aliases
+
+
+def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
+    primary_answer, aliases = _unified_answer(sample)
+    messages = sample.get("messages")
+    normalized_messages = [
+        _normalize_unified_message(message)
+        for message in messages
+        if isinstance(message, dict)
+    ] if isinstance(messages, list) else []
+    media_refs = _unified_sample_media_refs(sample)
+    if not normalized_messages and media_refs:
+        normalized_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": media_refs[0]},
+                {"type": "text", "text": str(sample.get("question", ""))},
+            ],
+        }]
+
+    request: dict[str, Any] = {
+        "id": str(sample.get("id") or f"ocrbench_{sample.get('source_index', 0):06d}"),
+        "messages": normalized_messages,
+        "answer": primary_answer,
+        "subject": str(
+            sample.get("category")
+            or sample.get("type")
+            or sample.get("dataset_name")
+            or ""
+        ),
+    }
+    if aliases:
+        request["answer_aliases"] = aliases
+    if media_refs:
+        request["image"] = media_refs[0]
+    for key in ("dataset_name", "type", "source_index", "metadata"):
+        if key in sample:
+            request[key] = sample[key]
+    return request
 
 
 def vlm_request_prompt(request: dict[str, Any]) -> str:
@@ -432,7 +583,7 @@ def resolve_dataset_asset_path(dataset_path: Path, asset_ref: str) -> Path:
     raise FileNotFoundError(f"Could not resolve dataset asset {asset_ref!r}; tried: {candidates}")
 
 
-def vlm_request_images(dataset_path: Path, request: dict[str, Any]) -> list[Path]:
+def vlm_request_image_refs(request: dict[str, Any]) -> list[str]:
     refs: list[str] = []
     messages = request.get("messages")
     if isinstance(messages, list):
@@ -441,7 +592,33 @@ def vlm_request_images(dataset_path: Path, request: dict[str, Any]) -> list[Path
                 refs.extend(_message_image_refs(msg))
     if not refs and isinstance(request.get("image"), str):
         refs.append(str(request["image"]))
+    return refs
+
+
+def vlm_request_images(dataset_path: Path, request: dict[str, Any]) -> list[Path]:
+    refs = vlm_request_image_refs(request)
     return [resolve_dataset_asset_path(dataset_path, ref) for ref in refs]
+
+
+def validate_vlm_dataset_assets(
+    dataset_path: Path,
+    indexed: list[tuple[int, dict[str, Any]]],
+) -> None:
+    missing: list[tuple[int, str, str]] = []
+    for dataset_index, request in indexed:
+        sample_id = str(request.get("id") or f"vlm_{dataset_index:06d}")
+        for ref in vlm_request_image_refs(request):
+            if not any(candidate.is_file() for candidate in _candidate_dataset_asset_paths(dataset_path, ref)):
+                missing.append((dataset_index, sample_id, ref))
+    if missing:
+        examples = "; ".join(
+            f"dataset_index={idx} sample_id={sample_id} ref={ref!r}"
+            for idx, sample_id, ref in missing[:5]
+        )
+        raise FileNotFoundError(
+            f"VLM dataset has {len(missing)} missing image asset(s) for "
+            f"{dataset_path}; first missing: {examples}"
+        )
 
 
 def _safe_sample_filename(sample_id: str, suffix: str = ".png") -> str:
@@ -502,21 +679,43 @@ def load_vlm_chat_requests(
     return data, indexed
 
 
-def prepare_vlm_chat_dataset(
+def load_vlm_unified_requests(
+    dataset_path: Path,
+    *,
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    samples = data.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'samples' list")
+    indexed = [
+        (idx, unified_sample_to_vlm_request(sample))
+        for idx, sample in enumerate(samples)
+        if isinstance(sample, dict)
+        and (not subject or str(sample.get("category", sample.get("type", ""))) == subject)
+    ]
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    return data, indexed
+
+
+def _prepare_vlm_requests(
     *,
     dataset_path: Path,
     work_dir: Path,
     suite: dict[str, Any],
+    data: dict[str, Any],
+    indexed: list[tuple[int, dict[str, Any]]],
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
 ) -> dict[str, Path]:
-    data, indexed = load_vlm_chat_requests(
-        dataset_path,
-        limit=limit,
-        subject=subject,
-        sample_seed=sample_seed,
-    )
+    validate_vlm_dataset_assets(dataset_path, indexed)
     work_dir.mkdir(parents=True, exist_ok=True)
     answers_path = work_dir / "answers.json"
     prompts_path = work_dir / "prompts.jsonl"
@@ -592,6 +791,60 @@ def prepare_vlm_chat_dataset(
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
+def prepare_vlm_chat_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> dict[str, Path]:
+    data, indexed = load_vlm_chat_requests(
+        dataset_path,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+    )
+    return _prepare_vlm_requests(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+    )
+
+
+def prepare_vlm_unified_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+) -> dict[str, Path]:
+    data, indexed = load_vlm_unified_requests(
+        dataset_path,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+    )
+    return _prepare_vlm_requests(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+    )
+
+
 def prepare_task_dataset(
     *,
     dataset_path: Path,
@@ -613,6 +866,15 @@ def prepare_task_dataset(
         )
     if dataset_kind == "vlm_chat_json":
         return prepare_vlm_chat_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+        )
+    if dataset_kind == "vlm_unified_json":
+        return prepare_vlm_unified_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -879,6 +1141,21 @@ def is_correct(prediction: str, reference: str) -> bool:
     return pred_clean == ref_clean
 
 
+def request_answer_values(request: dict[str, Any]) -> list[str]:
+    values = [str(request["answer"])]
+    aliases = request.get("answer_aliases", [])
+    if isinstance(aliases, list):
+        for alias in aliases:
+            alias_text = str(alias)
+            if alias_text not in values:
+                values.append(alias_text)
+    return values
+
+
+def is_correct_for_request(prediction: str, request: dict[str, Any]) -> bool:
+    return any(is_correct(prediction, answer) for answer in request_answer_values(request))
+
+
 def score_predictions(predictions_data: dict[str, Any], answers_data: dict[str, Any]) -> dict[str, Any]:
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
@@ -896,6 +1173,7 @@ def score_predictions(predictions_data: dict[str, Any], answers_data: dict[str, 
         output_text = str(response.get("output_text", ""))
         subject = str(request.get("subject", ""))
         answer = str(request["answer"])
+        answer_values = request_answer_values(request)
         if output_text == ERROR_OUTPUT_TEXT:
             skipped += 1
             samples.append({
@@ -903,12 +1181,13 @@ def score_predictions(predictions_data: dict[str, Any], answers_data: dict[str, 
                 "sample_id": response.get("sample_id", f"sample_{idx}"),
                 "subject": subject,
                 "answer": answer,
+                "answer_aliases": answer_values[1:],
                 "prediction": output_text,
                 "skipped": True,
                 "correct": False,
             })
             continue
-        ok = is_correct(output_text, answer)
+        ok = is_correct_for_request(output_text, request)
         correct += int(ok)
         subject_stats[subject]["total"] += 1
         subject_stats[subject]["correct"] += int(ok)
@@ -917,6 +1196,7 @@ def score_predictions(predictions_data: dict[str, Any], answers_data: dict[str, 
             "sample_id": response.get("sample_id", f"sample_{idx}"),
             "subject": subject,
             "answer": answer,
+            "answer_aliases": answer_values[1:],
             "prediction": output_text,
             "parsed_prediction": parse_multi_choice_response(clean_text(output_text)),
             "skipped": False,
@@ -963,8 +1243,8 @@ def compare_prediction_sets(
         answer = str(req["answer"])
         hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
         trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
-        hf_ok = is_correct(str(hf_row.get("output_text", "")), answer)
-        trt_ok = is_correct(str(trt_row.get("output_text", "")), answer)
+        hf_ok = is_correct_for_request(str(hf_row.get("output_text", "")), req)
+        trt_ok = is_correct_for_request(str(trt_row.get("output_text", "")), req)
         agreement += int(hf_pred == trt_pred)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
@@ -1043,6 +1323,10 @@ def _work_dataset_kind(work_dir: Path) -> str:
     return str(work_manifest(work_dir).get("dataset_kind", ""))
 
 
+def _is_vlm_dataset_kind(kind: str) -> bool:
+    return kind in {"vlm_chat_json", "vlm_unified_json"}
+
+
 def _model_dtype(torch_mod: Any, dtype_name: str) -> Any:
     if dtype_name == "float16":
         return torch_mod.float16
@@ -1063,12 +1347,33 @@ def _load_pil_images(image_paths: list[str]) -> list[Any]:
     return images
 
 
-def _vlm_model_class(transformers_mod: Any) -> Any:
-    for name in ("AutoModelForImageTextToText", "AutoModelForVision2Seq", "AutoModelForCausalLM"):
+def _vlm_model_classes(transformers_mod: Any) -> list[Any]:
+    classes = []
+    for name in (
+        "AutoModelForImageTextToText",
+        "AutoModelForVision2Seq",
+        "AutoModelForCausalLM",
+        "AutoModel",
+    ):
         cls = getattr(transformers_mod, name, None)
         if cls is not None:
-            return cls
-    raise RuntimeError("Transformers installation does not expose a VLM-capable AutoModel class")
+            classes.append(cls)
+    if not classes:
+        raise RuntimeError("Transformers installation does not expose a VLM-capable AutoModel class")
+    return classes
+
+
+def _load_vlm_model(transformers_mod: Any, model_id: str, model_kwargs: dict[str, Any]) -> Any:
+    errors: list[str] = []
+    for model_cls in _vlm_model_classes(transformers_mod):
+        try:
+            return model_cls.from_pretrained(model_id, **model_kwargs).eval()
+        except ValueError as exc:
+            errors.append(f"{model_cls.__name__}: {exc}")
+    raise RuntimeError(
+        f"Could not load VLM HF reference model {model_id!r} with available AutoModel classes: "
+        + " | ".join(errors)
+    )
 
 
 def _vlm_prompt_has_image_placeholder(text: str) -> bool:
@@ -1089,6 +1394,21 @@ def _vlm_fallback_prompt(model_id: str, prompt: str) -> str:
     return prompt
 
 
+def _apply_vlm_chat_template(obj: Any, messages: list[Any]) -> str:
+    if not hasattr(obj, "apply_chat_template"):
+        return ""
+    try:
+        return str(obj.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        ))
+    except ValueError as exc:
+        if "chat_template" in str(exc):
+            return ""
+        raise
+
+
 def _vlm_chat_text(
     processor: Any,
     request: dict[str, Any],
@@ -1098,11 +1418,7 @@ def _vlm_chat_text(
     messages = request.get("messages")
     rendered = ""
     if hasattr(processor, "apply_chat_template") and isinstance(messages, list):
-        rendered = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        rendered = _apply_vlm_chat_template(processor, messages)
     tokenizer = getattr(processor, "tokenizer", None)
     if (
         not rendered
@@ -1110,11 +1426,7 @@ def _vlm_chat_text(
         and hasattr(tokenizer, "apply_chat_template")
         and isinstance(messages, list)
     ):
-        rendered = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        rendered = _apply_vlm_chat_template(tokenizer, messages)
     if rendered:
         return rendered
     if _vlm_prompt_has_image_placeholder(fallback_prompt):
@@ -1137,6 +1449,70 @@ def _to_device(batch: Any, device: Any) -> Any:
     if hasattr(batch, "to"):
         return batch.to(device)
     return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
+
+
+def _is_deepseek_ocr_hf_model(model_id: str, model: Any) -> bool:
+    return "deepseek-ocr" in model_id.lower() and hasattr(model, "infer")
+
+
+def _deepseek_ocr_prompt(prompt: str) -> str:
+    if "<image>" in prompt:
+        return prompt
+    return f"<image>\n{prompt}"
+
+
+def _run_deepseek_ocr_hf_reference(
+    *,
+    model: Any,
+    tokenizer: Any,
+    answers: dict[str, Any],
+    prompt_rows: list[dict[str, Any]],
+    work_dir: Path,
+) -> None:
+    raw_path = work_dir / "hf_raw.jsonl"
+    pred_path = work_dir / "hf_predictions.json"
+    output_root = work_dir / "hf_deepseek_ocr_outputs"
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, _request in enumerate(answers["requests"]):
+            prompt_row = prompt_rows[idx]
+            image_paths = [str(path) for path in prompt_row.get("images", [])]
+            if len(image_paths) != 1:
+                raise ValueError(f"DeepSeek-OCR HF reference expects exactly one image for sample {idx}")
+            sample_id = str(prompt_row.get("sample_id", f"vlm_{idx:06d}"))
+            output_path = output_root / sample_id
+            start = time.perf_counter()
+            output_text = model.infer(
+                tokenizer,
+                prompt=_deepseek_ocr_prompt(str(prompt_row.get("prompt", ""))),
+                image_file=image_paths[0],
+                output_path=str(output_path),
+                save_results=False,
+                eval_mode=True,
+            )
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            output_text = "" if output_text is None else str(output_text)
+            generated_token_ids = []
+            try:
+                generated_token_ids = [
+                    int(token_id)
+                    for token_id in tokenizer(output_text, add_special_tokens=False).input_ids
+                ]
+            except Exception:
+                generated_token_ids = []
+            row = {
+                "sample_id": sample_id,
+                "output_text": output_text,
+                "generated_tokens": len(generated_token_ids),
+                "generated_token_ids": generated_token_ids,
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+    write_predictions(pred_path, responses)
 
 
 def run_vlm_hf_reference(args: argparse.Namespace) -> None:
@@ -1170,7 +1546,6 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
     )
-    model_cls = _vlm_model_class(transformers)
     model_kwargs = {
         "torch_dtype": _model_dtype(torch, args.dtype),
         "trust_remote_code": args.trust_remote_code,
@@ -1180,12 +1555,26 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
         model_kwargs["device_map"] = args.device_map
     if args.attn_impl:
         model_kwargs["attn_implementation"] = args.attn_impl
-    model = model_cls.from_pretrained(args.model, **model_kwargs).eval()
+    model = _load_vlm_model(transformers, args.model, model_kwargs)
     if not args.device_map:
         device = torch.device(args.device)
         model.to(device)
     else:
         device = model.device
+
+    if _is_deepseek_ocr_hf_model(args.model, model):
+        _run_deepseek_ocr_hf_reference(
+            model=model,
+            tokenizer=processor,
+            answers=answers,
+            prompt_rows=prompt_rows,
+            work_dir=work_dir,
+        )
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return
 
     tokenizer = getattr(processor, "tokenizer", None)
     pad_token_id = getattr(tokenizer, "pad_token_id", None)
@@ -1267,7 +1656,7 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
 
 
 def run_hf_reference(args: argparse.Namespace) -> None:
-    if _work_dataset_kind(Path(args.work_dir)) == "vlm_chat_json":
+    if _is_vlm_dataset_kind(_work_dataset_kind(Path(args.work_dir))):
         run_vlm_hf_reference(args)
         return
     try:
@@ -1385,7 +1774,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
 
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
-    if _work_dataset_kind(work_dir) == "vlm_chat_json":
+    if _is_vlm_dataset_kind(_work_dataset_kind(work_dir)):
         run_vlm_trtfb(args)
         return
     defaults = generation_defaults(work_dir)
@@ -1693,8 +2082,9 @@ def run_hf_reference_subprocess(
     resident reference model from contending with the TRT engine + KV cache.
     """
     hf_args = _namespace_for_run_hf(args, model, work_dir)
+    hf_python = str(getattr(args, "hf_python", "") or sys.executable)
     cmd = [
-        sys.executable,
+        hf_python,
         str(Path(__file__).resolve()),
         "run-hf",
         "--model", str(hf_args.model),
@@ -1752,6 +2142,7 @@ def eval_one_model(
     if not dataset_path:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
+    reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
     prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
@@ -1821,6 +2212,8 @@ def eval_one_model(
         "bundle": str(bundle_path),
         "build_max_cache_length": max_cache_length,
         "max_prompt_tokens": max_prompt_len,
+        "reference_backend": reference_backend,
+        "hf_reference_status": "reused" if hf_reused else "ran",
         "hf_reused": hf_reused,
         "bundle_built": built,
     }
@@ -1858,7 +2251,7 @@ def eval_one_model(
         write_summary_markdown(summary, work_dir / "summary.md")
         result = {
             **base_result,
-            "mode": "mcq",
+            "mode": scorer,
             "hf_accuracy": summary["hf"]["overall_accuracy"],
             "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
             "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
@@ -2579,7 +2972,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json"}:
+    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json", "vlm_unified_json"}:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
     waives = load_waives(Path(args.waives), args.waive_platform) if args.waives else {}

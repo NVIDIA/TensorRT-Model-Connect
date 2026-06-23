@@ -71,6 +71,66 @@ def _write_vlm_mmmu_pro_vision(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_ocrbench_unified(path: Path) -> None:
+    image_path = path.parent / "images" / "ocrbench_v2_000000.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake image bytes")
+    payload = {
+        "schema_version": "1.0",
+        "dataset": "OCRBench_v2",
+        "samples": [
+            {
+                "id": "ocrbench_v2_000000",
+                "source_index": 0,
+                "dataset_name": "rico",
+                "category": "APP agent en",
+                "type": "APP agent en",
+                "question": "What is the wrong answer 2?",
+                "media": [{"type": "image", "path": "images/ocrbench_v2_000000.jpg"}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "path": "images/ocrbench_v2_000000.jpg"},
+                            {"type": "text", "text": "What is the wrong answer 2?"},
+                        ],
+                    }
+                ],
+                "answer": {"primary": "enabled", "aliases": ["enabled", "on"]},
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_default_suites_include_ocrbench_v2_unified() -> None:
+    suites = task_eval.load_suites()
+    suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
+
+    assert suite["dataset"]["kind"] == "vlm_unified_json"
+    assert suite["selectors"]["runtime_strategies"] == ["vision_language"]
+    assert suite["selectors"]["families"] == ["deepseek_ocr"]
+
+
+def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
+    custom = tmp_path / "suites.json"
+    custom.write_text(
+        json.dumps({
+            "suites": [
+                {
+                    "id": "custom_only",
+                    "dataset": {"kind": "mmlu_five_shot_json"},
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    suites = task_eval.load_suites(custom)
+
+    assert [suite["id"] for suite in suites] == ["custom_only"]
+
+
 def test_plan_selects_chat_text_generation_manifests() -> None:
     suites = task_eval.load_suites()
     models = task_eval.load_manifest_records()
@@ -97,6 +157,21 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
     assert "qwen3-vl-2b" in selected
     assert "internvl3-2b" in selected
     assert "deepseek-ocr-l0" not in selected
+    assert "locateanything-3b" not in selected
+
+
+def test_plan_selects_ocrbench_v2_unified_models() -> None:
+    suites = task_eval.load_suites()
+    models = task_eval.load_manifest_records()
+
+    rows = task_eval.build_plan(suites, models, suite_id="ocrbench_v2_unified")
+
+    selected = {row["model"]: row for row in rows}
+    model_by_name = {model["name"]: model for model in models}
+    assert "deepseek-ocr-l0" in selected
+    assert model_by_name["deepseek-ocr-l0"]["reference_backend"] == "golden_snapshot"
+    assert "qwen25vl-3b" not in selected
+    assert "internvl3-2b" not in selected
     assert "locateanything-3b" not in selected
 
 
@@ -162,6 +237,71 @@ def test_prepare_vlm_mmmu_pro_vision_writes_image_prompt_jsonl(tmp_path: Path) -
     assert manifest["request_count"] == 1
     assert manifest["image_count"] == 1
     assert "reference" not in manifest
+
+
+def test_prepare_ocrbench_unified_writes_image_prompt_jsonl(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "OCRBench_v2" / "unified"
+    dataset_dir.mkdir(parents=True)
+    dataset = dataset_dir / "dataset.json"
+    _write_ocrbench_unified(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+
+    outputs = task_eval.prepare_vlm_unified_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+
+    assert len(answers["requests"]) == 1
+    assert "samples" not in answers
+    assert answers["requests"][0]["answer"] == "enabled"
+    assert answers["requests"][0]["answer_aliases"] == ["enabled", "on"]
+    assert answers["requests"][0]["messages"][0]["content"][0] == {
+        "type": "image",
+        "image": "images/ocrbench_v2_000000.jpg",
+    }
+    assert prompts == [{
+        "sample_id": "ocrbench_v2_000000",
+        "dataset_index": 0,
+        "eval_index": 0,
+        "subject": "APP agent en",
+        "answer": "enabled",
+        "prompt": "What is the wrong answer 2?",
+        "images": [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")],
+    }]
+    assert manifest["suite"] == "ocrbench_v2_unified"
+    assert manifest["dataset_kind"] == "vlm_unified_json"
+    assert manifest["request_count"] == 1
+    assert manifest["image_count"] == 1
+
+
+def test_prepare_ocrbench_unified_reports_missing_images(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "OCRBench_v2" / "unified"
+    dataset_dir.mkdir(parents=True)
+    dataset = dataset_dir / "dataset.json"
+    _write_ocrbench_unified(dataset)
+    (dataset_dir / "images" / "ocrbench_v2_000000.jpg").unlink()
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+
+    try:
+        task_eval.prepare_vlm_unified_dataset(
+            dataset_path=dataset,
+            work_dir=tmp_path / "work",
+            suite=suite,
+            limit=1,
+        )
+    except FileNotFoundError as exc:
+        message = str(exc)
+        assert "1 missing image asset" in message
+        assert "ocrbench_v2_000000" in message
+        assert "images/ocrbench_v2_000000.jpg" in message
+    else:
+        raise AssertionError("expected missing-image validation failure")
 
 
 def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(
@@ -437,6 +577,16 @@ def test_score_predictions_parses_vlm_a_to_j_choices() -> None:
     assert score["samples"][0]["parsed_prediction"] == "J"
 
 
+def test_score_predictions_accepts_answer_aliases() -> None:
+    answers = {"requests": [{"answer": "enabled", "answer_aliases": ["enabled", "on"]}]}
+    predictions = {"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}
+
+    score = task_eval.score_predictions(predictions, answers)
+
+    assert score["overall_accuracy"] == 1.0
+    assert score["samples"][0]["answer_aliases"] == ["on"]
+
+
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
     suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
     models = task_eval.load_manifest_records()
@@ -569,6 +719,134 @@ def test_prompt_length_validation_rejects_over_cache(tmp_path: Path, monkeypatch
         assert "max_prompt_tokens=513" in str(exc)
     else:
         raise AssertionError("expected prompt length validation failure")
+
+
+def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    captured: dict[str, list[str]] = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    args = argparse.Namespace(
+        hf_python="/opt/deepseek-hf/bin/python3",
+        hf_dtype="auto",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=False,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=None,
+    )
+    model = {"hf_id": "org/model", "trust_remote_code": False}
+
+    task_eval.run_hf_reference_subprocess(args, model, work_dir)
+
+    assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
+    assert captured["cmd"][1:3] == [str(Path(task_eval.__file__).resolve()), "run-hf"]
+
+
+def test_load_vlm_model_falls_back_between_auto_classes() -> None:
+    calls: list[str] = []
+
+    class UnsupportedAutoModel:
+        __name__ = "UnsupportedAutoModel"
+
+        @staticmethod
+        def from_pretrained(*_args, **_kwargs):
+            calls.append("unsupported")
+            raise ValueError("Unrecognized configuration class")
+
+    class SupportedAutoModel:
+        __name__ = "SupportedAutoModel"
+
+        @staticmethod
+        def from_pretrained(*_args, **_kwargs):
+            calls.append("supported")
+            return SupportedAutoModel()
+
+        def eval(self):
+            calls.append("eval")
+            return self
+
+    class Transformers:
+        AutoModelForImageTextToText = UnsupportedAutoModel
+        AutoModel = SupportedAutoModel
+
+    model = task_eval._load_vlm_model(Transformers, "org/model", {})
+
+    assert isinstance(model, SupportedAutoModel)
+    assert calls == ["unsupported", "supported", "eval"]
+
+
+def test_vlm_chat_text_falls_back_when_chat_template_missing() -> None:
+    class Processor:
+        def apply_chat_template(self, *_args, **_kwargs):
+            raise ValueError("tokenizer.chat_template is not set")
+
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Extract text."}],
+            }
+        ]
+    }
+
+    assert task_eval._vlm_chat_text(
+        Processor(),
+        request,
+        "Extract text.",
+        "deepseek-ai/DeepSeek-OCR-2",
+    ) == "Extract text."
+
+
+def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> None:
+    calls: list[dict[str, str]] = []
+
+    class Model:
+        def infer(self, _tokenizer, **kwargs):
+            calls.append(kwargs)
+            return "enabled"
+
+    class Tokenizer:
+        def __call__(self, text, **_kwargs):
+            assert text == "enabled"
+            return argparse.Namespace(input_ids=[1, 2])
+
+    task_eval._run_deepseek_ocr_hf_reference(
+        model=Model(),
+        tokenizer=Tokenizer(),
+        answers={"requests": [{"answer": "enabled"}]},
+        prompt_rows=[{
+            "sample_id": "ocrbench_v2_000000",
+            "prompt": "What is shown?",
+            "images": ["/tmp/image.jpg"],
+        }],
+        work_dir=tmp_path,
+    )
+
+    payload = json.loads((tmp_path / "hf_predictions.json").read_text(encoding="utf-8"))
+
+    assert calls[0]["prompt"] == "<image>\nWhat is shown?"
+    assert calls[0]["image_file"] == "/tmp/image.jpg"
+    assert calls[0]["eval_mode"] is True
+    assert payload["responses"][0]["output_text"] == "enabled"
+    assert payload["responses"][0]["generated_token_ids"] == [1, 2]
 
 
 def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
@@ -777,6 +1055,104 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
     assert calls == ["hf", "build", "trtfb"]
     assert result["trtfb_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
+
+
+def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_dir = tmp_path / "OCRBench_v2" / "unified"
+    dataset_dir.mkdir(parents=True)
+    dataset = dataset_dir / "dataset.json"
+    _write_ocrbench_unified(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+    model = {
+        "name": "deepseek-ocr-l0",
+        "hf_id": "deepseek-ai/DeepSeek-OCR-2",
+        "bundle": "deepseek-ocr-l0.trtfb",
+        "max_cache_length": 4096,
+        "precision": "fp32",
+        "trust_remote_code": True,
+        "reference_backend": "golden_snapshot",
+        "build_args": {},
+        "quantization": {},
+    }
+    calls: list[str] = []
+
+    def fake_run_hf(_args, _model, work_dir):
+        calls.append("hf")
+        Path(work_dir, "hf_predictions.json").write_text(
+            json.dumps({"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}),
+            encoding="utf-8",
+        )
+
+    def fake_ensure_bundle(*_args, **kwargs):
+        calls.append("build")
+        bundle = kwargs["bundle_path"]
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_bytes(b"bundle")
+        return bundle, True
+
+    def fake_run_trtfb(args):
+        calls.append("trtfb")
+        prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
+        assert prompts[0]["images"] == [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")]
+        Path(args.work_dir, "trtfb_predictions.json").write_text(
+            json.dumps({"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+
+    args = argparse.Namespace(
+        work_root=str(tmp_path / "work"),
+        dataset=str(dataset),
+        limit=1,
+        subject="",
+        sample_seed=None,
+        force_hf=False,
+        force_build=False,
+        build_max_cache_length=None,
+        skip_prompt_length_check=True,
+        bundle="",
+        model=["deepseek-ocr-l0"],
+        engine_dir="",
+        trtmc_binary="build/trtmc",
+        extra_build_arg=[],
+        hf_dtype="auto",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=True,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=123,
+        benchmark_binary="build/trtmc_dataset_benchmark",
+        hf_python="",
+        backend_dir="",
+        kv_cache_size="",
+        config="",
+        set=[],
+        cuda_visible_devices="",
+        chat_template=False,
+    )
+
+    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+
+    assert calls == ["hf", "build", "trtfb"]
+    assert result["mode"] == "exact_or_alias"
+    assert result["hf_reference_status"] == "ran"
+    assert result["hf_accuracy"] == 1.0
+    assert result["prediction_agreement_rate"] == 1.0
+    assert result["trtfb_accuracy"] == 1.0
+    assert (tmp_path / "work" / suite["id"] / model["name"] / "hf_predictions.json").is_file()
 
 
 def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -> None:
