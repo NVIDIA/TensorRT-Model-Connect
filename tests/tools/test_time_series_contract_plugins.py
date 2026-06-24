@@ -8,8 +8,8 @@ def _case(name: str, reference_family: str, user_contract: str) -> E2ECase:
     return E2ECase(
         name=name,
         hf_id="dummy/model",
-        family="patchtst",
-        runtime_strategy="patchtst_torchtrt",
+        family="neural_operator",
+        runtime_strategy="neural_operator",
         reference_family=reference_family,
         user_contract=user_contract,
     )
@@ -20,7 +20,7 @@ def test_time_series_point_forecast_plugin_discovers_and_passes():
     assert plugin is not None
     assert plugin.user_contract == "time_series_point_forecast"
 
-    case = _case("patchtst-granite-official", "time_series_point_forecast", plugin.user_contract)
+    case = _case("point-forecast-case", "time_series_point_forecast", plugin.user_contract)
     threshold = ThresholdProfile(
         task_strategy="neural_operator",
         metrics={"relative_l2": 1e-6, "max_pointwise_error": 1e-6},
@@ -47,7 +47,7 @@ def test_time_series_quantile_forecast_plugin_requires_quantile_output():
     assert plugin.user_contract == "time_series_quantile_forecast"
 
     case = _case(
-        "chronos-bolt-tiny-official",
+        "quantile-forecast-case",
         "time_series_quantile_forecast",
         plugin.user_contract,
     )

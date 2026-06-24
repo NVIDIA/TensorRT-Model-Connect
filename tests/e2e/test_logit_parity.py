@@ -10,6 +10,12 @@ import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
+_SPEECH_RUNTIME_STRATEGIES = {
+    "speech_to_text",
+    "speech_to_text_rnnt",
+    "speech_to_speech",
+}
+
 
 @pytest.mark.e2e
 def test_logit_parity(model_entry):
@@ -20,6 +26,11 @@ def test_logit_parity(model_entry):
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
     if model_entry.get("test_type") == "audio":
         pytest.skip("Audio model — use test_audio_pipeline")
+    if (
+        model_entry.get("test_type") == "transcription"
+        or model_entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
+    ):
+        pytest.skip("Speech model — no text logit parity")
     if model_entry.get("runtime_strategy") == "vision_language":
         pytest.skip("VL model — diff_logits requires decoder-only models")
     if model_entry.get("skip_logit_parity"):

@@ -27,6 +27,11 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
+static void check_message_contains(const std::string& message, const std::string& needle,
+                                   const char* test_name) {
+    check(message.find(needle) != std::string::npos, test_name);
+}
+
 namespace {
 
 trtmc::cli::CliArgs parse(std::initializer_list<std::string> args) {
@@ -205,6 +210,65 @@ void test_bad_kv_cache_size_fails() {
     check(args.error_message.find("--kv-cache-size expects") == 0, "bad kv cache message");
 }
 
+void test_invalid_generation_sampling_values_fail() {
+    auto negative_tokens =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "-5"});
+    check(negative_tokens.parse_error, "negative max tokens parse error");
+    check_message_contains(negative_tokens.error_message, "--max-new-tokens expects an integer > 0",
+                           "negative max tokens message");
+
+    auto malformed_tokens =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "abc"});
+    check(malformed_tokens.parse_error, "malformed max tokens parse error");
+    check_message_contains(malformed_tokens.error_message,
+                           "--max-new-tokens expects an integer > 0",
+                           "malformed max tokens message");
+
+    auto negative_temperature =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--temperature", "-1"});
+    check(negative_temperature.parse_error, "negative temperature parse error");
+    check_message_contains(negative_temperature.error_message,
+                           "--temperature expects a finite number >= 0",
+                           "negative temperature message");
+
+    auto malformed_top_k =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--top-k", "abc"});
+    check(malformed_top_k.parse_error, "malformed top-k parse error");
+    check_message_contains(malformed_top_k.error_message, "--top-k expects an integer >= 0",
+                           "malformed top-k message");
+
+    auto negative_top_k =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--top-k", "-1"});
+    check(negative_top_k.parse_error, "negative top-k parse error");
+    check_message_contains(negative_top_k.error_message, "--top-k expects an integer >= 0",
+                           "negative top-k message");
+
+    auto out_of_range_top_p =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--top-p", "5.0"});
+    check(out_of_range_top_p.parse_error, "out-of-range top-p parse error");
+    check_message_contains(out_of_range_top_p.error_message,
+                           "--top-p expects a finite number in [0, 1]",
+                           "out-of-range top-p message");
+
+    auto out_of_range_min_p =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--min-p", "-0.1"});
+    check(out_of_range_min_p.parse_error, "out-of-range min-p parse error");
+    check_message_contains(out_of_range_min_p.error_message,
+                           "--min-p expects a finite number in [0, 1]",
+                           "out-of-range min-p message");
+}
+
+void test_generation_sampling_boundaries_parse() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "1",
+                       "--temperature", "0", "--top-p", "0", "--min-p", "1", "--top-k", "0"});
+    check(!args.parse_error, "generation sampling boundary values parse");
+    check(args.max_new_tokens == 1, "boundary max tokens");
+    check(args.temperature == 0.0F, "boundary temperature");
+    check(args.top_p == 0.0F, "boundary top-p");
+    check(args.min_p == 1.0F, "boundary min-p");
+    check(args.top_k == 0, "boundary top-k");
+}
+
 void test_unexpected_positional_fails() {
     auto args = parse({"trtmc", "run", "one.trtfb", "two.trtfb"});
     check(args.parse_error, "unexpected positional parse error");
@@ -254,6 +318,8 @@ int main() {
     test_missing_value_fails();
     test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();
+    test_invalid_generation_sampling_values_fail();
+    test_generation_sampling_boundaries_parse();
     test_unexpected_positional_fails();
     test_num_images_zero_fails();
     test_seed_csv_populates_seed_list();

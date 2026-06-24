@@ -1,0 +1,255 @@
+version: 1
+
+suites:
+  - id: mmlu_five_shot_mcq
+    description: >
+      Local five-shot MMLU multiple-choice accuracy evaluation. This validates
+      user-visible task quality for decoder-style text generation bundles and
+      records HF-reference agreement separately from absolute correctness.
+    user_contract: multiple_choice_qa
+    dataset:
+      kind: mmlu_five_shot_json
+      default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+    selectors:
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - decoder_kv_cache
+        - decoder_moe
+        - ssm_recurrent
+        - rwkv_recurrent
+        - hybrid_mamba_attention
+        - torchtrt_decoder
+      user_contracts:
+        - chat_response
+      exclude_user_contracts:
+        - continuation_parity
+        - code_completion
+        - translation
+        - seq2seq_output
+        - model_card_generation_parity
+    generation:
+      max_new_tokens: 1
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    build:
+      min_max_cache_length: 0
+    gates:
+      max_accuracy_drop_from_hf: 0.01
+      min_prediction_agreement: 0.98
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        First step is local execution. CI can later consume the same suite
+        manifest with a smaller sampled dataset and explicit model allowlist.
+
+  - id: mmlu_continuation_parity
+    description: >
+      Base / completion-model continuation parity. Both the HF reference and the
+      TRTFB bundle greedily continue the same plain-text MMLU prompt; the two
+      continuations are compared token-level (no gold answer, no logits). This
+      measures conversion fidelity for completion models rather than task
+      accuracy.
+    user_contract: continuation_parity
+    dataset:
+      kind: mmlu_five_shot_json
+      default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+    selectors:
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - decoder_kv_cache
+        - decoder_moe
+        - ssm_recurrent
+        - rwkv_recurrent
+        - hybrid_mamba_attention
+        - torchtrt_decoder
+      user_contracts:
+        - continuation_parity
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    build:
+      min_max_cache_length: 0
+    gates:
+      min_token_prefix_agreement: 0.98
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Intended for local/p2021 validation before a sampled CI variant is
+        enabled.
+
+  - id: vlm_mmmu_pro_vision_mcq
+    description: >
+      Local VLM multiple-choice accuracy evaluation on MMMU-Pro-Vision. This
+      validates image-conditioned question answering for vision-language bundles
+      with gold option-letter answers and records HF-reference agreement
+      separately from absolute correctness.
+    user_contract: vl_answer
+    dataset:
+      kind: vlm_chat_json
+      default_path: /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+      image_source: messages
+      max_images_per_sample: 1
+    selectors:
+      task_strategies:
+        - vision_language_generation
+      runtime_strategies:
+        - vision_language
+      families:
+        - qwen_vl
+        - internvl
+      exclude_families:
+        - deepseek_ocr
+        - locateanything
+        - lance
+    generation:
+      max_new_tokens: 8
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: true
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: mcq
+    build:
+      min_max_cache_length: 512
+    gates:
+      max_accuracy_drop_from_hf: 0.02
+      min_prediction_agreement: 0.95
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        First step is local execution on a sampled subset. Nightly/premerge
+        gates should be enabled only after the HF/TRTFB baselines are calibrated
+        for each VLM family.
+
+  - id: vlm_mmmu_pro_vision_fixed_mcq
+    description: >
+      Fixed-input VLM multiple-choice parity evaluation on MMMU-Pro-Vision.
+      Images are normalized to the current Qwen/InternVL fixed-size TRTFB
+      contract and prompts are normalized to a single user image-first message
+      so HF native and TRTFB consume the same controlled input shape.
+    user_contract: vl_answer
+    dataset:
+      kind: vlm_chat_json
+      default_path: /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+      image_source: messages
+      max_images_per_sample: 1
+      normalization:
+        image_size: 448
+        prompt_contract: single_user_image_first
+    selectors:
+      task_strategies:
+        - vision_language_generation
+      runtime_strategies:
+        - vision_language
+      families:
+        - qwen_vl
+        - internvl
+      exclude_families:
+        - deepseek_ocr
+        - locateanything
+        - lance
+    generation:
+      max_new_tokens: 8
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: true
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: mcq
+    build:
+      min_max_cache_length: 1024
+    gates:
+      max_accuracy_drop_from_hf: 0.02
+      min_prediction_agreement: 0.95
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Controlled fixed-input parity suite for the current fixed-shape VLM
+        runtime. This does not replace the native HF-target suite above.
+
+  - id: ocrbench_v2_unified
+    description: >
+      Local OCRBench v2 evaluation on the unified VLM dataset format. This
+      validates image-conditioned OCR / visual QA bundles against OCRBench v2
+      task-specific gold metrics without requiring dataset-local TRTMC config.
+    user_contract: ocr_text
+    dataset:
+      kind: vlm_unified_json
+      default_path: /mnt/data/OCRBench_v2/unified/dataset.json
+      answer_field: answer.primary
+      subject_field: category
+      prompt_source: messages
+      image_source: media
+      max_images_per_sample: 1
+    selectors:
+      task_strategies:
+        - vision_language_generation
+      runtime_strategies:
+        - vision_language
+      families:
+        - deepseek_ocr
+      exclude_families:
+        - locateanything
+        - lance
+    generation:
+      max_new_tokens: 32
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: true
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: ocrbench_v2
+    build:
+      min_max_cache_length: 1024
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Intended for local/p2021 validation first. Pass --dataset for
+        machine-specific data roots such as
+        /localhome/.../trtmc/data/OCRBench_v2_repaired.

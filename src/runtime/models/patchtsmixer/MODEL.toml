@@ -1,1 +1,1 @@
-runtime_strategies = ["patchtsmixer_torchtrt"]
+runtime_strategies = ["patchtsmixer_trt"]

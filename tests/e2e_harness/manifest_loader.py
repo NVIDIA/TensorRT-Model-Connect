@@ -30,16 +30,6 @@ logger = logging.getLogger(__name__)
 # Default manifest directory (relative to project root)
 _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
 
-_TORCHTRT_RUNTIME_STRATEGIES = frozenset({
-    "torchtrt_decoder",
-    "torchtrt_diffusion",
-    "diffusion_pixart_torchtrt",
-    "patchtst_torchtrt",
-    "patchtsmixer_torchtrt",
-    "timesfm_torchtrt",
-    "chronos_bolt_torchtrt",
-})
-
 # ---------------------------------------------------------------------------
 # Reference backend defaults per task strategy
 # ---------------------------------------------------------------------------
@@ -56,7 +46,6 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
     "object_detection": "hf_transformers",
     "diffusion_media_generation": "hf_diffusers",
     "diffusion_text_generation": "invariant_only",
-    "torchtrt_diffusion": "torchtrt_diffusers",
     "embedding": "hf_transformers",
     "reranking": "hf_transformers",
     "encoder_only_nlp": "hf_transformers",
@@ -68,7 +57,6 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
 _DEFAULT_ORACLE_LEVEL: dict[str, str] = {
     "hf_transformers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "hf_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
-    "torchtrt_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "nemo": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torch_reference": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "custom_python": OracleLevel.L2_INTERNAL_REFERENCE.value,
@@ -135,12 +123,6 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
         {"name": "vision_encode", "required": False},
         {"name": "audio_encode", "required": False},
         {"name": "talker_decode", "required": True},
-        {"name": "end_to_end", "required": True},
-    ],
-    "torchtrt_diffusion": [
-        {"name": "t5_encode", "required": True},
-        {"name": "dit_step", "required": True},
-        {"name": "vae_decode", "required": True},
         {"name": "end_to_end", "required": True},
     ],
     "composite_pipeline": [
@@ -241,22 +223,6 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    # Torch-TRT-backed models need torch_tensorrt, even when the manifest
-    # relies on CLI auto-selection instead of forcing --method torchtrt.
-    build_args = manifest.get("build_args", {})
-    backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
-    runtime_strategy = str(manifest.get("runtime_strategy", "") or "")
-    if (
-        build_args.get("torch_trt", False)
-        or backend in {"torchtrt", "torch_trt"}
-        or runtime_strategy in _TORCHTRT_RUNTIME_STRATEGIES
-    ):
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "torch_tensorrt", "phase": "build"},
-            gating=True,
-        ))
-
     # Diffusion needs diffusers
     if task_strategy == "diffusion_media_generation":
         reqs.append(PreflightRequirement(
@@ -270,17 +236,17 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    if runtime_strategy == "chronos_bolt_torchtrt":
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "chronos", "phase": "build"},
-            gating=True,
-        ))
-
     if task_strategy == "image_classification":
         reqs.append(PreflightRequirement(
             kind="python_module_available",
             args={"module": "timm", "phase": "reference"},
+            gating=True,
+        ))
+
+    if manifest.get("runtime_strategy") == "chronos_bolt_trt":
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "chronos", "phase": "build"},
             gating=True,
         ))
 
@@ -373,7 +339,7 @@ def _build_inputs(manifest: dict) -> dict:
         inputs["video_width"] = manifest.get("video_width", 832)
         inputs["num_inference_steps"] = manifest.get("num_inference_steps", 30)
 
-    # Image dimensions (torch-trt diffusion uses these for latent shape)
+    # Image dimensions for image-only diffusion.
     if manifest.get("image_height"):
         inputs["image_height"] = manifest["image_height"]
         inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
@@ -495,8 +461,7 @@ def _build_metadata(manifest: dict) -> dict:
     if "quantization" in manifest:
         meta["quantization"] = manifest["quantization"]
 
-    # Propagate build_args so the orchestrator can select the correct backend
-    # (e.g. --method torchtrt for torch-trt models vs raw TRT default).
+    # Propagate build_args so the orchestrator can select the correct backend.
     if "build_args" in manifest:
         meta["build_args"] = manifest["build_args"]
 
@@ -539,8 +504,6 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_zimage",
     "diffusion_qwen_image",
     "diffusion_pixart",
-    "torchtrt_diffusion",
-    "diffusion_pixart_torchtrt",
     "segmentation",
     "prompted_segmentation",
     "image_classification",
@@ -553,11 +516,10 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "object_detection",
     "omni_multimodal",
     "neural_operator",
-    "torchtrt_decoder",
-    "patchtst_torchtrt",
-    "patchtsmixer_torchtrt",
-    "timesfm_torchtrt",
-    "chronos_bolt_torchtrt",
+    "patchtst_trt",
+    "patchtsmixer_trt",
+    "timesfm_trt",
+    "chronos_bolt_trt",
     "elf_flow",
 })
 

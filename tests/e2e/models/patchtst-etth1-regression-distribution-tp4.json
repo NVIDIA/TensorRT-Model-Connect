@@ -3,7 +3,7 @@
   "hf_id": "ibm-research/patchtst-etth1-regression-distribution",
   "bundle": "patchtst-etth1-regression-distribution-tp4.trtfb",
   "family": "patchtst",
-  "runtime_strategy": "patchtst_torchtrt",
+  "runtime_strategy": "patchtst_trt",
   "reference_backend": "torch_reference",
   "reference_family": "time_series_regression",
   "user_contract": "time_series_regression",

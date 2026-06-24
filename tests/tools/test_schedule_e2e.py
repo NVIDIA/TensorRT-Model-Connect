@@ -34,7 +34,7 @@ def _test_id(name: str) -> str:
 def test_diffusion_family_strategies_are_large() -> None:
     assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_flux"}) == "large"
     assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_ltx"}) == "large"
-    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_pixart_torchtrt"}) == "large"
+    assert schedule_e2e.classify_size({"runtime_strategy": "diffusion_pixart"}) == "large"
 
 
 def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:

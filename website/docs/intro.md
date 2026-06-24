@@ -123,7 +123,7 @@ TensorRT-Model-Connect addresses that by separating "understand the model" from 
 | Concern | Where it lives | Why |
 | --- | --- | --- |
 | Read HuggingFace config and weights | Python builder | Python has the richest ecosystem for model formats and checkpoint conversion. |
-| Construct TensorRT graphs or Torch-TRT engines | Python builder | Build-time logic can use TensorRT Python APIs and model-specific adapters. |
+| Construct TensorRT graphs | Python builder | Build-time logic can use TensorRT Python APIs and model-specific adapters. |
 | Package engines, tokenizer assets, config, and metadata | `.trtfb` bundle | The bundle becomes the stable build/runtime handoff. |
 | Load, validate, and dispatch the bundle | C++ runtime | Deployment code can stay native and task-oriented. |
 | Execute engine plans and own request state | C++ pipeline and backend DSO | Request-time latency stays in native code and TensorRT ABI is isolated. |

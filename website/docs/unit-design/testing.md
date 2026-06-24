@@ -33,7 +33,6 @@ Use for:
 - Engine builder orchestration.
 - Quantization and calibration logic.
 - Config schema and CLI coverage.
-- Torch-TRT engine definitions.
 
 Builder tests are the right place to validate that a model family can be identified, weights can be mapped, config fields are interpreted correctly, and bundle metadata is emitted as intended.
 

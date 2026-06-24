@@ -3,7 +3,7 @@
   "hf_id": "amazon/chronos-bolt-tiny",
   "bundle": "chronos-bolt-tiny-official-tp4.trtfb",
   "family": "chronos_bolt",
-  "runtime_strategy": "chronos_bolt_torchtrt",
+  "runtime_strategy": "chronos_bolt_trt",
   "reference_backend": "torch_reference",
   "reference_family": "time_series_quantile_forecast",
   "user_contract": "time_series_quantile_forecast",

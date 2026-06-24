@@ -1,0 +1,32 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b-asr-probe05",
+  "trace_id": "IT-E2E-NEMO-RNNT-ASR-05",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "bundle": "nemotron-speech-streaming-en-0.6b.trtfb",
+  "family": "nemotron_speech_streaming",
+  "runtime_strategy": "speech_to_text_rnnt",
+  "reference_family": "asr_canary",
+  "user_contract": "exact_transcript",
+  "test_type": "transcription",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "nemotron-speech-streaming-en-0.6b",
+  "l0_replacement_reason": "ASR probe matrix runs in nightly; PR L0 uses the base ASR model for the same runtime path.",
+  "max_cache_length": 128,
+  "prompt": "test",
+  "max_new_tokens": 80,
+  "logit_atol": 0.01,
+  "layer_atol": 0.1,
+  "trust_remote_code": false,
+  "test_input_audio": "data/asr_probes/probe_05_low_volume_48k_stereo.wav",
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.1,
+    "contract_wer_threshold": 0.1,
+    "contract_cer_threshold": 0.1,
+    "wer": 0.1,
+    "cer": 0.1
+  },
+  "asr_probe_id": "probe_05_low_volume_48k_stereo",
+  "asr_probe_readiness": "ready_now",
+  "asr_probe_purpose": "Cover low-amplitude PCM handling.",
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM int16 decode + float normalization + ASR preprocessing."
+}

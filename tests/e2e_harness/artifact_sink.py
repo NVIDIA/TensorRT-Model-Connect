@@ -124,7 +124,7 @@ result = {
     "python_executable": sys.executable,
     "python_version": sys.version,
 }
-for module_name in ("torch", "transformers", "diffusers", "chronos", "tensorrt"):
+for module_name in ("torch", "transformers", "diffusers", "tensorrt"):
     try:
         module = importlib.import_module(module_name)
         result[f"{module_name}_version"] = getattr(module, "__version__", "unknown")

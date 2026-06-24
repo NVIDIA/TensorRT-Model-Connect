@@ -39,7 +39,7 @@ flowchart LR
   subgraph Builder["Python build phase"]
     MC["ModelConfig"]
     Family["FamilyPlugin"]
-    Graph["TensorRT graph or Torch-TRT export"]
+    Graph["TensorRT graph"]
     Plans["engine plan bytes"]
     Writer["bundle_writer"]
   end
@@ -114,7 +114,7 @@ The same model has three identities as it moves through the stack:
 | Identity | Example | Source of truth | Used by |
 | --- | --- | --- | --- |
 | HuggingFace model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
-| Builder family | `qwen`, `whisper`, `flux`, `timesfm` | `python/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
+| Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
 | Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux` | Bundle metadata and C++ plugin manifest | C++ dispatch and pipeline construction. |
 
 This matters because adding a new model does not always mean adding a new runtime. A new decoder-only family can often reuse `decoder_kv_cache`; a new task shape may need a new runtime strategy.

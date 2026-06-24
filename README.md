@@ -74,7 +74,7 @@ If CMake says the TensorRT backend was skipped, follow the [Installation](websit
 Nightly wheels are tagged `py310-none-manylinux_2_39_aarch64` and
 `py312-none-manylinux_2_39_aarch64`; use the tag matching your Python
 interpreter. The `manylinux_2_39_aarch64` platform tag matches the TensorRT
-10.16 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host.
+11 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host.
 CI package jobs build and test wheels in the repository Dockerfile image
 (`TRTMC_CI_IMAGE`, derived from repository variable `TRTMC_MANYLINUX_CI_IMAGE`
 or default `trtmc-dev-gb300:manylinux_2_39`) so the compiled

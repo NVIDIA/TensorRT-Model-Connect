@@ -1,4 +1,4 @@
-// PatchTSTPlugin: handles "patchtst_torchtrt" strategy.
+// PatchTSTPlugin: handles "patchtst_trt" strategy.
 // Numeric time-series models compiled from the PatchTST HF family.
 
 #include "runtime/models/patchtst/pipeline.h"
@@ -111,7 +111,6 @@ class PatchTSTPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtst_plugin, PatchTSTPlugin,
-                                       "patchtst_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtst_plugin, PatchTSTPlugin, "patchtst_trt");
 
 } // namespace trtmc

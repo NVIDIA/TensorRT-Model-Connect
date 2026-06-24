@@ -40,6 +40,12 @@ import pytest
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_DIR / "tools"
 
+_SPEECH_RUNTIME_STRATEGIES = {
+    "speech_to_text",
+    "speech_to_text_rnnt",
+    "speech_to_speech",
+}
+
 # Ensure tools/ is importable for compare_logits, run_hf, etc.
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
@@ -277,7 +283,12 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
 
     # Skip audio models (handled by test_audio_pipeline)
-    if entry.get("test_type") == "audio" or entry.get("runtime_strategy") == "text_to_audio":
+    if (
+        entry.get("test_type") == "audio"
+        or entry.get("test_type") == "transcription"
+        or entry.get("runtime_strategy") == "text_to_audio"
+        or entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
+    ):
         pytest.skip("Audio model — use test_audio_pipeline")
 
     # Skip gated models (require HF auth for diff_logits)

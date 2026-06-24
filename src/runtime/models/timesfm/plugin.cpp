@@ -1,4 +1,4 @@
-// TimesFmPlugin: handles "timesfm_torchtrt" bundles.
+// TimesFmPlugin: handles "timesfm_trt" bundles.
 // Loads a single TRT engine and routes solve() through TimesFmPipeline.
 
 #include "runtime/models/timesfm/pipeline.h"
@@ -74,6 +74,6 @@ class TimesFmPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_timesfm_plugin, TimesFmPlugin, "timesfm_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_timesfm_plugin, TimesFmPlugin, "timesfm_trt");
 
 } // namespace trtmc

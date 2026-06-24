@@ -60,6 +60,16 @@ class _FakeLayer:
         return None
 
 
+class _FakeLayerWithoutComputePrecision:
+    def __init__(self, name: str = "layer", *, dtype=None):
+        self.name = name
+        self._out = _FakeTensor(name, dtype=dtype)
+        self.epsilon = None
+
+    def get_output(self, _idx: int) -> _FakeTensor:
+        return self._out
+
+
 class _FakeNetwork:
     def __init__(self):
         self.inputs: list[tuple[str, object, tuple]] = []
@@ -316,6 +326,35 @@ def _capturing_create_network(monkeypatch):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_layernorm_no_affine_tolerates_trt11_without_compute_precision(
+    monkeypatch,
+):
+    pytest.importorskip("numpy")
+    from tensorrt_model_connect.families.qwen_image import (
+        qwen_image_dit_builder as dit_mod,
+    )
+
+    class _TRT11Network(_FakeNetwork):
+        def __init__(self):
+            super().__init__()
+            self.norm = _FakeLayerWithoutComputePrecision("norm")
+
+        def add_normalization(self, *_a, **_kw):
+            return self.norm
+
+    monkeypatch.setattr(dit_mod, "trt", _FakeTRT)
+    network = _TRT11Network()
+    out = dit_mod._add_layernorm_no_affine_3d(
+        network,
+        _FakeTensor("x", dtype=dit_mod._CAST_DTYPE),
+        hidden_size=4,
+        eps=1e-6,
+    )
+
+    assert out is network.norm.get_output(0)
+    assert network.norm.epsilon == 1e-6
 
 
 def test_max_batch_size_four_uses_dynamic_dim_and_calls_profile(

@@ -393,10 +393,10 @@ def _is_supported_time_series_case(case: E2ECase) -> bool:
     family = str(case.family or "").lower()
     runtime = str(case.runtime_strategy or "").lower()
     return family in {"patchtst", "patchtsmixer", "timesfm", "chronos_bolt"} or runtime in {
-        "patchtst_torchtrt",
-        "patchtsmixer_torchtrt",
-        "timesfm_torchtrt",
-        "chronos_bolt_torchtrt",
+        "patchtst_trt",
+        "patchtsmixer_trt",
+        "timesfm_trt",
+        "chronos_bolt_trt",
     }
 
 

@@ -48,10 +48,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
-    "patchtst_torchtrt": "neural_operator",
-    "patchtsmixer_torchtrt": "neural_operator",
-    "timesfm_torchtrt": "neural_operator",
-    "chronos_bolt_torchtrt": "neural_operator",
+    "patchtst_trt": "neural_operator",
+    "patchtsmixer_trt": "neural_operator",
+    "timesfm_trt": "neural_operator",
+    "chronos_bolt_trt": "neural_operator",
     "elf_flow": "diffusion_text_generation",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
@@ -60,9 +60,6 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_qwen_image": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
-    "torchtrt_decoder": "text_generation_causal",
-    "torchtrt_diffusion": "diffusion_media_generation",
-    "diffusion_pixart_torchtrt": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",
     "marian_translation": "text_generation_causal",
@@ -82,10 +79,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "magpie_plugin": ["text_to_audio_magpie"],
     "speech_plugin": ["speech_to_speech"],
     "encoder_plugin": ["encoder_only", "embedding", "reranking", "neural_operator"],
-    "patchtst_plugin": ["patchtst_torchtrt"],
-    "patchtsmixer_plugin": ["patchtsmixer_torchtrt"],
-    "timesfm_plugin": ["timesfm_torchtrt"],
-    "chronos_bolt_plugin": ["chronos_bolt_torchtrt"],
     "elf_flow_plugin": ["elf_flow"],
     "segmentation_plugin": ["segmentation", "prompted_segmentation"],
     "object_detection_plugin": ["object_detection"],
@@ -94,7 +87,6 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "ltx_video_plugin": ["diffusion_ltx"],
     "wan_plugin": ["diffusion_wan"],
     "pixart_plugin": ["diffusion_pixart"],
-    "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
     "zimage_plugin": ["diffusion_zimage"],
     "qwen_image_plugin": ["diffusion_qwen_image"],
     "t5_plugin": ["text_to_text"],
@@ -122,21 +114,16 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
         "encoder_only", "embedding", "reranking", "neural_operator",
         "object_detection",
     ],
-    "patchtst_pipeline": ["patchtst_torchtrt"],
-    "patchtsmixer_pipeline": ["patchtsmixer_torchtrt"],
-    "timesfm_pipeline": ["timesfm_torchtrt"],
-    "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
     "elf_flow_pipeline": ["elf_flow"],
     "flux_pipeline": ["diffusion_flux"],
     "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
     "pixart_pipeline": ["diffusion_pixart"],
-    "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
     "qwen_image_pipeline": ["diffusion_qwen_image"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
-        "diffusion_zimage", "diffusion_qwen_image", "diffusion_pixart_torchtrt",
+        "diffusion_zimage", "diffusion_qwen_image",
     ],
 }
 
@@ -176,6 +163,7 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
 
 # E2E contract plugin filename (stem) -> task_strategies
 PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
+    "asr": ["speech_to_text"],
     "diffusion": ["diffusion_media_generation"],
     "vl_qa": ["vision_language_generation"],
     "multimodal_chat": ["omni_multimodal"],
@@ -201,7 +189,6 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
 # E2E threshold profile filename (stem) -> task_strategies
 THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_media_generation": ["diffusion_media_generation"],
-    "torchtrt_diffusion": ["diffusion_media_generation"],
     "vision_language_generation": ["vision_language_generation"],
     "omni_multimodal": ["omni_multimodal"],
     "segmentation": ["segmentation"],
@@ -223,6 +210,12 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
     "debug_runner", "diffusion_runner",
+}
+
+# Python profile names normally match a model family. Aliases cover profiles
+# that install package-level dependencies shared by a more specific family.
+PYTHON_PROFILE_TO_FAMILIES: Dict[str, List[str]] = {
+    "chronos": ["chronos_bolt"],
 }
 
 # Patterns for files that never affect E2E or unit tests
@@ -279,6 +272,7 @@ class ImpactMap:
     e2e_data_file_to_models: Dict[str, List[str]]
     path_scope_overrides: Dict[str, List[str]]
     l0_replacement_by_model: Dict[str, str]
+    reference_family_to_models: Dict[str, List[str]]
 
 
 @dataclass
@@ -304,7 +298,7 @@ def _iter_family_python_files(families_dir: Path) -> List[tuple[str, Path]]:
     files: List[tuple[str, Path]] = []
     for py_file in sorted(families_dir.glob("*.py")):
         name = py_file.stem
-        if name in ("__init__", "base"):
+        if name in ("__init__", "base") or name.startswith("_"):
             continue
         files.append((name, py_file))
     for family_dir in sorted(path for path in families_dir.iterdir() if path.is_dir()):
@@ -376,6 +370,49 @@ def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
     return scoped
 
 
+def _scan_contract_reference_families(
+    contracts_path: Path,
+    known_models: Set[str],
+) -> Dict[str, List[str]]:
+    """Build ReferenceFamily value -> models from the static contract table."""
+    try:
+        text = contracts_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    reference_family_block = re.search(
+        r"class\s+ReferenceFamily\([^)]*\):(?P<body>.*?)(?=^class\s+\w+\()",
+        text,
+        re.M | re.S,
+    )
+    if reference_family_block is None:
+        return {}
+
+    enum_values: Dict[str, str] = {}
+    for match in re.finditer(
+        r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*\"([^\"]+)\"",
+        reference_family_block.group("body"),
+        re.M,
+    ):
+        enum_values[match.group(1)] = match.group(2)
+
+    models_by_reference_family: Dict[str, Set[str]] = {}
+    for match in re.finditer(
+        r"\"([^\"]+)\"\s*:\s*(?:\(\s*)?ReferenceFamily\.([A-Z0-9_]+)\.value",
+        text,
+        re.S,
+    ):
+        model, enum_name = match.groups()
+        reference_family = enum_values.get(enum_name)
+        if reference_family and model in known_models:
+            models_by_reference_family.setdefault(reference_family, set()).add(model)
+
+    return {
+        reference_family: sorted(models)
+        for reference_family, models in models_by_reference_family.items()
+    }
+
+
 def _iter_manifest_data_paths(value: object) -> List[str]:
     """Return repo-relative tests/e2e/data paths referenced by a manifest."""
     paths: Set[str] = set()
@@ -406,6 +443,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     task_strategy_to_models: Dict[str, List[str]] = {}
     manifest_field_to_models_sets: Dict[str, Set[str]] = {}
     e2e_data_file_to_models_sets: Dict[str, Set[str]] = {}
+    reference_family_to_models_sets: Dict[str, Set[str]] = {}
     all_model_names: List[str] = []
     core_models: List[str] = []
     model_metadata: Dict[str, Dict] = {}
@@ -444,9 +482,17 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 f"tests/e2e/data/{fp8_scales}", set()).add(name)
         for data_path in _iter_manifest_data_paths(data):
             e2e_data_file_to_models_sets.setdefault(data_path, set()).add(name)
+        reference_family = data.get("reference_family")
+        if isinstance(reference_family, str) and reference_family:
+            reference_family_to_models_sets.setdefault(reference_family, set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
     cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
+    for reference_family, models in _scan_contract_reference_families(
+        repo_root / "tests" / "e2e_harness" / "contracts.py",
+        set(all_model_names),
+    ).items():
+        reference_family_to_models_sets.setdefault(reference_family, set()).update(models)
 
     def _models_for_scoped_strategies(strategies: Set[str]) -> List[str]:
         models: Set[str] = set()
@@ -507,6 +553,10 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         },
         path_scope_overrides=path_scope_overrides,
         l0_replacement_by_model=l0_replacement_by_model,
+        reference_family_to_models={
+            reference_family: sorted(models)
+            for reference_family, models in reference_family_to_models_sets.items()
+        },
     )
 
 # ---------------------------------------------------------------------------
@@ -603,9 +653,7 @@ def _infer_unit_tiers(path: str) -> List[str]:
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
         tiers.append("cpp")
-    if (path.startswith("tests/builder/")
-            or path.startswith("tests/torchtrt_builder/")
-            or path.startswith("tests/engine_defs/torch_trt/")):
+    if path.startswith("tests/builder/"):
         tiers.append("builder")
     if path.startswith("tests/cpp/"):
         tiers.append("cpp")
@@ -768,6 +816,15 @@ def _manifest_models(context: RuleContext, imap: ImpactMap) -> List[str]:
 
 def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
+
+
+def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    profile = _group(context)
+    families = PYTHON_PROFILE_TO_FAMILIES.get(profile, [profile])
+    models: Set[str] = set()
+    for family in families:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
 
 
 def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
@@ -979,48 +1036,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=50,
-            name="torchtrt_family_plugin",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/families/(\w+)\.py$",
-                lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
-            ),
-            resolver=_match_result("torchtrt_family_plugin", _family_models),
-            covered_by=("TestFamilyPlugin.test_torchtrt_family_only_change",),
-        ),
-        ClassificationRule(
-            priority=60,
-            name="torchtrt_family_base",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/families/((__init__|base)\.py)$"
-            ),
-            resolver=_match_result("torchtrt_family_base", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
-            priority=70,
-            name="torchtrt_strategy",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/strategies/(diffusion)\.py$"
-            ),
-            resolver=_match_result(
-                "torchtrt_strategy",
-                _task_strategy_models(["diffusion_media_generation"]),
-            ),
-            covered_by=("TestHarness.test_torchtrt_diffusion_strategy",),
-        ),
-        ClassificationRule(
             priority=80,
-            name="torchtrt_strategy_unknown",
+            name="python_profile_requirements",
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/"
-                r"engine_defs/torch_trt/strategies/(\w+)\.py$"
+                r"python_profile_requirements/([^/]+)\.lock\.txt$"
             ),
-            resolver=_match_result("torchtrt_strategy_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+            resolver=_match_result("python_profile_requirements", _python_profile_models),
+            covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
         ),
         ClassificationRule(
             priority=90,
@@ -1387,16 +1410,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_unit_tier_tools",),
         ),
         ClassificationRule(
-            priority=450,
-            name="unit_torchtrt_builder",
-            matcher=_path_startswith_any((
-                "tests/torchtrt_builder/",
-                "tests/engine_defs/torch_trt/",
-            )),
-            resolver=_match_result("unit_torchtrt_builder", _no_models),
-            covered_by=("TestUnitTiers.test_unit_tier_torchtrt_engine_defs",),
-        ),
-        ClassificationRule(
             priority=460,
             name="cmake",
             matcher=lambda path, _imap: (
@@ -1413,6 +1426,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
+        ),
+        ClassificationRule(
+            priority=475,
+            name="asr_probe_data",
+            matcher=_regex_rule(r"tests/e2e/data/asr_probes/.+$"),
+            resolver=_match_result(
+                "asr_probe_data",
+                _task_strategy_models(["speech_to_text"]),
+            ),
+            covered_by=("TestE2EDataFiles.test_asr_probe_support_files_select_asr",),
         ),
         ClassificationRule(
             priority=480,
@@ -1433,6 +1456,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             }),
             resolver=_match_result("elf_replay_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_elf_replay_tools_trigger_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=486,
+            name="task_eval_tool",
+            matcher=_path_equals("tools/task_eval.py"),
+            resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=487,
+            name="task_eval_config",
+            matcher=_path_startswith("tests/task_eval/"),
+            resolver=_match_result("task_eval_config", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_task_eval_suite_config_triggers_tools_tier",),
         ),
         ClassificationRule(
             priority=490,
@@ -1484,7 +1521,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
         path = raw_path.replace("\\", "/").strip("/")
         if not path.endswith(".py"):
             continue
-        if path.startswith("tests/builder/") or path.startswith("tests/engine_defs/torch_trt/"):
+        if path.startswith("tests/builder/"):
             builder_tests.add(path)
         elif path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
             tools_tests.add(path)
@@ -1527,14 +1564,30 @@ def analyze_impact(
     all_tiers: Set[str] = set()
     rebuild_cpp = False
     matched_rules: List[Dict] = []
+    diff_text_by_path: Dict[str, str] = {}
+    candidate_models: List[str] = []
+
+    if base and head and repo_root:
+        for fpath in changed_files:
+            diff_text = get_file_diff(base, head, repo_root, fpath)
+            if diff_text:
+                diff_text_by_path[fpath] = diff_text
+        candidate_models = _candidate_models_from_diffs(
+            changed_files,
+            imap,
+        )
 
     for fpath in changed_files:
         match = classify_file(fpath, imap)
-        diff_text = None
-        if base and head and repo_root:
-            diff_text = get_file_diff(base, head, repo_root, fpath)
+        diff_text = diff_text_by_path.get(fpath)
         if diff_text:
-            match = maybe_refine_match_with_diff(fpath, match, diff_text, imap)
+            match = maybe_refine_match_with_diff(
+                fpath,
+                match,
+                diff_text,
+                imap,
+                candidate_models,
+            )
         all_models.update(match.models)
         if match.rule in ("manifest", "e2e_data_file"):
             exact_models.update(match.models)
@@ -1648,7 +1701,7 @@ def _significant_diff_lines(diff_text: str) -> List[str]:
         content = raw_line[1:].strip()
         if not content:
             continue
-        if re.fullmatch(r"[\[\]{}(),;]+", content):
+        if re.fullmatch(r"[\[\]{}(),;:'\"]+", content):
             continue
         lines.append(content)
     return lines
@@ -1692,11 +1745,6 @@ def _diffusion_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(["diffusion_media_generation"], imap)
 
 
-def _torchtrt_tokenizer_models(imap: ImpactMap) -> List[str]:
-    return _models_for_runtime_strategies(
-        ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap)
-
-
 def _sam3_models(imap: ImpactMap) -> List[str]:
     models = imap.family_to_models.get("sam3", [])
     if models:
@@ -1707,6 +1755,199 @@ def _sam3_models(imap: ImpactMap) -> List[str]:
 def _segmentation_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(
         ["segmentation", "prompted_segmentation", "object_detection"], imap)
+
+
+def _models_for_families(families: Tuple[str, ...], imap: ImpactMap) -> List[str]:
+    models: Set[str] = set()
+    for family in families:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
+def _canonical_identifier(value: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.lower())).strip("_")
+
+
+def _diff_identifier_fragments(line: str) -> Set[str]:
+    fragments: Set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", line):
+        fragments.add(_canonical_identifier(token))
+        for part in re.split(r"[.]", token):
+            part = _canonical_identifier(part)
+            if part:
+                fragments.add(part)
+    return {fragment for fragment in fragments if fragment}
+
+
+def _models_for_profile_name(profile: str, imap: ImpactMap) -> List[str]:
+    families = PYTHON_PROFILE_TO_FAMILIES.get(profile, [profile])
+    return _models_for_families(tuple(families), imap)
+
+
+def _line_identifier_models(
+    line: str,
+    imap: ImpactMap,
+    include_task_strategies: bool = False,
+) -> List[str]:
+    fragments = _diff_identifier_fragments(line)
+    models: Set[str] = set()
+    model_fragments = {
+        _canonical_identifier(model)
+        for model in imap.all_model_names
+    }
+
+    for model in imap.all_model_names:
+        if _canonical_identifier(model) in fragments:
+            models.add(model)
+    for runtime_strategy, strategy_models in imap.strategy_to_models.items():
+        if _canonical_identifier(runtime_strategy) in fragments:
+            models.update(strategy_models)
+    for family, family_models in imap.family_to_models.items():
+        if _canonical_identifier(family) in fragments - model_fragments:
+            models.update(family_models)
+    for reference_family, reference_models in imap.reference_family_to_models.items():
+        if _canonical_identifier(reference_family) in fragments:
+            models.update(reference_models)
+    for profile in PYTHON_PROFILE_TO_FAMILIES:
+        if _canonical_identifier(profile) in fragments:
+            models.update(_models_for_profile_name(profile, imap))
+    if include_task_strategies:
+        for task_strategy, task_models in imap.task_strategy_to_models.items():
+            if _canonical_identifier(task_strategy) in fragments:
+                models.update(task_models)
+
+    return sorted(models)
+
+
+def _models_from_diff_identifiers(
+    lines: List[str],
+    imap: ImpactMap,
+    include_task_strategies: bool = False,
+) -> List[str]:
+    models: Set[str] = set()
+    for line in lines:
+        models.update(
+            _line_identifier_models(
+                line,
+                imap,
+                include_task_strategies=include_task_strategies,
+            )
+        )
+    return sorted(models)
+
+
+def _is_narrow_model_set(models: List[str], imap: ImpactMap) -> bool:
+    return bool(models) and len(set(models)) < len(imap.all_model_names_set)
+
+
+def _line_is_metadata_comment(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
+def _line_matches_allowed_tokens(line: str, allowed_tokens: Tuple[str, ...]) -> bool:
+    normalized = _normalize_diff_line(line)
+    return any(token in normalized for token in allowed_tokens)
+
+
+def _scoped_models_from_path(path: str, imap: ImpactMap) -> List[str]:
+    match = classify_file(path, imap)
+    candidate_rule_names = {
+        "cpp_runtime_model",
+        "e2e_data_file",
+        "family_package",
+        "family_plugin",
+        "manifest",
+        "python_profile_requirements",
+        "specialized_builder",
+    }
+    if match.rule not in candidate_rule_names:
+        return []
+    if not _is_narrow_model_set(match.models, imap):
+        return []
+    if match.rule in _BROAD_FALLBACK_RULES:
+        return []
+    if match.rule.endswith("_unknown"):
+        return []
+    return match.models
+
+
+def _candidate_models_from_diffs(
+    changed_files: List[str],
+    imap: ImpactMap,
+) -> List[str]:
+    models: Set[str] = set()
+    for path in changed_files:
+        models.update(_scoped_models_from_path(path, imap))
+    return sorted(models)
+
+
+_PROFILE_METADATA_TOKENS: Tuple[str, ...] = (
+    "'''",
+    "architectures",
+    "build",
+    "config",
+    "context_length",
+    "ctor",
+    "d_ff",
+    "d_model",
+    "decoder_start_token_id",
+    "dropout_rate",
+    "eos_token_id",
+    "eval",
+    "family_defaults",
+    "import",
+    "input_patch_size",
+    "input_patch_stride",
+    "kind",
+    "num_decoder_layers",
+    "num_heads",
+    "num_layers",
+    "pad_token_id",
+    "prediction_length",
+    "print",
+    "profiles",
+    "quantiles",
+    "reference",
+    "requirements",
+    "system_site_packages",
+    "transformers",
+    "use_reg_token",
+    "venv",
+    "verification_script",
+)
+
+_HARNESS_REGISTRY_TOKENS: Tuple[str, ...] = (
+    "args",
+    "build",
+    "case.family",
+    "case.metadata",
+    "case.reference_family",
+    "cli_commands",
+    "comparisonmode",
+    "comparator_class",
+    "diff_framework",
+    "family",
+    "gating",
+    "import",
+    "kind",
+    "metadata",
+    "overrides",
+    "phase",
+    "preflightrequirement",
+    "python_module_available",
+    "referencefamily",
+    "reference_family",
+    "reqs.append",
+    "return",
+    "runner_class",
+    "runtime_strategy",
+    "stage",
+    "task",
+    "task_strategy",
+    "torch",
+    "transformers",
+    "usercontract",
+)
 
 
 @dataclass(frozen=True)
@@ -1731,6 +1972,108 @@ class TokenDiffRefinementRule(DiffRefinementRule):
         return RuleMatch(
             self.name,
             self.models_for_impact(imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+@dataclass(frozen=True)
+class IdentifierDiffRefinementRule(DiffRefinementRule):
+    name: str
+    paths: Tuple[str, ...] = ()
+    path_prefixes: Tuple[str, ...] = ()
+    allowed_tokens: Tuple[str, ...] = ()
+    include_task_strategies: bool = False
+
+    def _path_matches(self, path: str) -> bool:
+        return path in self.paths or path.startswith(self.path_prefixes)
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        if not self._path_matches(path):
+            return False
+        scoped_models = _models_from_diff_identifiers(
+            lines,
+            imap,
+            include_task_strategies=self.include_task_strategies,
+        )
+        if not _is_narrow_model_set(scoped_models, imap):
+            return False
+        return all(
+            _line_is_metadata_comment(line)
+            or _line_identifier_models(
+                line,
+                imap,
+                include_task_strategies=self.include_task_strategies,
+            )
+            or _line_matches_allowed_tokens(line, self.allowed_tokens)
+            for line in lines
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path
+        return RuleMatch(
+            self.name,
+            _models_from_diff_identifiers(
+                lines,
+                imap,
+                include_task_strategies=self.include_task_strategies,
+            ),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+@dataclass(frozen=True)
+class CandidateTokenDiffRefinementRule(DiffRefinementRule):
+    name: str
+    path: str
+    allowed_tokens: Tuple[str, ...]
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del path, lines, imap
+        return False
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, match, lines, imap
+        raise RuntimeError("candidate-aware rules must use refine_with_candidates")
+
+    def matches_with_candidates(
+        self,
+        path: str,
+        lines: List[str],
+        imap: ImpactMap,
+        candidate_models: List[str],
+    ) -> bool:
+        return (
+            path == self.path
+            and _is_narrow_model_set(candidate_models, imap)
+            and _all_lines_match_tokens(lines, self.allowed_tokens)
+        )
+
+    def refine_with_candidates(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+        candidate_models: List[str],
+    ) -> RuleMatch:
+        del path, lines, imap
+        return RuleMatch(
+            self.name,
+            sorted(set(candidate_models)),
             match.unit_tiers,
             match.rebuild_cpp,
         )
@@ -1899,6 +2242,102 @@ class HarnessSharedFp8ScalesRule(DiffRefinementRule):
         )
 
 
+class KnownModelTimingEstimateRule(DiffRefinementRule):
+    name = "e2e_timing_estimates_known_models"
+    path = "tests/e2e/timing_estimates.json"
+
+    @staticmethod
+    def _models_from_lines(lines: List[str], imap: ImpactMap) -> List[str]:
+        models: Set[str] = set()
+        for line in lines:
+            match = re.fullmatch(r'"([^"]+)":\s*[0-9]+,?', line)
+            if match is None:
+                return []
+            model = match.group(1)
+            if model not in imap.all_model_names_set:
+                return []
+            models.add(model)
+        return sorted(models)
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        return path == self.path and bool(self._models_from_lines(lines, imap))
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path
+        return RuleMatch(
+            self.name,
+            self._models_from_lines(lines, imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
+class RuntimeStrategyMatrixRule(DiffRefinementRule):
+    name = "runtime_strategy_matrix_known_strategies"
+    path = "tests/runtime_strategy_matrix.yaml"
+    allowed_tokens = (
+        "cli_commands",
+        "comparator_class",
+        "diff_framework_check_classes",
+        "diff_framework_exemption",
+        "neural_operator",
+        "no_diff_framework_check_currently_registers_runtime_strategies",
+        "runner_class",
+        "solve",
+        "task_strategy",
+        "tests.e2e_harness.comparators",
+        "tests.e2e_harness.runners",
+    )
+
+    @staticmethod
+    def _strategies_from_lines(lines: List[str], imap: ImpactMap) -> List[str]:
+        strategies: Set[str] = set()
+        for line in lines:
+            match = re.match(r'"([^"]+)":\s*\{', line.strip())
+            if match and match.group(1) in imap.strategy_to_models:
+                strategies.add(match.group(1))
+        return sorted(strategies)
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        if path != self.path:
+            return False
+        strategies = self._strategies_from_lines(lines, imap)
+        if not strategies:
+            return False
+        normalized_lines = [
+            _normalize_diff_line(line)
+            for line in lines
+            if any(ch.isalnum() for ch in _normalize_diff_line(line))
+        ]
+        strategy_tokens = tuple(strategies)
+        return all(
+            any(token in line for token in strategy_tokens)
+            or any(token in line for token in self.allowed_tokens)
+            for line in normalized_lines
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path
+        return RuleMatch(
+            self.name,
+            _models_for_runtime_strategies(self._strategies_from_lines(lines, imap), imap),
+            match.unit_tiers,
+            match.rebuild_cpp,
+        )
+
+
 class HarnessReferenceDprContextEncoderRule(DiffRefinementRule):
     name = "harness_reference_dpr_context_encoder"
     path = "tests/e2e_harness/references/hf_transformers.py"
@@ -2055,6 +2494,58 @@ class E2EWaivesModelLinesRule(DiffRefinementRule):
 
 DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     HarnessSharedFp8ScalesRule(),
+    KnownModelTimingEstimateRule(),
+    RuntimeStrategyMatrixRule(),
+    IdentifierDiffRefinementRule(
+        "pyproject_known_profiles",
+        paths=("pyproject.toml",),
+        allowed_tokens=(
+            "dependencies",
+            "optional_dependencies",
+            "project",
+            "version",
+        ),
+    ),
+    IdentifierDiffRefinementRule(
+        "python_profiles_known_profiles",
+        paths=("python/tensorrt_model_connect/python_profiles.toml",),
+        allowed_tokens=_PROFILE_METADATA_TOKENS,
+    ),
+    CandidateTokenDiffRefinementRule(
+        "shared_builder_config_lookup_family_registry",
+        "python/tensorrt_model_connect/families/__init__.py",
+        (
+            "callable(matches_config)",
+            "def_find_plugin",
+            "familyplugin",
+            "getattr(model_type",
+            "getattr(p",
+            "matches_config",
+            "model_type",
+            "model_type_str",
+            "p.matches",
+            "return_p",
+        ),
+    ),
+    CandidateTokenDiffRefinementRule(
+        "shared_builder_config_lookup_cli",
+        "python/tensorrt_model_connect/build_cli.py",
+        (
+            "find_plugin(config)",
+            "find_plugin(config.model_type)",
+            "plugin",
+            "raw_plugin",
+        ),
+    ),
+    CandidateTokenDiffRefinementRule(
+        "shared_builder_config_lookup_engine",
+        "python/tensorrt_model_connect/engine_builder.py",
+        (
+            "find_plugin(config)",
+            "find_plugin(config.model_type)",
+            "plugin",
+        ),
+    ),
     TokenDiffRefinementRule(
         "sam3_public_prompted_segmentation_api",
         "include/trtmc/pipeline.h",
@@ -2206,6 +2697,15 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         ),
         _sam3_models,
     ),
+    IdentifierDiffRefinementRule(
+        "harness_shared_known_identifiers",
+        paths=(
+            "tests/e2e_harness/contracts.py",
+            "tests/e2e_harness/manifest_loader.py",
+            "tests/e2e_harness/orchestrator.py",
+        ),
+        allowed_tokens=_HARNESS_REGISTRY_TOKENS,
+    ),
     TokenDiffRefinementRule(
         "e2e_warm_hf_cache_diffusers_components",
         "scripts/warm_hf_cache.py",
@@ -2289,39 +2789,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         _diffusion_task_models,
     ),
     TokenDiffRefinementRule(
-        "torchtrt_compiler_tokenizer",
-        "python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
-        (
-            "detect_tokenizer_add_special_tokens",
-            "detect_diffusion_tokenizer_add_special_tokens",
-            "detect_add_special",
-            "diffusion",
-            "tokenizer_add_special_tokens",
-            "tokenizer_config_json",
-            "tokenizer_2",
-            "autotokenizer",
-            "ids_default",
-            "ids_without",
-            "add_special_tokens",
-            "add_bos_token",
-            "add_eos_token",
-            "tok_config_path",
-            "tok_cfg",
-            "tok_subdir",
-            "tok_dir",
-            "tok_=",
-            "if_tok_dir",
-            "model_dir_path",
-            "except_exception",
-            "try:",
-            "pass",
-            "return_bool",
-            "return_true",
-            "return_detect_tokenizer_add_special_tokens",
-        ),
-        _torchtrt_tokenizer_models,
-    ),
-    TokenDiffRefinementRule(
         "harness_manifest_diffusion_thresholds",
         "tests/e2e_harness/manifest_loader.py",
         (
@@ -2334,6 +2801,91 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     ),
     HarnessReferenceDprContextEncoderRule(),
     HarnessReferenceVlGeneratedOnlyDecodeRule(),
+    IdentifierDiffRefinementRule(
+        "harness_reference_known_identifiers",
+        path_prefixes=("tests/e2e_harness/references/",),
+        allowed_tokens=_HARNESS_REGISTRY_TOKENS + (
+            "1.0",
+            "align_window",
+            "any",
+            "arch",
+            "architectures",
+            "backend",
+            "branch_input",
+            "candidate",
+            "case",
+            "channels",
+            "coerce_numeric_sequence",
+            "context",
+            "cpu",
+            "ctx",
+            "data",
+            "def_",
+            "detach",
+            "dtype",
+            "elapsed",
+            "else",
+            "error",
+            "eval",
+            "exc",
+            "expected_len",
+            "field",
+            "field_input",
+            "float",
+            "for",
+            "forecast",
+            "freq",
+            "from_pretrained",
+            "full_inference",
+            "getattr",
+            "hf_id",
+            "gt",
+            "in",
+            "inputs",
+            "int",
+            "isinstance",
+            "json",
+            "key",
+            "logits",
+            "max",
+            "mean_predictions",
+            "model",
+            "num_input_channels",
+            "observed_mask",
+            "output",
+            "padding",
+            "past",
+            "path",
+            "payload",
+            "pipe.predict",
+            "prediction",
+            "project_dir",
+            "quantile_preds",
+            "raw",
+            "reference_output_name",
+            "regression",
+            "reshape",
+            "result",
+            "run_time_series",
+            "scale",
+            "script",
+            "series",
+            "stderr",
+            "str",
+            "subprocess",
+            "sys",
+            "tensor",
+            "text",
+            "time",
+            "trunk",
+            "trunk_input",
+            "try",
+            "typing",
+            "unsupported",
+            "value",
+            "valid_len",
+        ),
+    ),
     E2EWaivesModelLinesRule(),
 )
 
@@ -2343,13 +2895,27 @@ def maybe_refine_match_with_diff(
     match: RuleMatch,
     diff_text: str,
     imap: ImpactMap,
+    candidate_models: Optional[List[str]] = None,
 ) -> RuleMatch:
     """Narrow broad file matches when the diff is demonstrably feature-scoped."""
     lines = _significant_diff_lines(diff_text)
     if not lines:
         return match
 
+    if candidate_models is None:
+        candidate_models = []
+
     for rule in DIFF_REFINEMENT_RULES:
+        if isinstance(rule, CandidateTokenDiffRefinementRule):
+            if rule.matches_with_candidates(path, lines, imap, candidate_models):
+                return rule.refine_with_candidates(
+                    path,
+                    match,
+                    lines,
+                    imap,
+                    candidate_models,
+                )
+            continue
         if rule.matches(path, lines, imap):
             return rule.refine(path, match, lines, imap)
 
@@ -2516,21 +3082,11 @@ def validate_map(
     errors: List[str] = []
     warnings: List[str] = []
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
-    torchtrt_families_dir = (
-        repo_root
-        / "python"
-        / "tensorrt_model_connect"
-        / "engine_defs"
-        / "torch_trt"
-        / "families"
-    )
 
     def _family_plugin_exists(family: str) -> bool:
         return any((
             (families_dir / f"{family}.py").exists(),
             (families_dir / family / "__init__.py").exists(),
-            (torchtrt_families_dir / f"{family}.py").exists(),
-            (torchtrt_families_dir / family / "__init__.py").exists(),
         ))
 
     # 1. Every family in a manifest has a corresponding plugin module/package
@@ -2538,14 +3094,14 @@ def validate_map(
         if not _family_plugin_exists(family):
             errors.append(
                 f"Family '{family}' in manifests has no plugin module or package under "
-                f"{families_dir} or {torchtrt_families_dir}"
+                f"{families_dir}"
             )
 
     # 2. Every family plugin module/package has at least one manifest (warn only)
     if families_dir.is_dir():
         for py_file in sorted(families_dir.glob("*.py")):
             name = py_file.stem
-            if name in ("__init__", "base"):
+            if name in ("__init__", "base") or name.startswith("_"):
                 continue
             if name not in imap.family_to_models:
                 warnings.append(f"Family plugin '{name}.py' has no manifests using it")

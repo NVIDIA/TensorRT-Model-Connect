@@ -172,8 +172,8 @@ Two names matter:
 
 | Name | Example | Meaning |
 | --- | --- | --- |
-| Family plugin | `qwen`, `llama`, `whisper`, `flux`, `timesfm` | Python build-time adapter that understands a model family's config and weights. |
-| Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `timesfm_torchtrt` | C++ dispatch key that selects the runtime plugin and pipeline shape. |
+| Family plugin | `qwen`, `llama`, `whisper`, `flux`, `pixart` | Python build-time adapter that understands a model family's config and weights. |
+| Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `diffusion_pixart` | C++ dispatch key that selects the runtime plugin and pipeline shape. |
 
 Many families can share one runtime strategy. Qwen, LLaMA, Mistral, GPT-2, OPT, Bloom, and other decoder-only families can route through `decoder_kv_cache` because their request-time behavior is the same: tokenize prompt, run decoder, sample tokens, update cache.
 
@@ -184,7 +184,7 @@ flowchart LR
   Mistral["mistral family"] --> Decoder
   Whisper["whisper family"] --> STT["speech_to_text strategy"]
   Flux["flux family"] --> Diff["diffusion_flux strategy"]
-  TimesFM["timesfm Torch-TRT family"] --> TS["timesfm_torchtrt strategy"]
+  PixArt["pixart family"] --> Pix["diffusion_pixart strategy"]
 ```
 
 That separation is the key extensibility idea in this repository.

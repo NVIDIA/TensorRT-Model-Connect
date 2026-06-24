@@ -1,234 +1,989 @@
 {
-  "transformer_blocks.0.attn.to_q": {
-    "input_scale": 0.11104910714285714,
-    "weight_scale": 0.0002986363002232143
+  "single_transformer_blocks.0.attn": {
+    "bmm2_output_scale": 0.004708426339285714,
+    "k_bmm_scale": 0.021623883928571428,
+    "q_bmm_scale": 0.027901785714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.0078125
   },
-  "transformer_blocks.0.attn.to_k": {
-    "input_scale": 0.11104910714285714,
+  "single_transformer_blocks.0.attn.to_out": {
+    "input_scale": 0.009416852678571428,
+    "weight_scale": 0.00035313197544642856
+  },
+  "single_transformer_blocks.0.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.01171875,
+    "weight_scale": 0.0004512241908482143
+  },
+  "single_transformer_blocks.1.attn": {
+    "bmm2_output_scale": 0.0036446707589285715,
+    "k_bmm_scale": 0.019810267857142856,
+    "q_bmm_scale": 0.027622767857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006870814732142857
+  },
+  "single_transformer_blocks.1.attn.to_out": {
+    "input_scale": 0.015345982142857142,
+    "weight_scale": 0.0005841936383928571
+  },
+  "single_transformer_blocks.1.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.013044084821428572,
     "weight_scale": 0.0005144391741071429
   },
-  "transformer_blocks.0.attn.to_v": {
-    "input_scale": 0.11104910714285714,
-    "weight_scale": 0.00020926339285714285
+  "single_transformer_blocks.10.attn": {
+    "bmm2_output_scale": 0.003383091517857143,
+    "k_bmm_scale": 0.024274553571428572,
+    "q_bmm_scale": 0.024553571428571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006940569196428571
   },
-  "transformer_blocks.0.attn.to_out.0": {
-    "input_scale": 0.026925223214285716,
-    "weight_scale": 0.00042724609375
+  "single_transformer_blocks.10.attn.to_out": {
+    "input_scale": 0.006766183035714286,
+    "weight_scale": 0.00039236886160714287
   },
-  "transformer_blocks.0.attn.add_q_proj": {
-    "input_scale": 0.062220982142857144,
-    "weight_scale": 0.00026484898158482144
+  "single_transformer_blocks.10.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012834821428571428,
+    "weight_scale": 0.0005078996930803571
+  },
+  "single_transformer_blocks.11.attn": {
+    "bmm2_output_scale": 0.00439453125,
+    "k_bmm_scale": 0.025111607142857144,
+    "q_bmm_scale": 0.025669642857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006452287946428571
+  },
+  "single_transformer_blocks.11.attn.to_out": {
+    "input_scale": 0.012625558035714286,
+    "weight_scale": 0.0004185267857142857
+  },
+  "single_transformer_blocks.11.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.0146484375,
+    "weight_scale": 0.0005166190011160714
+  },
+  "single_transformer_blocks.12.attn": {
+    "bmm2_output_scale": 0.0038539341517857145,
+    "k_bmm_scale": 0.021763392857142856,
+    "q_bmm_scale": 0.025111607142857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.009626116071428572
+  },
+  "single_transformer_blocks.12.attn.to_out": {
+    "input_scale": 0.014020647321428572,
+    "weight_scale": 0.0004207066127232143
+  },
+  "single_transformer_blocks.12.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014090401785714286,
+    "weight_scale": 0.0005166190011160714
+  },
+  "single_transformer_blocks.13.attn": {
+    "bmm2_output_scale": 0.003208705357142857,
+    "k_bmm_scale": 0.024274553571428572,
+    "q_bmm_scale": 0.025530133928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006068638392857143
+  },
+  "single_transformer_blocks.13.attn.to_out": {
+    "input_scale": 0.017020089285714284,
+    "weight_scale": 0.0003814697265625
+  },
+  "single_transformer_blocks.13.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.013950892857142858,
+    "weight_scale": 0.0007062639508928571
+  },
+  "single_transformer_blocks.14.attn": {
+    "bmm2_output_scale": 0.002964564732142857,
+    "k_bmm_scale": 0.023856026785714284,
+    "q_bmm_scale": 0.023577008928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007219587053571429
+  },
+  "single_transformer_blocks.14.attn.to_out": {
+    "input_scale": 0.012904575892857142,
+    "weight_scale": 0.00040108816964285713
+  },
+  "single_transformer_blocks.14.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014369419642857142,
+    "weight_scale": 0.0005449567522321429
+  },
+  "single_transformer_blocks.15.attn": {
+    "bmm2_output_scale": 0.004237583705357143,
+    "k_bmm_scale": 0.021902901785714284,
+    "q_bmm_scale": 0.020647321428571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007428850446428571
+  },
+  "single_transformer_blocks.15.attn.to_out": {
+    "input_scale": 0.014369419642857142,
+    "weight_scale": 0.0005754743303571429
+  },
+  "single_transformer_blocks.15.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015066964285714286,
+    "weight_scale": 0.0005035400390625
+  },
+  "single_transformer_blocks.16.attn": {
+    "bmm2_output_scale": 0.004568917410714286,
+    "k_bmm_scale": 0.024972098214285716,
+    "q_bmm_scale": 0.021484375,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.005894252232142857
+  },
+  "single_transformer_blocks.16.attn.to_out": {
+    "input_scale": 0.012067522321428572,
+    "weight_scale": 0.0003444126674107143
+  },
+  "single_transformer_blocks.16.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.0146484375,
+    "weight_scale": 0.0006059919084821429
+  },
+  "single_transformer_blocks.17.attn": {
+    "bmm2_output_scale": 0.004708426339285714,
+    "k_bmm_scale": 0.022739955357142856,
+    "q_bmm_scale": 0.019670758928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006870814732142857
+  },
+  "single_transformer_blocks.17.attn.to_out": {
+    "input_scale": 0.010672433035714286,
+    "weight_scale": 0.0003749302455357143
+  },
+  "single_transformer_blocks.17.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014508928571428572,
+    "weight_scale": 0.0005667550223214286
+  },
+  "single_transformer_blocks.18.attn": {
+    "bmm2_output_scale": 0.003976004464285714,
+    "k_bmm_scale": 0.021484375,
+    "q_bmm_scale": 0.024553571428571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007359095982142857
+  },
+  "single_transformer_blocks.18.attn.to_out": {
+    "input_scale": 0.01220703125,
+    "weight_scale": 0.0003662109375
+  },
+  "single_transformer_blocks.18.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014369419642857142,
+    "weight_scale": 0.0004926409040178571
+  },
+  "single_transformer_blocks.19.attn": {
+    "bmm2_output_scale": 0.004464285714285714,
+    "k_bmm_scale": 0.02734375,
+    "q_bmm_scale": 0.027483258928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.0068359375
+  },
+  "single_transformer_blocks.19.attn.to_out": {
+    "input_scale": 0.012276785714285714,
+    "weight_scale": 0.00042942592075892856
+  },
+  "single_transformer_blocks.19.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014787946428571428,
+    "weight_scale": 0.0005711146763392857
+  },
+  "single_transformer_blocks.2.attn": {
+    "bmm2_output_scale": 0.004673549107142857,
+    "k_bmm_scale": 0.019252232142857144,
+    "q_bmm_scale": 0.029436383928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007428850446428571
+  },
+  "single_transformer_blocks.2.attn.to_out": {
+    "input_scale": 0.017647879464285716,
+    "weight_scale": 0.00067138671875
+  },
+  "single_transformer_blocks.2.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012416294642857142,
+    "weight_scale": 0.00042942592075892856
+  },
+  "single_transformer_blocks.20.attn": {
+    "bmm2_output_scale": 0.004568917410714286,
+    "k_bmm_scale": 0.021344866071428572,
+    "q_bmm_scale": 0.021065848214285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007114955357142857
+  },
+  "single_transformer_blocks.20.attn.to_out": {
+    "input_scale": 0.012904575892857142,
+    "weight_scale": 0.00044686453683035713
+  },
+  "single_transformer_blocks.20.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015345982142857142,
+    "weight_scale": 0.0004359654017857143
+  },
+  "single_transformer_blocks.21.attn": {
+    "bmm2_output_scale": 0.004673549107142857,
+    "k_bmm_scale": 0.022181919642857144,
+    "q_bmm_scale": 0.028599330357142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006940569196428571
+  },
+  "single_transformer_blocks.21.attn.to_out": {
+    "input_scale": 0.013881138392857142,
+    "weight_scale": 0.0005623953683035714
+  },
+  "single_transformer_blocks.21.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.016043526785714284,
+    "weight_scale": 0.0005166190011160714
+  },
+  "single_transformer_blocks.22.attn": {
+    "bmm2_output_scale": 0.004813058035714286,
+    "k_bmm_scale": 0.025809151785714284,
+    "q_bmm_scale": 0.022600446428571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.009137834821428572
+  },
+  "single_transformer_blocks.22.attn.to_out": {
+    "input_scale": 0.011928013392857142,
+    "weight_scale": 0.00039454868861607144
+  },
+  "single_transformer_blocks.22.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015764508928571428,
+    "weight_scale": 0.0005929129464285714
+  },
+  "single_transformer_blocks.23.attn": {
+    "bmm2_output_scale": 0.006452287946428571,
+    "k_bmm_scale": 0.023158482142857144,
+    "q_bmm_scale": 0.029715401785714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.00830078125
+  },
+  "single_transformer_blocks.23.attn.to_out": {
+    "input_scale": 0.015555245535714286,
+    "weight_scale": 0.00033787318638392856
+  },
+  "single_transformer_blocks.23.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015904017857142856,
+    "weight_scale": 0.0005711146763392857
+  },
+  "single_transformer_blocks.24.attn": {
+    "bmm2_output_scale": 0.005266462053571429,
+    "k_bmm_scale": 0.023018973214285716,
+    "q_bmm_scale": 0.019810267857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.008265904017857142
+  },
+  "single_transformer_blocks.24.attn.to_out": {
+    "input_scale": 0.022739955357142856,
+    "weight_scale": 0.00035313197544642856
+  },
+  "single_transformer_blocks.24.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015345982142857142,
+    "weight_scale": 0.0005144391741071429
+  },
+  "single_transformer_blocks.25.attn": {
+    "bmm2_output_scale": 0.004411969866071429,
+    "k_bmm_scale": 0.023577008928571428,
+    "q_bmm_scale": 0.021902901785714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007672991071428571
+  },
+  "single_transformer_blocks.25.attn.to_out": {
+    "input_scale": 0.009347098214285714,
+    "weight_scale": 0.0005972726004464286
+  },
+  "single_transformer_blocks.25.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015206473214285714,
+    "weight_scale": 0.0005405970982142857
+  },
+  "single_transformer_blocks.26.attn": {
+    "bmm2_output_scale": 0.005161830357142857,
+    "k_bmm_scale": 0.023018973214285716,
+    "q_bmm_scale": 0.020089285714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.008405412946428572
+  },
+  "single_transformer_blocks.26.attn.to_out": {
+    "input_scale": 0.009416852678571428,
+    "weight_scale": 0.00035313197544642856
+  },
+  "single_transformer_blocks.26.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015345982142857142,
+    "weight_scale": 0.0005558558872767857
+  },
+  "single_transformer_blocks.27.attn": {
+    "bmm2_output_scale": 0.004359654017857143,
+    "k_bmm_scale": 0.028738839285714284,
+    "q_bmm_scale": 0.026227678571428572,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006975446428571429
+  },
+  "single_transformer_blocks.27.attn.to_out": {
+    "input_scale": 0.014857700892857142,
+    "weight_scale": 0.00038582938058035713
+  },
+  "single_transformer_blocks.27.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.0146484375,
+    "weight_scale": 0.0005711146763392857
+  },
+  "single_transformer_blocks.28.attn": {
+    "bmm2_output_scale": 0.004324776785714286,
+    "k_bmm_scale": 0.021065848214285716,
+    "q_bmm_scale": 0.026088169642857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007114955357142857
+  },
+  "single_transformer_blocks.28.attn.to_out": {
+    "input_scale": 0.011369977678571428,
+    "weight_scale": 0.00037711007254464287
+  },
+  "single_transformer_blocks.28.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014229910714285714,
+    "weight_scale": 0.0005623953683035714
+  },
+  "single_transformer_blocks.29.attn": {
+    "bmm2_output_scale": 0.005754743303571429,
+    "k_bmm_scale": 0.024274553571428572,
+    "q_bmm_scale": 0.027622767857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.008684430803571428
+  },
+  "single_transformer_blocks.29.attn.to_out": {
+    "input_scale": 0.016810825892857144,
+    "weight_scale": 0.0008719308035714286
+  },
+  "single_transformer_blocks.29.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.014718191964285714,
+    "weight_scale": 0.0004512241908482143
+  },
+  "single_transformer_blocks.3.attn": {
+    "bmm2_output_scale": 0.005022321428571429,
+    "k_bmm_scale": 0.023856026785714284,
+    "q_bmm_scale": 0.021065848214285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.005580357142857143
+  },
+  "single_transformer_blocks.3.attn.to_out": {
+    "input_scale": 0.005789620535714286,
+    "weight_scale": 0.0005013602120535714
+  },
+  "single_transformer_blocks.3.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.011579241071428572,
+    "weight_scale": 0.0004643031529017857
+  },
+  "single_transformer_blocks.30.attn": {
+    "bmm2_output_scale": 0.005092075892857143,
+    "k_bmm_scale": 0.028180803571428572,
+    "q_bmm_scale": 0.024274553571428572,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.009486607142857142
+  },
+  "single_transformer_blocks.30.attn.to_out": {
+    "input_scale": 0.013113839285714286,
+    "weight_scale": 0.00041416713169642856
+  },
+  "single_transformer_blocks.30.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015066964285714286,
+    "weight_scale": 0.0005318777901785714
+  },
+  "single_transformer_blocks.31.attn": {
+    "bmm2_output_scale": 0.005545479910714286,
+    "k_bmm_scale": 0.025111607142857144,
+    "q_bmm_scale": 0.029296875,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.008126395089285714
+  },
+  "single_transformer_blocks.31.attn.to_out": {
+    "input_scale": 0.014439174107142858,
+    "weight_scale": 0.00030517578125
+  },
+  "single_transformer_blocks.31.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015066964285714286,
+    "weight_scale": 0.0006234305245535714
+  },
+  "single_transformer_blocks.32.attn": {
+    "bmm2_output_scale": 0.006103515625,
+    "k_bmm_scale": 0.022879464285714284,
+    "q_bmm_scale": 0.027622767857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.007917131696428572
+  },
+  "single_transformer_blocks.32.attn.to_out": {
+    "input_scale": 0.015415736607142858,
+    "weight_scale": 0.0002986363002232143
+  },
+  "single_transformer_blocks.32.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.015206473214285714,
+    "weight_scale": 0.0004643031529017857
+  },
+  "single_transformer_blocks.33.attn": {
+    "bmm2_output_scale": 0.0068359375,
+    "k_bmm_scale": 0.023158482142857144,
+    "q_bmm_scale": 0.022879464285714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.012904575892857142
+  },
+  "single_transformer_blocks.33.attn.to_out": {
+    "input_scale": 0.016741071428571428,
+    "weight_scale": 0.0003138950892857143
+  },
+  "single_transformer_blocks.33.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.021065848214285716,
+    "weight_scale": 0.00047520228794642856
+  },
+  "single_transformer_blocks.34.attn": {
+    "bmm2_output_scale": 0.006801060267857143,
+    "k_bmm_scale": 0.022321428571428572,
+    "q_bmm_scale": 0.026925223214285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.010184151785714286
+  },
+  "single_transformer_blocks.34.attn.to_out": {
+    "input_scale": 0.022879464285714284,
+    "weight_scale": 0.00033133370535714287
+  },
+  "single_transformer_blocks.34.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.016462053571428572,
+    "weight_scale": 0.0005623953683035714
+  },
+  "single_transformer_blocks.35.attn": {
+    "bmm2_output_scale": 0.010393415178571428,
+    "k_bmm_scale": 0.021763392857142856,
+    "q_bmm_scale": 0.018973214285714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.018136160714285716
+  },
+  "single_transformer_blocks.35.attn.to_out": {
+    "input_scale": 0.01708984375,
+    "weight_scale": 0.00036185128348214287
+  },
+  "single_transformer_blocks.35.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.019949776785714284,
+    "weight_scale": 0.0004664829799107143
+  },
+  "single_transformer_blocks.36.attn": {
+    "bmm2_output_scale": 0.007498604910714286,
+    "k_bmm_scale": 0.024135044642857144,
+    "q_bmm_scale": 0.028599330357142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.012765066964285714
+  },
+  "single_transformer_blocks.36.attn.to_out": {
+    "input_scale": 0.049107142857142856,
+    "weight_scale": 0.00028555733816964287
+  },
+  "single_transformer_blocks.36.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.017508370535714284,
+    "weight_scale": 0.0006583077566964286
+  },
+  "single_transformer_blocks.37.attn": {
+    "bmm2_output_scale": 0.007882254464285714,
+    "k_bmm_scale": 0.0244140625,
+    "q_bmm_scale": 0.026785714285714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.010184151785714286
+  },
+  "single_transformer_blocks.37.attn.to_out": {
+    "input_scale": 0.04436383928571429,
+    "weight_scale": 0.00036185128348214287
+  },
+  "single_transformer_blocks.37.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.017020089285714284,
+    "weight_scale": 0.00045340401785714287
+  },
+  "single_transformer_blocks.38.attn": {
+    "bmm2_output_scale": 0.013811383928571428,
+    "k_bmm_scale": 0.021065848214285716,
+    "q_bmm_scale": 0.026646205357142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.022181919642857144
+  },
+  "single_transformer_blocks.38.attn.to_out": {
+    "input_scale": 0.033900669642857144,
+    "weight_scale": 0.0005929129464285714
+  },
+  "single_transformer_blocks.38.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.019112723214285716,
+    "weight_scale": 0.0006452287946428571
+  },
+  "single_transformer_blocks.39.attn": {
+    "bmm2_output_scale": 0.010323660714285714,
+    "k_bmm_scale": 0.023577008928571428,
+    "q_bmm_scale": 0.027064732142857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.014020647321428572
+  },
+  "single_transformer_blocks.39.attn.to_out": {
+    "input_scale": 0.15401785714285715,
+    "weight_scale": 0.00028773716517857144
+  },
+  "single_transformer_blocks.39.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.018415178571428572,
+    "weight_scale": 0.0005885532924107143
+  },
+  "single_transformer_blocks.4.attn": {
+    "bmm2_output_scale": 0.002598353794642857,
+    "k_bmm_scale": 0.028599330357142856,
+    "q_bmm_scale": 0.023577008928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.005161830357142857
+  },
+  "single_transformer_blocks.4.attn.to_out": {
+    "input_scale": 0.007393973214285714,
+    "weight_scale": 0.00048828125
+  },
+  "single_transformer_blocks.4.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.01171875,
+    "weight_scale": 0.0005209786551339286
+  },
+  "single_transformer_blocks.40.attn": {
+    "bmm2_output_scale": 0.008858816964285714,
+    "k_bmm_scale": 0.025948660714285716,
+    "q_bmm_scale": 0.026088169642857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.011788504464285714
+  },
+  "single_transformer_blocks.40.attn.to_out": {
+    "input_scale": 0.07003348214285714,
+    "weight_scale": 0.0005449567522321429
+  },
+  "single_transformer_blocks.40.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.017578125,
+    "weight_scale": 0.0005580357142857143
+  },
+  "single_transformer_blocks.41.attn": {
+    "bmm2_output_scale": 0.010881696428571428,
+    "k_bmm_scale": 0.024832589285714284,
+    "q_bmm_scale": 0.023158482142857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.030412946428571428
+  },
+  "single_transformer_blocks.41.attn.to_out": {
+    "input_scale": 0.04827008928571429,
+    "weight_scale": 0.00029427664620535713
+  },
+  "single_transformer_blocks.41.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.017438616071428572,
+    "weight_scale": 0.0005122593470982143
+  },
+  "single_transformer_blocks.42.attn": {
+    "bmm2_output_scale": 0.010811941964285714,
+    "k_bmm_scale": 0.0234375,
+    "q_bmm_scale": 0.026088169642857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.017717633928571428
+  },
+  "single_transformer_blocks.42.attn.to_out": {
+    "input_scale": 0.16294642857142858,
+    "weight_scale": 0.0009722028459821429
+  },
+  "single_transformer_blocks.42.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.018136160714285716,
+    "weight_scale": 0.0006801060267857143
+  },
+  "single_transformer_blocks.43.attn": {
+    "bmm2_output_scale": 0.010044642857142858,
+    "k_bmm_scale": 0.020089285714285716,
+    "q_bmm_scale": 0.022042410714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.016322544642857144
+  },
+  "single_transformer_blocks.43.attn.to_out": {
+    "input_scale": 0.07756696428571429,
+    "weight_scale": 0.0006234305245535714
+  },
+  "single_transformer_blocks.43.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.019112723214285716,
+    "weight_scale": 0.0006626674107142857
+  },
+  "single_transformer_blocks.44.attn": {
+    "bmm2_output_scale": 0.011439732142857142,
+    "k_bmm_scale": 0.023716517857142856,
+    "q_bmm_scale": 0.025530133928571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.024693080357142856
+  },
+  "single_transformer_blocks.44.attn.to_out": {
+    "input_scale": 0.03962053571428571,
+    "weight_scale": 0.00044032505580357144
+  },
+  "single_transformer_blocks.44.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.0205078125,
+    "weight_scale": 0.0007106236049107143
+  },
+  "single_transformer_blocks.45.attn": {
+    "bmm2_output_scale": 0.025669642857142856,
+    "k_bmm_scale": 0.025251116071428572,
+    "q_bmm_scale": 0.023297991071428572,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.033482142857142856
+  },
+  "single_transformer_blocks.45.attn.to_out": {
+    "input_scale": 0.10044642857142858,
+    "weight_scale": 0.00045558384486607144
+  },
+  "single_transformer_blocks.45.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.024274553571428572,
+    "weight_scale": 0.0008108956473214286
+  },
+  "single_transformer_blocks.46.attn": {
+    "bmm2_output_scale": 0.024832589285714284,
+    "k_bmm_scale": 0.03334263392857143,
+    "q_bmm_scale": 0.023856026785714284,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.039341517857142856
+  },
+  "single_transformer_blocks.46.attn.to_out": {
+    "input_scale": 0.10435267857142858,
+    "weight_scale": 0.00037711007254464287
+  },
+  "single_transformer_blocks.46.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.021205357142857144,
+    "weight_scale": 0.0008762904575892857
+  },
+  "single_transformer_blocks.47.attn": {
+    "bmm2_output_scale": 0.008126395089285714,
+    "k_bmm_scale": 0.025948660714285716,
+    "q_bmm_scale": 0.022739955357142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.01220703125
+  },
+  "single_transformer_blocks.47.attn.to_out": {
+    "input_scale": 0.14732142857142858,
+    "weight_scale": 0.0004054478236607143
+  },
+  "single_transformer_blocks.47.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.03306361607142857,
+    "weight_scale": 0.0008544921875
+  },
+  "single_transformer_blocks.5.attn": {
+    "bmm2_output_scale": 0.0030343191964285715,
+    "k_bmm_scale": 0.023856026785714284,
+    "q_bmm_scale": 0.0244140625,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006312779017857143
+  },
+  "single_transformer_blocks.5.attn.to_out": {
+    "input_scale": 0.006277901785714286,
+    "weight_scale": 0.00038364955357142856
+  },
+  "single_transformer_blocks.5.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.011997767857142858,
+    "weight_scale": 0.00048392159598214287
+  },
+  "single_transformer_blocks.6.attn": {
+    "bmm2_output_scale": 0.0038539341517857145,
+    "k_bmm_scale": 0.024135044642857144,
+    "q_bmm_scale": 0.022321428571428572,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.005859375
+  },
+  "single_transformer_blocks.6.attn.to_out": {
+    "input_scale": 0.006173270089285714,
+    "weight_scale": 0.0003814697265625
+  },
+  "single_transformer_blocks.6.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012416294642857142,
+    "weight_scale": 0.000518798828125
+  },
+  "single_transformer_blocks.7.attn": {
+    "bmm2_output_scale": 0.003208705357142857,
+    "k_bmm_scale": 0.023577008928571428,
+    "q_bmm_scale": 0.021205357142857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006138392857142857
+  },
+  "single_transformer_blocks.7.attn.to_out": {
+    "input_scale": 0.005859375,
+    "weight_scale": 0.0004664829799107143
+  },
+  "single_transformer_blocks.7.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012555803571428572,
+    "weight_scale": 0.0005384172712053571
+  },
+  "single_transformer_blocks.8.attn": {
+    "bmm2_output_scale": 0.0031040736607142855,
+    "k_bmm_scale": 0.0244140625,
+    "q_bmm_scale": 0.024135044642857144,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006103515625
+  },
+  "single_transformer_blocks.8.attn.to_out": {
+    "input_scale": 0.006417410714285714,
+    "weight_scale": 0.00031607491629464287
+  },
+  "single_transformer_blocks.8.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012416294642857142,
+    "weight_scale": 0.0008806501116071429
+  },
+  "single_transformer_blocks.9.attn": {
+    "bmm2_output_scale": 0.003086635044642857,
+    "k_bmm_scale": 0.023297991071428572,
+    "q_bmm_scale": 0.020089285714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.006661551339285714
+  },
+  "single_transformer_blocks.9.attn.to_out": {
+    "input_scale": 0.005615234375,
+    "weight_scale": 0.0003749302455357143
+  },
+  "single_transformer_blocks.9.attn.to_qkv_mlp_proj": {
+    "input_scale": 0.012974330357142858,
+    "weight_scale": 0.0005231584821428571
+  },
+  "transformer_blocks.0.attn": {
+    "bmm2_output_scale": 0.027064732142857144,
+    "k_bmm_scale": 0.023577008928571428,
+    "q_bmm_scale": 0.022042410714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.06975446428571429
   },
   "transformer_blocks.0.attn.add_k_proj": {
-    "input_scale": 0.062220982142857144,
+    "input_scale": 0.06556919642857142,
     "weight_scale": 0.0003880092075892857
   },
+  "transformer_blocks.0.attn.add_q_proj": {
+    "input_scale": 0.06556919642857142,
+    "weight_scale": 0.00026484898158482144
+  },
   "transformer_blocks.0.attn.add_v_proj": {
-    "input_scale": 0.062220982142857144,
+    "input_scale": 0.06556919642857142,
     "weight_scale": 0.00015912737165178572
   },
   "transformer_blocks.0.attn.to_add_out": {
-    "input_scale": 0.027483258928571428,
+    "input_scale": 0.0263671875,
     "weight_scale": 0.00043814522879464287
   },
+  "transformer_blocks.0.attn.to_k": {
+    "input_scale": 0.10658482142857142,
+    "weight_scale": 0.0005144391741071429
+  },
+  "transformer_blocks.0.attn.to_out.0": {
+    "input_scale": 0.027064732142857144,
+    "weight_scale": 0.00042724609375
+  },
+  "transformer_blocks.0.attn.to_q": {
+    "input_scale": 0.10658482142857142,
+    "weight_scale": 0.0002986363002232143
+  },
+  "transformer_blocks.0.attn.to_v": {
+    "input_scale": 0.10658482142857142,
+    "weight_scale": 0.00020926339285714285
+  },
   "transformer_blocks.0.ff.linear_in": {
-    "input_scale": 0.012834821428571428,
+    "input_scale": 0.013044084821428572,
     "weight_scale": 0.0003138950892857143
   },
   "transformer_blocks.0.ff.linear_out": {
-    "input_scale": 0.012137276785714286,
+    "input_scale": 0.01318359375,
     "weight_scale": 0.00048610142299107144
   },
   "transformer_blocks.0.ff_context.linear_in": {
-    "input_scale": 0.029017857142857144,
+    "input_scale": 0.03362165178571429,
     "weight_scale": 0.00025721958705357144
   },
   "transformer_blocks.0.ff_context.linear_out": {
-    "input_scale": 0.19754464285714285,
+    "input_scale": 0.20535714285714285,
     "weight_scale": 0.0007062639508928571
   },
-  "transformer_blocks.1.attn.to_q": {
-    "input_scale": 0.0703125,
-    "weight_scale": 0.00034877232142857144
-  },
-  "transformer_blocks.1.attn.to_k": {
-    "input_scale": 0.0703125,
-    "weight_scale": 0.000335693359375
-  },
-  "transformer_blocks.1.attn.to_v": {
-    "input_scale": 0.0703125,
-    "weight_scale": 0.00020490373883928572
-  },
-  "transformer_blocks.1.attn.to_out.0": {
-    "input_scale": 0.011648995535714286,
-    "weight_scale": 0.00027792794363839287
-  },
-  "transformer_blocks.1.attn.add_q_proj": {
-    "input_scale": 0.04631696428571429,
-    "weight_scale": 0.00018419538225446428
+  "transformer_blocks.1.attn": {
+    "bmm2_output_scale": 0.010672433035714286,
+    "k_bmm_scale": 0.022600446428571428,
+    "q_bmm_scale": 0.017229352678571428,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.041294642857142856
   },
   "transformer_blocks.1.attn.add_k_proj": {
-    "input_scale": 0.04631696428571429,
+    "input_scale": 0.03627232142857143,
     "weight_scale": 0.00036403111049107144
   },
+  "transformer_blocks.1.attn.add_q_proj": {
+    "input_scale": 0.03627232142857143,
+    "weight_scale": 0.00018419538225446428
+  },
   "transformer_blocks.1.attn.add_v_proj": {
-    "input_scale": 0.04631696428571429,
+    "input_scale": 0.03627232142857143,
     "weight_scale": 0.00015803745814732144
   },
   "transformer_blocks.1.attn.to_add_out": {
-    "input_scale": 0.015834263392857144,
+    "input_scale": 0.010672433035714286,
     "weight_scale": 0.0002583095005580357
   },
+  "transformer_blocks.1.attn.to_k": {
+    "input_scale": 0.06640625,
+    "weight_scale": 0.000335693359375
+  },
+  "transformer_blocks.1.attn.to_out.0": {
+    "input_scale": 0.00927734375,
+    "weight_scale": 0.00027792794363839287
+  },
+  "transformer_blocks.1.attn.to_q": {
+    "input_scale": 0.06640625,
+    "weight_scale": 0.00034877232142857144
+  },
+  "transformer_blocks.1.attn.to_v": {
+    "input_scale": 0.06640625,
+    "weight_scale": 0.00020490373883928572
+  },
   "transformer_blocks.1.ff.linear_in": {
-    "input_scale": 0.011021205357142858,
+    "input_scale": 0.011369977678571428,
     "weight_scale": 0.00033787318638392856
   },
   "transformer_blocks.1.ff.linear_out": {
-    "input_scale": 0.011160714285714286,
+    "input_scale": 0.006277901785714286,
     "weight_scale": 0.00035313197544642856
   },
   "transformer_blocks.1.ff_context.linear_in": {
-    "input_scale": 0.045200892857142856,
+    "input_scale": 0.04352678571428571,
     "weight_scale": 0.00021253313337053572
   },
   "transformer_blocks.1.ff_context.linear_out": {
-    "input_scale": 0.11328125,
+    "input_scale": 0.09709821428571429,
     "weight_scale": 0.00040980747767857144
   },
-  "transformer_blocks.2.attn.to_q": {
-    "input_scale": 0.07924107142857142,
-    "weight_scale": 0.00041634695870535713
-  },
-  "transformer_blocks.2.attn.to_k": {
-    "input_scale": 0.07924107142857142,
-    "weight_scale": 0.0004032679966517857
-  },
-  "transformer_blocks.2.attn.to_v": {
-    "input_scale": 0.07924107142857142,
-    "weight_scale": 0.00023433140345982144
-  },
-  "transformer_blocks.2.attn.to_out.0": {
-    "input_scale": 0.01953125,
-    "weight_scale": 0.00024087088448660715
-  },
-  "transformer_blocks.2.attn.add_q_proj": {
-    "input_scale": 0.034877232142857144,
-    "weight_scale": 0.00023651123046875
+  "transformer_blocks.2.attn": {
+    "bmm2_output_scale": 0.015066964285714286,
+    "k_bmm_scale": 0.017717633928571428,
+    "q_bmm_scale": 0.018136160714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.05524553571428571
   },
   "transformer_blocks.2.attn.add_k_proj": {
-    "input_scale": 0.034877232142857144,
+    "input_scale": 0.038783482142857144,
     "weight_scale": 0.00023106166294642856
   },
+  "transformer_blocks.2.attn.add_q_proj": {
+    "input_scale": 0.038783482142857144,
+    "weight_scale": 0.00023651123046875
+  },
   "transformer_blocks.2.attn.add_v_proj": {
-    "input_scale": 0.034877232142857144,
+    "input_scale": 0.038783482142857144,
     "weight_scale": 0.00016130719866071428
   },
   "transformer_blocks.2.attn.to_add_out": {
-    "input_scale": 0.018694196428571428,
+    "input_scale": 0.015066964285714286,
     "weight_scale": 0.00017874581473214285
   },
+  "transformer_blocks.2.attn.to_k": {
+    "input_scale": 0.07366071428571429,
+    "weight_scale": 0.0004032679966517857
+  },
+  "transformer_blocks.2.attn.to_out.0": {
+    "input_scale": 0.014229910714285714,
+    "weight_scale": 0.00024087088448660715
+  },
+  "transformer_blocks.2.attn.to_q": {
+    "input_scale": 0.07366071428571429,
+    "weight_scale": 0.00041634695870535713
+  },
+  "transformer_blocks.2.attn.to_v": {
+    "input_scale": 0.07366071428571429,
+    "weight_scale": 0.00023433140345982144
+  },
   "transformer_blocks.2.ff.linear_in": {
-    "input_scale": 0.010532924107142858,
+    "input_scale": 0.008823939732142858,
     "weight_scale": 0.0003117152622767857
   },
   "transformer_blocks.2.ff.linear_out": {
-    "input_scale": 0.012416294642857142,
+    "input_scale": 0.010532924107142858,
     "weight_scale": 0.00047738211495535713
   },
   "transformer_blocks.2.ff_context.linear_in": {
-    "input_scale": 0.044642857142857144,
+    "input_scale": 0.04380580357142857,
     "weight_scale": 0.00022779192243303572
   },
   "transformer_blocks.2.ff_context.linear_out": {
-    "input_scale": 0.19084821428571427,
+    "input_scale": 0.18526785714285715,
     "weight_scale": 0.0003509521484375
   },
-  "transformer_blocks.3.attn.to_q": {
-    "input_scale": 0.07254464285714286,
-    "weight_scale": 0.000274658203125
-  },
-  "transformer_blocks.3.attn.to_k": {
-    "input_scale": 0.07254464285714286,
-    "weight_scale": 0.0004119873046875
-  },
-  "transformer_blocks.3.attn.to_v": {
-    "input_scale": 0.07254464285714286,
-    "weight_scale": 0.00027792794363839287
-  },
-  "transformer_blocks.3.attn.to_out.0": {
-    "input_scale": 0.013253348214285714,
-    "weight_scale": 0.00033133370535714287
-  },
-  "transformer_blocks.3.attn.add_q_proj": {
-    "input_scale": 0.05719866071428571,
-    "weight_scale": 0.0001983642578125
+  "transformer_blocks.3.attn": {
+    "bmm2_output_scale": 0.017438616071428572,
+    "k_bmm_scale": 0.025111607142857144,
+    "q_bmm_scale": 0.023995535714285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.03431919642857143
   },
   "transformer_blocks.3.attn.add_k_proj": {
-    "input_scale": 0.05719866071428571,
+    "input_scale": 0.04575892857142857,
     "weight_scale": 0.00030299595424107144
   },
+  "transformer_blocks.3.attn.add_q_proj": {
+    "input_scale": 0.04575892857142857,
+    "weight_scale": 0.0001983642578125
+  },
   "transformer_blocks.3.attn.add_v_proj": {
-    "input_scale": 0.05719866071428571,
+    "input_scale": 0.04575892857142857,
     "weight_scale": 0.00017547607421875
   },
   "transformer_blocks.3.attn.to_add_out": {
-    "input_scale": 0.0185546875,
+    "input_scale": 0.017438616071428572,
     "weight_scale": 0.0002899169921875
   },
+  "transformer_blocks.3.attn.to_k": {
+    "input_scale": 0.06584821428571429,
+    "weight_scale": 0.0004119873046875
+  },
+  "transformer_blocks.3.attn.to_out.0": {
+    "input_scale": 0.012625558035714286,
+    "weight_scale": 0.00033133370535714287
+  },
+  "transformer_blocks.3.attn.to_q": {
+    "input_scale": 0.06584821428571429,
+    "weight_scale": 0.000274658203125
+  },
+  "transformer_blocks.3.attn.to_v": {
+    "input_scale": 0.06584821428571429,
+    "weight_scale": 0.00027792794363839287
+  },
   "transformer_blocks.3.ff.linear_in": {
-    "input_scale": 0.009207589285714286,
+    "input_scale": 0.01025390625,
     "weight_scale": 0.0002986363002232143
   },
   "transformer_blocks.3.ff.linear_out": {
-    "input_scale": 0.01220703125,
+    "input_scale": 0.008405412946428572,
     "weight_scale": 0.00039890834263392856
   },
   "transformer_blocks.3.ff_context.linear_in": {
-    "input_scale": 0.045200892857142856,
+    "input_scale": 0.044921875,
     "weight_scale": 0.00037711007254464287
   },
   "transformer_blocks.3.ff_context.linear_out": {
-    "input_scale": 0.062220982142857144,
+    "input_scale": 0.07254464285714286,
     "weight_scale": 0.00047520228794642856
   },
-  "transformer_blocks.4.attn.to_q": {
-    "input_scale": 0.08203125,
-    "weight_scale": 0.00026157924107142856
-  },
-  "transformer_blocks.4.attn.to_k": {
-    "input_scale": 0.08203125,
-    "weight_scale": 0.00038582938058035713
-  },
-  "transformer_blocks.4.attn.to_v": {
-    "input_scale": 0.08203125,
-    "weight_scale": 0.0003204345703125
-  },
-  "transformer_blocks.4.attn.to_out.0": {
-    "input_scale": 0.016252790178571428,
-    "weight_scale": 0.00024632045200892856
-  },
-  "transformer_blocks.4.attn.add_q_proj": {
-    "input_scale": 0.07756696428571429,
-    "weight_scale": 0.00032261439732142856
+  "transformer_blocks.4.attn": {
+    "bmm2_output_scale": 0.017438616071428572,
+    "k_bmm_scale": 0.02734375,
+    "q_bmm_scale": 0.01953125,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.04771205357142857
   },
   "transformer_blocks.4.attn.add_k_proj": {
-    "input_scale": 0.07756696428571429,
+    "input_scale": 0.05524553571428571,
     "weight_scale": 0.00030517578125
   },
+  "transformer_blocks.4.attn.add_q_proj": {
+    "input_scale": 0.05524553571428571,
+    "weight_scale": 0.00032261439732142856
+  },
   "transformer_blocks.4.attn.add_v_proj": {
-    "input_scale": 0.07756696428571429,
+    "input_scale": 0.05524553571428571,
     "weight_scale": 0.000244140625
   },
   "transformer_blocks.4.attn.to_add_out": {
-    "input_scale": 0.017508370535714284,
+    "input_scale": 0.015276227678571428,
     "weight_scale": 0.00022343226841517856
   },
+  "transformer_blocks.4.attn.to_k": {
+    "input_scale": 0.07979910714285714,
+    "weight_scale": 0.00038582938058035713
+  },
+  "transformer_blocks.4.attn.to_out.0": {
+    "input_scale": 0.017438616071428572,
+    "weight_scale": 0.00024632045200892856
+  },
+  "transformer_blocks.4.attn.to_q": {
+    "input_scale": 0.07979910714285714,
+    "weight_scale": 0.00026157924107142856
+  },
+  "transformer_blocks.4.attn.to_v": {
+    "input_scale": 0.07979910714285714,
+    "weight_scale": 0.0003204345703125
+  },
   "transformer_blocks.4.ff.linear_in": {
-    "input_scale": 0.011439732142857142,
+    "input_scale": 0.009835379464285714,
     "weight_scale": 0.0003138950892857143
   },
   "transformer_blocks.4.ff.linear_out": {
-    "input_scale": 0.019810267857142856,
+    "input_scale": 0.019112723214285716,
     "weight_scale": 0.0005013602120535714
   },
   "transformer_blocks.4.ff_context.linear_in": {
@@ -236,535 +991,172 @@
     "weight_scale": 0.00031607491629464287
   },
   "transformer_blocks.4.ff_context.linear_out": {
-    "input_scale": 0.2857142857142857,
+    "input_scale": 0.2845982142857143,
     "weight_scale": 0.0004730224609375
   },
-  "transformer_blocks.5.attn.to_q": {
-    "input_scale": 0.07645089285714286,
-    "weight_scale": 0.00032479422433035713
-  },
-  "transformer_blocks.5.attn.to_k": {
-    "input_scale": 0.07645089285714286,
-    "weight_scale": 0.00032261439732142856
-  },
-  "transformer_blocks.5.attn.to_v": {
-    "input_scale": 0.07645089285714286,
-    "weight_scale": 0.00030081612723214287
-  },
-  "transformer_blocks.5.attn.to_out.0": {
-    "input_scale": 0.04241071428571429,
-    "weight_scale": 0.00020163399832589285
-  },
-  "transformer_blocks.5.attn.add_q_proj": {
-    "input_scale": 0.08984375,
-    "weight_scale": 0.00030735560825892856
+  "transformer_blocks.5.attn": {
+    "bmm2_output_scale": 0.05078125,
+    "k_bmm_scale": 0.026925223214285716,
+    "q_bmm_scale": 0.021065848214285716,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.3013392857142857
   },
   "transformer_blocks.5.attn.add_k_proj": {
-    "input_scale": 0.08984375,
+    "input_scale": 0.06863839285714286,
     "weight_scale": 0.00030517578125
   },
+  "transformer_blocks.5.attn.add_q_proj": {
+    "input_scale": 0.06863839285714286,
+    "weight_scale": 0.00030735560825892856
+  },
   "transformer_blocks.5.attn.add_v_proj": {
-    "input_scale": 0.08984375,
+    "input_scale": 0.06863839285714286,
     "weight_scale": 0.00020708356584821428
   },
   "transformer_blocks.5.attn.to_add_out": {
-    "input_scale": 0.05719866071428571,
+    "input_scale": 0.05078125,
     "weight_scale": 0.00029209681919642856
   },
+  "transformer_blocks.5.attn.to_k": {
+    "input_scale": 0.07421875,
+    "weight_scale": 0.00032261439732142856
+  },
+  "transformer_blocks.5.attn.to_out.0": {
+    "input_scale": 0.023856026785714284,
+    "weight_scale": 0.00020163399832589285
+  },
+  "transformer_blocks.5.attn.to_q": {
+    "input_scale": 0.07421875,
+    "weight_scale": 0.00032479422433035713
+  },
+  "transformer_blocks.5.attn.to_v": {
+    "input_scale": 0.07421875,
+    "weight_scale": 0.00030081612723214287
+  },
   "transformer_blocks.5.ff.linear_in": {
-    "input_scale": 0.013253348214285714,
+    "input_scale": 0.013462611607142858,
     "weight_scale": 0.0002757481166294643
   },
   "transformer_blocks.5.ff.linear_out": {
-    "input_scale": 0.0546875,
+    "input_scale": 0.025809151785714284,
     "weight_scale": 0.00027901785714285713
   },
   "transformer_blocks.5.ff_context.linear_in": {
-    "input_scale": 0.04296875,
+    "input_scale": 0.04157366071428571,
     "weight_scale": 0.00034877232142857144
   },
   "transformer_blocks.5.ff_context.linear_out": {
-    "input_scale": 0.265625,
+    "input_scale": 0.2544642857142857,
     "weight_scale": 0.00034877232142857144
   },
-  "transformer_blocks.6.attn.to_q": {
-    "input_scale": 0.078125,
-    "weight_scale": 0.00030735560825892856
-  },
-  "transformer_blocks.6.attn.to_k": {
-    "input_scale": 0.078125,
-    "weight_scale": 0.00031825474330357144
-  },
-  "transformer_blocks.6.attn.to_v": {
-    "input_scale": 0.078125,
-    "weight_scale": 0.0002964564732142857
-  },
-  "transformer_blocks.6.attn.to_out.0": {
-    "input_scale": 0.0341796875,
-    "weight_scale": 0.00021253313337053572
-  },
-  "transformer_blocks.6.attn.add_q_proj": {
-    "input_scale": 0.09988839285714286,
-    "weight_scale": 0.00042288643973214287
+  "transformer_blocks.6.attn": {
+    "bmm2_output_scale": 0.05078125,
+    "k_bmm_scale": 0.021902901785714284,
+    "q_bmm_scale": 0.019810267857142856,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.22991071428571427
   },
   "transformer_blocks.6.attn.add_k_proj": {
-    "input_scale": 0.09988839285714286,
+    "input_scale": 0.08705357142857142,
     "weight_scale": 0.00045558384486607144
   },
+  "transformer_blocks.6.attn.add_q_proj": {
+    "input_scale": 0.08705357142857142,
+    "weight_scale": 0.00042288643973214287
+  },
   "transformer_blocks.6.attn.add_v_proj": {
-    "input_scale": 0.09988839285714286,
+    "input_scale": 0.08705357142857142,
     "weight_scale": 0.00018637520926339285
   },
   "transformer_blocks.6.attn.to_add_out": {
     "input_scale": 0.05078125,
     "weight_scale": 0.00023433140345982144
   },
+  "transformer_blocks.6.attn.to_k": {
+    "input_scale": 0.11383928571428571,
+    "weight_scale": 0.00031825474330357144
+  },
+  "transformer_blocks.6.attn.to_out.0": {
+    "input_scale": 0.03599330357142857,
+    "weight_scale": 0.00021253313337053572
+  },
+  "transformer_blocks.6.attn.to_q": {
+    "input_scale": 0.11383928571428571,
+    "weight_scale": 0.00030735560825892856
+  },
+  "transformer_blocks.6.attn.to_v": {
+    "input_scale": 0.11383928571428571,
+    "weight_scale": 0.0002964564732142857
+  },
   "transformer_blocks.6.ff.linear_in": {
-    "input_scale": 0.013532366071428572,
+    "input_scale": 0.018973214285714284,
     "weight_scale": 0.00037057059151785713
   },
   "transformer_blocks.6.ff.linear_out": {
-    "input_scale": 0.03515625,
+    "input_scale": 0.03138950892857143,
     "weight_scale": 0.00027247837611607144
   },
   "transformer_blocks.6.ff_context.linear_in": {
-    "input_scale": 0.049107142857142856,
+    "input_scale": 0.04743303571428571,
     "weight_scale": 0.0006234305245535714
   },
   "transformer_blocks.6.ff_context.linear_out": {
-    "input_scale": 0.6116071428571429,
+    "input_scale": 0.5491071428571429,
     "weight_scale": 0.00035313197544642856
   },
-  "transformer_blocks.7.attn.to_q": {
-    "input_scale": 0.07700892857142858,
-    "weight_scale": 0.00046212332589285713
-  },
-  "transformer_blocks.7.attn.to_k": {
-    "input_scale": 0.07700892857142858,
-    "weight_scale": 0.00047738211495535713
-  },
-  "transformer_blocks.7.attn.to_v": {
-    "input_scale": 0.07700892857142858,
-    "weight_scale": 0.000335693359375
-  },
-  "transformer_blocks.7.attn.to_out.0": {
-    "input_scale": 0.040736607142857144,
-    "weight_scale": 0.0002833775111607143
-  },
-  "transformer_blocks.7.attn.add_q_proj": {
-    "input_scale": 0.12946428571428573,
-    "weight_scale": 0.000244140625
+  "transformer_blocks.7.attn": {
+    "bmm2_output_scale": 0.07254464285714286,
+    "k_bmm_scale": 0.0224609375,
+    "q_bmm_scale": 0.022321428571428572,
+    "softmax_scale": 0.002232142857142857,
+    "v_bmm_scale": 0.25558035714285715
   },
   "transformer_blocks.7.attn.add_k_proj": {
-    "input_scale": 0.12946428571428573,
+    "input_scale": 0.10435267857142858,
     "weight_scale": 0.0002964564732142857
   },
+  "transformer_blocks.7.attn.add_q_proj": {
+    "input_scale": 0.10435267857142858,
+    "weight_scale": 0.000244140625
+  },
   "transformer_blocks.7.attn.add_v_proj": {
-    "input_scale": 0.12946428571428573,
+    "input_scale": 0.10435267857142858,
     "weight_scale": 0.00026375906808035713
   },
   "transformer_blocks.7.attn.to_add_out": {
-    "input_scale": 0.045200892857142856,
+    "input_scale": 0.07254464285714286,
     "weight_scale": 0.0002757481166294643
   },
+  "transformer_blocks.7.attn.to_k": {
+    "input_scale": 0.09040178571428571,
+    "weight_scale": 0.00047738211495535713
+  },
+  "transformer_blocks.7.attn.to_out.0": {
+    "input_scale": 0.03962053571428571,
+    "weight_scale": 0.0002833775111607143
+  },
+  "transformer_blocks.7.attn.to_q": {
+    "input_scale": 0.09040178571428571,
+    "weight_scale": 0.00046212332589285713
+  },
+  "transformer_blocks.7.attn.to_v": {
+    "input_scale": 0.09040178571428571,
+    "weight_scale": 0.000335693359375
+  },
   "transformer_blocks.7.ff.linear_in": {
-    "input_scale": 0.015485491071428572,
+    "input_scale": 0.020228794642857144,
     "weight_scale": 0.0003269740513392857
   },
   "transformer_blocks.7.ff.linear_out": {
-    "input_scale": 0.056640625,
+    "input_scale": 0.03850446428571429,
     "weight_scale": 0.0003138950892857143
   },
   "transformer_blocks.7.ff_context.linear_in": {
-    "input_scale": 0.05915178571428571,
+    "input_scale": 0.04771205357142857,
     "weight_scale": 0.0004904610770089286
   },
   "transformer_blocks.7.ff_context.linear_out": {
-    "input_scale": 2.732142857142857,
+    "input_scale": 2.9642857142857144,
     "weight_scale": 0.00040980747767857144
-  },
-  "single_transformer_blocks.0.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.011021205357142858,
-    "weight_scale": 0.0004512241908482143
-  },
-  "single_transformer_blocks.0.attn.to_out": {
-    "input_scale": 0.012486049107142858,
-    "weight_scale": 0.00035313197544642856
-  },
-  "single_transformer_blocks.1.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012276785714285714,
-    "weight_scale": 0.0005144391741071429
-  },
-  "single_transformer_blocks.1.attn.to_out": {
-    "input_scale": 0.014787946428571428,
-    "weight_scale": 0.0005841936383928571
-  },
-  "single_transformer_blocks.2.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.011648995535714286,
-    "weight_scale": 0.00042942592075892856
-  },
-  "single_transformer_blocks.2.attn.to_out": {
-    "input_scale": 0.029854910714285716,
-    "weight_scale": 0.00067138671875
-  },
-  "single_transformer_blocks.3.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010044642857142858,
-    "weight_scale": 0.0004643031529017857
-  },
-  "single_transformer_blocks.3.attn.to_out": {
-    "input_scale": 0.005580357142857143,
-    "weight_scale": 0.0005013602120535714
-  },
-  "single_transformer_blocks.4.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010602678571428572,
-    "weight_scale": 0.0005209786551339286
-  },
-  "single_transformer_blocks.4.attn.to_out": {
-    "input_scale": 0.005719866071428571,
-    "weight_scale": 0.00048828125
-  },
-  "single_transformer_blocks.5.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010951450892857142,
-    "weight_scale": 0.00048392159598214287
-  },
-  "single_transformer_blocks.5.attn.to_out": {
-    "input_scale": 0.011579241071428572,
-    "weight_scale": 0.00038364955357142856
-  },
-  "single_transformer_blocks.6.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010881696428571428,
-    "weight_scale": 0.000518798828125
-  },
-  "single_transformer_blocks.6.attn.to_out": {
-    "input_scale": 0.00732421875,
-    "weight_scale": 0.0003814697265625
-  },
-  "single_transformer_blocks.7.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0107421875,
-    "weight_scale": 0.0005384172712053571
-  },
-  "single_transformer_blocks.7.attn.to_out": {
-    "input_scale": 0.007463727678571429,
-    "weight_scale": 0.0004664829799107143
-  },
-  "single_transformer_blocks.8.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010672433035714286,
-    "weight_scale": 0.0008806501116071429
-  },
-  "single_transformer_blocks.8.attn.to_out": {
-    "input_scale": 0.007498604910714286,
-    "weight_scale": 0.00031607491629464287
-  },
-  "single_transformer_blocks.9.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0107421875,
-    "weight_scale": 0.0005231584821428571
-  },
-  "single_transformer_blocks.9.attn.to_out": {
-    "input_scale": 0.005650111607142857,
-    "weight_scale": 0.0003749302455357143
-  },
-  "single_transformer_blocks.10.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.010951450892857142,
-    "weight_scale": 0.0005078996930803571
-  },
-  "single_transformer_blocks.10.attn.to_out": {
-    "input_scale": 0.006975446428571429,
-    "weight_scale": 0.00039236886160714287
-  },
-  "single_transformer_blocks.11.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012137276785714286,
-    "weight_scale": 0.0005166190011160714
-  },
-  "single_transformer_blocks.11.attn.to_out": {
-    "input_scale": 0.012904575892857142,
-    "weight_scale": 0.0004185267857142857
-  },
-  "single_transformer_blocks.12.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.01171875,
-    "weight_scale": 0.0005166190011160714
-  },
-  "single_transformer_blocks.12.attn.to_out": {
-    "input_scale": 0.014508928571428572,
-    "weight_scale": 0.0004207066127232143
-  },
-  "single_transformer_blocks.13.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.01171875,
-    "weight_scale": 0.0007062639508928571
-  },
-  "single_transformer_blocks.13.attn.to_out": {
-    "input_scale": 0.009835379464285714,
-    "weight_scale": 0.0003814697265625
-  },
-  "single_transformer_blocks.14.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.011858258928571428,
-    "weight_scale": 0.0005449567522321429
-  },
-  "single_transformer_blocks.14.attn.to_out": {
-    "input_scale": 0.014090401785714286,
-    "weight_scale": 0.00040108816964285713
-  },
-  "single_transformer_blocks.15.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012137276785714286,
-    "weight_scale": 0.0005035400390625
-  },
-  "single_transformer_blocks.15.attn.to_out": {
-    "input_scale": 0.012904575892857142,
-    "weight_scale": 0.0005754743303571429
-  },
-  "single_transformer_blocks.16.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.011858258928571428,
-    "weight_scale": 0.0006059919084821429
-  },
-  "single_transformer_blocks.16.attn.to_out": {
-    "input_scale": 0.009974888392857142,
-    "weight_scale": 0.0003444126674107143
-  },
-  "single_transformer_blocks.17.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.011439732142857142,
-    "weight_scale": 0.0005667550223214286
-  },
-  "single_transformer_blocks.17.attn.to_out": {
-    "input_scale": 0.009416852678571428,
-    "weight_scale": 0.0003749302455357143
-  },
-  "single_transformer_blocks.18.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012276785714285714,
-    "weight_scale": 0.0004926409040178571
-  },
-  "single_transformer_blocks.18.attn.to_out": {
-    "input_scale": 0.012276785714285714,
-    "weight_scale": 0.0003662109375
-  },
-  "single_transformer_blocks.19.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012276785714285714,
-    "weight_scale": 0.0005711146763392857
-  },
-  "single_transformer_blocks.19.attn.to_out": {
-    "input_scale": 0.016183035714285716,
-    "weight_scale": 0.00042942592075892856
-  },
-  "single_transformer_blocks.20.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013113839285714286,
-    "weight_scale": 0.0004359654017857143
-  },
-  "single_transformer_blocks.20.attn.to_out": {
-    "input_scale": 0.013044084821428572,
-    "weight_scale": 0.00044686453683035713
-  },
-  "single_transformer_blocks.21.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013811383928571428,
-    "weight_scale": 0.0005166190011160714
-  },
-  "single_transformer_blocks.21.attn.to_out": {
-    "input_scale": 0.016950334821428572,
-    "weight_scale": 0.0005623953683035714
-  },
-  "single_transformer_blocks.22.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012834821428571428,
-    "weight_scale": 0.0005929129464285714
-  },
-  "single_transformer_blocks.22.attn.to_out": {
-    "input_scale": 0.014927455357142858,
-    "weight_scale": 0.00039454868861607144
-  },
-  "single_transformer_blocks.23.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012974330357142858,
-    "weight_scale": 0.0005711146763392857
-  },
-  "single_transformer_blocks.23.attn.to_out": {
-    "input_scale": 0.017020089285714284,
-    "weight_scale": 0.00033787318638392856
-  },
-  "single_transformer_blocks.24.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013253348214285714,
-    "weight_scale": 0.0005144391741071429
-  },
-  "single_transformer_blocks.24.attn.to_out": {
-    "input_scale": 0.016183035714285716,
-    "weight_scale": 0.00035313197544642856
-  },
-  "single_transformer_blocks.25.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.012974330357142858,
-    "weight_scale": 0.0005405970982142857
-  },
-  "single_transformer_blocks.25.attn.to_out": {
-    "input_scale": 0.011090959821428572,
-    "weight_scale": 0.0005972726004464286
-  },
-  "single_transformer_blocks.26.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013811383928571428,
-    "weight_scale": 0.0005558558872767857
-  },
-  "single_transformer_blocks.26.attn.to_out": {
-    "input_scale": 0.010811941964285714,
-    "weight_scale": 0.00035313197544642856
-  },
-  "single_transformer_blocks.27.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013671875,
-    "weight_scale": 0.0005711146763392857
-  },
-  "single_transformer_blocks.27.attn.to_out": {
-    "input_scale": 0.013323102678571428,
-    "weight_scale": 0.00038582938058035713
-  },
-  "single_transformer_blocks.28.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.013392857142857142,
-    "weight_scale": 0.0005623953683035714
-  },
-  "single_transformer_blocks.28.attn.to_out": {
-    "input_scale": 0.011160714285714286,
-    "weight_scale": 0.00037711007254464287
-  },
-  "single_transformer_blocks.29.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.014369419642857142,
-    "weight_scale": 0.0004512241908482143
-  },
-  "single_transformer_blocks.29.attn.to_out": {
-    "input_scale": 0.012486049107142858,
-    "weight_scale": 0.0008719308035714286
-  },
-  "single_transformer_blocks.30.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.014508928571428572,
-    "weight_scale": 0.0005318777901785714
-  },
-  "single_transformer_blocks.30.attn.to_out": {
-    "input_scale": 0.01513671875,
-    "weight_scale": 0.00041416713169642856
-  },
-  "single_transformer_blocks.31.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0146484375,
-    "weight_scale": 0.0006234305245535714
-  },
-  "single_transformer_blocks.31.attn.to_out": {
-    "input_scale": 0.028180803571428572,
-    "weight_scale": 0.00030517578125
-  },
-  "single_transformer_blocks.32.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.020647321428571428,
-    "weight_scale": 0.0004643031529017857
-  },
-  "single_transformer_blocks.32.attn.to_out": {
-    "input_scale": 0.03264508928571429,
-    "weight_scale": 0.0002986363002232143
-  },
-  "single_transformer_blocks.33.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.016950334821428572,
-    "weight_scale": 0.00047520228794642856
-  },
-  "single_transformer_blocks.33.attn.to_out": {
-    "input_scale": 0.028041294642857144,
-    "weight_scale": 0.0003138950892857143
-  },
-  "single_transformer_blocks.34.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.020368303571428572,
-    "weight_scale": 0.0005623953683035714
-  },
-  "single_transformer_blocks.34.attn.to_out": {
-    "input_scale": 0.026646205357142856,
-    "weight_scale": 0.00033133370535714287
-  },
-  "single_transformer_blocks.35.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.017996651785714284,
-    "weight_scale": 0.0004664829799107143
-  },
-  "single_transformer_blocks.35.attn.to_out": {
-    "input_scale": 0.040736607142857144,
-    "weight_scale": 0.00036185128348214287
-  },
-  "single_transformer_blocks.36.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.019391741071428572,
-    "weight_scale": 0.0006583077566964286
-  },
-  "single_transformer_blocks.36.attn.to_out": {
-    "input_scale": 0.051060267857142856,
-    "weight_scale": 0.00028555733816964287
-  },
-  "single_transformer_blocks.37.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0224609375,
-    "weight_scale": 0.00045340401785714287
-  },
-  "single_transformer_blocks.37.attn.to_out": {
-    "input_scale": 0.08928571428571429,
-    "weight_scale": 0.00036185128348214287
-  },
-  "single_transformer_blocks.38.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.026646205357142856,
-    "weight_scale": 0.0006452287946428571
-  },
-  "single_transformer_blocks.38.attn.to_out": {
-    "input_scale": 0.04575892857142857,
-    "weight_scale": 0.0005929129464285714
-  },
-  "single_transformer_blocks.39.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0244140625,
-    "weight_scale": 0.0005885532924107143
-  },
-  "single_transformer_blocks.39.attn.to_out": {
-    "input_scale": 0.15066964285714285,
-    "weight_scale": 0.00028773716517857144
-  },
-  "single_transformer_blocks.40.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.019670758928571428,
-    "weight_scale": 0.0005580357142857143
-  },
-  "single_transformer_blocks.40.attn.to_out": {
-    "input_scale": 0.12388392857142858,
-    "weight_scale": 0.0005449567522321429
-  },
-  "single_transformer_blocks.41.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.016880580357142856,
-    "weight_scale": 0.0005122593470982143
-  },
-  "single_transformer_blocks.41.attn.to_out": {
-    "input_scale": 0.06277901785714286,
-    "weight_scale": 0.00029427664620535713
-  },
-  "single_transformer_blocks.42.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.017159598214285716,
-    "weight_scale": 0.0006801060267857143
-  },
-  "single_transformer_blocks.42.attn.to_out": {
-    "input_scale": 0.19419642857142858,
-    "weight_scale": 0.0009722028459821429
-  },
-  "single_transformer_blocks.43.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0185546875,
-    "weight_scale": 0.0006626674107142857
-  },
-  "single_transformer_blocks.43.attn.to_out": {
-    "input_scale": 0.08928571428571429,
-    "weight_scale": 0.0006234305245535714
-  },
-  "single_transformer_blocks.44.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.019112723214285716,
-    "weight_scale": 0.0007106236049107143
-  },
-  "single_transformer_blocks.44.attn.to_out": {
-    "input_scale": 0.07645089285714286,
-    "weight_scale": 0.00044032505580357144
-  },
-  "single_transformer_blocks.45.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.020647321428571428,
-    "weight_scale": 0.0008108956473214286
-  },
-  "single_transformer_blocks.45.attn.to_out": {
-    "input_scale": 0.13895089285714285,
-    "weight_scale": 0.00045558384486607144
-  },
-  "single_transformer_blocks.46.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.0283203125,
-    "weight_scale": 0.0008762904575892857
-  },
-  "single_transformer_blocks.46.attn.to_out": {
-    "input_scale": 0.07142857142857142,
-    "weight_scale": 0.00037711007254464287
-  },
-  "single_transformer_blocks.47.attn.to_qkv_mlp_proj": {
-    "input_scale": 0.032505580357142856,
-    "weight_scale": 0.0008544921875
-  },
-  "single_transformer_blocks.47.attn.to_out": {
-    "input_scale": 0.12723214285714285,
-    "weight_scale": 0.0004054478236607143
   }
 }

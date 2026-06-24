@@ -1,4 +1,4 @@
-// PatchTSMixerPlugin: handles "patchtsmixer_torchtrt" strategy.
+// PatchTSMixerPlugin: handles "patchtsmixer_trt" strategy.
 // Loads a single TRT engine and dispatches to PatchTSMixerPipeline.
 
 #include "runtime/models/patchtsmixer/pipeline.h"
@@ -64,6 +64,6 @@ class PatchTSMixerPlugin final : public IPipelinePlugin {
 };
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtsmixer_plugin, PatchTSMixerPlugin,
-                                       "patchtsmixer_torchtrt");
+                                       "patchtsmixer_trt");
 
 } // namespace trtmc

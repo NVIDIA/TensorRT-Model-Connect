@@ -115,12 +115,24 @@ bool TrtModuleImpl::attach_distributed_communicator() {
 #endif
 }
 
+bool TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEntry& entry) {
+    if (!ctx_ || !entry.d_ptr)
+        return false;
+    const bool ok = entry.is_input ? ctx_->setInputTensorAddress(name.c_str(), entry.d_ptr)
+                                   : ctx_->setOutputTensorAddress(name.c_str(), entry.d_ptr);
+    if (!ok) {
+        std::cerr << "[trt_module] Failed to bind " << (entry.is_input ? "input" : "output")
+                  << " tensor address for '" << name << "'\n";
+    }
+    return ok;
+}
+
 void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const BufferEntry& entry) {
     // Fresh IExecutionContexts have neither tensor addresses nor dynamic
     // input shapes set; replay both from our cached BufferEntry so the next
     // enqueueV3 doesn't fail with "Not all shapes are specified".
     if (entry.d_ptr)
-        ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+        bind_tensor_address(name, entry);
     if (!entry.is_dynamic || entry.shape.empty())
         return;
     nvinfer1::Dims dims;
@@ -204,10 +216,13 @@ std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType
 void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io) {
     has_dynamic_shapes_ = false;
     for (int32_t i = 0; i < num_io && !has_dynamic_shapes_; ++i) {
-        const char* name = engine->getIOTensorName(i);
-        if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
+        const char* raw_name = engine->getIOTensorName(i);
+        if (raw_name == nullptr)
             continue;
-        if (dims_are_dynamic(engine->getTensorShape(name)))
+        const std::string name(raw_name);
+        if (engine->getTensorIOMode(name.c_str()) != nvinfer1::TensorIOMode::kINPUT)
+            continue;
+        if (dims_are_dynamic(engine->getTensorShape(name.c_str())))
             has_dynamic_shapes_ = true;
     }
 }
@@ -215,20 +230,23 @@ void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t
 void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                              nvinfer1::OptProfileSelector selector) {
     for (int32_t i = 0; i < num_io; ++i) {
-        const char* name = engine->getIOTensorName(i);
-        if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
+        const char* raw_name = engine->getIOTensorName(i);
+        if (raw_name == nullptr)
             continue;
-        if (dims_are_dynamic(engine->getTensorShape(name))) {
-            auto dims = engine->getProfileShape(name, profile_idx_, selector);
-            ctx_->setInputShape(name, dims);
+        const std::string name(raw_name);
+        if (engine->getTensorIOMode(name.c_str()) != nvinfer1::TensorIOMode::kINPUT)
+            continue;
+        if (dims_are_dynamic(engine->getTensorShape(name.c_str()))) {
+            auto dims = engine->getProfileShape(name.c_str(), profile_idx_, selector);
+            ctx_->setInputShape(name.c_str(), dims);
         }
     }
 }
 
-void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
+void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                           int32_t num_profiles) {
-    auto trt_shape = engine->getTensorShape(name);
-    auto dtype = from_trt_dtype(engine->getTensorDataType(name));
+    auto trt_shape = engine->getTensorShape(name.c_str());
+    auto dtype = from_trt_dtype(engine->getTensorDataType(name.c_str()));
 
     // Determine allocation shape (max) and initial runtime shape (opt).
     nvinfer1::Dims alloc_dims = trt_shape;
@@ -237,8 +255,9 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
 
     if (is_dynamic) {
         alloc_dims =
-            engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
-        init_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kOPT);
+            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        init_dims =
+            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 
     std::vector<int64_t> shape;
@@ -260,10 +279,10 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
     }
 
     if (entry.d_ptr)
-        ctx_->setTensorAddress(name, entry.d_ptr);
+        bind_tensor_address(name, entry);
 
     if (is_dynamic)
-        ctx_->setInputShape(name, init_dims);
+        ctx_->setInputShape(name.c_str(), init_dims);
 
     buffers_[name] = std::move(entry);
 }
@@ -271,8 +290,11 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
 void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                            int32_t num_profiles) {
     for (int32_t i = 0; i < num_io; ++i) {
-        const char* name = engine->getIOTensorName(i);
-        if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
+        const char* raw_name = engine->getIOTensorName(i);
+        if (raw_name == nullptr)
+            continue;
+        const std::string name(raw_name);
+        if (engine->getTensorIOMode(name.c_str()) != nvinfer1::TensorIOMode::kINPUT)
             continue;
         allocate_single_input(engine, name, num_profiles);
     }
@@ -280,17 +302,20 @@ void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_
 
 void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io) {
     for (int32_t i = 0; i < num_io; ++i) {
-        const char* name = engine->getIOTensorName(i);
-        if (engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
+        const char* raw_name = engine->getIOTensorName(i);
+        if (raw_name == nullptr)
+            continue;
+        const std::string name(raw_name);
+        if (engine->getTensorIOMode(name.c_str()) == nvinfer1::TensorIOMode::kINPUT)
             continue;
 
-        auto dtype = from_trt_dtype(engine->getTensorDataType(name));
+        auto dtype = from_trt_dtype(engine->getTensorDataType(name.c_str()));
 
         // For dynamic engines, query the context for inferred output shape
         // (based on the max input shapes set by the caller).
         // For static engines, use the engine shape directly.
-        nvinfer1::Dims out_dims =
-            has_dynamic_shapes_ ? ctx_->getTensorShape(name) : engine->getTensorShape(name);
+        nvinfer1::Dims out_dims = has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
+                                                      : engine->getTensorShape(name.c_str());
 
         std::vector<int64_t> shape;
         std::size_t nbytes = compute_alloc_bytes(out_dims, dtype, shape);
@@ -310,7 +335,7 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         }
 
         if (entry.d_ptr)
-            ctx_->setTensorAddress(name, entry.d_ptr);
+            bind_tensor_address(name, entry);
 
         if (nbytes > 0)
             host_output_staging_[name].resize(nbytes);
@@ -679,9 +704,8 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     entry.is_external = true;
 
     // Update execution context binding
-    if (ctx_ && external_device_ptr) {
-        ctx_->setTensorAddress(name.c_str(), external_device_ptr);
-    }
+    if (ctx_ && external_device_ptr)
+        bind_tensor_address(name, entry);
 }
 
 } // namespace trtmc

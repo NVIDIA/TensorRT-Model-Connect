@@ -5,6 +5,12 @@ from __future__ import annotations
 import subprocess
 import pytest
 
+_SPEECH_RUNTIME_STRATEGIES = {
+    "speech_to_text",
+    "speech_to_text_rnnt",
+    "speech_to_speech",
+}
+
 
 @pytest.mark.e2e
 def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_library_path):
@@ -15,6 +21,11 @@ def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_librar
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
     if model_entry.get("test_type") == "audio":
         pytest.skip("Audio model — use test_audio_pipeline")
+    if (
+        model_entry.get("test_type") == "transcription"
+        or model_entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
+    ):
+        pytest.skip("Speech model — use speech/audio pipeline tests")
     prompt = model_entry.get("prompt", "Hello")
     max_new = model_entry.get("max_new_tokens", 10)
 
@@ -40,6 +51,11 @@ def test_inference_deterministic(model_entry, trtmc_binary, hf_python, ld_librar
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
     if model_entry.get("test_type") == "audio":
         pytest.skip("Audio model — use test_audio_pipeline")
+    if (
+        model_entry.get("test_type") == "transcription"
+        or model_entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
+    ):
+        pytest.skip("Speech model — use speech/audio pipeline tests")
     prompt = model_entry.get("prompt", "Hello")
     max_new = min(model_entry.get("max_new_tokens", 10), 5)
 

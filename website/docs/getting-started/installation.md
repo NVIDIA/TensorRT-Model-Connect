@@ -39,7 +39,7 @@ The wheel installs:
 - the Python builder package,
 - the native `trtmc` executable,
 - packaged TensorRT backend DSOs,
-- declared Python dependencies, including `tensorrt>=10.16.1,<10.17`.
+- declared Python dependencies, including `tensorrt>=11.0.0.114,<11.1`.
 
 Quick smoke test:
 

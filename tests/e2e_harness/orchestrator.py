@@ -95,10 +95,10 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "speech_to_speech",
     "omni_multimodal",
     "diffusion",
-    "patchtst_torchtrt",
-    "patchtsmixer_torchtrt",
-    "timesfm_torchtrt",
-    "chronos_bolt_torchtrt",
+    "patchtst_trt",
+    "patchtsmixer_trt",
+    "timesfm_trt",
+    "chronos_bolt_trt",
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
@@ -160,9 +160,14 @@ def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[boo
         if candidate.is_file():
             p = candidate
         else:
-            # Fallback: try e2e data dir with just the filename
-            e2e_data = project_root / "tests" / "e2e" / "data"
-            p = e2e_data / Path(asset_path).name
+            e2e_dir = project_root / "tests" / "e2e"
+            candidate = e2e_dir / asset_path
+            if candidate.is_file():
+                p = candidate
+            else:
+                # Backward-compatible fallback for older manifests that
+                # provided bare filenames for assets under tests/e2e/data/.
+                p = e2e_dir / "data" / Path(asset_path).name
     if p.is_file():
         return True, f"Asset found: {p}"
     return False, f"Asset not found: {p}"
@@ -924,8 +929,6 @@ def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
     Returning None means "use the CLI default", which is now auto-selection.
     """
     backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
-    if backend in {"torchtrt", "torch_trt"} or build_args.get("torch_trt", False):
-        return "torchtrt"
     if backend == "trt":
         return "trt"
     if backend == "auto":

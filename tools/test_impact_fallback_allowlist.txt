@@ -100,17 +100,15 @@ no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact 
 no_impact scripts/magpie_codec_bridge.py # developer utility script; no CI test impact is intentional
 no_impact scripts/magpie_tokenizer.py # developer utility script; no CI test impact is intentional
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
-no_impact scripts/new_torchtrt_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
 no_impact scripts/prepare_lance_model.py # one-off Lance model staging helper; not imported by package/tests, no CI test impact is intentional
 no_impact scripts/profile_magpie_tts.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
-no_impact scripts/sdpa_nan_repro.py # developer utility script; no CI test impact is intentional
+no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_clip_metrics_local.py # developer utility script for local CLIP metric validation; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
-no_impact scripts/validate_torchtrt_family.sh # developer utility script; no CI test impact is intentional
 no_impact tools/__init__.py # developer utility script; no CI test impact is intentional
 no_impact tools/ai_agent_system.py # developer utility script; no CI test impact is intentional
 no_impact tools/ai_staging.py # developer utility script; no CI test impact is intentional
@@ -156,7 +154,6 @@ no_impact tools/diff_logits.py # developer utility script; no CI test impact is 
 no_impact tools/diff_personaplex.py # developer utility script; no CI test impact is intentional
 no_impact tools/diff_segmentation.py # developer utility script; no CI test impact is intentional
 no_impact tools/diff_t5.py # developer utility script; no CI test impact is intentional
-no_impact tools/diff_torchtrt.py # developer utility script; no CI test impact is intentional
 no_impact tools/diff_vl.py # developer utility script; no CI test impact is intentional
 no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
@@ -164,10 +161,6 @@ no_impact tools/layer_profiler.py # developer utility script; no CI test impact 
 no_impact tools/make_elf_replay_artifact.py # developer utility script; no CI test impact is intentional
 no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test impact is intentional
 no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
-no_impact tools/perf_compare_all.py # developer utility script; no CI test impact is intentional
-no_impact tools/perf_compare_diffusion.py # developer utility script; no CI test impact is intentional
-no_impact tools/perf_compare_torchtrt.py # developer utility script; no CI test impact is intentional
-no_impact tools/perf_utils.py # developer utility script; no CI test impact is intentional
 no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional
 no_impact tools/profile_report.py # developer utility script; no CI test impact is intentional
 no_impact tools/prepare_elf_model_dir.py # developer utility script; no CI test impact is intentional
@@ -199,13 +192,6 @@ shared_builder_module python/tensorrt_model_connect/diffusion_runner.py # shared
 shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/bundle_reader.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/compiler.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/config.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/torch_trt/tp_builder.py # shared Torch-TensorRT TP builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/graph_blocks.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/graph_ops.py # shared Python builder surface; broad builder impact is intentional
@@ -213,7 +199,6 @@ shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared
 shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/python_profile_requirements/chronos.lock.txt # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profile_requirements/internlm.lock.txt # shared Python profile lockfile; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profiles.toml # shared Python builder surface; broad builder impact is intentional

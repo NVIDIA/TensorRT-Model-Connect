@@ -12,7 +12,7 @@ Family plugins can:
 - Load and normalize weights.
 - Choose a runtime strategy.
 - Build engine plan bytes.
-- Add tokenizer, vision, diffusion, audio, or time-series metadata.
+- Add tokenizer, vision, diffusion, or audio metadata.
 - Provide quantization exclusions or calibration data.
 
 ## Raw TRT families
@@ -30,7 +30,3 @@ Common raw TRT groups:
 - Audio and speech: Whisper, Canary, Bark, Magpie, PersonaPlex, Nemotron streaming.
 - Diffusion: FLUX, Wan, Z-Image, PixArt.
 - Perception: SegFormer, SAM.
-
-## Torch-TRT families
-
-Torch-TRT engine definition families live in `python/tensorrt_model_connect/engine_defs/torch_trt/families/`. They are useful when a model can be captured through `torch.export` and compiled without hand-written graph construction.

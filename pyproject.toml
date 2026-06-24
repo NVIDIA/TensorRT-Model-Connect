@@ -18,14 +18,14 @@ dependencies = [
     "transformers>=4.40",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
-    "tensorrt>=10.16.1,<10.17",
+    "tensorrt>=11.0.0.114,<11.1",
     "PyYAML>=6.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-chronos = ["chronos-forecasting>=2.2.2"]
 test = ["pytest>=7.0", "torch>=2.0"]
+chronos = ["chronos-forecasting>=2.2.2"]
 # clip: required by tests/e2e_harness/comparators/clip_metrics.py for
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
 # at runtime when absent, but all CLIP gates become no-ops without it.

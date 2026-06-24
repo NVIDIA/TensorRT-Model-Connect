@@ -62,10 +62,6 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
             return "diffusion_pixart";
         return "diffusion_wan";
     }
-    // Legacy torch-trt diffusion bundles -> pixart torch-trt
-    if (strategy == "torchtrt_diffusion") {
-        return "diffusion_pixart_torchtrt";
-    }
     return strategy;
 }
 

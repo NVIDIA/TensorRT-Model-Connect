@@ -75,26 +75,28 @@ jobs:
           if [ -d "$GITHUB_WORKSPACE" ]; then
             chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
             docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-            docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
-              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_MANYLINUX_CI_IMAGE if the runner uses a different local manylinux image tag."
-              exit 1
-            }
-            docker run --rm \
-              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
-              -w "$GITHUB_WORKSPACE" \
-              "$TRTMC_CI_IMAGE" \
-              bash -lc '
-                set -euo pipefail
-                cleanup_workspace() {
-                  find . -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
-                  find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-                }
-                cleanup_workspace || {
-                  echo "::warning::Initial workspace cleanup failed; retrying after canceled-run processes settle"
-                  sleep 10
-                  cleanup_workspace
-                }
-              '
+            if docker image inspect "$TRTMC_CI_IMAGE" >/dev/null 2>&1; then
+              docker run --rm \
+                -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+                -w "$GITHUB_WORKSPACE" \
+                "$TRTMC_CI_IMAGE" \
+                bash -lc '
+                  set -euo pipefail
+                  cleanup_workspace() {
+                    find . -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
+                    find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+                  }
+                  cleanup_workspace || {
+                    echo "::warning::Initial workspace cleanup failed; retrying after canceled-run processes settle"
+                    sleep 10
+                    cleanup_workspace
+                  }
+                '
+            else
+              echo "::warning::Docker image '$TRTMC_CI_IMAGE' is not present before checkout; using host workspace cleanup so PR Dockerfile changes can rebuild it later."
+              find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
+              find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} + || true
+            fi
           fi
 
       - name: Check out source
@@ -143,6 +145,42 @@ jobs:
           else
             echo "CI mode: branch/manual unit gates"
           fi
+
+      - name: Detect CI Docker image changes
+        id: ci_image
+        run: |
+          set -euo pipefail
+          mapfile -t changed_paths < <(
+            git diff --name-only "$CI_BASE_REF"...HEAD -- \
+              Dockerfile \
+              scripts/docker_build_gb300.sh \
+              .github/scripts/start-gha-container.sh \
+              .github/workflows/trtmc-ci.yml
+          )
+
+          if [ "${#changed_paths[@]}" -gt 0 ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "Changed CI Docker image inputs:"
+              printf '  %s\n' "${changed_paths[@]}"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+            echo "No CI Docker image inputs changed."
+          fi
+
+      - name: Rebuild CI Docker image
+        if: ${{ steps.ci_image.outputs.rebuild == 'true' }}
+        timeout-minutes: 180
+        run: |
+          set -euo pipefail
+          empty_context="${RUNNER_TEMP:-/tmp}/trtmc-empty-docker-context"
+          mkdir -p "$empty_context"
+          echo "Rebuilding CI Docker image '$TRTMC_CI_IMAGE' from Dockerfile"
+          docker build \
+            -t "$TRTMC_CI_IMAGE" \
+            -f Dockerfile \
+            "$empty_context"
 
       - name: Start CI container
         timeout-minutes: 5

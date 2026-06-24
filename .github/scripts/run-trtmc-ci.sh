@@ -451,13 +451,11 @@ for test in tests:
     printf '  %s\n' "${selected_python_tests[@]}"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest "${selected_python_tests[@]}" -v \
       --ignore=tests/builder/test_cli.py \
-      --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
       -n auto "${cov_args[@]}"
   else
     echo "Running all builder + tools tests"
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ tests/e2e_harness/test_*.py -v \
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/e2e_harness/test_*.py -v \
       --ignore=tests/builder/test_cli.py \
-      --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
       -n auto "${cov_args[@]}"
   fi
 
@@ -878,11 +876,11 @@ for wheel in sys.argv[1:]:
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
     trt_dep_variants = (
-        "Requires-Dist: tensorrt<10.17,>=10.16.1",
-        "Requires-Dist: tensorrt>=10.16.1,<10.17",
+        "Requires-Dist: tensorrt<11.1,>=11.0.0.114",
+        "Requires-Dist: tensorrt>=11.0.0.114,<11.1",
     )
     if not any(dep in metadata for dep in trt_dep_variants):
-        raise SystemExit(f"{wheel}: TensorRT 10.16 dependency metadata is missing")
+        raise SystemExit(f"{wheel}: TensorRT 11 dependency metadata is missing")
     if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
         raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
     audit = subprocess.run(

@@ -858,7 +858,7 @@ def build_bundle(
           f"vocab={config.vocab_size})", file=sys.stderr)
 
     # 2. Find family plugin
-    plugin = find_plugin(config.model_type)
+    plugin = find_plugin(config)
     if plugin is None:
         supported = ", ".join(p.name for p in _ALL_PLUGINS)
         raise ValueError(

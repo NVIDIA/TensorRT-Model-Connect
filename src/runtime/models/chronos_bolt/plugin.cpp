@@ -1,4 +1,4 @@
-// ChronosBoltPlugin: handles "chronos_bolt_torchtrt" strategy.
+// ChronosBoltPlugin: handles "chronos_bolt_trt" strategy.
 //
 // This is a numeric forecasting pipeline for Chronos-Bolt-style bundles.
 // The C++ runtime keeps the implementation intentionally narrow: load the
@@ -82,6 +82,6 @@ class ChronosBoltPlugin final : public IPipelinePlugin {
 };
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_chronos_bolt_plugin, ChronosBoltPlugin,
-                                       "chronos_bolt_torchtrt");
+                                       "chronos_bolt_trt");
 
 } // namespace trtmc

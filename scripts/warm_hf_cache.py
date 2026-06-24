@@ -39,6 +39,7 @@ import time
 
 try:
     from huggingface_hub import constants as hf_constants
+    from huggingface_hub import hf_hub_download
     from huggingface_hub import snapshot_download
     from huggingface_hub.utils import HfHubHTTPError
 except ImportError:
@@ -123,6 +124,36 @@ _MAGPIE_REFERENCE_DEPENDENCIES = [
         "microsoft/wavlm-base-plus",
     ),
 ]
+_CLIP_METRICS_ASSETS = [
+    (
+        "clip-metrics-openclip",
+        "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+        "open_clip_pytorch_model.bin",
+    ),
+]
+
+
+def _manifest_needs_clip_metrics(manifest: dict) -> bool:
+    runtime_is_diffusion = str(manifest.get("runtime_strategy", "")).startswith(
+        "diffusion_"
+    )
+    task_is_diffusion = manifest.get("task_strategy") == "diffusion_media_generation"
+    if not (runtime_is_diffusion or task_is_diffusion):
+        return False
+    video_frames = int(manifest.get("video_num_frames", 1) or 1)
+    return video_frames <= 1
+
+
+def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
+    try:
+        hf_hub_download(
+            hf_id,
+            filename=filename,
+            local_files_only=True,
+        )
+    except Exception:
+        return False
+    return True
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -160,6 +191,7 @@ excluded_ci_tiers = set(args.exclude_ci_tier or [])
 
 entries: list[tuple[str, str, bool]] = []
 needs_tts_asr_verifier = False
+needs_clip_metrics_assets = False
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
@@ -172,6 +204,8 @@ for m in manifests:
     if filter_names is not None and name not in filter_names:
         continue
     entries.append((name, d["hf_id"], bool(d.get("gated"))))
+    if _manifest_needs_clip_metrics(d):
+        needs_clip_metrics_assets = True
     if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
         needs_tts_asr_verifier = True
         if str(d.get("family", "")) == "magpie_tts":
@@ -195,6 +229,7 @@ for name, hf_id, gated in entries:
     seen_hf_ids.add(hf_id)
     deduped_entries.append((name, hf_id, gated))
 entries = deduped_entries
+comparator_assets = _CLIP_METRICS_ASSETS if needs_clip_metrics_assets else []
 
 
 def _is_cached(hf_id: str) -> bool:
@@ -286,7 +321,14 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
 
 
 selective = filter_names is not None
-scope = f"selective ({len(entries)} models)" if selective else f"all {len(entries)} models"
+asset_scope = (
+    f", {len(comparator_assets)} comparator asset(s)" if comparator_assets else ""
+)
+scope = (
+    f"selective ({len(entries)} models{asset_scope})"
+    if selective
+    else f"all {len(entries)} models{asset_scope}"
+)
 print(f"Warming HF cache — {scope}...")
 print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
 
@@ -325,18 +367,39 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     # Small inter-request delay to stay well below the API rate limit.
     time.sleep(0.3)
 
+if comparator_assets:
+    print()
+    print("Warming comparator assets...")
+for i, (name, hf_id, filename) in enumerate(comparator_assets, 1):
+    if selective and _is_hf_file_cached(hf_id, filename):
+        print(f"  [{i:3d}/{len(comparator_assets)}] {name}  CACHED (skip)")
+        skipped.append(name)
+        continue
+
+    try:
+        hf_hub_download(hf_id, filename=filename)
+        print(f"  [{i:3d}/{len(comparator_assets)}] {name}  OK")
+    except HfHubHTTPError as e:
+        print(f"  [{i:3d}/{len(comparator_assets)}] {name}  WARN (HTTP {e.response.status_code}): {e}")
+        warned.append(name)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{i:3d}/{len(comparator_assets)}] {name}  WARN: {e}")
+        warned.append(name)
+    time.sleep(0.3)
+
 print()
 if selective and skipped:
-    print(f"Skipped {len(skipped)} already-cached models (no network calls).")
+    print(f"Skipped {len(skipped)} already-cached item(s) (no network calls).")
 if warned:
+    total_items = len(entries) + len(comparator_assets)
     print(
-        f"Warning: {len(warned)}/{len(entries)} models could not be warmed: {warned}",
+        f"Warning: {len(warned)}/{total_items} item(s) could not be warmed: {warned}",
         file=sys.stderr,
     )
-    print("Parallel E2E phase may re-issue model_info() for these models.")
+    print("Parallel E2E phase may re-issue HF cache requests for these item(s).")
 else:
-    downloaded = len(entries) - len(skipped)
+    downloaded = len(entries) + len(comparator_assets) - len(skipped)
     if downloaded == 0:
-        print("All models already cached — zero network calls.")
+        print("All items already cached — zero network calls.")
     else:
-        print(f"Downloaded {downloaded} model(s) successfully.")
+        print(f"Downloaded {downloaded} item(s) successfully.")

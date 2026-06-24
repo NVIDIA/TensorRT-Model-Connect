@@ -1,12 +1,12 @@
 FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
 
-ARG TENSORRT_VERSION=10.16.1.11
-ARG TENSORRT_DEB_VERSION=10.16.1.11-1+cuda13.2
+ARG TENSORRT_VERSION=11.0.0.114
+ARG TENSORRT_DEB_VERSION=11.0.0.114-1+cuda13.2
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
 ARG TORCHAUDIO_VERSION=2.11.0+cu130
-ARG TORCH_TENSORRT_VERSION=2.12.0+cu130
+ARG MODELOPT_VERSION=0.44.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -37,8 +37,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # TensorRT Python/runtime libraries. Keep this in sync with the headers above:
 # CMake derives the backend ABI alias from NvInferVersion.h.
 RUN pip install -U pip && \
-    pip install "tensorrt_cu13==${TENSORRT_VERSION}" && \
-    pip install "tensorrt==${TENSORRT_VERSION}" --no-deps
+    pip install --no-cache-dir "tensorrt_cu13==${TENSORRT_VERSION}" && \
+    pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}" --no-deps
 
 # CUDA Python bindings (needed by debug_runner.py / diff tools). Match the CUDA
 # 13.0 Python stack pulled by PyTorch.
@@ -54,8 +54,8 @@ RUN pip install \
     ml_dtypes \
     datasets
 
-# PyTorch ecosystem. Torch-TRT 2.12 uses TensorRT 10.16 and requires glibc
-# symbols newer than Ubuntu 22.04, which is why the CI image is Ubuntu 24.04.
+# PyTorch ecosystem. The CI image is Ubuntu 24.04 to match the
+# manylinux_2_39/glibc floor used by the native wheel.
 RUN pip install \
       "torch==${TORCH_VERSION}" \
       "torchvision==${TORCHVISION_VERSION}" \
@@ -63,13 +63,8 @@ RUN pip install \
       --index-url "${PYTORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82"
 
-# Torch-TRT compiles HF models to TRT-optimized TorchScript via torch.export
-# and dynamo. Use the public CUDA 13 wheel, never a source build in CI.
-RUN pip install "torch_tensorrt==${TORCH_TENSORRT_VERSION}" \
-      --extra-index-url "${PYTORCH_CUDA_INDEX}"
-
-# Quantized model support for Torch-TRT
-RUN pip install nvidia-modelopt
+# Quantized model support
+RUN pip install "nvidia-modelopt==${MODELOPT_VERSION}"
 
 # ML / testing / utilities
 RUN pip install \
@@ -100,23 +95,21 @@ RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
 # NeMo may adjust the torch stack through transitive dependencies. Reinstall the
-# exact CUDA 13 stack and Torch-TRT pairing that this image is meant to test.
+# exact CUDA 13 stack that this image is meant to test.
 RUN pip install --force-reinstall \
       "torch==${TORCH_VERSION}" \
       "torchvision==${TORCHVISION_VERSION}" \
       "torchaudio==${TORCHAUDIO_VERSION}" \
       --index-url "${PYTORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82" && \
-    pip install --upgrade "torch_tensorrt==${TORCH_TENSORRT_VERSION}" \
-      --extra-index-url "${PYTORCH_CUDA_INDEX}" && \
     python3 -c "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
     python3 -c "import torch; assert torch.__version__ == '${TORCH_VERSION}', torch.__version__" && \
-    python3 -c "import importlib.metadata as m; assert m.version('torch_tensorrt') == '${TORCH_TENSORRT_VERSION}', m.version('torch_tensorrt')"
+    python3 -c "import importlib.metadata as m; assert m.version('nvidia-modelopt') == '${MODELOPT_VERSION}', m.version('nvidia-modelopt')"
 
-# Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
+# Create libnvinfer.so symlink (pip ships the versioned libnvinfer.so.11 only)
 RUN TRT_LIB=$(python3 -c \
       "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])") && \
-    [ ! -f "$TRT_LIB/libnvinfer.so" ] && ln -sf libnvinfer.so.10 "$TRT_LIB/libnvinfer.so" || true && \
+    [ ! -f "$TRT_LIB/libnvinfer.so" ] && ln -sf libnvinfer.so.11 "$TRT_LIB/libnvinfer.so" || true && \
     echo "$TRT_LIB" > /etc/ld.so.conf.d/tensorrt.conf && \
     ldconfig
 

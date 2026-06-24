@@ -517,7 +517,7 @@ class TestCmdBuildMocked:
             eb.build = original_build
 
     def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
-        """Chronos-family builds should re-exec into their declared Python profile."""
+        """Families with declared profiles should re-exec into that Python profile."""
         import tensorrt_model_connect.build_cli as cli
         import tensorrt_model_connect.python_profiles as profile_mod
 
@@ -526,12 +526,12 @@ class TestCmdBuildMocked:
         monkeypatch.setattr(
             cli,
             "_resolve_build_model_metadata",
-            lambda model_ref, method_name: ("/tmp/resolved-model", "chronos_bolt"),
+            lambda model_ref, method_name: ("/tmp/resolved-model", "internlm"),
         )
         monkeypatch.setattr(
             profile_mod,
             "resolve_profile_python",
-            lambda profile_name, base_python: "/tmp/chronos-profile/bin/python",
+            lambda profile_name, base_python: "/tmp/internlm-profile/bin/python",
         )
 
         def _fake_run(cmd, env=None, **kwargs):
@@ -542,7 +542,7 @@ class TestCmdBuildMocked:
         monkeypatch.setattr(cli.subprocess, "run", _fake_run)
 
         args = argparse.Namespace(
-            model="amazon/chronos-bolt-tiny",
+            model="internlm/internlm-test",
             output=str(tmp_path / "out.trtfb"),
             max_cache_length=256,
             precision="fp32",
@@ -558,20 +558,20 @@ class TestCmdBuildMocked:
         with patch.object(
             sys,
             "argv",
-            ["trtmc", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
+            ["trtmc", "build", "internlm/internlm-test", "-o", str(tmp_path / "out.trtfb")],
         ):
             assert cli._cmd_build(args) == 0
 
         assert captured["cmd"] == [
-            "/tmp/chronos-profile/bin/python",
+            "/tmp/internlm-profile/bin/python",
             "-m",
             "tensorrt_model_connect.__main__",
             "build",
-            "amazon/chronos-bolt-tiny",
+            "internlm/internlm-test",
             "-o",
             str(tmp_path / "out.trtfb"),
             "--active-python-profile",
-            "chronos",
+            "internlm",
         ]
         assert all("ACTIVE_PYTHON_PROFILE" not in key for key in captured["env"])
 
