@@ -1,0 +1,52 @@
+schema_version: 1
+required_buckets:
+  - decoder-only LLM
+  - encoder / embedding
+  - encoder-decoder
+  - vision
+  - diffusion
+  - speech
+  - multimodal
+tier_a_models:
+  - gpt2-125m
+  - bert-base-uncased
+  - t5-small
+  - timm-vit-base-p16-224-augreg-in21k-ft-in1k
+  - flux-schnell-l0
+  - whisper-tiny-fp16
+  - internvl3-2b
+negative_test_models:
+  decoder-only LLM:
+    - gpt2-125m
+  encoder / embedding:
+    - bert-base-uncased
+  encoder-decoder:
+    - t5-small
+  vision:
+    - timm-vit-base-p16-224-augreg-in21k-ft-in1k
+  diffusion:
+    - flux-schnell-l0
+  speech:
+    - whisper-tiny-fp16
+  multimodal:
+    - internvl3-2b
+metamorphic_test_models:
+  decoder-only LLM:
+    - gpt2-125m
+  encoder / embedding:
+    - bert-base-uncased
+  encoder-decoder:
+    - t5-small
+  vision:
+    - timm-vit-base-p16-224-augreg-in21k-ft-in1k
+  diffusion:
+    - flux-schnell-l0
+  speech:
+    - whisper-tiny-fp16
+  multimodal:
+    - internvl3-2b
+gate_thresholds:
+  assertion_strength_min: 0.95
+  negative_test_count_min: 7
+  skip_xfail_delta_max: 0
+  report_integrity_min: 1.0

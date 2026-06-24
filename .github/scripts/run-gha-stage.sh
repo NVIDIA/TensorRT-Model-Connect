@@ -21,6 +21,7 @@ docker exec \
   -e HF_MODULES_CACHE \
   -e FULL_E2E \
   -e RUN_COVERAGE_MAP \
+  -e TRTMC_MUTATION_MODE \
   -e REBUILD_ENGINES \
   -e GITHUB_EVENT_NAME \
   -e GITHUB_REF_NAME \

@@ -1,0 +1,24 @@
+schema_version: 1
+source_of_truth: tests/e2e/models
+description: >
+  Supported Hugging Face model coverage is derived from the checked-in E2E
+  model manifests. This file freezes the schema and Tier A representatives used
+  by the CI mutation gate.
+required_manifest_fields:
+  - name
+  - hf_id_or_model_id
+  - family
+  - runtime_strategy
+recommended_manifest_fields:
+  - revision
+  - tokenizer_revision
+  - processor_revision
+  - prompt
+  - seed
+  - threshold_overrides
+revision_policy:
+  mode: evidence-only
+  rationale: >
+    Most existing manifests predate pinned revision fields. The mutation lane
+    reports missing pins as release evidence while the mandatory matrix gate
+    starts by preventing silent coverage shrinkage.

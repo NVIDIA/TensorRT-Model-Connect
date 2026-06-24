@@ -1,0 +1,14 @@
+schema_version: 1
+defaults:
+  numeric_atol_max: 0.01
+  numeric_rtol_max: 0.01
+  cosine_similarity_min: 0.98
+  text_normalized_edit_distance_max: 0.1
+  image_psnr_min: 8.0
+  audio_wer_max: 0.1
+assertion_strength:
+  minimum_score: 0.95
+skip_xfail_waive:
+  max_unapproved_delta: 0
+report_integrity:
+  minimum_score: 1.0

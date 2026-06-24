@@ -58,6 +58,25 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         assert f"-e {name}" in text
 
 
+def test_github_stage_wrapper_exports_ci_mutation_controls() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    assert "-e TRTMC_MUTATION_MODE" in text
+
+
+def test_ci_mutation_stage_is_wired_into_driver_and_workflows() -> None:
+    driver = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "run_ci_mutation() {" in driver
+    assert "tools/ci_mutation.py run" in driver
+    assert "ci-mutation)" in driver
+    assert "CI mutation self-test" in driver
+
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "TRTMC_MUTATION_MODE:" in text
+        assert "run-gha-stage.sh ci-mutation" in text
+        assert "ci_mutation_artifacts/" in text
+
+
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text

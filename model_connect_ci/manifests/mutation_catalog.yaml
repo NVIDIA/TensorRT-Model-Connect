@@ -1,0 +1,193 @@
+schema_version: 1
+operators:
+  - id: batch_size_profile_edge
+    taxonomy: T1
+    layer: input
+    family: semantic_preserving
+    expected_outcome: parity_pass
+    critical: false
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - multimodal
+    description: Mutate batch size within the declared dynamic profile and require per-sample parity.
+  - id: sequence_length_profile_edge
+    taxonomy: T1
+    layer: input
+    family: semantic_preserving
+    expected_outcome: parity_pass
+    critical: false
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - multimodal
+    description: Mutate sequence length within the supported profile and require parity under tolerance.
+  - id: optional_inputs_present_absent
+    taxonomy: T1
+    layer: interface
+    family: semantic_preserving
+    expected_outcome: parity_pass
+    critical: false
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder-decoder
+      - multimodal
+    description: Toggle optional inputs that should preserve semantics under the model contract.
+  - id: precision_mode_toggle
+    taxonomy: T1
+    layer: numeric
+    family: semantic_preserving
+    expected_outcome: parity_pass
+    critical: false
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Toggle supported precision modes and use the tolerance policy as oracle.
+  - id: transpose_permutation_break
+    taxonomy: T2
+    layer: graph
+    family: semantic_breaking
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - multimodal
+    description: Mutate a legal transpose permutation while keeping the graph executable.
+  - id: concat_axis_break
+    taxonomy: T2
+    layer: graph
+    family: semantic_breaking
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder-decoder
+      - vision
+      - diffusion
+      - multimodal
+    description: Mutate a concat axis and require the semantic oracle to reject the output.
+  - id: mismatched_tokenizer_revision
+    taxonomy: T2
+    layer: interface
+    family: semantic_breaking
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - multimodal
+    description: Pair the model with the wrong tokenizer revision and require parity failure.
+  - id: unsupported_shape_rejection
+    taxonomy: T3
+    layer: rejection
+    family: fail_fast
+    expected_outcome: rejected
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Present an out-of-profile shape and require a classified fail-fast diagnostic.
+  - id: missing_required_input_rejection
+    taxonomy: T3
+    layer: rejection
+    family: fail_fast
+    expected_outcome: rejected
+    critical: true
+    applies_to_buckets:
+      - encoder / embedding
+      - vision
+      - speech
+      - multimodal
+    description: Drop a required model input and require an explicit rejection.
+  - id: shrink_supported_model_matrix
+    taxonomy: CI
+    layer: ci_test_suite
+    family: false_green_guard
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Remove a mandatory model or bucket and require the manifest freeze gate to fail.
+  - id: weaken_numeric_assertions
+    taxonomy: CI
+    layer: ci_test_suite
+    family: false_green_guard
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Relax numeric assertions below the configured assertion-strength score.
+  - id: drop_negative_tests
+    taxonomy: CI
+    layer: ci_test_suite
+    family: false_green_guard
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Remove negative/rejection tests and require the CI robustness gate to fail.
+  - id: grow_skip_xfail_waives
+    taxonomy: CI
+    layer: ci_test_suite
+    family: false_green_guard
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Grow skip/xfail/waive count beyond the allowed delta and require failure.
+  - id: mask_failed_subtests
+    taxonomy: CI
+    layer: ci_test_suite
+    family: false_green_guard
+    expected_outcome: killed
+    critical: true
+    applies_to_buckets:
+      - decoder-only LLM
+      - encoder / embedding
+      - encoder-decoder
+      - vision
+      - diffusion
+      - speech
+      - multimodal
+    description: Suppress a failed subtest in report aggregation and require report-integrity failure.

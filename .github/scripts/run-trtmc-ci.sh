@@ -657,6 +657,17 @@ generate_coverage_map() {
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
 
+run_ci_mutation() {
+  local mode="${TRTMC_MUTATION_MODE:-premerge}"
+  if [ "${FULL_E2E:-false}" = "true" ] && [ -z "${TRTMC_MUTATION_MODE:-}" ]; then
+    mode="nightly"
+  fi
+
+  python tools/ci_mutation.py run \
+    --mode "$mode" \
+    --result-dir ci_mutation_artifacts
+}
+
 current_python_wheel_tag() {
   python - <<'PY'
 import sys
@@ -1070,6 +1081,10 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Generate coverage map" generate_coverage_map
       ;;
+    ci-mutation)
+      run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
+      run_step "CI mutation self-test" run_ci_mutation
+      ;;
     package)
       run_step "Setup TensorRT-Model-Connect package build environment" setup_package_build_environment
       run_step "Build trtmc pip package" build_pip_package
@@ -1105,5 +1120,6 @@ run_step "C++ coverage" run_cpp_coverage
 run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
+run_step "CI mutation self-test" run_ci_mutation
 run_step "Generate coverage map" generate_coverage_map
 run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke

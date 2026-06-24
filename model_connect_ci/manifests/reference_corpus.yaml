@@ -1,0 +1,65 @@
+schema_version: 1
+corpora:
+  decoder-only LLM:
+    canonical_model: gpt2-125m
+    inputs:
+      - kind: prompt
+        value: The capital of France is
+    metamorphic:
+      - batch_reordering_preserves_sample_outputs
+    negative:
+      - mismatched_tokenizer_revision
+  encoder / embedding:
+    canonical_model: bert-base-uncased
+    inputs:
+      - kind: prompt
+        value: The capital of France is Paris.
+    metamorphic:
+      - padding_does_not_affect_valid_tokens
+    negative:
+      - missing_attention_mask
+  encoder-decoder:
+    canonical_model: t5-small
+    inputs:
+      - kind: prompt
+        value: "translate English to German: The house is wonderful."
+    metamorphic:
+      - decoder_step_count_preserves_prefix
+    negative:
+      - swapped_encoder_decoder_input
+  vision:
+    canonical_model: timm-vit-base-p16-224-augreg-in21k-ft-in1k
+    inputs:
+      - kind: image
+        value: tests/assets/test_image.jpg
+    metamorphic:
+      - image_batch_reordering_preserves_sample_outputs
+    negative:
+      - illegal_channel_layout
+  diffusion:
+    canonical_model: flux-schnell-l0
+    inputs:
+      - kind: prompt
+        value: A photo of a cat sitting on a windowsill at sunset
+    metamorphic:
+      - fixed_seed_is_reproducible
+    negative:
+      - out_of_profile_image_size
+  speech:
+    canonical_model: whisper-tiny-fp16
+    inputs:
+      - kind: audio
+        value: tests/e2e/data/Recording.wav
+    metamorphic:
+      - silence_padding_preserves_transcript_core
+    negative:
+      - illegal_sample_rate
+  multimodal:
+    canonical_model: internvl3-2b
+    inputs:
+      - kind: image_prompt
+        value: What color is the vehicle in this image? Answer in one word.
+    metamorphic:
+      - prompt_batch_reordering_preserves_image_binding
+    negative:
+      - missing_image_input

@@ -41,6 +41,7 @@ env:
   CPP_COVERAGE_MIN_BRANCH: "21"
   FULL_E2E: "false"
   RUN_COVERAGE_MAP: "false"
+  TRTMC_MUTATION_MODE: "premerge"
   REBUILD_ENGINES: "true"
   DIFFUSION_VLM_ASSESSMENT: "true"
   DIFFUSION_VLM_MODEL_ID: ${{ vars.TRTMC_DIFFUSION_VLM_MODEL_ID || 'Qwen/Qwen2.5-VL-3B-Instruct' }}
@@ -232,6 +233,10 @@ jobs:
         timeout-minutes: 240
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
 
+      - name: CI mutation self-test
+        timeout-minutes: 10
+        run: bash .github/scripts/run-gha-stage.sh ci-mutation
+
       - name: Write CI summary
         if: always()
         run: |
@@ -265,6 +270,7 @@ jobs:
             impact.json
             coverage_map.json
             coverage/
+            ci_mutation_artifacts/
             e2e_artifacts/
             dist/*.whl
 
