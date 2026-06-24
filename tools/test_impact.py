@@ -194,6 +194,18 @@ THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "segmentation": ["segmentation"],
 }
 
+# Third-party image loaders are used by image/video-producing or image-consuming
+# runtime paths, not by every model family.
+STB_IMAGE_TASK_STRATEGIES = [
+    "diffusion_media_generation",
+    "image_classification",
+    "object_detection",
+    "omni_multimodal",
+    "prompted_segmentation",
+    "segmentation",
+    "vision_language_generation",
+]
+
 # Shared C++ helper -> affected task_strategies
 SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_helpers": [
@@ -231,6 +243,12 @@ _NO_IMPACT_PATTERNS = [
     r"^plugins/trtmc-agent-skills/",
     r"^LICENSE",
     r"^CLAUDE\.md$",
+    r"^CODEOWNERS$",
+    r"^hf_links_wave1\.txt$",
+    r"^ruff\.toml$",
+    r"^verify_encoder\.py$",
+    r"^tests/(__init__\.py|engine_defs/__init__\.py)$",
+    r"^tests/assets/",
     r"^recovery-",
 ]
 
@@ -847,6 +865,18 @@ def _task_strategy_models(task_strategies: List[str]) -> ModelsResolver:
     return _resolver
 
 
+def _hf_id_models(hf_ids: Set[str]) -> ModelsResolver:
+    def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
+        del context
+        return sorted(
+            model
+            for model, metadata in imap.model_metadata.items()
+            if metadata.get("hf_id") in hf_ids
+        )
+
+    return _resolver
+
+
 def _runtime_strategy_models(
     strategies_getter: Callable[[RuleContext, ImpactMap], List[str]],
 ) -> ModelsResolver:
@@ -1210,6 +1240,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
+            priority=225,
+            name="third_party_stb_image",
+            matcher=_path_startswith("third_party/stb/"),
+            resolver=_match_result(
+                "third_party_stb_image",
+                _task_strategy_models(STB_IMAGE_TASK_STRATEGIES),
+                ["cpp"],
+                True,
+            ),
+            covered_by=("TestCppScope.test_third_party_stb_scopes_to_image_models",),
+        ),
+        ClassificationRule(
             priority=230,
             name="cpp_source",
             matcher=_path_startswith_any(("src/", "include/")),
@@ -1384,6 +1426,19 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
+            priority=395,
+            name="e2e_schedule_metadata",
+            matcher=_path_in({
+                "tests/e2e/timing_estimates.json",
+                "tests/e2e_partition.py",
+                "tests/runtime_strategy_matrix.yaml",
+            }),
+            resolver=_match_result(
+                "e2e_schedule_metadata", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestNoImpact.test_e2e_schedule_metadata_tools_only",),
+        ),
+        ClassificationRule(
             priority=400,
             name="e2e_runner_script",
             matcher=_path_in({
@@ -1395,11 +1450,35 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
         ),
         ClassificationRule(
+            priority=405,
+            name="legacy_e2e_test_support",
+            matcher=_regex_rule(r"tests/e2e/(?:__init__|conftest|test_[\w_]+)\.py$"),
+            resolver=_match_result(
+                "legacy_e2e_test_support", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestNoImpact.test_legacy_e2e_tests_do_not_select_models",),
+        ),
+        ClassificationRule(
             priority=410,
             name="e2e_waives",
             matcher=_path_equals("tests/e2e/waives.txt"),
             resolver=_match_result("e2e_waives", _all_models),
             covered_by=("TestHarness.test_waives_diff_can_be_refined",),
+        ),
+        ClassificationRule(
+            priority=415,
+            name="standalone_gpu_test_support",
+            matcher=_path_in({
+                "tests/run_qwen3_fi.py",
+                "tests/test_flashinfer_plugin_e2e.py",
+                "tests/test_flashinfer_trt_attention.py",
+                "tests/test_qwen3_flashinfer_e2e.py",
+                "tests/test_tvm_ffi_e2e.py",
+            }),
+            resolver=_match_result(
+                "standalone_gpu_test_support", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
         ClassificationRule(
             priority=420,
@@ -1421,6 +1500,23 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_startswith("tests/tools/"),
             resolver=_match_result("unit_tools", _no_models),
             covered_by=("TestUnitTiers.test_unit_tier_tools",),
+        ),
+        ClassificationRule(
+            priority=450,
+            name="local_qwen3_hf_fixture",
+            matcher=_regex_rule(r"models/hf/(?:Qwen__Qwen3-0\.6B|qwen3)(?:/.*)?$"),
+            resolver=_match_result(
+                "local_qwen3_hf_fixture",
+                _hf_id_models({"Qwen/Qwen3-0.6B"}),
+            ),
+            covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
+        ),
+        ClassificationRule(
+            priority=455,
+            name="cpp_example_tool",
+            matcher=_regex_rule(r"examples/.+\.cpp$"),
+            resolver=_match_result("cpp_example_tool", _no_models, ["cpp"], True),
+            covered_by=("TestUnitTiers.test_cpp_example_tool_triggers_cpp_tier",),
         ),
         ClassificationRule(
             priority=460,

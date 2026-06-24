@@ -668,6 +668,7 @@ class TestCppScope:
         assert "rnnt-small" in match.models
         assert "bark-small" not in match.models
         assert "qwen3-0.6b" not in match.models
+        assert "flux-schnell" not in match.models
 
     def test_scoped_cpp_helper_diffusion_seam(self, imap):
         """diffusion seam helper -> only diffusion pipelines that include it."""
@@ -678,6 +679,18 @@ class TestCppScope:
         assert "flux-2-dev" in match.models
         assert "flux-2-dev-fp8" not in match.models
         assert "qwen3-0.6b" not in match.models
+
+    def test_third_party_stb_scopes_to_image_models(self, imap):
+        """STB image headers affect image/video runtimes, not text-only models."""
+        match = test_impact.classify_file("third_party/stb/stb_image.h", imap)
+        assert match.rule == "third_party_stb_image"
+        assert "qwen25vl-3b" in match.models
+        assert "flux-schnell" in match.models
+        assert "sam-vit" in match.models
+        assert "segformer-b0" in match.models
+        assert "qwen3-0.6b" not in match.models
+        assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +770,26 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "CODEOWNERS",
+            "hf_links_wave1.txt",
+            "ruff.toml",
+            "tests/__init__.py",
+            "tests/assets/test_image.jpg",
+            "tests/engine_defs/__init__.py",
+            "verify_encoder.py",
+        ],
+    )
+    def test_repo_metadata_and_test_assets_no_impact(self, imap, path):
+        """Repo metadata and standalone test assets should not select E2E models."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "no_impact"
+        assert match.models == []
+        assert match.unit_tiers == []
+        assert match.rebuild_cpp is False
+
     def test_gitignore_no_impact(self, imap):
         """.gitignore -> no E2E tests."""
         match = test_impact.classify_file(".gitignore", imap)
@@ -793,6 +826,61 @@ class TestNoImpact:
         assert result.e2e_models == []
         assert result.unit_tiers == []
         assert result.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/e2e/timing_estimates.json",
+            "tests/e2e_partition.py",
+            "tests/runtime_strategy_matrix.yaml",
+        ],
+    )
+    def test_e2e_schedule_metadata_tools_only(self, imap, path):
+        """E2E scheduling/catalog metadata should run tools tests, not every model."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "e2e_schedule_metadata"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/e2e/__init__.py",
+            "tests/e2e/conftest.py",
+            "tests/e2e/test_full_pipeline.py",
+        ],
+    )
+    def test_legacy_e2e_tests_do_not_select_models(self, imap, path):
+        """Legacy direct E2E tests are not the manifest-harness model selector."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "legacy_e2e_test_support"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/run_qwen3_fi.py",
+            "tests/test_flashinfer_plugin_e2e.py",
+            "tests/test_flashinfer_trt_attention.py",
+            "tests/test_qwen3_flashinfer_e2e.py",
+            "tests/test_tvm_ffi_e2e.py",
+        ],
+    )
+    def test_standalone_gpu_tests_do_not_select_models(self, imap, path):
+        """Standalone GPU test files should not drive manifest-harness model scope."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "standalone_gpu_test_support"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
+    def test_local_qwen3_fixture_scopes_to_qwen3(self, imap):
+        """Checked-in local Qwen3 fixture files map to Qwen3 0.6B manifests."""
+        imap.model_metadata["qwen3-0.6b"]["hf_id"] = "Qwen/Qwen3-0.6B"
+        match = test_impact.classify_file("models/hf/qwen3/config.json", imap)
+        assert match.rule == "local_qwen3_hf_fixture"
+        assert match.models == ["qwen3-0.6b"]
 
 
 class TestE2EDataFiles:
@@ -892,6 +980,16 @@ class TestUnitTiers:
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
+
+    def test_cpp_example_tool_triggers_cpp_tier(self, imap):
+        """C++ example tools require C++ validation, not E2E model execution."""
+        match = test_impact.classify_file(
+            "examples/trtmc_dataset_benchmark.cpp", imap)
+
+        assert match.rule == "cpp_example_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
 
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
