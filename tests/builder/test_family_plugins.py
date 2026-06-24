@@ -2207,6 +2207,17 @@ class TestCanaryPlugin:
     HEADS, HEAD_DIM, FFN = 2, 8, 32
     MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
 
+    def test_audio_config_declares_nemo_frontend(self):
+        from tensorrt_model_connect.families.canary import plugin
+
+        audio_cfg = plugin.get_audio_config(object())
+
+        assert audio_cfg["mel_frontend"] == "nemo"
+        assert audio_cfg["mel_n_fft"] == 512
+        assert audio_cfg["mel_win_length"] == 400
+        assert audio_cfg["mel_preemph"] == 0.97
+        assert audio_cfg["mel_normalize"] == "per_feature"
+
     @staticmethod
     def _make_tp_weights(
         *,

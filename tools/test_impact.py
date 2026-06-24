@@ -504,6 +504,12 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     scoped_cpp_tokens = {
         "src/runtime/core/gpu_matmul.h": "gpu_matmul",
         "src/runtime/core/gpu_matmul.cpp": "gpu_matmul",
+        "src/runtime/domains/audio/mel_spectrogram.h": (
+            "runtime/domains/audio/mel_spectrogram.h"
+        ),
+        "src/runtime/domains/audio/mel_spectrogram.cpp": (
+            "runtime/domains/audio/mel_spectrogram.h"
+        ),
         "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h": (
             "diffusion_denoising_step_seam.h"
         ),
@@ -615,18 +621,24 @@ def _models_for_task_strategies(
 def _apply_l0_replacements(
     models: List[str],
     imap: ImpactMap,
-    exact_models: Set[str],
+    preserve_models: Set[str],
 ) -> tuple[List[str], List[Dict[str, str]]]:
     """Replace nightly-only scale models with their L0 representatives.
 
     Direct edits to a nightly-only scale model still use the L0 representative:
     the large model's artifact contract is covered by nightly, while PR L0 keeps
     the same plugin/runtime path at smaller scale.
+
+    Waiver diffs are different: they name the exact config whose xfail status
+    changed, so keep those exact model IDs even if they normally have an L0
+    representative.
     """
-    del exact_models  # Retained in the signature to keep call sites stable.
     selected: Set[str] = set()
     replacements: List[Dict[str, str]] = []
     for model in models:
+        if model in preserve_models:
+            selected.add(model)
+            continue
         replacement = imap.l0_replacement_by_model.get(model)
         if replacement:
             selected.add(replacement)
@@ -1193,6 +1205,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             resolver=_match_result("cpp_scoped_helper", _scoped_cpp_helper_models),
             covered_by=(
                 "TestCppScope.test_scoped_cpp_helper_gpu_matmul",
+                "TestCppScope.test_scoped_cpp_helper_audio_mel_spectrogram",
                 "TestCppScope.test_scoped_cpp_helper_diffusion_seam",
             ),
         ),
@@ -1560,7 +1573,7 @@ def analyze_impact(
         exclude_ci_tiers = set(_DEFAULT_EXCLUDED_CI_TIERS)
 
     all_models: Set[str] = set()
-    exact_models: Set[str] = set()
+    preserve_l0_models: Set[str] = set()
     all_tiers: Set[str] = set()
     rebuild_cpp = False
     matched_rules: List[Dict] = []
@@ -1589,8 +1602,8 @@ def analyze_impact(
                 candidate_models,
             )
         all_models.update(match.models)
-        if match.rule in ("manifest", "e2e_data_file"):
-            exact_models.update(match.models)
+        if match.rule == "e2e_waives_model_lines":
+            preserve_l0_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
         matched_rules.append({
@@ -1603,7 +1616,7 @@ def analyze_impact(
     l0_replacements: List[Dict[str, str]] = []
     if e2e_suite == "l0":
         e2e_models, l0_replacements = _apply_l0_replacements(
-            e2e_models, imap, exact_models,
+            e2e_models, imap, preserve_l0_models,
         )
     cap_applied = False
     if cap is not None and len(e2e_models) > cap:

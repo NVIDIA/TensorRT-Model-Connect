@@ -21,11 +21,44 @@ struct TensorParallelRuntimeConfig {
     int32_t tp_size{1};
 };
 
+struct SpeechMelRuntimeConfig {
+    int32_t n_fft{400};
+    int32_t hop_length{160};
+    int32_t chunk_length{30};
+    int32_t sampling_rate{16000};
+    int32_t win_length{400};
+    float preemph{0.0F};
+    bool normalize_per_feature{false};
+    std::string frontend{"whisper"};
+};
+
 TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
     TensorParallelRuntimeConfig cfg;
     cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
     const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
     cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+SpeechMelRuntimeConfig parse_speech_mel_runtime_config(const std::string& json,
+                                                       const std::string& bundle_model_type,
+                                                       const std::string& bundle_family) {
+    SpeechMelRuntimeConfig cfg;
+    cfg.n_fft = extract_json_int(json, "mel_n_fft", 400);
+    cfg.hop_length = extract_json_int(json, "mel_hop_length", 160);
+    cfg.chunk_length = extract_json_int(json, "mel_chunk_length", 30);
+    cfg.sampling_rate = extract_json_int(json, "mel_sampling_rate", 16000);
+
+    const std::string model_type = extract_json_string(json, "model_type", bundle_model_type);
+    const bool is_canary = (model_type == "canary" || bundle_family == "canary");
+    cfg.frontend = extract_json_string(json, "mel_frontend", is_canary ? "nemo" : "whisper");
+    cfg.win_length =
+        extract_json_int(json, "mel_win_length", (cfg.frontend == "nemo") ? 400 : cfg.n_fft);
+    cfg.preemph = extract_json_float(json, "mel_preemph", (cfg.frontend == "nemo") ? 0.97F : 0.0F);
+
+    const std::string normalize =
+        extract_json_string(json, "mel_normalize", is_canary ? "per_feature" : "");
+    cfg.normalize_per_feature = (cfg.frontend == "nemo" && normalize == "per_feature");
     return cfg;
 }
 
@@ -110,15 +143,15 @@ class WhisperPlugin final : public IPipelinePlugin {
         auto mel_fb = load_mel_filterbank(ctx.bundle);
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
 
-        int32_t mel_n_fft = extract_json_int(json, "mel_n_fft", 400);
-        int32_t mel_hop_length = extract_json_int(json, "mel_hop_length", 160);
-        int32_t mel_chunk_length = extract_json_int(json, "mel_chunk_length", 30);
-        int32_t mel_sampling_rate = extract_json_int(json, "mel_sampling_rate", 16000);
+        SpeechMelRuntimeConfig mel_cfg = parse_speech_mel_runtime_config(
+            json, ctx.bundle.info.model_type, ctx.bundle.info.family);
 
         return std::make_unique<WhisperPipeline>(
             std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(state),
-            std::move(wc), ctx.config.hidden_size, dl, std::move(mel_fb), mel_n_fft, mel_hop_length,
-            mel_chunk_length, mel_sampling_rate, stream, std::move(tok), ctx.bundle.info.model_id);
+            std::move(wc), ctx.config.hidden_size, dl, std::move(mel_fb), mel_cfg.n_fft,
+            mel_cfg.hop_length, mel_cfg.chunk_length, mel_cfg.sampling_rate, mel_cfg.win_length,
+            mel_cfg.preemph, mel_cfg.normalize_per_feature, std::move(mel_cfg.frontend), stream,
+            std::move(tok), ctx.bundle.info.model_id);
     }
 };
 

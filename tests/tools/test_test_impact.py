@@ -56,7 +56,10 @@ def mock_repo(tmp_path):
     (tmp_path / "src" / "runtime" / "models" / "vision_language").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "flux").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "pixart").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "whisper").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "rnnt").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "domains" / "audio").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "domains" / "diffusion").mkdir(parents=True)
     (tmp_path / "include" / "trtmc").mkdir(parents=True)
     (tmp_path / "tests" / "e2e" / "data").mkdir(parents=True)
@@ -84,6 +87,8 @@ def mock_repo(tmp_path):
         {"name": "whisper-tiny-fp16", "family": "whisper", "runtime_strategy": "speech_to_text",
          "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True,
          "test_input_audio": "tests/e2e/data/Recording.wav"},
+        {"name": "rnnt-small", "family": "rnnt", "runtime_strategy": "speech_to_text_rnnt",
+         "hf_id": "nvidia/rnnt-small", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
         {"name": "z-image-turbo", "family": "z_image", "runtime_strategy": "diffusion_zimage",
@@ -242,6 +247,22 @@ def mock_repo(tmp_path):
     )
     (tmp_path / "src" / "runtime" / "models" / "pixart" / "pipeline.cpp").write_text(
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "whisper" / "MODEL.toml").write_text(
+        'runtime_strategies = ["speech_to_text"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "whisper" / "pipeline.cpp").write_text(
+        '#include "runtime/domains/audio/mel_spectrogram.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "rnnt" / "MODEL.toml").write_text(
+        'runtime_strategies = ["speech_to_text_rnnt"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "rnnt" / "pipeline.cpp").write_text(
+        '#include "runtime/domains/audio/mel_spectrogram.h"\n',
         encoding="utf-8",
     )
     (tmp_path / "tests" / "e2e" / "data" / "flux2-fp8-scales.json").write_text(
@@ -630,6 +651,22 @@ class TestCppScope:
         assert "flux-schnell" in match.models
         assert "flux-2-dev" in match.models
         assert "flux-2-dev-fp8" not in match.models
+        assert "qwen3-0.6b" not in match.models
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/runtime/domains/audio/mel_spectrogram.cpp",
+            "src/runtime/domains/audio/mel_spectrogram.h",
+        ],
+    )
+    def test_scoped_cpp_helper_audio_mel_spectrogram(self, imap, path):
+        """mel_spectrogram helper -> only ASR runtime models that include it."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "cpp_scoped_helper"
+        assert "whisper-tiny-fp16" in match.models
+        assert "rnnt-small" in match.models
+        assert "bark-small" not in match.models
         assert "qwen3-0.6b" not in match.models
 
     def test_scoped_cpp_helper_diffusion_seam(self, imap):
@@ -1962,6 +1999,21 @@ class TestAggregation:
             "replacement": "qwen3-0.6b",
             "reason": "scale-only coverage",
         }]
+
+    def test_waive_line_keeps_exact_model_despite_l0_replacement(self, mock_repo):
+        """Waiver edits name exact configs, so L0 should not substitute them."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["l0_replacement"] = "qwen3-0.6b"
+        qwen4b["l0_replacement_reason"] = "scale-only coverage"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        selected, replacements = test_impact._apply_l0_replacements(
+            ["qwen3-4b"], imap, {"qwen3-4b"})
+
+        assert selected == ["qwen3-4b"]
+        assert replacements == []
 
     def test_nightly_keeps_exact_impacted_models(self, mock_repo):
         """Nightly policy does not apply PR L0 replacements."""

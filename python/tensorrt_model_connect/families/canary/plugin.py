@@ -760,10 +760,14 @@ class CanaryPlugin:
     def get_audio_config(self, config: ModelConfig) -> dict | None:
         """NeMo mel spectrogram parameters (differ from Whisper defaults)."""
         return {
+            "mel_frontend": "nemo",
             "mel_n_fft": 512,
+            "mel_win_length": 400,
             "mel_hop_length": 160,
             "mel_chunk_length": 30,
             "mel_sampling_rate": 16000,
+            "mel_preemph": 0.97,
+            "mel_normalize": "per_feature",
         }
 
     def build_extra_engines(self, config: ModelConfig, weights, max_cache_length: int, *, precision: str = "fp32", verbose: bool = False) -> dict | None:

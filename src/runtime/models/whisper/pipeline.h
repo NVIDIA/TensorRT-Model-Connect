@@ -27,6 +27,14 @@ class WhisperPipeline final : public IPipeline {
                     std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config,
                     int32_t hidden_size, int32_t num_decoder_layers, MelFilterbank mel_fb,
                     int32_t mel_n_fft, int32_t mel_hop_length, int32_t mel_chunk_length,
+                    int32_t mel_sampling_rate, int32_t mel_win_length, float mel_preemph,
+                    bool mel_normalize_per_feature, std::string mel_frontend, cudaStream_t stream,
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+
+    WhisperPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+                    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config,
+                    int32_t hidden_size, int32_t num_decoder_layers, MelFilterbank mel_fb,
+                    int32_t mel_n_fft, int32_t mel_hop_length, int32_t mel_chunk_length,
                     int32_t mel_sampling_rate, cudaStream_t stream,
                     std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
@@ -56,6 +64,10 @@ class WhisperPipeline final : public IPipeline {
     int32_t mel_hop_length_;
     int32_t mel_chunk_length_;
     int32_t mel_sampling_rate_;
+    int32_t mel_win_length_;
+    float mel_preemph_;
+    bool mel_normalize_per_feature_;
+    std::string mel_frontend_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

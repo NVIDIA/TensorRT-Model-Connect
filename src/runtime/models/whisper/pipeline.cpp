@@ -26,14 +26,17 @@ WhisperPipeline::WhisperPipeline(
     std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
     std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
     int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_hop_length,
-    int32_t mel_chunk_length, int32_t mel_sampling_rate, cudaStream_t stream,
+    int32_t mel_chunk_length, int32_t mel_sampling_rate, int32_t mel_win_length, float mel_preemph,
+    bool mel_normalize_per_feature, std::string mel_frontend, cudaStream_t stream,
     std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       whisper_config_(std::move(whisper_config)), hidden_size_(hidden_size),
       num_decoder_layers_(num_decoder_layers),
       mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))), mel_n_fft_(mel_n_fft),
       mel_hop_length_(mel_hop_length), mel_chunk_length_(mel_chunk_length),
-      mel_sampling_rate_(mel_sampling_rate), stream_(stream), tokenizer_(std::move(tokenizer)),
+      mel_sampling_rate_(mel_sampling_rate), mel_win_length_(mel_win_length),
+      mel_preemph_(mel_preemph), mel_normalize_per_feature_(mel_normalize_per_feature),
+      mel_frontend_(std::move(mel_frontend)), stream_(stream), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("WhisperPipeline: invalid encoder module");
@@ -53,6 +56,18 @@ WhisperPipeline::WhisperPipeline(
         cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
     }
 }
+
+WhisperPipeline::WhisperPipeline(
+    std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
+    int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_hop_length,
+    int32_t mel_chunk_length, int32_t mel_sampling_rate, cudaStream_t stream,
+    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+    : WhisperPipeline(std::move(encoder), std::move(decoder), std::move(state),
+                      std::move(whisper_config), hidden_size, num_decoder_layers, std::move(mel_fb),
+                      mel_n_fft, mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_n_fft,
+                      0.0F, false, "whisper", stream, std::move(tokenizer),
+                      std::move(model_id_str)) {}
 
 WhisperPipeline::~WhisperPipeline() {
     for (auto* ptr : cross_k_ptrs_) {
@@ -84,9 +99,16 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     // Step 1: Extract mel spectrogram
     MelResult mel;
     if (mel_fb_ && !mel_fb_->data.empty()) {
-        mel = extract_mel_spectrogram(samples_ptr, samples_count, mel_fb_->data.data(),
-                                      mel_fb_->n_freq_bins, mel_fb_->n_mel_bins, mel_n_fft_,
-                                      mel_hop_length_, mel_chunk_length_, mel_sampling_rate_);
+        if (mel_frontend_ == "nemo") {
+            mel = extract_nemo_mel_spectrogram(
+                samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins,
+                mel_fb_->n_mel_bins, mel_n_fft_, mel_win_length_, mel_hop_length_,
+                mel_chunk_length_, mel_sampling_rate_, mel_preemph_, mel_normalize_per_feature_);
+        } else {
+            mel = extract_mel_spectrogram(samples_ptr, samples_count, mel_fb_->data.data(),
+                                          mel_fb_->n_freq_bins, mel_fb_->n_mel_bins, mel_n_fft_,
+                                          mel_hop_length_, mel_chunk_length_, mel_sampling_rate_);
+        }
     }
 
     if (mel.data.empty()) {

@@ -194,6 +194,50 @@ void nemo_log_mel_inplace(std::vector<float>& mel_spec) {
         value = std::log(value + kLogGuard);
 }
 
+void normalize_nemo_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_mel_bins,
+                                        int32_t n_frames_raw, int32_t valid_frames) {
+    if (n_mel_bins <= 0 || n_frames_raw <= 0) {
+        return;
+    }
+
+    valid_frames = std::clamp(valid_frames, 0, n_frames_raw);
+    if (valid_frames <= 0) {
+        std::fill(mel_spec.begin(), mel_spec.end(), 0.0F);
+        return;
+    }
+
+    constexpr float kStdGuard = 1e-5F; // NeMo preprocessing CONSTANT.
+    for (int32_t m = 0; m < n_mel_bins; ++m) {
+        const std::size_t base = static_cast<std::size_t>(m) * n_frames_raw;
+
+        double mean = 0.0;
+        for (int32_t t = 0; t < valid_frames; ++t)
+            mean += static_cast<double>(mel_spec[base + static_cast<std::size_t>(t)]);
+        mean /= static_cast<double>(valid_frames);
+
+        if (valid_frames == 1) {
+            mel_spec[base] = 0.0F;
+        } else {
+            double var = 0.0;
+            for (int32_t t = 0; t < valid_frames; ++t) {
+                const double diff =
+                    static_cast<double>(mel_spec[base + static_cast<std::size_t>(t)]) - mean;
+                var += diff * diff;
+            }
+            const double stddev =
+                std::sqrt(var / static_cast<double>(valid_frames - 1)) + kStdGuard;
+            for (int32_t t = 0; t < valid_frames; ++t) {
+                const std::size_t idx = base + static_cast<std::size_t>(t);
+                mel_spec[idx] =
+                    static_cast<float>((static_cast<double>(mel_spec[idx]) - mean) / stddev);
+            }
+        }
+
+        for (int32_t t = valid_frames; t < n_frames_raw; ++t)
+            mel_spec[base + static_cast<std::size_t>(t)] = 0.0F;
+    }
+}
+
 std::vector<float> trim_last_frame_if_needed(std::vector<float> mel_spec, int32_t n_mel_bins,
                                              int32_t n_frames_raw, int32_t& n_frames_out) {
     n_frames_out = n_frames_raw;
@@ -242,7 +286,8 @@ MelResult extract_nemo_mel_spectrogram(const float* samples, int32_t n_samples,
                                        const float* mel_filters, int32_t n_freq_bins,
                                        int32_t n_mel_bins, int32_t n_fft, int32_t win_length,
                                        int32_t hop_length, int32_t chunk_length_s,
-                                       int32_t sample_rate, float preemph) {
+                                       int32_t sample_rate, float preemph,
+                                       bool normalize_per_feature) {
     const std::vector<float> padded = build_nemo_center_padded_audio(
         samples, n_samples, chunk_length_s, sample_rate, n_fft, preemph);
     const int32_t freq_bins = resolve_num_freq_bins(n_freq_bins, n_fft);
@@ -254,6 +299,10 @@ MelResult extract_nemo_mel_spectrogram(const float* samples, int32_t n_samples,
     std::vector<float> mel_spec =
         project_power_to_mel(power, mel_filters, freq_bins, n_mel_bins, n_frames_raw);
     nemo_log_mel_inplace(mel_spec);
+    if (normalize_per_feature) {
+        const int32_t valid_frames = (hop_length > 0) ? (n_samples / hop_length) : 0;
+        normalize_nemo_per_feature_inplace(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
+    }
 
     int32_t n_frames_out = 0;
     mel_spec =
