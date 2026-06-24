@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import gc
+import html
 import json
+import math
 import os
 import random
 import re
@@ -13,6 +16,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -33,58 +37,6 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
-
-DEFAULT_BUILTIN_SUITES = [
-    {
-        "id": "ocrbench_v2_unified",
-        "description": (
-            "Local OCRBench v2 evaluation on the unified VLM dataset format. "
-            "This validates image-conditioned OCR / visual QA bundles against "
-            "dataset gold answers without requiring dataset-local TRTMC config."
-        ),
-        "user_contract": "ocr_text",
-        "dataset": {
-            "kind": "vlm_unified_json",
-            "default_path": "/mnt/data/OCRBench_v2/unified/dataset.json",
-            "answer_field": "answer.primary",
-            "subject_field": "category",
-            "prompt_source": "messages",
-            "image_source": "media",
-            "max_images_per_sample": 1,
-        },
-        "selectors": {
-            "task_strategies": ["vision_language_generation"],
-            "runtime_strategies": ["vision_language"],
-            "families": ["deepseek_ocr"],
-            "exclude_families": ["locateanything", "lance"],
-        },
-        "generation": {
-            "max_new_tokens": 32,
-            "temperature": 1.0,
-            "top_k": 1,
-            "top_p": 1.0,
-            "min_p": 0.0,
-            "seed": -1,
-            "apply_chat_template": True,
-            "enable_thinking": False,
-            "do_sample": False,
-        },
-        "scoring": {
-            "scorer": "exact_or_alias",
-        },
-        "build": {
-            "min_max_cache_length": 1024,
-        },
-        "ci": {
-            "eligible": False,
-            "lane": "local_only",
-            "notes": (
-                "Intended for local/p2021 validation first. Pass --dataset for "
-                "machine-specific data roots such as /localhome/.../updated_datasets."
-            ),
-        },
-    },
-]
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -108,8 +60,6 @@ def load_suites(path: Path = DEFAULT_SUITES) -> list[dict[str, Any]]:
     if not isinstance(suites, list):
         raise ValueError(f"{path}: 'suites' must be a list")
     suites = copy.deepcopy(suites)
-    if path.resolve() == DEFAULT_SUITES.resolve():
-        suites.extend(copy.deepcopy(DEFAULT_BUILTIN_SUITES))
     seen: set[str] = set()
     for suite in suites:
         suite_id = suite.get("id")
@@ -498,8 +448,17 @@ def _unified_answer(sample: dict[str, Any]) -> tuple[str, list[str]]:
     return primary, aliases
 
 
+def _unified_answer_eval(sample: dict[str, Any]) -> Any:
+    raw_answer = sample.get("answer")
+    if isinstance(raw_answer, dict):
+        return raw_answer.get("eval")
+    return None
+
+
 def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
     primary_answer, aliases = _unified_answer(sample)
+    eval_method = _unified_answer_eval(sample)
+    metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
     messages = sample.get("messages")
     normalized_messages = [
         _normalize_unified_message(message)
@@ -520,6 +479,7 @@ def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
         "id": str(sample.get("id") or f"ocrbench_{sample.get('source_index', 0):06d}"),
         "messages": normalized_messages,
         "answer": primary_answer,
+        "question": str(sample.get("question", "")),
         "subject": str(
             sample.get("category")
             or sample.get("type")
@@ -534,6 +494,13 @@ def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
     for key in ("dataset_name", "type", "source_index", "metadata"):
         if key in sample:
             request[key] = sample[key]
+    if str(sample.get("dataset", "") or sample.get("source", "") or "").lower() == "ocrbench_v2" or str(sample.get("id", "")).startswith("ocrbench_v2_"):
+        request["ocrbench_type"] = sample.get("type")
+        request["ocrbench_eval"] = eval_method
+        request["ocrbench_answers"] = aliases
+        request["ocrbench_bbox"] = metadata.get("bbox")
+        request["ocrbench_bbox_list"] = metadata.get("bbox_list")
+        request["ocrbench_content"] = metadata.get("content")
     return request
 
 
@@ -1156,7 +1123,755 @@ def is_correct_for_request(prediction: str, request: dict[str, Any]) -> bool:
     return any(is_correct(prediction, answer) for answer in request_answer_values(request))
 
 
-def score_predictions(predictions_data: dict[str, Any], answers_data: dict[str, Any]) -> dict[str, Any]:
+OCRBENCH_EN_GROUPS = {
+    "text_recognition": {
+        "text recognition en",
+        "fine-grained text recognition en",
+        "full-page OCR en",
+    },
+    "text_detection": {"text grounding en", "VQA with position en"},
+    "text_spotting": {"text spotting en"},
+    "relationship_extraction": {
+        "key information extraction en",
+        "key information mapping en",
+    },
+    "element_parsing": {
+        "document parsing en",
+        "chart parsing en",
+        "table parsing en",
+        "formula recognition en",
+    },
+    "mathematical_calculation": {"math QA en", "text counting en"},
+    "visual_text_understanding": {
+        "document classification en",
+        "cognition VQA en",
+        "diagram QA en",
+    },
+    "knowledge_reasoning": {
+        "reasoning VQA en",
+        "science QA en",
+        "APP agent en",
+        "ASCII art classification en",
+    },
+}
+
+OCRBENCH_CN_GROUPS = {
+    "text_recognition": {"full-page OCR cn"},
+    "relationship_extraction": {
+        "key information extraction cn",
+        "handwritten answer extraction cn",
+    },
+    "element_parsing": {
+        "document parsing cn",
+        "table parsing cn",
+        "formula recognition cn",
+    },
+    "visual_text_understanding": {"cognition VQA cn"},
+    "knowledge_reasoning": {"reasoning VQA cn", "text translation cn"},
+}
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _clip_score(score: float) -> float:
+    if math.isnan(score) or math.isinf(score):
+        return 0.0
+    return max(0.0, min(1.0, float(score)))
+
+
+def _levenshtein_distance(s1: Any, s2: Any) -> int:
+    if not isinstance(s1, str):
+        s1 = list(s1)
+    if not isinstance(s2, str):
+        s2 = list(s2)
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+    previous = list(range(len(s1) + 1))
+    for i2, c2 in enumerate(s2):
+        current = [i2 + 1]
+        for i1, c1 in enumerate(s1):
+            current.append(
+                previous[i1]
+                if c1 == c2
+                else 1 + min(previous[i1], previous[i1 + 1], current[-1])
+            )
+        previous = current
+    return int(previous[-1])
+
+
+def _normalized_edit_similarity(prediction: str, reference: str) -> float:
+    length = max(len(prediction), len(reference))
+    if length == 0:
+        return 1.0
+    return _clip_score(1.0 - (_levenshtein_distance(prediction, reference) / length))
+
+
+def _ocrbench_eval_method(request: dict[str, Any]) -> str:
+    raw = request.get("ocrbench_eval")
+    if raw is None:
+        return ""
+    text = str(raw)
+    return "" if text.lower() == "none" else text
+
+
+def _ocrbench_answers(request: dict[str, Any]) -> list[str]:
+    raw = request.get("ocrbench_answers")
+    if isinstance(raw, list):
+        values = [str(value) for value in raw]
+    elif raw is None:
+        values = request_answer_values(request)
+    else:
+        values = [str(raw)]
+    return values
+
+
+def _ocrbench_task_type(request: dict[str, Any]) -> str:
+    return str(request.get("ocrbench_type") or request.get("type") or request.get("subject", ""))
+
+
+def _contains_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+
+def _ocrbench_tokens(text: str) -> list[str]:
+    if _contains_chinese(text):
+        return [char for char in text if not char.isspace()]
+    return text.split()
+
+
+def _ocrbench_anls(predict: str, answer: str) -> float:
+    value = _normalized_edit_similarity(predict, answer)
+    return value if value >= 0.5 else 0.0
+
+
+def _ocrbench_vqa_score(
+    predict: str,
+    answers: list[str],
+    *,
+    case_sensitive: bool = False,
+    chinese: bool = False,
+) -> float:
+    score = 0.0
+    for raw_answer in answers:
+        answer = str(raw_answer)
+        current_predict = str(predict)
+        if not case_sensitive:
+            answer = answer.lower()
+            current_predict = current_predict.lower()
+        answer = answer.strip().replace("\n", " ")
+        current_predict = current_predict.strip().replace("\n", " ")
+        if chinese:
+            answer = answer.replace(" ", "")
+            current_predict = current_predict.replace(" ", "")
+            short_answer = len(answer.split(",")) < 4
+        else:
+            short_answer = len(answer.split()) < 5
+        if short_answer:
+            if answer in current_predict:
+                score = 1.0
+        else:
+            score = max(score, _ocrbench_anls(current_predict, answer))
+    return _clip_score(score)
+
+
+def _ocrbench_multiple_choice_score(predict: str, answers: list[str]) -> float:
+    if not answers:
+        return 0.0
+    parsed = "".join(char for char in str(predict) if char.isalpha())
+    return 1.0 if parsed == str(answers[0]) else 0.0
+
+
+def _extract_first_number(text: str) -> int | None:
+    match = re.search(r"\d+", text)
+    return int(match.group(0)) if match else None
+
+
+def _ocrbench_counting_score(predict: str, answers: list[str], eval_method: str) -> float:
+    score = 0.0
+    predict_text = str(predict).lower().strip().replace("\n", " ")
+    for raw_answer in answers:
+        answer_text = str(raw_answer).lower().strip().replace("\n", " ")
+        if eval_method == "exact match":
+            score = max(score, 1.0 if answer_text in predict_text else 0.0)
+            continue
+        if eval_method != "regression":
+            continue
+        predict_number = _extract_first_number(predict_text)
+        if predict_number is None:
+            continue
+        try:
+            answer_number = int(answer_text)
+        except ValueError:
+            continue
+        if answer_number <= 0 or predict_number <= 0 or predict_number >= 2 * answer_number:
+            continue
+        value = 1 - abs(predict_number - answer_number) / answer_number
+        if value > 0.5:
+            score = max(score, value)
+    return _clip_score(score)
+
+
+def _remove_latex_text_tags(latex: str) -> str:
+    return re.sub(r"\\text\{([^{}]*)\}", r"\1", latex)
+
+
+def _ocrbench_formula_score(predict: str, answers: list[str], *, chinese: bool = False) -> float:
+    predict_text = str(predict).strip().replace("\n", " ").replace(" ", "")
+    for raw_answer in answers:
+        answer = str(raw_answer)
+        if chinese:
+            answer = _remove_latex_text_tags(answer)
+        answer = answer.strip().replace("\n", " ").replace(" ", "")
+        if answer and answer in predict_text:
+            return 1.0
+    return 0.0
+
+
+def _safe_f_measure(reference_tokens: set[str], hypothesis_tokens: set[str]) -> float:
+    if not reference_tokens or not hypothesis_tokens:
+        return 0.0
+    overlap = len(reference_tokens & hypothesis_tokens)
+    precision = overlap / len(hypothesis_tokens)
+    recall = overlap / len(reference_tokens)
+    return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+
+
+def _bleu_score(reference: list[str], hypothesis: list[str]) -> float:
+    if not reference or not hypothesis:
+        return 0.0
+    precisions: list[float] = []
+    for n in range(1, 5):
+        hyp_ngrams = Counter(tuple(hypothesis[i:i + n]) for i in range(len(hypothesis) - n + 1))
+        ref_ngrams = Counter(tuple(reference[i:i + n]) for i in range(len(reference) - n + 1))
+        total = sum(hyp_ngrams.values())
+        if total == 0:
+            precisions.append(0.0)
+            continue
+        matched = sum(min(count, ref_ngrams[ngram]) for ngram, count in hyp_ngrams.items())
+        precisions.append(matched / total)
+    if any(precision == 0.0 for precision in precisions):
+        return 0.0
+    brevity = 1.0 if len(hypothesis) > len(reference) else math.exp(1 - len(reference) / len(hypothesis))
+    return _clip_score(brevity * math.exp(sum(math.log(precision) for precision in precisions) / 4))
+
+
+def _meteor_like_score(reference: list[str], hypothesis: list[str]) -> float:
+    if not reference or not hypothesis:
+        return 0.0
+    ref_counter = Counter(reference)
+    hyp_counter = Counter(hypothesis)
+    matches = sum(min(count, hyp_counter[token]) for token, count in ref_counter.items())
+    if matches == 0:
+        return 0.0
+    precision = matches / len(hypothesis)
+    recall = matches / len(reference)
+    return _clip_score((10 * precision * recall) / (recall + 9 * precision))
+
+
+def _ocrbench_long_reading_score(predict: str, answer: str) -> float:
+    prediction = str(predict)
+    reference_text = str(answer)
+    if not prediction or not reference_text:
+        return 0.0
+    reference = _ocrbench_tokens(reference_text)
+    hypothesis = _ocrbench_tokens(prediction)
+    bleu = _bleu_score(reference, hypothesis)
+    meteor = _meteor_like_score(reference, hypothesis)
+    f_measure = _safe_f_measure(set(reference), set(hypothesis))
+    edit_similarity = _normalized_edit_similarity(prediction, reference_text)
+    return _clip_score((bleu + meteor + f_measure + edit_similarity) / 4)
+
+
+def _literal_or_json_dict(text: str) -> dict[str, Any]:
+    content = str(text).strip()
+    match = re.search(r"```(?:python|json)?\n(.*?)\n```", content, re.DOTALL | re.IGNORECASE)
+    if match:
+        content = match.group(1)
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            value = loader(content)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            return value
+    data: dict[str, Any] = {}
+    pattern = r'["\']?([\w\s%-]+)["\']?\s*[:=]\s*["\']?([^\n,"\'{}]+)["\']?'
+    for key, value in re.findall(pattern, content):
+        data[key.strip()] = value.strip()
+    return data
+
+
+def _generate_value_combinations(raw_answer: Any) -> list[dict[str, Any]]:
+    if isinstance(raw_answer, dict):
+        answer_dict = raw_answer
+    else:
+        answer_dict = _literal_or_json_dict(str(raw_answer).strip('"'))
+    if not isinstance(answer_dict, dict) or not answer_dict:
+        return []
+    keys = list(answer_dict)
+    value_lists = [
+        value if isinstance(value, list) else [value]
+        for value in (answer_dict[key] for key in keys)
+    ]
+    return [dict(zip(keys, values, strict=True)) for values in product(*value_lists)]
+
+
+def _ocrbench_kie_f1(preds: dict[str, Any], gts: dict[str, Any]) -> float:
+    keys = set(preds) | set(gts)
+    if not keys:
+        return 0.0
+    scores: list[float] = []
+    for key in keys:
+        pred_value = preds.get(key)
+        gt_value = gts.get(key)
+        if pred_value is None or gt_value is None:
+            scores.append(0.0)
+            continue
+        pred_text = str(pred_value).lower().strip().replace("\n", " ").replace(" ", "")
+        gt_text = str(gt_value).lower().strip().replace("\n", " ").replace(" ", "")
+        scores.append(1.0 if pred_text == gt_text else 0.0)
+    return _mean(scores)
+
+
+def _ocrbench_kie_score(predict: str, answers: list[str]) -> float:
+    pred_dict = _literal_or_json_dict(predict)
+    max_score = 0.0
+    for answer in answers[:1]:
+        for answer_dict in _generate_value_combinations(answer):
+            max_score = max(max_score, _ocrbench_kie_f1(pred_dict, answer_dict))
+    return _clip_score(max_score)
+
+
+def _coerce_bbox(value: Any) -> list[int] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        try:
+            return [int(coord) for coord in value]
+        except Exception:
+            return None
+    if isinstance(value, str):
+        matches = re.findall(r"-?\d+", value)
+        if len(matches) >= 4:
+            return [int(coord) for coord in matches[:4]]
+    return None
+
+
+def _extract_coordinates(text: str) -> list[int] | None:
+    pattern = r"[\(\[]\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*[\)\]]"
+    coords_list: list[list[int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for match in re.finditer(pattern, str(text)):
+        coords = tuple(int(part) for part in match.groups())
+        if not all(0 <= coord <= 1000 for coord in coords):
+            continue
+        if coords in seen:
+            coords_list = [item for item in coords_list if tuple(item) != coords]
+        coords_list.append(list(coords))
+        seen.add(coords)
+    return coords_list[-1] if coords_list else None
+
+
+def _calculate_iou(box1: Any, box2: Any) -> float:
+    lhs = _coerce_bbox(box1)
+    rhs = _coerce_bbox(box2)
+    if lhs is None or rhs is None:
+        return 0.0
+    x1_inter = max(lhs[0], rhs[0])
+    y1_inter = max(lhs[1], rhs[1])
+    x2_inter = min(lhs[2], rhs[2])
+    y2_inter = min(lhs[3], rhs[3])
+    inter_area = max(0, x2_inter - x1_inter) * max(0, y2_inter - y1_inter)
+    lhs_area = max(0, lhs[2] - lhs[0]) * max(0, lhs[3] - lhs[1])
+    rhs_area = max(0, rhs[2] - rhs[0]) * max(0, rhs[3] - rhs[1])
+    union = lhs_area + rhs_area - inter_area
+    return _clip_score(inter_area / union) if union else 0.0
+
+
+def _extract_bounding_boxes_robust(predict: str) -> list[list[Any]]:
+    results: list[list[Any]] = []
+    seen: set[tuple[int, int, int, int, str]] = set()
+    try:
+        value = ast.literal_eval(str(predict))
+    except Exception:
+        value = None
+    items = value if isinstance(value, (list, tuple)) else []
+    if not items:
+        items = re.findall(r"[\[\(]\s*([^\[\]\(\)]*?)\s*[\]\)]", str(predict))
+    for item in items:
+        if isinstance(item, str):
+            parts = item.split(",", 4)
+        elif isinstance(item, (list, tuple)):
+            parts = list(item[:5])
+        else:
+            continue
+        if len(parts) < 5:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(str(part).strip()) for part in parts[:4]]
+        except ValueError:
+            continue
+        if not all(0 <= coord <= 1000 for coord in (x1, y1, x2, y2)):
+            continue
+        text = str(parts[4]).replace("\n", "").strip().strip('"').strip("'")
+        key = (x1, y1, x2, y2, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append([x1, y1, x2, y2, text])
+    return results
+
+
+def _quadrilateral_to_bbox(points: Any) -> list[int] | None:
+    if not isinstance(points, (list, tuple)) or len(points) < 8:
+        return _coerce_bbox(points)
+    try:
+        values = [int(point) for point in points]
+    except Exception:
+        return None
+    xs = values[0::2]
+    ys = values[1::2]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _ocrbench_spotting_score(predict: str, request: dict[str, Any]) -> tuple[float, str]:
+    predictions = _extract_bounding_boxes_robust(predict)
+    gt_boxes = request.get("ocrbench_bbox_list") or []
+    gt_content = request.get("ocrbench_content") or []
+    if not predictions or not isinstance(gt_boxes, list) or not isinstance(gt_content, list):
+        return 0.0, ""
+    matched_gt: set[int] = set()
+    matches = 0
+    for pred in predictions:
+        pred_box = pred[:4]
+        pred_text = str(pred[4])
+        best_idx = -1
+        best_iou = 0.0
+        for idx, (gt_box_raw, gt_text) in enumerate(zip(gt_boxes, gt_content, strict=False)):
+            if idx in matched_gt or pred_text != str(gt_text):
+                continue
+            gt_box = _quadrilateral_to_bbox(gt_box_raw)
+            iou = _calculate_iou(pred_box, gt_box)
+            if iou >= 0.5 and iou > best_iou:
+                best_idx = idx
+                best_iou = iou
+        if best_idx >= 0:
+            matched_gt.add(best_idx)
+            matches += 1
+    precision = matches / len(predictions) if predictions else 0.0
+    recall = matches / len(gt_content) if gt_content else 0.0
+    hmean = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+    return _clip_score(hmean), "builtin_hmean_approximation"
+
+
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:html|markdown)?", "", stripped, flags=re.IGNORECASE).strip()
+    stripped = re.sub(r"```$", "", stripped).strip()
+    return stripped
+
+
+def _wrap_html_table(table: str) -> str:
+    table = table.replace("\n", "")
+    if "<table" in table and "</table>" not in table:
+        table = f"{table}</table>"
+    elif "<table" not in table and "</table>" in table:
+        table = f"<table>{table}"
+    elif "<table" not in table and "</table>" not in table:
+        table = f"<table>{table}</table>"
+    if "<body" not in table:
+        table = f"<body>{table}</body>"
+    if "<html" not in table:
+        table = f"<html>{table}</html>"
+    return table
+
+
+def _markdown_table_to_html(markdown_table: str) -> str:
+    rows = [row for row in _strip_code_fence(markdown_table).splitlines() if row.strip()]
+    if len(rows) >= 2 and set(rows[1].replace("|", "").replace(":", "").strip()) <= {"-", " "}:
+        rows = [rows[0], *rows[2:]]
+    html_rows = []
+    for row in rows:
+        cells = [html.escape(cell.strip() or " ") for cell in row.strip().split("|")[1:-1]]
+        if cells:
+            html_rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+    return "<html><body><table>" + "".join(html_rows) + "</table></body></html>"
+
+
+def _canonical_structured_text(text: str) -> str:
+    text = html.unescape(_strip_code_fence(str(text))).lower()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _structured_similarity(prediction: str, reference: str) -> tuple[float, str]:
+    pred_clean = _canonical_structured_text(prediction)
+    ref_clean = _canonical_structured_text(reference)
+    return _normalized_edit_similarity(pred_clean, ref_clean), "builtin_structural_approximation"
+
+
+def _dict_to_html(data: Any) -> str:
+    if not isinstance(data, dict):
+        data = _literal_or_json_dict(str(data))
+    rows = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            rows.append(f"<tr><td>{html.escape(str(key))}</td><td>{html.escape(str(value))}</td></tr>")
+    return "<html><body><table>" + "".join(rows) + "</table></body></html>"
+
+
+def _ocrbench_table_score(predict: str, answers: list[str], question: str, task_type: str) -> tuple[float, str]:
+    if not answers or not isinstance(predict, str) or not predict:
+        return 0.0, ""
+    prediction = predict.replace("\n", "")
+    answer = str(answers[0])
+    if task_type == "table parsing cn" or "html" in question.lower():
+        if "<body" in prediction:
+            prediction = prediction[prediction.find("<body"):]
+        elif "<table" in prediction:
+            prediction = prediction[prediction.find("<table"):]
+        else:
+            return 0.0, ""
+        return _structured_similarity(_wrap_html_table(prediction), _wrap_html_table(answer))
+    if "markdown" in question.lower():
+        return _structured_similarity(
+            _markdown_table_to_html(predict),
+            _markdown_table_to_html(answer),
+        )
+    return _structured_similarity(predict, answer)
+
+
+def _ocrbench_chart_score(predict: str, answers: list[str]) -> tuple[float, str]:
+    if not answers or not predict:
+        return 0.0, ""
+    pred_dict = _literal_or_json_dict(predict)
+    answer_dict = _literal_or_json_dict(answers[0])
+    if not pred_dict:
+        return 0.0, ""
+    return _structured_similarity(_dict_to_html(pred_dict), _dict_to_html(answer_dict))
+
+
+def _ocrbench_document_score(predict: str, answers: list[str]) -> tuple[float, str]:
+    if not answers or not isinstance(predict, str):
+        return 0.0, ""
+    return _structured_similarity(predict, answers[0])
+
+
+def _ocrbench_group(task_type: str) -> tuple[str, str] | None:
+    for group, types in OCRBENCH_EN_GROUPS.items():
+        if task_type in types:
+            return "en", group
+    for group, types in OCRBENCH_CN_GROUPS.items():
+        if task_type in types:
+            return "cn", group
+    return None
+
+
+def _ocrbench_score_sample(predict: str, request: dict[str, Any]) -> tuple[float, str, str]:
+    task_type = _ocrbench_task_type(request)
+    answers = _ocrbench_answers(request)
+    eval_method = _ocrbench_eval_method(request)
+    question = str(request.get("question", ""))
+    warning = ""
+
+    basic_vqa_en = (
+        OCRBENCH_EN_GROUPS["knowledge_reasoning"]
+        | OCRBENCH_EN_GROUPS["mathematical_calculation"]
+        | OCRBENCH_EN_GROUPS["visual_text_understanding"]
+        | {"text recognition en"}
+    )
+    basic_vqa_en.discard("text counting en")
+    basic_vqa_en.discard("formula recognition en")
+
+    if task_type in basic_vqa_en:
+        if eval_method == "multiple choice":
+            return _ocrbench_multiple_choice_score(predict, answers), "multiple_choice_exact", warning
+        if eval_method == "case sensitive":
+            return _ocrbench_vqa_score(predict, answers, case_sensitive=True), "vqa_case_sensitive", warning
+        return _ocrbench_vqa_score(predict, answers), "vqa", warning
+
+    if task_type in {"cognition VQA cn", "reasoning VQA cn"}:
+        if eval_method == "multiple choice":
+            return _ocrbench_multiple_choice_score(predict, answers), "multiple_choice_exact", warning
+        if eval_method == "case sensitive":
+            return _ocrbench_vqa_score(predict, answers, case_sensitive=True), "vqa_case_sensitive", warning
+        return _ocrbench_vqa_score(predict, answers, chinese=True), "cn_vqa", warning
+
+    if task_type == "handwritten answer extraction cn":
+        if "简答" in question:
+            return _ocrbench_long_reading_score(predict, answers[0] if answers else ""), "long_reading", warning
+        if not answers:
+            return 0.0, "contains", warning
+        answer = answers[0]
+        if len(answer) > 1:
+            chars = list(answer)
+            candidates = [
+                "".join(chars), ".".join(chars), ". ".join(chars), ",".join(chars),
+                ", ".join(chars), "、".join(chars), ";".join(chars), "; ".join(chars),
+                " ".join(chars), "和".join(chars),
+            ]
+            return (1.0 if any(candidate in predict for candidate in candidates) else 0.0), "contains", warning
+        return (1.0 if answer in predict else 0.0), "contains", warning
+
+    if task_type == "formula recognition cn":
+        return _ocrbench_formula_score(predict, answers, chinese=True), "formula_contains", warning
+    if task_type == "formula recognition en":
+        return _ocrbench_formula_score(predict, answers), "formula_contains", warning
+    if task_type == "text counting en":
+        return _ocrbench_counting_score(predict, answers, eval_method), "counting", warning
+
+    if task_type in {"fine-grained text recognition en", "full-page OCR en", "full-page OCR cn", "text translation cn"}:
+        return _ocrbench_long_reading_score(predict, answers[0] if answers else ""), "long_reading", warning
+
+    if task_type in {"table parsing en", "table parsing cn"}:
+        score, warning = _ocrbench_table_score(predict, answers, question, task_type)
+        return score, "table_similarity", warning
+    if task_type == "chart parsing en":
+        score, warning = _ocrbench_chart_score(predict, answers)
+        return score, "chart_similarity", warning
+    if task_type in {"document parsing en", "document parsing cn"}:
+        score, warning = _ocrbench_document_score(predict, answers)
+        return score, "document_similarity", warning
+
+    if task_type in {"key information extraction en", "key information mapping en", "key information extraction cn"}:
+        return _ocrbench_kie_score(predict, answers), "key_value_f1", warning
+
+    if task_type == "VQA with position en":
+        pred_dict = _literal_or_json_dict(predict)
+        content_score = _ocrbench_vqa_score(str(pred_dict.get("answer", "")), answers)
+        bbox_score = _calculate_iou(pred_dict.get("bbox"), request.get("ocrbench_bbox"))
+        return _clip_score(0.5 * content_score + 0.5 * bbox_score), "vqa_with_position", warning
+
+    if task_type == "text grounding en":
+        pred_bbox = _extract_coordinates(predict)
+        gt_bbox = request.get("ocrbench_bbox") or answers
+        return _calculate_iou(pred_bbox, gt_bbox), "bbox_iou", warning
+
+    if task_type == "text spotting en":
+        score, warning = _ocrbench_spotting_score(predict, request)
+        return score, "text_spotting_hmean", warning
+
+    return 1.0 if is_correct_for_request(predict, request) else 0.0, "exact_or_alias", "unknown_ocrbench_type"
+
+
+def score_ocrbench_v2_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+) -> dict[str, Any]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            f"Predictions and answers must have the same length: "
+            f"{len(responses)} != {len(requests)}"
+        )
+
+    samples: list[dict[str, Any]] = []
+    subject_stats: dict[str, Counter[str]] = defaultdict(Counter)
+    type_scores: dict[str, list[float]] = defaultdict(list)
+    capability_scores: dict[str, dict[str, list[float]]] = {
+        "en": defaultdict(list),
+        "cn": defaultdict(list),
+    }
+    skipped = 0
+    score_sum = 0.0
+    perfect = 0
+    for idx, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        output_text = str(response.get("output_text", ""))
+        subject = str(request.get("subject", ""))
+        task_type = _ocrbench_task_type(request)
+        is_error_output = output_text == ERROR_OUTPUT_TEXT
+        if is_error_output:
+            skipped += 1
+            sample_score, metric, warning = 0.0, "runtime_error", ""
+        else:
+            sample_score, metric, warning = _ocrbench_score_sample(output_text, request)
+        sample_score = _clip_score(sample_score)
+        score_sum += sample_score
+        perfect += int(sample_score >= 1.0)
+        subject_stats[subject]["total"] += 1
+        subject_stats[subject]["correct"] += int(sample_score >= 1.0)
+        subject_stats[subject]["score_sum"] += sample_score
+        type_scores[task_type].append(sample_score)
+        group = _ocrbench_group(task_type)
+        if group:
+            language, capability = group
+            capability_scores[language][capability].append(sample_score)
+        sample = {
+            "index": idx,
+            "sample_id": response.get("sample_id", f"sample_{idx}"),
+            "subject": subject,
+            "type": task_type,
+            "answer": str(request.get("answer", "")),
+            "answer_aliases": request_answer_values(request)[1:],
+            "prediction": output_text,
+            "skipped": is_error_output,
+            "score": sample_score,
+            "correct": sample_score >= 1.0,
+            "metric": metric,
+        }
+        if warning:
+            sample["metric_warning"] = warning
+        samples.append(sample)
+
+    subject_accuracy = {}
+    for subject, stats in sorted(subject_stats.items()):
+        total = int(stats["total"])
+        subject_accuracy[subject] = {
+            "accuracy": (float(stats["score_sum"]) / total) if total else 0.0,
+            "correct": int(stats["correct"]),
+            "score_sum": float(stats["score_sum"]),
+            "total": total,
+        }
+
+    type_accuracy = {
+        task_type: {"accuracy": _mean(scores), "total": len(scores)}
+        for task_type, scores in sorted(type_scores.items())
+    }
+    language_scores: dict[str, dict[str, Any]] = {}
+    all_capability_averages: list[float] = []
+    for language, groups in capability_scores.items():
+        capability_accuracy = {
+            group: {"accuracy": _mean(scores), "total": len(scores)}
+            for group, scores in sorted(groups.items())
+            if scores
+        }
+        group_averages = [entry["accuracy"] for entry in capability_accuracy.values()]
+        all_capability_averages.extend(group_averages)
+        language_scores[language] = {
+            "capability_accuracy": capability_accuracy,
+            "overall_accuracy": _mean(group_averages),
+        }
+
+    valid_count = len(requests)
+    return {
+        "overall_accuracy": _mean(all_capability_averages) if all_capability_averages else (
+            score_sum / valid_count if valid_count else 0.0
+        ),
+        "sample_average_accuracy": score_sum / valid_count if valid_count else 0.0,
+        "correct": perfect,
+        "score_sum": score_sum,
+        "valid_count": valid_count,
+        "skipped_count": skipped,
+        "total_count": len(requests),
+        "subject_accuracy": subject_accuracy,
+        "ocrbench_v2": {
+            "language_scores": language_scores,
+            "type_accuracy": type_accuracy,
+        },
+        "samples": samples,
+    }
+
+
+def score_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    scorer: str = "exact_or_alias",
+) -> dict[str, Any]:
+    if scorer == "ocrbench_v2":
+        return score_ocrbench_v2_predictions(predictions_data, answers_data)
+
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
     if len(responses) != len(requests):
@@ -1227,9 +1942,11 @@ def compare_prediction_sets(
     hf_predictions: dict[str, Any],
     trtfb_predictions: dict[str, Any],
     answers: dict[str, Any],
+    *,
+    scorer: str = "exact_or_alias",
 ) -> dict[str, Any]:
-    hf_score = score_predictions(hf_predictions, answers)
-    trtfb_score = score_predictions(trtfb_predictions, answers)
+    hf_score = score_predictions(hf_predictions, answers, scorer=scorer)
+    trtfb_score = score_predictions(trtfb_predictions, answers, scorer=scorer)
     hf_responses = hf_predictions["responses"]
     trt_responses = trtfb_predictions["responses"]
     requests = answers["requests"]
@@ -1243,9 +1960,12 @@ def compare_prediction_sets(
         answer = str(req["answer"])
         hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
         trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
-        hf_ok = is_correct_for_request(str(hf_row.get("output_text", "")), req)
-        trt_ok = is_correct_for_request(str(trt_row.get("output_text", "")), req)
-        agreement += int(hf_pred == trt_pred)
+        hf_sample = hf_score["samples"][idx]
+        trtfb_sample = trtfb_score["samples"][idx]
+        hf_ok = bool(hf_sample.get("correct", False))
+        trt_ok = bool(trtfb_sample.get("correct", False))
+        agreement_match = (hf_ok == trt_ok) if scorer == "ocrbench_v2" else (hf_pred == trt_pred)
+        agreement += int(agreement_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
         elif hf_ok and not trt_ok:
@@ -1254,7 +1974,7 @@ def compare_prediction_sets(
             buckets["hf_wrong_trtfb_correct"] += 1
         else:
             buckets["both_wrong"] += 1
-        if hf_pred != trt_pred:
+        if not agreement_match:
             disagreements.append({
                 "index": idx,
                 "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
@@ -1262,6 +1982,10 @@ def compare_prediction_sets(
                 "answer": answer,
                 "hf_prediction": hf_pred,
                 "trtfb_prediction": trt_pred,
+                "hf_correct": hf_ok,
+                "trtfb_correct": trt_ok,
+                "hf_score": hf_sample.get("score", int(hf_ok)),
+                "trtfb_score": trtfb_sample.get("score", int(trt_ok)),
             })
 
     total = len(requests)
@@ -2243,7 +2967,10 @@ def eval_one_model(
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_prediction_sets(
-            hf_data, trtfb_data, json.loads(answers_path.read_text(encoding="utf-8"))
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            scorer=scorer,
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -2566,6 +3293,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output")
     p.add_argument("--work-dir")
     p.add_argument("--label", default="")
+    p.add_argument("--scorer", default="exact_or_alias")
 
     p = sub.add_parser("compare")
     p.add_argument("--work-dir", required=True)
@@ -2574,6 +3302,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--trtfb-predictions")
     p.add_argument("--output", default="")
     p.add_argument("--markdown", default="")
+    p.add_argument("--scorer", default="exact_or_alias")
 
     p = sub.add_parser("eval-worker", help=argparse.SUPPRESS)
     p.add_argument("--request", required=True)
@@ -2721,6 +3450,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     score = score_predictions(
         json.loads(predictions_path.read_text(encoding="utf-8")),
         json.loads(answers_path.read_text(encoding="utf-8")),
+        scorer=args.scorer,
     )
     output_path.write_text(json.dumps(score, indent=2, ensure_ascii=False), encoding="utf-8")
     print(
@@ -2742,6 +3472,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         json.loads(hf_path.read_text(encoding="utf-8")),
         json.loads(trtfb_path.read_text(encoding="utf-8")),
         json.loads(answers_path.read_text(encoding="utf-8")),
+        scorer=args.scorer,
     )
     output = Path(args.output) if args.output else work_dir / "summary.json"
     markdown = Path(args.markdown) if args.markdown else work_dir / "summary.md"

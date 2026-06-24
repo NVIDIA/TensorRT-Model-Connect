@@ -108,6 +108,7 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
 
     assert suite["dataset"]["kind"] == "vlm_unified_json"
+    assert suite["scoring"]["scorer"] == "ocrbench_v2"
     assert suite["selectors"]["runtime_strategies"] == ["vision_language"]
     assert suite["selectors"]["families"] == ["deepseek_ocr"]
 
@@ -261,6 +262,9 @@ def test_prepare_ocrbench_unified_writes_image_prompt_jsonl(tmp_path: Path) -> N
     assert "samples" not in answers
     assert answers["requests"][0]["answer"] == "enabled"
     assert answers["requests"][0]["answer_aliases"] == ["enabled", "on"]
+    assert answers["requests"][0]["ocrbench_type"] == "APP agent en"
+    assert answers["requests"][0]["ocrbench_answers"] == ["enabled", "on"]
+    assert answers["requests"][0]["ocrbench_eval"] is None
     assert answers["requests"][0]["messages"][0]["content"][0] == {
         "type": "image",
         "image": "images/ocrbench_v2_000000.jpg",
@@ -585,6 +589,117 @@ def test_score_predictions_accepts_answer_aliases() -> None:
 
     assert score["overall_accuracy"] == 1.0
     assert score["samples"][0]["answer_aliases"] == ["on"]
+
+
+def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:
+    answers = {"requests": [{
+        "answer": "San Francisco",
+        "subject": "APP agent en",
+        "ocrbench_type": "APP agent en",
+        "ocrbench_answers": ["San Francisco"],
+    }]}
+    predictions = {"responses": [{
+        "sample_id": "ocrbench_v2_000009",
+        "output_text": "San Francisco, CA",
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+
+    assert score["overall_accuracy"] == 1.0
+    assert score["samples"][0]["score"] == 1.0
+    assert score["samples"][0]["metric"] == "vqa"
+    assert score["ocrbench_v2"]["language_scores"]["en"]["overall_accuracy"] == 1.0
+
+
+def test_ocrbench_v2_scores_counting_regression() -> None:
+    answers = {"requests": [{
+        "answer": "10",
+        "subject": "text counting en",
+        "ocrbench_type": "text counting en",
+        "ocrbench_eval": "regression",
+        "ocrbench_answers": ["10"],
+    }]}
+    predictions = {"responses": [{
+        "sample_id": "ocrbench_v2_008200",
+        "output_text": "There are 9 words.",
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+
+    assert score["overall_accuracy"] == 0.9
+    assert score["samples"][0]["metric"] == "counting"
+
+
+def test_ocrbench_v2_scores_text_grounding_iou_from_answer_coords() -> None:
+    answers = {"requests": [{
+        "answer": "0",
+        "subject": "text grounding en",
+        "ocrbench_type": "text grounding en",
+        "ocrbench_answers": ["0", "0", "100", "100"],
+    }]}
+    predictions = {"responses": [{
+        "sample_id": "ocrbench_v2_008400",
+        "output_text": "(0, 0, 50, 100)",
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+
+    assert score["overall_accuracy"] == 0.5
+    assert score["samples"][0]["metric"] == "bbox_iou"
+
+
+def test_ocrbench_v2_scores_key_information_f1() -> None:
+    answers = {"requests": [{
+        "answer": "{'name': ['Ada'], 'total': ['42']}",
+        "subject": "key information extraction en",
+        "ocrbench_type": "key information extraction en",
+        "ocrbench_answers": ["{'name': ['Ada'], 'total': ['42']}"],
+    }]}
+    predictions = {"responses": [{
+        "sample_id": "ocrbench_v2_000900",
+        "output_text": "{'name': 'Ada', 'total': '41'}",
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+
+    assert score["overall_accuracy"] == 0.5
+    assert score["samples"][0]["metric"] == "key_value_f1"
+
+
+def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
+    answers = {"requests": [
+        {
+            "answer": "alpha",
+            "subject": "APP agent en",
+            "ocrbench_type": "APP agent en",
+            "ocrbench_answers": ["alpha"],
+        },
+        {
+            "answer": "Facebook",
+            "subject": "APP agent en",
+            "ocrbench_type": "APP agent en",
+            "ocrbench_answers": ["Facebook"],
+        },
+    ]}
+    hf = {"responses": [
+        {"sample_id": "both_wrong", "output_text": "zzz"},
+        {"sample_id": "hf_correct", "output_text": "Facebook"},
+    ]}
+    trtfb = {"responses": [
+        {"sample_id": "both_wrong", "output_text": "yyy"},
+        {"sample_id": "hf_correct", "output_text": "Instagram"},
+    ]}
+
+    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="ocrbench_v2")
+
+    assert summary["prediction_agreement_rate"] == 0.5
+    assert summary["agreement_count"] == 1
+    assert summary["buckets"]["both_wrong"] == 1
+    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert len(summary["disagreements"]) == 1
+    assert summary["disagreements"][0]["sample_id"] == "hf_correct"
+    assert summary["disagreements"][0]["hf_correct"] is True
+    assert summary["disagreements"][0]["trtfb_correct"] is False
 
 
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
@@ -1147,7 +1262,7 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(
     result = task_eval.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf", "build", "trtfb"]
-    assert result["mode"] == "exact_or_alias"
+    assert result["mode"] == "ocrbench_v2"
     assert result["hf_reference_status"] == "ran"
     assert result["hf_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
