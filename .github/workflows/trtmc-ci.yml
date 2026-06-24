@@ -146,41 +146,9 @@ jobs:
             echo "CI mode: branch/manual unit gates"
           fi
 
-      - name: Detect CI Docker image changes
-        id: ci_image
-        run: |
-          set -euo pipefail
-          mapfile -t changed_paths < <(
-            git diff --name-only "$CI_BASE_REF"...HEAD -- \
-              Dockerfile \
-              scripts/docker_build_gb300.sh \
-              .github/scripts/start-gha-container.sh \
-              .github/workflows/trtmc-ci.yml
-          )
-
-          if [ "${#changed_paths[@]}" -gt 0 ]; then
-            echo "rebuild=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "Changed CI Docker image inputs:"
-              printf '  %s\n' "${changed_paths[@]}"
-            } | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "rebuild=false" >> "$GITHUB_OUTPUT"
-            echo "No CI Docker image inputs changed."
-          fi
-
-      - name: Rebuild CI Docker image
-        if: ${{ steps.ci_image.outputs.rebuild == 'true' }}
+      - name: Ensure CI Docker image
         timeout-minutes: 180
-        run: |
-          set -euo pipefail
-          empty_context="${RUNNER_TEMP:-/tmp}/trtmc-empty-docker-context"
-          mkdir -p "$empty_context"
-          echo "Rebuilding CI Docker image '$TRTMC_CI_IMAGE' from Dockerfile"
-          docker build \
-            -t "$TRTMC_CI_IMAGE" \
-            -f Dockerfile \
-            "$empty_context"
+        run: bash .github/scripts/ensure-ci-docker-image.sh
 
       - name: Start CI container
         timeout-minutes: 5
