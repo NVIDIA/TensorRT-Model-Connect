@@ -67,6 +67,16 @@ GPU_SPECS: dict[str, GpuSpec] = {
         fp16_tflops=4500,
         hbm_capacity_gb=192,
     ),
+    # GB100 eng-sample on 2u2g-gen-0004 (96 GB, 350 W) — measured achievable HBM
+    # BW 3695 GB/s (torch d2d copy); peak estimated ~4200 GB/s. ~half a B200.
+    # TFLOPS rough (not used for batch-1 decode SOL, which is bandwidth-bound).
+    "GB100": GpuSpec(
+        name="NVIDIA GB100 (96GB eng-sample)",
+        hbm_bandwidth_gb_s=4200,
+        fp32_tflops=30,
+        fp16_tflops=2250,
+        hbm_capacity_gb=96,
+    ),
     "H200": GpuSpec(
         name="NVIDIA H200",
         hbm_bandwidth_gb_s=4800,
