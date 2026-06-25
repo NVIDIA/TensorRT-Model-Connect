@@ -23,6 +23,8 @@ import re
 import sys
 from typing import Callable, TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     import torch.nn
 
@@ -154,6 +156,16 @@ def extract_scales_from_state_dict(
     scales: dict[str, dict[str, float]] = {}
 
     for key, value in state_dict.items():
+        # SmoothQuant per-input-channel factor lives on the input quantizer as
+        # ``_pre_quant_scale`` (not an ``_amax``). Capture it so the format can
+        # apply the smoothing that the calibrated (smoothed-weight) scales assume.
+        m_pqs = re.match(r"(.+)\.input_quantizer\._pre_quant_scale$", key)
+        if m_pqs is not None:
+            prefix = m_pqs.group(1)
+            pqs = value.detach().cpu().numpy() if hasattr(value, "detach") else value
+            pqs = np.asarray(pqs, dtype=np.float32).reshape(-1)
+            scales.setdefault(prefix, {})["pre_quant_scale"] = pqs
+            continue
         if "_amax" not in key:
             continue
         m = re.match(r"(.+)\.([A-Za-z0-9_]+_quantizer)\._amax", key)
@@ -165,8 +177,15 @@ def extract_scales_from_state_dict(
         scale_field = _QUANTIZER_SCALE_FIELDS.get(qtype)
         if scale_field is None:
             continue
-        amax = value.item() if hasattr(value, "item") else float(value)
-        scale = amax / maxbound
+        # amax may be a scalar (per-tensor, e.g. FP8 / activations) or a
+        # multi-element tensor (per-channel weights, e.g. INT8 weight_quantizer
+        # with shape [out, 1]). Scalar -> float; per-channel -> flat np.ndarray
+        # (formats.py consumes either; it sets IQuantizeLayer.axis for the
+        # per-channel case). Calling .item() on a multi-element amax raised
+        # "Tensor with N elements cannot be converted to Scalar".
+        arr = value.detach().cpu().numpy() if hasattr(value, "detach") else value
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+        scale = float(arr[0]) / maxbound if arr.size == 1 else arr / maxbound
 
         if prefix not in scales:
             scales[prefix] = {}

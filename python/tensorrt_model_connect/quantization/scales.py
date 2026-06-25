@@ -25,6 +25,11 @@ class LayerScales:
     weight_scale: float | np.ndarray = 1.0
     output_scale: float | np.ndarray = 1.0
     block_size: int | None = None
+    # Per-input-channel SmoothQuant factor (ModelOpt ``input_quantizer.
+    # _pre_quant_scale``). When present, the format smooths activations by
+    # ``*pre_quant_scale`` and weights by ``/pre_quant_scale`` so the calibrated
+    # (smoothed-weight) scales match what runs. None for non-SmoothQuant formats.
+    pre_quant_scale: np.ndarray | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {}
@@ -36,6 +41,8 @@ class LayerScales:
                 d[k] = v
         if self.block_size is not None:
             d["block_size"] = self.block_size
+        if self.pre_quant_scale is not None:
+            d["pre_quant_scale"] = np.asarray(self.pre_quant_scale).tolist()
         return d
 
     @staticmethod
@@ -47,6 +54,9 @@ class LayerScales:
                 kwargs[k] = np.array(v) if isinstance(v, list) else v
         if "block_size" in d:
             kwargs["block_size"] = d["block_size"]
+        if "pre_quant_scale" in d:
+            kwargs["pre_quant_scale"] = np.asarray(d["pre_quant_scale"],
+                                                   dtype=np.float32)
         return LayerScales(**kwargs)
 
 

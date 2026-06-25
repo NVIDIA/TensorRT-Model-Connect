@@ -85,6 +85,11 @@ class ModelOptCalibrationProvider:
     # Map our format names to ModelOpt config names
     _MTQ_CONFIG_NAMES: dict[str, str] = {
         "fp8": "FP8_DEFAULT_CFG",
+        # INT8SmoothQuantFormat now applies SmoothQuant smoothing in the graph
+        # (activations *pre_quant_scale, weights /pre_quant_scale), so it is
+        # paired with INT8_SMOOTHQUANT_CFG. The calibrated per-channel weight
+        # amax corresponds to the smoothed weights, and pre_quant_scale is
+        # extracted + threaded through LayerScales so the build reproduces it.
         "int8_sq": "INT8_SMOOTHQUANT_CFG",
         "int4_awq": "INT4_AWQ_CFG",
         "nvfp4": "NVFP4_DEFAULT_CFG",
@@ -199,6 +204,7 @@ class ModelOptCalibrationProvider:
             scales[mapped] = LayerScales(
                 input_scale=scale_dict["input_scale"],
                 weight_scale=scale_dict["weight_scale"],
+                pre_quant_scale=scale_dict.get("pre_quant_scale"),
             )
 
         logger.info("Extracted scales for %d layers", len(scales))

@@ -239,9 +239,25 @@ class INT8SmoothQuantFormat:
 
         out_trt_dtype = activation.dtype
 
+        # SmoothQuant: migrate per-input-channel range from activations into
+        # weights. ModelOpt stores pre_quant_scale (=1/s) on the input quantizer
+        # and calibrates the weight amax on the SMOOTHED weight. MC loads the
+        # ORIGINAL weights, so reproduce the smoothing here: activations are
+        # scaled by pre_quant_scale and weights by 1/pre_quant_scale (per input
+        # channel) — x@W == (x*pqs)@(W/pqs). When pre_quant_scale is absent the
+        # format degrades to plain per-channel-weight int8.
+        pqs = getattr(scales, "pre_quant_scale", None)
+        weight_for_const = weight_array
+        if pqs is not None:
+            pqs = np.asarray(pqs, dtype=np.float32).reshape(-1)  # [lhs_width=in]
+            inv = (1.0 / pqs).astype(np.float32)
+            weight_for_const = np.ascontiguousarray(
+                weight_array.astype(np.float32) * inv[:, None]).astype(
+                    weight_array.dtype)
+
         # Weight Q/DQ: per-channel (axis=1 for [in, out] layout)
         weight_const = graph_ops.add_constant(
-            network, (lhs_width, rhs_width), weight_array, dtype=dtype)
+            network, (lhs_width, rhs_width), weight_for_const, dtype=dtype)
         w_scale = np.asarray(scales.weight_scale, dtype=np.float32)
         if w_scale.ndim == 0:
             w_scale = np.full(rhs_width, float(w_scale), dtype=np.float32)
@@ -253,13 +269,26 @@ class INT8SmoothQuantFormat:
             q_w.get_output(0), w_scale_t, out_trt_dtype)
         dq_w.axis = 1
 
+        # SmoothQuant activation scaling: x_smooth = x * pre_quant_scale
+        # (per input channel), broadcast over the leading (token) dim.
+        act = activation
+        if pqs is not None:
+            pqs_t = graph_ops.add_constant(
+                network, (1, lhs_width), pqs.reshape(1, lhs_width),
+                dtype=np.float32)
+            pqs_in = pqs_t
+            if activation.dtype != trt.float32:
+                pqs_in = network.add_cast(pqs_t, activation.dtype).get_output(0)
+            act = network.add_elementwise(
+                activation, pqs_in, trt.ElementWiseOperation.PROD).get_output(0)
+
         # Activation Q/DQ: per-tensor
         a_scale = np.array(
             [scales.input_scale] if np.isscalar(scales.input_scale)
             else scales.input_scale, dtype=np.float32)
         a_scale_t = graph_ops.add_constant(
             network, a_scale.shape, a_scale, dtype=np.float32)
-        q_a = network.add_quantize(activation, a_scale_t, trt.int8)
+        q_a = network.add_quantize(act, a_scale_t, trt.int8)
         dq_a = network.add_dequantize(
             q_a.get_output(0), a_scale_t, out_trt_dtype)
 
