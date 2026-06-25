@@ -38,7 +38,7 @@ _DEFAULT_FIXED_IMAGE_SIZE = 448
 
 class LocateAnythingPlugin:
     name = "locateanything"
-    runtime_strategy = "vision_language"
+    runtime_strategy = "locateanything_vision_language"
     embed_input = True
 
     def matches(self, model_type: str) -> bool:
@@ -165,7 +165,7 @@ class LocateAnythingPlugin:
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
         return {
             "model_type": "locateanything",
-            "runtime_strategy": "vision_language",
+            "runtime_strategy": "locateanything_vision_language",
             "embed_input": True,
         }
 

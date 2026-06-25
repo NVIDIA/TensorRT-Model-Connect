@@ -270,8 +270,10 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
 
+    runtime_strategy = str(entry.get("runtime_strategy") or "")
+
     # Skip VL models (handled by test_full_pipeline_vlm)
-    if entry.get("runtime_strategy") == "vision_language":
+    if runtime_strategy.endswith("_vision_language"):
         pytest.skip("VL model — use test_full_pipeline_vlm")
 
     # Skip diffusion models (handled by test_diffusion_pipeline)
@@ -279,7 +281,7 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
         pytest.skip("Diffusion model — use test_diffusion_pipeline")
 
     # Skip segmentation models (handled by test_segmentation_pipeline)
-    if entry.get("test_type") == "segmentation" or entry.get("runtime_strategy") == "segmentation":
+    if entry.get("test_type") == "segmentation" or entry.get("task_strategy") == "segmentation":
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
 
     # Skip audio models (handled by test_audio_pipeline)
@@ -318,9 +320,9 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
 
     # Step 3: perf_compare — TRT vs HF performance (subprocess, informational)
     # Skip for SSM/Mamba models (perf_compare rejects them)
-    runtime_strategy = entry.get("runtime_strategy", "decoder_kv_cache")
+    assert runtime_strategy, "model entry must declare runtime_strategy"
     perf_result = None
-    if runtime_strategy != "ssm_recurrent":
+    if runtime_strategy != "mamba_ssm_recurrent":
         perf_result = _run_perf_compare_subprocess(
             hf_id, bundle_path, prompt, max_new_tokens,
             trust_remote_code=trust_remote_code)
@@ -396,7 +398,7 @@ def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_pat
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
 
-    if entry.get("runtime_strategy") != "vision_language":
+    if not str(entry.get("runtime_strategy") or "").endswith("_vision_language"):
         pytest.skip(f"{entry['name']} is not a VL model")
 
     test_image = entry.get("test_image")
@@ -436,7 +438,7 @@ def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_pat
             "name": entry["name"],
             "hf_id": hf_id,
             "family": entry.get("family", "unknown"),
-            "runtime_strategy": "vision_language",
+            "runtime_strategy": "qwen_vl_vision_language",
         },
         "build": {
             "was_cached": built_bundle["was_cached"],
@@ -519,7 +521,7 @@ def test_segmentation_pipeline(built_bundle, trtmc_binary, hf_python,
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
 
-    if entry.get("runtime_strategy") != "segmentation":
+    if entry.get("task_strategy") != "segmentation":
         pytest.skip(f"{entry['name']} is not a segmentation model")
 
     test_image = entry.get("test_image")
@@ -580,7 +582,7 @@ def test_segmentation_pipeline(built_bundle, trtmc_binary, hf_python,
             "name": entry["name"],
             "hf_id": entry["hf_id"],
             "family": entry.get("family", "unknown"),
-            "runtime_strategy": "segmentation",
+            "runtime_strategy": entry.get("runtime_strategy"),
         },
         "build": {
             "was_cached": built_bundle["was_cached"],
@@ -718,7 +720,7 @@ def test_segmentation_engine_parity(built_bundle, engine_dir):
     """Engine parity: same HF-preprocessed input -> TRT vs HF logits match."""
     entry = built_bundle["entry"]
 
-    if entry.get("runtime_strategy") != "segmentation":
+    if entry.get("task_strategy") != "segmentation":
         pytest.skip(f"{entry['name']} is not a segmentation model")
 
     test_image = entry.get("test_image")
@@ -1187,7 +1189,7 @@ def test_speech_to_speech_pipeline(model_entry, trtmc_binary, hf_python,
             "name": entry["name"],
             "hf_id": entry["hf_id"],
             "family": entry.get("family", "unknown"),
-            "runtime_strategy": "speech_to_speech",
+            "runtime_strategy": entry.get("runtime_strategy", "personaplex_speech_to_speech"),
         },
         "build": {
             "engine_size_bytes": os.path.getsize(bundle_path),

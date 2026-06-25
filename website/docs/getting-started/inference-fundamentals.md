@@ -137,7 +137,7 @@ sequenceDiagram
   Pipeline-->>User: TextResult
 ```
 
-In the source tree, this abstraction is `IInferenceState`. Attention models use `KvCache`; recurrent or state-space models use `RecurrentState`; hybrid models can compose both.
+In the source tree, this abstraction is `IInferenceState`. Attention models use `KvCache`; recurrent or state-space models use family-owned recurrent state classes; hybrid models can compose both.
 
 ## What TensorRT changes
 

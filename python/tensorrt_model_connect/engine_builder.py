@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import re
@@ -34,7 +35,6 @@ from .triattention_export import (
 from .parallel_config import (
     ParallelConfig,
     normalize_parallel_config,
-    rank_denoiser_section,
     rank_engine_section,
     require_tensorrt_11_for_tensor_parallel,
 )
@@ -95,28 +95,9 @@ _HF_ALLOW_PATTERNS = [
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",
-    "linear_spec_lora/**",
     "*.model",
     "*.spm",
     "*.py",
-    # Diffusers format
-    "model_index.json",
-    "scheduler/**",
-    "text_encoder/**",
-    "text_encoder_2/**",
-    "transformer/**",
-    "vae/**",
-    "tokenizer/**",
-    "tokenizer_2/**",
-    "*/config.json",
-    "*/model.safetensors",
-    "*/model-*.safetensors",
-    "*/model.safetensors.index.json",
-    "*/diffusion_pytorch_model.safetensors",
-    "*/diffusion_pytorch_model-*.safetensors",
-    "*/diffusion_pytorch_model.safetensors.index.json",
-    "scheduler/*",
-    "tokenizer/*",
 ]
 
 
@@ -275,6 +256,108 @@ def _call_supports_kwarg(func, name: str) -> bool:
     )
 
 
+def _normalize_bundle_sections(
+    plugin,
+    raw_sections,
+    *,
+    hook_name: str = "diffusion_bundle_sections",
+) -> list[BundleSection]:
+    sections: list[BundleSection] = []
+    for index, item in enumerate(raw_sections):
+        if isinstance(item, BundleSection):
+            section = item
+        elif isinstance(item, dict):
+            section = BundleSection(item.get("name"), item.get("data"))
+        else:
+            try:
+                name, data = item
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Plugin {plugin.name}.{hook_name}() item "
+                    f"{index} must be a BundleSection, dict, or (name, data) pair"
+                ) from exc
+            section = BundleSection(name, data)
+        if not isinstance(section.name, str) or not section.name:
+            raise TypeError(
+                f"Plugin {plugin.name}.{hook_name}() item "
+                f"{index} has invalid section name {section.name!r}"
+            )
+        if not isinstance(section.data, (bytes, bytearray)):
+            raise TypeError(
+                f"Plugin {plugin.name}.{hook_name}() item "
+                f"{index} data must be bytes"
+            )
+        sections.append(BundleSection(section.name, bytes(section.data)))
+    return sections
+
+
+def _diffusion_bundle_sections_from_plugin(
+    plugin,
+    components: dict,
+    parallel: ParallelConfig,
+) -> list[BundleSection]:
+    bundle_sections = getattr(plugin, "diffusion_bundle_sections", None)
+    if not callable(bundle_sections):
+        raise ValueError(
+            f"Plugin {plugin.name} must implement diffusion_bundle_sections() "
+            "so bundle section policy stays model-owned"
+        )
+    kwargs = {}
+    if _call_supports_kwarg(bundle_sections, "parallel_config"):
+        kwargs["parallel_config"] = parallel
+    raw_sections = bundle_sections(components, **kwargs)
+    if raw_sections is None:
+        raise ValueError(
+            f"Plugin {plugin.name}.diffusion_bundle_sections() returned None"
+        )
+    return _normalize_bundle_sections(plugin, raw_sections)
+
+
+def _diffusion_tokenizer_add_special_tokens_from_plugin(
+    plugin,
+    model_dir_path: Path,
+) -> bool:
+    detector = getattr(plugin, "diffusion_tokenizer_add_special_tokens", None)
+    if not callable(detector):
+        raise ValueError(
+            f"Plugin {plugin.name} must implement "
+            "diffusion_tokenizer_add_special_tokens() so tokenizer priority "
+            "policy stays model-owned"
+        )
+    kwargs = {}
+    if _call_supports_kwarg(detector, "detect_tokenizer_add_special_tokens"):
+        kwargs["detect_tokenizer_add_special_tokens"] = _detect_tokenizer_add_special_tokens
+    return bool(detector(model_dir_path, **kwargs))
+
+
+def _diffusion_tokenizer_bundle_sections_from_plugin(
+    plugin,
+    model_dir_path: Path,
+) -> list[BundleSection]:
+    tokenizer_sections = getattr(plugin, "diffusion_tokenizer_bundle_sections", None)
+    if not callable(tokenizer_sections):
+        raise ValueError(
+            f"Plugin {plugin.name} must implement "
+            "diffusion_tokenizer_bundle_sections() so tokenizer bundle section "
+            "policy stays model-owned"
+        )
+    kwargs = {}
+    if _call_supports_kwarg(tokenizer_sections, "ensure_tokenizer_json"):
+        kwargs["ensure_tokenizer_json"] = (
+            lambda tokenizer_dir: _ensure_tokenizer_json(tokenizer_dir, plugin=plugin)
+        )
+    raw_sections = tokenizer_sections(model_dir_path, **kwargs)
+    if raw_sections is None:
+        raise ValueError(
+            f"Plugin {plugin.name}.diffusion_tokenizer_bundle_sections() returned None"
+        )
+    return _normalize_bundle_sections(
+        plugin,
+        raw_sections,
+        hook_name="diffusion_tokenizer_bundle_sections",
+    )
+
+
 def _quant_format_name(quant_ctx) -> str | None:
     quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
     return getattr(quant_format, "name", None)
@@ -285,6 +368,23 @@ def _plugin_supports_parallel_quantization(plugin, quant_ctx) -> bool:
     if not callable(supports):
         return False
     return bool(supports(_quant_format_name(quant_ctx)))
+
+
+def _plugin_graph_ops_module(plugin):
+    """Load the graph helper module owned by the selected family plugin."""
+    provided = getattr(plugin, "graph_ops", None)
+    if provided is not None:
+        return provided
+
+    module_name = getattr(plugin.__class__, "__module__", "")
+    if module_name.endswith(".plugin"):
+        package_name = module_name.rsplit(".", 1)[0]
+    else:
+        package_name = module_name
+    if not package_name:
+        raise RuntimeError(
+            f"Cannot resolve family graph_ops module for {plugin!r}")
+    return importlib.import_module(f"{package_name}.graph_ops")
 
 
 def _plugin_supports_split_decoder_roles(plugin, config: ModelConfig) -> bool:
@@ -303,6 +403,23 @@ def _apply_family_builder_capabilities(config: ModelConfig) -> None:
         config.raw["_disable_dual_profile_decoder"] = True
 
 
+def _plugin_runtime_capabilities(plugin) -> set[str]:
+    raw = getattr(plugin, "runtime_capabilities", ())
+    if isinstance(raw, str):
+        return {raw}
+    try:
+        return {str(item) for item in raw}
+    except TypeError:
+        return set()
+
+
+def _is_decoder_kv_runtime(plugin, runtime_strategy: str) -> bool:
+    del runtime_strategy
+    if "decoder_kv" in _plugin_runtime_capabilities(plugin):
+        return True
+    return False
+
+
 def _can_build_split_decoder_engines(
     plugin,
     config: ModelConfig,
@@ -318,7 +435,7 @@ def _can_build_split_decoder_engines(
     VL/embed-input, TriAttention, and dynamic-KV runtimes keep their existing
     single-engine behavior until they opt into the same contract.
     """
-    if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+    if not _is_decoder_kv_runtime(plugin, runtime_strategy):
         return False
     if dynamic_kv_cache or triattention_enabled:
         return False
@@ -502,15 +619,6 @@ def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[in
     return None
 
 
-def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
-    """Detect add-special behavior from the tokenizer embedded in diffusion bundles."""
-    for tok_subdir in ("tokenizer_2", "tokenizer"):
-        tok_dir = model_dir / tok_subdir
-        if tok_dir.is_dir():
-            return _detect_tokenizer_add_special_tokens(tok_dir)
-    return _detect_tokenizer_add_special_tokens(model_dir)
-
-
 def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
@@ -683,6 +791,7 @@ def build_bundle(
                 num_calibration_samples=quant_calibration_samples,
                 plugin=plugin,
                 quant_plan=quant_plan,
+                graph_ops=_plugin_graph_ops_module(plugin),
             )
         finally:
             _add_build_timing(
@@ -695,14 +804,14 @@ def build_bundle(
     # 4. Build TRT engine
     triattention_cfg = None
     triattention_section = None
-    runtime_strategy = getattr(plugin, "runtime_strategy", "") or "decoder_kv_cache"
+    runtime_strategy = getattr(plugin, "runtime_strategy", "") or ""
     enable_dynamic_kv_cache = bool(dynamic_kv_cache)
     dynamic_kv_profile_rows = _sanitize_dynamic_kv_profile_rows(
         dynamic_kv_profile_rows_override,
         max_cache_length,
     )
     if triattention_stats_path:
-        if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+        if not _is_decoder_kv_runtime(plugin, runtime_strategy):
             raise ValueError(
                 "TriAttention is only supported for decoder KV-cache runtimes. "
                 f"Found runtime_strategy={runtime_strategy!r}."
@@ -765,7 +874,7 @@ def build_bundle(
         enable_dynamic_kv_cache = True
 
     if enable_dynamic_kv_cache:
-        if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+        if not _is_decoder_kv_runtime(plugin, runtime_strategy):
             raise ValueError(
                 "dynamic_kv_cache is only supported for decoder KV-cache runtimes. "
                 f"Found runtime_strategy={runtime_strategy!r}."
@@ -886,9 +995,7 @@ def build_bundle(
             )
             actual_decoder_engine_layout = "split"
         else:
-            if decoder_engine_layout == "split" and runtime_strategy in (
-                "decoder_kv_cache", "decoder_moe"
-            ):
+            if decoder_engine_layout == "split" and _is_decoder_kv_runtime(plugin, runtime_strategy):
                 print(
                     "[trtmc build] Split decoder layout is not supported for "
                     f"family={plugin.name}; using existing single-engine path",
@@ -1040,16 +1147,9 @@ def build_bundle(
 
     # If model lacks tokenizer.json (fast format), generate it from the
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
-    # Skip for non-text models (segmentation, audio) that don't use tokenizers.
-    runtime_strategy = getattr(plugin, "runtime_strategy", "")
-    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", False))
-    if requires_tokenizer or runtime_strategy not in (
-        "segmentation",
-        "neural_operator",
-        "object_detection",
-        "prompted_segmentation",
-        "image_classification",
-    ):
+    # Non-text families opt out explicitly through their plugin metadata.
+    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", True))
+    if requires_tokenizer:
         tokenizer_json_t0 = time.monotonic()
         _ensure_tokenizer_json(model_dir_path, plugin=plugin)
         _add_build_timing(
@@ -1057,18 +1157,16 @@ def build_bundle(
             time.monotonic() - tokenizer_json_t0)
         _write_build_timing(build_timing)
 
-    # Inject encoder_only config overrides
-    if runtime_strategy == "encoder_only":
-        # Use max_cache_length as max_seq_length for encoder
-        pass
-
     def make_runtime_config_json(source: bytes | None) -> bytes:
         cfg_dict = json.loads(source) if source is not None else dict(config.raw)
         runtime_strategy = getattr(plugin, "runtime_strategy", None)
         if runtime_strategy:
             cfg_dict["runtime_strategy"] = runtime_strategy
         elif triattention_cfg is not None:
-            cfg_dict["runtime_strategy"] = "decoder_kv_cache"
+            raise ValueError(
+                "TriAttention requires the family plugin to declare a "
+                "model-owned decoder runtime_strategy."
+            )
         cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
         cfg_dict["trt_version"] = trt_version
         if trt_abi:
@@ -1344,74 +1442,19 @@ def _build_diffusion_bundle(
     print(f"[trtmc build] All engines built [{components_elapsed:.1f}s]",
           file=sys.stderr)
 
-    # Assemble bundle sections
-    sections = []
-
-    # Text encoder plans
-    text_encoders = components.get("text_encoders", [])
-    for i, (enc_name, enc_plan) in enumerate(text_encoders):
-        sections.append(BundleSection(f"text_encoder_{i}_plan", enc_plan))
+    # Assemble model-owned bundle sections.
+    sections = _diffusion_bundle_sections_from_plugin(plugin, components, parallel)
+    for section in sections:
         print(
-            f"  text_encoder_{i} ({enc_name}): "
-            f"{len(enc_plan) / (1024 * 1024):.1f} MB",
+            f"  {section.name}: {len(section.data) / (1024 * 1024):.1f} MB",
             file=sys.stderr,
         )
-
-    # Denoiser plan(s)
-    if parallel.enabled:
-        denoiser_rank_plans = components.get("denoiser_ranks")
-        if not isinstance(denoiser_rank_plans, dict):
-            raise ValueError(
-                f"Plugin {plugin.name}.build_components() did not return denoiser_ranks")
-        for rank in range(parallel.tp_size):
-            denoiser_plan = denoiser_rank_plans.get(rank)
-            if denoiser_plan is None:
-                denoiser_plan = denoiser_rank_plans.get(str(rank))
-            if denoiser_plan is None:
-                raise ValueError(f"Missing tensor-parallel denoiser plan for rank {rank}")
-            section_name = rank_denoiser_section(rank)
-            sections.append(BundleSection(section_name, denoiser_plan))
-            print(
-                f"  {section_name}: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
-                file=sys.stderr,
-            )
-    else:
-        denoiser_plan = components["denoiser"]
-        sections.append(BundleSection("denoiser_plan", denoiser_plan))
-        print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
-              file=sys.stderr)
-
-    # VAE decoder plan
-    vae_plan = components["vae_decoder"]
-    sections.append(BundleSection("vae_decoder_plan", vae_plan))
-    print(f"  vae_decoder: {len(vae_plan) / (1024 * 1024):.1f} MB",
-          file=sys.stderr)
-
-    # Optional image-edit components. Text-to-image bundles omit these.
-    if "vision_engine" in components:
-        vision_plan = components["vision_engine"]
-        sections.append(BundleSection("vision_engine_plan", vision_plan))
-        print(f"  vision_engine: {len(vision_plan) / (1024 * 1024):.1f} MB",
-              file=sys.stderr)
-
-    if "vae_encoder" in components:
-        vae_encoder_plan = components["vae_encoder"]
-        sections.append(BundleSection("vae_encoder_plan", vae_encoder_plan))
-        print(f"  vae_encoder: {len(vae_encoder_plan) / (1024 * 1024):.1f} MB",
-              file=sys.stderr)
-
-    # Preprocessor weights (patch embedding, timestep MLP, text projection)
-    if "preprocessor_weights" in components:
-        pp_data = components["preprocessor_weights"]
-        sections.append(BundleSection("preprocessor_weights", pp_data))
-        print(f"  preprocessor_weights: {len(pp_data) / (1024):.1f} KB",
-              file=sys.stderr)
 
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     tokenizer_t0 = time.monotonic()
-    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(
-        model_dir_path)
+    tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(
+        plugin, model_dir_path)
     _add_build_timing(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)
@@ -1435,7 +1478,6 @@ def _build_diffusion_bundle(
             "precision": _effective_precision,
             "engine_backend": "trt_rtx" if rtx else "trt",
             "trt_version": trt_version,
-            "num_text_encoders": len(components["text_encoders"]),
             "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
         }
         if trt_abi:
@@ -1443,67 +1485,29 @@ def _build_diffusion_bundle(
         if fp8_scales:
             cfg_dict["quantization"] = {"format": "fp8"}
 
-        # Inject diffusion config from plugin
-        get_diff_config = getattr(plugin, 'get_diffusion_config', None)
-        if get_diff_config is not None:
-            diff_cfg = get_diff_config(config)
-            if diff_cfg is not None:
-                cfg_dict.update(diff_cfg)
+        # Inject diffusion config from plugin.
+        get_bundle_config = getattr(plugin, "diffusion_bundle_config", None)
+        if not callable(get_bundle_config):
+            raise ValueError(
+                f"Plugin {plugin.name} must implement diffusion_bundle_config() "
+                "so component-derived config stays model-owned"
+            )
+        diff_cfg = get_bundle_config(config, components=components)
+        if diff_cfg is not None:
+            cfg_dict.update(diff_cfg)
         cfg_dict.update(parallel.to_bundle_config_fields())
 
         cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
 
     sections.append(BundleSection("config.json", cfg_data))
 
-    # Ensure tokenizer.json exists for diffusion tokenizer directories.
     tokenizer_json_t0 = time.monotonic()
-    for tok_subdir in ("tokenizer_2", "tokenizer"):
-        tok_dir = model_dir_path / tok_subdir
-        if tok_dir.is_dir() and not (tok_dir / "tokenizer.json").exists():
-            _ensure_tokenizer_json(tok_dir, plugin=plugin)
+    sections.extend(_diffusion_tokenizer_bundle_sections_from_plugin(
+        plugin, model_dir_path))
     _add_build_timing(
         build_timing, "tokenizer_json_ensure_s",
         time.monotonic() - tokenizer_json_t0)
     _write_build_timing(build_timing)
-
-    # Embed tokenizer files from tokenizer subdirectories.
-    # Multi-encoder diffusion models have tokenizer/ and tokenizer_2/.
-    # Prefer tokenizer_2/ if it has tokenizer.json (fast tokenizer format)
-    # because it typically provides the main text conditioning. Fall back to
-    # tokenizer/ for single-tokenizer models.
-    _tok_filenames = ("tokenizer.json", "tokenizer_config.json",
-                      "special_tokens_map.json", "vocab.json",
-                      "merges.txt", "spiece.model", "tokenizer.model")
-    _tok_embedded = set()
-
-    for tok_subdir in ("tokenizer_2", "tokenizer"):
-        tokenizer_dir = model_dir_path / tok_subdir
-        if not tokenizer_dir.is_dir():
-            continue
-        for filename in _tok_filenames:
-            if filename in _tok_embedded:
-                continue  # already embedded from higher-priority dir
-            file_path = tokenizer_dir / filename
-            if file_path.exists():
-                sections.append(BundleSection(filename, file_path.read_bytes()))
-                _tok_embedded.add(filename)
-
-    # For dual-tokenizer models, also embed the secondary tokenizer files
-    # under prefixed names so the C++ runtime can create a separate tokenizer.
-    # The secondary tokenizer lives in tokenizer/ with BPE vocab/merges files.
-    _clip_file_map = {
-        "tokenizer.json": "clip_tokenizer.json",
-        "vocab.json": "clip_vocab.json",
-        "merges.txt": "clip_merges.txt",
-        "tokenizer_config.json": "clip_tokenizer_config.json",
-        "special_tokens_map.json": "clip_special_tokens_map.json",
-    }
-    clip_tokenizer_dir = model_dir_path / "tokenizer"
-    if clip_tokenizer_dir.is_dir() and (model_dir_path / "tokenizer_2").is_dir():
-        for src_name, dst_name in _clip_file_map.items():
-            file_path = clip_tokenizer_dir / src_name
-            if file_path.exists():
-                sections.append(BundleSection(dst_name, file_path.read_bytes()))
 
     # Resolve per-component batch envelope. Plugins that batchified record
     # the envelope on components["max_batch_size_envelope"]. When absent

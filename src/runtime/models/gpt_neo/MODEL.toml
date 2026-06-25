@@ -1,0 +1,6 @@
+id = "gpt_neo"
+runtime_library = "libtrtmc_model_gpt_neo.so"
+runtime_plugins = ["plugin.cpp|register_gpt_neo_plugin"]
+runtime_strategies = ["gpt_neo_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["gpt_neo_decoder_kv_cache"]

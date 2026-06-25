@@ -8,7 +8,14 @@ aliases = [
 prefixes = [
   "nemotron_labs_diffusion",
 ]
+hf_allow_patterns = [
+  "linear_spec_lora/**",
+]
 hf_required_files = [
   "nvidia/Nemotron-Labs-Diffusion-8B|linear_spec_lora/adapter_config.json",
   "nvidia/Nemotron-Labs-Diffusion-8B|linear_spec_lora/adapter_model.safetensors",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "nemotron_labs_diffusion",
 ]

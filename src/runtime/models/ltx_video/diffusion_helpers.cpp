@@ -1,9 +1,100 @@
 #include "diffusion_helpers.h"
 
 namespace trtmc {
+namespace {
 
-DiffusionConfig make_diffusion_config(const std::string& json) {
-    DiffusionConfig dc;
+void load_preprocessor_weights(const std::string& index_json, const char* blob,
+                               std::size_t blob_size, LTXVideoPreprocessorWeights& w) {
+    ltx_video_preprocessor_weights::load_with_fallback(index_json, blob, blob_size,
+                                                       "patch_embedding.weight",
+                                                       "x_embedder.weight", w.patch_embed_weight);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "patch_embedding.bias", "x_embedder.bias", w.patch_embed_bias);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.time_embedding.0.weight",
+        "time_text_embed.timestep_embedder.linear_1.weight", w.time_emb_0_weight);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.time_embedding.0.bias",
+        "time_text_embed.timestep_embedder.linear_1.bias", w.time_emb_0_bias);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.time_embedding.2.weight",
+        "time_text_embed.timestep_embedder.linear_2.weight", w.time_emb_2_weight);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.time_embedding.2.bias",
+        "time_text_embed.timestep_embedder.linear_2.bias", w.time_emb_2_bias);
+
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.time_proj.weight", w.time_proj_weight);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.time_proj.bias", w.time_proj_bias);
+
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.text_embedding.weight",
+        "time_text_embed.text_embedder.linear_1.weight", w.text_proj_weight);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.text_embedding.bias",
+        "time_text_embed.text_embedder.linear_1.bias", w.text_proj_bias);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.text_embedding_2.weight",
+        "time_text_embed.text_embedder.linear_2.weight", w.text_proj_2_weight);
+    ltx_video_preprocessor_weights::load_with_fallback(
+        index_json, blob, blob_size, "condition_embedder.text_embedding_2.bias",
+        "time_text_embed.text_embedder.linear_2.bias", w.text_proj_2_bias);
+
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "context_embedder.weight", w.context_embed_weight);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "context_embedder.bias", w.context_embed_bias);
+
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.weight",
+        w.guidance_emb_0_weight);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.bias",
+        w.guidance_emb_0_bias);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.weight",
+        w.guidance_emb_2_weight);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.bias",
+        w.guidance_emb_2_bias);
+
+    ltx_video_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
+                                                             "vae_bn.running_mean", w.vae_bn_mean);
+    ltx_video_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
+                                                             "vae_bn.running_var", w.vae_bn_var);
+}
+
+void finalize_preprocessor_weights(LTXVideoPreprocessorWeights& w) {
+    if (!w.patch_embed_weight.empty() && !w.patch_embed_bias.empty()) {
+        const auto dit_dim = static_cast<int32_t>(w.patch_embed_bias.size());
+        w.patch_dim = static_cast<int32_t>(w.patch_embed_weight.size()) / dit_dim;
+    }
+    w.valid = !w.patch_embed_weight.empty() && !w.time_emb_0_weight.empty();
+}
+
+LTXVideoPreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data) {
+    LTXVideoPreprocessorWeights w;
+    std::string index_json;
+    const char* blob = nullptr;
+    std::size_t blob_size = 0;
+    if (!ltx_video_preprocessor_weights::extract_preprocessor_index(data, index_json, blob,
+                                                                    blob_size)) {
+        return w;
+    }
+
+    load_preprocessor_weights(index_json, blob, blob_size, w);
+    finalize_preprocessor_weights(w);
+
+    std::cerr << "[ltx-video] Preprocessor weights loaded: " << (w.valid ? "OK" : "INCOMPLETE")
+              << " (patch_dim=" << w.patch_dim << ")\n";
+    return w;
+}
+
+} // namespace
+
+LTXVideoDiffusionConfig make_diffusion_config(const std::string& json) {
+    LTXVideoDiffusionConfig dc;
     std::string sched = extract_json_string(json, "scheduler", "flow_match_euler");
     dc.scheduler = sched.empty() ? "flow_match_euler" : sched;
     dc.num_inference_steps = extract_json_int(json, "num_inference_steps", 50);

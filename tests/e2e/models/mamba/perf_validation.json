@@ -2,7 +2,7 @@
   "models": [
     {
       "model": "state-spaces/mamba-130m-hf",
-      "pipeline_type": "ssm_recurrent",
+      "pipeline_type": "mamba_ssm_recurrent",
       "label": "A5-ssm",
       "benchmark": {
         "label": "CPU argmax",

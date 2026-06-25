@@ -4,7 +4,7 @@
   "hf_id": "nvidia/Nemotron-4-Mini-Hindi-4B-Base",
   "bundle": "nemotron-hindi-4b.trtfb",
   "family": "nemotron",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "nemotron_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

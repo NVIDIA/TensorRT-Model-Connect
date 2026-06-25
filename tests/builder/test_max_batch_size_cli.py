@@ -59,6 +59,8 @@ class _FakeDiffusionPlugin:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.tokenizer_add_special_calls = 0
+        self.tokenizer_section_calls = 0
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("fake_batch", "fakebatchpipeline")
@@ -100,6 +102,32 @@ class _FakeDiffusionPlugin:
 
     def get_diffusion_config(self, config):  # noqa: ARG002
         return {"diffusion_backend_type": "fake"}
+
+    def diffusion_bundle_config(self, config, *, components):  # noqa: ARG002
+        cfg = self.get_diffusion_config(config)
+        cfg["num_text_encoders"] = len(components["text_encoders"])
+        return cfg
+
+    def diffusion_bundle_sections(self, components, *, parallel_config=None):  # noqa: ARG002
+        sections = []
+        for index, (_name, plan) in enumerate(components["text_encoders"]):
+            sections.append((f"text_encoder_{index}_plan", plan))
+        sections.append(("denoiser_plan", components["denoiser"]))
+        sections.append(("vae_decoder_plan", components["vae_decoder"]))
+        sections.append(("preprocessor_weights", components["preprocessor_weights"]))
+        return sections
+
+    def diffusion_tokenizer_add_special_tokens(
+        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+    ):  # noqa: ARG002
+        self.tokenizer_add_special_calls += 1
+        return False
+
+    def diffusion_tokenizer_bundle_sections(
+        self, model_dir_path, *, ensure_tokenizer_json,
+    ):  # noqa: ARG002
+        self.tokenizer_section_calls += 1
+        return []
 
 
 def _install_stub_plugin(monkeypatch) -> _FakeDiffusionPlugin:
@@ -187,6 +215,8 @@ def test_default_max_batch_size_omits_envelope(monkeypatch, tmp_path):
     # Plugin should still have been called, with max_batch_size=1.
     assert len(plugin.calls) == 1
     assert plugin.calls[0]["max_batch_size"] == 1
+    assert plugin.tokenizer_add_special_calls == 1
+    assert plugin.tokenizer_section_calls == 1
 
 
 def test_max_batch_size_four_records_envelope(monkeypatch, tmp_path):
@@ -209,5 +239,5 @@ def test_max_batch_size_four_records_envelope(monkeypatch, tmp_path):
     assert plugin.calls[0]["max_batch_size"] == 4
     assert plugin.calls[0]["te_mbs"] == 8  # encoder cap policy
     assert plugin.calls[0]["vae_mbs"] == 1  # VAE always slices
-
-
+    assert plugin.tokenizer_add_special_calls == 1
+    assert plugin.tokenizer_section_calls == 1

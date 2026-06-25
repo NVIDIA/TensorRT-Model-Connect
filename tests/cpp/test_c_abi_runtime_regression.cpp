@@ -107,8 +107,17 @@ void write_invalid_engine_bundle(const std::filesystem::path& path) {
     // Intentionally invalid TensorRT plan payload.
     static constexpr char kInvalidPlan[16] = {'N', 'O', 'T', '_', 'A', '_', 'P', 'L',
                                               'A', 'N', '_', 'B', 'L', 'O', 'B', '!'};
+    const std::string config = R"({
+  "runtime_strategy": "qwen_decoder_kv_cache",
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
     write_bundle_with_sections(
-        path, {BundleSectionSpec{"engine_plan", std::string(kInvalidPlan, sizeof(kInvalidPlan))}});
+        path,
+        {BundleSectionSpec{"config.json", config},
+         BundleSectionSpec{"engine_plan", std::string(kInvalidPlan, sizeof(kInvalidPlan))}},
+        "qwen");
 }
 
 bool message_contains_any(const std::string& msg, std::initializer_list<const char*> needles) {
@@ -155,15 +164,15 @@ void test_missing_engine_plan_bundle_reports_error() {
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
 
-    // Preconditions: valid bundle + config.json section, but no engine_plan section.
-    // The runtime strategy is intentionally omitted so the C API exercises the
-    // manifest-owned legacy default without naming a model-owned strategy here.
+    // Preconditions: valid bundle + model-owned config.json section, but no
+    // engine_plan section.
     const std::string config = R"({
+  "runtime_strategy": "qwen_decoder_kv_cache",
   "hidden_size": 64,
   "num_attention_heads": 1,
   "num_key_value_heads": 1
 })";
-    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
+    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}}, "qwen");
 
     auto* pipeline = trtmc_create_pipeline(bundle_path.string().c_str(), 0);
     check(pipeline == nullptr, "bundle missing engine_plan returns nullptr");

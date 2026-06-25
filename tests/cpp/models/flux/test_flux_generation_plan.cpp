@@ -34,7 +34,7 @@ void check_close(float actual, float expected, float tolerance, const char* name
 }
 
 void test_flux_generation_plan_derives_layout_and_scheduler() {
-    trtmc::DiffusionConfig config;
+    trtmc::FluxDiffusionConfig config;
     config.num_inference_steps = 28;
     config.guidance_scale = 4.5F;
     config.z_dim = 16;
@@ -48,7 +48,7 @@ void test_flux_generation_plan_derives_layout_and_scheduler() {
     config.base_image_seq_len = 256;
     config.max_image_seq_len = 4096;
 
-    trtmc::PreprocessorWeights weights;
+    trtmc::FluxPreprocessorWeights weights;
     weights.vae_bn_mean = {0.0F};
 
     const auto plan =

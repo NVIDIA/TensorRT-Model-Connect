@@ -53,7 +53,7 @@ def _make_repo(tmp_path: Path) -> Path:
             json.dumps({
                 "name": name,
                 "family": "decoder_family",
-                "runtime_strategy": "decoder_kv_cache",
+                "runtime_strategy": "llama_decoder_kv_cache",
                 "bundle": f"{name}.trtfb",
                 "ci_tier": ci_tier,
             }),
@@ -63,11 +63,12 @@ def _make_repo(tmp_path: Path) -> Path:
     write_manifest("decoder-small")
     write_manifest("decoder-small-tp2", ci_tier="multi_device")
 
-    runtime_dir = repo_root / "src" / "runtime" / "models" / "text_generation"
+    runtime_dir = repo_root / "src" / "runtime" / "models" / "llama"
     runtime_dir.mkdir(parents=True)
     (runtime_dir / "MODEL.toml").write_text(
-        'id = "text_generation"\n'
-        'runtime_strategies = ["decoder_kv_cache"]\n',
+        'id = "llama"\n'
+        'runtime_library = "libtrtmc_model_llama.so"\n'
+        'runtime_strategies = ["llama_decoder_kv_cache"]\n',
         encoding="utf-8",
     )
     return repo_root
@@ -164,7 +165,7 @@ def test_run_cli_uses_isolated_current_and_origin_main_baseline(
     origin_main = tmp_path / "origin-main"
     current_artifacts = tmp_path / "current-artifacts"
     baseline_artifacts = tmp_path / "baseline-artifacts"
-    plugin_dir = tmp_path / "only-text-generation"
+    plugin_dir = tmp_path / "only-llama"
 
     assert e2e_origin_main_parity.main([
         "run",
@@ -419,8 +420,8 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
     plugin_lib = (
         build_dir
         / "models"
-        / "text_generation"
-        / "libtrtmc_model_text_generation.so"
+        / "llama"
+        / "libtrtmc_model_llama.so"
     )
     plugin_lib.parent.mkdir(parents=True)
     plugin_lib.write_bytes(b"fake-so")
@@ -462,8 +463,8 @@ def test_batch_cli_prepares_isolated_plugin_dirs_and_writes_summary(
     isolated_lib = (
         plugin_work_dir
         / "decoder-small"
-        / "text_generation"
-        / "libtrtmc_model_text_generation.so"
+        / "llama"
+        / "libtrtmc_model_llama.so"
     )
     assert isolated_lib.read_bytes() == b"fake-so"
 
@@ -529,8 +530,8 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
     plugin_lib = (
         build_dir
         / "models"
-        / "text_generation"
-        / "libtrtmc_model_text_generation.so"
+        / "llama"
+        / "libtrtmc_model_llama.so"
     )
     plugin_lib.parent.mkdir(parents=True)
     plugin_lib.write_bytes(b"fake-so")
@@ -573,9 +574,9 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
     assert entry["baseline_bundle_exists"] is True
     assert entry["ready"] is True
     assert entry["plugins"] == [{
-        "model_id": "text_generation",
-        "target": "trtmc_model_text_generation",
-        "library": "libtrtmc_model_text_generation.so",
+        "model_id": "llama",
+        "target": "trtmc_model_llama",
+        "library": "libtrtmc_model_llama.so",
         "library_path": str(plugin_lib),
         "library_exists": True,
     }]
@@ -593,8 +594,8 @@ def test_plan_cli_fails_when_requested_and_baseline_bundle_is_missing(
     plugin_lib = (
         build_dir
         / "models"
-        / "text_generation"
-        / "libtrtmc_model_text_generation.so"
+        / "llama"
+        / "libtrtmc_model_llama.so"
     )
     plugin_lib.parent.mkdir(parents=True)
     plugin_lib.write_bytes(b"fake-so")

@@ -57,7 +57,7 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
     trtmc_c.write_text(
         """
         static const std::unordered_map<std::string, int> kStrategyFamilies = {
-            {"decoder_kv_cache", 1},
+            {"qwen_decoder_kv_cache", 1},
             {"diffusion", 2},
         };
         """,
@@ -68,8 +68,8 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
     builder.write_text(
         """
         static constexpr std::array<std::string_view, 2> kStrategies = {
-            "vision_language",
-            "segmentation",
+            "qwen_vl_vision_language",
+            "segformer_segmentation",
         };
         """,
         encoding="utf-8",
@@ -77,13 +77,18 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
 
     strategies = mod.extract_runtime_strategies_from_cpp_files(
         [trtmc_c, builder],
-        {"decoder_kv_cache", "diffusion", "vision_language", "segmentation"},
+        {
+            "qwen_decoder_kv_cache",
+            "diffusion",
+            "qwen_vl_vision_language",
+            "segformer_segmentation",
+        },
     )
     assert strategies == {
-        "decoder_kv_cache",
+        "qwen_decoder_kv_cache",
         "diffusion",
-        "vision_language",
-        "segmentation",
+        "qwen_vl_vision_language",
+        "segformer_segmentation",
     }
 
 
@@ -91,9 +96,9 @@ def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
     mod = _import_checker()
 
     model_dir = tmp_path / "src" / "runtime" / "models"
-    (model_dir / "text_generation").mkdir(parents=True)
-    (model_dir / "text_generation" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_kv_cache", "decoder_moe"]\n',
+    (model_dir / "qwen").mkdir(parents=True)
+    (model_dir / "qwen" / "MODEL.toml").write_text(
+        'runtime_strategies = ["qwen_decoder_kv_cache"]\n',
         encoding="utf-8",
     )
     (model_dir / "media_runtime").mkdir(parents=True)
@@ -103,8 +108,7 @@ def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
     )
 
     assert mod.extract_runtime_strategies_from_model_manifests(model_dir) == {
-        "decoder_kv_cache",
-        "decoder_moe",
+        "qwen_decoder_kv_cache",
         "diffusion_primary",
     }
 
@@ -172,7 +176,7 @@ def test_validate_matrix_data_requires_exemption_when_no_diff_check():
         },
         cpp_runtime_strategies={"unit_recurrent"},
         runtime_to_task_strategy={"unit_recurrent": "text_generation_causal"},
-        diff_checks_by_strategy={},
+        diff_check_classes=set(),
         runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
         comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
     )
@@ -184,7 +188,7 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
     mod = _import_checker()
     errors = mod.validate_matrix_data(
         matrix={
-            "vision_language": {
+            "qwen_vl_vision_language": {
                 "task_strategy": "vision_language_generation",
                 "cli_commands": ["run"],
                 "runner_class": "VisionLanguageRunner",
@@ -192,9 +196,9 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
                 "diff_framework_check_classes": ["VLPipelineTest"],
             }
         },
-        cpp_runtime_strategies={"vision_language", "future_runtime_strategy"},
-        runtime_to_task_strategy={"vision_language": "vision_language_generation"},
-        diff_checks_by_strategy={"vision_language": {"VLPipelineTest"}},
+        cpp_runtime_strategies={"qwen_vl_vision_language", "future_runtime_strategy"},
+        runtime_to_task_strategy={"qwen_vl_vision_language": "vision_language_generation"},
+        diff_check_classes={"VLPipelineTest"},
         runner_classes_by_task={"vision_language_generation": {"VisionLanguageRunner"}},
         comparator_classes_by_task={"vision_language_generation": {"VisionLanguageComparator"}},
     )
@@ -211,15 +215,17 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
         """
         {
           "runtime_strategies": {
-            "decoder_kv_cache": {
+            "qwen_decoder_kv_cache": {
               "task_strategy": "text_generation_causal",
+              "performance_mode": "decode",
               "cli_commands": ["run"],
               "runner_class": "pkg.TextGenerationCausalRunner",
               "comparator_class": "pkg.TextComparator",
               "diff_framework_check_classes": ["LogitDiffTest"]
             },
-            "vision_language": {
+            "qwen_vl_vision_language": {
               "task_strategy": "vision_language_generation",
+              "performance_mode": "enc_dec",
               "cli_commands": ["run"],
               "runner_class": "pkg.VisionLanguageRunner",
               "comparator_class": "pkg.VisionLanguageComparator",
@@ -240,7 +246,7 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
   "name": "text",
   "hf_id": "unit/text",
   "family": "text",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal"
 }
         """,
@@ -254,7 +260,7 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
   "name": "vl",
   "hf_id": "unit/vl",
   "family": "vl",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation"
 }
         """,
@@ -266,8 +272,8 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
     cpp_path.write_text(
         """
         static const std::unordered_map<std::string, int> kStrategyFamilies = {
-            {"decoder_kv_cache", 1},
-            {"vision_language", 2},
+            {"qwen_decoder_kv_cache", 1},
+            {"qwen_vl_vision_language", 2},
         };
         """,
         encoding="utf-8",
@@ -277,14 +283,14 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
     (builders_dir / "text").mkdir(parents=True)
     (builders_dir / "text" / "text_strategy_builder.cpp").write_text(
         """
-        static constexpr std::array<std::string_view, 1> kStrategies = {"decoder_kv_cache"};
+        static constexpr std::array<std::string_view, 1> kStrategies = {"qwen_decoder_kv_cache"};
         """,
         encoding="utf-8",
     )
     (builders_dir / "vision").mkdir(parents=True)
     (builders_dir / "vision" / "vision_strategy_builder.cpp").write_text(
         """
-        static constexpr std::array<std::string_view, 1> kStrategies = {"vision_language"};
+        static constexpr std::array<std::string_view, 1> kStrategies = {"qwen_vl_vision_language"};
         """,
         encoding="utf-8",
     )
@@ -332,14 +338,14 @@ class VisionLanguageComparator:
     (diff_checks_dir / "text_checks.py").write_text(
         """
 class LogitDiffTest:
-    runtime_strategies = ["decoder_kv_cache"]
+    name = "logit_diff"
         """,
         encoding="utf-8",
     )
     (diff_checks_dir / "vision_checks.py").write_text(
         """
 class VLPipelineTest:
-    runtime_strategies = ["vision_language"]
+    name = "vl_pipeline"
         """,
         encoding="utf-8",
     )

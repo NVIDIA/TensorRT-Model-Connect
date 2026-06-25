@@ -309,13 +309,10 @@ class HfTransformersReference:
 
         Dispatches to task-specific methods for non-standard tasks:
         - vision_language_generation -> _run_vl_full_generation()
-        - speech_to_text -> _run_speech_to_text_ref() (via full_inference)
         """
         task = case.task_strategy
         if task == "vision_language_generation":
             return self._run_vl_full_generation(case, stage, ctx)
-        if task == "speech_to_text":
-            return self._run_speech_to_text_ref(case, stage, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -468,8 +465,6 @@ class HfTransformersReference:
             return self._run_embedding_ref(case, stage, ctx)
         if task == "reranking":
             return self._run_reranking_ref(case, stage, ctx)
-        if task == "speech_to_text":
-            return self._run_speech_to_text_ref(case, stage, ctx)
         if task == "object_detection":
             return self._run_object_detection_ref(case, stage, ctx)
         raise ValueError(
@@ -816,82 +811,6 @@ class HfTransformersReference:
             env=_reference_env(ctx),
             output_readers=(_json_output_reader(output_path),),
             failure_label="HF reranking",
-        )
-
-    def _run_speech_to_text_ref(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
-        """Run generic HuggingFace speech-to-text reference."""
-        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
-        output_path = str(Path(model_dir) / "hf_stt.json")
-
-        audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
-        trust_remote_code = case.metadata.get("trust_remote_code", False)
-        hf_id = case.hf_id
-        torch_dtype_expr = _torch_dtype_for_case(case)
-
-        script = textwrap.dedent(f"""\
-            import json, torch, numpy as np
-            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-            import scipy.io.wavfile as wav
-
-            hf_id = {hf_id!r}
-            audio_path = {audio_path!r}
-            trust_remote_code = {trust_remote_code!r}
-            output_path = {output_path!r}
-
-            processor = AutoProcessor.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype={torch_dtype_expr})
-            model.eval()
-
-            sr, audio = wav.read(audio_path)
-            if audio.dtype == np.int16:
-                audio = audio.astype(np.float32) / 32768.0
-            elif audio.dtype == np.int32:
-                audio = audio.astype(np.float32) / 2147483648.0
-            if len(audio.shape) > 1:
-                audio = audio.mean(axis=1)
-
-            # Resample to the model's expected sample rate.
-            target_sr = getattr(processor.feature_extractor, "sampling_rate", sr)
-            if sr != target_sr:
-                from scipy.signal import resample
-                num_samples = int(len(audio) * target_sr / sr)
-                audio = resample(audio, num_samples).astype(np.float32)
-                sr = target_sr
-
-            inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
-            # Cast floating-point inputs to match model dtype (e.g. fp16 mel features)
-            model_dtype = next(model.parameters()).dtype
-            inputs = {{k: v.to(model_dtype) if v.is_floating_point() else v
-                       for k, v in inputs.items()}}
-            with torch.no_grad():
-                generated_ids = model.generate(**inputs, max_new_tokens=100)
-            text = processor.batch_decode(
-                generated_ids, skip_special_tokens=True)[0]
-
-            result = {{"text": text}}
-            with open(output_path, "w") as f:
-                json.dump(result, f)
-            print(f"OK text={{text[:100]!r}}")
-        """)
-
-        python = ctx.reference_python_path() or sys.executable
-        return run_reference_subprocess(
-            command=[python, "-c", script],
-            timeout_s=600,
-            label="hf_speech_to_text",
-            artifact_dir=ctx.artifacts_dir or "",
-            case_name=case.name,
-            stage_name=stage.name,
-            env=_reference_env(ctx),
-            output_readers=(_json_output_reader(output_path),),
-            text_reader=_json_text_reader(output_path),
-            failure_label="HF speech-to-text",
         )
 
     def _run_object_detection_ref(

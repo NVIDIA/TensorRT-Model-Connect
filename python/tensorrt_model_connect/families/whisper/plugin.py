@@ -51,7 +51,7 @@ def _load_bias_or_zeros(readers, hf_key: str, size: int, dtype=np.float32) -> np
 
 class WhisperPlugin:
     name = "whisper"
-    runtime_strategy = "speech_to_text"
+    runtime_strategy = "whisper_speech_to_text"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "whisper"

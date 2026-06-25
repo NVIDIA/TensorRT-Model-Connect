@@ -11,7 +11,7 @@ def _case() -> E2ECase:
         name="model",
         hf_id="hf/model",
         family="family",
-        runtime_strategy="hybrid_mamba_attention",
+        runtime_strategy="qwen_decoder_kv_cache",
         reference_family="chat_instruct_template",
         user_contract="chat_response",
         inputs={"prompt": "What is the capital of France? Answer in one word."},

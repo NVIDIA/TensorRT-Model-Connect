@@ -31,6 +31,8 @@ from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engin
 
 class GPTNeoPlugin:
     name = "gpt_neo"
+    runtime_strategy = "gpt_neo_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "gpt_neo"

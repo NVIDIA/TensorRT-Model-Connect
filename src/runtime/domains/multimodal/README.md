@@ -1,13 +1,12 @@
-# Multimodal Runtime (Vision-Language)
+# Multimodal Runtime Domain
 
-Vision-language preprocessing and cross-modal runtime components.
+Cross-modal runtime helpers that are generic enough to be shared.
 
 Key files:
-- `image_preprocessor.*`: model-specific preprocessing strategies.
-- `vision_engine.*`: vision encoder execution helpers.
-- `vl_backend.*`: VL generation path combining vision features and text decode.
+- No behavior-bearing helpers remain in the shared multimodal domain.
 
 How to understand:
-1. Inspect `image_preprocessor` strategy selection and config parsing.
-2. Follow `vision_engine` tensor bindings and output extraction.
-3. Read `vl_backend::generate_vl` for end-to-end multimodal decode orchestration.
+1. Inspect model-owned `src/runtime/models/<family>/image_preprocessor.*`
+   files for VL preprocessing strategies and config parsing.
+2. Inspect model-owned `src/runtime/models/<family>/pipeline.*` files for
+   end-to-end vision-language decode behavior.

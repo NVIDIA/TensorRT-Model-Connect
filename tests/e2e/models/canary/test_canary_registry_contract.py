@@ -16,4 +16,4 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("canary")
-    assert getattr(plugin, "runtime_strategy", None) == "speech_to_text"
+    assert getattr(plugin, "runtime_strategy", None) == "canary_speech_to_text"

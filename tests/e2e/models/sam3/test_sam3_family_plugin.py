@@ -302,7 +302,7 @@ def test_sam3_matches_sam3_video_not_legacy_sam() -> None:
     assert plugin.matches("sam3_video")
     assert not plugin.matches("sam")
     assert not plugin.matches("qwen3")
-    assert plugin.runtime_strategy == "prompted_segmentation"
+    assert plugin.runtime_strategy == "sam3_prompted_segmentation"
     assert plugin.requires_tokenizer is True
 
 

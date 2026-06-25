@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from tests.e2e.models.bart.e2e_plugins.contract import BartCausalContinuationPlugin
 from tests.e2e_harness.contracts import E2ECase, StageOutput, StageStatus, ThresholdProfile
-from tests.e2e_harness.plugins.causal_continuation import CausalContinuationPlugin
 
 
 def _case(reference_family: str = "causal_base_continuation") -> E2ECase:
@@ -19,7 +19,7 @@ def _case(reference_family: str = "causal_base_continuation") -> E2ECase:
         name="model",
         hf_id="hf/model",
         family="family",
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="family_decoder_kv_cache",
         reference_family=reference_family,
         inputs={"prompt": "The capital of France is"},
         metadata=metadata,
@@ -27,7 +27,7 @@ def _case(reference_family: str = "causal_base_continuation") -> E2ECase:
 
 
 def test_continuation_rejects_empty_trt_and_reference_outputs() -> None:
-    result = CausalContinuationPlugin().verify(
+    result = BartCausalContinuationPlugin().verify(
         StageOutput(stage_name="full_generation", text=""),
         StageOutput(stage_name="full_generation", text=""),
         _case(),
@@ -39,7 +39,7 @@ def test_continuation_rejects_empty_trt_and_reference_outputs() -> None:
 
 
 def test_seq2seq_weak_reference_prompt_text_is_not_stripped_to_empty() -> None:
-    result = CausalContinuationPlugin().verify(
+    result = BartCausalContinuationPlugin().verify(
         StageOutput(stage_name="full_generation", text=""),
         StageOutput(stage_name="full_generation", text="The capital of France is"),
         _case(reference_family="seq2seq_base_weak"),
@@ -51,7 +51,7 @@ def test_seq2seq_weak_reference_prompt_text_is_not_stripped_to_empty() -> None:
 
 
 def test_seq2seq_weak_trt_prompt_text_is_not_stripped_to_empty() -> None:
-    result = CausalContinuationPlugin().verify(
+    result = BartCausalContinuationPlugin().verify(
         StageOutput(stage_name="full_generation", text="The capital of France is"),
         StageOutput(stage_name="full_generation", text="The capital of France is"),
         _case(reference_family="seq2seq_base_weak"),
@@ -63,7 +63,7 @@ def test_seq2seq_weak_trt_prompt_text_is_not_stripped_to_empty() -> None:
 
 
 def test_continuation_reports_cpp_runtime_error() -> None:
-    result = CausalContinuationPlugin().verify(
+    result = BartCausalContinuationPlugin().verify(
         StageOutput(
             stage_name="full_generation",
             data={

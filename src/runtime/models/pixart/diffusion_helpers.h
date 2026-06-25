@@ -1,22 +1,22 @@
 #pragma once
 #include "plugin_helpers.h"
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "preprocessor_weights_helpers.h"
+#include "runtime/models/pixart/pixart_diffusion_types.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {
 
-DiffusionConfig make_diffusion_config(const std::string& json);
+PixArtDiffusionConfig make_diffusion_config(const std::string& json);
 
-// Shared diffusion resources loaded once, then dispatched to per-model factory.
+// PixArt diffusion resources loaded once, then dispatched to the PixArt factory.
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
     LoadedModule vision;
     LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;
-    DiffusionConfig config;
-    PreprocessorWeights weights;
+    PixArtDiffusionConfig config;
+    PixArtPreprocessorWeights weights;
     std::shared_ptr<ITokenizer> tokenizer;
 };
 

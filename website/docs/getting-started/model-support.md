@@ -28,9 +28,9 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 | Task | Runtime strategies | Example manifest families |
 | --- | --- | --- |
 | Decoder text generation | `decoder_kv_cache`, `decoder_moe` | `qwen`, `llama`, `mistral`, `gpt_oss`, `deepseek_v2`, `mixtral` |
-| Recurrent and hybrid text | `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | `mamba`, `rwkv`, `nemotron_h`, `qwen3_5` |
+| Recurrent and hybrid text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | `mamba`, `rwkv`, `nemotron_h`, `qwen3_5` |
 | Encoder-only and retrieval | `encoder_only`, `embedding`, `reranking` | `bert`, `roberta`, `mpnet`, `eagle_vlm` |
-| Seq2seq and translation | `text_to_text`, `marian_translation`, `seq2seq_encoder_decoder` | `t5`, `marian`, `bart`, `m2m_100` |
+| Seq2seq and translation | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` | `t5`, `marian`, `bart`, `m2m_100` |
 | Vision-language and OCR | `vision_language`, `omni_multimodal` | `qwen_vl`, `internvl`, `phi4_multimodal`, `deepseek_ocr`, `qwen3_omni` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` | `whisper`, `canary`, `nemotron_speech_streaming`, `bark`, `magpie_tts`, `personaplex` |
 | Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `z_image`, `pixart` |

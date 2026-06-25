@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 try:
-    from tensorrt_model_connect import graph_ops
+    import tensorrt_model_connect.families.qwen_vl.graph_ops as graph_ops
     from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import (
         _compute_vision_rope_tables,
         build_qwen3_vl_vision_engine,

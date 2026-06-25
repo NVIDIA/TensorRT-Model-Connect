@@ -15,8 +15,8 @@ void check(bool condition, const char* name) {
 }
 
 void test_wan_construction() {
-    trtmc::DiffusionConfig cfg;
-    trtmc::PreprocessorWeights weights;
+    trtmc::WanDiffusionConfig cfg;
+    trtmc::WanPreprocessorWeights weights;
 
     trtmc::WanPipeline pipeline(nullptr, nullptr, nullptr, cfg, weights, nullptr, "test-wan");
 

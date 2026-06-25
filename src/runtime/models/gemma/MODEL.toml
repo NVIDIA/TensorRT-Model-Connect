@@ -1,0 +1,6 @@
+id = "gemma"
+runtime_library = "libtrtmc_model_gemma.so"
+runtime_plugins = ["plugin.cpp|register_gemma_plugin"]
+runtime_strategies = ["gemma_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["gemma_decoder_kv_cache"]

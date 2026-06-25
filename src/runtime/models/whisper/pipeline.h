@@ -1,13 +1,12 @@
 #pragma once
 
 // WhisperPipeline: encoder-decoder speech-to-text pipeline.
-// Uses TrtModule(encoder) + TrtModule(decoder) + IInferenceState.
+// Uses TrtModule(encoder) + TrtModule(decoder) + WhisperInferenceState.
 
-#include "runtime/core/trt_common.h"
+#include "runtime/models/whisper/inference_state.h"
+#include "runtime/models/whisper/kv_cache.h"
 #include "runtime/models/whisper/whisper_config.h"
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/inference_state.h"
-#include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -24,7 +23,7 @@ struct MelFilterbank;
 class WhisperPipeline final : public IPipeline {
   public:
     WhisperPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-                    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config,
+                    std::unique_ptr<WhisperInferenceState> state, WhisperConfig whisper_config,
                     int32_t hidden_size, int32_t num_decoder_layers, MelFilterbank mel_fb,
                     int32_t mel_n_fft, int32_t mel_hop_length, int32_t mel_chunk_length,
                     int32_t mel_sampling_rate, int32_t mel_win_length, float mel_preemph,
@@ -32,7 +31,7 @@ class WhisperPipeline final : public IPipeline {
                     std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     WhisperPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-                    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config,
+                    std::unique_ptr<WhisperInferenceState> state, WhisperConfig whisper_config,
                     int32_t hidden_size, int32_t num_decoder_layers, MelFilterbank mel_fb,
                     int32_t mel_n_fft, int32_t mel_hop_length, int32_t mel_chunk_length,
                     int32_t mel_sampling_rate, cudaStream_t stream,
@@ -55,7 +54,7 @@ class WhisperPipeline final : public IPipeline {
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<IInferenceState> state_;
+    std::unique_ptr<WhisperInferenceState> state_;
     WhisperConfig whisper_config_;
     int32_t hidden_size_;
     int32_t num_decoder_layers_;

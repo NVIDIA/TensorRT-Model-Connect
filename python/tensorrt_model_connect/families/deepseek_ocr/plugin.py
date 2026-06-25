@@ -59,7 +59,7 @@ trt = trt_compat.get_trt()
 
 class DeepSeekOCRPlugin:
     name = "deepseek_ocr"
-    runtime_strategy = "vision_language"
+    runtime_strategy = "deepseek_ocr_vision_language"
     embed_input = True
 
     def matches(self, model_type: str) -> bool:

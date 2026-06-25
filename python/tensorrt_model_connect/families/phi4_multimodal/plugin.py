@@ -23,6 +23,7 @@ from .checkpoint_mapper import (
 
 class Phi4MultimodalPlugin:
     name = "phi4_multimodal"
+    runtime_strategy = "phi4_multimodal_vision_language"
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()

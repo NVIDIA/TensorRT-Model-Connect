@@ -2,7 +2,7 @@
   "models": [
     {
       "model": "Qwen/Qwen3-0.6B",
-      "pipeline_type": "decoder_kv_cache",
+      "pipeline_type": "qwen_decoder_kv_cache",
       "label": "A1-decode-small",
       "benchmark": {
         "label": "CPU argmax",
@@ -13,7 +13,7 @@
     },
     {
       "model": "Qwen/Qwen2.5-7B-Instruct",
-      "pipeline_type": "decoder_kv_cache",
+      "pipeline_type": "qwen_decoder_kv_cache",
       "label": "A3-decode-large",
       "benchmark": {
         "label": "CPU argmax",

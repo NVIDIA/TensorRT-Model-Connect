@@ -101,7 +101,7 @@ def test_contract_plugin_verifies_masks_from_npy(tmp_path) -> None:
         name="sam-vit-base",
         hf_id="facebook/sam-vit-base",
         family="sam",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="sam_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam",
     )
@@ -164,7 +164,7 @@ def test_contract_plugin_fails_bad_trt_masks(tmp_path) -> None:
         name="sam-vit-base",
         hf_id="facebook/sam-vit-base",
         family="sam",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="sam_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam",
     )
@@ -192,12 +192,17 @@ def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> No
                 "hf_id": "facebook/sam-vit-base",
                 "bundle": "sam-vit-base.trtfb",
                 "family": "sam",
-                "runtime_strategy": "prompted_segmentation",
+                "runtime_strategy": "sam_prompted_segmentation",
                 "test_type": "prompted_segmentation",
                 "test_image": "data/test_img.jpeg",
                 "point_x": 0.5,
                 "point_y": 0.5,
                 "num_expected_masks": 3,
+                "input_fields": [
+                    {"input": "point_x", "manifest": "point_x"},
+                    {"input": "point_y", "manifest": "point_y"},
+                    {"input": "num_expected_masks", "manifest": "num_expected_masks"},
+                ],
             }
         ),
         encoding="utf-8",
@@ -205,5 +210,7 @@ def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> No
 
     case = load_manifest(manifest_path)
 
+    assert case.inputs["point_x"] == 0.5
+    assert case.inputs["point_y"] == 0.5
     assert case.inputs["num_expected_masks"] == 3
     assert case.threshold_overrides["num_expected_masks"] == 3

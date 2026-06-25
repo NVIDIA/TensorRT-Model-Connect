@@ -30,10 +30,14 @@ def _make_bundle_bytes(
 
 
 def test_hybrid_engine_section_and_communicator_forwarded(tmp_path):
-    from tensorrt_model_connect.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.families.nemotron_h.debug_runner import (
+        load_config_from_bundle,
+        load_engine_from_bundle,
+        runner_from_bundle,
+    )
 
     config_data = json.dumps({
-        "runtime_strategy": "hybrid_mamba_attention",
+        "runtime_strategy": "nemotron_h_hybrid_mamba_attention",
         "num_mamba_layers": 1,
         "num_attention_layers": 1,
     }).encode("utf-8")
@@ -54,9 +58,15 @@ def test_hybrid_engine_section_and_communicator_forwarded(tmp_path):
         "tensorrt_model_connect.families.nemotron_h.debug_runner.HybridTrtRunner",
         return_value="hybrid-tp-runner",
     ) as mock_runner:
+        config_json = load_config_from_bundle(str(path))
+        engine_plan, header = load_engine_from_bundle(
+            str(path), section_name="engine_plan_tp_rank1")
         runner = runner_from_bundle(
-            str(path),
-            engine_section="engine_plan_tp_rank1",
+            runtime_strategy=str(config_json.get("runtime_strategy") or ""),
+            config=config_json,
+            header=header,
+            engine_plan=engine_plan,
+            bundle_path=str(path),
             distributed_communicator=communicator,
         )
 

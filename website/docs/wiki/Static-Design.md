@@ -81,7 +81,7 @@ classDiagram
         +reset()
     }
 
-    class RecurrentState {
+    class FamilyRecurrentState {
         +bind_to(module)
         +advance()
         +reset()
@@ -99,9 +99,9 @@ classDiagram
         +ok() bool
     }
 
-    class HybridState {
+    class FamilyHybridState {
         -KvCache kv
-        -RecurrentState ssm
+        -FamilyRecurrentState ssm
     }
 
     class ITokenizer {
@@ -110,14 +110,6 @@ classDiagram
         +decode(ids) string
         +id_for_token(token) int32
         +token_for_id(id) string
-    }
-
-    class IScheduler {
-        <<interface>>
-        +set_timesteps(num_steps)
-        +timesteps() vector~float~
-        +sigmas() vector~float~
-        +step(latents, velocity, n, idx)
     }
 
     class TextGenerationPipeline {
@@ -219,11 +211,11 @@ classDiagram
     IPipeline <|.. ZImagePipeline
 
     IInferenceState <|.. KvCache
-    IInferenceState <|.. RecurrentState
-    IInferenceState <|.. HybridState
+    IInferenceState <|.. FamilyRecurrentState
+    IInferenceState <|.. FamilyHybridState
 
-    HybridState --> KvCache
-    HybridState --> RecurrentState
+    FamilyHybridState --> KvCache
+    FamilyHybridState --> FamilyRecurrentState
 
     TextGenerationPipeline --> TrtModule
     TextGenerationPipeline --> KvCache
@@ -256,9 +248,8 @@ classDiagram
     PipelineFactory ..> IPipelinePlugin : create
     IPipelinePlugin ..> IPipeline : creates
     KvCache --> TrtModule : bind_to
-    RecurrentState --> TrtModule : bind_to
+    FamilyRecurrentState --> TrtModule : bind_to
 
-    IScheduler <|.. FlowMatchEulerScheduler
 ```
 
 ### Registry Components (not shown in diagram)
@@ -316,7 +307,7 @@ classDiagram
 | **Files** | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp`, `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`, `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | **Purpose** | Sole creation path for all pipelines. `PipelineFactory::from_bundle()` reads a `.trtfb`, parses `BaseConfig`, and delegates to the registry-resolved `IPipelinePlugin`. |
 | **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each model runtime folder in `src/runtime/models/` handles one or more strategies and exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`. 25 strategies are registered across model-owned plugin files. |
-| **Strategy mapping** | `decoder_kv_cache`/`decoder_moe` -> `TextGenerationPipeline`; `ssm_recurrent`/`rwkv_recurrent`/`hybrid_mamba_attention` -> `RecurrentPipeline`; `encoder_only`/`embedding`/`reranking`/`neural_operator` -> `EncoderPipeline`; `vision_language` -> `VLPipeline`; `segmentation` -> `SegmentPipeline`; `prompted_segmentation` -> `SamPipeline`; `object_detection` -> `EncoderPipeline`; `speech_to_text` -> `WhisperPipeline`; `text_to_audio_bark` -> `BarkPipeline`; `text_to_audio_magpie` -> `MagpiePipeline`; `speech_to_speech` -> `SpeechPipeline`; `omni_multimodal` -> `OmniPipeline`; `text_to_text` -> `T5Pipeline`; `marian_translation` -> `MarianPipeline`; `seq2seq_encoder_decoder` -> `Seq2SeqPipeline`; `diffusion_flux` -> `FluxPipeline`; `diffusion_wan`/`diffusion_pixart` -> `WanPipeline`; `diffusion_zimage` -> `ZImagePipeline`. |
+| **Strategy mapping** | `decoder_kv_cache`/`decoder_moe` -> `TextGenerationPipeline`; `mamba_ssm_recurrent`/`rwkv_recurrent`/`hybrid_mamba_attention` -> family-owned `RecurrentPipeline`; `encoder_only`/`embedding`/`reranking`/`neural_operator` -> `EncoderPipeline`; `vision_language` -> `VLPipeline`; `segmentation` -> `SegmentPipeline`; `prompted_segmentation` -> `SamPipeline`; `object_detection` -> `EncoderPipeline`; `speech_to_text` -> `WhisperPipeline`; `text_to_audio_bark` -> `BarkPipeline`; `text_to_audio_magpie` -> `MagpiePipeline`; `speech_to_speech` -> `SpeechPipeline`; `omni_multimodal` -> `OmniPipeline`; `t5_text_to_text` -> `T5Pipeline`; `marian_translation` -> `MarianPipeline`; `bart_seq2seq_encoder_decoder` -> `BartPipeline`; `m2m_100_seq2seq_encoder_decoder` -> `M2M100Pipeline`; `diffusion_flux` -> `FluxPipeline`; `diffusion_wan`/`diffusion_pixart` -> `WanPipeline`; `diffusion_zimage` -> `ZImagePipeline`. |
 
 ### UD-MOD-01: TRT Module
 
@@ -332,17 +323,17 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp`, `src/runtime/core/device_kv_cache.h`, `src/runtime/core/device_kv_cache.cpp` |
+| **Files** | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
 | **Purpose** | Autoregressive KV cache state manager. Allocates per-layer K/V device tensors, builds causal attention masks, and binds directly to TrtModule. |
 | **Key API** | `bind_to()` binds `cache_k_{i}`, `cache_v_{i}` (inputs) and `present_k_{i}`, `present_v_{i}` (outputs). `advance()` appends present into cache and increments position. `build_attention_mask()` produces `[max_length]` float mask. |
-| **Legacy** | `device_kv_cache.h/cpp` contains the older `DeviceKvCache` and `run_decoder_step_device()` used by legacy backends. |
+| **Retired** | Legacy shared `device_kv_cache.h/cpp`, `DeviceKvCache`, `DeviceResources`, and `run_decoder_step_device()` were removed; concrete decoder cache execution belongs to model-owned runtime code. |
 
 ### UD-REC-01: Recurrent State
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtmc/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
-| **Purpose** | Config-driven SSM/RWKV state manager. Replaces old `MambaStepState` and `RwkvStepState` with a single class parametrized by `TensorSpec` array. |
+| **Files** | `src/runtime/models/mamba/recurrent_state.h/cpp`, `src/runtime/models/rwkv/recurrent_state.h/cpp`, `src/runtime/models/nemotron_h/recurrent_state.h/cpp`, `src/runtime/models/qwen3_5/recurrent_state.h/cpp`, `src/runtime/models/qwen3_omni/recurrent_state.h/cpp` |
+| **Purpose** | Family-owned SSM/RWKV recurrent state managers. The old shared `RecurrentState` class is retired so tensor-state behavior changes stay with the owning model family. |
 | **Key API** | `bind_to()` binds state tensors (`{name}_{i}`) and present tensors (`{output_prefix}_{i}`). `advance()` copies present->state (D2D async). `reset()` zeros all state. |
 | **Usage** | Mamba: `specs = {{"conv_state", ...}, {"ssm_state", ...}}`. RWKV: `specs = {{"attn_state", ...}, ...}`. |
 
@@ -358,7 +349,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/text_generation/pipeline.h`, `src/runtime/models/text_generation/pipeline.cpp` |
+| **Files** | `src/runtime/models/<family>/pipeline.h`, `src/runtime/models/<family>/pipeline.cpp` |
 | **Purpose** | Serves all decoder-only LLMs (Qwen, LLaMA, Mistral, GPT-2, etc.) and MoE decoders (Mixtral, Phi-MoE). Composes TrtModule + KvCache + ITokenizer. Runs prefill->decode loop with greedy argmax. |
 | **Key API** | `generate()` (text in, `TextResult` out), `generate_ids()` (token IDs in/out for testing). |
 
@@ -366,17 +357,17 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/recurrent/pipeline.h`, `src/runtime/models/recurrent/pipeline.cpp` |
-| **Purpose** | Serves Mamba, RWKV, and Hybrid (Nemotron-H) models. Uses `IInferenceState` to abstract between pure recurrent (`RecurrentState`) and hybrid attention+recurrent (`HybridState`). |
+| **Files** | `src/runtime/models/mamba/pipeline.h`, `src/runtime/models/mamba/pipeline.cpp`; `src/runtime/models/rwkv/pipeline.h`, `src/runtime/models/rwkv/pipeline.cpp`; `src/runtime/models/nemotron_h/pipeline.h`, `src/runtime/models/nemotron_h/pipeline.cpp`; `src/runtime/models/qwen3_5/pipeline.h`, `src/runtime/models/qwen3_5/pipeline.cpp` |
+| **Purpose** | Serves Mamba, RWKV, Nemotron-H, and Qwen3.5 recurrent models. Uses `IInferenceState` to abstract between pure family-owned recurrent state and family-owned hybrid attention+recurrent state. |
 | **Key API** | Same `generate()` / `generate_ids()` interface as TextGenerationPipeline. |
-| **State implementations** | `RecurrentState`: SSM/RWKV state (no mask, position tracked internally). `HybridState`: composes `KvCache` + `RecurrentState` (has mask, position from KvCache). Both implement `IInferenceState`. |
+| **State implementations** | `MambaRecurrentState` and `RwkvRecurrentState`: recurrent tensor state (no mask, position tracked internally). `NemotronHHybridState` and `Qwen35HybridState`: compose `KvCache` + family-owned recurrent state in model-owned files. All implement `IInferenceState`. |
 
 ### UD-PIP-VL-01: VL Pipeline
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/vision_language/pipeline.h`, `src/runtime/models/vision_language/pipeline.cpp` |
-| **Purpose** | Vision-language generation (Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4). Composes text decoder TrtModule + optional vision encoder TrtModule + KvCache + ITokenizer + image preprocessor. |
+| **Files** | `src/runtime/models/<vl-family>/pipeline.h`, `src/runtime/models/<vl-family>/pipeline.cpp` |
+| **Purpose** | Family-owned vision-language generation (Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4). Composes text decoder TrtModule + optional vision encoder TrtModule + KvCache + ITokenizer + model-owned image preprocessor. |
 | **Key API** | `generate(prompt, cfg)` for text-only, `generate(prompt, pixels, h, w, cfg)` for image+text. Vision encoder runs on preprocessed pixels, features are injected at image token positions during prefill. |
 
 ### UD-PIP-ENC-01: Encoder Pipeline
@@ -401,8 +392,8 @@ classDiagram
 |---|---|
 | **Files** | `src/runtime/models/flux/pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `src/runtime/models/wan/pipeline.cpp`, `src/runtime/models/flux/pipeline.cpp`, `src/runtime/models/z_image/pipeline.cpp` |
 | **Purpose** | Three diffusion pipelines, all using TrtModule directly. `WanPipeline` (T5 + denoiser + 3D VAE for text-to-video), `FluxPipeline` (T5 + CLIP + denoiser + VAE for text-to-image), `ZImagePipeline` (Qwen3 text encoder + denoiser + VAE for text-to-image). |
-| **Key API** | `generate_image(prompt, cfg)` returns `ImageResult`. All use `FlowMatchEulerScheduler` for noise scheduling. |
-| **Supporting types** | `src/runtime/domains/diffusion/diffusion_types.h` (`DiffusionConfig`, `PreprocessorWeights`, `VideoResult`), `src/runtime/domains/diffusion/diffusion_math.h` (math helpers). |
+| **Key API** | `generate_image(prompt, cfg)` returns `ImageResult`. Scheduler behavior is model-owned; Qwen Image uses its local `FlowMatchEulerScheduler` copy. |
+| **Supporting types** | Model-owned diffusion type headers such as `src/runtime/models/flux/flux_diffusion_types.h`, `src/runtime/models/wan/wan_diffusion_types.h`, and `src/runtime/models/z_image/z_image_diffusion_types.h`; shared support is limited to `src/runtime/domains/diffusion/diffusion_math.h` (math helpers). |
 
 ### UD-TRT-CORE-01: TRT Common
 
@@ -422,15 +413,15 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/multimodal/image_preprocessor.h`, `src/runtime/domains/multimodal/image_preprocessor.cpp` |
-| **Purpose** | VL image preprocessing with 4 strategies (configurable per model). Handles resize, normalize, pad, and CHW reorder. `VLPreprocessConfig` drives the preprocessing behavior. |
+| **Files** | `src/runtime/models/<vl-family>/image_preprocessor.h`, `src/runtime/models/<vl-family>/image_preprocessor.cpp` |
+| **Purpose** | Family-owned VL image preprocessing with model-specific strategies. Handles resize, normalize, pad, prompt formatting, and CHW reorder. `VLPreprocessConfig` drives the preprocessing behavior within the owning family. |
 
-### UD-SCHED-01: Noise Scheduler
+### UD-QWEN-IMAGE-SCHED-01: Qwen Image Noise Scheduler
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtmc/runtime/scheduler.h`, `src/runtime/core/flow_match_euler_scheduler.cpp` |
-| **Purpose** | `IScheduler` interface for diffusion noise scheduling. `FlowMatchEulerScheduler` implements the Flow Matching Euler Discrete schedule used by FLUX, Wan, and Z-Image. |
+| **Files** | `src/runtime/models/qwen_image/qwen_image_scheduler.h`, `src/runtime/models/qwen_image/qwen_image_scheduler.cpp` |
+| **Purpose** | Qwen Image-owned Flow Matching Euler Discrete scheduler. The shared runtime core has no scheduler header or implementation. |
 
 ### UD-AUD-WHISPER-01: Whisper Audio Domain
 
@@ -471,64 +462,57 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/audio_bundle_validation.h`, `src/runtime/domains/audio/audio_bundle_validation.cpp`, `src/runtime/domains/audio/audio_configs.h`, `src/runtime/domains/audio/mel_spectrogram.h`, `src/runtime/domains/audio/mel_spectrogram.cpp` |
-| **Purpose** | Shared audio infrastructure. Bundle validation ensures required sections exist for each audio pipeline type. Audio configs define shared configuration types. Mel spectrogram computes filterbank features from raw audio for Whisper input. |
+| **Files** | `include/trtmc/trtmc_io.hpp`; model-owned audio helpers under `src/runtime/models/<audio-family>/` |
+| **Purpose** | Generic public WAV I/O plus model-owned audio helpers. Shared audio-domain helper implementations are retired. |
 
 ### UD-REC-MAMBA-01: SSM Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/recurrent/ssm_plugin.cpp` |
-| **Purpose** | SSM/Mamba pipeline plugin. Constructs `RecurrentPipeline` with `RecurrentState` (conv_state + ssm_state specs). Handles `ssm_recurrent` strategy. |
+| **Files** | `src/runtime/models/mamba/plugin.cpp`, `src/runtime/models/mamba/recurrent_state.h`, `src/runtime/models/mamba/recurrent_state.cpp` |
+| **Purpose** | SSM/Mamba pipeline plugin. Constructs `RecurrentPipeline` with `MambaRecurrentState` (conv_state + ssm_state specs). Handles `mamba_ssm_recurrent` strategy. |
 
 ### UD-REC-RWKV-01: RWKV Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/recurrent/rwkv_plugin.cpp` |
-| **Purpose** | RWKV pipeline plugin. Constructs `RecurrentPipeline` with `RecurrentState` (5 state specs per layer: attn_state, ff_state, num_state, den_state, max_state). Handles `rwkv_recurrent` strategy. |
+| **Files** | `src/runtime/models/rwkv/plugin.cpp`, `src/runtime/models/rwkv/recurrent_state.h`, `src/runtime/models/rwkv/recurrent_state.cpp` |
+| **Purpose** | RWKV pipeline plugin. Constructs `RecurrentPipeline` with `RwkvRecurrentState` (5 state specs per layer: attn_state, ff_state, num_state, den_state, max_state). Handles `rwkv_recurrent` strategy. |
 
 ### UD-REC-HYBRID-01: Hybrid Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/recurrent/hybrid_plugin.cpp` |
-| **Purpose** | Hybrid (Mamba + Attention) pipeline plugin for Nemotron-H. Constructs `RecurrentPipeline` with `HybridState` wrapping both `KvCache` (attention layers) and `RecurrentState` (Mamba layers). Handles `hybrid_mamba_attention` strategy. |
+| **Files** | `src/runtime/models/nemotron_h/plugin.cpp`, `src/runtime/models/nemotron_h/hybrid_state.h`, `src/runtime/models/nemotron_h/hybrid_state.cpp`; `src/runtime/models/qwen3_5/plugin.cpp`, `src/runtime/models/qwen3_5/hybrid_state.h`, `src/runtime/models/qwen3_5/hybrid_state.cpp` |
+| **Purpose** | Hybrid (Mamba + Attention) pipeline plugins for Nemotron-H and Qwen3.5. Each constructs `RecurrentPipeline` with a family-owned hybrid state wrapping both `KvCache` (attention layers) and that family's recurrent state (Mamba layers). |
 
 ### UD-REC-COMMON-01: Recurrent Common Contracts
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/recurrent/recurrent_step_contracts.h`, `src/runtime/domains/recurrent/recurrent_tensor_bindings.h` |
-| **Purpose** | Shared contracts for recurrent backends. Step contracts define the interface for per-step execution. Tensor bindings provide helpers for binding recurrent state tensors to TRT modules. |
+| **Files** | Model-owned step contracts in `src/runtime/models/mamba/mamba_recurrent_step_contracts.h`, `src/runtime/models/rwkv/rwkv_recurrent_step_contracts.h`, `src/runtime/models/nemotron_h/nemotron_h_recurrent_step_contracts.h`, and `src/runtime/models/qwen3_5/qwen3_5_recurrent_step_contracts.h` |
+| **Purpose** | Step contracts are copied into each recurrent family so validation/output behavior changes stay model-owned. Shared recurrent domain helpers are retired. |
 
-### UD-VL-VISION-01: Vision Engine
-
-| Field | Value |
-|---|---|
-| **Files** | `src/runtime/domains/multimodal/vision_engine.h`, `src/runtime/domains/multimodal/vision_engine.cpp`, `src/runtime/domains/multimodal/vision_execution_plan.h` |
-| **Purpose** | Vision encoder TRT engine lifecycle. Manages deserialization, execution, and output extraction for vision encoders in VL pipelines. Execution plan configures input/output tensor shapes and processing parameters. |
-
-### UD-VL-DECODE-01: VL Decode Policy
+### UD-VL-DECODE-01: Model-Owned VL Decode
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/multimodal/vl_decode_policy.h`, `src/runtime/models/vision_language/plugin.cpp`, `src/runtime/models/vision_language/pipeline.h/cpp` |
-| **Purpose** | VL decode policy and pipeline plugin. Decode policy governs vision feature injection into text decoder at image token positions and autoregressive generation stopping. Plugin constructs `VLPipeline`. |
+| **Files** | `src/runtime/models/<vl-family>/pipeline.h/cpp`, `src/runtime/models/<vl-family>/plugin.cpp` |
+| **Purpose** | Family-owned VL decode and pipeline plugin. Each family owns vision feature injection into text decoder at image token positions and autoregressive generation stopping. |
 
 ### UD-SEG-01: Segmentation Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/perception/segmentation_postprocess_seam.h`, `src/runtime/domains/perception/segmentation_preprocess_seam.h`, `src/runtime/models/segmentation/plugin.cpp`, `src/runtime/models/segmentation/segment_pipeline.h/cpp` |
-| **Purpose** | SegFormer semantic segmentation domain types and pipeline plugin. Preprocess seam handles image resize/normalize, postprocess seam handles argmax class selection and colorization. Plugin constructs `SegmentPipeline`. |
+| **Files** | `src/runtime/models/segformer/segformer_postprocess_seam.h`, `src/runtime/models/segformer/segformer_preprocess_seam.h`, `src/runtime/models/segformer/plugin.cpp`, `src/runtime/models/segformer/segment_pipeline.h/cpp` |
+| **Purpose** | SegFormer semantic segmentation runtime. Preprocess seam handles image resize/normalize, postprocess seam handles argmax class selection and colorization. Plugin constructs `SegmentPipeline`. |
 
 ### UD-SAM-01: SAM Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/perception/sam_image_preprocess_seam.h`, `src/runtime/domains/perception/sam_output_selection.h`, `src/runtime/domains/perception/sam_postprocess_seam.h`, `src/runtime/domains/perception/sam_prompt_seam.h`, `src/runtime/models/segmentation/plugin.cpp`, `src/runtime/models/segmentation/sam_pipeline.h/cpp` |
-| **Purpose** | SAM (Segment Anything Model) two-stage domain types. Seams handle image preprocessing, prompt encoding, output mask selection, and postprocessing. Plugin (shared with segmentation) constructs `SamPipeline`. |
+| **Files** | `src/runtime/models/sam/sam_image_preprocess_seam.h`, `src/runtime/models/sam/sam_output_selection.h`, `src/runtime/models/sam/sam_postprocess_seam.h`, `src/runtime/models/sam/sam_prompt_seam.h`, `src/runtime/models/sam/plugin.cpp`, `src/runtime/models/sam/sam_pipeline.h/cpp` |
+| **Purpose** | SAM (Segment Anything Model) two-stage runtime. Seams handle image preprocessing, prompt encoding, output mask selection, and postprocessing. Plugin constructs `SamPipeline`. |
 
 ### UD-DET-01: Object Detection Plugin
 
@@ -548,15 +532,15 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/diffusion/diffusion_denoising_step_seam.h`, `src/runtime/domains/diffusion/diffusion_generation_plan.h`, `src/runtime/domains/diffusion/diffusion_math.h`, `src/runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h`, `src/runtime/domains/diffusion/diffusion_scheduler_helpers.h`, `src/runtime/domains/diffusion/diffusion_types.h`, `src/runtime/domains/diffusion/wan_generation_conditioning.h`, `src/runtime/domains/diffusion/diffusion_preprocessor.cpp` |
-| **Purpose** | Shared diffusion infrastructure. Denoising step seam isolates per-step denoising logic. Generation plan configures the full denoising schedule. Math helpers provide numerical utilities. Preprocessor weights helpers manage VAE/text encoder weight extraction. Scheduler helpers bridge to `IScheduler`. Types define `DiffusionConfig`, `PreprocessorWeights`, `VideoResult`. Wan conditioning handles T2V-specific guidance. |
+| **Files** | `src/runtime/domains/diffusion/diffusion_math.h`; model-owned type/denoising/batch helpers: `src/runtime/models/flux/flux_diffusion_types.h`, `src/runtime/models/flux/flux_denoising_step_seam.h`, `src/runtime/models/flux/flux_batch_utils.h`, `src/runtime/models/wan/wan_diffusion_types.h`, `src/runtime/models/wan/wan_denoising_step_seam.h`, `src/runtime/models/pixart/pixart_diffusion_types.h`, `src/runtime/models/pixart/pixart_denoising_step_seam.h`, `src/runtime/models/z_image/z_image_diffusion_types.h`, `src/runtime/models/z_image/z_image_batch_utils.h`, `src/runtime/models/qwen_image/qwen_image_diffusion_types.h`, `src/runtime/models/qwen_image/qwen_image_batch_utils.h` |
+| **Purpose** | Shared diffusion infrastructure is limited to generic math utilities. Config/result types, preprocessor weights, denoising step seams, generation plans, scheduler state, fallback policy, batch/chunk policy, preprocessor section parsing, weight-key parsing, and Wan conditioning live in model-owned files. |
 
 ### UD-CORE-HELPER-01: Core Runtime Helpers
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_kv_cache_update_plan.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/core/flow_match_euler_scheduler.cpp`, `src/runtime/models/text_generation/pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
-| **Purpose** | Core runtime helpers not covered by other UD entries. `decoded_image.h` holds decoded pixel data. `device_kv_cache_update_plan.h` describes cache update operations. `device_tensor.cpp` implements GPU tensor memory management. `flow_match_euler_scheduler.cpp` implements the `FlowMatchEulerScheduler` (see UD-SCHED-01). `generation_backend.h` defines the `IGenerationBackend` interface. `step_state.h` defines the `IStepState` interface. `stb_impl.cpp` provides STB image library implementation. `trt_graph_builder.cpp` provides TRT network construction utilities. |
+| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/models/<family>/pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
+| **Purpose** | Core runtime helpers not covered by other UD entries. `decoded_image.h` holds decoded pixel data. `device_tensor.cpp` implements GPU tensor memory management. `generation_backend.h` defines the `IGenerationBackend` interface. `step_state.h` defines the `IStepState` interface. `stb_impl.cpp` provides STB image library implementation. `trt_graph_builder.cpp` provides TRT network construction utilities. |
 
 ### UD-ENC-EMBED-01: Embedding Support
 
@@ -592,31 +576,29 @@ classDiagram
 | `UD-AUD-MAGPIE-01` | `magpie_codec_plan.h`, `magpie_decode_policy.h`, `magpie_decoder_plan.h`, `magpie_text_completion_policy.h`, `magpie_kernels.cu/h` | `magpie_plugin.cpp` | `MagpiePipeline` |
 | `UD-AUD-SPEECH-01` | `speech_delay_cache.h`, `speech_depth_plan.h`, `speech_generation_policy.h`, `speech_mimi_decode_plan.h`, `speech_runtime_plan.h`, `speech_temporal_embed_plan.h`, `speech_waveform_postprocess.h` | `speech_plugin.cpp` | `SpeechPipeline` |
 | `UD-AUD-OMNI-01` | `omni_audio_plan.h` | `omni_plugin.cpp` | `OmniPipeline` |
-| `UD-AUD-COMMON-01` | `mel_spectrogram.h/cpp`, `audio_bundle_validation.h/cpp`, `audio_configs.h`, `audio_types.h/cpp` | Shared audio utilities | All audio pipelines |
+| `UD-AUD-COMMON-01` | `trtmc_io.hpp`; model-owned audio helpers | Generic WAV I/O plus model-owned audio helpers | Audio pipelines |
 
 ### Recurrent Domain Types (`src/runtime/domains/recurrent/`)
 
 | UD ID | Domain files | Plugin | Pipeline |
 |---|---|---|---|
-| `UD-REC-MAMBA-01` | -- | `ssm_plugin.cpp` | `RecurrentPipeline` + `RecurrentState` |
-| `UD-REC-RWKV-01` | -- | `rwkv_plugin.cpp` | `RecurrentPipeline` + `RecurrentState` |
-| `UD-REC-HYBRID-01` | -- | `hybrid_plugin.cpp` | `RecurrentPipeline` + `HybridState` |
-| `UD-REC-COMMON-01` | `recurrent_step_contracts.h`, `recurrent_tensor_bindings.h` | Shared contracts and tensor binding helpers | -- |
+| `UD-REC-MAMBA-01` | -- | `mamba/plugin.cpp` | `RecurrentPipeline` + `MambaRecurrentState` |
+| `UD-REC-RWKV-01` | -- | `rwkv/plugin.cpp` | `RecurrentPipeline` + `RwkvRecurrentState` |
+| `UD-REC-HYBRID-01` | -- | `nemotron_h/plugin.cpp`, `qwen3_5/plugin.cpp` | `RecurrentPipeline` + family-owned hybrid state |
+| `UD-REC-COMMON-01` | model-owned `*_recurrent_step_contracts.h` | Model-owned recurrent step contracts | -- |
 
 ### Multimodal (`src/runtime/domains/multimodal/`)
 
-| UD ID | File | Purpose |
-|---|---|---|
-| `UD-VL-VISION-01` | `vision_engine.h/cpp`, `vision_execution_plan.h` | Vision engine lifecycle and execution plan config |
-| `UD-VL-DECODE-01` | `vl_backend.h/cpp`, `vl_decode_policy.h` | Legacy VL backend and decode step policy |
-| `UD-IMG-01` | `image_preprocessor.h/cpp` | Image preprocessing (4 strategies) |
+Behavior-bearing VL preprocessing and decode logic is model-owned under
+`src/runtime/models/<vl-family>/`, including each family's
+`image_transform_helper.h`.
 
-### Perception (`src/runtime/domains/perception/`)
+### Perception (`src/runtime/models/<perception-family>/`)
 
 | UD ID | Domain files | Plugin | Pipeline |
 |---|---|---|---|
-| `UD-SEG-01` | `segmentation_postprocess_seam.h`, `segmentation_preprocess_seam.h` | `segmentation_plugin.cpp` | `SegmentPipeline` |
-| `UD-SAM-01` | `sam_image_preprocess_seam.h`, `sam_output_selection.h`, `sam_postprocess_seam.h`, `sam_prompt_seam.h`, `perception_types.h` | `segmentation_plugin.cpp` | `SamPipeline` |
+| `UD-SEG-01` | `src/runtime/models/segformer/segformer_postprocess_seam.h`, `src/runtime/models/segformer/segformer_preprocess_seam.h` | `src/runtime/models/segformer/plugin.cpp` | `SegmentPipeline` |
+| `UD-SAM-01` | `src/runtime/models/sam/sam_image_preprocess_seam.h`, `src/runtime/models/sam/sam_output_selection.h`, `src/runtime/models/sam/sam_postprocess_seam.h`, `src/runtime/models/sam/sam_prompt_seam.h` | `src/runtime/models/sam/plugin.cpp` | `SamPipeline` |
 | `UD-DET-01` | -- | `object_detection_plugin.cpp` | `EncoderPipeline` |
 | `UD-NOP-01` | -- | `encoder_plugin.cpp` | `EncoderPipeline` |
 
@@ -712,16 +694,16 @@ Each UD-* identifier links to architecture contracts in
 | UD-BDL-02 | ARCH-BDL | `tests/cpp/test_bundle_view.cpp` |
 | UD-FAC-01 | ARCH-FAC | `tests/cpp/test_pipeline_api.cpp` |
 | UD-MOD-01 | ARCH-MOD | (GPU integration tests via E2E) |
-| UD-KVC-01 | ARCH-KVC | `tests/cpp/test_device_kv_cache.cpp`, `tests/builder/test_cache_state_machine.py` |
-| UD-REC-01 | ARCH-REC | `tests/cpp/test_device_kv_cache.cpp` (recurrent paths) |
+| UD-KVC-01 | ARCH-KVC | `tests/cpp/test_kv_cache_new.cpp`, `tests/builder/test_cache_state_machine.py` |
+| UD-REC-01 | ARCH-REC | model-owned recurrent tests |
 | UD-TOK-01 | ARCH-TOK | `tests/cpp/test_vocab_tokenizer.cpp`, `tests/cpp/test_bpe_tokenizer.cpp` |
 | UD-PIP-TEXT-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (text_generation_causal models) |
-| UD-PIP-REC-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (ssm_recurrent, rwkv_recurrent models) |
+| UD-PIP-REC-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (mamba_ssm_recurrent, rwkv_recurrent models) |
 | UD-PIP-VL-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (vision_language models) |
 | UD-PIP-ENC-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (encoder_only, embedding, reranking models) |
 | UD-PIP-AUD-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (speech_to_text, text_to_audio, speech_to_speech models) |
 | UD-PIP-DIFF-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (diffusion models) |
-| UD-IMG-01 | ARCH-VL | `tests/cpp/test_image_preprocessor.cpp` |
+| UD-IMG-01 | ARCH-VL | `tests/cpp/models/qwen_vl/test_qwen_vl_vl_pipeline.cpp`, `tests/cpp/models/internvl/test_internvl_vl_pipeline.cpp` |
 | UD-BLD-CFG-01 | ARCH-BLD | `tests/builder/test_config.py` |
 | UD-BLD-FAM-01 | ARCH-BLD | `tests/builder/test_families.py`, `tests/builder/test_family_plugins.py` |
 | UD-BLD-CKP-01 | ARCH-BLD | `tests/builder/test_checkpoint_mapper.py` |
@@ -736,19 +718,19 @@ Each UD-* identifier links to architecture contracts in
 | UD-AUD-MAGPIE-01 | ARCH-PIP-AUD | `tests/cpp/test_magpie_codec_plan.cpp`, `tests/cpp/test_magpie_decode_policy.cpp`, `tests/cpp/test_magpie_decoder_plan.cpp`, `tests/cpp/test_magpie_text_completion_policy.cpp` |
 | UD-AUD-SPEECH-01 | ARCH-PIP-AUD | `tests/cpp/test_speech_decode_stop_policy.cpp`, `tests/cpp/test_speech_depth_plan.cpp`, `tests/cpp/test_speech_generation_helpers.cpp`, `tests/cpp/test_speech_mimi_decode_plan.cpp`, `tests/cpp/test_speech_runtime_plan.cpp`, `tests/cpp/test_speech_temporal_embed_plan.cpp`, `tests/cpp/test_speech_subprocess_seam.cpp` |
 | UD-AUD-OMNI-01 | ARCH-PIP-AUD | `tests/cpp/test_omni_audio_plan.cpp` |
-| UD-AUD-COMMON-01 | ARCH-PIP-AUD | `tests/cpp/test_audio_bundle_validation.cpp`, `tests/cpp/test_mel_spectrogram.cpp` |
-| UD-REC-MAMBA-01 | ARCH-PIP-REC | `tests/cpp/test_recurrent_pipeline.cpp`, `tests/cpp/test_recurrent_state.cpp` |
-| UD-REC-RWKV-01 | ARCH-PIP-REC | `tests/cpp/test_recurrent_pipeline.cpp`, `tests/cpp/test_recurrent_state.cpp` |
+| UD-AUD-COMMON-01 | ARCH-PIP-AUD | `tests/cpp/test_trtmc_io.cpp`; model-owned audio helper tests |
+| UD-REC-MAMBA-01 | ARCH-PIP-REC | `tests/cpp/models/mamba/test_mamba_recurrent_pipeline.cpp` |
+| UD-REC-RWKV-01 | ARCH-PIP-REC | `tests/cpp/models/rwkv/test_rwkv_recurrent_pipeline.cpp` |
 | UD-REC-HYBRID-01 | ARCH-PIP-REC | `tests/cpp/test_recurrent_pipeline.cpp` |
-| UD-REC-COMMON-01 | ARCH-PIP-REC | `tests/cpp/test_recurrent_step_contracts.cpp` |
-| UD-VL-VISION-01 | ARCH-PIP-VL | `tests/cpp/test_vision_execution_plan.cpp` |
-| UD-VL-DECODE-01 | ARCH-PIP-VL | `tests/cpp/test_vl_decode_policy.cpp`, `tests/cpp/test_vl_pipeline.cpp` |
-| UD-SEG-01 | ARCH-PIP-SEG | `tests/cpp/test_perception_preprocess_seams.cpp` |
-| UD-SAM-01 | ARCH-PIP-SEG | `tests/cpp/test_sam_prompt_seam.cpp`, `tests/cpp/test_perception_preprocess_seams.cpp` |
+| UD-REC-COMMON-01 | ARCH-PIP-REC | `tests/cpp/models/mamba/test_mamba_recurrent_output_initializers.cpp`, `tests/cpp/models/rwkv/test_rwkv_recurrent_output_initializers.cpp`, `tests/cpp/models/nemotron_h/test_nemotron_h_recurrent_output_initializers.cpp`, `tests/cpp/models/qwen3_5/test_qwen3_5_recurrent_output_initializers.cpp` |
+| UD-VL-DECODE-01 | ARCH-PIP-VL | `tests/cpp/models/qwen_vl/test_qwen_vl_vl_pipeline.cpp`, `tests/cpp/models/internvl/test_internvl_vl_pipeline.cpp` |
+| UD-SEG-01 | ARCH-PIP-SEG | `tests/cpp/models/segformer/test_segformer_preprocess_seam.cpp`, `tests/cpp/models/segformer/test_segformer_postprocess_seam.cpp` |
+| UD-SAM-01 | ARCH-PIP-SEG | `tests/cpp/models/sam/test_sam_prompt_seam.cpp`, `tests/cpp/models/sam/test_sam_image_preprocess_seam.cpp` |
 | UD-DET-01 | ARCH-PIP-SEG | (no dedicated unit test — gap) |
-| UD-NOP-01 | ARCH-PIP-ENC | `tests/cpp/test_neural_operator_config.cpp` |
-| UD-DIFF-HELPER-01 | ARCH-PIP-DIFF | `tests/cpp/test_diffusion_denoising_step_seam.cpp`, `tests/cpp/test_diffusion_generation_plan.cpp`, `tests/cpp/test_wan_generation_conditioning.cpp`, `tests/cpp/test_diffusion_pipeline_new.cpp` |
-| UD-CORE-HELPER-01 | ARCH-TRT | `tests/cpp/test_device_tensor.cpp`, `tests/cpp/test_flow_match_scheduler.cpp`, `tests/cpp/test_device_kv_cache.cpp` |
+| UD-NOP-01 | ARCH-PIP-ENC | (no dedicated unit test -- gap) |
+| UD-DIFF-HELPER-01 | ARCH-PIP-DIFF | `tests/cpp/models/flux/test_flux_denoising_step_seam.cpp`, `tests/cpp/models/wan/test_wan_denoising_step_seam.cpp`, `tests/cpp/models/pixart/test_pixart_denoising_step_seam.cpp`, `tests/cpp/models/flux/test_flux_generation_plan.cpp`, `tests/cpp/models/wan/test_wan_generation_plan.cpp`, `tests/cpp/models/wan/test_wan_generation_conditioning.cpp`, `tests/cpp/models/flux/test_flux_pipeline.cpp`, `tests/cpp/models/wan/test_wan_pipeline.cpp`, `tests/cpp/models/z_image/test_z_image_pipeline.cpp`, `tests/cpp/models/ltx_video/test_ltx_video_pipeline.cpp` |
+| UD-QWEN-IMAGE-SCHED-01 | ARCH-PIP-DIFF | `tests/cpp/models/qwen_image/test_qwen_image_flow_match_scheduler.cpp` |
+| UD-CORE-HELPER-01 | ARCH-TRT | `tests/cpp/test_device_tensor.cpp` |
 | UD-ENC-EMBED-01 | ARCH-PIP-ENC | `tests/cpp/test_encoder_pipeline.cpp` |
 | UD-ENC-RERANK-01 | ARCH-PIP-ENC | `tests/cpp/test_encoder_pipeline.cpp` |
 | UD-UTIL-MEDIA-01 | ARCH-UTIL | `tests/cpp/test_wav_reader.cpp` |

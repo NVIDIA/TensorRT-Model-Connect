@@ -97,8 +97,7 @@ Core runtime units own reusable device-side execution concerns:
 
 - `DeviceTensor`
 - `KvCache`
-- `DeviceKvCache`
-- `RecurrentState`
+- family-owned recurrent state classes
 - `Sampler`
 - `FlowMatchEulerScheduler`
 - CUDA streams and buffers

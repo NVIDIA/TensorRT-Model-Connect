@@ -4,13 +4,12 @@
 // Trace ID:       UT-IOMAP-CPP-01
 // Architecture:   ARCH-IOMAP-001
 // Unit Design:    UD-IOMAP-01
-// Intent:         IoMap struct defaults, expand_layer_name pattern expansion,
-//                 parse_base_config io_map parsing from JSON
+// Intent:         IoMap struct defaults and parse_base_config io_map parsing
+//                 from JSON
 // Preconditions:  None (pure CPU string logic)
-// Postconditions: Pattern tokens are expanded correctly for all layer indices
+// Postconditions: IoMap defaults and JSON overrides are preserved
 // =============================================================================
 
-#include "runtime/core/trt_engine_lifecycle.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 
 #include <cstdio>
@@ -23,41 +22,6 @@ static void check(bool cond, const char* name) {
         fprintf(stderr, "FAIL: %s\n", name);
         ++g_failures;
     }
-}
-
-// --- expand_layer_name tests ---
-
-static void test_expand_simple_i() {
-    check(trtmc::expand_layer_name("cache_k_{i}", 0) == "cache_k_0", "k_{i}_0");
-    check(trtmc::expand_layer_name("cache_k_{i}", 5) == "cache_k_5", "k_{i}_5");
-    check(trtmc::expand_layer_name("cache_k_{i}", 27) == "cache_k_27", "k_{i}_27");
-}
-
-static void test_expand_2i() {
-    check(trtmc::expand_layer_name("cache_kv_{2i}", 0) == "cache_kv_0", "kv_{2i}_0");
-    check(trtmc::expand_layer_name("cache_kv_{2i}", 3) == "cache_kv_6", "kv_{2i}_3");
-}
-
-static void test_expand_2i_plus_1() {
-    check(trtmc::expand_layer_name("cache_kv_{2i+1}", 0) == "cache_kv_1", "kv_{2i+1}_0");
-    check(trtmc::expand_layer_name("cache_kv_{2i+1}", 3) == "cache_kv_7", "kv_{2i+1}_3");
-}
-
-static void test_expand_2i_plus_2() {
-    check(trtmc::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
-    check(trtmc::expand_layer_name("output{2i+2}", 4) == "output10", "out_{2i+2}_4");
-}
-
-static void test_expand_mixed() {
-    // Pattern with both {2i+1} and {2i+2} — each replaced independently.
-    check(trtmc::expand_layer_name("output{2i+1}", 0) == "output1", "out_{2i+1}_0");
-    check(trtmc::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
-}
-
-static void test_expand_literal() {
-    // No tokens — should return the pattern unchanged.
-    check(trtmc::expand_layer_name("my_tensor", 5) == "my_tensor", "literal_passthrough");
-    check(trtmc::expand_layer_name("", 0) == "", "empty_pattern");
 }
 
 // --- IoMap default tests ---
@@ -139,14 +103,6 @@ static void test_parse_io_map_partial() {
 }
 
 int main() {
-    // expand_layer_name tests
-    test_expand_simple_i();
-    test_expand_2i();
-    test_expand_2i_plus_1();
-    test_expand_2i_plus_2();
-    test_expand_mixed();
-    test_expand_literal();
-
     // IoMap struct tests
     test_io_map_defaults();
     test_base_config_io_map_default();

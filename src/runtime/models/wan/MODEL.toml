@@ -9,4 +9,5 @@ runtime_tests = [
   "test_wan_c_abi_runtime_regression|test_wan_c_abi_runtime_regression.cpp|trtmc_model_wan|_|_",
   "test_wan_generation_plan|test_wan_generation_plan.cpp|_|_|_",
   "test_wan_generation_conditioning|test_wan_generation_conditioning.cpp|_|_|_",
+  "test_wan_denoising_step_seam|test_wan_denoising_step_seam.cpp|_|_|_",
 ]

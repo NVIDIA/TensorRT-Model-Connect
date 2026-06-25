@@ -15,7 +15,7 @@ into the denoiser engine by :mod:`qwen_image_dit_builder`, so unlike
 Z-Image / Wan T2V this blob is intentionally tiny.
 
 Format (matches Z-Image / Wan T2V so
-``src/runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h``
+``src/runtime/models/qwen_image/preprocessor_weights_helpers.h``
 can parse it unchanged):
 
     <u32 little-endian index_len>
@@ -88,7 +88,7 @@ def load_qwen_image_preprocessor_weights(
 
     Used by unit tests to assert lossless round-trip; the production C++
     runtime has its own parser in
-    ``diffusion_preprocessor_weights_helpers.h``.
+    ``src/runtime/models/qwen_image/preprocessor_weights_helpers.h``.
     """
     if len(blob) < 4:
         raise ValueError(

@@ -128,3 +128,4 @@ class TestBartPlugin:
         assert plugin.matches("bart")
         assert plugin.matches("mbart")
         assert not plugin.matches("t5")
+        assert plugin.runtime_strategy == "bart_seq2seq_encoder_decoder"

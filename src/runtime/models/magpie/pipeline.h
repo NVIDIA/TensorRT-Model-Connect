@@ -1,14 +1,14 @@
 #pragma once
 
 // MagpiePipeline: Magpie TTS encoder-decoder pipeline with optional CFG.
-// Uses TrtModule(encoder) + TrtModule(decoder) + KvCache + TrtModule(codec).
+// Uses TrtModule(encoder) + TrtModule(decoder) + MagpieKvCache + TrtModule(codec).
 
 #include "plugin_helpers.h"
-#include "runtime/core/trt_common.h"
+#include "runtime/models/magpie/cuda_common.h"
+#include "runtime/models/magpie/inference_state.h"
+#include "runtime/models/magpie/kv_cache.h"
 #include "runtime/models/magpie/magpie_config.h"
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/inference_state.h"
-#include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -25,16 +25,18 @@ namespace trtmc {
 class MagpiePipeline final : public IPipeline {
   public:
     MagpiePipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-                   std::unique_ptr<IInferenceState> decoder_state, std::unique_ptr<TrtModule> codec,
-                   std::unique_ptr<TrtModule> lt_module, std::unique_ptr<TrtModule> prefill_module,
-                   std::unique_ptr<IInferenceState> decoder_state_uncond,
-                   std::vector<CudaBuffer> cross_k, std::vector<CudaBuffer> cross_v,
-                   std::vector<CudaBuffer> cross_k_uncond, std::vector<CudaBuffer> cross_v_uncond,
-                   CudaBuffer encoder_output, CudaBuffer encoder_output_uncond,
-                   std::vector<float> audio_embed, std::vector<float> text_embed,
-                   std::vector<float> context_embed, std::vector<int32_t> context_lengths,
-                   MagpieTTSConfig config, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+                   std::unique_ptr<MagpieInferenceState> decoder_state,
+                   std::unique_ptr<TrtModule> codec, std::unique_ptr<TrtModule> lt_module,
+                   std::unique_ptr<TrtModule> prefill_module,
+                   std::unique_ptr<MagpieInferenceState> decoder_state_uncond,
+                   std::vector<MagpieCudaBuffer> cross_k, std::vector<MagpieCudaBuffer> cross_v,
+                   std::vector<MagpieCudaBuffer> cross_k_uncond,
+                   std::vector<MagpieCudaBuffer> cross_v_uncond, MagpieCudaBuffer encoder_output,
+                   MagpieCudaBuffer encoder_output_uncond, std::vector<float> audio_embed,
+                   std::vector<float> text_embed, std::vector<float> context_embed,
+                   std::vector<int32_t> context_lengths, MagpieTTSConfig config,
+                   cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                   std::string model_id_str = "");
 
     ~MagpiePipeline() override;
 
@@ -118,17 +120,19 @@ class MagpiePipeline final : public IPipeline {
 
     // GPU greedy loop
     std::vector<int32_t> run_gpu_greedy_loop(DecoderLoopState& state, int32_t max_frames);
-    bool gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame, CudaBuffer& d_eos_flag);
+    bool gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame,
+                               MagpieCudaBuffer& d_eos_flag);
     void gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame);
 
     // GPU sampling loop (top-k temperature sampling on device)
     std::vector<int32_t> run_gpu_sampling_loop(DecoderLoopState& state, int32_t max_frames);
-    bool gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame, CudaBuffer& d_eos_flag,
-                                 std::vector<int32_t>& h_codes);
+    bool gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame,
+                                 MagpieCudaBuffer& d_eos_flag, std::vector<int32_t>& h_codes);
 
     // Unified GPU stop checking
-    bool gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame, CudaBuffer& d_eos_flag,
-                                   int32_t& h_eos_flag, int32_t& gen_frames_actual);
+    bool gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
+                                   MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
+                                   int32_t& gen_frames_actual);
     // GPU-side text completion update
     void gpu_update_text_completion(DecoderLoopState& state, int32_t frame);
 
@@ -186,33 +190,33 @@ class MagpiePipeline final : public IPipeline {
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<IInferenceState> decoder_state_;
+    std::unique_ptr<MagpieInferenceState> decoder_state_;
     std::unique_ptr<TrtModule> codec_;
 
-    std::unique_ptr<IInferenceState> decoder_state_uncond_;
+    std::unique_ptr<MagpieInferenceState> decoder_state_uncond_;
 
-    std::vector<CudaBuffer> cross_k_, cross_v_;
-    std::vector<CudaBuffer> cross_k_uncond_, cross_v_uncond_;
-    CudaBuffer encoder_output_, encoder_output_uncond_;
+    std::vector<MagpieCudaBuffer> cross_k_, cross_v_;
+    std::vector<MagpieCudaBuffer> cross_k_uncond_, cross_v_uncond_;
+    MagpieCudaBuffer encoder_output_, encoder_output_uncond_;
 
-    CudaBuffer cross_attn_weights_, cross_attn_weights_scratch_;
+    MagpieCudaBuffer cross_attn_weights_, cross_attn_weights_scratch_;
     bool has_cross_attn_output_{false};
 
     std::vector<float> audio_embed_, text_embed_, context_embed_;
     std::vector<int32_t> context_lengths_;
 
-    CudaBuffer audio_embed_device_, context_embed_device_;
-    CudaBuffer device_codes_, device_full_argmax_, device_prev_codes_;
-    CudaBuffer device_all_codes_;
-    CudaBuffer device_logits_cond_, device_logits_uncond_;
+    MagpieCudaBuffer audio_embed_device_, context_embed_device_;
+    MagpieCudaBuffer device_codes_, device_full_argmax_, device_prev_codes_;
+    MagpieCudaBuffer device_all_codes_;
+    MagpieCudaBuffer device_logits_cond_, device_logits_uncond_;
 
     // GPU sampling: host-generated random values uploaded per frame
-    CudaBuffer device_rand_vals_{0};
+    MagpieCudaBuffer device_rand_vals_{0};
 
     // Attention prior (monotonic alignment, NeMo inference)
-    CudaBuffer attn_prior_device_{0};        // [1, 1, max_source_positions] prior input
-    CudaBuffer alignment_weights_device_{0}; // alignment output (avg of layers 3-6)
-    CudaBuffer alignment_scratch_device_{0}; // scratch for uncond pass
+    MagpieCudaBuffer attn_prior_device_{0};        // [1, 1, max_source_positions] prior input
+    MagpieCudaBuffer alignment_weights_device_{0}; // alignment output (avg of layers 3-6)
+    MagpieCudaBuffer alignment_scratch_device_{0}; // scratch for uncond pass
     bool has_attn_prior_{false};
     bool has_alignment_output_{false};
     int32_t last_attended_pos_{0};
@@ -221,20 +225,20 @@ class MagpiePipeline final : public IPipeline {
     // Batched prefill (optimization profile 1)
     std::unique_ptr<TrtModule> prefill_module_; // profile-1 context for batched prefill
     int32_t prefill_ctx_len_{0};
-    CudaBuffer prefill_mask_{0};      // [1, ctx_len, max_cache + ctx_len] causal mask
-    CudaBuffer prefill_logits_{0};    // [ctx_len, output_size] scratch for prefill logits
-    CudaBuffer prefill_positions_{0}; // [ctx_len] int32 positions 0..ctx_len-1
+    MagpieCudaBuffer prefill_mask_{0};      // [1, ctx_len, max_cache + ctx_len] causal mask
+    MagpieCudaBuffer prefill_logits_{0};    // [ctx_len, output_size] scratch for prefill logits
+    MagpieCudaBuffer prefill_positions_{0}; // [ctx_len] int32 positions 0..ctx_len-1
     bool prefill_ready_{false};
 
     // Local transformer TrtModule (codebook AR sampling)
     std::unique_ptr<TrtModule> lt_module_; // secondary engine for 1-layer LT
-    CudaBuffer lt_cache_k_{0}, lt_cache_v_{0};
-    CudaBuffer lt_present_k_{0}, lt_present_v_{0};
-    CudaBuffer lt_output_{0}, lt_mask_{0}, lt_position_id_{0}, lt_input_embed_{0};
+    MagpieCudaBuffer lt_cache_k_{0}, lt_cache_v_{0};
+    MagpieCudaBuffer lt_present_k_{0}, lt_present_v_{0};
+    MagpieCudaBuffer lt_output_{0}, lt_mask_{0}, lt_position_id_{0}, lt_input_embed_{0};
     // CFG: duplicate LT KV caches for unconditional path
-    CudaBuffer lt_cache_k_uncond_{0}, lt_cache_v_uncond_{0};
-    CudaBuffer lt_present_k_uncond_{0}, lt_present_v_uncond_{0};
-    CudaBuffer lt_output_uncond_{0};
+    MagpieCudaBuffer lt_cache_k_uncond_{0}, lt_cache_v_uncond_{0};
+    MagpieCudaBuffer lt_present_k_uncond_{0}, lt_present_v_uncond_{0};
+    MagpieCudaBuffer lt_output_uncond_{0};
     std::vector<float> lt_in_proj_w_; // [decoder_hidden, lt_hidden] in_projection weight
     std::vector<float> lt_in_proj_b_; // [lt_hidden] bias
     std::vector<float> lt_out_proj_;  // packed: 8 x (weight [lt_hidden, cb_size] + bias [cb_size])
@@ -243,8 +247,8 @@ class MagpiePipeline final : public IPipeline {
     int32_t lt_max_cache_{8};
     bool has_lt_{false}; // true if LT engine was loaded
     // Device buffer for decoder_hidden output from main decoder engine
-    CudaBuffer decoder_hidden_buf_{0};        // [1, decoder_hidden] conditioned
-    CudaBuffer decoder_hidden_buf_uncond_{0}; // [1, decoder_hidden] unconditional (CFG)
+    MagpieCudaBuffer decoder_hidden_buf_{0};        // [1, decoder_hidden] conditioned
+    MagpieCudaBuffer decoder_hidden_buf_uncond_{0}; // [1, decoder_hidden] unconditional (CFG)
     bool has_decoder_hidden_output_{false};
 
     cudaStream_t stream_;

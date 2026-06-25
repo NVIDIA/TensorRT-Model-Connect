@@ -98,6 +98,59 @@ class TestQuantFormatProtocol:
             assert hasattr(fmt, "wrap_conv2d"), f"{name} missing wrap_conv2d"
 
 
+class TestQuantContextGraphOpsOwnership:
+    def test_plain_matmul_uses_injected_family_graph_ops(self):
+        from tensorrt_model_connect.quantization.context import QuantContext
+
+        calls = []
+
+        class FakeGraphOps:
+            @staticmethod
+            def add_matmul_rhs_constant(*args, **kwargs):
+                calls.append((args, kwargs))
+                return "family-owned-matmul"
+
+        ctx = QuantContext(
+            profile=QuantProfile(
+                format=get_format("fp8"),
+                scale_map=QuantScaleMap(),
+            ),
+            graph_ops=FakeGraphOps,
+        )
+
+        result = ctx.maybe_quantized_matmul(
+            object(),
+            object(),
+            lhs_width=2,
+            rhs_width=3,
+            rhs_weights=np.zeros((2, 3), dtype=np.float32),
+            weight_name="layer.0.w_q",
+        )
+
+        assert result == "family-owned-matmul"
+        assert calls
+
+    def test_context_rejects_matmul_without_family_graph_ops(self):
+        from tensorrt_model_connect.quantization.context import QuantContext
+
+        ctx = QuantContext(
+            profile=QuantProfile(
+                format=get_format("fp8"),
+                scale_map=QuantScaleMap(),
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="family graph_ops"):
+            ctx.maybe_quantized_matmul(
+                object(),
+                object(),
+                lhs_width=2,
+                rhs_width=3,
+                rhs_weights=np.zeros((2, 3), dtype=np.float32),
+                weight_name="layer.0.w_q",
+            )
+
+
 class TestPreQuantizedCheckpointProvider:
     def test_detect_awq_format(self, tmp_path):
         """AWQ path reached (not NotImplementedError)."""

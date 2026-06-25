@@ -1,4 +1,4 @@
-#include "runtime/core/cuda_common.h"
+#include "runtime/models/magpie/cuda_common.h"
 #include "runtime/models/magpie/magpie_config.h"
 #include "runtime/models/magpie/pipeline.h"
 
@@ -24,8 +24,8 @@ void test_magpie_validates_modules() {
     try {
         trtmc::MagpieTTSConfig cfg;
         trtmc::MagpiePipeline p(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {},
-                                {}, {}, {}, trtmc::CudaBuffer(0), trtmc::CudaBuffer(0), {}, {}, {},
-                                {}, cfg, stream, nullptr, "x");
+                                {}, {}, {}, trtmc::MagpieCudaBuffer(0), trtmc::MagpieCudaBuffer(0),
+                                {}, {}, {}, {}, cfg, stream, nullptr, "x");
         check(false, "null magpie decoder should throw");
     } catch (const std::exception&) {
         threw = true;

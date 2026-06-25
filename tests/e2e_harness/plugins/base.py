@@ -1,4 +1,4 @@
-"""Contract test plugin protocol and shared verification helpers.
+"""Contract test plugin protocol.
 
 Each contract test plugin handles one or more reference families and defines:
 1. Which reference families it covers.
@@ -8,22 +8,20 @@ Each contract test plugin handles one or more reference families and defines:
 Plugins are auto-discovered from this directory by __init__.py, following the
 same pattern as builder family plugins in python/tensorrt_model_connect/families/.
 
-Adding a new contract = adding one .py file with a module-level ``plugin``
-attribute.  Zero edits to the orchestrator or registry.
+Concrete contract behavior belongs in model-owned ``e2e_plugins/contract.py``
+files. This shared module only carries the structural protocol used by the
+registry.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Protocol, runtime_checkable
 
 from ..contracts import (
     CompareResult,
     E2ECase,
-    MetricResult,
     PluginRuntimeContext,
     StageOutput,
-    StageStatus,
     ThresholdProfile,
 )
 
@@ -88,168 +86,3 @@ class ContractTestPlugin(Protocol):
         Returns a CompareResult with contract-level metrics.
         """
         ...
-
-
-# ---------------------------------------------------------------------------
-# Shared text helpers (used by multiple plugins)
-# ---------------------------------------------------------------------------
-
-
-def contract_config(case: E2ECase) -> Dict[str, Any]:
-    """Return model-owned contract configuration for shared plugins."""
-    config = case.metadata.get("contract_config", {})
-    return dict(config) if isinstance(config, dict) else {}
-
-
-def normalize_text(text: str) -> str:
-    """Lightweight text normalization: collapse whitespace, lowercase, strip."""
-    if not text:
-        return ""
-    return " ".join(text.split()).strip().lower()
-
-
-def strip_prompt_echo(text: str, prompt: str) -> str:
-    """Remove echoed prompt from generated text.
-
-    Some C++ runs echo the prompt before the generated continuation.
-    Handles warning preambles up to 2048 chars before the prompt.
-    """
-    if not text or not prompt:
-        return text
-    idx = text.find(prompt)
-    if 0 <= idx <= 2048:
-        return text[idx + len(prompt):].lstrip()
-    # Fallback: try normalized match
-    norm_text = normalize_text(text)
-    norm_prompt = normalize_text(prompt)
-    if norm_prompt and norm_text.startswith(norm_prompt):
-        # Map back to original text position
-        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
-    return text
-
-
-_CHAT_ROLE_PREFIXES = (
-    "### response:", "### assistant:", "assistant:",
-    "<|assistant|>", "<|im_start|>assistant\n",
-)
-
-_CHAT_TURN_MARKERS = (
-    "### response:", "### instruction:", "### assistant:",
-    "### user:", "<|assistant|>", "<|user|>",
-    "<|im_start|>", "<|im_end|>",
-)
-
-
-def strip_chat_markup(text: str) -> str:
-    """Remove leading chat role prefixes and truncate after first turn."""
-    if not text:
-        return ""
-    out = text.lstrip()
-    # Strip leading role prefix
-    while True:
-        lowered = out.lower()
-        matched = False
-        for prefix in _CHAT_ROLE_PREFIXES:
-            if lowered.startswith(prefix):
-                out = out[len(prefix):].lstrip()
-                matched = True
-                break
-        if not matched:
-            break
-    # Truncate after first turn
-    lowered = out.lower()
-    cut = len(out)
-    for marker in _CHAT_TURN_MARKERS:
-        idx = lowered.find(marker)
-        if idx > 0:
-            cut = min(cut, idx)
-    if cut < len(out):
-        out = out[:cut]
-    # Strip trailing markdown stubs
-    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
-    return out
-
-
-def extract_answer(output: StageOutput, prompt: str = "") -> str:
-    """Extract clean answer text from a StageOutput.
-
-    Strips prompt echo, chat markup, and normalizes.
-    """
-    raw = output.text or ""
-    if prompt:
-        raw = strip_prompt_echo(raw, prompt)
-    raw = strip_chat_markup(raw)
-    return raw.strip()
-
-
-def levenshtein_ned(a: str, b: str) -> float:
-    """Normalized edit distance (0.0 = identical, 1.0 = completely different)."""
-    if not a and not b:
-        return 0.0
-    max_len = max(len(a), len(b))
-    if max_len == 0:
-        return 0.0
-    # DP computation
-    if len(a) < len(b):
-        a, b = b, a
-    prev = list(range(len(b) + 1))
-    for i, c1 in enumerate(a):
-        curr = [i + 1]
-        for j, c2 in enumerate(b):
-            curr.append(min(
-                prev[j + 1] + 1,
-                curr[j] + 1,
-                prev[j] + (0 if c1 == c2 else 1),
-            ))
-        prev = curr
-    return prev[-1] / max_len
-
-
-# ---------------------------------------------------------------------------
-# Shared result builders
-# ---------------------------------------------------------------------------
-
-
-def make_pass(stage_name: str, metrics: Dict[str, MetricResult],
-              rule: str = "") -> CompareResult:
-    """Build a passing CompareResult."""
-    return CompareResult(
-        stage_name=stage_name,
-        status=StageStatus.PASSED.value,
-        metrics=metrics,
-        composite_rule=rule,
-        message="Contract verified",
-    )
-
-
-def make_fail(stage_name: str, metrics: Dict[str, MetricResult],
-              rule: str = "", message: str = "") -> CompareResult:
-    """Build a failing CompareResult."""
-    return CompareResult(
-        stage_name=stage_name,
-        status=StageStatus.FAILED.value,
-        metrics=metrics,
-        composite_rule=rule,
-        message=message or "Contract verification failed",
-    )
-
-
-def make_skip(stage_name: str, metrics: Dict[str, MetricResult],
-              rule: str = "", message: str = "") -> CompareResult:
-    """Build a skipped CompareResult for an unvalidated required contract."""
-    return CompareResult(
-        stage_name=stage_name,
-        status=StageStatus.SKIPPED.value,
-        metrics=metrics,
-        composite_rule=rule,
-        message=message or "Contract validation skipped",
-    )
-
-
-def make_error(stage_name: str, error: str) -> CompareResult:
-    """Build an error CompareResult."""
-    return CompareResult(
-        stage_name=stage_name,
-        status=StageStatus.ERROR.value,
-        message=f"Contract verification error: {error}",
-    )

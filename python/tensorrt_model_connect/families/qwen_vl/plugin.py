@@ -52,7 +52,7 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
 
 class QwenVLPlugin:
     name = "qwen_vl"
-    runtime_strategy = "vision_language"
+    runtime_strategy = "qwen_vl_vision_language"
     embed_input = True
 
     def matches(self, model_type: str) -> bool:

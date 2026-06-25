@@ -61,7 +61,7 @@ trt = trt_compat.get_trt()
 
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
-    runtime_strategy = "omni_multimodal"
+    runtime_strategy = "qwen3_omni_multimodal"
     embed_input = True
 
     def __init__(self):

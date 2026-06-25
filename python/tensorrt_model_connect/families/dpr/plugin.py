@@ -66,7 +66,7 @@ def _bpfx(root, key):
 
 class DprPlugin:
     name = "dpr"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "dpr_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "dpr"

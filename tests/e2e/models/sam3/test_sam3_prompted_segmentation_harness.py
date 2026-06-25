@@ -108,7 +108,7 @@ def test_contract_plugin_requires_boxes_and_scores() -> None:
         name="sam3",
         hf_id="facebook/sam3",
         family="sam3",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="sam3_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam3",
     )
@@ -144,7 +144,7 @@ def test_contract_plugin_errors_when_boxes_missing() -> None:
         name="sam3",
         hf_id="facebook/sam3",
         family="sam3",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="sam3_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam3",
     )
@@ -194,7 +194,7 @@ def test_manifest_loader_keeps_text_prompt_contract(tmp_path) -> None:
                 "hf_id": "facebook/sam3",
                 "bundle": "sam3.trtfb",
                 "family": "sam3",
-                "runtime_strategy": "prompted_segmentation",
+                "runtime_strategy": "sam3_prompted_segmentation",
                 "test_type": "prompted_segmentation",
                 "reference_family": "prompted_segmentation_sam3",
                 "user_contract": "prompted_mask",
@@ -219,3 +219,15 @@ def test_manifest_loader_keeps_text_prompt_contract(tmp_path) -> None:
     assert case.threshold_overrides["box_iou_mean"] == 0.95
     assert case.threshold_overrides["score_abs_error_mean"] == 0.05
     assert case.inputs["image"] == "data/test_img.jpeg"
+
+
+def test_sam3_manifest_maps_model_local_image_asset() -> None:
+    manifest_path = Path(__file__).resolve().parent / "manifests" / "sam3.json"
+
+    case = load_manifest(manifest_path)
+
+    image_path = Path(case.inputs["image"])
+    assert image_path.is_absolute()
+    assert image_path == Path(__file__).resolve().parent / "data" / "test_img.jpeg"
+    assert image_path.is_file()
+    assert case.inputs["prompt"] == "car"

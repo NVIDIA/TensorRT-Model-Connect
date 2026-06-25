@@ -1,4 +1,4 @@
-// WhisperPlugin: handles "speech_to_text" strategy.
+// WhisperPlugin: handles "whisper_speech_to_text" strategy.
 // Whisper encoder-decoder pipeline with mel spectrogram input.
 
 #include "plugin_helpers.h"
@@ -128,15 +128,15 @@ class WhisperPlugin final : public IPipelinePlugin {
         wc.mel_length = extract_json_int(json, "mel_length", 0);
         wc.decoder_start_token_ids = extract_json_int_array(json, "decoder_start_token_ids");
 
-        // Create KvCache for decoder self-attention
+        // Create WhisperKvCache for decoder self-attention
         cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> state =
-            std::make_unique<KvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
+        std::unique_ptr<WhisperInferenceState> state =
+            std::make_unique<WhisperKvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
         if (!state->ok())
-            throw std::runtime_error("Failed to create KvCache for Whisper decoder");
+            throw std::runtime_error("Failed to create WhisperKvCache for Whisper decoder");
 
         // Load mel filterbank + tokenizer
         auto mel_fb = load_mel_filterbank(ctx.bundle);
@@ -154,6 +154,7 @@ class WhisperPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_whisper_plugin, WhisperPlugin, "speech_to_text");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_whisper_plugin, WhisperPlugin,
+                                       "whisper_speech_to_text");
 
 } // namespace trtmc

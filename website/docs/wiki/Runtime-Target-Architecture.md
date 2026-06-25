@@ -134,8 +134,8 @@ pipeline source when needed, and `MODEL.toml` strategy manifest. The plugin:
 
 ```text
 src/runtime/models/
-  text_generation/            # decoder_kv_cache, decoder_moe
-  recurrent/                  # ssm_recurrent, rwkv_recurrent, hybrid_mamba_attention
+  <family>/                   # <family>_decoder_kv_cache, <family>_decoder_moe
+  <recurrent-family>/         # family-owned recurrent and hybrid strategies
   encoder/                    # encoder_only, embedding, reranking, neural_operator, object_detection
   vision_language/            # vision_language
   segmentation/               # segmentation, prompted_segmentation
@@ -144,9 +144,10 @@ src/runtime/models/
   magpie/                     # text_to_audio_magpie
   speech/                     # speech_to_speech
   omni/                       # omni_multimodal
-  t5/                         # text_to_text
+  t5/                         # t5_text_to_text
   marian/                     # marian_translation
-  seq2seq/                    # seq2seq_encoder_decoder
+  bart/                       # bart_seq2seq_encoder_decoder
+  m2m_100/                    # m2m_100_seq2seq_encoder_decoder
   flux/                       # diffusion_flux
   wan/                        # diffusion_wan, diffusion_pixart
   z_image/                    # diffusion_zimage

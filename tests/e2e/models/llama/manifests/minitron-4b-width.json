@@ -4,7 +4,7 @@
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
   "bundle": "minitron-4b-width.trtfb",
   "family": "llama",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

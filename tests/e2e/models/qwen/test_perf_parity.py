@@ -134,7 +134,8 @@ def _run_python(hf_python: Path, bundle: Path) -> tuple[str, float]:
     script = f"""
 import sys
 sys.path.insert(0, "{PROJECT_DIR / 'python'}")
-from tensorrt_model_connect.debug_runner import TrtRunner, load_engine_from_bundle
+from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
+from tensorrt_model_connect.families.qwen.debug_runner import TrtRunner
 import numpy as np
 
 bundle_path = "{bundle}"

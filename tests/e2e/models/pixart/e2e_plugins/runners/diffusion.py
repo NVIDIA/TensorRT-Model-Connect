@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from .text_generation import (
+from ._runtime_common import (
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
     _extract_rank_zero_stdout,
@@ -196,7 +196,7 @@ class DiffusionMediaRunner:
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
             import numpy as np
-            from tensorrt_model_connect.diffusion_runner import DiffusionRunner
+            from tensorrt_model_connect.families.pixart.diffusion_runner import DiffusionRunner
 
             runner = DiffusionRunner({bundle_path!r})
             prompt_text = {prompt_text!r}

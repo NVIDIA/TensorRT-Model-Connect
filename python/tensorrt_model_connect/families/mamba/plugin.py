@@ -53,7 +53,7 @@ trt = trt_compat.get_trt()
 
 class MambaPlugin:
     name = "mamba"
-    runtime_strategy = "ssm_recurrent"
+    runtime_strategy = "mamba_ssm_recurrent"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "mamba"

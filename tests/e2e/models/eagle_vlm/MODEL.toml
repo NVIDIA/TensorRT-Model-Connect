@@ -6,3 +6,17 @@ test_manifests = [
   "manifests/nemotron-rerank-vl-1b-v2-tp4.json",
   "manifests/nemotron-rerank-vl-1b-v2.json",
 ]
+
+[e2e_defaults.embedding]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+
+[e2e_defaults.reranking]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]

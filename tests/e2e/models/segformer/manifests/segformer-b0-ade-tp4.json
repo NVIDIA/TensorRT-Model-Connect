@@ -4,7 +4,7 @@
   "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
   "bundle": "segformer-b0-ade-tp4.trtfb",
   "family": "segformer",
-  "runtime_strategy": "segmentation",
+  "runtime_strategy": "segformer_segmentation",
   "task_strategy": "segmentation",
   "reference_family": "semantic_segmentation",
   "user_contract": "segmentation_mask",

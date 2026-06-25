@@ -1,0 +1,7 @@
+id = "roberta"
+runtime_library = "libtrtmc_model_roberta.so"
+runtime_plugins = ["plugin.cpp|register_roberta_plugin"]
+runtime_strategies = ["roberta_encoder_only"]
+runtime_tests = [
+  "test_roberta_encoder_pipeline|test_roberta_encoder_pipeline.cpp|trtmc_model_roberta,trtmc_backend_trt|_|REQUIRES_TRT",
+]

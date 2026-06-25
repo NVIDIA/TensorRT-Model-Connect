@@ -30,6 +30,8 @@ from .standard_decoder_builder import build_standard_decoder_engine
 
 class FalconPlugin:
     name = "falcon"
+    runtime_strategy = "falcon_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()

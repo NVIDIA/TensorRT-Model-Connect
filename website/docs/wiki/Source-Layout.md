@@ -36,8 +36,6 @@ path listed here exists in the source tree.
 | `trt_module.h` | `ITrtModule` -- pure virtual interface for TRT engine execution (`forward()`, `forward_device()`, `bind_external()`). Concrete impl lives in backend DSOs. |
 | `trt_backend.h` | `IBackend` interface + `ModuleCreateOptions` for backend DSO dispatch |
 | `kv_cache.h` | `KvCache` -- autoregressive KV cache with per-layer device tensors |
-| `recurrent_state.h` | `RecurrentState` -- config-driven SSM/RWKV state manager |
-| `scheduler.h` | `IScheduler` interface, `FlowMatchEulerScheduler` for diffusion |
 | `tensor.h` | `Tensor`, `TensorMap`, `TensorInfo`, `DType` enum |
 | `device_tensor.h` | `DeviceTensor` -- GPU-resident tensor with RAII |
 | `tokenizer_interface.h` | Minimal `ITokenizer` (encode/decode only) |
@@ -48,14 +46,6 @@ path listed here exists in the source tree.
 |------|---------|
 | `speech_decode_stop_policy.h` | Speech decode stopping criterion |
 | `subprocess_runner.h` | Subprocess execution helper |
-
-### `include/trtmc/runtime/domains/multimodal/`
-
-| File | Purpose |
-|------|---------|
-| `image_transform_helper.h` | Image transform helpers for VL preprocessing |
-
----
 
 ## C++ Runtime Source (`src/`)
 
@@ -117,8 +107,8 @@ strategy family in one place.
 
 | Folder | Strategies | Pipeline class |
 |------|-----------|---------------|
-| `text_generation/` | `decoder_kv_cache`, `decoder_moe` | `TextGenerationPipeline` |
-| `recurrent/` | `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | `RecurrentPipeline` |
+| `<family>/` decoder folders | `<family>_decoder_kv_cache`, `<family>_decoder_moe` | Family-owned `TextGenerationPipeline` copy |
+| recurrent model folders | `mamba_ssm_recurrent`, `rwkv_recurrent`, `nemotron_h_hybrid_mamba_attention`, `qwen3_5_hybrid_mamba_attention` | `RecurrentPipeline` |
 | `encoder/` | `encoder_only`, `embedding`, `reranking`, `neural_operator`, `object_detection` | `EncoderPipeline` |
 | `vision_language/` | `vision_language` | `VLPipeline` |
 | `segmentation/` | `segmentation`, `prompted_segmentation` | `SegmentPipeline`, `SamPipeline` |
@@ -127,9 +117,10 @@ strategy family in one place.
 | `magpie/` | `text_to_audio_magpie` | `MagpiePipeline` |
 | `speech/` | `speech_to_speech` | `SpeechPipeline` |
 | `omni/` | `omni_multimodal` | `OmniPipeline` |
-| `t5/` | `text_to_text` | inline plugin pipeline |
+| `t5/` | `t5_text_to_text` | inline plugin pipeline |
 | `marian/` | `marian_translation` | inline plugin pipeline |
-| `seq2seq/` | `seq2seq_encoder_decoder` | inline plugin pipeline |
+| `bart/` | `bart_seq2seq_encoder_decoder` | inline plugin pipeline |
+| `m2m_100/` | `m2m_100_seq2seq_encoder_decoder` | inline plugin pipeline |
 | `flux/` | `diffusion_flux` | `FluxPipeline` |
 | `wan/` | `diffusion_wan`, `diffusion_pixart` | `WanPipeline` |
 | `z_image/` | `diffusion_zimage` | `ZImagePipeline` |
@@ -138,6 +129,7 @@ strategy family in one place.
 Runtime helper code is model-local. Each `src/runtime/models/<model>/`
 folder carries the helper copies it needs, such as `plugin_helpers.h/cpp`,
 `diffusion_helpers.h/cpp`, or `audio_helpers.h/cpp`.
+Qwen Image also owns its scheduler copy in `qwen_image_scheduler.h/cpp`.
 
 ### `src/runtime/core/`
 
@@ -148,14 +140,10 @@ Common TRT runtime infrastructure.
 | `trt_common.h/cpp` | TRT logger, CudaBuffer (RAII), CudaStream (RAII + move) |
 | `trt_module.cpp` | Legacy `TrtModule` stubs (I/O binding delegates to `ITrtModule` from backend DSO) |
 | `kv_cache.cpp` | `KvCache` implementation (bind_to, advance, mask, reset) |
-| `recurrent_state.cpp` | `RecurrentState` implementation |
 | `device_tensor.cpp` | `DeviceTensor` GPU memory management |
-| `device_kv_cache.h/cpp` | Legacy `DeviceKvCache`, `DeviceResources`, `run_decoder_step_device()` |
-| `device_kv_cache_update_plan.h` | KV cache update plan helpers |
 | `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine`, tensor validation |
 | `trt_decode_runtime.h/cpp` | `select_argmax_token()`, `build_attention_mask()` |
 | `trt_graph_builder.cpp` | TRT graph construction helpers |
-| `flow_match_euler_scheduler.cpp` | `FlowMatchEulerScheduler` implementation |
 | `generation_backend.h` | Legacy generation backend interface |
 | `step_state.h` | Legacy `IStepState` interface |
 | `decoded_image.h` | Decoded image data struct |
@@ -172,7 +160,6 @@ Audio-family backends and helpers.
 | `magpie_tts_backend.h/cpp` | Magpie TTS backend |
 | `speech_backend.h/cpp` | Speech-to-speech backend |
 | `omni_backend.h/cpp` | Legacy omni-multimodal backend |
-| `mel_spectrogram.h/cpp` | Mel filterbank extraction for Whisper |
 | `audio_bundle_validation.h/cpp` | Audio bundle section validation |
 | `audio_configs.h` | Audio model configuration structs |
 | `magpie_kernels.cu/h` | CUDA kernels for Magpie |
@@ -196,18 +183,11 @@ Audio-family backends and helpers.
 
 ### `src/runtime/domains/diffusion/`
 
-Diffusion-family helpers and types.
+Diffusion-family helpers.
 
 | File | Purpose |
 |------|---------|
-| `diffusion_types.h` | `DiffusionConfig`, `PreprocessorWeights`, `VideoResult` |
 | `diffusion_math.h` | Math helpers (silu, gelu_tanh, timestep embedding) |
-| `diffusion_preprocessor.cpp` | Preprocessor weight loading |
-| `diffusion_preprocessor_weights_helpers.h` | Weight loading helpers |
-| `diffusion_scheduler_helpers.h` | Scheduler step helpers |
-| `diffusion_denoising_step_seam.h` | Denoising step abstraction |
-| `diffusion_generation_plan.h` | Generation plan for diffusion |
-| `wan_generation_conditioning.h` | Wan-specific conditioning |
 
 ### `src/runtime/domains/encoder/`
 
@@ -225,28 +205,15 @@ Vision-language and multimodal support.
 
 | File | Purpose |
 |------|---------|
-| `image_preprocessor.h/cpp` | VL image preprocessing (4 strategies) |
-| `vision_engine.h/cpp` | Vision encoder engine lifecycle |
-| `vl_backend.h/cpp` | Legacy VL backend |
-| `vision_execution_plan.h` | Vision execution plan config |
-| `vl_decode_policy.h` | VL decode step policy |
+| `README.md` | Points to model-owned VL preprocessing and decode files |
 
 ### `src/runtime/domains/perception/`
 
-Segmentation and detection backends.
+Perception behavior is model-owned under `src/runtime/models/<family>/`.
 
 | File | Purpose |
 |------|---------|
-| `segmentation_backend.h/cpp` | SegFormer backend |
-| `segmentation_preprocess_seam.h` | Segmentation preprocessing |
-| `segmentation_postprocess_seam.h` | Segmentation postprocessing |
-| `sam_backend.h/cpp` | SAM two-stage (encoder + decoder) backend |
-| `sam_image_preprocess_seam.h` | SAM image preprocessing |
-| `sam_prompt_seam.h` | SAM prompt encoding |
-| `sam_output_selection.h` | SAM mask output selection |
-| `sam_postprocess_seam.h` | SAM postprocessing |
-| `detection_backend.h/cpp` | Object detection backend |
-| `neural_operator_backend.h/cpp` | Neural operator (FNO) backend |
+| `README.md` | Points perception runtime behavior to owning model folders |
 
 ### `src/runtime/domains/recurrent/`
 
@@ -261,8 +228,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `rwkv_decode_runtime.h/cpp` | RWKV step engine |
 | `rwkv_step_state.h/cpp` | Legacy `RwkvStepState` |
 | `hybrid_backend.h/cpp` | Legacy Hybrid (Mamba + Attention) backend |
-| `recurrent_step_contracts.h` | Shared recurrent step contracts |
-| `recurrent_tensor_bindings.h` | Tensor binding helpers |
+Recurrent helper behavior is owned by each recurrent family under `src/runtime/models/<family>/`.
 
 ### `src/tokenizer/`
 
@@ -327,7 +293,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `causal_vae_3d_builder.py` | Causal 3D VAE builder (Wan video) |
 | `encodec_builder.py` | EnCodec audio codec builder |
 | `nanocodec_builder.py` | NanoCodec builder |
-| `diffusion_runner.py` | Python-side diffusion inference runner |
+| `families/<family>/diffusion_runner.py` | Family-owned Python-side diffusion inference runner |
 
 ### Family Plugins (`python/tensorrt_model_connect/families/`)
 

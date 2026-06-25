@@ -95,7 +95,7 @@ def _compute_relative_position_bias(
 
 class MpnetPlugin:
     name = "mpnet"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "mpnet_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "mpnet"

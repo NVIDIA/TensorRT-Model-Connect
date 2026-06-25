@@ -60,7 +60,8 @@ requires_tvm_ffi = pytest.mark.skipif(
 def test_add_one_roundtrip(trt_runner):
     """Build TRT engine with TVM-FFI add_one kernel, verify output."""
     import tvm.ffi
-    from tensorrt_model_connect.graph_ops import add_tvm_ffi_kernel
+    from tests.builder.owned_graph_modules import load_graph_ops
+    add_tvm_ffi_kernel = load_graph_ops().add_tvm_ffi_kernel
 
     # Register trivial add_one kernel
     @tvm.ffi.register_func("tvm_ffi_test.py_add_one")
@@ -108,7 +109,8 @@ def test_add_one_roundtrip(trt_runner):
 def test_add_one_multi_shape(trt_runner):
     """Verify add_one works with a 2D input shape."""
     import tvm.ffi
-    from tensorrt_model_connect.graph_ops import add_tvm_ffi_kernel
+    from tests.builder.owned_graph_modules import load_graph_ops
+    add_tvm_ffi_kernel = load_graph_ops().add_tvm_ffi_kernel
 
     # Kernel already registered from test above (same process),
     # but register again to be safe (idempotent).

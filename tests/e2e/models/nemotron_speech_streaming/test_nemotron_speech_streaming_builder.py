@@ -15,7 +15,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.e2e.models.canary.synthetic_nemo import (
+from tests.e2e.models.nemotron_speech_streaming.synthetic_nemo import (
     make_nemo_archive,
     make_nemo_state_dict,
 )
@@ -136,6 +136,6 @@ class TestNemotronSpeechStreamingPlugin:
         assert weights["joint_out_w"].shape == (self.JOINT_HIDDEN, self.VOCAB + 1)
 
         overrides = plugin.get_bundle_config_overrides(cfg)
-        assert overrides["runtime_strategy"] == "speech_to_text_rnnt"
+        assert overrides["runtime_strategy"] == "nemotron_speech_streaming_speech_to_text_rnnt"
         assert overrides["rnnt_blank_id"] == self.VOCAB
         assert overrides["rnnt_causal_downsampling"] is True

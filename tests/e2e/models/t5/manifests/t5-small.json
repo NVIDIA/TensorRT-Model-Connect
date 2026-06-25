@@ -3,7 +3,7 @@
   "hf_id": "google-t5/t5-small",
   "bundle": "t5-small.trtfb",
   "family": "t5",
-  "runtime_strategy": "text_to_text",
+  "runtime_strategy": "t5_text_to_text",
   "task_strategy": "text_generation_causal",
   "reference_family": "seq2seq_text2text",
   "user_contract": "seq2seq_output",

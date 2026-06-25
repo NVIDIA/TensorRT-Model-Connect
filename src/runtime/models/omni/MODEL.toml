@@ -1,8 +1,0 @@
-id = "omni"
-runtime_library = "libtrtmc_model_omni.so"
-runtime_plugins = ["plugin.cpp|register_omni_plugin"]
-runtime_strategies = ["omni_multimodal"]
-runtime_tests = [
-  "test_omni_audio_plan|test_omni_audio_plan.cpp|_|_|_",
-  "test_omni_pipeline|test_omni_pipeline.cpp|trtmc_model_omni|_|REQUIRES_TRT",
-]

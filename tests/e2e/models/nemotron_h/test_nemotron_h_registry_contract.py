@@ -16,4 +16,4 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("nemotron_h")
-    assert getattr(plugin, "runtime_strategy", None) == "hybrid_mamba_attention"
+    assert getattr(plugin, "runtime_strategy", None) == "nemotron_h_hybrid_mamba_attention"

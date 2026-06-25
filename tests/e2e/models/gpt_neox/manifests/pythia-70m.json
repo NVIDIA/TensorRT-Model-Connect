@@ -4,7 +4,7 @@
   "hf_id": "EleutherAI/pythia-70m",
   "bundle": "pythia-70m.trtfb",
   "family": "gpt_neox",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "gpt_neox_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

@@ -3,7 +3,7 @@
 Scope (Stage 1): the **understanding** path only — ``x2t_image`` and
 ``x2t_video``. Lance's understanding sub-model is a Qwen2.5-VL ViT vision
 encoder feeding a Lance text decoder, which maps onto the existing
-``vision_language`` runtime strategy.
+``lance_vision_language`` runtime strategy.
 
 Lance is a Mixture-of-Transformer-Experts model: every decoder layer carries a
 second ``*_moe_gen`` parameter set, plus ``llm2vae`` / ``vae2llm`` /
@@ -62,7 +62,7 @@ _LM_HEAD_KEY = "language_model.lm_head.weight"
 
 class LancePlugin:
     name = "lance"
-    runtime_strategy = "vision_language"
+    runtime_strategy = "lance_vision_language"
     # During VL prefill the decoder consumes ViT features as input_embed in
     # place of the image-pad token embeddings.
     embed_input = True

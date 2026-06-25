@@ -8,7 +8,7 @@ from diff_framework.protocol import DiffResult, TestContext
 class VLPipelineTest:
     name = "vl_pipeline"
     description = "Vision-language pipeline: vision features, embed, generation, C++ parity"
-    runtime_strategies = ["vision_language"]
+    runtime_strategies = []
     requires_bundle = True
     requires_gpu = True
 

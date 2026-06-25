@@ -92,7 +92,8 @@ def _resolve_sam_config(raw: dict) -> dict:
 
 class SamPlugin:
     name = "sam"
-    runtime_strategy = "prompted_segmentation"
+    runtime_strategy = "sam_prompted_segmentation"
+    requires_tokenizer = False
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("sam",)

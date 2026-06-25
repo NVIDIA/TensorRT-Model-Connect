@@ -240,7 +240,7 @@ class TestSamPlugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.sam import plugin
-        assert plugin.runtime_strategy == "prompted_segmentation"
+        assert plugin.runtime_strategy == "sam_prompted_segmentation"
 
     def test_load_weights_has_encoder_keys(self, tmp_path):
         from tensorrt_model_connect.families.sam import plugin

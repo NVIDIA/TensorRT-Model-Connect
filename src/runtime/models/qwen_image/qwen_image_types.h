@@ -174,8 +174,7 @@ struct QwenImagePreprocessorWeights {
 
 // Parse a Qwen-Image preprocessor_weights bundle section into the struct.
 //
-// The blob format is the canonical diffusion preprocessor wire format
-// (shared with FLUX / Z-Image / Wan-T2V):
+// The blob format is the canonical diffusion preprocessor wire format:
 //   <u32 LE index_len><UTF-8 JSON index><raw float32 payload>
 //
 // Recognized index entries:

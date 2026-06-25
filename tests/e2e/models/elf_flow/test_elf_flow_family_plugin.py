@@ -482,7 +482,7 @@ def test_elf_rope_cache_matches_github_empty_token_semantics() -> None:
 @pytest.mark.trt
 def test_elf_trt_forward_matches_github_numpy_reference(tmp_path: Path) -> None:
     pytest.importorskip("tensorrt")
-    from tensorrt_model_connect.debug_runner import VisionTrtRunner
+    from tensorrt_model_connect.families.elf_flow.debug_runner import VisionTrtRunner
     from tensorrt_model_connect.families.elf_flow.builder import build_elf_flow_engine
 
     cfg = _cfg(num_hidden_layers=1)

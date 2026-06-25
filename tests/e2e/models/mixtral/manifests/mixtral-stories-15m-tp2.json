@@ -4,7 +4,7 @@
   "hf_id": "ggml-org/stories15M_MOE",
   "bundle": "mixtral-stories-15m-tp2.trtfb",
   "family": "mixtral",
-  "runtime_strategy": "decoder_moe",
+  "runtime_strategy": "mixtral_decoder_moe",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

@@ -155,7 +155,7 @@ def _resolve_graph_id_filter(db: sqlite3.Connection, engine_section: str) -> int
 
 def classify_from_nsys(
     sqlite_path: str,
-    pipeline_type: str = "decoder_kv_cache",
+    pipeline_type: str = "",
     engine_section: str = "all",
 ) -> BottleneckResult:
     """Classify bottleneck from nsys SQLite export.
@@ -163,6 +163,8 @@ def classify_from_nsys(
     engine_section: 'all' (default), 'primary', 'secondary', or a graph ID.
     When not 'all', kernel analysis is filtered to the specified CUDA graph.
     """
+    if not pipeline_type:
+        raise ValueError("pipeline_type is required")
     db = sqlite3.connect(sqlite_path)
 
     graph_id = _resolve_graph_id_filter(db, engine_section)
@@ -303,9 +305,11 @@ def classify_from_nsys(
 
 def classify_from_l1(
     l1_path: str,
-    pipeline_type: str = "decoder_kv_cache",
+    pipeline_type: str = "",
 ) -> BottleneckResult:
     """Classify bottleneck from L1 CPU profile JSON."""
+    if not pipeline_type:
+        raise ValueError("pipeline_type is required")
     with open(l1_path) as f:
         data = json.load(f)
 
@@ -454,7 +458,7 @@ def main():
                         help="Path to nsys SQLite export")
     parser.add_argument("--l1-json",
                         help="Path to L1 CPU profile JSON")
-    parser.add_argument("--pipeline-type", default="decoder_kv_cache",
+    parser.add_argument("--pipeline-type", required=True,
                         help="Runtime strategy declared in tests/runtime_strategy_matrix.yaml")
     parser.add_argument("--engine-section", default="all",
                         help="Which engine to analyze: 'all' (default), 'primary', "

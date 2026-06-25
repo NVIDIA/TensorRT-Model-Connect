@@ -7,9 +7,8 @@
 
 #include "runtime/models/qwen_image/pipeline.h"
 
-#include "runtime/domains/diffusion/batch_utils.h"
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "trtmc/runtime/scheduler.h"
+#include "runtime/models/qwen_image/qwen_image_batch_utils.h"
+#include "runtime/models/qwen_image/qwen_image_scheduler.h"
 
 #include <algorithm>
 #include <cmath>
@@ -216,12 +215,26 @@ struct GenerateKnobs {
     std::string negative;
 };
 
+int resolve_qwen_image_requested_steps(int requested, int fallback) {
+    if (requested < 0) {
+        return fallback;
+    }
+    if (requested == 0) {
+        return fallback;
+    }
+    return requested;
+}
+
+float resolve_qwen_image_requested_guidance(float requested, float fallback) {
+    return requested < 0.0F ? fallback : requested;
+}
+
 // Resolve runtime knobs from cfg, falling back to bundle defaults.
 GenerateKnobs resolve_generate_knobs(const GenerateConfig& cfg, const QwenImageConfig& bundle_cfg) {
     GenerateKnobs k;
-    k.num_steps = diffusion::resolve_requested_steps(
-        cfg.num_steps, bundle_cfg.diffusion.default_num_inference_steps, true);
-    k.cfg_scale = diffusion::resolve_requested_guidance(cfg.guidance_scale,
+    k.num_steps = resolve_qwen_image_requested_steps(
+        cfg.num_steps, bundle_cfg.diffusion.default_num_inference_steps);
+    k.cfg_scale = resolve_qwen_image_requested_guidance(cfg.guidance_scale,
                                                         bundle_cfg.diffusion.default_cfg_scale);
     k.height = cfg.height > 0 ? cfg.height : bundle_cfg.image.default_height;
     k.width = cfg.width > 0 ? cfg.width : bundle_cfg.image.default_width;
@@ -351,7 +364,7 @@ ImageResult QwenImagePipeline::generate_image(const std::string& prompt, const f
 // Decision B: TWO denoiser forwards per step (cond + uncond), combined by
 //             the existing per-token L2-renorm helper. No fusion in Phase 1.
 // Decision D: silently chunk against ``config_.max_batch_size.dit`` via
-//             ``trtmc::diffusion::plan_chunks``.
+//             ``qwen_image_batch::plan_chunks``.
 // Decision E: VAE always slices at B=1 — one sequential decode per sample.
 //
 // Per-sample seeds: the caller hands us one ``per_sample_seeds`` entry per
@@ -659,7 +672,7 @@ QwenImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
 
     const int32_t total = static_cast<int32_t>(prompts.size());
     const int32_t cap = std::max(1, config_.max_batch_size.dit);
-    const auto chunks = trtmc::diffusion::plan_chunks(total, cap);
+    const auto chunks = qwen_image_batch::plan_chunks(total, cap);
 
     std::vector<ImageResult> results;
     results.reserve(prompts.size());

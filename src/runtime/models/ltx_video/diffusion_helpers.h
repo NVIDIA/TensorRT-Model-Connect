@@ -1,22 +1,22 @@
 #pragma once
 #include "plugin_helpers.h"
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "preprocessor_weights_helpers.h"
+#include "runtime/models/ltx_video/ltx_video_diffusion_types.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {
 
-DiffusionConfig make_diffusion_config(const std::string& json);
+LTXVideoDiffusionConfig make_diffusion_config(const std::string& json);
 
-// Shared diffusion resources loaded once, then dispatched to per-model factory.
+// LTX Video diffusion resources loaded once, then dispatched to the LTX Video factory.
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
     LoadedModule vision;
     LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;
-    DiffusionConfig config;
-    PreprocessorWeights weights;
+    LTXVideoDiffusionConfig config;
+    LTXVideoPreprocessorWeights weights;
     std::shared_ptr<ITokenizer> tokenizer;
 };
 

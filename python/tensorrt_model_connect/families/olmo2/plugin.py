@@ -44,7 +44,8 @@ class Olmo2Plugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "olmo2"
 
-    runtime_strategy = "decoder_kv_cache"
+    runtime_strategy = "olmo2_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,

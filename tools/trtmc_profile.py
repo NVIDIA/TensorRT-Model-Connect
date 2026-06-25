@@ -76,22 +76,29 @@ def bench_trt_with_layer_profile(
     iterations: int,
     eos_token_id: int | None,
     verbose: bool,
+    *,
+    runtime_strategy: str,
+    config=None,
+    bundle_path: str = "",
 ) -> tuple[dict, dict]:
     """Run TRT inference with LayerProfiler attached.
 
     Returns (trt_bench_result, layer_profile_dict) collected in a single run.
     trt_bench_result has the same schema as perf_compare.bench_trt().
     """
-    from tensorrt_model_connect.debug_runner import TrtRunner
     from layer_profiler import LayerProfiler
+    from tool_helpers import make_family_debug_runner
 
     profiler = LayerProfiler()
-    runner = TrtRunner(
+    runner = make_family_debug_runner(
         engine_plan=engine_plan,
+        runtime_strategy=runtime_strategy,
         max_cache_length=max_cache_length,
         num_layers=num_layers,
+        config=config,
+        bundle_path=bundle_path,
+        profiler=profiler,
     )
-    runner.context.profiler = profiler
 
     prefill_times: list[float] = []
     decode_times: list[float] = []
@@ -391,13 +398,20 @@ def main():
     # -- Build / load TRT engine --
     if args.bundle:
         print(f"[profile] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, perf_handler = \
+        engine_plan, num_layers, max_cache_length, bundle_config, perf_handler = \
             pc.load_trt_from_bundle(args.bundle)
+        runtime_strategy = str(bundle_config.get("runtime_strategy") or "")
+        runner_config = bundle_config
+        runner_bundle_path = args.bundle
     else:
+        from tool_helpers import runtime_strategy_from_config
         engine_plan, config, _, perf_handler = pc.build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
+        runtime_strategy = runtime_strategy_from_config(config)
+        runner_config = config
+        runner_bundle_path = ""
 
     if not pc._handler_supports(perf_handler, "supports_layer_profile", True):
         print(pc._handler_attr(
@@ -442,7 +456,10 @@ def main():
         trt_res = pc.bench_trt(
             engine_plan, num_layers, max_cache_length,
             input_ids, args.max_new_tokens,
-            args.warmup, args.iterations, eos_token_id, args.verbose)
+            args.warmup, args.iterations, eos_token_id, args.verbose,
+            runtime_strategy=runtime_strategy,
+            config=runner_config,
+            bundle_path=runner_bundle_path)
 
     # -- Pass 1b: TRT per-layer profiling (IProfiler attached — timing discarded) --
     layer_data = None
@@ -455,7 +472,10 @@ def main():
             engine_plan, num_layers, max_cache_length,
             input_ids, args.max_new_tokens,
             warmup=1, iterations=1,  # minimal — only need layer %
-            eos_token_id=eos_token_id, verbose=False)
+            eos_token_id=eos_token_id, verbose=False,
+            runtime_strategy=runtime_strategy,
+            config=runner_config,
+            bundle_path=runner_bundle_path)
 
     del engine_plan
     gc.collect()

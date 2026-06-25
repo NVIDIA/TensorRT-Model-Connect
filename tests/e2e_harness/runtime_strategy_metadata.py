@@ -57,27 +57,6 @@ def _runtime_strategy_entries(matrix_path: str) -> dict[str, dict[str, Any]]:
     return entries
 
 
-_TASK_STRATEGY_PERFORMANCE_MODES = {
-    "text_generation_causal": "decode",
-    "diffusion_media_generation": "diffusion",
-    "diffusion_text_generation": "diffusion",
-    "speech_to_text": "enc_dec",
-    "text_to_text": "enc_dec",
-    "vision_language_generation": "enc_dec",
-    "encoder_only_nlp": "single_pass",
-    "embedding": "single_pass",
-    "reranking": "single_pass",
-    "segmentation": "single_pass",
-    "prompted_segmentation": "single_pass",
-    "image_classification": "single_pass",
-    "object_detection": "single_pass",
-    "neural_operator": "single_pass",
-    "text_to_audio": "multi_stage",
-    "speech_to_speech": "multi_stage",
-    "omni_multimodal": "multi_stage",
-}
-
-
 def runtime_strategy_requires_new_runtime_guard(
     runtime_strategy: str,
     matrix_path: Path | None = None,
@@ -106,11 +85,7 @@ def runtime_strategy_performance_mode(
     *,
     default: str = "decode",
 ) -> str:
-    """Return the generic performance mode for a runtime strategy.
-
-    The mapping is intentionally expressed at the task-strategy level so shared
-    profiling tools do not need to know family-specific runtime strategy names.
-    """
+    """Return the model-declared performance mode for a runtime strategy."""
     path = matrix_path or _DEFAULT_MATRIX_PATH
     entry = _runtime_strategy_entries(str(path)).get(runtime_strategy)
     if entry is None:
@@ -118,7 +93,4 @@ def runtime_strategy_performance_mode(
     explicit_mode = entry.get("performance_mode")
     if isinstance(explicit_mode, str) and explicit_mode:
         return explicit_mode
-    task_strategy = entry.get("task_strategy")
-    if not isinstance(task_strategy, str) or not task_strategy:
-        return default
-    return _TASK_STRATEGY_PERFORMANCE_MODES.get(task_strategy, default)
+    return default

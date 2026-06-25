@@ -1,0 +1,11 @@
+id = "nemotron_h"
+runtime_library = "libtrtmc_model_nemotron_h.so"
+runtime_plugins = ["plugin.cpp|register_nemotron_h_plugin"]
+runtime_strategies = ["nemotron_h_hybrid_mamba_attention"]
+[validation_profiles]
+decoder_debug = ["nemotron_h_hybrid_mamba_attention"]
+
+runtime_tests = [
+  "test_nemotron_h_recurrent_output_initializers|test_nemotron_h_recurrent_output_initializers.cpp|_|_|_",
+  "test_nemotron_h_recurrent_pipeline|test_nemotron_h_recurrent_pipeline.cpp|trtmc_model_nemotron_h,trtmc_backend_trt|_|REQUIRES_TRT",
+]

@@ -5,9 +5,9 @@
 // KvCaches + embeddings.
 
 #include "runtime/models/bark/bark_config.h"
+#include "runtime/models/bark/inference_state.h"
+#include "runtime/models/bark/kv_cache.h"
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/inference_state.h"
-#include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -23,9 +23,10 @@ namespace trtmc {
 class BarkPipeline final : public IPipeline {
   public:
     BarkPipeline(std::unique_ptr<TrtModule> semantic, std::unique_ptr<TrtModule> coarse,
-                 std::unique_ptr<IInferenceState> semantic_state,
-                 std::unique_ptr<IInferenceState> coarse_state, std::vector<float> semantic_embed,
-                 std::vector<float> coarse_embed, BarkConfig config, cudaStream_t stream,
+                 std::unique_ptr<BarkInferenceState> semantic_state,
+                 std::unique_ptr<BarkInferenceState> coarse_state,
+                 std::vector<float> semantic_embed, std::vector<float> coarse_embed,
+                 BarkConfig config, cudaStream_t stream,
                  std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     ~BarkPipeline() override;
@@ -46,9 +47,9 @@ class BarkPipeline final : public IPipeline {
     std::vector<float> run_codec(const std::vector<int32_t>& coarse_tokens);
     std::vector<float> run_codec(const std::vector<int32_t>& codes_flat, int32_t n_frames);
 
-    void run_step_with_embed(TrtModule& module, IInferenceState& state, const float* embed,
+    void run_step_with_embed(TrtModule& module, BarkInferenceState& state, const float* embed,
                              int32_t embed_dim, std::vector<float>& logits);
-    void run_step_with_token(TrtModule& module, IInferenceState& state, int32_t token_id,
+    void run_step_with_token(TrtModule& module, BarkInferenceState& state, int32_t token_id,
                              std::vector<float>& logits);
     int32_t sample_top_k(const float* logits, int32_t vocab_size, float temperature, int32_t top_k);
 
@@ -56,8 +57,8 @@ class BarkPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> coarse_;
     std::unique_ptr<TrtModule> codec_;
     std::unique_ptr<TrtModule> fine_;
-    std::unique_ptr<IInferenceState> semantic_state_;
-    std::unique_ptr<IInferenceState> coarse_state_;
+    std::unique_ptr<BarkInferenceState> semantic_state_;
+    std::unique_ptr<BarkInferenceState> coarse_state_;
     std::vector<float> semantic_embed_;
     std::vector<float> coarse_embed_;
     std::vector<float> fine_embed_;

@@ -134,7 +134,7 @@ class TestQwen3MoePlugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.qwen_moe import plugin
-        assert plugin.runtime_strategy == "decoder_moe"
+        assert plugin.runtime_strategy == "qwen_moe_decoder_moe"
 
     def test_qwen_plugin_excludes_moe(self):
         """The standard Qwen plugin should NOT match qwen3_moe."""

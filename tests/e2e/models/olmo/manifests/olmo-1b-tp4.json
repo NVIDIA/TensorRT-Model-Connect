@@ -4,7 +4,7 @@
   "hf_id": "allenai/OLMo-1B-hf",
   "bundle": "olmo-1b-tp4.trtfb",
   "family": "olmo",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "olmo_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

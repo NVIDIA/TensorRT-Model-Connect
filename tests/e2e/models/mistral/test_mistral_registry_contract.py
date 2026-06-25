@@ -14,9 +14,9 @@ def _plugin(model_type: str):
     assert plugin is not None
     return plugin
 
-def test_no_explicit_runtime_strategy() -> None:
+def test_runtime_strategy() -> None:
     plugin = _plugin("mistral")
-    assert getattr(plugin, "runtime_strategy", None) is None
+    assert getattr(plugin, "runtime_strategy", None) == "mistral_decoder_kv_cache"
 
 
 def test_no_embed_input() -> None:

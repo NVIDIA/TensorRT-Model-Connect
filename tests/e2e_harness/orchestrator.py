@@ -318,18 +318,7 @@ def _resolve_bundle(
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
-    diffusion_build_args = {
-        "image_height": "--image-height",
-        "image_width": "--image-width",
-        "video_height": "--video-height",
-        "video_width": "--video-width",
-        "video_num_frames": "--video-num-frames",
-        "num_inference_steps": "--num-inference-steps",
-    }
-    for input_key, cli_arg in diffusion_build_args.items():
-        value = case.inputs.get(input_key)
-        if value is not None:
-            cmd.extend([cli_arg, str(value)])
+    _append_declared_build_cli_args(cmd, case)
     if build_method:
         cmd.extend(["--method", build_method])
     _append_manifest_build_args(cmd, build_args)
@@ -657,72 +646,28 @@ def _build_repro_commands(
     if build_method:
         build_parts.extend(["--method", build_method])
     _append_manifest_build_args(build_parts, case.metadata.get("build_args", {}))
+    _append_declared_build_cli_args(build_parts, case)
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
 
-    # TRT inference command (task-specific C++ binary entrypoint)
+    # TRT inference command. Model-local repro providers or runner-owned hooks
+    # own task-specific CLI recipes; the orchestrator only renders and wraps.
     if bundle_path and ctx.binary_path:
-        image = (case.inputs.get("image") or case.inputs.get("test_image")
-                 or case.inputs.get("image_path"))
-        task_strategy = case.task_strategy or ""
-        repro_provider = get_repro_command_provider(case.family)
-        model_owned_infer_parts: list[str] | None = None
-        if repro_provider is not None:
-            try:
-                model_owned_infer_parts = repro_provider.build_trt_inference_command(
-                    case, ctx, bundle_path)
-            except Exception:
-                logger.warning(
-                    "Model-local repro command provider failed for %s",
-                    case.family,
-                    exc_info=True,
-                )
+        plugin_owned_infer_parts = _build_plugin_owned_trt_inference_command(
+            case, ctx, bundle_path)
 
-        if model_owned_infer_parts is not None:
-            infer_parts = model_owned_infer_parts
-        elif task_strategy == "neural_operator":
-            infer_parts = [ctx.binary_path, "solve", bundle_path]
-            branch_input = case.inputs.get("branch_input")
-            trunk_input = case.inputs.get("trunk_input")
-            if branch_input is not None or trunk_input is not None:
-                if branch_input is not None:
-                    infer_parts.extend(["--branch-input", _csv_arg(branch_input)])
-                if trunk_input is not None:
-                    infer_parts.extend(["--trunk-input", _csv_arg(trunk_input)])
-            else:
-                field_input = case.inputs.get("field_input")
-                if field_input is not None:
-                    infer_parts.extend(["--field-input", _csv_arg(field_input)])
-        elif task_strategy == "diffusion_media_generation":
-            infer_parts = [
-                ctx.binary_path, "generate-video", bundle_path,
-                "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
-                "--output", "/tmp/trtmc_frames",
-                "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
-            ]
-            guidance_scale = case.inputs.get("guidance_scale")
-            if guidance_scale is not None:
-                infer_parts.extend(["--guidance-scale", str(guidance_scale)])
-            if "seed" in case.inputs:
-                infer_parts.extend(["--seed", str(case.inputs["seed"])])
-        elif task_strategy == "segmentation":
-            infer_parts = [
-                ctx.binary_path, "segment", bundle_path,
-                "--image", str(image or ""),
-                "--output", "/tmp/trtmc_segmentation.png",
-            ]
+        if plugin_owned_infer_parts is not None:
+            infer_parts = plugin_owned_infer_parts
         else:
             infer_parts = [
                 ctx.binary_path, "run", bundle_path,
                 "--prompt", _shell_quote(case.inputs.get("prompt", "")),
                 "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
             ]
-            if image:
-                infer_parts.extend(["--image", str(image)])
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python and task_strategy != "neural_operator":
-            infer_parts.extend(["--hf-python", runtime_cli_python])
+            runtime_cli_python = ctx.runtime_cli_hf_python()
+            if runtime_cli_python:
+                infer_parts.extend(["--hf-python", runtime_cli_python])
         infer_parts = _wrap_distributed_repro_command(infer_parts, case)
         repro["trt_inference"] = " ".join(infer_parts)
 
@@ -759,6 +704,44 @@ def _build_repro_commands(
     return repro
 
 
+def _build_plugin_owned_trt_inference_command(
+    case: E2ECase,
+    ctx: RunContext,
+    bundle_path: str,
+) -> list[str] | None:
+    """Ask registered plugins to build task-specific TRT repro commands."""
+    repro_provider = get_repro_command_provider(case.family)
+    if repro_provider is not None:
+        try:
+            model_owned_infer_parts = repro_provider.build_trt_inference_command(
+                case, ctx, bundle_path)
+            if model_owned_infer_parts is not None:
+                return model_owned_infer_parts
+        except Exception:
+            logger.warning(
+                "Model-local repro command provider failed for %s",
+                case.family,
+                exc_info=True,
+            )
+
+    task_strategy = case.task_strategy or ""
+    runner = get_runner(task_strategy) if task_strategy else None
+    build_command = getattr(runner, "build_trt_inference_command", None)
+    if callable(build_command):
+        try:
+            runner_owned_infer_parts = build_command(case, ctx, bundle_path)
+            if runner_owned_infer_parts is not None:
+                return runner_owned_infer_parts
+        except Exception:
+            logger.warning(
+                "Runner-owned repro command hook failed for %s",
+                task_strategy,
+                exc_info=True,
+            )
+
+    return None
+
+
 def _shell_quote(s: str) -> str:
     """Simple shell quoting for inclusion in repro commands."""
     if not s:
@@ -769,13 +752,6 @@ def _shell_quote(s: str) -> str:
         escaped = s.replace("'", "'\\''")
         return f"'{escaped}'"
     return s
-
-
-def _csv_arg(value: Any) -> str:
-    """Serialize numeric E2E inputs into the CLI CSV form used by solve()."""
-    if isinstance(value, (list, tuple)):
-        return ",".join(str(v) for v in value)
-    return str(value)
 
 
 def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
@@ -816,6 +792,46 @@ def _append_manifest_build_args(cmd: list[str], build_args: dict[str, Any]) -> N
     tp_size = _manifest_tensor_parallel_size(build_args)
     if tp_size is not None and tp_size > 1:
         cmd.extend(["--tp-size", str(tp_size)])
+
+
+def _append_declared_build_cli_args(cmd: list[str], case: E2ECase) -> None:
+    specs = case.metadata.get("build_cli_args", [])
+    if not isinstance(specs, list):
+        return
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        flag = spec.get("flag")
+        if not isinstance(flag, str) or not flag:
+            continue
+
+        present = False
+        value: object = None
+        if "value" in spec:
+            value = spec["value"]
+            present = True
+        elif "input" in spec:
+            key = spec["input"]
+            if isinstance(key, str) and key in case.inputs:
+                value = case.inputs[key]
+                present = True
+        elif "metadata" in spec:
+            key = spec["metadata"]
+            if isinstance(key, str) and key in case.metadata:
+                value = case.metadata[key]
+                present = True
+
+        if not present or value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                cmd.append(flag)
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                cmd.extend([flag, str(item)])
+            continue
+        cmd.extend([flag, str(value)])
 
 
 def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:

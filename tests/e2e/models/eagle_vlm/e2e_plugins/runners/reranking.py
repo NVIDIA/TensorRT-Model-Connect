@@ -16,7 +16,7 @@ from typing import Any
 
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from .text_generation import (
+from ._runtime_common import (
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
     _extract_rank_zero_stdout,

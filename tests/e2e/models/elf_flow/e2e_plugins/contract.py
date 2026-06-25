@@ -11,8 +11,140 @@ from tests.e2e_harness.contracts import (
     StageOutput,
     ThresholdProfile,
 )
-from tests.e2e_harness.plugins.base import make_fail, make_pass, normalize_text
+# Model-owned contract helpers. Keep behavior here so contract semantics do not
+# drift across model families through shared harness code.
+def contract_config(case):
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
 
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split()).strip().lower()
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    idx = text.find(prompt)
+    if 0 <= idx <= 2048:
+        return text[idx + len(prompt):].lstrip()
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    if norm_prompt and norm_text.startswith(norm_prompt):
+        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
+    return text
+
+
+_CHAT_ROLE_PREFIXES = (
+    "### response:", "### assistant:", "assistant:",
+    "<|assistant|>", "<|im_start|>assistant\n",
+)
+
+_CHAT_TURN_MARKERS = (
+    "### response:", "### instruction:", "### assistant:",
+    "### user:", "<|assistant|>", "<|user|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def strip_chat_markup(text: str) -> str:
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            break
+    lowered = out.lower()
+    cut = len(out)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    if cut < len(out):
+        out = out[:cut]
+    import re
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
+
+
+def extract_answer(output, prompt: str = "") -> str:
+    raw = output.text or ""
+    if prompt:
+        raw = strip_prompt_echo(raw, prompt)
+    raw = strip_chat_markup(raw)
+    return raw.strip()
+
+
+def levenshtein_ned(a: str, b: str) -> float:
+    if not a and not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,
+                curr[j] + 1,
+                prev[j] + (0 if c1 == c2 else 1),
+            ))
+        prev = curr
+    return prev[-1] / max_len
+
+
+def make_pass(stage_name: str, metrics, rule: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="passed",
+        metrics=metrics,
+        composite_rule=rule,
+        message="Contract verified",
+    )
+
+
+def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="failed",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract verification failed",
+    )
+
+
+def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="skipped",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
+def make_error(stage_name: str, error: str):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="error",
+        message=f"Contract verification error: {error}",
+    )
 
 def _metric_value(output: StageOutput, *names: str) -> float | None:
     for name in names:
@@ -27,7 +159,6 @@ def _metric_value(output: StageOutput, *names: str) -> float | None:
             continue
     return None
 
-
 def _text_from_sample(sample: Any) -> str:
     if isinstance(sample, str):
         return sample
@@ -37,7 +168,6 @@ def _text_from_sample(sample: Any) -> str:
             if isinstance(value, str):
                 return value
     return ""
-
 
 def _token_ids_from_sample(sample: Any) -> list[int]:
     if not isinstance(sample, dict):
@@ -50,7 +180,6 @@ def _token_ids_from_sample(sample: Any) -> list[int]:
     except (TypeError, ValueError):
         return []
 
-
 def _samples_from_jsonl(payload: str) -> list[Any]:
     samples: list[Any] = []
     for line in payload.splitlines():
@@ -62,7 +191,6 @@ def _samples_from_jsonl(payload: str) -> list[Any]:
         except json.JSONDecodeError:
             samples.append({"generated": line})
     return samples
-
 
 def _generated_samples(output: StageOutput) -> list[Any]:
     data = output.data or {}
@@ -81,7 +209,6 @@ def _generated_samples(output: StageOutput) -> list[Any]:
         return [{"generated": output.text}]
     return []
 
-
 def _expected_samples(output: StageOutput) -> list[Any]:
     data = output.data or {}
     value = data.get("expected_generated_samples")
@@ -91,7 +218,6 @@ def _expected_samples(output: StageOutput) -> list[Any]:
     if isinstance(value, str):
         return _samples_from_jsonl(value)
     return []
-
 
 def _has_condition_api(case: E2ECase, output: StageOutput) -> bool:
     resolved = (output.data or {}).get("resolved_inputs", {})
@@ -114,13 +240,11 @@ def _has_condition_api(case: E2ECase, output: StageOutput) -> bool:
     condition_mask = inputs.get("condition_mask_raw") or inputs.get("condition_mask_path")
     return bool(condition_latents and condition_mask)
 
-
 def _has_condition(case: E2ECase, output: StageOutput) -> bool:
     if case.reference_family != "elf_conditional_text":
         return True
 
     return _has_condition_api(case, output)
-
 
 def _optional_metric(
     metrics: dict[str, MetricResult],
@@ -145,7 +269,6 @@ def _optional_metric(
         passed=passed,
     )
     return passed
-
 
 class ElfDiffusionTextPlugin:
     reference_families = ["elf_unconditional_text", "elf_conditional_text"]
@@ -322,6 +445,5 @@ class ElfDiffusionTextPlugin:
         if has_samples and expected_sample_count_ok and non_empty_ok and condition_ok and metric_ok:
             return make_pass(stage, metrics, rule)
         return make_fail(stage, metrics, rule, "ELF diffusion text contract failed")
-
 
 plugin = ElfDiffusionTextPlugin()

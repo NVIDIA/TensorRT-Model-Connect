@@ -27,24 +27,28 @@ import test_impact  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _TASK_STRATEGY_BY_RUNTIME = {
-    "decoder_kv_cache": "text_generation_causal",
-    "decoder_moe": "text_generation_causal",
-    "ssm_recurrent": "text_generation_causal",
-    "vision_language": "vision_language_generation",
+    "decoder_family_decoder_kv_cache": "text_generation_causal",
+    "decoder_peer_family_decoder_kv_cache": "text_generation_causal",
+    "decoder_moe_family_decoder_moe": "text_generation_causal",
+    "mamba_ssm_recurrent": "text_generation_causal",
+    "vision_family_vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
     "text_to_audio_generic": "text_to_audio",
-    "prompted_segmentation": "prompted_segmentation",
-    "segmentation": "segmentation",
-    "encoder_only": "encoder_only_nlp",
+    "prompt_seg_family_prompted_segmentation": "prompted_segmentation",
+    "prompt_seg_text_family_prompted_segmentation": "prompted_segmentation",
+    "semantic_seg_family_segmentation": "segmentation",
+    "encoder_family_encoder_only": "encoder_only_nlp",
+    "context_embed_family_encoder_only": "encoder_only_nlp",
+    "encoder_package_family_encoder_only": "encoder_only_nlp",
+    "custom_builder_family_encoder_only": "encoder_only_nlp",
     "diffusion_media_primary": "diffusion_media_generation",
     "diffusion_media_secondary": "diffusion_media_generation",
-    "decoder_registry_extension": "text_generation_causal",
+    "registry_extension_family_decoder_kv_cache": "text_generation_causal",
     "sequence_point_runtime": "neural_operator",
     "sequence_mixer_runtime": "neural_operator",
     "sequence_global_runtime": "neural_operator",
     "sequence_quantile_runtime": "neural_operator",
     "translation_runtime": "text_generation_causal",
-    "neural_operator": "neural_operator",
 }
 
 
@@ -79,9 +83,14 @@ def mock_repo(tmp_path):
     families_dir.mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "text_generation").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "vision_language").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "speech_runtime").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "decoder_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "decoder_peer_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "decoder_moe_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "registry_extension_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "vision_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_text_family").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "models" / "semantic_seg_family").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "media_runtime").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
@@ -205,15 +214,15 @@ class TorchReference:
 
     # Manifests
     manifests = [
-        {"name": "decoder-small", "family": "decoder_family", "runtime_strategy": "decoder_kv_cache",
+        {"name": "decoder-small", "family": "decoder_family", "runtime_strategy": "decoder_family_decoder_kv_cache",
          "hf_id": "example/decoder-small", "core": True},
-        {"name": "decoder-large", "family": "decoder_family", "runtime_strategy": "decoder_kv_cache",
+        {"name": "decoder-large", "family": "decoder_family", "runtime_strategy": "decoder_family_decoder_kv_cache",
          "hf_id": "example/decoder-large"},
-        {"name": "decoder-peer", "family": "decoder_peer_family", "runtime_strategy": "decoder_kv_cache",
+        {"name": "decoder-peer", "family": "decoder_peer_family", "runtime_strategy": "decoder_peer_family_decoder_kv_cache",
          "hf_id": "meta/decoder-peer"},
-        {"name": "encoder-core", "family": "encoder_family", "runtime_strategy": "encoder_only",
+        {"name": "encoder-core", "family": "encoder_family", "runtime_strategy": "encoder_family_encoder_only",
          "hf_id": "encoder-core", "core": True},
-        {"name": "speech-core", "family": "speech_family", "runtime_strategy": "speech_to_text",
+        {"name": "speech-core", "family": "speech_family", "runtime_strategy": "speech_family_speech_to_text",
          "hf_id": "example/speech-core", "precision": "fp16", "core": True,
          "test_input_audio": "tests/e2e/data/Recording.wav"},
         {"name": "media-core", "family": "media_family", "runtime_strategy": "diffusion_media_primary",
@@ -224,29 +233,29 @@ class TorchReference:
          "hf_id": "example/media-scale"},
         {"name": "media-scale-fp8", "family": "media_family", "runtime_strategy": "diffusion_media_primary",
          "hf_id": "example/media-scale", "fp8_scales": "media-scale-fp8-scales.json"},
-        {"name": "recurrent-core", "family": "recurrent_family", "runtime_strategy": "ssm_recurrent",
+        {"name": "recurrent-core", "family": "recurrent_family", "runtime_strategy": "mamba_ssm_recurrent",
          "hf_id": "example/recurrent-core", "core": True},
-        {"name": "vision-core", "family": "vision_family", "runtime_strategy": "vision_language",
+        {"name": "vision-core", "family": "vision_family", "runtime_strategy": "vision_family_vision_language",
          "hf_id": "example/vision-core", "test_image": "data/test_img.jpeg", "core": True},
         {"name": "audio-core", "family": "audio_family", "runtime_strategy": "text_to_audio_generic",
          "hf_id": "example/audio-core", "core": True},
-        {"name": "prompt-seg-core", "family": "prompt_seg_family", "runtime_strategy": "prompted_segmentation",
+        {"name": "prompt-seg-core", "family": "prompt_seg_family", "runtime_strategy": "prompt_seg_family_prompted_segmentation",
          "hf_id": "example/prompt-seg-core", "reference_family": "prompted_segmentation_point",
          "core": True},
-        {"name": "prompt-seg-text", "family": "prompt_seg_text_family", "runtime_strategy": "prompted_segmentation",
+        {"name": "prompt-seg-text", "family": "prompt_seg_text_family", "runtime_strategy": "prompt_seg_text_family_prompted_segmentation",
          "hf_id": "example/prompt-seg-text", "reference_family": "prompted_segmentation_text",
          "core": True},
-        {"name": "context-embed-model", "family": "context_embed_family", "runtime_strategy": "encoder_only",
+        {"name": "context-embed-model", "family": "context_embed_family", "runtime_strategy": "context_embed_family_encoder_only",
          "hf_id": "example/context-embed-model", "reference_family": "context_embed_reference"},
-        {"name": "semantic-seg-core", "family": "semantic_seg_family", "runtime_strategy": "segmentation",
+        {"name": "semantic-seg-core", "family": "semantic_seg_family", "runtime_strategy": "semantic_seg_family_segmentation",
          "hf_id": "example/semantic-seg-core", "reference_family": "semantic_segmentation",
          "core": True},
-        {"name": "decoder-moe-core", "family": "decoder_moe_family", "runtime_strategy": "decoder_moe",
+        {"name": "decoder-moe-core", "family": "decoder_moe_family", "runtime_strategy": "decoder_moe_family_decoder_moe",
          "hf_id": "example/decoder-moe-core", "core": True},
         {"name": "decoder-registry-case", "family": "registry_extension_family",
-         "runtime_strategy": "decoder_registry_extension",
+         "runtime_strategy": "registry_extension_family_decoder_kv_cache",
          "hf_id": "org/decoder-registry-case"},
-        {"name": "encoder-package-core", "family": "encoder_package_family", "runtime_strategy": "encoder_only",
+        {"name": "encoder-package-core", "family": "encoder_package_family", "runtime_strategy": "encoder_package_family_encoder_only",
          "hf_id": "example/encoder-package"},
         {"name": "elf-flow-case", "family": "elf_flow", "runtime_strategy": "diffusion_text_generation",
          "hf_id": "example/elf-flow"},
@@ -361,15 +370,9 @@ class TorchReference:
                 ],
             },
             {
-                "name": "prompt_seg_text_perception_config",
-                "path": "src/runtime/domains/perception/perception_types.h",
-                "scope": {
-                    "task_strategies": [
-                        "segmentation",
-                        "prompted_segmentation",
-                        "object_detection",
-                    ],
-                },
+                "name": "prompt_seg_text_config",
+                "path": "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h",
+                "scope": {"owner_family": True},
                 "allowed_tokens": [
                     "image_mean",
                     "image_size",
@@ -433,7 +436,10 @@ class TorchReference:
         json.dumps([
             {
                 "name": "context_embed_reference_backend",
-                "path": "tests/e2e_harness/references/hf_transformers.py",
+                "path": (
+                    "tests/e2e/models/context_embed_family/e2e_plugins/"
+                    "references/hf_transformers.py"
+                ),
                 "scope": {"models": ["context-embed-model"]},
                 "allowed_tokens": [
                     "autotokenizer.from_pretrained",
@@ -558,12 +564,36 @@ class TorchReference:
     (python_package_dir / "config.py").write_text("")
     (python_package_dir / "checkpoint_mapper.py").write_text("")
     (python_package_dir / "graph_ops.py").write_text("")
-    (tmp_path / "src" / "runtime" / "models" / "text_generation" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_kv_cache", "decoder_moe", "decoder_registry_extension"]\n',
+    (tmp_path / "src" / "runtime" / "models" / "decoder_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["decoder_family_decoder_kv_cache"]\n',
         encoding="utf-8",
     )
-    (tmp_path / "src" / "runtime" / "models" / "vision_language" / "MODEL.toml").write_text(
-        'runtime_strategies = ["vision_language"]\n',
+    (tmp_path / "src" / "runtime" / "models" / "decoder_peer_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["decoder_peer_family_decoder_kv_cache"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "decoder_moe_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["decoder_moe_family_decoder_moe"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "registry_extension_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["registry_extension_family_decoder_kv_cache"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "vision_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["vision_family_vision_language"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["prompt_seg_family_prompted_segmentation"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_text_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["prompt_seg_text_family_prompted_segmentation"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "models" / "semantic_seg_family" / "MODEL.toml").write_text(
+        'runtime_strategies = ["semantic_seg_family_segmentation"]\n',
         encoding="utf-8",
     )
     (tmp_path / "src" / "runtime" / "models" / "media_runtime" / "MODEL.toml").write_text(
@@ -572,7 +602,18 @@ class TorchReference:
     )
     (tmp_path / "src" / "runtime" / "models" / "media_runtime" / "pipeline.cpp").write_text(
         '#include "runtime/core/gpu_matmul.h"\n'
-        '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        '#include "runtime/models/media_runtime/diffusion_denoising_step_seam.h"\n',
+        encoding="utf-8",
+    )
+    (
+        tmp_path
+        / "src"
+        / "runtime"
+        / "models"
+        / "media_runtime"
+        / "diffusion_denoising_step_seam.h"
+    ).write_text(
+        "",
         encoding="utf-8",
     )
     (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime" / "MODEL.toml").write_text(
@@ -580,15 +621,18 @@ class TorchReference:
         encoding="utf-8",
     )
     (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime" / "pipeline.cpp").write_text(
-        '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        '#include "runtime/models/media_aux_runtime/diffusion_denoising_step_seam.h"\n',
         encoding="utf-8",
     )
-    (tmp_path / "src" / "runtime" / "models" / "speech_runtime" / "MODEL.toml").write_text(
-        'runtime_strategies = ["speech_to_text"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "speech_runtime" / "pipeline.cpp").write_text(
-        '#include "runtime/domains/audio/mel_spectrogram.h"\n',
+    (
+        tmp_path
+        / "src"
+        / "runtime"
+        / "models"
+        / "media_aux_runtime"
+        / "diffusion_denoising_step_seam.h"
+    ).write_text(
+        "",
         encoding="utf-8",
     )
     (tmp_path / "tests" / "e2e" / "data" / "media-scale-fp8-scales.json").write_text(
@@ -679,7 +723,7 @@ class TestDeclarativeClassificationRules:
             {
                 "name": "custom-builder-model",
                 "family": "custom_builder_family",
-                "runtime_strategy": "encoder_only",
+                "runtime_strategy": "custom_builder_family_encoder_only",
                 "hf_id": "custom/model",
             },
         )
@@ -879,24 +923,23 @@ class TestFamilyOwnedBuilder:
 
 
 class TestCppScope:
-    def test_cpp_runtime_text_generation_scope(self, imap):
-        """text_generation runtime model files -> only decoder models."""
+    def test_cpp_runtime_decoder_family_scope(self, imap):
+        """decoder_family runtime model files -> only decoder_family models."""
         match = test_impact.classify_file(
-            "src/runtime/models/text_generation/plugin.cpp", imap)
+            "src/runtime/models/decoder_family/plugin.cpp", imap)
         assert match.rule == "cpp_runtime_model"
         assert match.rebuild_cpp is True
-        # Should include decoder_family, decoder_peer_family (kv_cache), and decoder_moe_family.
-        assert "decoder-small" in match.models
-        assert "decoder-moe-core" in match.models
-        assert "decoder-registry-case" in match.models
-        # Should NOT include non-decoder models
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
+        assert "decoder-moe-core" not in match.models
+        assert "decoder-registry-case" not in match.models
         assert "encoder-core" not in match.models
         assert "media-core" not in match.models
 
-    def test_cpp_runtime_vision_language_scope(self, imap):
-        """vision_language runtime model files -> only vision_language models."""
+    def test_cpp_runtime_vision_family_scope(self, imap):
+        """vision_family runtime model files -> only vision_family models."""
         match = test_impact.classify_file(
-            "src/runtime/models/vision_language/plugin.cpp", imap)
+            "src/runtime/models/vision_family/plugin.cpp", imap)
         assert match.rule == "cpp_runtime_model"
         assert set(match.models) == {"vision-core"}
 
@@ -920,7 +963,7 @@ class TestCppScope:
         for path in (
             "src/runtime/plugins/decoder_plugin.cpp",
             "src/runtime/plugins/media_runtime_plugin.cpp",
-            "src/runtime/pipelines/text_generation_pipeline.cpp",
+            "src/runtime/pipelines/legacy_decoder_pipeline.cpp",
             "src/runtime/pipelines/media_runtime_pipeline.cpp",
         ):
             match = test_impact.classify_file(path, imap)
@@ -928,12 +971,12 @@ class TestCppScope:
             assert len(match.models) == len(imap.all_model_names)
 
     def test_cpp_pipeline_scope(self, imap):
-        """text_generation pipeline.cpp -> only decoder models."""
+        """decoder_family pipeline.cpp -> only decoder_family models."""
         match = test_impact.classify_file(
-            "src/runtime/models/text_generation/pipeline.cpp", imap)
+            "src/runtime/models/decoder_family/pipeline.cpp", imap)
         assert match.rule == "cpp_runtime_model"
-        assert "decoder-small" in match.models
-        assert "decoder-registry-case" in match.models
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-registry-case" not in match.models
         assert "encoder-core" not in match.models
 
     def test_media_family_pipeline_runtime_scope_uses_non_fp8_l0_representative(self, imap):
@@ -979,27 +1022,12 @@ class TestCppScope:
         assert "media-scale-fp8" not in match.models
         assert "decoder-small" not in match.models
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "src/runtime/domains/audio/mel_spectrogram.cpp",
-            "src/runtime/domains/audio/mel_spectrogram.h",
-        ],
-    )
-    def test_scoped_cpp_helper_audio_mel_spectrogram(self, imap, path):
-        """mel_spectrogram helper -> only ASR runtime models that include it."""
-        match = test_impact.classify_file(path, imap)
-        assert match.rule == "cpp_scoped_helper"
-        assert "speech-core" in match.models
-        assert "audio-core" not in match.models
-        assert "decoder-small" not in match.models
-        assert "media-core" not in match.models
-
-    def test_scoped_cpp_helper_diffusion_seam(self, imap):
-        """diffusion seam helper -> only diffusion pipelines that include it."""
+    def test_cpp_runtime_model_owned_diffusion_seam(self, imap):
+        """model-owned diffusion seam helper -> owning runtime models only."""
         match = test_impact.classify_file(
-            "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h", imap)
-        assert match.rule == "cpp_scoped_helper"
+            "src/runtime/models/media_runtime/diffusion_denoising_step_seam.h", imap
+        )
+        assert match.rule == "cpp_runtime_model"
         assert "media-core" in match.models
         assert "media-scale" in match.models
         assert "media-scale-fp8" not in match.models
@@ -1460,18 +1488,58 @@ class TestUnitTiers:
 
 
 class TestHarness:
-    def test_harness_runner(self, imap):
-        """runners/text_generation.py -> text_generation_causal models."""
+    def test_harness_runner_placeholder(self, imap):
+        """Shared runner placeholders run structural tools checks only."""
         match = test_impact.classify_file(
             "tests/e2e_harness/runners/text_generation.py", imap)
+        assert match.rule == "harness_runner_placeholder"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
+    def test_harness_runner(self, mock_repo):
+        """Non-placeholder shared runner routes stay task-scoped."""
+        runner_path = mock_repo / "tests" / "e2e_harness" / "runners" / "custom_text.py"
+        runner_path.write_text(
+            """
+class CustomTextRunner:
+    @property
+    def strategy_name(self):
+        return "text_generation_causal"
+""".lstrip(),
+            encoding="utf-8",
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(
+            "tests/e2e_harness/runners/custom_text.py", imap)
         assert match.rule == "harness_runner"
         assert "decoder-small" in match.models
         assert "encoder-core" not in match.models
 
-    def test_harness_comparator(self, imap):
-        """comparators/diffusion.py -> diffusion models."""
+    def test_harness_comparator_placeholder(self, imap):
+        """Shared comparator placeholders run structural tools checks only."""
         match = test_impact.classify_file(
             "tests/e2e_harness/comparators/diffusion.py", imap)
+        assert match.rule == "harness_comparator_placeholder"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
+    def test_harness_comparator(self, mock_repo):
+        """Non-placeholder shared comparator routes stay task-scoped."""
+        comparator_path = (
+            mock_repo / "tests" / "e2e_harness" / "comparators" / "custom_diffusion.py"
+        )
+        comparator_path.write_text(
+            """
+class CustomDiffusionComparator:
+    @property
+    def task_strategy(self):
+        return "diffusion_media_generation"
+""".lstrip(),
+            encoding="utf-8",
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(
+            "tests/e2e_harness/comparators/custom_diffusion.py", imap)
         assert match.rule == "harness_comparator"
         assert "media-core" in match.models
         assert "decoder-small" not in match.models
@@ -1518,21 +1586,45 @@ class TestHarness:
         assert match.models == []
         assert match.unit_tiers == ["tools"]
 
+    def test_harness_reference_placeholder(self, imap):
+        """Shared reference placeholders run structural tools checks only."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/references/torch_reference.py", imap)
+        assert match.rule == "harness_reference_placeholder"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+
     def test_torch_reference_includes_neural_operator_models(self, mock_repo):
-        """torch_reference.py includes neural_operator-backed manifests."""
+        """Non-placeholder shared references can still route by backend."""
+        reference_path = (
+            mock_repo
+            / "tests"
+            / "e2e_harness"
+            / "references"
+            / "custom_torch_reference.py"
+        )
+        reference_path.write_text(
+            """
+class CustomTorchReference:
+    @property
+    def backend_name(self):
+        return "torch_reference"
+""".lstrip(),
+            encoding="utf-8",
+        )
         models_dir = mock_repo / "tests" / "e2e" / "models"
         _write_json(
             models_dir / "neural-op-case.json",
             {
                 "name": "neural-op-case",
-                "family": "neural_operator",
-                "runtime_strategy": "neural_operator",
+                "family": "sequence_point_family",
+                "runtime_strategy": "sequence_point_runtime",
                 "hf_id": "example/neural-operator",
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
         match = test_impact.classify_file(
-            "tests/e2e_harness/references/torch_reference.py",
+            "tests/e2e_harness/references/custom_torch_reference.py",
             imap,
         )
         assert match.rule == "harness_reference"
@@ -1578,7 +1670,7 @@ class TestHarness:
             "prompt_seg_text_engine_builder_metadata",
             "prompt_seg_text_segment_prompted_cli_usage",
             "prompt_seg_text_segment_prompted_cli_runtime",
-            "prompt_seg_text_perception_config",
+            "prompt_seg_text_config",
             "prompt_seg_text_bpe_end_of_word_suffix",
             "prompt_seg_text_harness_contract",
         ]
@@ -1606,19 +1698,19 @@ diff --git a/tests/e2e/timing_estimates.json b/tests/e2e/timing_estimates.json
         matrix_diff = """
 diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
 @@ -1 +1 @@
-+    "decoder_moe": {
++    "decoder_moe_family_decoder_moe": {
 +      "task_strategy": "text_generation_causal",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
++      "runner_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.runners.text_generation.TextGenerationCausalRunner",
++      "comparator_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.comparators.text.TextComparator",
 +      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe']."
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe_family_decoder_moe']."
 +    },
 +    "sequence_quantile_runtime": {
 +      "task_strategy": "neural_operator",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "runner_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
 +      "diff_framework_check_classes": [],
 +      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_quantile_runtime']."
 +    },
@@ -1751,11 +1843,11 @@ diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
             "tests/runtime_strategy_matrix.yaml": """
 diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
 @@ -1 +1 @@
-+    "decoder_moe": {
++    "decoder_moe_family_decoder_moe": {
 +      "task_strategy": "text_generation_causal",
 +      "cli_commands": ["run"],
-+      "runner_class": "tests.e2e_harness.runners.text_generation.TextGenerationCausalRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.text.TextComparator",
++      "runner_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.runners.text_generation.TextGenerationCausalRunner",
++      "comparator_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.comparators.text.TextComparator",
 +      "diff_framework_check_classes": []
 +    },
 """,
@@ -1914,32 +2006,32 @@ diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.
 +    "sequence_point_runtime": {
 +      "task_strategy": "neural_operator",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "runner_class": "tests.e2e.models.sequence_point_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e.models.sequence_point_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
 +      "diff_framework_check_classes": [],
 +      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_point_runtime']."
 +    },
 +    "sequence_mixer_runtime": {
 +      "task_strategy": "neural_operator",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "runner_class": "tests.e2e.models.sequence_mixer_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e.models.sequence_mixer_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
 +      "diff_framework_check_classes": [],
 +      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_mixer_runtime']."
 +    },
 +    "sequence_global_runtime": {
 +      "task_strategy": "neural_operator",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "runner_class": "tests.e2e.models.sequence_global_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e.models.sequence_global_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
 +      "diff_framework_check_classes": [],
 +      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_global_runtime']."
 +    },
 +    "sequence_quantile_runtime": {
 +      "task_strategy": "neural_operator",
 +      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e_harness.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e_harness.comparators.neural_operator.NeuralOperatorComparator",
++      "runner_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
++      "comparator_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
 +      "diff_framework_check_classes": [],
 +      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_quantile_runtime']."
 +    },
@@ -2068,7 +2160,7 @@ diff --git a/src/cli/main.cpp b/src/cli/main.cpp
     def test_prompt_seg_text_runtime_support_rules_refine_shared_cpp_diffs(self, imap):
         """text-prompt segmentation config and BPE suffix support avoid all-model fallback."""
         config_diff = """
-diff --git a/src/runtime/domains/perception/perception_types.h b/src/runtime/domains/perception/perception_types.h
+diff --git a/src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h b/src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h
 @@ -10 +10 @@ struct PromptSegConfig {
 -    int32_t image_embedding_size{64};  // image_size / patch_size
 +    int32_t image_embedding_size{64}; // image_size / patch_size
@@ -2106,15 +2198,15 @@ diff --git a/src/runtime/domains/perception/perception_types.h b/src/runtime/dom
 +    std::vector<int32_t> class_map; // [H, W] class indices
 """
         broad_config = test_impact.classify_file(
-            "src/runtime/domains/perception/perception_types.h", imap)
+            "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h", imap)
         refined_config = test_impact.maybe_refine_match_with_diff(
-            "src/runtime/domains/perception/perception_types.h",
+            "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h",
             broad_config,
             config_diff,
             imap,
         )
-        assert refined_config.rule == "prompt_seg_text_perception_config"
-        assert "prompt-seg-text" in refined_config.models
+        assert refined_config.rule == "prompt_seg_text_config"
+        assert refined_config.models == ["prompt-seg-text"]
         assert "decoder-small" not in refined_config.models
 
         tokenizer_diff = """
@@ -2215,9 +2307,9 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         assert "decoder-small" not in refined.models
 
     def test_harness_reference_vl_generated_only_decode_rule_refines_hf_vl_diff(self, imap):
-        """VL generated-only decode fallback is scoped to InternVL3-8B."""
+        """InternVL-owned generated-only decode fallback is scoped to InternVL3-8B."""
         diff_text = """
-diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+diff --git a/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py b/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py
 @@ -1 +1 @@
 +def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
 +    token_count = len(generated_ids)
@@ -2230,16 +2322,18 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
 +    if not text.strip():
 +        raise RuntimeError("HF VL reference produced empty or prompt-only generated text")
 +    return _decode_token_ids(generated_ids)
-+            from tests.e2e_harness.references.hf_transformers import (
++            from tests.e2e.models.internvl.e2e_plugins.references.hf_transformers import (
 +                _decode_vl_generated_text,
 +            )
 +            text = _decode_vl_generated_text(
 +                processor, generated_ids[0], input_len, prompt_texts)
 """
         broad = test_impact.classify_file(
-            "tests/e2e_harness/references/hf_transformers.py", imap)
+            "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py",
+            imap,
+        )
         refined = test_impact.maybe_refine_match_with_diff(
-            "tests/e2e_harness/references/hf_transformers.py",
+            "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py",
             broad,
             diff_text,
             imap,
@@ -2250,7 +2344,7 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
     def test_model_owned_reference_rule_refines_hf_context_diff(self, imap):
         """A model-owned reference rule should not select every HF model."""
         diff_text = """
-diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness/references/hf_transformers.py
+diff --git a/tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py b/tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py
 @@ -1 +1 @@
 -            tokenizer = AutoTokenizer.from_pretrained(
 -                model_ref, trust_remote_code=trust_remote_code)
@@ -2266,9 +2360,11 @@ diff --git a/tests/e2e_harness/references/hf_transformers.py b/tests/e2e_harness
 +                    model_ref, trust_remote_code=trust_remote_code)
 """
         broad = test_impact.classify_file(
-            "tests/e2e_harness/references/hf_transformers.py", imap)
+            "tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py",
+            imap,
+        )
         refined = test_impact.maybe_refine_match_with_diff(
-            "tests/e2e_harness/references/hf_transformers.py",
+            "tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py",
             broad,
             diff_text,
             imap,
@@ -2333,11 +2429,10 @@ diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_m
         diff_text = """
 diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
 @@ -1 +1 @@
-+def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
-+    for tok_subdir in ("tokenizer_2", "tokenizer"):
-+        tok_dir = model_dir / tok_subdir
-+            return _detect_tokenizer_add_special_tokens(tok_dir)
-+    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(model_dir_path)
++def _diffusion_tokenizer_add_special_tokens_from_plugin(plugin, model_dir_path: Path) -> bool:
++    detector = getattr(plugin, "diffusion_tokenizer_add_special_tokens", None)
++    kwargs["detect_tokenizer_add_special_tokens"] = _detect_tokenizer_add_special_tokens
++    tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(plugin, model_dir_path)
 +        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
 """
         broad = test_impact.classify_file(

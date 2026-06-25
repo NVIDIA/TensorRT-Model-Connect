@@ -41,7 +41,7 @@ trt = trt_compat.get_trt()
 
 class BartPlugin:
     name = "bart"
-    runtime_strategy = "seq2seq_encoder_decoder"
+    runtime_strategy = "bart_seq2seq_encoder_decoder"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("bart", "mbart")

@@ -611,7 +611,7 @@ def resolve_nemo_archive_model_dir(nemo_path: str | Path) -> str | None:
     return None
 
 
-def resolve_debug_runner_from_bundle(
+def resolve_debug_runner(
     runtime_strategy: str,
     *,
     config: dict[str, Any],
@@ -642,6 +642,26 @@ def resolve_debug_runner_from_bundle(
             distributed_communicator=distributed_communicator,
         )
     return None
+
+
+def resolve_debug_runner_from_bundle(
+    runtime_strategy: str,
+    *,
+    config: dict[str, Any],
+    header: dict[str, Any],
+    engine_plan: bytes,
+    bundle_path: str | Path,
+    distributed_communicator: object | None = None,
+) -> object | None:
+    """Compatibility wrapper for bundle-based debug runner dispatch."""
+    return resolve_debug_runner(
+        runtime_strategy,
+        config=config,
+        header=header,
+        engine_plan=engine_plan,
+        bundle_path=bundle_path,
+        distributed_communicator=distributed_communicator,
+    )
 
 
 def _matching_family_metadata(model_type: object) -> list[_FamilyMetadata]:

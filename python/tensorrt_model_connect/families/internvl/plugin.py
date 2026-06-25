@@ -39,7 +39,7 @@ _DEFAULT_FIXED_IMAGE_SIZE = 448
 
 class InternVLPlugin:
     name = "internvl"
-    runtime_strategy = "vision_language"
+    runtime_strategy = "internvl_vision_language"
     embed_input = True
 
     def matches(self, model_type: str) -> bool:

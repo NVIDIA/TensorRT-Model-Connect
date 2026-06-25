@@ -4,7 +4,7 @@
   "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
   "bundle": "riva-translate-4b.trtfb",
   "family": "mistral",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "translation_chat_template",
   "user_contract": "translation",

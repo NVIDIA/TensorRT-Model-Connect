@@ -62,7 +62,8 @@ else:
 # 3. Runner helper
 # ---------------------------------------------------------------------------
 
-from tensorrt_model_connect.debug_runner import load_section_from_bundle, TrtRunner  # noqa: E402
+from tensorrt_model_connect.families.qwen.debug_runner import TrtRunner  # noqa: E402
+from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 try:

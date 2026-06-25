@@ -7,8 +7,140 @@ from pathlib import Path
 import numpy as np
 
 from tests.e2e_harness.contracts import MetricResult
-from tests.e2e_harness.plugins.base import make_error, make_fail, make_pass
+# Model-owned contract helpers. Keep behavior here so contract semantics do not
+# drift across model families through shared harness code.
+def contract_config(case):
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
 
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split()).strip().lower()
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    idx = text.find(prompt)
+    if 0 <= idx <= 2048:
+        return text[idx + len(prompt):].lstrip()
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    if norm_prompt and norm_text.startswith(norm_prompt):
+        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
+    return text
+
+
+_CHAT_ROLE_PREFIXES = (
+    "### response:", "### assistant:", "assistant:",
+    "<|assistant|>", "<|im_start|>assistant\n",
+)
+
+_CHAT_TURN_MARKERS = (
+    "### response:", "### instruction:", "### assistant:",
+    "### user:", "<|assistant|>", "<|user|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def strip_chat_markup(text: str) -> str:
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            break
+    lowered = out.lower()
+    cut = len(out)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    if cut < len(out):
+        out = out[:cut]
+    import re
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
+
+
+def extract_answer(output, prompt: str = "") -> str:
+    raw = output.text or ""
+    if prompt:
+        raw = strip_prompt_echo(raw, prompt)
+    raw = strip_chat_markup(raw)
+    return raw.strip()
+
+
+def levenshtein_ned(a: str, b: str) -> float:
+    if not a and not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,
+                curr[j] + 1,
+                prev[j] + (0 if c1 == c2 else 1),
+            ))
+        prev = curr
+    return prev[-1] / max_len
+
+
+def make_pass(stage_name: str, metrics, rule: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="passed",
+        metrics=metrics,
+        composite_rule=rule,
+        message="Contract verified",
+    )
+
+
+def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="failed",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract verification failed",
+    )
+
+
+def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="skipped",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
+def make_error(stage_name: str, error: str):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="error",
+        message=f"Contract verification error: {error}",
+    )
 
 def _resolve_mask_list(data):
     masks = data.get("masks") or []
@@ -28,7 +160,6 @@ def _resolve_mask_list(data):
         return [loaded]
     return [loaded[i] for i in range(loaded.shape[0])]
 
-
 def _resolve_score_list(data):
     scores = data.get("mask_scores")
     if scores is None:
@@ -38,7 +169,6 @@ def _resolve_score_list(data):
     if scores is None:
         return []
     return [float(score) for score in scores]
-
 
 def _resolve_box_list(data):
     boxes = data.get("boxes")
@@ -51,7 +181,6 @@ def _resolve_box_list(data):
             resolved.append(values)
     return resolved
 
-
 def _compute_binary_iou(pred, gt):
     pred = np.asarray(pred, dtype=bool)
     gt = np.asarray(gt, dtype=bool)
@@ -60,7 +189,6 @@ def _compute_binary_iou(pred, gt):
     if union == 0:
         return 1.0 if intersection == 0 else 0.0
     return float(intersection / union)
-
 
 def _compute_box_iou(box_a, box_b):
     x1 = max(box_a[0], box_b[0])
@@ -74,7 +202,6 @@ def _compute_box_iou(box_a, box_b):
     if union <= 0.0:
         return 0.0
     return float(inter / union)
-
 
 def _verify_sam3_instance_metadata(trt_output, ref_output, threshold, metrics):
     trt_boxes = _resolve_box_list(trt_output.data)
@@ -130,7 +257,6 @@ def _verify_sam3_instance_metadata(trt_output, ref_output, threshold, metrics):
         )
 
     return None
-
 
 def _verify_sam3_prompted_masks(trt_output, ref_output, threshold):
     trt_masks = _resolve_mask_list(trt_output.data)
@@ -207,7 +333,6 @@ def _verify_sam3_prompted_masks(trt_output, ref_output, threshold):
         f"Sam3 prompted segmentation quality: mean_iou={mean_iou:.3f}",
     )
 
-
 class Sam3SegmentationPlugin:
     reference_families = ["prompted_segmentation_sam3"]
     user_contract = "prompted_mask"
@@ -217,6 +342,5 @@ class Sam3SegmentationPlugin:
 
     def verify(self, trt_output, ref_output, case, threshold):
         return _verify_sam3_prompted_masks(trt_output, ref_output, threshold)
-
 
 plugin = Sam3SegmentationPlugin()

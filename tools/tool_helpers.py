@@ -6,7 +6,6 @@ Used by: diff_logits.py, diff_layers.py, perf_compare.py,
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import numpy as np
 
@@ -35,36 +34,85 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose, *, tag="diff")
     return engine_plan, config, model_dir
 
 
+def runtime_strategy_from_config(config) -> str:
+    """Return the family-owned runtime strategy for a ModelConfig-like object."""
+    from tensorrt_model_connect.families import find_plugin
+
+    plugin = find_plugin(getattr(config, "model_type", config))
+    strategy = str(getattr(plugin, "runtime_strategy", "") or "")
+    if not strategy:
+        raise ValueError(
+            f"No runtime_strategy declared for model_type="
+            f"{getattr(config, 'model_type', config)!r}"
+        )
+    return strategy
+
+
+def _debug_runner_config_dict(config, runtime_strategy: str, num_layers: int) -> dict:
+    if isinstance(config, dict):
+        result = dict(config)
+    else:
+        result = {
+            "model_type": str(getattr(config, "model_type", "")),
+            "num_hidden_layers": int(
+                getattr(config, "num_hidden_layers", num_layers)
+            ),
+        }
+        raw = getattr(config, "raw", None)
+        if isinstance(raw, dict):
+            result.update(raw)
+    result.setdefault("runtime_strategy", runtime_strategy)
+    result.setdefault("num_hidden_layers", num_layers)
+    return result
+
+
+def make_family_debug_runner(
+    *,
+    engine_plan: bytes,
+    runtime_strategy: str,
+    max_cache_length: int,
+    num_layers: int,
+    config=None,
+    bundle_path: str = "",
+    profiler=None,
+):
+    """Instantiate the debug runner owned by runtime_strategy's family."""
+    from tensorrt_model_connect.families import resolve_debug_runner
+
+    strategy = str(runtime_strategy or "")
+    if not strategy:
+        raise ValueError("runtime_strategy is required for family debug runner dispatch")
+    runner = resolve_debug_runner(
+        strategy,
+        config=_debug_runner_config_dict(config, strategy, num_layers),
+        header={
+            "max_cache_length": max_cache_length,
+            "num_layers": num_layers,
+        },
+        engine_plan=engine_plan,
+        bundle_path=bundle_path,
+    )
+    if runner is None:
+        raise RuntimeError(
+            f"No family-owned debug_runner adapter handles {strategy!r}"
+        )
+    if profiler is not None:
+        runner.context.profiler = profiler
+    return runner
+
+
 def load_hf_model(model_dir, *, trust_remote_code=False, torch_dtype=None,
                    tag="diff"):
-    """Load HF model with VL detection and trust_remote_code fallback.
+    """Load a standard causal-LM HF model with trust_remote_code fallback.
 
     Returns the model on CPU. Callers should move to device and call eval()
     as needed.
     """
-    import json
     import torch
     from transformers import AutoModelForCausalLM
 
     if torch_dtype is None:
         torch_dtype = torch.float32
-
-    # Check if this is a VL model that requires a different AutoModel class.
-    config_path = Path(model_dir) / "config.json"
-    is_vl_model = False
-    if config_path.exists():
-        cfg = json.loads(config_path.read_text())
-        model_type = cfg.get("model_type", "").lower()
-        if "vl" in model_type or "vision" in model_type:
-            is_vl_model = True
-
-    if is_vl_model:
-        from transformers import AutoModelForImageTextToText
-        print(f"[{tag}] Loading VL model via AutoModelForImageTextToText ...",
-              file=sys.stderr)
-        return AutoModelForImageTextToText.from_pretrained(
-            model_dir, trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype)
 
     try:
         return AutoModelForCausalLM.from_pretrained(

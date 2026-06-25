@@ -152,4 +152,4 @@ class TestModernbertPlugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.modernbert import plugin
-        assert plugin.runtime_strategy == "encoder_only"
+        assert plugin.runtime_strategy == "modernbert_encoder_only"

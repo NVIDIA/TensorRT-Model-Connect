@@ -9,3 +9,7 @@ aliases = [
 prefixes = [
   "qwen3_5",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen3_5_hybrid_mamba_attention",
+]

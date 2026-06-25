@@ -17,8 +17,8 @@ independently. This makes the run ~2-3x slower than production but gives
 accurate per-phase attribution.
 
 Supported runtime strategies:
-  decoder_kv_cache / decoder_moe  -- uses TrtRunner (standard KV-cache decoder)
-  family-owned runtimes           -- use model-owned CPU profiling hooks
+  family-owned decoder runtimes   -- use family-owned debug runners
+  family-owned custom runtimes    -- use model-owned CPU profiling hooks
 
 Usage:
     # Standard decoder
@@ -73,7 +73,7 @@ DECODER_PHASES = ("mask_build", "h2d", "tensor_bind", "execute",
 # ---------------------------------------------------------------------------
 
 class _TimedDecoderRunner:
-    """Wraps TrtRunner and provides timed_step() with per-phase measurements.
+    """Wraps a family-owned debug runner and provides timed_step().
 
     Each phase is separated by cudaStreamSynchronize so times are accurate.
     VL/DeepStack inputs are intentionally omitted — this tool profiles the
@@ -83,12 +83,16 @@ class _TimedDecoderRunner:
     PHASES = DECODER_PHASES
 
     def __init__(self, engine_plan: bytes, max_cache_length: int,
-                 num_layers: int):
-        from tensorrt_model_connect.debug_runner import TrtRunner
-        self._runner = TrtRunner(
+                 num_layers: int, runtime_strategy: str, config=None,
+                 bundle_path: str = ""):
+        from tool_helpers import make_family_debug_runner
+        self._runner = make_family_debug_runner(
             engine_plan=engine_plan,
+            runtime_strategy=runtime_strategy,
             max_cache_length=max_cache_length,
             num_layers=num_layers,
+            config=config,
+            bundle_path=bundle_path,
         )
         self._phase_times: dict[str, list[float]] = {p: [] for p in self.PHASES}
 
@@ -390,18 +394,25 @@ def main():
 
     if args.bundle:
         print(f"[cpu_profile] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, perf_handler = \
+        engine_plan, num_layers, max_cache_length, bundle_config, perf_handler = \
             load_trt_from_bundle(args.bundle)
+        runtime_strategy = str(bundle_config.get("runtime_strategy") or "")
+        runner_config = bundle_config
+        runner_bundle_path = args.bundle
         runner_type = _handler_attr(
             perf_handler, "cpu_profile_runner_type", "decoder")
         if args.runner != runner_type:
             print(f"[cpu_profile] Note: bundle is {runner_type!r}, "
                   f"ignoring --runner={args.runner!r}", file=sys.stderr)
     else:
+        from tool_helpers import runtime_strategy_from_config
         engine_plan, config, _, perf_handler = build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
+        runtime_strategy = runtime_strategy_from_config(config)
+        runner_config = config
+        runner_bundle_path = ""
         runner_type = _handler_attr(
             perf_handler, "cpu_profile_runner_type", args.runner)
 
@@ -415,7 +426,14 @@ def main():
             max_cache_length=max_cache_length,
         )
     else:
-        runner = _TimedDecoderRunner(engine_plan, max_cache_length, num_layers)
+        runner = _TimedDecoderRunner(
+            engine_plan,
+            max_cache_length,
+            num_layers,
+            runtime_strategy,
+            config=runner_config,
+            bundle_path=runner_bundle_path,
+        )
     del engine_plan
 
     # -- Run profiling --

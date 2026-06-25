@@ -242,6 +242,87 @@ class WanT2VPlugin:
             out["denoiser"] = dit_plan
         return out
 
+    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+        from ...parallel_config import normalize_parallel_config, rank_denoiser_section
+
+        parallel = normalize_parallel_config(parallel_config)
+        sections: list[tuple[str, bytes]] = []
+        for index, (_name, plan) in enumerate(components["text_encoders"]):
+            sections.append((f"text_encoder_{index}_plan", plan))
+        if parallel.enabled:
+            denoiser_rank_plans = components["denoiser_ranks"]
+            for rank in range(parallel.tp_size):
+                plan = denoiser_rank_plans.get(rank)
+                if plan is None:
+                    plan = denoiser_rank_plans.get(str(rank))
+                if plan is None:
+                    raise ValueError(f"Missing Wan tensor-parallel denoiser rank {rank}")
+                sections.append((rank_denoiser_section(rank), plan))
+        else:
+            sections.append(("denoiser_plan", components["denoiser"]))
+        sections.append(("vae_decoder_plan", components["vae_decoder"]))
+        sections.append(("preprocessor_weights", components["preprocessor_weights"]))
+        return sections
+
+    def diffusion_bundle_config(self, config: ModelConfig, *, components: dict) -> dict:
+        cfg = self.get_diffusion_config(config)
+        cfg["num_text_encoders"] = len(components["text_encoders"])
+        return cfg
+
+    def diffusion_tokenizer_add_special_tokens(
+        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+    ) -> bool:
+        from pathlib import Path
+
+        model_dir = Path(model_dir_path)
+        for tok_subdir in ("tokenizer_2", "tokenizer"):
+            tok_dir = model_dir / tok_subdir
+            if tok_dir.is_dir():
+                return bool(detect_tokenizer_add_special_tokens(tok_dir))
+        return bool(detect_tokenizer_add_special_tokens(model_dir))
+
+    def diffusion_tokenizer_bundle_sections(
+        self, model_dir_path, *, ensure_tokenizer_json,
+    ) -> list[tuple[str, bytes]]:
+        from pathlib import Path
+
+        model_dir = Path(model_dir_path)
+        token_filenames = (
+            "tokenizer.json", "tokenizer_config.json",
+            "special_tokens_map.json", "vocab.json",
+            "merges.txt", "spiece.model", "tokenizer.model",
+        )
+        sections: list[tuple[str, bytes]] = []
+        embedded: set[str] = set()
+        for tok_subdir in ("tokenizer_2", "tokenizer"):
+            tokenizer_dir = model_dir / tok_subdir
+            if not tokenizer_dir.is_dir():
+                continue
+            if not (tokenizer_dir / "tokenizer.json").exists():
+                ensure_tokenizer_json(tokenizer_dir)
+            for filename in token_filenames:
+                if filename in embedded:
+                    continue
+                file_path = tokenizer_dir / filename
+                if file_path.exists():
+                    sections.append((filename, file_path.read_bytes()))
+                    embedded.add(filename)
+
+        clip_file_map = {
+            "tokenizer.json": "clip_tokenizer.json",
+            "vocab.json": "clip_vocab.json",
+            "merges.txt": "clip_merges.txt",
+            "tokenizer_config.json": "clip_tokenizer_config.json",
+            "special_tokens_map.json": "clip_special_tokens_map.json",
+        }
+        clip_tokenizer_dir = model_dir / "tokenizer"
+        if clip_tokenizer_dir.is_dir() and (model_dir / "tokenizer_2").is_dir():
+            for src_name, dst_name in clip_file_map.items():
+                file_path = clip_tokenizer_dir / src_name
+                if file_path.exists():
+                    sections.append((dst_name, file_path.read_bytes()))
+        return sections
+
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         """Return diffusion pipeline configuration."""
         from .causal_vae_3d_builder import count_vae_caches

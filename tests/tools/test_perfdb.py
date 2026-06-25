@@ -110,7 +110,7 @@ class _FakeE2EResult:
 class _FakeE2ECase:
     """Minimal stand-in for contracts.E2ECase."""
     def __init__(self, name="example-decoder", hf_id="example-org/example-decoder",
-                 runtime_strategy="decoder_kv_cache",
+                 runtime_strategy="example_decoder_decoder_kv_cache",
                  task_strategy="text_generation_causal"):
         self.name = name
         self.hf_id = hf_id

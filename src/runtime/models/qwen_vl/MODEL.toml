@@ -1,0 +1,7 @@
+id = "qwen_vl"
+runtime_library = "libtrtmc_model_qwen_vl.so"
+runtime_plugins = ["plugin.cpp|register_qwen_vl_plugin"]
+runtime_strategies = ["qwen_vl_vision_language"]
+runtime_tests = [
+  "test_qwen_vl_vl_pipeline|test_qwen_vl_vl_pipeline.cpp|trtmc_model_qwen_vl,trtmc_backend_trt|_|REQUIRES_TRT",
+]

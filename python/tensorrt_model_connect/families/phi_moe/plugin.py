@@ -48,6 +48,8 @@ trt = trt_compat.get_trt()
 
 class PhiMoEPlugin:
     name = "phi_moe"
+    runtime_strategy = "phi_moe_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "phimoe"

@@ -13,10 +13,6 @@ from tests.e2e_harness.orchestrator import (  # noqa: E402
     _build_detailed_timing,
     _collect_trt_stage_timing,
 )
-from tests.e2e_harness.runners.text_generation import (  # noqa: E402
-    _extract_trtmc_load_timing,
-    _extract_trtmc_timing,
-)
 from tensorrt_model_connect.engine_builder import (  # noqa: E402
     _compile_time_excluding_component_weight_load,
     _untracked_compile_time,
@@ -78,27 +74,6 @@ def test_detailed_timing_does_not_treat_trt_wall_time_as_inference():
     assert details["trt_load_deserialization_s"] == 0.8
     assert details["trt_validation_s"] == 3.0
     assert details["reference_s"] == 2.0
-
-
-def test_text_runner_extracts_engine_timing_from_cli_stderr():
-    timing = _extract_trtmc_timing(
-        "noise\n[trtmc.timing] prefill_ms=12.500000 decode_ms=7.250000 total_ms=19.750000\n"
-    )
-
-    assert timing["trt_engine_prefill_s"] == 0.0125
-    assert timing["trt_engine_decode_s"] == 0.00725
-    assert timing["trt_engine_s"] == 0.01975
-
-
-def test_text_runner_extracts_load_deserialize_timing_from_cli_stderr():
-    timing = _extract_trtmc_load_timing(
-        "\n".join([
-            "[trtmc.load_timing] label=\"engine_plan\" load_deserialize_ms=10.500000 plan_bytes=4",
-            "[trtmc.load_timing] label=\"extra\" load_deserialize_ms=2.250000 plan_bytes=8",
-        ])
-    )
-
-    assert timing["trt_load_deserialize_s"] == 0.01275
 
 
 def test_orchestrator_does_not_double_count_saved_stderr_log(tmp_path):

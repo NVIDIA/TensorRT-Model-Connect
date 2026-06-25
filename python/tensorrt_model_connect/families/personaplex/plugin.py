@@ -191,7 +191,7 @@ def _infer_config_from_weights(readers) -> dict:
 
 class PersonaPlexPlugin:
     name = "personaplex"
-    runtime_strategy = "speech_to_speech"
+    runtime_strategy = "personaplex_speech_to_speech"
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()

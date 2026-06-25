@@ -2,7 +2,7 @@
   "models": [
     {
       "model": "microsoft/Phi-3-mini-4k-instruct",
-      "pipeline_type": "decoder_kv_cache",
+      "pipeline_type": "phi_decoder_kv_cache",
       "label": "A2-decode-medium",
       "benchmark": {
         "label": "CPU argmax",

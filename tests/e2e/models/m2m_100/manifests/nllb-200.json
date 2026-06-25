@@ -3,7 +3,7 @@
   "hf_id": "facebook/nllb-200-distilled-600M",
   "bundle": "nllb-200-distilled-600m.trtfb",
   "family": "m2m_100",
-  "runtime_strategy": "seq2seq_encoder_decoder",
+  "runtime_strategy": "m2m_100_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
   "reference_family": "seq2seq_translation",
   "user_contract": "translation",

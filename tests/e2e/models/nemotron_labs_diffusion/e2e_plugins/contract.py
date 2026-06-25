@@ -3,13 +3,140 @@
 from __future__ import annotations
 
 from tests.e2e_harness.contracts import MetricResult
-from tests.e2e_harness.plugins.base import (
-    levenshtein_ned,
-    make_fail,
-    make_pass,
-    normalize_text,
+# Model-owned contract helpers. Keep behavior here so contract semantics do not
+# drift across model families through shared harness code.
+def contract_config(case):
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split()).strip().lower()
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    idx = text.find(prompt)
+    if 0 <= idx <= 2048:
+        return text[idx + len(prompt):].lstrip()
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    if norm_prompt and norm_text.startswith(norm_prompt):
+        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
+    return text
+
+
+_CHAT_ROLE_PREFIXES = (
+    "### response:", "### assistant:", "assistant:",
+    "<|assistant|>", "<|im_start|>assistant\n",
 )
 
+_CHAT_TURN_MARKERS = (
+    "### response:", "### instruction:", "### assistant:",
+    "### user:", "<|assistant|>", "<|user|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def strip_chat_markup(text: str) -> str:
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            break
+    lowered = out.lower()
+    cut = len(out)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    if cut < len(out):
+        out = out[:cut]
+    import re
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
+
+
+def extract_answer(output, prompt: str = "") -> str:
+    raw = output.text or ""
+    if prompt:
+        raw = strip_prompt_echo(raw, prompt)
+    raw = strip_chat_markup(raw)
+    return raw.strip()
+
+
+def levenshtein_ned(a: str, b: str) -> float:
+    if not a and not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,
+                curr[j] + 1,
+                prev[j] + (0 if c1 == c2 else 1),
+            ))
+        prev = curr
+    return prev[-1] / max_len
+
+
+def make_pass(stage_name: str, metrics, rule: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="passed",
+        metrics=metrics,
+        composite_rule=rule,
+        message="Contract verified",
+    )
+
+
+def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="failed",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract verification failed",
+    )
+
+
+def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="skipped",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
+def make_error(stage_name: str, error: str):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="error",
+        message=f"Contract verification error: {error}",
+    )
 
 class NemotronLabsDiffusionPlugin:
     reference_families = ["nemotron_labs_diffusion_model_card"]
@@ -130,13 +257,11 @@ class NemotronLabsDiffusionPlugin:
             "Nemotron Labs Diffusion model-card token parity failed",
         )
 
-
 def _token_ids(output) -> list[int]:
     value = (output.data or {}).get("token_ids", [])
     if not isinstance(value, list):
         return []
     return [int(token) for token in value]
-
 
 def _int_set(values) -> set[int]:
     if values is None:
@@ -144,7 +269,6 @@ def _int_set(values) -> set[int]:
     if not isinstance(values, (list, tuple, set)):
         values = [values]
     return {int(value) for value in values if value is not None}
-
 
 def _canonical_terminal_tokens(
     token_ids: list[int],
@@ -160,7 +284,6 @@ def _canonical_terminal_tokens(
     out.append(eos)
     return out
 
-
 def _position_agreement(lhs: list[int], rhs: list[int]) -> float:
     denom = max(len(lhs), len(rhs))
     if denom == 0:
@@ -168,6 +291,5 @@ def _position_agreement(lhs: list[int], rhs: list[int]) -> float:
     common = min(len(lhs), len(rhs))
     matches = sum(1 for idx in range(common) if lhs[idx] == rhs[idx])
     return matches / denom
-
 
 plugin = NemotronLabsDiffusionPlugin()

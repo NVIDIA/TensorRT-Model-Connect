@@ -4,7 +4,7 @@
   "hf_id": "tiiuae/falcon-rw-1b",
   "bundle": "falcon-rw-1b-tp4.trtfb",
   "family": "falcon",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "falcon_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

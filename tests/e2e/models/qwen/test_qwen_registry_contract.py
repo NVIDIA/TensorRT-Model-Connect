@@ -14,9 +14,9 @@ def _plugin(model_type: str):
     assert plugin is not None
     return plugin
 
-def test_no_explicit_runtime_strategy() -> None:
+def test_qwen_owned_runtime_strategy() -> None:
     plugin = _plugin("qwen")
-    assert getattr(plugin, "runtime_strategy", None) is None
+    assert getattr(plugin, "runtime_strategy", None) == "qwen_decoder_kv_cache"
 
 
 def test_no_embed_input() -> None:

@@ -20,7 +20,7 @@ def test_load_manifest_applies_internlm_default_execution_profiles(tmp_path) -> 
             "name": "internlm-case",
             "hf_id": "internlm/internlm-test",
             "family": "internlm",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "internlm_decoder_kv_cache",
             "reference_backend": "torch_reference",
         },
     )
@@ -38,7 +38,7 @@ def test_load_manifest_preserves_internlm_execution_profile_overrides(tmp_path) 
             "name": "internlm-case",
             "hf_id": "internlm/internlm-test",
             "family": "internlm",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "internlm_decoder_kv_cache",
             "reference_backend": "torch_reference",
             "execution_profiles": {"runtime": "custom-runtime"},
         },

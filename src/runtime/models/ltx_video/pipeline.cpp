@@ -1,6 +1,6 @@
 #include "runtime/models/ltx_video/pipeline.h"
 
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/ltx_video/ltx_video_scheduler_helpers.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -161,19 +161,19 @@ bool should_log_progress(int32_t step, int32_t num_steps) {
     return (step + 1) % 5 == 0 || step + 1 == num_steps;
 }
 
-int32_t latent_frames(const DiffusionConfig& config) {
+int32_t latent_frames(const LTXVideoDiffusionConfig& config) {
     return (config.video_num_frames - 1) / std::max(config.scale_factor_temporal, 1) + 1;
 }
 
-int32_t latent_height(const DiffusionConfig& config) {
+int32_t latent_height(const LTXVideoDiffusionConfig& config) {
     return config.video_height / std::max(config.scale_factor_spatial, 1);
 }
 
-int32_t latent_width(const DiffusionConfig& config) {
+int32_t latent_width(const LTXVideoDiffusionConfig& config) {
     return config.video_width / std::max(config.scale_factor_spatial, 1);
 }
 
-int32_t ltx_sequence_length(const DiffusionConfig& config) {
+int32_t ltx_sequence_length(const LTXVideoDiffusionConfig& config) {
     return latent_frames(config) * latent_height(config) * latent_width(config);
 }
 
@@ -201,8 +201,8 @@ std::vector<float> make_initial_packed_latents(std::size_t count, int32_t seed) 
     return latents;
 }
 
-void unpack_ltx_latents_for_vae(const std::vector<float>& packed, const DiffusionConfig& config,
-                                std::vector<float>& out) {
+void unpack_ltx_latents_for_vae(const std::vector<float>& packed,
+                                const LTXVideoDiffusionConfig& config, std::vector<float>& out) {
     const int32_t channels = config.z_dim;
     const int32_t frames = latent_frames(config);
     const int32_t height = latent_height(config);
@@ -233,7 +233,8 @@ void unpack_ltx_latents_for_vae(const std::vector<float>& packed, const Diffusio
     }
 }
 
-void denormalize_ltx_latents_for_vae(std::vector<float>& latents, const DiffusionConfig& config) {
+void denormalize_ltx_latents_for_vae(std::vector<float>& latents,
+                                     const LTXVideoDiffusionConfig& config) {
     const int32_t channels = config.z_dim;
     if (channels <= 0 || config.latents_mean.size() < static_cast<std::size_t>(channels) ||
         config.latents_std.size() < static_cast<std::size_t>(channels)) {
@@ -256,8 +257,8 @@ void denormalize_ltx_latents_for_vae(std::vector<float>& latents, const Diffusio
     }
 }
 
-void vae_output_to_video(const std::vector<float>& raw, const DiffusionConfig& config,
-                         VideoResult& result) {
+void vae_output_to_video(const std::vector<float>& raw, const LTXVideoDiffusionConfig& config,
+                         LTXVideoResult& result) {
     const int32_t frames = config.video_num_frames;
     const int32_t height = config.video_height;
     const int32_t width = config.video_width;
@@ -315,7 +316,7 @@ void apply_cfg_and_rescale(const std::vector<float>& cond, const std::vector<flo
     }
 }
 
-ImageResult video_to_image_result(VideoResult&& video) {
+ImageResult video_to_image_result(LTXVideoResult&& video) {
     ImageResult image;
     image.pixels = std::move(video.frames);
     image.height = video.height;
@@ -339,7 +340,7 @@ LTXVideoOptions parse_ltx_video_options(const std::string& config_json) {
 
 LTXVideoPipeline::LTXVideoPipeline(std::unique_ptr<TrtModule> text_encoder,
                                    std::unique_ptr<TrtModule> denoiser,
-                                   std::unique_ptr<TrtModule> vae, DiffusionConfig config,
+                                   std::unique_ptr<TrtModule> vae, LTXVideoDiffusionConfig config,
                                    LTXVideoOptions options, std::shared_ptr<ITokenizer> tokenizer,
                                    std::string model_id_str)
     : text_encoder_(std::move(text_encoder)), denoiser_(std::move(denoiser)), vae_(std::move(vae)),
@@ -453,7 +454,8 @@ bool LTXVideoPipeline::run_denoiser(const std::vector<float>& packed_latents,
     return true;
 }
 
-bool LTXVideoPipeline::decode_vae(const std::vector<float>& packed_latents, VideoResult& result) {
+bool LTXVideoPipeline::decode_vae(const std::vector<float>& packed_latents,
+                                  LTXVideoResult& result) {
     if (!vae_ || !vae_->ok())
         return false;
 
@@ -521,7 +523,7 @@ bool LTXVideoPipeline::denoise_loop(std::vector<float>& latents,
                                     const std::vector<float>& negative_embeddings,
                                     int32_t negative_tokens, int32_t num_steps,
                                     float guidance_scale) {
-    diffusion::FlowMatchEulerState scheduler;
+    diffusion::ltx_video_scheduler::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = 1000;
     scheduler.shift = config_.flow_shift;
     scheduler.use_dynamic_shifting = config_.use_dynamic_shifting;
@@ -605,7 +607,7 @@ ImageResult LTXVideoPipeline::generate_image(const std::string& prompt, const Ge
         return {};
     }
 
-    VideoResult video;
+    LTXVideoResult video;
     if (!decode_vae(latents, video)) {
         std::cerr << "[ltx-video] VAE decode failed\n";
         return {};

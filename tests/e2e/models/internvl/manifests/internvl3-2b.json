@@ -4,13 +4,16 @@
   "hf_id": "OpenGVLab/InternVL3-2B-hf",
   "bundle": "internvl3-2b-vl.trtfb",
   "family": "internvl",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
   "ci_tier": "l0_only",
+  "task_eval": {
+    "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
+  },
   "max_cache_length": 384,
   "prompt": "What color is the vehicle in this image? Answer in one word.",
   "max_new_tokens": 10,
   "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
-  "notes": "Smaller InternVL3 representative for PR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
+  "notes": "Smaller InternVL3 representative for PR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, internvl_vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
 }

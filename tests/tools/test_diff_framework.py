@@ -43,7 +43,7 @@ def _import_runner():
 def _mock_model_strategy_detection(
     monkeypatch,
     *,
-    runtime_strategy: str | None = "decoder_kv_cache",
+    runtime_strategy: str | None = "qwen_decoder_kv_cache",
     plugin_found: bool = True,
 ):
     """Install fake tensorrt_model_connect modules consumed by detect_runtime_strategy()."""
@@ -102,7 +102,7 @@ class TestDiffResult:
         proto = _import_protocol()
         r = proto.DiffResult(
             test_name="logit_diff", model="test/model",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="qwen_decoder_kv_cache",
             passed=True, status="PASS", message="ok",
             metrics={"max_abs_diff": 0.001}, duration_s=1.5, details="")
         d = r.to_dict()
@@ -115,7 +115,7 @@ class TestDiffResult:
         proto = _import_protocol()
         r = proto.DiffResult(
             test_name="layer_diff", model="test/model",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="qwen_decoder_kv_cache",
             passed=False, status="FAIL", message="bad",
             metrics={}, duration_s=0.0, details="detail")
         parsed = json.loads(r.to_json())
@@ -164,11 +164,11 @@ class TestRegistry:
     def test_get_tests_for_strategy_filters(self):
         registry = _import_registry()
 
-        decoder_tests = registry.get_tests_for_strategy("decoder_kv_cache")
+        decoder_tests = registry.get_tests_for_strategy("qwen_decoder_kv_cache")
         names = [c.name for c in decoder_tests]
         assert "logit_diff" in names
         assert "layer_diff" in names
-        # VL and diffusion should not appear for decoder_kv_cache
+        # VL and diffusion should not appear for qwen_decoder_kv_cache
         assert "vl_pipeline" not in names
         assert "diffusion_components" not in names
 
@@ -178,17 +178,17 @@ class TestRegistry:
 
     def test_vl_tests_for_vision_language(self):
         registry = _import_registry()
-        vl_tests = registry.get_tests_for_strategy("vision_language")
+        vl_tests = registry.get_tests_for_strategy("qwen_vl_vision_language")
         names = [c.name for c in vl_tests]
         assert "vl_pipeline" in names
         # Standard decoder tests should not appear
         assert "logit_diff" not in names
 
-    def test_diffusion_tests_for_diffusion(self):
+    def test_diffusion_media_strategies_do_not_use_shared_diffusion_check(self):
         registry = _import_registry()
-        diff_tests = registry.get_tests_for_strategy("diffusion")
+        diff_tests = registry.get_tests_for_strategy("diffusion_flux")
         names = [c.name for c in diff_tests]
-        assert "diffusion_components" in names
+        assert "diffusion_components" not in names
         assert "logit_diff" not in names
 
     def test_get_all_tests_returns_all(self):
@@ -222,7 +222,7 @@ class TestRunner:
 
     def test_list_tests_filtered(self):
         runner = _import_runner()
-        entries = runner.list_tests("vision_language")
+        entries = runner.list_tests("qwen_vl_vision_language")
         names = [e["name"] for e in entries]
         assert "vl_pipeline" in names
         assert "logit_diff" not in names
@@ -233,7 +233,7 @@ class TestRunner:
 
         ctx = proto.TestContext(
             model="test/model",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="qwen_decoder_kv_cache",
             bundle_path=None,
         )
         results = runner.run_tests(ctx, test_names=["runner_parity"])
@@ -247,7 +247,7 @@ class TestRunner:
 
         ctx = proto.TestContext(
             model="test/model",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="qwen_decoder_kv_cache",
         )
         with pytest.raises(ValueError, match="Unknown test"):
             runner.run_tests(ctx, test_names=["nonexistent_test_xyz"])
@@ -274,7 +274,7 @@ class TestRunner:
             strategy = runner.detect_runtime_strategy("test/model")
         assert strategy == "future_runtime_strategy"
 
-    def test_detect_runtime_strategy_missing_plugin_warns_legacy_fallback(
+    def test_detect_runtime_strategy_missing_plugin_warns_without_fallback(
         self, monkeypatch
     ):
         runner = _import_runner()
@@ -283,11 +283,11 @@ class TestRunner:
         result = runner.detect_runtime_strategy(
             "test/model", with_status=True)
         assert result.status == "warning"
-        assert result.runtime_strategy == "decoder_kv_cache"
+        assert result.runtime_strategy is None
 
         with pytest.warns(RuntimeWarning, match="No family plugin resolved"):
             strategy = runner.detect_runtime_strategy("test/model")
-        assert strategy == "decoder_kv_cache"
+        assert strategy == ""
 
     def test_detect_bundle_unknown_strategy_reports_skip(self, tmp_path):
         runner = _import_runner()
@@ -305,7 +305,7 @@ class TestRunner:
             strategy = runner.detect_runtime_strategy_from_bundle(str(bundle))
         assert strategy == "future_runtime_strategy"
 
-    def test_detect_bundle_missing_runtime_strategy_warns_fallback(
+    def test_detect_bundle_missing_runtime_strategy_warns_without_fallback(
         self, tmp_path
     ):
         runner = _import_runner()
@@ -315,11 +315,11 @@ class TestRunner:
         result = runner.detect_runtime_strategy_from_bundle(
             str(bundle), with_status=True)
         assert result.status == "warning"
-        assert result.runtime_strategy == "decoder_kv_cache"
+        assert result.runtime_strategy is None
 
         with pytest.warns(RuntimeWarning, match="has no runtime_strategy"):
             strategy = runner.detect_runtime_strategy_from_bundle(str(bundle))
-        assert strategy == "decoder_kv_cache"
+        assert strategy == ""
 
     def test_detect_bundle_read_failure_reports_error(self, tmp_path):
         runner = _import_runner()

@@ -27,6 +27,8 @@ from types import ModuleType
 
 import numpy as np
 
+from tool_helpers import make_family_debug_runner, runtime_strategy_from_config
+
 STANDARD_PROMPTS = [
     ("factual", "The capital of France is"),
     ("reasoning", "Explain why water boils at 100 degrees Celsius."),
@@ -109,11 +111,12 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     if callable(make_runner):
         runner = make_runner(engine_plan, config, max_cache_length)
     else:
-        from tensorrt_model_connect.debug_runner import TrtRunner
-        runner = TrtRunner(
+        runner = make_family_debug_runner(
             engine_plan=engine_plan,
+            runtime_strategy=runtime_strategy_from_config(config),
             max_cache_length=max_cache_length,
             num_layers=config.num_hidden_layers,
+            config=config,
         )
 
     results = runner.generate(input_ids, max_new_tokens)
@@ -125,37 +128,21 @@ def _load_hf_model(model_dir, trust_remote_code=False):
 
     If the model requires custom code (e.g. older repos without native
     transformers support), pass --trust-remote-code to enable it.
-
-    Vision-language models load the full model but only use the text decoder
-    path for comparison.
     """
     import json
     import torch
     from transformers import AutoModelForCausalLM
 
-    # Check if this is a VL model that requires a different AutoModel class.
     config_path = Path(model_dir) / "config.json"
-    is_vl_model = False
     model_type = ""
     if config_path.exists():
         cfg = json.loads(config_path.read_text())
         model_type = cfg.get("model_type", "").lower()
-        if "vl" in model_type or "vision" in model_type:
-            is_vl_model = True
 
     handler = _find_family_diff_logits_handler(model_type)
     load_hf_model = getattr(handler, "load_hf_model", None)
     if callable(load_hf_model):
         return load_hf_model(model_dir)
-
-    if is_vl_model:
-        from transformers import AutoModelForImageTextToText
-        print("[diff] Loading VL model via AutoModelForImageTextToText ...",
-              file=sys.stderr)
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_dir, trust_remote_code=trust_remote_code,
-            torch_dtype=torch.float32)
-        return model
 
     try:
         return AutoModelForCausalLM.from_pretrained(

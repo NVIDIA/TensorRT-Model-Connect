@@ -1,13 +1,11 @@
-# Recurrent Backends
+# Recurrent Domain
 
-Recurrent/stateful decode implementations.
+Shared recurrent helper implementations are retired. Recurrent validation,
+output initialization, and runtime behavior live in each owning model family
+under `src/runtime/models/<family>/`.
 
-Key files:
-- `two_state_*`: two-tensor recurrent state types, single-step runtime, and generate loop.
-- `multi_state_*`: multi-tensor recurrent state types, single-step runtime, and generate loop.
-- `hybrid_backend.*`: hybrid recurrent+attention runtime path.
-
-How to understand:
-1. Start with `*_backend.cpp` (`generate`).
-2. Follow into `*_decode_runtime.*` for one-step TensorRT execution.
-3. Inspect `*_step_state.*` for persistent state layout/updates.
+Current recurrent contract owners:
+- `src/runtime/models/mamba/mamba_recurrent_step_contracts.h`
+- `src/runtime/models/rwkv/rwkv_recurrent_step_contracts.h`
+- `src/runtime/models/nemotron_h/nemotron_h_recurrent_step_contracts.h`
+- `src/runtime/models/qwen3_5/qwen3_5_recurrent_step_contracts.h`

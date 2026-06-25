@@ -5,7 +5,7 @@
 
 #include "diffusion_helpers.h"
 #include "plugin_helpers.h"
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "preprocessor_weights_helpers.h"
 #include "runtime/models/z_image/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -38,36 +38,37 @@ std::string tp_denoiser_section_name(int32_t rank) {
 
 // Parse Z-Image-specific preprocessor weights from the preprocessor_weights
 // bundle section. These weights are separate from the standard
-// PreprocessorWeights and include timestep embedder MLP, caption embedder
+// ZImageCommonPreprocessorWeights and include timestep embedder MLP, caption embedder
 // projection + norm, cap_pad_token, and patch (x) embedder.
 ZImagePreprocessorWeights parse_zimage_preprocessor_weights(const std::vector<char>& data) {
     ZImagePreprocessorWeights w;
     std::string index_json;
     const char* blob = nullptr;
     std::size_t blob_size = 0;
-    if (!diffusion::extract_preprocessor_index(data, index_json, blob, blob_size))
+    if (!z_image_preprocessor_weights::extract_preprocessor_index(data, index_json, blob,
+                                                                  blob_size))
         return w;
 
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "t_embedder.mlp.0.weight",
-                                        w.t_embedder_mlp_0_weight);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "t_embedder.mlp.0.bias",
-                                        w.t_embedder_mlp_0_bias);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "t_embedder.mlp.2.weight",
-                                        w.t_embedder_mlp_2_weight);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "t_embedder.mlp.2.bias",
-                                        w.t_embedder_mlp_2_bias);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "cap_embedder.proj.weight",
-                                        w.cap_proj_weight);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "cap_embedder.proj.bias",
-                                        w.cap_proj_bias);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "cap_embedder.norm.weight",
-                                        w.cap_norm_weight);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "cap_pad_token",
-                                        w.cap_pad_token);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "x_embedder.weight",
-                                        w.x_embed_weight);
-    diffusion::load_preprocessor_floats(index_json, blob, blob_size, "x_embedder.bias",
-                                        w.x_embed_bias);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "t_embedder.mlp.0.weight", w.t_embedder_mlp_0_weight);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "t_embedder.mlp.0.bias", w.t_embedder_mlp_0_bias);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "t_embedder.mlp.2.weight", w.t_embedder_mlp_2_weight);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "t_embedder.mlp.2.bias", w.t_embedder_mlp_2_bias);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "cap_embedder.proj.weight", w.cap_proj_weight);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "cap_embedder.proj.bias", w.cap_proj_bias);
+    z_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "cap_embedder.norm.weight", w.cap_norm_weight);
+    z_image_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
+                                                           "cap_pad_token", w.cap_pad_token);
+    z_image_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
+                                                           "x_embedder.weight", w.x_embed_weight);
+    z_image_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
+                                                           "x_embedder.bias", w.x_embed_bias);
 
     // Derive dimensions
     if (!w.cap_proj_bias.empty())

@@ -8,7 +8,7 @@ from diff_framework.protocol import DiffResult, TestContext
 class LayerProfileTest:
     name = "layer_profile"
     description = "Per-layer TRT kernel timing via IProfiler (decoder models only)"
-    runtime_strategies = ["decoder_kv_cache", "decoder_moe"]
+    runtime_strategies = []
     requires_bundle = False
     requires_gpu = True
 
@@ -26,8 +26,8 @@ class LayerProfileTest:
         try:
             from layer_profiler import LayerProfiler
             from perf_compare import build_trt_engine, load_trt_from_bundle
-            from tensorrt_model_connect.debug_runner import TrtRunner
             from tensorrt_model_connect.engine_builder import _resolve_model
+            from tool_helpers import make_family_debug_runner, runtime_strategy_from_config
             from transformers import AutoTokenizer
             import numpy as np
 
@@ -38,21 +38,30 @@ class LayerProfileTest:
             eos_token_id = tokenizer.eos_token_id
 
             if ctx.bundle_path:
-                engine_plan, num_layers, max_cache_length, _, _ = \
+                engine_plan, num_layers, max_cache_length, bundle_config, _ = \
                     load_trt_from_bundle(ctx.bundle_path)
+                runtime_strategy = str(bundle_config.get("runtime_strategy") or "")
+                runner_config = bundle_config
+                runner_bundle_path = ctx.bundle_path
             else:
                 engine_plan, config, _, _ = build_trt_engine(
                     ctx.model, ctx.max_cache_length, ctx.verbose)
                 num_layers = config.num_hidden_layers
                 max_cache_length = ctx.max_cache_length
+                runtime_strategy = runtime_strategy_from_config(config)
+                runner_config = config
+                runner_bundle_path = ""
 
             warmup, iterations, max_new_tokens = 1, 3, 10
 
             profiler = LayerProfiler()
-            runner = TrtRunner(
+            runner = make_family_debug_runner(
                 engine_plan=engine_plan,
+                runtime_strategy=runtime_strategy,
                 max_cache_length=max_cache_length,
                 num_layers=num_layers,
+                config=runner_config,
+                bundle_path=runner_bundle_path,
                 profiler=profiler,
             )
             del engine_plan

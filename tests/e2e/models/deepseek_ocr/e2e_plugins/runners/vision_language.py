@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from .text_generation import (
+from ._runtime_common import (
     _detect_trt_runtime_error,
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
@@ -408,7 +408,7 @@ logits_path = "{logits_path}"
 features_path = "{features_path}"
 text_path = "{text_path}"
 
-from tensorrt_model_connect.debug_runner import VLTrtRunner
+from tests.e2e.models.deepseek_ocr.e2e_plugins.runners.vl_debug_runner import VLTrtRunner
 
 runner = VLTrtRunner(bundle_path)
 if runner.vision_runner is None:
@@ -429,7 +429,7 @@ try:
     from transformers import AutoTokenizer
     import tempfile
     from pathlib import Path
-    from tensorrt_model_connect.debug_runner import load_section_from_bundle
+    from tests.e2e.models.deepseek_ocr.e2e_plugins.runners.vl_debug_runner import load_section_from_bundle
     tok_data = load_section_from_bundle(bundle_path, "tokenizer.json")
     if tok_data:
         with tempfile.TemporaryDirectory() as tmpdir:

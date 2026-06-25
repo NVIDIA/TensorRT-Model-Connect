@@ -1,0 +1,6 @@
+id = "xglm"
+runtime_library = "libtrtmc_model_xglm.so"
+runtime_plugins = ["plugin.cpp|register_xglm_plugin"]
+runtime_strategies = ["xglm_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["xglm_decoder_kv_cache"]

@@ -60,7 +60,7 @@ def _load_ln(readers, prefix):
 
 class RobertaPlugin:
     name = "roberta"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "roberta_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("roberta", "xlm-roberta", "camembert")

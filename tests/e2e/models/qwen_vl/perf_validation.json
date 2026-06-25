@@ -2,7 +2,7 @@
   "models": [
     {
       "model": "Qwen/Qwen2.5-VL-3B-Instruct",
-      "pipeline_type": "vision_language",
+      "pipeline_type": "qwen_vl_vision_language",
       "label": "C3-vision-language",
       "benchmark": {
         "label": "CPU argmax",

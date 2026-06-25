@@ -21,7 +21,6 @@
 //   trtmc version
 
 #include "cli/args.h"
-#include "runtime/domains/diffusion/batch_utils.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -31,9 +30,11 @@
 #include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,7 +47,9 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <sys/wait.h>
 #include <system_error>
@@ -76,6 +79,49 @@ std::string format_output_path(const std::string& prefix, int index, int total) 
     else
         out << prefix << '_' << index;
     return out.str();
+}
+
+std::uint32_t low32(std::uint64_t v) {
+    return static_cast<std::uint32_t>(v & 0xFFFFFFFFu);
+}
+
+std::uint32_t high32(std::uint64_t v) {
+    return static_cast<std::uint32_t>((v >> 32) & 0xFFFFFFFFu);
+}
+
+std::vector<std::uint32_t> derive_image_batch_seeds(std::uint64_t global_seed, int count) {
+    if (count < 1) {
+        throw std::invalid_argument("count must be >= 1");
+    }
+    std::vector<std::uint32_t> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        std::seed_seq seq{
+            low32(global_seed),
+            high32(global_seed),
+            static_cast<std::uint32_t>(i),
+        };
+        std::array<std::uint32_t, 1> buf{};
+        seq.generate(buf.begin(), buf.end());
+        out.push_back(buf[0]);
+    }
+    return out;
+}
+
+std::vector<std::uint32_t>
+normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_list, int count) {
+    if (count < 1) {
+        throw std::invalid_argument("count must be >= 1");
+    }
+    if (static_cast<int>(explicit_list.size()) != count) {
+        throw std::invalid_argument("explicit seed list length must equal the total batch count");
+    }
+    std::vector<std::uint32_t> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (auto v : explicit_list) {
+        out.push_back(static_cast<std::uint32_t>(v));
+    }
+    return out;
 }
 
 trtmc::LoadOptions make_load_options(const CliArgs& args) {
@@ -534,13 +580,11 @@ int cmd_run(const CliArgs& args) {
                                   << ") must equal the total batch count (" << total << ")\n";
                         return EXIT_FAILURE;
                     }
-                    per_sample_seeds =
-                        trtmc::diffusion::derive_per_sample_seeds(args.seed_list, total);
+                    per_sample_seeds = normalize_explicit_image_batch_seeds(args.seed_list, total);
                 } else {
                     const std::uint64_t global_seed =
                         args.seed >= 0 ? static_cast<std::uint64_t>(args.seed) : 0ULL;
-                    per_sample_seeds =
-                        trtmc::diffusion::derive_per_sample_seeds(global_seed, total);
+                    per_sample_seeds = derive_image_batch_seeds(global_seed, total);
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << '\n';

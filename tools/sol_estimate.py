@@ -388,7 +388,7 @@ def estimate_sol_for_workload(
     arch: ModelArch,
     gpu: GpuSpec,
     dtype: str = "fp32",
-    pipeline_type: str = "decoder_kv_cache",
+    pipeline_type: str = "",
     cache_length: int = 0,
     actual_throughput: float = 0,
     sequence_length: int = 1,
@@ -404,12 +404,14 @@ def estimate_sol_for_workload(
         arch: Model architecture.
         gpu: GPU specifications.
         dtype: Precision string.
-        pipeline_type: One of the runtime_strategy strings (e.g., "decoder_kv_cache").
+        pipeline_type: One of the runtime_strategy strings (e.g., "qwen_decoder_kv_cache").
         cache_length: KV cache length (decode mode).
         actual_throughput: Measured throughput (tok/s, img/s, or samples/s).
         sequence_length: Input sequence length (for encoder/single-pass modes).
         num_denoising_steps: Number of denoising steps (diffusion mode).
     """
+    if not pipeline_type:
+        raise ValueError("pipeline_type is required")
     mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     bpp = BYTES_PER_PARAM[dtype]
 

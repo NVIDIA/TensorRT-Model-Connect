@@ -1,0 +1,6 @@
+id = "nemotron"
+runtime_library = "libtrtmc_model_nemotron.so"
+runtime_plugins = ["plugin.cpp|register_nemotron_plugin"]
+runtime_strategies = ["nemotron_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["nemotron_decoder_kv_cache"]

@@ -3,7 +3,7 @@
 // LTXVideoPipeline: native C++ runtime for Lightricks LTX-Video.
 // All model execution goes through TensorRT component engines.
 
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/ltx_video/ltx_video_diffusion_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -26,7 +26,7 @@ LTXVideoOptions parse_ltx_video_options(const std::string& config_json);
 class LTXVideoPipeline final : public IPipeline {
   public:
     LTXVideoPipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> denoiser,
-                     std::unique_ptr<TrtModule> vae, DiffusionConfig config,
+                     std::unique_ptr<TrtModule> vae, LTXVideoDiffusionConfig config,
                      LTXVideoOptions options, std::shared_ptr<ITokenizer> tokenizer,
                      std::string model_id_str);
 
@@ -47,7 +47,7 @@ class LTXVideoPipeline final : public IPipeline {
     bool run_denoiser(const std::vector<float>& packed_latents,
                       const std::vector<float>& text_embeddings, int32_t real_tokens,
                       float timestep, std::vector<float>& output);
-    bool decode_vae(const std::vector<float>& packed_latents, VideoResult& result);
+    bool decode_vae(const std::vector<float>& packed_latents, LTXVideoResult& result);
 
     bool denoise_loop(std::vector<float>& latents, const std::vector<float>& prompt_embeddings,
                       int32_t prompt_tokens, const std::vector<float>& negative_embeddings,
@@ -64,7 +64,7 @@ class LTXVideoPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
-    DiffusionConfig config_;
+    LTXVideoDiffusionConfig config_;
     LTXVideoOptions options_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

@@ -4,3 +4,6 @@ runtime_plugins = ["plugin.cpp|register_pixart_plugin"]
 runtime_strategies = ["diffusion_pixart"]
 legacy_runtime_strategy_aliases = ["diffusion|contains|diffusion_backend_type|pixart|diffusion_pixart"]
 gnu_warning_suppressed_sources = ["pipeline.cpp"]
+runtime_tests = [
+  "test_pixart_denoising_step_seam|test_pixart_denoising_step_seam.cpp|_|_|_",
+]

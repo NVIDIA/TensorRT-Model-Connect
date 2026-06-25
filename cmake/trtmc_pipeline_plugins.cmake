@@ -118,6 +118,13 @@ foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)
     list(APPEND TRTMC_MODEL_${_trtmc_model_var}_TESTS "${_trtmc_test_entry}")
   endforeach()
 
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "runtime_link_libraries"
+    _trtmc_runtime_link_libraries)
+  foreach(_trtmc_runtime_link_library IN LISTS _trtmc_runtime_link_libraries)
+    list(APPEND TRTMC_MODEL_${_trtmc_model_var}_LINK_LIBRARIES
+      "${_trtmc_runtime_link_library}")
+  endforeach()
+
   _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "gnu_warning_suppressed_sources"
     _trtmc_gnu_warning_suppressed_sources)
   foreach(_trtmc_suppressed_source IN LISTS _trtmc_gnu_warning_suppressed_sources)

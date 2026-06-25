@@ -58,7 +58,8 @@ trt = trt_compat.get_trt()
 
 class Qwen3MoePlugin:
     name = "qwen_moe"
-    runtime_strategy = "decoder_moe"
+    runtime_strategy = "qwen_moe_decoder_moe"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("qwen3_moe", "qwen2_moe")

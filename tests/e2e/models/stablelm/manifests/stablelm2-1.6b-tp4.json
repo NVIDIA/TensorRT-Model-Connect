@@ -4,7 +4,7 @@
   "hf_id": "stabilityai/stablelm-2-1_6b",
   "bundle": "stablelm2-1.6b-tp4.trtfb",
   "family": "stablelm",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "stablelm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

@@ -4,7 +4,7 @@
   "hf_id": "google-bert/bert-base-uncased",
   "bundle": "bert-base-uncased-tp4.trtfb",
   "family": "bert",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

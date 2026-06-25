@@ -7,7 +7,7 @@ the checkpoint and builds three TensorRT plans:
   * ``engine_plan``: RNNT prediction network
   * ``joint_engine_plan``: RNNT joint network
 
-The C++ runtime strategy is ``speech_to_text_rnnt`` and performs greedy RNNT
+The C++ runtime strategy is ``nemotron_speech_streaming_speech_to_text_rnnt`` and performs greedy RNNT
 decoding without a Python subprocess.
 """
 
@@ -441,7 +441,7 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
 
 class NemotronSpeechStreamingPlugin:
     name = "nemotron_speech_streaming"
-    runtime_strategy = "speech_to_text_rnnt"
+    runtime_strategy = "nemotron_speech_streaming_speech_to_text_rnnt"
     _DEFAULT_MEL_LENGTH = 3000
 
     def __init__(self):

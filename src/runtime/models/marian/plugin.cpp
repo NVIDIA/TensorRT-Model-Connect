@@ -8,9 +8,9 @@
 //   4. Detokenize output
 
 #include "plugin_helpers.h"
+#include "runtime/models/marian/kv_cache.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
-#include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -70,10 +70,11 @@ int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& confi
 class MarianPipeline final : public IPipeline {
   public:
     MarianPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-                   std::unique_ptr<KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
-                   int32_t max_enc_seq_len, int32_t vocab_size, int32_t decoder_start_token_id,
-                   int32_t eos_token_id, int32_t pad_token_id, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                   std::unique_ptr<MarianKvCache> cache, int32_t hidden_size,
+                   int32_t num_decoder_layers, int32_t max_enc_seq_len, int32_t vocab_size,
+                   int32_t decoder_start_token_id, int32_t eos_token_id, int32_t pad_token_id,
+                   cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                   std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), cache_(std::move(cache)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_enc_seq_len_(max_enc_seq_len), vocab_size_(vocab_size),
@@ -262,7 +263,7 @@ class MarianPipeline final : public IPipeline {
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<MarianKvCache> cache_;
     int32_t hidden_size_;
     int32_t num_decoder_layers_;
     int32_t max_enc_seq_len_;
@@ -330,9 +331,10 @@ class MarianPlugin final : public IPipelinePlugin {
 
         cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
-        auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
+        auto cache =
+            std::make_unique<MarianKvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())
-            throw std::runtime_error("MarianPlugin: failed to create KvCache");
+            throw std::runtime_error("MarianPlugin: failed to create MarianKvCache");
 
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
         if (!tok) {

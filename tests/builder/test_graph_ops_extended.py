@@ -16,7 +16,14 @@ import pytest
 from tests.builder.conftest import requires_trt
 
 try:
-    from tensorrt_model_connect import graph_ops
+    from tests.builder.owned_graph_modules import load_graph_ops
+    graph_ops = load_graph_ops(
+        "_yarn_correction_dim",
+        "compute_alibi_slopes",
+        "make_bucketed_relative_position_bias",
+        "make_yarn_rope_table",
+        "make_rope_query_scale_table",
+    )
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

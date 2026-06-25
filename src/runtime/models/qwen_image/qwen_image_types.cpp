@@ -14,7 +14,7 @@
 
 #include "runtime/models/qwen_image/qwen_image_types.h"
 
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "preprocessor_weights_helpers.h"
 #include "utils/json_helpers.h"
 
 #include <cstddef>
@@ -214,10 +214,9 @@ QwenImageConfig QwenImageConfig::parse(std::string_view config_json) {
 // -----------------------------------------------------------------------------
 //
 // The blob carries latents_mean (float[16]) and latents_std (float[16]) for
-// the Qwen-Image VAE. Format is the canonical diffusion preprocessor wire
-// layout shared with FLUX / Z-Image / Wan-T2V — see
-// diffusion_preprocessor_weights_helpers.h. We reuse extract_preprocessor_index
-// + load_preprocessor_floats so the C++ parser mirrors Python's
+// the Qwen-Image VAE. Format is the Qwen Image preprocessor wire layout. We
+// reuse the local extract_preprocessor_index + load_preprocessor_floats helpers
+// so the C++ parser mirrors Python's
 // pack_qwen_image_preprocessor_weights() exactly.
 //
 // On a malformed header (blob < 4 bytes or index length overflow) the helper
@@ -230,14 +229,15 @@ QwenImagePreprocessorWeights parse_qwen_image_preprocessor_weights(const std::ve
     std::string index_json;
     const char* blob = nullptr;
     std::size_t blob_size = 0;
-    if (!diffusion::extract_preprocessor_index(data, index_json, blob, blob_size)) {
+    if (!qwen_image_preprocessor_weights::extract_preprocessor_index(data, index_json, blob,
+                                                                     blob_size)) {
         return w;
     }
 
-    const bool got_mean = diffusion::load_preprocessor_floats(index_json, blob, blob_size,
-                                                              "latents_mean", w.latents_mean);
-    const bool got_std = diffusion::load_preprocessor_floats(index_json, blob, blob_size,
-                                                             "latents_std", w.latents_std);
+    const bool got_mean = qwen_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "latents_mean", w.latents_mean);
+    const bool got_std = qwen_image_preprocessor_weights::load_preprocessor_floats(
+        index_json, blob, blob_size, "latents_std", w.latents_std);
 
     w.valid = got_mean && got_std;
 

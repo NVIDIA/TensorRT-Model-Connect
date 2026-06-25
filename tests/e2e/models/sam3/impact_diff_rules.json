@@ -89,14 +89,10 @@
     ]
   },
   {
-    "name": "sam3_perception_config",
-    "path": "src/runtime/domains/perception/perception_types.h",
+    "name": "sam3_config",
+    "path": "src/runtime/models/sam3/sam3_config.h",
     "scope": {
-      "task_strategies": [
-        "segmentation",
-        "prompted_segmentation",
-        "object_detection"
-      ]
+      "owner_family": true
     },
     "allowed_tokens": [
       "image_mean",

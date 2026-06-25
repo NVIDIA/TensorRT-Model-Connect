@@ -1,21 +1,18 @@
-"""Unit tests for tensorrt_model_connect.debug_runner — load_engine_from_bundle,
-load_vision_engine_from_bundle, and runner resource cleanup.
+"""Unit tests for model-owned debug runner bundle readers.
 
 Mock-based, no TRT/GPU needed. Tests bundle parsing logic and
-runner __del__ cleanup order.
+bundle section parsing through an owned E2E debug runner module.
 
 Trace: ARCH-DBG-001, UD-DBG-02
-Intent: Validate debug runner bundle section loading, vision engine extraction, and deterministic resource cleanup ordering.
+Intent: Validate model-owned bundle section loading and vision engine extraction.
 Preconditions: No TRT or GPU required; uses in-memory .trtfb bundles and mocks for TRT engine deserialization.
-Postconditions: Engine plan bytes are correctly extracted from bundle sections, vision plans are found when present, and runner destructors release resources in the correct order.
+Postconditions: Engine plan bytes are correctly extracted from bundle sections, vision plans are found when present.
 """
 
 from __future__ import annotations
 
 import json
 import struct
-from unittest.mock import MagicMock, patch
-
 import numpy as np
 import pytest
 
@@ -66,7 +63,7 @@ class TestLoadEngineFromBundle:
     """Tests for load_engine_from_bundle() bundle parsing."""
 
     def test_roundtrip(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_engine_from_bundle
 
         header = {
             "model_id": "test-model",
@@ -86,7 +83,7 @@ class TestLoadEngineFromBundle:
         assert hdr["num_layers"] == 4
 
     def test_invalid_magic(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_engine_from_bundle
 
         path = tmp_path / "bad.trtfb"
         path.write_bytes(b"NOT_A_BUNDLE_xxxxxxxxxxxx")
@@ -95,7 +92,7 @@ class TestLoadEngineFromBundle:
             load_engine_from_bundle(str(path))
 
     def test_named_engine_section(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_engine_from_bundle
 
         header = {
             "model_id": "test-model",
@@ -125,7 +122,7 @@ class TestLoadVisionEngineFromBundle:
     """Tests for load_vision_engine_from_bundle()."""
 
     def test_with_vision_section(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_vision_engine_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_vision_engine_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         engine_data = b"TEXT_ENGINE"
@@ -141,7 +138,7 @@ class TestLoadVisionEngineFromBundle:
         assert hdr["num_layers"] == 2
 
     def test_without_vision_section(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_vision_engine_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_vision_engine_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = _make_bundle_bytes(header, engine_plan=b"TEXT_ONLY")
@@ -162,7 +159,7 @@ class TestBundleSectionUtils:
     """Tests for section loading utilities."""
 
     def test_load_section_missing(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_section_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_section_from_bundle
 
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = _make_bundle_bytes(header, engine_plan=b"X")
@@ -174,7 +171,7 @@ class TestBundleSectionUtils:
         assert result is None
 
     def test_load_config_from_bundle(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_config_from_bundle
+        from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_config_from_bundle
 
         # Build a bundle with a config.json section
         config_data = json.dumps({"model_type": "example_decoder"}).encode("utf-8")
@@ -198,128 +195,7 @@ class TestBundleSectionUtils:
         cfg = load_config_from_bundle(str(path))
         assert cfg["model_type"] == "example_decoder"
 
-    def test_load_triattention_stats_from_bundle(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import load_triattention_stats_from_bundle
-
-        stats_data = json.dumps({
-            "version": 1,
-            "sampled_heads": [[0, 0]],
-            "stats": {},
-        }).encode("utf-8")
-        header = {"num_layers": 1, "max_cache_length": 32}
-        bundle = _make_bundle_bytes(
-            header,
-            engine_plan=b"X",
-            extra_sections={"triattention_stats.json": stats_data},
-        )
-
-        path = tmp_path / "tri.trtfb"
-        path.write_bytes(bundle)
-
-        payload = load_triattention_stats_from_bundle(str(path))
-        assert payload["version"] == 1
-        assert payload["sampled_heads"] == [[0, 0]]
-
-
 class TestRunnerFromBundle:
-    def test_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_ENGINE",
-            extra_sections={"engine_plan_tp_rank1": b"RANK1_ENGINE"},
-        )
-
-        path = tmp_path / "tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.TrtRunner",
-                   return_value="tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["engine_plan"] == b"RANK1_ENGINE"
-        assert kwargs["distributed_communicator"] is communicator
-
-    def test_seq2seq_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({
-            "runtime_strategy": "text_to_text",
-            "decoder_layers": 2,
-            "decoder_start_token_id": 0,
-        }).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_DECODER",
-            vision_plan=b"ENCODER_PLAN",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"RANK1_DECODER",
-            },
-        )
-
-        path = tmp_path / "seq2seq_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.Seq2SeqTrtRunner",
-                   return_value="seq2seq-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "seq2seq-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["decoder_plan"] == b"RANK1_DECODER"
-        assert kwargs["encoder_plan"] == b"ENCODER_PLAN"
-        assert kwargs["distributed_communicator"] is communicator
-
-    def test_seq2seq_encoder_decoder_engine_section_and_communicator_forwarded(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({
-            "runtime_strategy": "seq2seq_encoder_decoder",
-            "decoder_layers": 2,
-            "decoder_start_token_id": 0,
-        }).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"SINGLE_DECODER",
-            vision_plan=b"ENCODER_PLAN",
-            extra_sections={
-                "config.json": config_data,
-                "engine_plan_tp_rank1": b"RANK1_DECODER",
-            },
-        )
-
-        path = tmp_path / "seq2seq_encoder_decoder_tp_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        communicator = object()
-        with patch("tensorrt_model_connect.debug_runner.Seq2SeqTrtRunner",
-                   return_value="seq2seq-tp-runner") as mock_runner:
-            runner = runner_from_bundle(
-                str(path),
-                engine_section="engine_plan_tp_rank1",
-                distributed_communicator=communicator,
-            )
-
-        assert runner == "seq2seq-tp-runner"
-        kwargs = mock_runner.call_args.kwargs
-        assert kwargs["decoder_plan"] == b"RANK1_DECODER"
-        assert kwargs["encoder_plan"] == b"ENCODER_PLAN"
-        assert kwargs["distributed_communicator"] is communicator
-
     def test_mpi_rank_info_uses_single_node_rank(self, monkeypatch):
         from tensorrt_model_connect.debug_runner import _mpi_rank_info_from_env
 
@@ -327,107 +203,6 @@ class TestRunnerFromBundle:
         monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
 
         assert _mpi_rank_info_from_env() == (3, 4)
-
-    def test_triattention_bundle_uses_triattention_runner(self, tmp_path):
-        from tensorrt_model_connect.debug_runner import runner_from_bundle
-
-        config_data = json.dumps({
-            "runtime_strategy": "decoder_kv_cache",
-            "triattention": {
-                "enabled": True,
-                "kv_budget": 64,
-                "recent_window": 16,
-                "stats_section": "triattention_stats.json",
-            },
-        }).encode("utf-8")
-        stats_data = json.dumps({
-            "version": 1,
-            "head_dim": 4,
-            "rope_style": "half",
-            "sampled_heads": [[0, 0]],
-            "stats": {
-                "layer00_head00": {
-                    "q_mean_real": [0.1, 0.2],
-                    "q_mean_imag": [0.0, 0.1],
-                    "q_abs_mean": [0.3, 0.4],
-                }
-            },
-        }).encode("utf-8")
-        bundle = _make_bundle_bytes(
-            {"num_layers": 2, "max_cache_length": 128},
-            engine_plan=b"ENGINE",
-            extra_sections={
-                "config.json": config_data,
-                "triattention_stats.json": stats_data,
-            },
-        )
-
-        path = tmp_path / "tri_dispatch.trtfb"
-        path.write_bytes(bundle)
-
-        with patch("tensorrt_model_connect.debug_runner.TriAttentionTrtRunner",
-                   return_value="tri-runner") as mock_tri:
-            runner = runner_from_bundle(str(path))
-
-        assert runner == "tri-runner"
-        kwargs = mock_tri.call_args.kwargs
-        assert kwargs["max_cache_length"] == 128
-        assert kwargs["num_layers"] == 2
-        assert kwargs["triattention_stats_payload"]["head_dim"] == 4
-
-
-# ---------------------------------------------------------------------------
-# TrtRunner.__del__ cleanup
-# ---------------------------------------------------------------------------
-
-class TestTrtRunnerCleanup:
-    """Verify TrtRunner.__del__ frees device buffers and stream."""
-
-    def test_del_frees_all_buffers(self):
-        """__del__ should cudaFree all device buffers then destroy stream."""
-        from tensorrt_model_connect.debug_runner import TrtRunner
-
-        runner = TrtRunner.__new__(TrtRunner)
-        runner.num_layers = 2
-        runner.attention_size = 8
-        runner.max_cache_length = 4
-        runner._has_embed_input = False
-        runner._d_token_id = 1000
-        runner._d_position_id = 1001
-        runner._d_mask = 1002
-        runner._d_logits = 1003
-        runner._d_cache_k = [2000, 2001]
-        runner._d_cache_v = [3000, 3001]
-        runner._d_present_k = [4000, 4001]
-        runner._d_present_v = [5000, 5001]
-        runner._d_input_embed = 0
-        runner._d_use_input_embed = 0
-        runner._d_deepstack = {}
-        runner._d_deepstack_active = 0
-        runner._d_debug = {}
-        runner.stream = 9999
-        runner.context = MagicMock()
-        runner.engine = MagicMock()
-
-        mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
-            runner.__del__()
-            # Neutralize so GC won't call __del__ again with real cudart
-            del runner._d_token_id
-
-        freed = [c.args[0] for c in mock_cudart.cudaFree.call_args_list]
-        expected = [1000, 1001, 1002, 1003, 2000, 2001, 3000, 3001,
-                    4000, 4001, 5000, 5001]
-        assert sorted(freed) == sorted(expected)
-        mock_cudart.cudaStreamDestroy.assert_called_once_with(9999)
-
-    def test_del_noop_before_init(self):
-        """__del__ should not crash if called before __init__ completes."""
-        from tensorrt_model_connect.debug_runner import TrtRunner
-
-        runner = TrtRunner.__new__(TrtRunner)
-        runner.__del__()  # Should not raise
-
 
 # ---------------------------------------------------------------------------
 # TrtRunner.step() mask/position logic (mocked CUDA)

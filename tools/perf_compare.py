@@ -2,7 +2,7 @@
 """TRT vs HuggingFace inference performance comparison.
 
 Runs both backends in-process Python for a controlled, apples-to-apples
-comparison. TRT uses TrtRunner (debug_runner.py); HF uses
+comparison. TRT uses the family-owned debug runner for the runtime strategy; HF uses
 AutoModelForCausalLM on CUDA with KV cache enabled.
 
 TRT and HF run serially (not simultaneously), so large models that
@@ -47,7 +47,11 @@ from types import ModuleType
 
 import numpy as np
 
-from tool_helpers import load_hf_model as _load_hf_model_base
+from tool_helpers import (
+    load_hf_model as _load_hf_model_base,
+    make_family_debug_runner,
+    runtime_strategy_from_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -173,14 +177,37 @@ def load_trt_from_bundle(bundle_path: str):
     Returns (engine_plan_bytes, num_layers, max_cache_length, bundle_config,
              family_perf_handler).
     """
-    from tensorrt_model_connect.debug_runner import load_engine_from_bundle, \
-        load_config_from_bundle
+    import struct
 
-    engine_plan, header = load_engine_from_bundle(bundle_path)
-    bundle_config = load_config_from_bundle(bundle_path)
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        sections = header.get("sections", {})
+        engine_meta = sections.get("engine_plan")
+        if engine_meta is None:
+            raise KeyError(
+                f"Bundle {bundle_path!r} does not contain section 'engine_plan'")
+        data_start = 16 + header_len
+        f.seek(data_start + engine_meta["offset"])
+        engine_plan = f.read(engine_meta["size"])
+
+        config_meta = sections.get("config.json")
+        if config_meta is None:
+            bundle_config = {}
+        else:
+            f.seek(data_start + config_meta["offset"])
+            bundle_config = json.loads(f.read(config_meta["size"]).decode("utf-8"))
 
     # Reject unsupported runtime strategies
-    rt = bundle_config.get("runtime_strategy", "decoder_kv_cache")
+    rt = str(bundle_config.get("runtime_strategy") or "")
+    if not rt:
+        raise SystemExit(
+            "ERROR: bundle config.json is missing runtime_strategy; "
+            "runtime dispatch requires an explicit model-owned strategy."
+        )
     if rt == "vision_language":
         raise SystemExit(
             "ERROR: VL bundles are not supported. Use tools/diff_vl.py.")
@@ -232,18 +259,19 @@ def _stats(values: list[float]) -> dict:
 def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
               input_ids: list[int], max_new_tokens: int,
               warmup: int, iterations: int, eos_token_id: int | None,
-              verbose: bool) -> dict:
-    """Benchmark TRT inference via TrtRunner (device-resident KV cache).
+              verbose: bool, *, runtime_strategy: str, config=None,
+              bundle_path: str = "") -> dict:
+    """Benchmark TRT inference via the family-owned debug runner.
 
     Returns dict with timing lists and generated token IDs.
     """
-    from tensorrt_model_connect.debug_runner import TrtRunner
-
-    # Create runner once (deserialization outside timing)
-    runner = TrtRunner(
+    runner = make_family_debug_runner(
         engine_plan=engine_plan,
+        runtime_strategy=runtime_strategy,
         max_cache_length=max_cache_length,
         num_layers=num_layers,
+        config=config,
+        bundle_path=bundle_path,
     )
 
     prefill_times: list[float] = []
@@ -899,13 +927,19 @@ def main():
     # -- Load / build TRT engine --
     if args.bundle:
         print(f"[perf] Loading bundle: {args.bundle}", file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, perf_handler = \
+        engine_plan, num_layers, max_cache_length, bundle_config, perf_handler = \
             load_trt_from_bundle(args.bundle)
+        runtime_strategy = str(bundle_config.get("runtime_strategy") or "")
+        runner_config = bundle_config
+        runner_bundle_path = args.bundle
     else:
         engine_plan, config, _, perf_handler = build_trt_engine(
             args.model, args.max_cache_length, args.verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
+        runtime_strategy = runtime_strategy_from_config(config)
+        runner_config = config
+        runner_bundle_path = ""
 
     # -- Bench TRT (GPU-exclusive) --
     backend_label = _handler_attr(perf_handler, "backend_label", "TRT")
@@ -920,7 +954,10 @@ def main():
         trt_res = bench_trt(
             engine_plan, num_layers, max_cache_length,
             input_ids, args.max_new_tokens,
-            args.warmup, args.iterations, eos_token_id, args.verbose)
+            args.warmup, args.iterations, eos_token_id, args.verbose,
+            runtime_strategy=runtime_strategy,
+            config=runner_config,
+            bundle_path=runner_bundle_path)
     del engine_plan
 
     # Free TRT GPU memory before loading HF
@@ -1132,13 +1169,19 @@ def run_as_diff_test(ctx, include_compile: bool = False):
 
         # Build or load TRT engine
         if ctx.bundle_path:
-            engine_plan, num_layers, max_cache_length, _, perf_handler = \
+            engine_plan, num_layers, max_cache_length, bundle_config, perf_handler = \
                 load_trt_from_bundle(ctx.bundle_path)
+            runtime_strategy = str(bundle_config.get("runtime_strategy") or "")
+            runner_config = bundle_config
+            runner_bundle_path = ctx.bundle_path
         else:
             engine_plan, config, _, perf_handler = build_trt_engine(
                 ctx.model, ctx.max_cache_length, ctx.verbose)
             num_layers = config.num_hidden_layers
             max_cache_length = ctx.max_cache_length
+            runtime_strategy = runtime_strategy_from_config(config)
+            runner_config = config
+            runner_bundle_path = ""
 
         warmup, iterations = 1, 3
         if perf_handler is not None:
@@ -1150,7 +1193,10 @@ def run_as_diff_test(ctx, include_compile: bool = False):
             trt_res = bench_trt(
                 engine_plan, num_layers, max_cache_length,
                 input_ids, ctx.max_new_tokens,
-                warmup, iterations, eos_token_id, ctx.verbose)
+                warmup, iterations, eos_token_id, ctx.verbose,
+                runtime_strategy=runtime_strategy,
+                config=runner_config,
+                bundle_path=runner_bundle_path)
         del engine_plan
 
         import gc

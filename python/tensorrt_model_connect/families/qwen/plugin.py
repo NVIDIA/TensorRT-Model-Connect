@@ -19,6 +19,8 @@ from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engin
 
 class QwenPlugin:
     name = "qwen"
+    runtime_strategy = "qwen_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     _CALIBRATION_PROMPTS = [
         "What is the capital of France? Answer in one sentence.",

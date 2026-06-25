@@ -1,0 +1,7 @@
+id = "lance"
+runtime_library = "libtrtmc_model_lance.so"
+runtime_plugins = ["plugin.cpp|register_lance_plugin"]
+runtime_strategies = ["lance_vision_language"]
+runtime_tests = [
+  "test_lance_vl_pipeline|test_lance_vl_pipeline.cpp|trtmc_model_lance,trtmc_backend_trt|_|REQUIRES_TRT",
+]

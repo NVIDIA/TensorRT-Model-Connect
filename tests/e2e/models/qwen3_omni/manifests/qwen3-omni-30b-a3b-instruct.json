@@ -4,7 +4,7 @@
   "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
   "bundle": "qwen3-omni-30b-a3b-instruct.trtfb",
   "family": "qwen3_omni",
-  "runtime_strategy": "omni_multimodal",
+  "runtime_strategy": "qwen3_omni_multimodal",
   "task_strategy": "omni_multimodal",
   "reference_backend": "invariant_only",
   "oracle_level": "L4_invariants",

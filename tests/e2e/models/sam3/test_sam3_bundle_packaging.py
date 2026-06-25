@@ -30,7 +30,7 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
 
     class _Sam3Plugin:
         name = "sam3"
-        runtime_strategy = "prompted_segmentation"
+        runtime_strategy = "sam3_prompted_segmentation"
         requires_tokenizer = True
 
         def load_weights(self, model_dir, config):
@@ -55,7 +55,7 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
         def get_bundle_config_overrides(self, config):
             return {
                 "model_type": "sam3",
-                "runtime_strategy": "prompted_segmentation",
+                "runtime_strategy": "sam3_prompted_segmentation",
                 "prompted_segmentation_variant": "sam3_text_prompt_pcs",
             }
 

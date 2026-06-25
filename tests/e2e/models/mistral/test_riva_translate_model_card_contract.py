@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from tests import test_e2e
+from tests.e2e.models.mistral.e2e_plugins.contract import MistralTranslationPlugin
 from tests.e2e_harness.manifest_loader import find_manifest_path, load_manifest
-from tests.e2e_harness.plugins.translation import plugin as translation_plugin
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -47,7 +47,7 @@ def test_riva_manifest_uses_model_card_translation_contract() -> None:
 
 def test_riva_translation_plugin_uses_preformatted_model_card_prompt() -> None:
     case = load_manifest(MANIFEST_PATH)
-    reference_cfg = translation_plugin.configure_reference(case)
+    reference_cfg = MistralTranslationPlugin().configure_reference(case)
 
     assert reference_cfg["use_chat_template"] is False
 

@@ -148,29 +148,12 @@ add_library(trtmc_core SHARED
   src/cabi/api/trtmc_c.cpp
   # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
   src/runtime/core/trt_common.cpp
-  src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
   src/runtime/backend/trt_version.cpp
-  src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/distributed_runtime.cpp
-  src/runtime/core/trt_decode_runtime.cpp
-  src/runtime/core/sampler.cpp
-  src/runtime/core/device_kv_cache.cpp
   src/runtime/core/device_tensor.cpp
-  src/runtime/core/kv_cache.cpp
-  src/runtime/core/triattention_kv_cache.cpp
-  src/runtime/core/recurrent_state.cpp
-  src/runtime/core/chat_template.cpp
-  src/runtime/core/flow_match_euler_scheduler.cpp
   src/runtime/core/stb_impl.cpp
-  # Domain-specific components
-  src/runtime/domains/multimodal/image_preprocessor.cpp
-  src/runtime/domains/multimodal/vision_engine.cpp
-  src/runtime/domains/audio/audio_types.cpp
-  src/runtime/domains/audio/mel_spectrogram.cpp
-  src/runtime/domains/diffusion/batch_utils.cpp
-  src/runtime/domains/diffusion/diffusion_preprocessor.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
@@ -182,7 +165,6 @@ add_library(trtmc_core SHARED
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
   src/utils/image_reader.cpp
-  src/runtime/core/hybrid_state.cpp
   # Config (schema registry + layered resolution + CLI surface + schemas)
   src/runtime/config/schema_registry.cpp
   src/runtime/config/config_bundle.cpp
@@ -206,17 +188,6 @@ set_source_files_properties(src/runtime/core/stb_impl.cpp
 )
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
-  target_sources(trtmc_core PRIVATE
-    src/runtime/core/argmax_kernel.cu
-    src/runtime/core/sparse_multinomial_kernel.cu
-    src/runtime/core/triattention_kernels.cu
-  )
-  set_source_files_properties(
-    src/runtime/core/argmax_kernel.cu
-    src/runtime/core/sparse_multinomial_kernel.cu
-    src/runtime/core/triattention_kernels.cu
-    PROPERTIES LANGUAGE CUDA
-  )
   target_include_directories(trtmc_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_compile_definitions(trtmc_core PUBLIC TRTMC_HAS_CUDA_KERNELS=1)
 endif()
@@ -418,6 +389,20 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     trtmc_core
     ${TRTMC_CUDART_LIBRARY}
   )
+  foreach(_trtmc_model_link_library IN LISTS TRTMC_MODEL_${_trtmc_model_var}_LINK_LIBRARIES)
+    if(_trtmc_model_link_library STREQUAL "cublas")
+      if(NOT TRTMC_CUBLAS_LIBRARY)
+        message(FATAL_ERROR
+          "Model '${_trtmc_model}' requires runtime_link_libraries=['cublas'], "
+          "but cuBLAS was not found")
+      endif()
+      target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE ${TRTMC_CUBLAS_LIBRARY})
+    else()
+      message(FATAL_ERROR
+        "Unknown runtime_link_libraries entry '${_trtmc_model_link_library}' "
+        "for model '${_trtmc_model}'")
+    endif()
+  endforeach()
   target_compile_definitions(trtmc_model_${_trtmc_model} PRIVATE TRTMC_HAS_TRT=0)
   target_compile_options(trtmc_model_${_trtmc_model}
     PRIVATE
@@ -698,14 +683,11 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
-trtmc_add_test(test_chat_template)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
 
 # TRT runtime core
-trtmc_add_test(test_decode_runtime REQUIRES_TRT)
-trtmc_add_test(test_sampler)
 trtmc_add_test(test_trt_logger REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtmc_backend_trt)
@@ -714,8 +696,6 @@ trtmc_add_test(test_trt_runtime_lifetime REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_runtime_lifetime PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_trt_engine_lifecycle)
-trtmc_add_test(test_trt_engine_lifecycle_fake_engine)
 trtmc_add_test(test_trt_module REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_module PRIVATE trtmc_backend_trt)
@@ -728,15 +708,7 @@ trtmc_add_test(test_cuda_graph REQUIRES_TRT)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_cuda_graph PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_device_kv_cache)
-trtmc_add_test(test_device_resources REQUIRES_TRT)
-if(TARGET trtmc_backend_trt)
-  target_link_libraries(test_device_resources PRIVATE trtmc_backend_trt)
-endif()
 trtmc_add_test(test_device_tensor)
-trtmc_add_test(test_kv_cache_new)
-trtmc_add_test(test_triattention_kv_cache)
-trtmc_add_test(test_recurrent_state)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
@@ -758,28 +730,11 @@ trtmc_add_test(test_tokenizer_edge_cases)
 trtmc_add_test(test_image_reader        NO_SRC_INCLUDE)
 trtmc_add_test(test_trtmc_io             NO_SRC_INCLUDE)
 
-# Vision / VL
-trtmc_add_test(test_image_preprocessor)
-trtmc_add_test(test_vl_decode_policy)
-trtmc_add_test(test_vision_execution_plan)
-
 # Diffusion
-trtmc_add_test(test_diffusion_denoising_step_seam)
-trtmc_add_test(test_flow_match_scheduler)
 trtmc_add_test(test_diffusion_math)
-trtmc_add_test(test_diffusion_batch_utils)
 
-# Recurrent contracts
-trtmc_add_test(test_recurrent_step_contracts)
-
-# Audio — transcription and shared preprocessing
+# Audio
 trtmc_add_test(test_wav_reader)
-trtmc_add_test(test_audio_types)
-trtmc_add_test(test_mel_spectrogram)
-
-# Perception and neural operator
-trtmc_add_test(test_neural_operator_config)
-trtmc_add_test(test_perception_preprocess_seams)
 
 # IoMap tensor name mapping
 trtmc_add_test(test_io_map)

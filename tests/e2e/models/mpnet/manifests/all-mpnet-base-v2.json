@@ -4,7 +4,7 @@
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
   "bundle": "all-mpnet-base-v2.trtfb",
   "family": "mpnet",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "mpnet_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "sentence_transformer_embed",
   "user_contract": "embedding_vector",

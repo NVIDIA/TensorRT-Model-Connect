@@ -1,0 +1,6 @@
+id = "gpt_oss"
+runtime_library = "libtrtmc_model_gpt_oss.so"
+runtime_plugins = ["plugin.cpp|register_gpt_oss_plugin"]
+runtime_strategies = ["gpt_oss_decoder_moe"]
+[validation_profiles]
+decoder_debug = ["gpt_oss_decoder_moe"]

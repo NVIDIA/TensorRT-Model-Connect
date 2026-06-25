@@ -1,0 +1,6 @@
+id = "gpt2"
+runtime_library = "libtrtmc_model_gpt2.so"
+runtime_plugins = ["plugin.cpp|register_gpt2_plugin"]
+runtime_strategies = ["gpt2_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["gpt2_decoder_kv_cache"]

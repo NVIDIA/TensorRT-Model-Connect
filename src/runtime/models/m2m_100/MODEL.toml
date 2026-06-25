@@ -1,0 +1,4 @@
+id = "m2m_100"
+runtime_library = "libtrtmc_model_m2m_100.so"
+runtime_plugins = ["plugin.cpp|register_m2m_100_plugin"]
+runtime_strategies = ["m2m_100_seq2seq_encoder_decoder"]

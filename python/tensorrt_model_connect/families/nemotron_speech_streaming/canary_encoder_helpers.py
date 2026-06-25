@@ -493,7 +493,7 @@ def _add_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k,
 
 class CanaryPlugin:
     name = "canary"
-    runtime_strategy = "speech_to_text"
+    runtime_strategy = "canary_speech_to_text"
     _MEL_LENGTH = 417  # exact match for 4.16s test audio
 
     def __init__(self):

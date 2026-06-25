@@ -1,7 +1,7 @@
 #include "runtime/models/bark/pipeline.h"
 
-#include "runtime/core/trt_decode_runtime.h"
 #include "runtime/models/bark/bark_generation_plan.h"
+#include "runtime/models/bark/decode_runtime.h"
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>
@@ -166,8 +166,8 @@ void update_fine_codes_from_logits(std::vector<int32_t>& codes,
 // ═══════════════════════════════════════════════════════════════════════════
 
 BarkPipeline::BarkPipeline(std::unique_ptr<TrtModule> semantic, std::unique_ptr<TrtModule> coarse,
-                           std::unique_ptr<IInferenceState> semantic_state,
-                           std::unique_ptr<IInferenceState> coarse_state,
+                           std::unique_ptr<BarkInferenceState> semantic_state,
+                           std::unique_ptr<BarkInferenceState> coarse_state,
                            std::vector<float> semantic_embed, std::vector<float> coarse_embed,
                            BarkConfig config, cudaStream_t stream,
                            std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
@@ -259,7 +259,7 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
     return out;
 }
 
-void BarkPipeline::run_step_with_embed(TrtModule& module, IInferenceState& state,
+void BarkPipeline::run_step_with_embed(TrtModule& module, BarkInferenceState& state,
                                        const float* embed, int32_t embed_dim,
                                        std::vector<float>& logits) {
     Tensor embed_tensor;
@@ -301,8 +301,8 @@ void BarkPipeline::run_step_with_embed(TrtModule& module, IInferenceState& state
     state.advance();
 }
 
-void BarkPipeline::run_step_with_token(TrtModule& module, IInferenceState& state, int32_t token_id,
-                                       std::vector<float>& logits) {
+void BarkPipeline::run_step_with_token(TrtModule& module, BarkInferenceState& state,
+                                       int32_t token_id, std::vector<float>& logits) {
     Tensor token_tensor;
     token_tensor.data = &token_id;
     token_tensor.shape = {1};

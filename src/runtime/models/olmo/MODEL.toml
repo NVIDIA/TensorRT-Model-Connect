@@ -1,0 +1,6 @@
+id = "olmo"
+runtime_library = "libtrtmc_model_olmo.so"
+runtime_plugins = ["plugin.cpp|register_olmo_plugin"]
+runtime_strategies = ["olmo_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["olmo_decoder_kv_cache"]

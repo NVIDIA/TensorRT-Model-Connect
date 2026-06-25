@@ -12,7 +12,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
 def _is_vl_model(entry):
-    return entry.get("runtime_strategy") == "vision_language"
+    return str(entry.get("runtime_strategy") or "").endswith("_vision_language")
 
 
 @pytest.mark.e2e

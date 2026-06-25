@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import math
 import sys
+import importlib
+from pathlib import Path
 
 import numpy as np
 import tensorrt as trt
@@ -35,7 +37,18 @@ except ImportError:
     from cuda import cudart  # type: ignore[no-redef]
 
 sys.path.insert(0, "python")
-from tensorrt_model_connect import graph_ops
+
+
+def _load_owned_graph_ops():
+    families = Path("python") / "tensorrt_model_connect" / "families"
+    for family_dir in sorted(families.iterdir()):
+        if (family_dir / "MODEL.toml").is_file() and (family_dir / "graph_ops.py").is_file():
+            return importlib.import_module(
+                f"tensorrt_model_connect.families.{family_dir.name}.graph_ops")
+    raise RuntimeError("No family-owned graph_ops.py found")
+
+
+graph_ops = _load_owned_graph_ops()
 
 
 # ---------------------------------------------------------------

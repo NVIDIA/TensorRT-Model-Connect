@@ -525,6 +525,19 @@ def make_llama4_attention_scale_table(
     return scale.reshape(max_cache_length, 1).astype(np.float32)
 
 
+def make_rope_query_scale_table(
+    max_cache_length: int,
+    beta: float,
+    original_max_position_embeddings: int,
+) -> np.ndarray:
+    """Build the generic per-position query scale for RoPE variants."""
+    return make_llama4_attention_scale_table(
+        max_cache_length=max_cache_length,
+        beta=beta,
+        original_max_position_embeddings=original_max_position_embeddings,
+    )
+
+
 def add_layer_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -1771,6 +1784,21 @@ def make_t5_relative_position_bias(
     )
 
     return buckets.astype(np.int32)
+
+
+def make_bucketed_relative_position_bias(
+    num_heads: int,
+    max_seq_len: int,
+    num_buckets: int = 32,
+    max_distance: int = 128,
+) -> np.ndarray:
+    """Compute bucketed relative position indices for attention helpers."""
+    return make_t5_relative_position_bias(
+        num_heads=num_heads,
+        max_seq_len=max_seq_len,
+        num_buckets=num_buckets,
+        max_distance=max_distance,
+    )
 
 
 # ---------------------------------------------------------------------------

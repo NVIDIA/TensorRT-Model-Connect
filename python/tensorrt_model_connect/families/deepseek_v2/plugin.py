@@ -62,7 +62,8 @@ trt = trt_compat.get_trt()
 
 class DeepSeekV2Plugin:
     name = "deepseek_v2"
-    runtime_strategy = "decoder_kv_cache"
+    runtime_strategy = "deepseek_v2_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("deepseek_v2", "deepseek_v3")

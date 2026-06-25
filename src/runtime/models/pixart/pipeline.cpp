@@ -5,8 +5,7 @@
 
 #include "runtime/models/pixart/pipeline.h"
 
-#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/pixart/pixart_denoising_step_seam.h"
 #include "runtime/models/pixart/pixart_generation_conditioning.h"
 #include "runtime/models/pixart/pixart_generation_plan.h"
 
@@ -21,8 +20,8 @@ namespace trtmc {
 
 namespace {
 
-using diffusion::FlowMatchEulerState;
 using diffusion::PixArtLayout;
+using diffusion::pixart_scheduler::FlowMatchEulerState;
 
 // ---------------------------------------------------------------------------
 // DDIM Scheduler (epsilon-prediction models like PixArt)
@@ -139,7 +138,7 @@ float clamp_unit(float value) {
 }
 
 void convert_pixart_chw_to_hwc(const std::vector<float>& raw, int32_t h_out, int32_t w_out,
-                               VideoResult& result) {
+                               PixArtVideoResult& result) {
     result.height = h_out;
     result.width = w_out;
     result.num_frames = 1;
@@ -163,7 +162,7 @@ void convert_pixart_chw_to_hwc(const std::vector<float>& raw, int32_t h_out, int
 // ---------------------------------------------------------------------------
 
 std::vector<float> prepare_pixart_vae_2d_input(const std::vector<float>& latents,
-                                               const DiffusionConfig& config,
+                                               const PixArtDiffusionConfig& config,
                                                std::size_t input_size) {
     std::vector<float> scaled_latents(latents.begin(),
                                       latents.begin() + static_cast<std::ptrdiff_t>(input_size));
@@ -194,7 +193,7 @@ void extract_pixart_latent_frame(const std::vector<float>& latents, int32_t c, i
 void compose_pixart_vae_video_frames(const std::vector<float>& all_raw_frames, int32_t t_lat,
                                      int32_t t_out_per_frame, int32_t h_out, int32_t w_out,
                                      int32_t scale_factor_temporal, int32_t max_video_frames,
-                                     VideoResult& result) {
+                                     PixArtVideoResult& result) {
     const int32_t total_out_frames = t_lat * t_out_per_frame;
     const int32_t trim = scale_factor_temporal - 1;
     const int32_t t_final = total_out_frames - trim;
@@ -425,7 +424,7 @@ bool run_pixart_denoising_loop(
     ComputeTembFn&& compute_temb, PatchifyFn&& patchify, EmbedHiddenFn&& embed_hidden,
     UnpatchifyFn&& unpatchify, RunDenoiserFn&& run_denoiser) {
     std::vector<float> patches;
-    return diffusion::run_video_denoising_steps(
+    return pixart_denoising::run_pixart_video_denoising_steps(
         num_inference_steps, step_timesteps, latents, error, compute_temb,
         [&](const std::vector<float>& current_latents, std::vector<float>& hidden) {
             patchify(current_latents, patches);
@@ -460,7 +459,7 @@ bool run_pixart_denoising_loop(
 // Latent denormalization
 // ---------------------------------------------------------------------------
 
-void denormalize_pixart_latents(const DiffusionConfig& config, int32_t z_dim, int32_t t_lat,
+void denormalize_pixart_latents(const PixArtDiffusionConfig& config, int32_t z_dim, int32_t t_lat,
                                 int32_t h_lat, int32_t w_lat, std::vector<float>& latents) {
     if (config.latents_mean.empty() || config.latents_std.empty()) {
         return;
@@ -477,10 +476,10 @@ void denormalize_pixart_latents(const DiffusionConfig& config, int32_t z_dim, in
 }
 
 // ---------------------------------------------------------------------------
-// VideoResult -> ImageResult conversion
+// PixArtVideoResult -> ImageResult conversion
 // ---------------------------------------------------------------------------
 
-ImageResult video_to_image(const VideoResult& vr, int32_t default_h, int32_t default_w) {
+ImageResult video_to_image(const PixArtVideoResult& vr, int32_t default_h, int32_t default_w) {
     ImageResult out;
     out.pixels = vr.frames;
     out.height = (vr.height > 0) ? vr.height : default_h;
@@ -498,7 +497,7 @@ ImageResult video_to_image(const VideoResult& vr, int32_t default_h, int32_t def
 
 PixArtPipeline::PixArtPipeline(std::unique_ptr<TrtModule> text_encoder,
                                std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
-                               DiffusionConfig config, PreprocessorWeights weights,
+                               PixArtDiffusionConfig config, PixArtPreprocessorWeights weights,
                                std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
                                std::shared_ptr<void> distributed_owner,
                                int32_t tensor_parallel_rank, int32_t tensor_parallel_size)
@@ -874,7 +873,7 @@ void PixArtPipeline::compute_3d_rope(int32_t nt, int32_t nh, int32_t nw,
 // ---------------------------------------------------------------------------
 
 bool PixArtPipeline::decode_vae_2d(const std::vector<float>& latents, int32_t c, int32_t h_lat,
-                                   int32_t w_lat, VideoResult& result) {
+                                   int32_t w_lat, PixArtVideoResult& result) {
     if (!vae_ || !vae_->ok()) {
         return false;
     }
@@ -1023,7 +1022,7 @@ void PixArtPipeline::decode_vae_single_frame(const std::vector<float>& latents, 
 // ---------------------------------------------------------------------------
 
 bool PixArtPipeline::decode_vae_3d(const std::vector<float>& latents, int32_t c, int32_t t_lat,
-                                   int32_t h_lat, int32_t w_lat, VideoResult& result) {
+                                   int32_t h_lat, int32_t w_lat, PixArtVideoResult& result) {
     if (!vae_ || !vae_->ok()) {
         return false;
     }
@@ -1095,7 +1094,7 @@ bool PixArtPipeline::run_pixart_text_conditioning(const std::vector<int32_t>& in
 
 bool PixArtPipeline::run_pixart_vae_decode(int32_t z_dim, int32_t t_lat, int32_t h_lat,
                                            int32_t w_lat, std::vector<float>& latents,
-                                           VideoResult& result) {
+                                           PixArtVideoResult& result) {
     std::cerr << "[diffusion] Decoding video ...\n";
     if (config_.num_vae_caches <= 0) {
         if (!decode_vae_2d(latents, z_dim, h_lat, w_lat, result)) {
@@ -1113,7 +1112,7 @@ bool PixArtPipeline::run_pixart_vae_decode(int32_t z_dim, int32_t t_lat, int32_t
 
 ImageResult PixArtPipeline::finish_pixart_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat,
                                                      int32_t w_lat, std::vector<float>& latents,
-                                                     VideoResult& result) {
+                                                     PixArtVideoResult& result) {
     denormalize_pixart_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
 
     if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
@@ -1152,7 +1151,7 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     const auto plan =
         diffusion::make_pixart_generation_plan(config_, requested_steps, requested_guidance);
 
-    VideoResult result;
+    PixArtVideoResult result;
     result.height = config_.video_height;
     result.width = config_.video_width;
 

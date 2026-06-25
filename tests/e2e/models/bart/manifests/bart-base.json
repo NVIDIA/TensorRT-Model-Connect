@@ -3,7 +3,7 @@
   "hf_id": "facebook/bart-base",
   "bundle": "bart-base.trtfb",
   "family": "bart",
-  "runtime_strategy": "seq2seq_encoder_decoder",
+  "runtime_strategy": "bart_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
   "reference_family": "seq2seq_base_weak",
   "user_contract": "continuation_parity",

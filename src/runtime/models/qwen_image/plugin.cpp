@@ -3,9 +3,9 @@
 // AutoencoderKLQwenImage VAE decoder, and Qwen-Image-specific preprocessor
 // weights (per-channel latents_mean / latents_std).
 //
-// Mirrors zimage_plugin.cpp — loads diffusion engines via the shared
-// load_diffusion_parts helper, parses Qwen-Image config and preprocessor
-// weights, then constructs QwenImagePipeline via its Construction struct.
+// Loads diffusion engines via the Qwen Image helper, parses Qwen-Image config
+// and preprocessor weights, then constructs QwenImagePipeline via its
+// Construction struct.
 //
 // Trace: ARCH-FAM-001, UD-FAM-QWEN-IMAGE-01.
 
@@ -24,8 +24,8 @@ class QwenImagePlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        // Load the standard diffusion engine triple (text_encoder_0_plan,
-        // denoiser_plan, vae_decoder_plan) via the shared helper. T2I bundles
+        // Load the Qwen Image diffusion engine triple (text_encoder_0_plan,
+        // denoiser_plan, vae_decoder_plan) via the family helper. T2I bundles
         // do not ship vision / vae_encoder engines, so those stay null on
         // Construction.
         auto parts = load_diffusion_parts(ctx.backend, ctx.bundle, ctx.config_json, opts);

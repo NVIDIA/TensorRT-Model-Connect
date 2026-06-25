@@ -1,0 +1,6 @@
+id = "granite"
+runtime_library = "libtrtmc_model_granite.so"
+runtime_plugins = ["plugin.cpp|register_granite_plugin"]
+runtime_strategies = ["granite_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["granite_decoder_kv_cache"]

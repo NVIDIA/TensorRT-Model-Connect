@@ -200,3 +200,76 @@ def test_summary_treats_xfail_result_as_waived_not_active_failure(
     assert "| skip | 1 |" in summary
     assert "### Failures" not in summary
     assert "| encoder-base | XFAIL | skip | known representation parity gap |" in summary
+
+
+def test_summary_treats_model_owned_xfail_as_waived_not_active_failure(
+    tmp_path: Path,
+) -> None:
+    mod = _import_summary()
+    e2e_root = tmp_path / "e2e_artifacts"
+    artifacts_dir = e2e_root / "artifacts"
+    _write_result(artifacts_dir, "fnet-base", "fail")
+    _write_junit(
+        e2e_root,
+        """
+        <testcase classname="tests.e2e.models.fnet.test_fnet_e2e"
+                  name="test_model_e2e[fnet-base]">
+          <skipped type="pytest.xfail"
+                   message="(encoder representation parity below minimum contract floor)" />
+        </testcase>
+        """,
+    )
+
+    results = mod._merge_pytest_outcomes(
+        mod._load_results(artifacts_dir),
+        mod._load_pytest_outcomes(e2e_root),
+    )
+    summary = mod.render_summary(
+        results=results,
+        mode="premerge",
+        report_path=e2e_root / "missing.html",
+        html_artifact_name="html",
+        full_artifact_name="full",
+        run_url="",
+        max_rows=40,
+    )
+
+    assert "| skip | 1 |" in summary
+    assert "### Failures" not in summary
+    assert (
+        "| fnet-base | XFAIL | skip | "
+        "encoder representation parity below minimum contract floor |"
+    ) in summary
+
+
+def test_summary_surfaces_model_owned_xpass_from_console_logs(tmp_path: Path) -> None:
+    mod = _import_summary()
+    e2e_root = tmp_path / "e2e_artifacts"
+    artifacts_dir = e2e_root / "artifacts"
+    _write_result(artifacts_dir, "fnet-base", "pass")
+    e2e_root.mkdir(parents=True, exist_ok=True)
+    (e2e_root / "console-gpu2-shared-w3.log").write_text(
+        "tests/e2e/models/fnet/test_fnet_e2e.py::test_model_e2e[fnet-base] "
+        "XPASS ((FNet parity gap unexpectedly closed)) [100%]\n",
+        encoding="utf-8",
+    )
+
+    results = mod._merge_pytest_outcomes(
+        mod._load_results(artifacts_dir),
+        mod._load_pytest_outcomes(e2e_root),
+    )
+    summary = mod.render_summary(
+        results=results,
+        mode="premerge",
+        report_path=e2e_root / "missing.html",
+        html_artifact_name="html",
+        full_artifact_name="full",
+        run_url="",
+        max_rows=40,
+    )
+
+    assert "### Pytest Waive Outcomes" in summary
+    assert (
+        "| fnet-base | XPASS | pass | "
+        "FNet parity gap unexpectedly closed |"
+    ) in summary

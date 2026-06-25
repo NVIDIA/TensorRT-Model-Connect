@@ -15,10 +15,10 @@ def test_case_matches_e2e_model_by_name_family_and_strategy():
         name="example-decoder-fp16",
         hf_id="example-org/example-decoder",
         family="example_decoder",
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="example_decoder_decoder_kv_cache",
     )
 
     assert _case_matches_e2e_model(case, {"example-decoder-fp16"})
     assert _case_matches_e2e_model(case, {"example_decoder"})
-    assert _case_matches_e2e_model(case, {"decoder_kv_cache"})
+    assert _case_matches_e2e_model(case, {"example_decoder_decoder_kv_cache"})
     assert not _case_matches_e2e_model(case, {"bark"})

@@ -1,13 +1,12 @@
 #include "runtime/models/whisper/pipeline.h"
 
 #include "plugin_helpers.h"
-#include "runtime/core/trt_decode_runtime.h"
-#include "runtime/core/trt_engine_lifecycle.h"
-#include "runtime/domains/audio/mel_spectrogram.h"
+#include "runtime/models/whisper/decode_runtime.h"
 #include "runtime/models/whisper/whisper_cross_kv_apply.h"
 #include "runtime/models/whisper/whisper_cross_kv_plan.h"
 #include "runtime/models/whisper/whisper_decode_policy.h"
 #include "runtime/models/whisper/whisper_host_plan.h"
+#include "runtime/models/whisper/whisper_mel_spectrogram.h"
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
@@ -24,7 +23,7 @@ namespace trtmc {
 
 WhisperPipeline::WhisperPipeline(
     std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
+    std::unique_ptr<WhisperInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
     int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_hop_length,
     int32_t mel_chunk_length, int32_t mel_sampling_rate, int32_t mel_win_length, float mel_preemph,
     bool mel_normalize_per_feature, std::string mel_frontend, cudaStream_t stream,
@@ -59,7 +58,7 @@ WhisperPipeline::WhisperPipeline(
 
 WhisperPipeline::WhisperPipeline(
     std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<IInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
+    std::unique_ptr<WhisperInferenceState> state, WhisperConfig whisper_config, int32_t hidden_size,
     int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_hop_length,
     int32_t mel_chunk_length, int32_t mel_sampling_rate, cudaStream_t stream,
     std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
@@ -97,28 +96,12 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     }
 
     // Step 1: Extract mel spectrogram
-    MelResult mel;
+    whisper::MelResult mel;
     if (mel_fb_ && !mel_fb_->data.empty()) {
-        if (mel_frontend_ == "nemo") {
-            MelSpectrogramOptions options;
-            options.n_fft = mel_n_fft_;
-            options.win_length = mel_win_length_;
-            options.hop_length = mel_hop_length_;
-            options.chunk_length_s = mel_chunk_length_;
-            options.sample_rate = mel_sampling_rate_;
-            options.symmetric_window = true;
-            options.center_window_in_fft = true;
-            options.preemphasis = mel_preemph_;
-            options.log_scale = MelLogScale::kNaturalLog;
-            options.normalize_per_feature = mel_normalize_per_feature_;
-            mel = extract_configured_mel_spectrogram(
-                samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins,
-                mel_fb_->n_mel_bins, options);
-        } else {
-            mel = extract_mel_spectrogram(samples_ptr, samples_count, mel_fb_->data.data(),
-                                          mel_fb_->n_freq_bins, mel_fb_->n_mel_bins, mel_n_fft_,
-                                          mel_hop_length_, mel_chunk_length_, mel_sampling_rate_);
-        }
+        mel = whisper::extract_mel_spectrogram(samples_ptr, samples_count, mel_fb_->data.data(),
+                                               mel_fb_->n_freq_bins, mel_fb_->n_mel_bins,
+                                               mel_n_fft_, mel_hop_length_, mel_chunk_length_,
+                                               mel_sampling_rate_);
     }
 
     if (mel.data.empty()) {
@@ -247,7 +230,7 @@ std::vector<int32_t> WhisperPipeline::run_decoder(const std::vector<int32_t>& in
             run_decoder_step(token, logits);
             return true;
         },
-        [](const std::vector<float>& logits) { return select_argmax_token(logits); });
+        [](const std::vector<float>& logits) { return whisper_select_argmax_token(logits); });
 
     if (result.prefill_failed) {
         std::cerr << "[whisper] Prefill step failed: " << result.error << std::endl;

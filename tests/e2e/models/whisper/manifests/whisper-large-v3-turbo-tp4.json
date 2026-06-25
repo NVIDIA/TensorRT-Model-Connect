@@ -4,7 +4,7 @@
   "hf_id": "openai/whisper-large-v3-turbo",
   "bundle": "whisper-large-v3-turbo-tp4.trtfb",
   "family": "whisper",
-  "runtime_strategy": "speech_to_text",
+  "runtime_strategy": "whisper_speech_to_text",
   "task_strategy": "speech_to_text",
   "reference_family": "asr_whisper",
   "user_contract": "exact_transcript",

@@ -4,7 +4,7 @@
   "hf_id": "facebook/sam-vit-base",
   "bundle": "sam-vit-base.trtfb",
   "family": "sam",
-  "runtime_strategy": "prompted_segmentation",
+  "runtime_strategy": "sam_prompted_segmentation",
   "task_strategy": "prompted_segmentation",
   "reference_family": "prompted_segmentation_sam",
   "user_contract": "prompted_mask",

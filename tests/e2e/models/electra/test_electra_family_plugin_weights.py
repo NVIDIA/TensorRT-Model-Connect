@@ -85,4 +85,4 @@ class TestElectraPlugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.electra import plugin
-        assert plugin.runtime_strategy == "encoder_only"
+        assert plugin.runtime_strategy == "electra_encoder_only"

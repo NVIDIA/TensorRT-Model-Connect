@@ -50,7 +50,8 @@ trt = trt_compat.get_trt()
 
 class GptOssPlugin:
     name = "gpt_oss"
-    runtime_strategy = "decoder_moe"
+    runtime_strategy = "gpt_oss_decoder_moe"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "gpt_oss"

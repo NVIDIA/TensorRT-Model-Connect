@@ -4,3 +4,14 @@ test_manifests = [
   "manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.json",
   "manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k.json",
 ]
+
+[e2e_defaults.image_classification]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = ["test_image"]

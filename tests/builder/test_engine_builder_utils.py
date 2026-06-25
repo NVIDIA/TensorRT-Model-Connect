@@ -28,10 +28,11 @@ try:
         _trt_abi_from_version,
         _get_gpu_name,
         _HF_ALLOW_PATTERNS,
-        _detect_diffusion_tokenizer_add_special_tokens,
+        _diffusion_tokenizer_add_special_tokens_from_plugin,
         _ensure_tokenizer_json,
         build_bundle,
     )
+    from tensorrt_model_connect.families import family_hf_allow_patterns
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
@@ -150,7 +151,18 @@ class TestDetectTokenizerAddSpecialTokens:
         tok_dir.mkdir()
         (tok_dir / "tokenizer_config.json").write_text(
             json.dumps({"add_eos_token": True}))
-        assert _detect_diffusion_tokenizer_add_special_tokens(tmp_path) is True
+
+        class FakeDiffusionPlugin:
+            name = "fake_diffusion"
+
+            def diffusion_tokenizer_add_special_tokens(
+                self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+            ):
+                tok_dir = Path(model_dir_path) / "tokenizer"
+                return detect_tokenizer_add_special_tokens(tok_dir)
+
+        assert _diffusion_tokenizer_add_special_tokens_from_plugin(
+            FakeDiffusionPlugin(), tmp_path) is True
 
     def test_diffusion_prefers_tokenizer_2(self, tmp_path):
         tok_dir = tmp_path / "tokenizer"
@@ -163,7 +175,21 @@ class TestDetectTokenizerAddSpecialTokens:
         (tok2_dir / "tokenizer_config.json").write_text(
             json.dumps({"add_eos_token": False}))
 
-        assert _detect_diffusion_tokenizer_add_special_tokens(tmp_path) is False
+        class FakeDiffusionPlugin:
+            name = "fake_diffusion"
+
+            def diffusion_tokenizer_add_special_tokens(
+                self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+            ):
+                model_dir = Path(model_dir_path)
+                for subdir in ("tokenizer_2", "tokenizer"):
+                    candidate = model_dir / subdir
+                    if candidate.is_dir():
+                        return detect_tokenizer_add_special_tokens(candidate)
+                return detect_tokenizer_add_special_tokens(model_dir)
+
+        assert _diffusion_tokenizer_add_special_tokens_from_plugin(
+            FakeDiffusionPlugin(), tmp_path) is False
 
 
 class TestResolveModel:
@@ -231,11 +257,17 @@ class TestHfAllowPatterns:
         assert "*.py" in _HF_ALLOW_PATTERNS
 
     def test_contains_diffusers_component_dirs(self):
-        assert "text_encoder/**" in _HF_ALLOW_PATTERNS
-        assert "text_encoder_2/**" in _HF_ALLOW_PATTERNS
-        assert "transformer/**" in _HF_ALLOW_PATTERNS
-        assert "vae/**" in _HF_ALLOW_PATTERNS
-        assert "tokenizer_2/**" in _HF_ALLOW_PATTERNS
+        shared = set(_HF_ALLOW_PATTERNS)
+        family_owned = set(family_hf_allow_patterns())
+        for pattern in (
+            "text_encoder/**",
+            "text_encoder_2/**",
+            "transformer/**",
+            "vae/**",
+            "tokenizer_2/**",
+        ):
+            assert pattern not in shared
+            assert pattern in family_owned
 
 
 class TestEnsureTokenizerJson:

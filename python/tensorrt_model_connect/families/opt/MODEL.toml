@@ -8,3 +8,7 @@ aliases = [
 prefixes = [
   "opt",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "opt_decoder_kv_cache",
+]

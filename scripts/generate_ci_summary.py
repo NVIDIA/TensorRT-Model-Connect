@@ -22,9 +22,10 @@ _PYTEST_TO_RESULT_STATUS = {
     "SKIPPED": "skip",
     "XFAIL": "skip",
 }
-_TEST_CASE_RE = re.compile(r"test_e2e\[([^\]]+)\]")
+_TEST_CASE_RE = re.compile(r"(?:test_e2e|test_model_e2e)\[([^\]]+)\]")
 _CONSOLE_OUTCOME_RE = re.compile(
-    r"tests/test_e2e\.py::test_e2e\[([^\]]+)\]\s+"
+    r"(?:tests/test_e2e\.py::test_e2e|"
+    r"tests/e2e/models/[^\s:]+::test_model_e2e)\[([^\]]+)\]\s+"
     r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
 )
 _METRIC_PRIORITY = (

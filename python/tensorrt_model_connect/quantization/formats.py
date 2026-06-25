@@ -7,7 +7,7 @@ all TRT API calls for that scheme — no switch/case logic elsewhere.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -37,6 +37,7 @@ class QuantFormat(Protocol):
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         """Insert format-specific Q/DQ around a matmul.
 
@@ -48,6 +49,7 @@ class QuantFormat(Protocol):
             lhs_width: Input feature dimension.
             rhs_width: Output feature dimension.
             dtype: Working numpy dtype (np.float16 for FP16 mode).
+            graph_ops: Family-owned graph helper module.
 
         Returns:
             Dequantized output tensor after quantized matmul.
@@ -68,6 +70,7 @@ class QuantFormat(Protocol):
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         """Insert format-specific Q/DQ around a Conv2D."""
         ...
@@ -118,10 +121,10 @@ class FP8Format:
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
 
@@ -167,10 +170,10 @@ class FP8Format:
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
 
@@ -226,10 +229,10 @@ class INT8SmoothQuantFormat:
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
 
@@ -276,10 +279,10 @@ class INT8SmoothQuantFormat:
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
 
@@ -337,10 +340,10 @@ class INT4AWQFormat:
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
@@ -377,10 +380,10 @@ class INT4AWQFormat:
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
@@ -427,10 +430,10 @@ class NVFP4Format:
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 16
@@ -474,10 +477,10 @@ class NVFP4Format:
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 16
@@ -532,10 +535,10 @@ class W4A8Format:
         lhs_width: int,
         rhs_width: int,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
@@ -581,10 +584,10 @@ class W4A8Format:
         padding: tuple[int, int] = (0, 0),
         groups: int = 1,
         dtype: np.dtype,
+        graph_ops: Any,
     ) -> trt.ITensor:
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from .. import graph_ops
 
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128

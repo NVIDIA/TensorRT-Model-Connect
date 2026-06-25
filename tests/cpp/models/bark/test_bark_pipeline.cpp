@@ -1,8 +1,8 @@
 #include "../../support/mock_trt_engines.h"
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/models/bark/bark_config.h"
+#include "runtime/models/bark/kv_cache.h"
 #include "runtime/models/bark/pipeline.h"
-#include "trtmc/runtime/kv_cache.h"
 
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -41,8 +41,8 @@ void test_bark_generate_audio() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
-    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::BarkKvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::BarkKvCache>(0, 16, 0, stream);
 
     check(sem_cache->ok(), "bark semantic cache ok");
     check(coarse_cache->ok(), "bark coarse cache ok");
@@ -90,8 +90,8 @@ void test_bark_constructor_validates_semantic() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
-    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::BarkKvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::BarkKvCache>(0, 512, 0, stream);
 
     const std::vector<float> coarse_logits(12, 0.1F);
     auto coarse_engine = trtmc::test::build_mock_mask_only_engine(17, 12, coarse_logits);
@@ -136,8 +136,8 @@ void test_bark_constructor_validates_embed() {
         sem_engine.get(), sem_engine->createExecutionContext(), stream);
     auto coarse = std::make_unique<trtmc::TrtModuleImpl>(
         coarse_engine.get(), coarse_engine->createExecutionContext(), stream);
-    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
-    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::BarkKvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::BarkKvCache>(0, 16, 0, stream);
 
     bool threw = false;
     try {

@@ -1,0 +1,8 @@
+id = "qwen3_omni"
+runtime_library = "libtrtmc_model_qwen3_omni.so"
+runtime_plugins = ["plugin.cpp|register_qwen3_omni_plugin"]
+runtime_strategies = ["qwen3_omni_multimodal"]
+runtime_tests = [
+  "test_qwen3_omni_audio_plan|test_qwen3_omni_audio_plan.cpp|_|_|_",
+  "test_qwen3_omni_pipeline|test_qwen3_omni_pipeline.cpp|trtmc_model_qwen3_omni|_|REQUIRES_TRT",
+]

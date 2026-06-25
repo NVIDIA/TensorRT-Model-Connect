@@ -77,7 +77,8 @@ def _resolve_image_size(model_dir: str) -> int:
 
 class SegformerPlugin:
     name = "segformer"
-    runtime_strategy = "segmentation"
+    runtime_strategy = "segformer_segmentation"
+    requires_tokenizer = False
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("segformer",)

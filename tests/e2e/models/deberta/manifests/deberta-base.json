@@ -3,7 +3,7 @@
   "hf_id": "microsoft/deberta-base",
   "bundle": "deberta-base.trtfb",
   "family": "deberta",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "deberta_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

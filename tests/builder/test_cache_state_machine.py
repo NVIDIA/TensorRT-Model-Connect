@@ -2,10 +2,10 @@
 
 Extracts and tests the pure-numpy cache/mask/position logic from TrtRunner
 without needing TRT or a real engine. Validates that the state machine
-matches the C++ runtime's DeviceKvCache behavior.
+matches the family-local debug runner cache behavior.
 
 Trace: ARCH-DBG-001, UD-DBG-01
-Intent: Validate that the Python debug runner's cache position, attention mask, and KV append/shift logic matches the C++ DeviceKvCache contract.
+Intent: Validate that the Python debug runner's cache position, attention mask, and KV append/shift logic matches the family-local debug runner cache contract.
 Preconditions: No TRT or GPU required; pure-numpy replica of cache state machine.
 Postconditions: Position IDs, attention masks, and cache contents are correct through prefill, autoregressive, and cache-full overflow phases.
 """

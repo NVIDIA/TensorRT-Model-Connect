@@ -14,6 +14,6 @@ def _plugin(model_type: str):
     assert plugin is not None
     return plugin
 
-def test_no_explicit_runtime_strategy() -> None:
+def test_runtime_strategy() -> None:
     plugin = _plugin("gpt2")
-    assert getattr(plugin, "runtime_strategy", None) is None
+    assert getattr(plugin, "runtime_strategy", None) == "gpt2_decoder_kv_cache"

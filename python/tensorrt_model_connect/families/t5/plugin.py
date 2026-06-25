@@ -13,7 +13,7 @@ trt = trt_compat.get_trt()
 
 class T5Plugin:
     name = "t5"
-    runtime_strategy = "text_to_text"
+    runtime_strategy = "t5_text_to_text"
 
     def matches(self, model_type):
         return model_type.lower() in ("t5",)

@@ -1,22 +1,22 @@
 #pragma once
 #include "plugin_helpers.h"
-#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "preprocessor_weights_helpers.h"
+#include "runtime/models/qwen_image/qwen_image_diffusion_types.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {
 
-DiffusionConfig make_diffusion_config(const std::string& json);
+QwenImageCommonDiffusionConfig make_diffusion_config(const std::string& json);
 
-// Shared diffusion resources loaded once, then dispatched to per-model factory.
+// Qwen Image diffusion resources loaded once, then dispatched to the Qwen Image factory.
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
     LoadedModule vision;
     LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;
-    DiffusionConfig config;
-    PreprocessorWeights weights;
+    QwenImageCommonDiffusionConfig config;
+    QwenImageCommonPreprocessorWeights weights;
     std::shared_ptr<ITokenizer> tokenizer;
 };
 

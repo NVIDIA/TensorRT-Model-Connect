@@ -268,8 +268,8 @@ def extract_comparator_classes_by_task_strategy(
     return _extract_class_map_by_method(comparators_dir, "comparators", "task_strategy")
 
 
-def extract_diff_framework_checks(checks_dir: Path) -> dict[str, set[str]]:
-    mapping: dict[str, set[str]] = {}
+def extract_diff_framework_check_classes(checks_dir: Path) -> set[str]:
+    classes: set[str] = set()
     for file_path in sorted(checks_dir.glob("*.py")):
         if file_path.name.startswith("_"):
             continue
@@ -277,28 +277,16 @@ def extract_diff_framework_checks(checks_dir: Path) -> dict[str, set[str]]:
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
                 continue
-            runtime_strategies: list[str] | None = None
-            for stmt in node.body:
-                if not isinstance(stmt, ast.Assign):
-                    continue
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name) and target.id == "runtime_strategies":
-                        parsed = ast.literal_eval(stmt.value)
-                        if not isinstance(parsed, list):
-                            raise ValueError(
-                                f"{file_path}: class {node.name} runtime_strategies must be a list literal."
-                            )
-                        if not all(isinstance(item, str) for item in parsed):
-                            raise ValueError(
-                                f"{file_path}: class {node.name} runtime_strategies must be strings."
-                            )
-                        runtime_strategies = parsed
-                        break
-            if runtime_strategies is None:
+            has_name = any(
+                isinstance(stmt, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "name"
+                        for target in stmt.targets)
+                for stmt in node.body
+            )
+            if not has_name:
                 continue
-            for strategy in runtime_strategies:
-                mapping.setdefault(strategy, set()).add(node.name)
-    return mapping
+            classes.add(node.name)
+    return classes
 
 
 def _append_set_mismatch(
@@ -326,7 +314,7 @@ def validate_matrix_data(
     matrix: dict[str, dict[str, Any]],
     cpp_runtime_strategies: set[str],
     runtime_to_task_strategy: dict[str, str],
-    diff_checks_by_strategy: dict[str, set[str]],
+    diff_check_classes: set[str],
     runner_classes_by_task: dict[str, set[str]],
     comparator_classes_by_task: dict[str, set[str]],
 ) -> list[str]:
@@ -349,7 +337,6 @@ def validate_matrix_data(
             f"E2E manifests: {missing_matrix_for_manifests}"
         )
 
-    wildcard_diff_checks = diff_checks_by_strategy.get("*", set())
     for runtime_strategy in sorted(matrix_strategies):
         entry = matrix[runtime_strategy]
         expected_task = runtime_to_task_strategy.get(runtime_strategy)
@@ -371,6 +358,12 @@ def validate_matrix_data(
         ):
             errors.append(
                 f"{runtime_strategy}: 'cli_commands' must be a non-empty list of strings."
+            )
+
+        performance_mode = entry.get("performance_mode")
+        if not _is_nonempty_str(performance_mode):
+            errors.append(
+                f"{runtime_strategy}: 'performance_mode' must be a non-empty string."
             )
 
         runner_class_ref = entry.get("runner_class")
@@ -422,14 +415,12 @@ def validate_matrix_data(
         if len(set(matrix_diff_checks)) != len(matrix_diff_checks):
             errors.append(f"{runtime_strategy}: duplicate entries in diff_framework_check_classes.")
 
-        actual_diff_checks = sorted(
-            diff_checks_by_strategy.get(runtime_strategy, set()) | wildcard_diff_checks
-        )
         matrix_diff_check_set = sorted(set(matrix_diff_checks))
-        if matrix_diff_check_set != actual_diff_checks:
+        unknown_diff_checks = sorted(set(matrix_diff_check_set) - diff_check_classes)
+        if unknown_diff_checks:
             errors.append(
-                f"{runtime_strategy}: diff_framework_check_classes={matrix_diff_check_set} "
-                f"does not match discovered checks={actual_diff_checks}."
+                f"{runtime_strategy}: diff_framework_check_classes references "
+                f"unknown check classes {unknown_diff_checks}."
             )
 
         diff_exemption = entry.get("diff_framework_exemption")
@@ -485,7 +476,7 @@ def validate_matrix_paths(
     cpp_runtime_strategies.update(
         extract_runtime_strategies_from_model_manifests(runtime_models_dir)
     )
-    diff_checks_by_strategy = extract_diff_framework_checks(diff_checks_dir)
+    diff_check_classes = extract_diff_framework_check_classes(diff_checks_dir)
     runner_classes_by_task = extract_runner_classes_by_task_strategy(runners_dir)
     comparator_classes_by_task = extract_comparator_classes_by_task_strategy(
         comparators_dir
@@ -494,7 +485,7 @@ def validate_matrix_paths(
         matrix=matrix,
         cpp_runtime_strategies=cpp_runtime_strategies,
         runtime_to_task_strategy=runtime_to_task_strategy,
-        diff_checks_by_strategy=diff_checks_by_strategy,
+        diff_check_classes=diff_check_classes,
         runner_classes_by_task=runner_classes_by_task,
         comparator_classes_by_task=comparator_classes_by_task,
     )

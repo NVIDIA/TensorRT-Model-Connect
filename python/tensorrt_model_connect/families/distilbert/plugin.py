@@ -39,7 +39,7 @@ from .encoder_builder import build_encoder_engine
 
 class DistilBertPlugin:
     name = "distilbert"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "distilbert_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "distilbert"

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
+import struct
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
@@ -92,6 +94,58 @@ def _find_family_diff_vl_handler(model_type: str) -> ModuleType | None:
         if handles(model_type):
             return module
     return None
+
+
+def _read_bundle_header(bundle_path: str) -> dict:
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        return json.loads(f.read(header_len).decode("utf-8"))
+
+
+def _bundle_family(bundle_path: str) -> str:
+    header = _read_bundle_header(bundle_path)
+    family = str(header.get("family") or "")
+    if family:
+        return family
+    model_type = str(header.get("model_type") or "")
+    if model_type:
+        from tensorrt_model_connect.families import find_plugin
+
+        plugin = find_plugin(model_type)
+        if plugin is not None:
+            return str(getattr(plugin, "name", "") or "")
+    return ""
+
+
+def _load_family_vl_debug_runner(bundle_path: str) -> ModuleType:
+    family = _bundle_family(bundle_path)
+    if not family:
+        raise RuntimeError(
+            "VL debug execution requires bundle family metadata so the "
+            "owning family vl_debug_runner.py can be selected."
+        )
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / family
+        / "vl_debug_runner.py"
+    )
+    if not module_path.is_file():
+        raise RuntimeError(
+            f"Family {family!r} does not provide owned vl_debug_runner.py"
+        )
+    module_name = f"_trtmc_vl_debug_runner_{family}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load owned VL debug runner {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _get_hf_vision_features_generic(
@@ -203,19 +257,15 @@ def test_vision_features(
     If model_id is provided, does a full numerical comparison.
     Otherwise, just verifies TRT produces non-zero output.
     """
-    from tensorrt_model_connect.debug_runner import (
-        VisionTrtRunner, load_vision_engine_from_bundle,
-        preprocess_image_inputs_for_trt, load_preprocessor_config_from_bundle,
-        load_config_from_bundle,
-    )
+    vl_debug = _load_family_vl_debug_runner(bundle_path)
 
-    vision_plan, header = load_vision_engine_from_bundle(bundle_path)
+    vision_plan, header = vl_debug.load_vision_engine_from_bundle(bundle_path)
     if vision_plan is None:
         print("[diff_vl] No vision engine in bundle — skipping", file=sys.stderr)
         return True
 
-    config = load_config_from_bundle(bundle_path)
-    preproc = load_preprocessor_config_from_bundle(bundle_path)
+    config = vl_debug.load_config_from_bundle(bundle_path)
+    preproc = vl_debug.load_preprocessor_config_from_bundle(bundle_path)
     fixed_image_size = config.get("fixed_image_size", 448)
     temporal = preproc.get(
         "temporal_patch_size", config.get("temporal_patch_size", 1))
@@ -239,12 +289,12 @@ def test_vision_features(
           f"interpolation={interpolation!r}, "
           f"image_size={fixed_image_size}", file=sys.stderr)
 
-    runner = VisionTrtRunner(vision_plan)
+    runner = vl_debug.VisionTrtRunner(vision_plan)
 
     # Prepare TRT pixel values
     vis_patch_size = preproc.get("patch_size", config.get("patch_size", 14))
     vis_merge_size = preproc.get("merge_size", config.get("merge_size", 2))
-    trt_inputs = preprocess_image_inputs_for_trt(
+    trt_inputs = vl_debug.preprocess_image_inputs_for_trt(
         image_path, preprocessor_type=preprocessor_type,
         fixed_image_size=fixed_image_size,
         temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std,
@@ -362,21 +412,25 @@ def test_vision_features(
 
 def test_embed_input(bundle_path: str) -> bool:
     """Verify the text decoder accepts embed_input mode."""
-    from tensorrt_model_connect.debug_runner import (
-        load_section_from_bundle,
-        runner_from_bundle,
-    )
+    vl_debug = _load_family_vl_debug_runner(bundle_path)
 
     if (
-        load_section_from_bundle(bundle_path, "engine_plan") is None
-        and load_section_from_bundle(bundle_path, "engine_plan_tp_rank0") is not None
+        vl_debug.load_section_from_bundle(bundle_path, "engine_plan") is None
+        and vl_debug.load_section_from_bundle(
+            bundle_path, "engine_plan_tp_rank0") is not None
     ):
         print("[diff_vl] Text decoder embed_input: SKIP "
               "(tensor-parallel decoder requires distributed runtime)",
               file=sys.stderr)
         return True
 
-    runner = runner_from_bundle(bundle_path)
+    config = vl_debug.load_config_from_bundle(bundle_path)
+    engine_plan, header = vl_debug.load_engine_from_bundle(bundle_path)
+    runner = vl_debug.TrtRunner(
+        engine_plan=engine_plan,
+        max_cache_length=header["max_cache_length"],
+        num_layers=header.get("num_layers", config.get("num_hidden_layers", 1)),
+    )
     if not runner.has_embed_input:
         print("[diff_vl] Text decoder has no embed_input — skipping",
               file=sys.stderr)
@@ -413,14 +467,11 @@ def test_vl_generation(
     image_path: str,
     max_new_tokens: int = 20,
 ) -> bool:
-    """Run full VL generation in Python using VLTrtRunner."""
-    from tensorrt_model_connect.debug_runner import (
-        load_section_from_bundle,
-        VLTrtRunner,
-    )
+    """Run full VL generation in Python using the family-owned VL runner."""
+    vl_debug = _load_family_vl_debug_runner(bundle_path)
 
     print("[diff_vl] Loading VL runner from bundle ...", file=sys.stderr)
-    runner = VLTrtRunner(bundle_path)
+    runner = vl_debug.VLTrtRunner(bundle_path)
     if runner.vision_runner is None:
         print("[diff_vl] No vision engine — skipping VL generation", file=sys.stderr)
         return True
@@ -442,14 +493,14 @@ def test_vl_generation(
     try:
         from transformers import AutoTokenizer
         model_source = runner.config.get("model_source", "")
-        tok_data = load_section_from_bundle(bundle_path, "tokenizer.json")
+        tok_data = vl_debug.load_section_from_bundle(bundle_path, "tokenizer.json")
         if tok_data:
             # Write tokenizer to temp dir and load
             import tempfile
             with tempfile.TemporaryDirectory() as tmpdir:
                 for name in ["tokenizer.json", "tokenizer_config.json",
                              "special_tokens_map.json"]:
-                    data = load_section_from_bundle(bundle_path, name)
+                    data = vl_debug.load_section_from_bundle(bundle_path, name)
                     if data:
                         (Path(tmpdir) / name).write_bytes(data)
                 try:

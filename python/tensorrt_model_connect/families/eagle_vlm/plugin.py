@@ -59,7 +59,7 @@ class EagleVLMPlugin:
     @property
     def runtime_strategy(self):
         # Set dynamically based on config during build; default to embedding
-        return getattr(self, '_runtime_strategy', 'embedding')
+        return getattr(self, '_runtime_strategy', 'eagle_vlm_embedding')
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -77,7 +77,7 @@ class EagleVLMPlugin:
     ) -> bytes:
         is_rerank = _is_reranker(config)
         # Store for runtime_strategy property
-        self._runtime_strategy = "reranking" if is_rerank else "embedding"
+        self._runtime_strategy = "eagle_vlm_reranking" if is_rerank else "eagle_vlm_embedding"
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
@@ -128,7 +128,7 @@ class EagleVLMPlugin:
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
         is_rerank = _is_reranker(config)
         return {
-            "runtime_strategy": "reranking" if is_rerank else "embedding",
+            "runtime_strategy": "eagle_vlm_reranking" if is_rerank else "eagle_vlm_embedding",
         }
 
 

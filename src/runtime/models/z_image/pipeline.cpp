@@ -1,8 +1,8 @@
 #include "runtime/models/z_image/pipeline.h"
 
-#include "runtime/domains/diffusion/batch_utils.h"
 #include "runtime/domains/diffusion/diffusion_math.h"
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/z_image/z_image_batch_utils.h"
+#include "runtime/models/z_image/z_image_scheduler_helpers.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,9 +17,9 @@
 
 namespace trtmc {
 
-using diffusion::FlowMatchEulerState;
-using diffusion::resolve_requested_guidance;
-using diffusion::resolve_requested_steps;
+using diffusion::z_image_scheduler::FlowMatchEulerState;
+using diffusion::z_image_scheduler::resolve_requested_guidance;
+using diffusion::z_image_scheduler::resolve_requested_steps;
 using diffusion_math::cpu_matmul_bias;
 using diffusion_math::cpu_silu_inplace;
 
@@ -46,7 +46,7 @@ constexpr int32_t kRopeDimW = 48;
 // dragging the full pipeline body into the header).
 // ---------------------------------------------------------------------------
 
-ZImageLayout make_layout(const DiffusionConfig& config) {
+ZImageLayout make_layout(const ZImageDiffusionConfig& config) {
     ZImageLayout layout;
     layout.dit_dim = config.dit_dim;
     layout.text_seq = config.text_seq_len;
@@ -185,7 +185,8 @@ void log_step_stats(int32_t step, int32_t num_inference_steps, float raw_timeste
 
 ZImagePipeline::ZImagePipeline(std::unique_ptr<TrtModule> text_encoder,
                                std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
-                               DiffusionConfig config, PreprocessorWeights weights,
+                               ZImageDiffusionConfig config,
+                               ZImageCommonPreprocessorWeights weights,
                                ZImagePreprocessorWeights z_weights,
                                std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
                                std::string bundle_path, std::shared_ptr<void> distributed_owner,
@@ -660,7 +661,7 @@ std::vector<std::uint32_t> resolve_batch_seeds(const std::vector<std::string>& p
         return {static_cast<std::uint32_t>(cfg_seed >= 0 ? cfg_seed : static_cast<int32_t>(42))};
     }
     const std::uint64_t global_seed = cfg_seed >= 0 ? static_cast<std::uint64_t>(cfg_seed) : 42ULL;
-    return diffusion::derive_per_sample_seeds(global_seed, static_cast<int>(prompts.size()));
+    return z_image_batch::derive_per_sample_seeds(global_seed, static_cast<int>(prompts.size()));
 }
 
 } // namespace
@@ -729,7 +730,7 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
 
     const bool engine_is_batched = denoiser_ && denoiser_->input_rank("hidden_states") == 3;
     const int32_t cap = resolve_batch_cap(engine_is_batched);
-    const auto chunks = diffusion::plan_chunks(static_cast<int>(prompts.size()), cap);
+    const auto chunks = z_image_batch::plan_chunks(static_cast<int>(prompts.size()), cap);
 
     std::vector<ImageResult> results;
     results.reserve(prompts.size());

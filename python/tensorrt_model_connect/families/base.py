@@ -20,10 +20,17 @@ class FamilyPlugin(Protocol):
 
     Optional attributes:
         runtime_strategy: Backend dispatch key for C++ runtime.
-            "decoder_kv_cache" (default), "decoder_moe", "ssm_recurrent",
-            "vision_language".
+            Must be a concrete runtime strategy owned by a runtime model
+            manifest, for example "qwen_decoder_kv_cache", "ssm_recurrent",
+            or "qwen_vl_vision_language".
+        runtime_capabilities: Capability labels such as "decoder_kv" that let
+            shared build orchestration apply generic contracts without naming
+            model-owned strategy strings.
         embed_input: If True, the text decoder takes input_embed instead of
             token_id during VL prefill. Only meaningful for VL models.
+        requires_tokenizer: If False, the builder skips tokenizer.json
+            generation and tokenizer-file packaging for this family. Default is
+            True because most runtime paths tokenize text.
         supports_split_decoder_roles: Optional callable or attribute. If true,
             the family build_engine() honors the internal prefill/decode role
             passed through config.raw["_decoder_engine_role"].
@@ -130,6 +137,50 @@ class FamilyPlugin(Protocol):
                 "denoiser": plan_bytes,                       # DiT or UNet
                 "vae_decoder": plan_bytes,                    # VAE decoder
             }
+        """
+        return None
+
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None,
+    ) -> list[tuple[str, bytes]] | None:
+        """Return bundle sections for family-owned diffusion components.
+
+        Return None (default) if this is not a diffusion model. Diffusion
+        plugins should convert their own component dictionary into
+        ``(section_name, section_bytes)`` pairs so adding a component to one
+        family does not require changing shared builder code.
+        """
+        return None
+
+    def diffusion_bundle_config(
+        self, config: ModelConfig, *, components: dict,
+    ) -> dict | None:
+        """Return component-derived diffusion bundle config fields.
+
+        Return None (default) if this is not a diffusion model. Diffusion
+        plugins should return fields such as ``num_text_encoders`` here when
+        those fields depend on the family-owned component layout.
+        """
+        return None
+
+    def diffusion_tokenizer_add_special_tokens(
+        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+    ) -> bool:
+        """Return whether this diffusion family bundles add-special tokenizer behavior.
+
+        Diffusion plugins own tokenizer directory priority and should call the
+        supplied single-tokenizer detector on whichever directory they choose.
+        """
+        return False
+
+    def diffusion_tokenizer_bundle_sections(
+        self, model_dir_path, *, ensure_tokenizer_json,
+    ) -> list[tuple[str, bytes]] | None:
+        """Return tokenizer bundle sections for this diffusion family.
+
+        Diffusion plugins own tokenizer directory priority and any secondary
+        tokenizer section names. The supplied ensure function handles a single
+        tokenizer directory.
         """
         return None
 

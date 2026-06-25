@@ -46,7 +46,7 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
         name="sam3",
         hf_id="facebook/sam3",
         family="sam3",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="sam3_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam3",
         inputs={"image": "data/test_img.jpeg", "prompt": "ear"},

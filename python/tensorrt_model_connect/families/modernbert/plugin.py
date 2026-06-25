@@ -49,7 +49,7 @@ def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):
 
 class ModernbertPlugin:
     name = "modernbert"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "modernbert_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().startswith("modernbert")

@@ -22,7 +22,7 @@ def _write_manifest(manifest_dir: Path, name: str, **fields: object) -> None:
     manifest = {
         "name": name,
         "hf_id": f"org/{name}",
-        "runtime_strategy": "decoder_kv_cache",
+        "runtime_strategy": f"{name.replace('-', '_')}_decoder_kv_cache",
         **fields,
     }
     (manifest_dir / f"{name}.json").write_text(json.dumps(manifest))

@@ -156,7 +156,7 @@ class TestEagleVLMPlugin:
         _write_config(tmp_path, config)
         cfg = ModelConfig.from_dir(tmp_path)
         overrides = plugin.get_bundle_config_overrides(cfg)
-        assert overrides["runtime_strategy"] == "embedding"
+        assert overrides["runtime_strategy"] == "eagle_vlm_embedding"
 
     def test_bundle_config_overrides_reranking(self, tmp_path):
         """Bundle config overrides: reranking mode."""
@@ -175,4 +175,4 @@ class TestEagleVLMPlugin:
         _write_config(tmp_path, config)
         cfg = ModelConfig.from_dir(tmp_path)
         overrides = plugin.get_bundle_config_overrides(cfg)
-        assert overrides["runtime_strategy"] == "reranking"
+        assert overrides["runtime_strategy"] == "eagle_vlm_reranking"

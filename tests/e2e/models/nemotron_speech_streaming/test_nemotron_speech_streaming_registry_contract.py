@@ -16,4 +16,4 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("nemotron_speech_streaming")
-    assert getattr(plugin, "runtime_strategy", None) == "speech_to_text_rnnt"
+    assert getattr(plugin, "runtime_strategy", None) == "nemotron_speech_streaming_speech_to_text_rnnt"

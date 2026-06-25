@@ -7,9 +7,8 @@
 
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
-#include "runtime/core/trt_common.h"
-#include "trtmc/runtime/inference_state.h"
-#include "trtmc/runtime/kv_cache.h"
+#include "runtime/models/magpie/inference_state.h"
+#include "runtime/models/magpie/kv_cache.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"

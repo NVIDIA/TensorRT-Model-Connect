@@ -9,7 +9,7 @@ Public API:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .adapters import resolve_calibration_adapter
 from .context import QuantContext
@@ -56,6 +56,7 @@ def build_quant_context(
     calibration_prompts: list[str] | None = None,
     plugin: object | None = None,
     quant_plan: QuantPlan | None = None,
+    graph_ops: Any | None = None,
 ) -> QuantContext:
     """Construct a QuantContext from high-level parameters.
 
@@ -70,6 +71,7 @@ def build_quant_context(
             calibration entirely.
         num_calibration_samples: Number of calibration samples for PTQ.
         calibration_prompts: Custom calibration prompts. None = default.
+        graph_ops: Family-owned graph helper module.
 
     Returns:
         QuantContext ready to thread through graph_blocks.
@@ -121,7 +123,7 @@ def build_quant_context(
         "%d excluded patterns",
         plan.quant_format, len(scale_map.scales), len(exclude_patterns))
 
-    return QuantContext(profile=profile)
+    return QuantContext(profile=profile, graph_ops=graph_ops)
 
 
 def _default_exclude_patterns() -> list[str]:

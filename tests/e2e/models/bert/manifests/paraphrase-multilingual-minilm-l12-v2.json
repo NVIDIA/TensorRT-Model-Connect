@@ -4,7 +4,7 @@
   "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
   "bundle": "paraphrase-multilingual-minilm-l12-v2.trtfb",
   "family": "bert",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "sentence_transformer_embed",
   "user_contract": "embedding_vector",

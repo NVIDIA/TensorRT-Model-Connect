@@ -48,7 +48,7 @@ def _pfx(root, key):
 
 class XlnetPlugin:
     name = "xlnet"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "xlnet_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "xlnet"

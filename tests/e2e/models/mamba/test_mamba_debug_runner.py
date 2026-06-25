@@ -32,9 +32,13 @@ def _make_bundle_bytes(
 
 
 def test_mamba_engine_section_and_communicator_forwarded(tmp_path):
-    from tensorrt_model_connect.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.families.mamba.debug_runner import (
+        load_config_from_bundle,
+        load_engine_from_bundle,
+        runner_from_bundle,
+    )
 
-    config_data = json.dumps({"runtime_strategy": "ssm_recurrent"}).encode("utf-8")
+    config_data = json.dumps({"runtime_strategy": "mamba_ssm_recurrent"}).encode("utf-8")
     bundle = _make_bundle_bytes(
         {"num_layers": 2, "max_cache_length": 128},
         engine_plan=b"SINGLE_ENGINE",
@@ -52,9 +56,15 @@ def test_mamba_engine_section_and_communicator_forwarded(tmp_path):
         "tensorrt_model_connect.families.mamba.debug_runner.MambaTrtRunner",
         return_value="mamba-tp-runner",
     ) as mock_runner:
+        config_json = load_config_from_bundle(str(path))
+        engine_plan, header = load_engine_from_bundle(
+            str(path), section_name="engine_plan_tp_rank1")
         runner = runner_from_bundle(
-            str(path),
-            engine_section="engine_plan_tp_rank1",
+            runtime_strategy=str(config_json.get("runtime_strategy") or ""),
+            config=config_json,
+            header=header,
+            engine_plan=engine_plan,
+            bundle_path=str(path),
             distributed_communicator=communicator,
         )
 

@@ -6,3 +6,10 @@ test_manifests = [
   "manifests/bark-small-tp4.json",
   "manifests/bark-small.json",
 ]
+
+[e2e_defaults.text_to_audio]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

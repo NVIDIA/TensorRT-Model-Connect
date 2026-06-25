@@ -18,7 +18,7 @@ def _make_ctx(tmp_path) -> RunContext:
             name="case-a",
             hf_id="dummy/model",
             family="dummy",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="sam_prompted_segmentation",
             bundle="case-a.trtfb",
             stages=[],
         ),
@@ -36,7 +36,7 @@ def test_sam_repro_command_comes_from_model_plugin(tmp_path) -> None:
             name="sam-case",
             hf_id="facebook/sam-vit-base",
             family="sam",
-            runtime_strategy="prompted_segmentation",
+            runtime_strategy="sam_prompted_segmentation",
             task_strategy="prompted_segmentation",
             bundle="sam-case.trtfb",
             inputs={

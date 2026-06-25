@@ -56,7 +56,7 @@ def _make_sinusoidal_pos_embed(num_positions: int, embedding_dim: int,
 
 class M2M100Plugin:
     name = "m2m_100"
-    runtime_strategy = "seq2seq_encoder_decoder"
+    runtime_strategy = "m2m_100_seq2seq_encoder_decoder"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("m2m_100", "nllb")

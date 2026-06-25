@@ -5,3 +5,16 @@ test_manifests = [
   "manifests/patchtst-etth1-regression-distribution.json",
   "manifests/patchtst-granite-official.json",
 ]
+
+[e2e_defaults.neural_operator]
+reference_backend = "torch_reference"
+oracle_level = "L2_internal_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "field_input", manifest = "field_input" },
+  { input = "branch_input", manifest = "branch_input" },
+  { input = "trunk_input", manifest = "trunk_input" },
+  { input = "output_field", manifest = "output_field" },
+]

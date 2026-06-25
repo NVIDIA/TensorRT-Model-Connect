@@ -4,7 +4,7 @@
   "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
   "bundle": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.trtfb",
   "family": "timm_vit",
-  "runtime_strategy": "image_classification",
+  "runtime_strategy": "timm_vit_image_classification",
   "task_strategy": "image_classification",
   "reference_family": "image_classification",
   "user_contract": "image_classification",

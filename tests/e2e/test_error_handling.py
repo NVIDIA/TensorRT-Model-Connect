@@ -157,9 +157,13 @@ class TestEmptyPrompt:
         # Skip non-text models
         if model_entry.get("test_type") in ("diffusion", "segmentation", "audio"):
             pytest.skip("Non-text model")
-        if model_entry.get("runtime_strategy") in ("vision_language",
-                                                     "text_to_audio",
-                                                     "segmentation"):
+        runtime_strategy = str(model_entry.get("runtime_strategy") or "")
+        task_strategy = str(model_entry.get("task_strategy") or "")
+        if (
+            runtime_strategy.endswith("_vision_language")
+            or runtime_strategy == "text_to_audio"
+            or task_strategy in ("segmentation", "prompted_segmentation")
+        ):
             pytest.skip("Non-text runtime strategy")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}

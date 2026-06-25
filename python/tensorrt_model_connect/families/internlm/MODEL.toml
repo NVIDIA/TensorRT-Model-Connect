@@ -17,3 +17,7 @@ aliases = [
 prefixes = [
   "internlm",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "internlm_decoder_kv_cache",
+]

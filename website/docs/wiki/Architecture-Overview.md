@@ -27,7 +27,7 @@ The scope covers:
 - The Python builder package (`python/tensorrt_model_connect/`) and its plugin-based family architecture.
 - The C++ runtime and its manifest-registered plugin-based pipeline dispatch.
 - The `.trtfb` bundle format that bridges the two phases.
-- Core runtime abstractions: `TrtModule`, `KvCache`, `RecurrentState`.
+- Core runtime abstractions: `TrtModule`, `KvCache`, `IInferenceState`, and family-owned recurrent state classes.
 - All 14 concrete pipeline implementations and 25 runtime strategies dispatched via a manifest-registered plugin registry.
 
 ---
@@ -151,11 +151,18 @@ Beyond the standard decoder, the build package contains dedicated engine builder
 
 These are used by diff-testing tools (`tools/diff_logits.py`, `tools/diff_layers.py`, `tools/diff_vl.py`) and the E2E test harness.
 
-Additionally, `python/tensorrt_model_connect/diffusion_runner.py` provides a `DiffusionRunner` for pure-Python TRT inference of diffusion models (text encoding, denoising loop, VAE decode), following the same pattern as the decoder `TrtRunner`.
+Diffusion Python TRT runners are model-family owned. Families that need this path
+carry their own `python/tensorrt_model_connect/families/<family>/diffusion_runner.py`
+copy so scheduler and denoising behavior can change without coupling sibling
+diffusion families.
 
 ### 3.8 Scheduler Package
 
-`python/tensorrt_model_connect/schedulers/` contains Python diffusion noise schedulers used during build-time validation and debug runner inference. Currently implements `flow_match_euler.py` (Flow Matching Euler Discrete), matching the C++ `FlowMatchEulerScheduler`.
+Python diffusion noise schedulers live beside the family-owned diffusion runners,
+for example `python/tensorrt_model_connect/families/flux/schedulers/`. The shared
+C++ runtime core does not own a scheduler implementation. Qwen Image carries the
+C++ `FlowMatchEulerScheduler` copy it uses in
+`src/runtime/models/qwen_image/qwen_image_scheduler.{h,cpp}`.
 
 ---
 
@@ -218,10 +225,10 @@ The plugin manifest `cmake/trtmc_pipeline_plugins.cmake` lists each plugin sourc
 
 | Model Plugin | Strategies Registered |
 |-------------|----------------------|
-| `text_generation/plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
-| `recurrent/ssm_plugin.cpp` | `ssm_recurrent` |
-| `recurrent/rwkv_plugin.cpp` | `rwkv_recurrent` |
-| `recurrent/hybrid_plugin.cpp` | `hybrid_mamba_attention` |
+| `<family>/plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
+| `mamba/plugin.cpp` | `mamba_ssm_recurrent` |
+| `rwkv/plugin.cpp` | `rwkv_recurrent` |
+| `nemotron_h/plugin.cpp`, `qwen3_5/plugin.cpp` | hybrid Mamba-attention strategies |
 | `encoder/plugin.cpp` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
 | `vision_language/plugin.cpp` | `vision_language` |
 | `segmentation/plugin.cpp` | `segmentation`, `prompted_segmentation` |
@@ -231,9 +238,10 @@ The plugin manifest `cmake/trtmc_pipeline_plugins.cmake` lists each plugin sourc
 | `magpie/plugin.cpp` | `text_to_audio_magpie` |
 | `speech/plugin.cpp` | `speech_to_speech` |
 | `omni/plugin.cpp` | `omni_multimodal` |
-| `t5/plugin.cpp` | `text_to_text` |
+| `t5/plugin.cpp` | `t5_text_to_text` |
 | `marian/plugin.cpp` | `marian_translation` |
-| `seq2seq/plugin.cpp` | `seq2seq_encoder_decoder` |
+| `bart/plugin.cpp` | `bart_seq2seq_encoder_decoder` |
+| `m2m_100/plugin.cpp` | `m2m_100_seq2seq_encoder_decoder` |
 | `flux/plugin.cpp` | `diffusion_flux` |
 | `wan/plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
 | `z_image/plugin.cpp` | `diffusion_zimage` |
@@ -315,7 +323,7 @@ trtmc::load(bundle_path)
       -> find_section(bundle, "engine_plan")  [src/bundle/bundle_view.cpp]
       -> load_trt_module_from_plan()          -- deserialize engine, create TrtModule
       -> create_tokenizer_from_bundle()       -- try BPE/WordPiece/Unigram from bundle
-      -> create KvCache / RecurrentState      -- if applicable
+      -> create KvCache / family-owned recurrent state -- if applicable
       -> construct concrete Pipeline class
   -> return unique_ptr<IPipeline>
 ```
@@ -326,11 +334,11 @@ All 25 registered strategy strings and their pipeline mappings:
 
 | `runtime_strategy` | Model Plugin | Pipeline Class | State Management |
 |--------------------|-------------|----------------|------------------|
-| `decoder_kv_cache` | `text_generation/plugin.cpp` | `TextGenerationPipeline` | `KvCache` |
-| `decoder_moe` | `text_generation/plugin.cpp` | `TextGenerationPipeline` | `KvCache` |
-| `ssm_recurrent` | `recurrent/ssm_plugin.cpp` | `RecurrentPipeline` | `RecurrentState` (conv + ssm) |
-| `rwkv_recurrent` | `recurrent/rwkv_plugin.cpp` | `RecurrentPipeline` | `RecurrentState` (5 state vectors) |
-| `hybrid_mamba_attention` | `recurrent/hybrid_plugin.cpp` | `RecurrentPipeline` | `KvCache` + `RecurrentState` (hybrid) |
+| `decoder_kv_cache` | `<family>/plugin.cpp` | `TextGenerationPipeline` | `KvCache` |
+| `decoder_moe` | `<family>/plugin.cpp` | `TextGenerationPipeline` | `KvCache` |
+| `mamba_ssm_recurrent` | `mamba/plugin.cpp` | `RecurrentPipeline` | `MambaRecurrentState` (conv + ssm) |
+| `rwkv_recurrent` | `rwkv/plugin.cpp` | `RecurrentPipeline` | `RwkvRecurrentState` (5 state vectors) |
+| hybrid Mamba-attention strategies | `nemotron_h/plugin.cpp`, `qwen3_5/plugin.cpp` | `RecurrentPipeline` | family-owned hybrid state wrapping `KvCache` + family-owned recurrent state |
 | `encoder_only` | `encoder/plugin.cpp` | `EncoderPipeline` | None (single pass) |
 | `embedding` | `encoder/plugin.cpp` | `EncoderPipeline` | None (single pass) |
 | `reranking` | `encoder/plugin.cpp` | `EncoderPipeline` | None (single pass) |
@@ -343,9 +351,10 @@ All 25 registered strategy strings and their pipeline mappings:
 | `diffusion_wan` | `wan/plugin.cpp` | `WanPipeline` | None (iterative denoising) |
 | `diffusion_pixart` | `wan/plugin.cpp` | `WanPipeline` | None (iterative denoising) |
 | `diffusion_zimage` | `z_image/plugin.cpp` | `ZImagePipeline` | None (iterative denoising) |
-| `text_to_text` | `t5/plugin.cpp` | (inline T5Pipeline) | `KvCache` + encoder `TrtModule` |
+| `t5_text_to_text` | `t5/plugin.cpp` | (inline T5Pipeline) | `KvCache` + encoder `TrtModule` |
 | `marian_translation` | `marian/plugin.cpp` | (inline MarianPipeline) | `KvCache` + encoder `TrtModule` |
-| `seq2seq_encoder_decoder` | `seq2seq/plugin.cpp` | (inline Seq2SeqPipeline) | `KvCache` + encoder `TrtModule` |
+| `bart_seq2seq_encoder_decoder` | `bart/plugin.cpp` | (inline BartPipeline) | `KvCache` + encoder `TrtModule` |
+| `m2m_100_seq2seq_encoder_decoder` | `m2m_100/plugin.cpp` | (inline M2M100Pipeline) | `KvCache` + encoder `TrtModule` |
 | `speech_to_text` | `whisper/plugin.cpp` | `WhisperPipeline` | Legacy `WhisperBackend` |
 | `text_to_audio_bark` | `bark/plugin.cpp` | `BarkPipeline` | Legacy `BarkBackend` |
 | `text_to_audio_magpie` | `magpie/plugin.cpp` | `MagpiePipeline` | Legacy `MagpieTTSBackend` |
@@ -364,14 +373,14 @@ Pipeline header/implementation pairs live beside their plugins in `src/runtime/m
 
 | Class | Header | Composition |
 |-------|--------|-------------|
-| `TextGenerationPipeline` | `text_generation/pipeline.h` | `TrtModule` (decoder) + `KvCache` + `ITokenizer` |
-| `RecurrentPipeline` | `recurrent/pipeline.h` | `TrtModule` + `IStateManager` + `ITokenizer` |
+| `TextGenerationPipeline` | `<family>/pipeline.h` | `TrtModule` (decoder) + `KvCache` + `ITokenizer` |
+| `RecurrentPipeline` | `<recurrent-family>/pipeline.h` | `TrtModule` + `IInferenceState` + `ITokenizer` |
 
-`TextGenerationPipeline` serves all standard decoder and MoE models. The model-specific architecture (GQA, RoPE, SwiGLU, etc.) is baked into the TRT engine.
+Each decoder family owns its own `TextGenerationPipeline` copy under `src/runtime/models/<family>/`. The model-specific architecture (GQA, RoPE, SwiGLU, MoE routing, etc.) is baked into that family's TRT engine and plugin code.
 
-`RecurrentPipeline` uses an `IStateManager` abstraction (defined in `recurrent_pipeline.h`) with two implementations:
-- `RecurrentStateManager` -- wraps `RecurrentState` for pure-recurrent models (Mamba, RWKV). Does not produce attention masks.
-- `HybridStateManager` -- wraps both `KvCache` + `RecurrentState` for hybrid Mamba-attention models. Produces attention masks via the KvCache.
+`RecurrentPipeline` uses `IInferenceState` implementations owned by each recurrent family:
+- `MambaRecurrentState` and `RwkvRecurrentState` for pure-recurrent models. They do not produce attention masks.
+- Family-owned hybrid state wraps both `KvCache` + family-owned recurrent state for hybrid Mamba-attention models. It produces attention masks via the KvCache.
 
 ### 7.2 Vision-Language
 
@@ -438,28 +447,30 @@ Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key
 - `advance()` -- copies present K/V into cache, advances position.
 - `reset()` -- zeros all buffers for a new sequence.
 
-### 8.3 RecurrentState
+### 8.3 Family-Owned Recurrent State
 
-- **Header**: `include/trtmc/runtime/recurrent_state.h`
-- **Implementation**: `src/runtime/core/recurrent_state.cpp`
+- **Headers**: `src/runtime/models/<recurrent-family>/recurrent_state.h`
+- **Implementations**: `src/runtime/models/<recurrent-family>/recurrent_state.cpp`
 
-Generic config-driven SSM/RWKV state manager. Replaces the original separate `MambaStepState` and `RwkvStepState` with a single class parameterized by `TensorSpec` vectors:
+Each recurrent family owns a config-driven state manager parameterized by `TensorSpec` vectors:
 
 - Mamba: `{{"conv_state", {d_inner*conv_kernel}}, {"ssm_state", {state_size*d_inner}}}`
 - RWKV: 5 state vectors per layer: `attn_state`, `ff_state`, `num_state`, `den_state`, `max_state`.
 
-### 8.4 IScheduler
+### 8.4 Qwen Image Scheduler
 
-- **Header**: `include/trtmc/runtime/scheduler.h`
-- **Implementation**: `src/runtime/core/flow_match_euler_scheduler.cpp`
+- **Header**: `src/runtime/models/qwen_image/qwen_image_scheduler.h`
+- **Implementation**: `src/runtime/models/qwen_image/qwen_image_scheduler.cpp`
 
-Diffusion noise scheduler interface. HF equivalent: `SchedulerMixin` / `FlowMatchEulerDiscreteScheduler`. Provides:
+Qwen Image-owned diffusion noise scheduler. HF equivalent: `SchedulerMixin` /
+`FlowMatchEulerDiscreteScheduler`. Provides:
 
 - `set_timesteps(num_steps)` -- configure the timestep schedule.
 - `timesteps()` / `sigmas()` -- access the schedule.
 - `step()` -- single scheduler step: update latents in-place.
 
-One concrete implementation: `FlowMatchEulerScheduler` (used by FLUX, Wan, Z-Image). Factory function `create_scheduler(name, shift)` instantiates by name.
+This is not a shared runtime-core abstraction. Sibling diffusion families own
+their scheduler behavior in their own runtime or Python family folders.
 
 ### 8.5 ITokenizer
 
@@ -486,9 +497,9 @@ Backend executor code lives in `src/runtime/core/` and `src/runtime/domains/` or
 
 | Directory | Contents |
 |-----------|----------|
-| `src/runtime/core/` | Shared infrastructure: `TrtModule`, `KvCache`, `RecurrentState`, `DeviceTensor`, TRT common utilities, decode runtime (argmax, mask building), engine lifecycle |
+| `src/runtime/core/` | Shared infrastructure: `TrtModule`, `KvCache`, `DeviceTensor`, TRT common utilities, decode runtime (argmax, mask building), engine lifecycle |
 | `src/runtime/domains/audio/` | Whisper, Bark, MagpieTTS, Speech-to-Speech, Omni backends and supporting types |
-| `src/runtime/domains/diffusion/` | Diffusion denoising step seam, generation plan, scheduler helpers, preprocessor weights, math utilities |
+| `src/runtime/domains/diffusion/` | Diffusion denoising step seam, preprocessor wire-format helpers, math utilities, shared value types |
 | `src/runtime/domains/encoder/` | Encoder, embedding, and reranking backends |
 | `src/runtime/domains/multimodal/` | VL backend, vision engine, image preprocessor (4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`) |
 | `src/runtime/domains/perception/` | Segmentation, SAM, detection, neural operator backends |
@@ -514,7 +525,7 @@ Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes (
 
 ### 10.4 Perception Backends vs Pipeline Classes
 
-The perception backends (`DetectionBackend`, `NeuralOperatorBackend`, `SegmentationBackend`, `SamBackend` in `src/runtime/domains/perception/`) coexist with the pipeline-level classes (`SegmentPipeline` in `src/runtime/models/segmentation/segment_pipeline.h`, `SamPipeline` in `src/runtime/models/segmentation/sam_pipeline.h`). The relationship between backend and pipeline is not always clear. `EncoderPipeline` handles `object_detection` and `neural_operator` strategies but the corresponding dedicated pipeline classes do not exist at the `IPipeline` level.
+Perception behavior is now split into model-owned runtime plugins such as `src/runtime/models/segformer/`, `src/runtime/models/sam/`, and `src/runtime/models/sam3/`. `EncoderPipeline` still handles `object_detection` and `neural_operator` strategies, so those strategies should continue moving toward dedicated model-owned pipeline classes.
 
 ---
 
@@ -555,9 +566,9 @@ All paths below are relative to the repository root and have been verified to ex
 | `python/tensorrt_model_connect/graph_blocks.py` | Composable graph blocks |
 | `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Family-local standard decoder engine builder |
 | `python/tensorrt_model_connect/debug_runner.py` | Python TRT inference runners (decoder, Mamba, VL) |
-| `python/tensorrt_model_connect/diffusion_runner.py` | Python TRT diffusion runner |
+| `python/tensorrt_model_connect/families/<family>/diffusion_runner.py` | Family-owned Python TRT diffusion runner |
 | `python/tensorrt_model_connect/pipeline.py` | Subprocess wrapper around C++ trtmc binary |
-| `python/tensorrt_model_connect/schedulers/` | Python diffusion schedulers (flow_match_euler) |
+| `python/tensorrt_model_connect/families/<family>/schedulers/` | Family-owned Python diffusion schedulers |
 | `python/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
 | `python/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
 | `python/tensorrt_model_connect/build_cli.py` | Python builder CLI entry point |
@@ -570,8 +581,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtmc/tokenizer.h` | ITokenizer interface |
 | `include/trtmc/runtime/trt_module.h` | TrtModule abstraction |
 | `include/trtmc/runtime/kv_cache.h` | KvCache state manager |
-| `include/trtmc/runtime/recurrent_state.h` | RecurrentState manager |
-| `include/trtmc/runtime/scheduler.h` | IScheduler interface, FlowMatchEulerScheduler |
+| `src/runtime/models/<recurrent-family>/recurrent_state.h` | family-owned recurrent state manager |
 | `include/trtmc/runtime/tensor.h` | Tensor, TensorMap, TensorInfo types |
 | `include/trtmc/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
 | `include/trtmc/runtime/pipeline_factory.h` | PipelineFactory |
@@ -580,7 +590,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtmc/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
 | `include/trtmc/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
 | `include/trtmc/runtime/domains/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
-| `include/trtmc/runtime/domains/multimodal/image_transform_helper.h` | Image transformation utilities for VL preprocessing |
+| `src/runtime/models/<vl-family>/image_transform_helper.h` | Family-owned image transformation utilities for VL preprocessing |
 
 ### C++ Runtime -- Registry and Plugins
 | Path | Purpose |
@@ -588,22 +598,25 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/registry/pipeline_factory.cpp` | Registry-based factory dispatch (~124 LOC) |
 | `src/runtime/registry/pipeline_registry.cpp` | PipelineRegistry singleton |
 | `src/runtime/registry/pipeline_plugin.cpp` | BaseConfig parsing (parse_base_config) |
-| `src/runtime/models/text_generation/plugin.cpp` | decoder_kv_cache, decoder_moe |
+| `src/runtime/models/<family>/plugin.cpp` | decoder_kv_cache, decoder_moe |
 | `src/runtime/models/encoder/plugin.cpp` | encoder_only, embedding, reranking, neural_operator |
-| `src/runtime/models/recurrent/ssm_plugin.cpp` | ssm_recurrent |
-| `src/runtime/models/recurrent/rwkv_plugin.cpp` | rwkv_recurrent |
-| `src/runtime/models/recurrent/hybrid_plugin.cpp` | hybrid_mamba_attention |
-| `src/runtime/models/vision_language/plugin.cpp` | vision_language |
-| `src/runtime/models/segmentation/plugin.cpp` | segmentation, prompted_segmentation |
+| `src/runtime/models/mamba/plugin.cpp` | mamba_ssm_recurrent |
+| `src/runtime/models/rwkv/plugin.cpp` | rwkv_recurrent |
+| `src/runtime/models/nemotron_h/plugin.cpp`, `src/runtime/models/qwen3_5/plugin.cpp` | hybrid Mamba-attention strategies |
+| `src/runtime/models/<vl-family>/plugin.cpp` | family-owned vision_language strategies |
+| `src/runtime/models/segformer/plugin.cpp` | segformer_segmentation |
+| `src/runtime/models/sam/plugin.cpp` | sam_prompted_segmentation |
+| `src/runtime/models/sam3/plugin.cpp` | sam3_prompted_segmentation |
 | `src/runtime/models/encoder/object_detection_plugin.cpp` | object_detection |
 | `src/runtime/models/whisper/plugin.cpp` | speech_to_text |
 | `src/runtime/models/bark/plugin.cpp` | text_to_audio_bark |
 | `src/runtime/models/magpie/plugin.cpp` | text_to_audio_magpie |
 | `src/runtime/models/speech/plugin.cpp` | speech_to_speech |
 | `src/runtime/models/omni/plugin.cpp` | omni_multimodal |
-| `src/runtime/models/t5/plugin.cpp` | text_to_text |
+| `src/runtime/models/t5/plugin.cpp` | t5_text_to_text |
 | `src/runtime/models/marian/plugin.cpp` | marian_translation |
-| `src/runtime/models/seq2seq/plugin.cpp` | seq2seq_encoder_decoder |
+| `src/runtime/models/bart/plugin.cpp` | bart_seq2seq_encoder_decoder |
+| `src/runtime/models/m2m_100/plugin.cpp` | m2m_100_seq2seq_encoder_decoder |
 | `src/runtime/models/flux/plugin.cpp` | diffusion_flux |
 | `src/runtime/models/wan/plugin.cpp` | diffusion_wan, diffusion_pixart |
 | `src/runtime/models/z_image/plugin.cpp` | diffusion_zimage |
@@ -619,14 +632,15 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/bundle/bundle_view.h` | find_section(), find_sections_by_prefix() |
 | `src/runtime/backend/trt_module_impl.cpp` | TrtModule implementation |
 | `src/runtime/core/kv_cache.cpp` | KvCache implementation |
-| `src/runtime/core/recurrent_state.cpp` | RecurrentState implementation |
-| `src/runtime/core/flow_match_euler_scheduler.cpp` | FlowMatchEulerScheduler implementation |
-| `src/runtime/models/text_generation/pipeline.h` | TextGenerationPipeline |
-| `src/runtime/models/recurrent/pipeline.h` | RecurrentPipeline, IStateManager |
-| `src/runtime/models/vision_language/pipeline.h` | VLPipeline |
+| `src/runtime/models/<recurrent-family>/recurrent_state.cpp` | family-owned recurrent state implementation |
+| `src/runtime/models/qwen_image/qwen_image_scheduler.cpp` | Qwen Image-owned FlowMatchEulerScheduler implementation |
+| `src/runtime/models/<family>/pipeline.h` | TextGenerationPipeline |
+| `src/runtime/models/<recurrent-family>/pipeline.h` | family-owned RecurrentPipeline |
+| `src/runtime/models/<vl-family>/pipeline.h` | Family-owned VLPipeline |
 | `src/runtime/models/encoder/pipeline.h` | EncoderPipeline |
-| `src/runtime/models/segmentation/segment_pipeline.h` | SegmentPipeline |
-| `src/runtime/models/segmentation/sam_pipeline.h` | SamPipeline |
+| `src/runtime/models/segformer/segment_pipeline.h` | SegmentPipeline |
+| `src/runtime/models/sam/sam_pipeline.h` | SamPipeline |
+| `src/runtime/models/sam3/sam3_pipeline.h` | Sam3Pipeline |
 | `src/runtime/models/flux/pipeline.h` | FluxPipeline |
 | `src/runtime/models/wan/pipeline.h` | WanPipeline |
 | `src/runtime/models/z_image/pipeline.h` | ZImagePipeline |

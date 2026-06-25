@@ -86,7 +86,8 @@ def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
 def manifest_record(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     build_args = raw.get("build_args", {})
-    runtime_strategy = str(raw.get("runtime_strategy", "decoder_kv_cache"))
+    task_eval_config = raw.get("task_eval", {})
+    runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
     reference_family = infer_reference_family(raw)
     user_contract = infer_user_contract(raw, reference_family)
@@ -120,6 +121,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "quantization": raw.get("quantization", {}),
         "build_args": build_args if isinstance(build_args, dict) else {},
         "fp8_scales": raw.get("fp8_scales", ""),
+        "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
     }
 
 
@@ -305,6 +307,7 @@ def prepare_mmlu_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_mmlu_requests(
         dataset_path,
@@ -346,6 +349,8 @@ def prepare_mmlu_dataset(
             "prompts": str(prompts_path),
         },
     }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -666,6 +671,7 @@ def _prepare_vlm_requests(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     validate_vlm_dataset_assets(dataset_path, indexed)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -739,6 +745,8 @@ def _prepare_vlm_requests(
     }
     if normalization:
         manifest["normalization"] = normalization
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -751,6 +759,7 @@ def prepare_vlm_chat_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_vlm_chat_requests(
         dataset_path,
@@ -767,6 +776,7 @@ def prepare_vlm_chat_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
     )
 
 
@@ -778,6 +788,7 @@ def prepare_vlm_unified_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_vlm_unified_requests(
         dataset_path,
@@ -794,6 +805,7 @@ def prepare_vlm_unified_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
     )
 
 
@@ -805,6 +817,7 @@ def prepare_task_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind == "mmlu_five_shot_json":
@@ -815,6 +828,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
         )
     if dataset_kind == "vlm_chat_json":
         return prepare_vlm_chat_dataset(
@@ -824,6 +838,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
         )
     if dataset_kind == "vlm_unified_json":
         return prepare_vlm_unified_dataset(
@@ -833,6 +848,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
         )
     raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
 
@@ -2094,13 +2110,10 @@ def _vlm_prompt_has_image_placeholder(text: str) -> bool:
     ))
 
 
-def _vlm_fallback_prompt(model_id: str, prompt: str) -> str:
-    lower_id = model_id.lower()
-    if "qwen" in lower_id and "vl" in lower_id:
-        return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
-    if "internvl" in lower_id:
-        return f"<IMG_CONTEXT>\n{prompt}"
-    return prompt
+def _vlm_fallback_prompt(prompt: str, template: str = "") -> str:
+    if not template:
+        return prompt
+    return template.replace("{prompt}", prompt)
 
 
 def _apply_vlm_chat_template(obj: Any, messages: list[Any]) -> str:
@@ -2122,8 +2135,14 @@ def _vlm_chat_text(
     processor: Any,
     request: dict[str, Any],
     fallback_prompt: str,
-    model_id: str,
+    model_id: str = "",
+    fallback_prompt_template: str = "",
 ) -> str:
+    if not fallback_prompt_template and (
+        "{prompt}" in model_id or _vlm_prompt_has_image_placeholder(model_id)
+    ):
+        fallback_prompt_template = model_id
+        model_id = ""
     messages = request.get("messages")
     rendered = ""
     if hasattr(processor, "apply_chat_template") and isinstance(messages, list):
@@ -2140,7 +2159,7 @@ def _vlm_chat_text(
         return rendered
     if _vlm_prompt_has_image_placeholder(fallback_prompt):
         return fallback_prompt
-    return _vlm_fallback_prompt(model_id, fallback_prompt)
+    return _vlm_fallback_prompt(fallback_prompt, fallback_prompt_template)
 
 
 def _strip_generated_text_prefix(text: str, prompt: str) -> str:
@@ -2238,6 +2257,10 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
     if len(prompt_rows) != len(answers["requests"]):
         raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
     defaults = generation_defaults(work_dir)
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    vlm_fallback_prompt_template = str(task_eval_config.get("vlm_fallback_prompt_template", "") or "")
     max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
         defaults.get("max_new_tokens", 8)
     )
@@ -2307,6 +2330,7 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
                 request,
                 str(prompt_row.get("prompt", "")),
                 args.model,
+                vlm_fallback_prompt_template,
             )
             inputs = processor(
                 text=[prompt],
@@ -2852,6 +2876,9 @@ def eval_one_model(
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
+    task_eval_config = model.get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
     prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
@@ -2859,6 +2886,7 @@ def eval_one_model(
         limit=args.limit,
         subject=args.subject,
         sample_seed=args.sample_seed,
+        task_eval_config=task_eval_config,
     )
 
     answers_path = work_dir / "answers.json"

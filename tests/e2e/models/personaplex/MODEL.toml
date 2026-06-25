@@ -5,3 +5,14 @@ test_manifests = [
   "manifests/personaplex-7b-l0.json",
   "manifests/personaplex-7b.json",
 ]
+
+[e2e_defaults.speech_to_speech]
+reference_backend = "torch_reference"
+oracle_level = "L2_internal_reference"
+stages = [
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "audio", manifest = "test_input_audio" },
+]
+preflight_asset_fields = ["test_input_audio", "speech_reference_tokens"]

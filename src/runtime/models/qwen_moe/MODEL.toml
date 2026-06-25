@@ -1,0 +1,6 @@
+id = "qwen_moe"
+runtime_library = "libtrtmc_model_qwen_moe.so"
+runtime_plugins = ["plugin.cpp|register_qwen_moe_plugin"]
+runtime_strategies = ["qwen_moe_decoder_moe"]
+[validation_profiles]
+decoder_debug = ["qwen_moe_decoder_moe"]

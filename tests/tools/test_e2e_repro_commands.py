@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from tests.e2e_harness.contracts import E2ECase, RunContext
 from tests.e2e_harness.orchestrator import _build_repro_commands
-from tests.e2e_harness.registry import register_repro_command_provider, reset
+from tests.e2e_harness.registry import (
+    register_repro_command_provider,
+    register_runner,
+    reset,
+)
 
 
 def _make_ctx(tmp_path) -> RunContext:
@@ -19,7 +23,7 @@ def _make_ctx(tmp_path) -> RunContext:
             name="case-a",
             hf_id="dummy/model",
             family="dummy",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="dummy_decoder_kv_cache",
             bundle="case-a.trtfb",
             stages=[],
         ),
@@ -64,6 +68,56 @@ class _PromptedSegmentationReproProvider:
         return parts
 
 
+class _DiffusionReproProvider:
+    @property
+    def family_name(self) -> str:
+        return "diffusion_media_family"
+
+    def build_trt_inference_command(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+        bundle_path: str,
+    ) -> list[str]:
+        parts = [
+            ctx.binary_path,
+            "generate-video",
+            bundle_path,
+            "--prompt",
+            str(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+            "--output",
+            "/tmp/trtmc_frames",
+            "--num-steps",
+            str(case.inputs.get("num_inference_steps", 30)),
+        ]
+        guidance_scale = case.inputs.get("guidance_scale")
+        if guidance_scale is not None:
+            parts.extend(["--guidance-scale", str(guidance_scale)])
+        if "seed" in case.inputs:
+            parts.extend(["--seed", str(case.inputs["seed"])])
+        return parts
+
+
+class _RunnerOwnedReproHook:
+    @property
+    def strategy_name(self) -> str:
+        return "runner_owned_repro_strategy"
+
+    def build_trt_inference_command(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+        bundle_path: str,
+    ) -> list[str]:
+        return [
+            ctx.binary_path,
+            "runner-owned-command",
+            bundle_path,
+            "--case",
+            case.name,
+        ]
+
+
 def _register_prompted_segmentation_provider() -> None:
     reset()
     register_repro_command_provider(_PromptedSegmentationReproProvider())
@@ -75,7 +129,7 @@ def test_repro_commands_use_segment_prompted_for_prompted_segmentation(tmp_path)
         name="prompted-segmentation-point-case",
         hf_id="example-org/prompted-segmentation-point",
         family="prompted_text_segmentation_family",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="prompted_text_segmentation_family_prompted_segmentation",
         task_strategy="prompted_segmentation",
         bundle="prompted-segmentation-point.trtfb",
         inputs={
@@ -105,7 +159,7 @@ def test_repro_commands_use_text_prompt_for_prompted_segmentation(tmp_path) -> N
         name="prompted-segmentation-text-case",
         hf_id="example-org/prompted-segmentation-text",
         family="prompted_text_segmentation_family",
-        runtime_strategy="prompted_segmentation",
+        runtime_strategy="prompted_text_segmentation_family_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_text_segmentation",
         bundle="prompted-segmentation-text.trtfb",
@@ -130,7 +184,9 @@ def test_repro_commands_use_text_prompt_for_prompted_segmentation(tmp_path) -> N
     assert "--point-y" not in cmd
 
 
-def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
+def test_repro_commands_use_model_owned_provider_for_diffusion(tmp_path) -> None:
+    reset()
+    register_repro_command_provider(_DiffusionReproProvider())
     case = E2ECase(
         name="diffusion-media-case",
         hf_id="example-org/diffusion-media",
@@ -159,3 +215,28 @@ def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
     assert "--num-steps 28" in cmd
     assert "--guidance-scale 3.0" in cmd
     assert "--seed 42" in cmd
+
+
+def test_repro_commands_can_use_runner_owned_hook(tmp_path) -> None:
+    reset()
+    register_runner(_RunnerOwnedReproHook())
+    case = E2ECase(
+        name="runner-owned-case",
+        hf_id="example-org/runner-owned",
+        family="runner_owned_family",
+        runtime_strategy="runner_owned_repro_strategy",
+        task_strategy="runner_owned_repro_strategy",
+        bundle="runner-owned.trtfb",
+        inputs={},
+        stages=[],
+    )
+    repro = _build_repro_commands(
+        case,
+        _make_ctx(tmp_path),
+        "/tmp/engines/runner-owned.trtfb",
+        {},
+    )
+
+    cmd = repro["trt_inference"]
+    assert " runner-owned-command " in f" {cmd} "
+    assert "--case runner-owned-case" in cmd

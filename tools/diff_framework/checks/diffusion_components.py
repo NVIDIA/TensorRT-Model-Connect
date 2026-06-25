@@ -8,7 +8,7 @@ from diff_framework.protocol import DiffResult, TestContext
 class DiffusionComponentsTest:
     name = "diffusion_components"
     description = "Diffusion pipeline: config, text encoder, denoiser, scheduler, full pipeline"
-    runtime_strategies = ["diffusion"]
+    runtime_strategies = []
     requires_bundle = True
     requires_gpu = True
 

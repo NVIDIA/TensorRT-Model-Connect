@@ -16,13 +16,6 @@ suites:
     selectors:
       task_strategies:
         - text_generation_causal
-      runtime_strategies:
-        - decoder_kv_cache
-        - decoder_moe
-        - ssm_recurrent
-        - rwkv_recurrent
-        - hybrid_mamba_attention
-        - torchtrt_decoder
       user_contracts:
         - chat_response
       exclude_user_contracts:
@@ -70,13 +63,6 @@ suites:
     selectors:
       task_strategies:
         - text_generation_causal
-      runtime_strategies:
-        - decoder_kv_cache
-        - decoder_moe
-        - ssm_recurrent
-        - rwkv_recurrent
-        - hybrid_mamba_attention
-        - torchtrt_decoder
       user_contracts:
         - continuation_parity
     generation:
@@ -121,7 +107,8 @@ suites:
       task_strategies:
         - vision_language_generation
       runtime_strategies:
-        - vision_language
+        - qwen_vl_vision_language
+        - internvl_vision_language
       families:
         - qwen_vl
         - internvl
@@ -176,7 +163,8 @@ suites:
       task_strategies:
         - vision_language_generation
       runtime_strategies:
-        - vision_language
+        - qwen_vl_vision_language
+        - internvl_vision_language
       families:
         - qwen_vl
         - internvl
@@ -226,7 +214,7 @@ suites:
       task_strategies:
         - vision_language_generation
       runtime_strategies:
-        - vision_language
+        - deepseek_ocr_vision_language
       families:
         - deepseek_ocr
       exclude_families:

@@ -300,8 +300,6 @@ and skip gracefully (exit 0).
 |------|---------------|:--:|
 | `test_cuda_buffer.cpp` | RAII alloc, move semantics, data round-trip (with index on mismatch) | GPU |
 | `test_cuda_stream.cpp` | RAII stream, move semantics | GPU |
-| `test_device_kv_cache.cpp` | Cache construction, mask progression, position clamping, reset | GPU |
-| `test_device_resources.cpp` | Device resource management | GPU |
 | `test_device_tensor.cpp` | GPU-resident tensor operations | GPU |
 | `test_kv_cache_new.cpp` | Additional KV cache tests | GPU |
 
@@ -315,7 +313,7 @@ and skip gracefully (exit 0).
 | `test_trt_module.cpp` | TrtModule construction, tensor binding, lifecycle | TRT |
 | `test_trt_runtime_lifetime.cpp` | TRT runtime lifetime management | TRT |
 | `test_decode_runtime.cpp` | Argmax, mask building | TRT |
-| `test_flow_match_scheduler.cpp` | Flow-matching Euler scheduler | No |
+| `tests/cpp/models/qwen_image/test_qwen_image_flow_match_scheduler.cpp` | Qwen Image-owned Flow-matching Euler scheduler | No |
 
 #### Pipeline and plugin tests
 
@@ -325,14 +323,12 @@ and skip gracefully (exit 0).
 | `test_pipeline_registry.cpp` | Plugin registry, strategy lookup | TRT |
 | `test_c_abi_entry.cpp` | C ABI entry point | TRT |
 | `test_c_abi_runtime_regression.cpp` | C ABI runtime regression tests | TRT |
-| `test_text_generation_pipeline.cpp` | Text generation pipeline | TRT |
+| `tests/cpp/models/llama/test_llama_pipeline.cpp` | Text generation pipeline | TRT |
 | `test_encoder_pipeline.cpp` | Encoder pipeline (BERT, embedding, reranking) | TRT |
 | `test_recurrent_pipeline.cpp` | Recurrent pipeline (Mamba, RWKV, hybrid) | TRT |
-| `test_recurrent_state.cpp` | Recurrent state management | TRT |
-| `test_recurrent_step_contracts.cpp` | Step contract types | No |
+| `tests/cpp/models/*/test_*_recurrent_pipeline.cpp` | Model-owned recurrent state management through recurrent pipelines | TRT |
+| `tests/cpp/models/*/test_*_recurrent_output_initializers.cpp` | Model-owned recurrent output initializers and step contracts | No |
 | `test_vl_pipeline.cpp` | Vision-language pipeline | TRT |
-| `test_vl_decode_policy.cpp` | VL decode policy | No |
-| `test_vision_execution_plan.cpp` | Vision encoder execution plan | No |
 
 #### Audio domain tests
 
@@ -340,9 +336,10 @@ and skip gracefully (exit 0).
 |------|---------------|:--:|
 | `test_audio_bundle_validation.cpp` | Bundle section validation for audio models | No |
 | `test_audio_pipeline_new.cpp` | Audio pipeline construction | TRT |
-| `test_audio_types.cpp` | Audio format types and WAV I/O | No |
 | `test_bark_generation_plan.cpp` | Bark multi-stage codebook generation plan | No |
-| `test_mel_spectrogram.cpp` | Mel spectrogram feature extraction | No |
+| `models/whisper/test_whisper_mel_spectrogram.cpp` | Whisper-owned mel spectrogram feature extraction | No |
+| `models/canary/test_canary_mel_spectrogram.cpp` | Canary-owned mel spectrogram feature extraction | No |
+| `models/nemotron_speech_streaming/test_nemotron_speech_streaming_audio_helpers.cpp` | RNNT-owned mel spectrogram feature extraction | No |
 | `test_whisper_decode_policy.cpp` | Whisper decode policy | No |
 | `test_whisper_host_plan.cpp` | Whisper host plan | No |
 | `test_magpie_codec_plan.cpp` | Magpie TTS codec plan | No |
@@ -368,19 +365,26 @@ and skip gracefully (exit 0).
 
 | File | What it tests | GPU? |
 |------|---------------|:--:|
-| `test_diffusion_denoising_step_seam.cpp` | Diffusion denoising step seam | No |
-| `test_diffusion_generation_plan.cpp` | Diffusion generation plan | No |
+| `models/flux/test_flux_denoising_step_seam.cpp` | Flux-owned denoising step seam | No |
+| `models/wan/test_wan_denoising_step_seam.cpp` | Wan-owned denoising step seam | No |
+| `models/pixart/test_pixart_denoising_step_seam.cpp` | PixArt-owned denoising step seam | No |
+| `models/flux/test_flux_generation_plan.cpp` | Flux-owned generation plan | No |
+| `models/wan/test_wan_generation_plan.cpp` | Wan-owned generation plan | No |
 | `test_diffusion_math.cpp` | Diffusion math helpers | No |
-| `test_diffusion_pipeline_new.cpp` | Diffusion pipeline construction | TRT |
-| `test_wan_generation_conditioning.cpp` | Wan-specific generation conditioning | No |
+| `models/flux/test_flux_pipeline.cpp` | Flux pipeline construction | TRT |
+| `models/wan/test_wan_pipeline.cpp` | Wan pipeline construction | No |
+| `models/z_image/test_z_image_pipeline.cpp` | Z Image pipeline construction | No |
+| `models/ltx_video/test_ltx_video_pipeline.cpp` | LTX Video pipeline construction | No |
+| `models/wan/test_wan_generation_conditioning.cpp` | Wan-specific generation conditioning | No |
 
 #### Perception and segmentation tests
 
 | File | What it tests | GPU? |
 |------|---------------|:--:|
-| `test_perception_preprocess_seams.cpp` | Segmentation/SAM preprocessing seams | No |
-| `test_sam_prompt_seam.cpp` | SAM prompt encoding seam | No |
-| `test_neural_operator_config.cpp` | Neural operator config parsing | No |
+| `models/segformer/test_segformer_preprocess_seam.cpp` | SegFormer preprocessing seam | No |
+| `models/segformer/test_segformer_postprocess_seam.cpp` | SegFormer postprocessing seam | No |
+| `models/sam/test_sam_image_preprocess_seam.cpp` | SAM image preprocessing seam | No |
+| `models/sam/test_sam_prompt_seam.cpp` | SAM prompt encoding seam | No |
 
 #### Image and multimodal tests
 
@@ -525,7 +529,7 @@ but new model work should use the owning family directory.
 | `diffusion_media_generation` | 4 | `diffusion.py` |
 | `speech_to_text` | 4 | `audio_speech.py` |
 | `text_to_audio` | 3 | `audio_speech.py` |
-| `text_to_text` | 3 | `text_generation.py` |
+| `t5_text_to_text` | 3 | `text_generation.py` |
 | `embedding` | 2 | `embedding.py` |
 | `speech_to_speech` | 1 | `audio_speech.py` |
 | `segmentation` | 1 | `segmentation.py` |
@@ -686,11 +690,11 @@ python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
 
 | Check | Strategies | Bundle? | What it validates |
 |-------|-----------|:--:|---|
-| `logit_diff` | decoder_kv_cache, decoder_moe, ssm_recurrent | No | Per-step logit comparison (4-prompt battery) |
+| `logit_diff` | decoder_kv_cache, decoder_moe, mamba_ssm_recurrent | No | Per-step logit comparison (4-prompt battery) |
 | `layer_diff` | decoder_kv_cache, decoder_moe | No | Per-layer hidden state comparison (debug engine) |
-| `runner_parity` | decoder_kv_cache, decoder_moe, ssm_recurrent | Yes | Python TrtRunner vs C++ binary (token-for-token) |
+| `runner_parity` | decoder_kv_cache, decoder_moe, mamba_ssm_recurrent | Yes | Python TrtRunner vs C++ binary (token-for-token) |
 | `vl_pipeline` | vision_language | Yes | 4-stage VL: vision features, embed_input, generation, C++ parity |
-| `perf_benchmark` | decoder_kv_cache, decoder_moe, ssm_recurrent | No | TRT vs HF latency/throughput |
+| `perf_benchmark` | decoder_kv_cache, decoder_moe, mamba_ssm_recurrent | No | TRT vs HF latency/throughput |
 | `diffusion_components` | diffusion | Yes | 9-step component comparison |
 
 ---
@@ -977,7 +981,7 @@ exists — see [Architecture Overview](Architecture-Overview.md#53-self-describi
 | Model | Strategy | `logit_atol` | `layer_atol` | Rationale |
 |-------|----------|:--:|:--:|---|
 | Most standard decoders | `decoder_kv_cache` | `1e-3` | `0.05` | Baseline FP32 precision |
-| mamba-130m | `ssm_recurrent` | `2e-3` | -- | Recurrent state drift |
+| mamba-130m | `mamba_ssm_recurrent` | `2e-3` | -- | Recurrent state drift |
 | mixtral-stories-15m | `decoder_moe` | `2e-3` | `0.05` | Expert routing precision |
 | phi-moe | `decoder_kv_cache` | `1e-3` | `0.05` | SparseMixer is deterministic |
 | VL models | `vision_language` | `1e-3` | `0.05` | Vision features `atol=0.1` |

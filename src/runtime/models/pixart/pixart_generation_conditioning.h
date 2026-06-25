@@ -23,7 +23,7 @@ struct PixArtTextConditioning {
 };
 
 inline PixArtConditioningInputs
-make_pixart_conditioning_inputs(const DiffusionConfig& config, const PixArtLayout& layout,
+make_pixart_conditioning_inputs(const PixArtDiffusionConfig& config, const PixArtLayout& layout,
                                 const std::vector<int32_t>& input_ids) {
     PixArtConditioningInputs inputs;
     inputs.null_ids.assign(static_cast<std::size_t>(layout.seq_len), 0);

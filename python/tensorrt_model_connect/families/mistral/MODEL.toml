@@ -9,3 +9,7 @@ aliases = [
 prefixes = [
   "mistral",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "mistral_decoder_kv_cache",
+]

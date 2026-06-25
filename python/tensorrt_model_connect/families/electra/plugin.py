@@ -53,7 +53,7 @@ def _bpfx(root, key):
 
 class ElectraPlugin:
     name = "electra"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "electra_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "electra"

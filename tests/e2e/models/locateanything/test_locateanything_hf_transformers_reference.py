@@ -31,7 +31,7 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
         name="locateanything-3b",
         hf_id="nvidia/LocateAnything-3B",
         family="locateanything",
-        runtime_strategy="vision_language",
+        runtime_strategy="locateanything_vision_language",
         task_strategy="vision_language_generation",
         inputs={
             "prompt": "Find the red vehicle in this image.",
@@ -69,6 +69,7 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert "Tokenizer.from_file" in script
     assert "model_max_length" in script
     assert "def batch_decode" in script
+    assert "tensorrt_model_connect.families.locateanything.vl_debug_runner" in script
     assert "preprocess_image_inputs_for_trt" in script
     assert 'preprocessor_type="patchify_chw"' in script
     assert 'image_pads = "<IMG_CONTEXT>" * 256' in script

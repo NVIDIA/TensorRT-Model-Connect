@@ -8,11 +8,10 @@
 
 #include "runtime/models/flux/pipeline.h"
 
-#include "runtime/core/gpu_matmul.h"
-#include "runtime/domains/diffusion/batch_utils.h"
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/flux/flux_batch_utils.h"
 #include "runtime/models/flux/flux_denoising_step_seam.h"
 #include "runtime/models/flux/flux_generation_plan.h"
+#include "runtime/models/flux/gpu_matmul.h"
 
 #include <algorithm>
 #include <chrono>
@@ -32,8 +31,8 @@ namespace trtmc {
 
 namespace {
 
-using diffusion::FlowMatchEulerState;
 using diffusion::FluxPackLayout;
+using diffusion::flux_scheduler::FlowMatchEulerState;
 
 constexpr int32_t kFluxClipSeqLen = 77;
 constexpr int32_t kFluxClipDim = 768;
@@ -47,7 +46,7 @@ void cpu_matmul_bias(const float* A, const float* B, const float* bias, float* o
     // Offload to cuBLAS when the matmul is large enough to justify H2D/D2H.
     // Context embedder (512×15360×6144) and temb MLPs (1×6144×6144) hit this.
     if (int64_t(M) * K * N > 100000) {
-        gpu_matmul_bias(A, B, bias, out, M, K, N);
+        flux_gpu_matmul_bias(A, B, bias, out, M, K, N);
         return;
     }
     for (int32_t i = 0; i < M; ++i) {
@@ -685,7 +684,7 @@ bool run_flux_denoising_loop(FlowMatchEulerState& scheduler, int32_t num_inferen
 
 FluxPipeline::FluxPipeline(std::vector<std::unique_ptr<TrtModule>> text_encoders,
                            std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
-                           DiffusionConfig config, PreprocessorWeights weights,
+                           FluxDiffusionConfig config, FluxPreprocessorWeights weights,
                            std::shared_ptr<ITokenizer> tokenizer,
                            std::unique_ptr<ITokenizer> clip_tokenizer, std::string model_id_str,
                            std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
@@ -713,11 +712,11 @@ FluxPipeline::FluxPipeline(std::vector<std::unique_ptr<TrtModule>> text_encoders
               << ", x_embedder=" << (weights_.patch_embed_weight.empty() ? "MISSING" : "OK")
               << ", ctx_embedder=" << (weights_.context_embed_weight.empty() ? "MISSING" : "OK")
               << "\n";
-    gpu_matmul_init();
+    flux_gpu_matmul_init();
 }
 
 FluxPipeline::~FluxPipeline() {
-    gpu_matmul_shutdown();
+    flux_gpu_matmul_shutdown();
 }
 
 // ===========================================================================
@@ -1503,7 +1502,7 @@ FluxPipeline::generate_image_batch(const std::vector<std::string>& prompts,
 
     const auto total = static_cast<int32_t>(prompts.size());
     const int32_t cap = std::max(1, config_.max_batch_size.dit);
-    const auto chunks = diffusion::plan_chunks(total, cap);
+    const auto chunks = flux_batch::plan_chunks(total, cap);
 
     std::vector<ImageResult> results;
     results.reserve(prompts.size());

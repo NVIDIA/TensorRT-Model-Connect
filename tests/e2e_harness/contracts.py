@@ -352,7 +352,7 @@ class E2ECase:
         name: Unique case identifier (e.g. "example-model").
         hf_id: HuggingFace model ID or local path.
         family: Family plugin name (e.g. "example_family").
-        runtime_strategy: C++ runtime backend selector (e.g. "decoder_kv_cache").
+        runtime_strategy: C++ runtime backend selector (e.g. "example_family_decoder_kv_cache").
         task_strategy: Logical task type declared by the model manifest
             (e.g. "text_generation_causal").
         reference_backend: Which reference implementation to compare against

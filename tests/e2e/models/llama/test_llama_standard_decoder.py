@@ -174,8 +174,10 @@ class TestTensorNamingContract:
     def test_bf16_embed_input_keeps_external_features_fp32(self):
         """VL image features stay fp32 while reduced-precision cache uses bf16."""
         import tensorrt as trt
-        from tensorrt_model_connect.builders.default_decoder import build_standard_decoder_engine
         from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import (
+            build_standard_decoder_engine,
+        )
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4

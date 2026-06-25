@@ -1,11 +1,11 @@
 #include "runtime/models/magpie/pipeline.h"
 
-#include "runtime/core/trt_decode_runtime.h"
-#include "runtime/core/trt_engine_lifecycle.h"
+#include "runtime/models/magpie/decode_runtime.h"
 #include "runtime/models/magpie/magpie_codec_plan.h"
 #include "runtime/models/magpie/magpie_decode_policy.h"
 #include "runtime/models/magpie/magpie_decoder_plan.h"
 #include "runtime/models/magpie/magpie_text_completion_policy.h"
+#include "runtime/models/magpie/tensor_names.h"
 
 #ifndef TRTMC_HAS_CUDA_KERNELS
 #define TRTMC_HAS_CUDA_KERNELS 0
@@ -59,10 +59,10 @@ void log_magpie_frame_preview(const std::vector<int32_t>& all_codes, int32_t num
     }
 }
 
-bool check_magpie_gpu_kernels_available([[maybe_unused]] const CudaBuffer& audio_embed,
-                                        [[maybe_unused]] const CudaBuffer& codes,
-                                        [[maybe_unused]] const CudaBuffer& full_argmax,
-                                        [[maybe_unused]] const CudaBuffer& prev_codes) {
+bool check_magpie_gpu_kernels_available([[maybe_unused]] const MagpieCudaBuffer& audio_embed,
+                                        [[maybe_unused]] const MagpieCudaBuffer& codes,
+                                        [[maybe_unused]] const MagpieCudaBuffer& full_argmax,
+                                        [[maybe_unused]] const MagpieCudaBuffer& prev_codes) {
 #if TRTMC_HAS_CUDA_KERNELS
     return audio_embed.ok() && codes.ok() && full_argmax.ok() && prev_codes.ok();
 #else
@@ -70,7 +70,7 @@ bool check_magpie_gpu_kernels_available([[maybe_unused]] const CudaBuffer& audio
 #endif
 }
 
-void upload_magpie_prev_codes_to_device([[maybe_unused]] CudaBuffer& d_prev,
+void upload_magpie_prev_codes_to_device([[maybe_unused]] MagpieCudaBuffer& d_prev,
                                         [[maybe_unused]] const int32_t* host_codes,
                                         [[maybe_unused]] int32_t num_cb,
                                         [[maybe_unused]] bool use_gpu,
@@ -91,14 +91,15 @@ void upload_magpie_prev_codes_to_device([[maybe_unused]] CudaBuffer& d_prev,
 
 MagpiePipeline::MagpiePipeline(
     std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<IInferenceState> decoder_state, std::unique_ptr<TrtModule> codec,
+    std::unique_ptr<MagpieInferenceState> decoder_state, std::unique_ptr<TrtModule> codec,
     std::unique_ptr<TrtModule> lt_module, std::unique_ptr<TrtModule> prefill_module,
-    std::unique_ptr<IInferenceState> decoder_state_uncond, std::vector<CudaBuffer> cross_k,
-    std::vector<CudaBuffer> cross_v, std::vector<CudaBuffer> cross_k_uncond,
-    std::vector<CudaBuffer> cross_v_uncond, CudaBuffer encoder_output,
-    CudaBuffer encoder_output_uncond, std::vector<float> audio_embed, std::vector<float> text_embed,
-    std::vector<float> context_embed, std::vector<int32_t> context_lengths, MagpieTTSConfig config,
-    cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+    std::unique_ptr<MagpieInferenceState> decoder_state_uncond,
+    std::vector<MagpieCudaBuffer> cross_k, std::vector<MagpieCudaBuffer> cross_v,
+    std::vector<MagpieCudaBuffer> cross_k_uncond, std::vector<MagpieCudaBuffer> cross_v_uncond,
+    MagpieCudaBuffer encoder_output, MagpieCudaBuffer encoder_output_uncond,
+    std::vector<float> audio_embed, std::vector<float> text_embed, std::vector<float> context_embed,
+    std::vector<int32_t> context_lengths, MagpieTTSConfig config, cudaStream_t stream,
+    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)),
       decoder_state_(std::move(decoder_state)), codec_(std::move(codec)),
       decoder_state_uncond_(std::move(decoder_state_uncond)), cross_k_(std::move(cross_k)),
@@ -139,8 +140,8 @@ MagpiePipeline::~MagpiePipeline() = default;
 // are included verbatim below.
 
 void MagpiePipeline::upload_embeddings_to_gpu() {
-    audio_embed_device_ = CudaBuffer(audio_embed_.size() * sizeof(float));
-    context_embed_device_ = CudaBuffer(context_embed_.size() * sizeof(float));
+    audio_embed_device_ = MagpieCudaBuffer(audio_embed_.size() * sizeof(float));
+    context_embed_device_ = MagpieCudaBuffer(context_embed_.size() * sizeof(float));
     if (!audio_embed_.empty() && audio_embed_device_.ok())
         cudaMemcpy(audio_embed_device_.data(), audio_embed_.data(),
                    audio_embed_.size() * sizeof(float), cudaMemcpyHostToDevice);
@@ -154,9 +155,9 @@ void MagpiePipeline::init_cross_attn_resources() {
         return;
     has_cross_attn_output_ = true;
     const auto xattn_bytes = static_cast<std::size_t>(config_.max_source_positions) * sizeof(float);
-    cross_attn_weights_ = CudaBuffer(xattn_bytes);
+    cross_attn_weights_ = MagpieCudaBuffer(xattn_bytes);
     if (config_.cfg_scale > 1.0F)
-        cross_attn_weights_scratch_ = CudaBuffer(xattn_bytes);
+        cross_attn_weights_scratch_ = MagpieCudaBuffer(xattn_bytes);
 }
 
 void MagpiePipeline::init_cfg_logit_buffers() {
@@ -164,8 +165,8 @@ void MagpiePipeline::init_cfg_logit_buffers() {
         return;
     const auto logits_bytes = static_cast<std::size_t>(config_.num_codebooks) *
                               static_cast<std::size_t>(config_.codebook_size) * sizeof(float);
-    device_logits_cond_ = CudaBuffer(logits_bytes);
-    device_logits_uncond_ = CudaBuffer(logits_bytes);
+    device_logits_cond_ = MagpieCudaBuffer(logits_bytes);
+    device_logits_uncond_ = MagpieCudaBuffer(logits_bytes);
 }
 
 void MagpiePipeline::lookup_embed(const float* table, int32_t token_id, float* out) const {
@@ -297,8 +298,8 @@ void MagpiePipeline::bind_cross_kv() {
     // Bind all layers to the SAME encoder output buffer (shared cross-KV).
     const int32_t dec_layers = static_cast<int32_t>(cross_k_.size());
     for (int32_t i = 0; i < dec_layers; ++i) {
-        const std::string cross_k_name = layer_tensor_name("cross_k", i);
-        const std::string cross_v_name = layer_tensor_name("cross_v", i);
+        const std::string cross_k_name = magpie_layer_tensor_name("cross_k", i);
+        const std::string cross_v_name = magpie_layer_tensor_name("cross_v", i);
         decoder_->bind_external(cross_k_name, encoder_output_.data());
         decoder_->bind_external(cross_v_name, encoder_output_.data());
     }
@@ -326,8 +327,8 @@ void MagpiePipeline::bind_cross_kv_uncond() {
     // Bind all layers to the shared unconditional encoder output buffer.
     const int32_t dec_layers = static_cast<int32_t>(cross_k_uncond_.size());
     for (int32_t i = 0; i < dec_layers; ++i) {
-        const std::string cross_k_name = layer_tensor_name("cross_k", i);
-        const std::string cross_v_name = layer_tensor_name("cross_v", i);
+        const std::string cross_k_name = magpie_layer_tensor_name("cross_k", i);
+        const std::string cross_v_name = magpie_layer_tensor_name("cross_v", i);
         decoder_->bind_external(cross_k_name, encoder_output_uncond_.data());
         decoder_->bind_external(cross_v_name, encoder_output_uncond_.data());
     }
@@ -712,7 +713,7 @@ void MagpiePipeline::cpu_compute_frame_embed(DecoderLoopState& state,
 // ---------------------------------------------------------------------------
 
 bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame,
-                                           CudaBuffer& d_eos_flag) {
+                                           MagpieCudaBuffer& d_eos_flag) {
 #if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t EOS_TOKEN = 2017;
     constexpr int32_t AUDIO_RANGE = 2016;
@@ -838,7 +839,7 @@ std::vector<int32_t> MagpiePipeline::run_gpu_greedy_loop(DecoderLoopState& state
 
     const int32_t num_cb = state.num_cb;
 
-    CudaBuffer d_eos_flag(sizeof(int32_t));
+    MagpieCudaBuffer d_eos_flag(sizeof(int32_t));
     int32_t h_eos_flag = 0;
     cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), stream_);
 
@@ -999,7 +1000,7 @@ std::vector<int32_t> MagpiePipeline::run_decoder(int32_t max_frames) {
 // ---------------------------------------------------------------------------
 
 bool MagpiePipeline::gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame,
-                                             CudaBuffer& d_eos_flag,
+                                             MagpieCudaBuffer& d_eos_flag,
                                              std::vector<int32_t>& h_codes) {
 #if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t EOS_TOKEN = kMagpieEosToken;
@@ -1028,7 +1029,7 @@ bool MagpiePipeline::gpu_sampling_frame_step(DecoderLoopState& state, int32_t fr
         bind_cross_kv();
     }
 
-    // Build inputs via IInferenceState::prepare_step
+    // Build inputs via MagpieInferenceState::prepare_step
     int32_t dummy_token = 0;
     float use_embed_val = 1.0F;
 
@@ -1124,7 +1125,7 @@ std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& sta
 
     const int32_t num_cb = state.num_cb;
 
-    CudaBuffer d_eos_flag(sizeof(int32_t));
+    MagpieCudaBuffer d_eos_flag(sizeof(int32_t));
 
     std::vector<int32_t> all_codes;
     all_codes.reserve(static_cast<std::size_t>(max_frames) * num_cb);
@@ -1161,7 +1162,7 @@ std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& sta
 // ---------------------------------------------------------------------------
 
 bool MagpiePipeline::gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
-                                               CudaBuffer& d_eos_flag, int32_t& h_eos_flag,
+                                               MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
                                                int32_t& gen_frames_actual) {
 #if TRTMC_HAS_CUDA_KERNELS
     (void)state;
@@ -1256,15 +1257,15 @@ void MagpiePipeline::init_attention_prior() {
     const auto max_src = config_.max_source_positions;
     const auto prior_bytes = static_cast<std::size_t>(max_src) * sizeof(float);
 
-    attn_prior_device_ = CudaBuffer(prior_bytes);
+    attn_prior_device_ = MagpieCudaBuffer(prior_bytes);
     has_attn_prior_ = true;
 
     // Detect alignment_weights output
     if (decoder_->has_output("alignment_weights")) {
-        alignment_weights_device_ = CudaBuffer(prior_bytes);
+        alignment_weights_device_ = MagpieCudaBuffer(prior_bytes);
         has_alignment_output_ = true;
         if (config_.cfg_scale > 1.0F) {
-            alignment_scratch_device_ = CudaBuffer(prior_bytes);
+            alignment_scratch_device_ = MagpieCudaBuffer(prior_bytes);
         }
     }
 
@@ -1386,19 +1387,19 @@ void MagpiePipeline::init_prefill_buffers(int32_t N, int32_t W) {
         for (int32_t c = W; c <= W + r; ++c)
             mask[static_cast<std::size_t>(r) * (W + N) + c] = 0.0F;
     }
-    prefill_mask_ = CudaBuffer(mask_elems * sizeof(float));
+    prefill_mask_ = MagpieCudaBuffer(mask_elems * sizeof(float));
     cudaMemcpy(prefill_mask_.data(), mask.data(), mask_elems * sizeof(float),
                cudaMemcpyHostToDevice);
 
     std::vector<int32_t> positions(N);
     for (int32_t i = 0; i < N; ++i)
         positions[i] = i;
-    prefill_positions_ = CudaBuffer(static_cast<std::size_t>(N) * sizeof(int32_t));
+    prefill_positions_ = MagpieCudaBuffer(static_cast<std::size_t>(N) * sizeof(int32_t));
     cudaMemcpy(prefill_positions_.data(), positions.data(),
                static_cast<std::size_t>(N) * sizeof(int32_t), cudaMemcpyHostToDevice);
 
     const int32_t output_size = config_.num_codebooks * config_.codebook_size;
-    prefill_logits_ = CudaBuffer(static_cast<std::size_t>(N) * output_size * sizeof(float));
+    prefill_logits_ = MagpieCudaBuffer(static_cast<std::size_t>(N) * output_size * sizeof(float));
 }
 
 void MagpiePipeline::bind_prefill_cross_kv() {
@@ -1465,7 +1466,7 @@ bool MagpiePipeline::prefill_context_batched(int32_t ctx_frames) {
     // Copy present_k/v from prefill module to decoder's KV cache
     // (The KV cache now has ctx_frames entries)
     // Advance state to reflect the prefilled context positions.
-    // KvCache::advance() only supports n_tokens=1, so advance in a loop.
+    // MagpieKvCache::advance() only supports n_tokens=1, so advance in a loop.
     for (int32_t i = 0; i < ctx_frames; ++i)
         decoder_state_->advance(1);
 
@@ -1560,9 +1561,9 @@ void MagpiePipeline::init_local_transformer() {
     // Detect and allocate decoder_hidden output buffer (needed for LT and NeMo EOS gating)
     if (decoder_->has_output("decoder_hidden")) {
         const auto dec_hidden_bytes = static_cast<std::size_t>(config_.hidden_size) * sizeof(float);
-        decoder_hidden_buf_ = CudaBuffer(dec_hidden_bytes);
+        decoder_hidden_buf_ = MagpieCudaBuffer(dec_hidden_bytes);
         if (config_.cfg_scale > 1.0F) {
-            decoder_hidden_buf_uncond_ = CudaBuffer(dec_hidden_bytes);
+            decoder_hidden_buf_uncond_ = MagpieCudaBuffer(dec_hidden_bytes);
         }
         has_decoder_hidden_output_ = true;
     }
@@ -1577,21 +1578,22 @@ void MagpiePipeline::init_local_transformer() {
 
         const std::size_t lt_cache_bytes = static_cast<std::size_t>(lt_max_cache_) *
                                            static_cast<std::size_t>(lt_hidden_) * sizeof(float);
-        lt_cache_k_ = CudaBuffer(lt_cache_bytes);
-        lt_cache_v_ = CudaBuffer(lt_cache_bytes);
-        lt_present_k_ = CudaBuffer(lt_cache_bytes);
-        lt_present_v_ = CudaBuffer(lt_cache_bytes);
-        lt_output_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
-        lt_mask_ = CudaBuffer(static_cast<std::size_t>(lt_max_cache_ + 1) * sizeof(float));
-        lt_position_id_ = CudaBuffer(sizeof(int32_t));
-        lt_input_embed_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+        lt_cache_k_ = MagpieCudaBuffer(lt_cache_bytes);
+        lt_cache_v_ = MagpieCudaBuffer(lt_cache_bytes);
+        lt_present_k_ = MagpieCudaBuffer(lt_cache_bytes);
+        lt_present_v_ = MagpieCudaBuffer(lt_cache_bytes);
+        lt_output_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+        lt_mask_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_max_cache_ + 1) * sizeof(float));
+        lt_position_id_ = MagpieCudaBuffer(sizeof(int32_t));
+        lt_input_embed_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
 
         if (config_.cfg_scale > 1.0F) {
-            lt_cache_k_uncond_ = CudaBuffer(lt_cache_bytes);
-            lt_cache_v_uncond_ = CudaBuffer(lt_cache_bytes);
-            lt_present_k_uncond_ = CudaBuffer(lt_cache_bytes);
-            lt_present_v_uncond_ = CudaBuffer(lt_cache_bytes);
-            lt_output_uncond_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+            lt_cache_k_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
+            lt_cache_v_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
+            lt_present_k_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
+            lt_present_v_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
+            lt_output_uncond_ =
+                MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
         }
 
         // Bind KV cache to LT module
@@ -1995,7 +1997,7 @@ void MagpiePipeline::ensure_cfg_resources() {
                   (static_cast<std::size_t>(config_.max_source_positions) * sizeof(float)))
             : config_.hidden_size;
 
-    // We can't easily construct a new KvCache without knowing kv_dim,
+    // We can't easily construct a new MagpieKvCache without knowing kv_dim,
     // so just log a warning and skip CFG.
     std::cerr << "[magpie-tts] WARNING: CFG requested via env but no uncond cache allocated. "
               << "Rebuild with cfg_scale > 1 in bundle config." << std::endl;

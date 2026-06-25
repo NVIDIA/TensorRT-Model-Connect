@@ -1,0 +1,6 @@
+id = "opt"
+runtime_library = "libtrtmc_model_opt.so"
+runtime_plugins = ["plugin.cpp|register_opt_plugin"]
+runtime_strategies = ["opt_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["opt_decoder_kv_cache"]

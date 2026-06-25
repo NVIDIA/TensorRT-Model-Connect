@@ -4,9 +4,12 @@
   "hf_id": "OpenGVLab/InternVL3-2B-hf",
   "bundle": "internvl3-2b-tp2-vl.trtfb",
   "family": "internvl",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
   "ci_tier": "multi_device",
+  "task_eval": {
+    "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
+  },
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
   "prompt": "What color is the vehicle in this image? Answer in one word.",

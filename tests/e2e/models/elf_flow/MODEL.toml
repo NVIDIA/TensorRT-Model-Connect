@@ -5,3 +5,10 @@ test_manifests = [
   "manifests/elf-b-owt-l0.json",
   "manifests/elf-b-xsum-l0.json",
 ]
+
+[e2e_defaults.diffusion_text_generation]
+reference_backend = "invariant_only"
+oracle_level = "L4_invariants"
+stages = [
+  { name = "decoded_text", required = true },
+]

@@ -16,7 +16,7 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("personaplex")
-    assert getattr(plugin, "runtime_strategy", None) == "speech_to_speech"
+    assert getattr(plugin, "runtime_strategy", None) == "personaplex_speech_to_speech"
 
 
 def test_bundle_overrides() -> None:

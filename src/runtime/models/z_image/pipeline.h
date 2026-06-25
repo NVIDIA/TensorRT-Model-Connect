@@ -3,7 +3,7 @@
 // ZImagePipeline: Z-Image diffusion pipeline with Qwen3 text encoder,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/z_image/z_image_diffusion_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -33,7 +33,7 @@ struct ZImageLayout {
     int32_t head_dim{0};
 };
 
-/// Z-Image-specific preprocessor weights (separate from standard PreprocessorWeights)
+/// Z-Image-specific preprocessor weights (separate from base ZImageCommonPreprocessorWeights)
 struct ZImagePreprocessorWeights {
     std::vector<float> t_embedder_mlp_0_weight;
     std::vector<float> t_embedder_mlp_0_bias;
@@ -54,8 +54,8 @@ struct ZImagePreprocessorWeights {
 class ZImagePipeline final : public IPipeline {
   public:
     ZImagePipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> denoiser,
-                   std::unique_ptr<TrtModule> vae, DiffusionConfig config,
-                   PreprocessorWeights weights, ZImagePreprocessorWeights z_weights,
+                   std::unique_ptr<TrtModule> vae, ZImageDiffusionConfig config,
+                   ZImageCommonPreprocessorWeights weights, ZImagePreprocessorWeights z_weights,
                    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
                    std::string bundle_path, std::shared_ptr<void> distributed_owner = {},
                    int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
@@ -168,8 +168,8 @@ class ZImagePipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
-    DiffusionConfig config_;
-    PreprocessorWeights weights_;
+    ZImageDiffusionConfig config_;
+    ZImageCommonPreprocessorWeights weights_;
     ZImagePreprocessorWeights z_weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

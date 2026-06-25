@@ -79,13 +79,13 @@ def test_extract_path_references_captures_backtick_path_with_1_based_line_no() -
     # enumerate() start=1 convention is preserved.
     content = (
         "first line of the doc\n"
-        "see `src/runtime/models/text_generation/plugin.cpp` for the impl\n"
+        "see `src/runtime/models/qwen/plugin.cpp` for the impl\n"
         "third line\n"
     )
 
     refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
-    assert refs == [(2, "src/runtime/models/text_generation/plugin.cpp")]
+    assert refs == [(2, "src/runtime/models/qwen/plugin.cpp")]
 
 
 def test_extract_path_references_skips_wildcard_glob() -> None:

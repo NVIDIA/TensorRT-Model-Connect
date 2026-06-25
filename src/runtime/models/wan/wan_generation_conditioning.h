@@ -22,7 +22,7 @@ struct WanTextConditioning {
     std::vector<float> null_text;
 };
 
-inline WanConditioningInputs make_wan_conditioning_inputs(const DiffusionConfig& config,
+inline WanConditioningInputs make_wan_conditioning_inputs(const WanDiffusionConfig& config,
                                                           const WanLayout& layout,
                                                           const std::vector<int32_t>& input_ids) {
     WanConditioningInputs inputs;

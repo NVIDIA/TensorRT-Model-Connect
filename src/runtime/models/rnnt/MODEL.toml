@@ -1,9 +1,0 @@
-id = "rnnt"
-runtime_library = "libtrtmc_model_rnnt.so"
-runtime_plugins = ["plugin.cpp|register_rnnt_plugin"]
-runtime_strategies = ["speech_to_text_rnnt"]
-runtime_tests = [
-  "test_rnnt_audio_helpers|test_rnnt_audio_helpers.cpp|_|audio_helpers.cpp|_",
-  "test_rnnt_decode_policy|test_rnnt_decode_policy.cpp|_|_|_",
-  "test_rnnt_streaming_contract|test_rnnt_streaming_contract.cpp|_|_|_",
-]

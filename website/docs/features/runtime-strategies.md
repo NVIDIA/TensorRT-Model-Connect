@@ -9,9 +9,9 @@ A runtime strategy is the C++ dispatch key stored in bundle `config.json`.
 | Category | Strategies |
 | --- | --- |
 | Text decoder | `decoder_kv_cache`, `decoder_moe` |
-| Recurrent text | `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` |
+| Recurrent text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` |
 | Encoder and retrieval | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
-| Seq2seq | `text_to_text`, `marian_translation`, `seq2seq_encoder_decoder` |
+| Seq2seq | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` |
 | Vision and multimodal | `vision_language`, `omni_multimodal` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` |
 | Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` |

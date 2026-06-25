@@ -15,10 +15,11 @@ import math
 import numpy as np
 import pytest
 
-pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tensorrt_model_connect import graph_ops
-
 from tests.builder.conftest import requires_trt
+from tests.builder.owned_graph_modules import load_graph_ops
+
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+graph_ops = load_graph_ops()
 
 
 # ===================================================================

@@ -74,4 +74,4 @@ class TestOlmo2Plugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.olmo2 import plugin
-        assert plugin.runtime_strategy == "decoder_kv_cache"
+        assert plugin.runtime_strategy == "olmo2_decoder_kv_cache"

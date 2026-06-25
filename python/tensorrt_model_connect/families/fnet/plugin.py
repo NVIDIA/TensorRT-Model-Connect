@@ -37,7 +37,7 @@ def _load_ln(readers, prefix):
 
 class FNetPlugin:
     name = "fnet"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "fnet_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "fnet"

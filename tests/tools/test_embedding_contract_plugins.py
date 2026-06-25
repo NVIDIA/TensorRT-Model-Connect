@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import math
 
+from tests.e2e.models.bert.e2e_plugins.contract import (
+    BertEmbeddingPlugin,
+    BertEncoderFeaturesPlugin,
+)
 from tests.e2e_harness.contracts import E2ECase, StageOutput, StageStatus, ThresholdProfile
-from tests.e2e_harness.plugins.embedding import EmbeddingPlugin
-from tests.e2e_harness.plugins.encoder_features import EncoderFeaturesPlugin
 
 
 def _outputs() -> tuple[StageOutput, StageOutput]:
@@ -23,14 +25,14 @@ def _outputs() -> tuple[StageOutput, StageOutput]:
 
 def test_embedding_contract_raises_unreasonably_low_cosine_threshold() -> None:
     trt, ref = _outputs()
-    result = EmbeddingPlugin().verify(
+    result = BertEmbeddingPlugin().verify(
         trt,
         ref,
         E2ECase(
             name="embedding-case",
             hf_id="hf/embedding-case",
-            family="embedding_family",
-            runtime_strategy="encoder_only",
+            family="bert",
+            runtime_strategy="bert_encoder_only",
             reference_family="sentence_transformer_embed",
         ),
         ThresholdProfile(
@@ -46,14 +48,14 @@ def test_embedding_contract_raises_unreasonably_low_cosine_threshold() -> None:
 
 def test_encoder_contract_raises_unreasonably_low_cosine_threshold() -> None:
     trt, ref = _outputs()
-    result = EncoderFeaturesPlugin().verify(
+    result = BertEncoderFeaturesPlugin().verify(
         trt,
         ref,
         E2ECase(
             name="encoder-case",
             hf_id="hf/encoder-case",
-            family="encoder_family",
-            runtime_strategy="encoder_only",
+            family="bert",
+            runtime_strategy="bert_encoder_only",
             reference_family="encoder_base_features",
         ),
         ThresholdProfile(

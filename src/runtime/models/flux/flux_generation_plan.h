@@ -1,7 +1,7 @@
 #pragma once
 
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/flux/flux_diffusion_types.h"
+#include "runtime/models/flux/flux_scheduler_helpers.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +17,7 @@ struct FluxPackLayout {
     int32_t w_packed{0};
 };
 
-inline FluxPackLayout make_flux_pack_layout(const DiffusionConfig& config, int32_t z_dim,
+inline FluxPackLayout make_flux_pack_layout(const FluxDiffusionConfig& config, int32_t z_dim,
                                             int32_t h_lat, int32_t w_lat) {
     FluxPackLayout layout;
     if (config.patch_size.size() >= 3) {
@@ -39,18 +39,19 @@ struct FluxGenerationPlan {
     FluxPackLayout layout;
     bool is_flux2{false};
     std::size_t latent_size{0};
-    FlowMatchEulerConfig scheduler_config;
+    flux_scheduler::FlowMatchEulerConfig scheduler_config;
 };
 
-inline FluxGenerationPlan make_flux_generation_plan(const DiffusionConfig& config,
-                                                    const PreprocessorWeights& weights,
+inline FluxGenerationPlan make_flux_generation_plan(const FluxDiffusionConfig& config,
+                                                    const FluxPreprocessorWeights& weights,
                                                     int32_t requested_steps,
                                                     float requested_guidance, int32_t h_lat,
                                                     int32_t w_lat, int32_t num_img_tokens) {
     FluxGenerationPlan plan;
     plan.num_inference_steps =
-        resolve_requested_steps(requested_steps, config.num_inference_steps, true);
-    plan.guidance_scale = resolve_requested_guidance(requested_guidance, config.guidance_scale);
+        flux_scheduler::resolve_requested_steps(requested_steps, config.num_inference_steps, true);
+    plan.guidance_scale =
+        flux_scheduler::resolve_requested_guidance(requested_guidance, config.guidance_scale);
     plan.dit_dim = config.dit_dim;
     plan.text_seq = config.text_seq_len;
     plan.z_dim = config.z_dim;
@@ -76,8 +77,9 @@ inline FluxGenerationPlan make_flux_generation_plan(const DiffusionConfig& confi
     return plan;
 }
 
-inline FlowMatchEulerState make_flux_scheduler_state(const FluxGenerationPlan& plan) {
-    FlowMatchEulerState scheduler;
+inline flux_scheduler::FlowMatchEulerState
+make_flux_scheduler_state(const FluxGenerationPlan& plan) {
+    flux_scheduler::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = plan.scheduler_config.num_train_timesteps;
     scheduler.shift = plan.scheduler_config.shift;
     scheduler.use_dynamic_shifting = plan.scheduler_config.use_dynamic_shifting;

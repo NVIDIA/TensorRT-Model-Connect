@@ -2,7 +2,7 @@
   "models": [
     {
       "model": "ggml-org/stories15M_MOE",
-      "pipeline_type": "decoder_moe",
+      "pipeline_type": "mixtral_decoder_moe",
       "label": "A4-decode-moe",
       "benchmark": {
         "label": "CPU argmax",

@@ -70,7 +70,8 @@ def _resolve_vit_config(raw: dict) -> dict:
 
 class TimmVitPlugin:
     name = "timm_vit"
-    runtime_strategy = "image_classification"
+    runtime_strategy = "timm_vit_image_classification"
+    requires_tokenizer = False
 
     def matches(self, model_type: str) -> bool:
         mt = (model_type or "").lower()

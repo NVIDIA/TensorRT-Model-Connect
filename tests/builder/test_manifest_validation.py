@@ -33,7 +33,7 @@ except ImportError:
 
 EXAMPLE_FAMILY = "example_family"
 EXAMPLE_MODEL_ID = "example-org/example-model"
-EXAMPLE_RUNTIME_STRATEGY = "decoder_kv_cache"
+EXAMPLE_RUNTIME_STRATEGY = "llama_decoder_kv_cache"
 
 
 class TestManifestValidation:
@@ -80,6 +80,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_new_tokens": "20",
         }
         with pytest.raises(TypeError, match="max_new_tokens"):
@@ -91,6 +92,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_new_tokens": 20.5,
         }
         with pytest.raises(TypeError, match="max_new_tokens"):
@@ -102,6 +104,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_cache_length": 256.5,
         }
         with pytest.raises(TypeError, match="max_cache_length"):
@@ -460,6 +463,7 @@ class TestManifestValidation:
             "name": "test-model",
             "model_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
         }
         _validate_manifest(data, "test.json")  # Should not raise
 
@@ -510,6 +514,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_new_tokens": True,
         }
         with pytest.raises(TypeError, match="max_new_tokens"):
@@ -520,6 +525,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "execution_profiles": "example_profile",
         }
         with pytest.raises(TypeError, match="execution_profiles"):
@@ -530,6 +536,7 @@ class TestManifestValidation:
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "execution_profiles": {
                 "build": "example_profile",
                 "verify": "example_profile",

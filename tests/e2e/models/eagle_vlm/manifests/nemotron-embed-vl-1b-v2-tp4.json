@@ -4,7 +4,7 @@
   "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2",
   "bundle": "nemotron-embed-vl-1b-v2-tp4.trtfb",
   "family": "eagle_vlm",
-  "runtime_strategy": "embedding",
+  "runtime_strategy": "eagle_vlm_embedding",
   "task_strategy": "embedding",
   "reference_family": "vl_embed_retrieval",
   "user_contract": "embedding_vector",

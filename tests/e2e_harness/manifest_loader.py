@@ -28,6 +28,7 @@ from .contracts import (
     StageSpec,
 )
 from .python_profiles import PROFILE_PHASES, normalize_execution_profiles
+from .runtime_strategy_metadata import runtime_strategy_task_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -255,105 +256,6 @@ def find_manifest_path(
     return None
 
 # ---------------------------------------------------------------------------
-# Reference backend defaults per task strategy
-# ---------------------------------------------------------------------------
-
-_DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
-    "text_generation_causal": "hf_transformers",
-    "vision_language_generation": "hf_transformers",
-    "speech_to_text": "hf_transformers",
-    "text_to_audio": "hf_transformers",
-    "speech_to_speech": "torch_reference",
-    "segmentation": "hf_transformers",
-    "prompted_segmentation": "hf_transformers",
-    "image_classification": "hf_transformers",
-    "object_detection": "hf_transformers",
-    "diffusion_media_generation": "hf_diffusers",
-    "diffusion_text_generation": "invariant_only",
-    "embedding": "hf_transformers",
-    "reranking": "hf_transformers",
-    "encoder_only_nlp": "hf_transformers",
-    "neural_operator": "torch_reference",
-    "omni_multimodal": "torch_reference",
-    "composite_pipeline": "hf_diffusers",
-}
-
-_DEFAULT_ORACLE_LEVEL: dict[str, str] = {
-    "hf_transformers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
-    "hf_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
-    "nemo": OracleLevel.L1_EXTERNAL_REFERENCE.value,
-    "torch_reference": OracleLevel.L2_INTERNAL_REFERENCE.value,
-    "custom_python": OracleLevel.L2_INTERNAL_REFERENCE.value,
-    "golden_snapshot": OracleLevel.L3_SNAPSHOT_REGRESSION.value,
-    "invariant_only": OracleLevel.L4_INVARIANTS.value,
-}
-
-# ---------------------------------------------------------------------------
-# Default stage specs per task strategy
-# ---------------------------------------------------------------------------
-
-_DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
-    "text_generation_causal": [
-        {"name": "full_generation", "required": True},
-    ],
-    "vision_language_generation": [
-        {"name": "vision_encode", "required": True},
-        {"name": "full_generation", "required": True},
-    ],
-    "speech_to_text": [
-        {"name": "full_generation", "required": True},
-    ],
-    "text_to_audio": [
-        {"name": "full_generation", "required": True},
-    ],
-    "speech_to_speech": [
-        {"name": "full_generation", "required": True},
-    ],
-    "segmentation": [
-        {"name": "full_inference", "required": True},
-    ],
-    "prompted_segmentation": [
-        {"name": "full_inference", "required": True},
-    ],
-    "image_classification": [
-        {"name": "full_inference", "required": True},
-    ],
-    "object_detection": [
-        {"name": "full_inference", "required": True},
-    ],
-    "diffusion_media_generation": [
-        {"name": "vae_decode", "required": False},
-        {"name": "end_to_end", "required": True},
-    ],
-    "diffusion_text_generation": [
-        {"name": "decoded_text", "required": True},
-    ],
-    "embedding": [
-        {"name": "full_inference", "required": True},
-    ],
-    "reranking": [
-        {"name": "full_inference", "required": True},
-    ],
-    "encoder_only_nlp": [
-        {"name": "full_inference", "required": True},
-    ],
-    "neural_operator": [
-        {"name": "full_inference", "required": True},
-    ],
-    "omni_multimodal": [
-        {"name": "thinker_decode", "required": True},
-        {"name": "vision_encode", "required": False},
-        {"name": "audio_encode", "required": False},
-        {"name": "talker_decode", "required": True},
-        {"name": "end_to_end", "required": True},
-    ],
-    "composite_pipeline": [
-        {"name": "end_to_end", "required": True},
-    ],
-}
-
-
-# ---------------------------------------------------------------------------
 # v1 -> v2 field inference
 # ---------------------------------------------------------------------------
 
@@ -361,22 +263,39 @@ def _infer_task_strategy(manifest: dict) -> str:
     """Return the model-owned task_strategy field when declared."""
     if "task_strategy" in manifest:
         return str(manifest["task_strategy"])
-    return str(manifest.get("runtime_strategy", "decoder_kv_cache"))
+    runtime_strategy = str(manifest.get("runtime_strategy") or "")
+    if not runtime_strategy:
+        return ""
+    return runtime_strategy_task_strategy(runtime_strategy) or runtime_strategy
 
 
-def _infer_reference_backend(manifest: dict, task_strategy: str) -> str:
-    """Infer reference_backend from manifest or task_strategy defaults."""
+def _model_e2e_defaults(manifest_path: Path, task_strategy: str) -> dict[str, Any]:
+    """Return family-owned E2E defaults for the manifest's task strategy."""
+    index_path = _model_test_dir_from_manifest_path(manifest_path) / "MODEL.toml"
+    if not index_path.is_file():
+        return {}
+    raw = _read_model_index(index_path)
+    defaults = raw.get("e2e_defaults", {})
+    if not isinstance(defaults, dict):
+        return {}
+    task_defaults = defaults.get(task_strategy, {})
+    return task_defaults if isinstance(task_defaults, dict) else {}
+
+
+def _infer_reference_backend(manifest: dict, defaults: dict[str, Any]) -> str:
+    """Return the model-owned reference_backend."""
     if "reference_backend" in manifest:
         return manifest["reference_backend"]
-    return _DEFAULT_REFERENCE_BACKEND.get(task_strategy, "hf_transformers")
+    value = defaults.get("reference_backend", "")
+    return str(value) if value else ""
 
 
-def _infer_oracle_level(manifest: dict, reference_backend: str) -> str:
-    """Infer oracle_level from reference_backend."""
+def _infer_oracle_level(manifest: dict, defaults: dict[str, Any]) -> str:
+    """Return the model-owned oracle_level."""
     if "oracle_level" in manifest:
         return manifest["oracle_level"]
-    return _DEFAULT_ORACLE_LEVEL.get(
-        reference_backend, OracleLevel.L2_INTERNAL_REFERENCE.value)
+    value = defaults.get("oracle_level", "")
+    return str(value) if value else OracleLevel.L2_INTERNAL_REFERENCE.value
 
 
 def _infer_reference_family(manifest: dict) -> str:
@@ -396,60 +315,43 @@ def _infer_ci_lane(manifest: dict) -> str:
     return CILane.ACCEPTANCE.value
 
 
-def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequirement]:
+def _preflight_requirements(raw_requirements: Any) -> list[PreflightRequirement]:
+    if not isinstance(raw_requirements, list):
+        return []
+    return [
+        PreflightRequirement(
+            kind=req["kind"],
+            args=req.get("args", {}),
+            gating=req.get("gating", True),
+        )
+        for req in raw_requirements
+        if isinstance(req, dict) and "kind" in req
+    ]
+
+
+def _build_preflight(manifest: dict, defaults: dict[str, Any]) -> list[PreflightRequirement]:
     """Build preflight requirements from manifest or infer defaults."""
     if "preflight_requirements" in manifest:
-        return [
-            PreflightRequirement(
-                kind=req["kind"],
-                args=req.get("args", {}),
-                gating=req.get("gating", True),
-            )
-            for req in manifest["preflight_requirements"]
-        ]
+        return _preflight_requirements(manifest["preflight_requirements"])
 
     # Auto-generate preflight from manifest fields
-    reqs: list[PreflightRequirement] = []
+    reqs: list[PreflightRequirement] = _preflight_requirements(
+        defaults.get("preflight_requirements", []))
 
     # All models need the binary
     reqs.append(PreflightRequirement(kind="binary_exists", args={}, gating=True))
 
-    # Vision/segmentation need test image
-    if manifest.get("test_image"):
-        reqs.append(PreflightRequirement(
-            kind="asset_exists",
-            args={"path": manifest["test_image"]},
-            gating=True,
-        ))
-
-    # Audio models need test audio
-    if manifest.get("test_input_audio"):
-        reqs.append(PreflightRequirement(
-            kind="asset_exists",
-            args={"path": manifest["test_input_audio"]},
-            gating=True,
-        ))
-
-    # Speech reference tokens
-    if manifest.get("speech_reference_tokens"):
-        reqs.append(PreflightRequirement(
-            kind="asset_exists",
-            args={"path": manifest["speech_reference_tokens"]},
-            gating=True,
-        ))
-
-    # Diffusion needs diffusers
-    if task_strategy == "diffusion_media_generation":
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "diffusers", "phase": "build"},
-            gating=True,
-        ))
-        reqs.append(PreflightRequirement(
-            kind="python_module_available",
-            args={"module": "ftfy", "phase": "build"},
-            gating=True,
-        ))
+    asset_fields = defaults.get("preflight_asset_fields", [])
+    if "preflight_asset_fields" in manifest:
+        asset_fields = manifest["preflight_asset_fields"]
+    if isinstance(asset_fields, list):
+        for field in asset_fields:
+            if isinstance(field, str) and manifest.get(field):
+                reqs.append(PreflightRequirement(
+                    kind="asset_exists",
+                    args={"path": manifest[field]},
+                    gating=True,
+                ))
 
     # HF auth for gated models.  trust_remote_code still gets a non-gating
     # diagnostic because many public repos use remote code, but gated repos
@@ -470,30 +372,36 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
     return reqs
 
 
-def _build_stages(manifest: dict, task_strategy: str) -> list[StageSpec]:
-    """Build stage specs from manifest or infer defaults."""
-    if "stages" in manifest:
-        return [
-            StageSpec(
-                name=s["name"],
-                required=s.get("required", True),
-                runner_override=s.get("runner_override"),
-                comparator_override=s.get("comparator_override"),
-                artifact_type=s.get("artifact_type", ""),
-                comparison_mode=s.get("comparison_mode", ""),
-                ci_lanes=s.get("ci_lanes", [CILane.ACCEPTANCE.value]),
-            )
-            for s in manifest["stages"]
-        ]
-
-    defaults = _DEFAULT_STAGES.get(task_strategy, [{"name": "full_generation", "required": True}])
+def _stage_specs(raw_stages: Any) -> list[StageSpec]:
+    if not isinstance(raw_stages, list):
+        return []
     return [
-        StageSpec(name=s["name"], required=s.get("required", True))
-        for s in defaults
+        StageSpec(
+            name=s["name"],
+            required=s.get("required", True),
+            runner_override=s.get("runner_override"),
+            comparator_override=s.get("comparator_override"),
+            artifact_type=s.get("artifact_type", ""),
+            comparison_mode=s.get("comparison_mode", ""),
+            ci_lanes=s.get("ci_lanes", [CILane.ACCEPTANCE.value]),
+        )
+        for s in raw_stages
+        if isinstance(s, dict) and "name" in s
     ]
 
 
-def _build_inputs(manifest: dict) -> dict:
+def _build_stages(manifest: dict, defaults: dict[str, Any]) -> list[StageSpec]:
+    """Build stage specs from manifest or infer defaults."""
+    if "stages" in manifest:
+        return _stage_specs(manifest["stages"])
+
+    stages = _stage_specs(defaults.get("stages", []))
+    if stages:
+        return stages
+    return [StageSpec(name="full_generation", required=True)]
+
+
+def _build_inputs(manifest: dict, defaults: dict[str, Any]) -> dict:
     """Extract input specification from manifest."""
     inputs: dict[str, Any] = {}
 
@@ -506,20 +414,33 @@ def _build_inputs(manifest: dict) -> dict:
     if prompt:
         inputs["prompt"] = prompt
 
-    # Image for VL/segmentation
-    if manifest.get("test_image"):
-        inputs["image"] = manifest["test_image"]
-
-    # Audio input
-    if manifest.get("test_input_audio"):
-        inputs["audio"] = manifest["test_input_audio"]
-
-    # Point prompts for prompted segmentation.
-    if "point_x" in manifest:
-        inputs["point_x"] = manifest["point_x"]
-        inputs["point_y"] = manifest["point_y"]
-    if "num_expected_masks" in manifest:
-        inputs["num_expected_masks"] = manifest["num_expected_masks"]
+    input_fields = defaults.get("input_fields", [])
+    if "input_fields" in manifest:
+        input_fields = manifest["input_fields"]
+    if isinstance(input_fields, list):
+        for mapping in input_fields:
+            if not isinstance(mapping, dict):
+                continue
+            input_name = mapping.get("input")
+            manifest_field = mapping.get("manifest")
+            required_manifest = mapping.get("required_manifest")
+            if (
+                not isinstance(input_name, str)
+                or not isinstance(manifest_field, str)
+                or input_name in inputs
+            ):
+                continue
+            if isinstance(required_manifest, str) and required_manifest not in manifest:
+                continue
+            if isinstance(required_manifest, list) and any(
+                not isinstance(field, str) or field not in manifest
+                for field in required_manifest
+            ):
+                continue
+            if manifest_field in manifest:
+                inputs[input_name] = manifest[manifest_field]
+            elif "default" in mapping:
+                inputs[input_name] = mapping["default"]
 
     # Max new tokens
     inputs["max_new_tokens"] = manifest.get("max_new_tokens", 30)
@@ -529,30 +450,7 @@ def _build_inputs(manifest: dict) -> dict:
     )
 
     # Generation parameters (optional, default to each runtime's configured value)
-    for key in ("temperature", "top_p", "top_k", "min_p", "seed", "guidance_scale"):
-        if key in manifest:
-            inputs[key] = manifest[key]
-
-    # Diffusion-specific
-    if manifest.get("video_num_frames"):
-        inputs["video_num_frames"] = manifest["video_num_frames"]
-        inputs["video_height"] = manifest.get("video_height", 480)
-        inputs["video_width"] = manifest.get("video_width", 832)
-        inputs["num_inference_steps"] = manifest.get("num_inference_steps", 30)
-
-    # Image dimensions for image-only diffusion.
-    if manifest.get("image_height"):
-        inputs["image_height"] = manifest["image_height"]
-        inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
-
-    # Image-only diffusion extras.
-    for key in ("negative_prompt", "cfg_scale", "height", "width",
-                "num_inference_steps"):
-        if key in manifest and key not in inputs:
-            inputs[key] = manifest[key]
-
-    # Numeric tensor inputs for neural-operator / one-shot dense models
-    for key in ("field_input", "branch_input", "trunk_input", "output_field"):
+    for key in ("temperature", "top_p", "top_k", "min_p", "seed"):
         if key in manifest:
             inputs[key] = manifest[key]
 
@@ -621,7 +519,7 @@ def _build_execution_profiles(
     )
 
 
-def _build_metadata(manifest: dict) -> dict:
+def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
     """Collect all non-standard fields into metadata."""
     standard_fields = {
         "name", "hf_id", "model_id", "bundle", "family", "runtime_strategy",
@@ -636,7 +534,8 @@ def _build_metadata(manifest: dict) -> dict:
         "min_pixel_mean", "max_pixel_mean", "min_pixel_std",
         "reference_min_pixel_std_for_ratio", "min_reference_std_ratio",
         "video_num_frames", "video_height", "video_width",
-        "num_inference_steps", "build_args", "preflight_requirements",
+        "num_inference_steps", "build_args", "build_cli_args", "preflight_requirements",
+        "preflight_asset_fields", "input_fields",
         "stages", "comparison_profile", "threshold_overrides", "determinism",
         "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
         "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
@@ -665,6 +564,11 @@ def _build_metadata(manifest: dict) -> dict:
     # Propagate build_args so the orchestrator can select the correct backend.
     if "build_args" in manifest:
         meta["build_args"] = manifest["build_args"]
+
+    if "build_cli_args" in defaults:
+        meta["build_cli_args"] = defaults["build_cli_args"]
+    if "build_cli_args" in manifest:
+        meta["build_cli_args"] = manifest["build_cli_args"]
 
     return meta
 
@@ -763,6 +667,11 @@ def _validate_manifest(raw: dict, path: str) -> None:
                 f"Manifest {path!r} (name={raw['name']!r}) is missing "
                 f"required field 'family' (and no 'skip' is set)"
             )
+        if "runtime_strategy" not in raw:
+            raise ValueError(
+                f"Manifest {path!r} (name={raw['name']!r}) is missing "
+                f"required field 'runtime_strategy' (and no 'skip' is set)"
+            )
 
     # 3. Type checks for int fields
     for field_name in ("max_new_tokens", "max_cache_length"):
@@ -827,8 +736,9 @@ def load_manifest(
     _validate_manifest(raw, str(path))
 
     task_strategy = _infer_task_strategy(raw)
-    reference_backend = _infer_reference_backend(raw, task_strategy)
-    oracle_level = _infer_oracle_level(raw, reference_backend)
+    e2e_defaults = _model_e2e_defaults(path, task_strategy)
+    reference_backend = _infer_reference_backend(raw, e2e_defaults)
+    oracle_level = _infer_oracle_level(raw, e2e_defaults)
 
     # Infer reference family, user contract, and CI lane
     reference_family = _infer_reference_family(raw)
@@ -837,7 +747,7 @@ def load_manifest(
 
     # Handle skip -> known_limitations migration
     known_limitation = _convert_skip_to_known_limitation(raw)
-    metadata = _build_metadata(raw)
+    metadata = _build_metadata(raw, e2e_defaults)
     metadata["manifest_path"] = str(path)
     metadata["model_test_dir"] = str(model_test_dir)
     if known_limitation:
@@ -855,7 +765,7 @@ def load_manifest(
         name=raw["name"],
         hf_id=raw.get("hf_id", raw.get("model_id", "")),
         family=raw.get("family", ""),
-        runtime_strategy=raw.get("runtime_strategy", "decoder_kv_cache"),
+        runtime_strategy=str(raw.get("runtime_strategy") or ""),
         task_strategy=task_strategy,
         reference_backend=reference_backend,
         oracle_level=oracle_level,
@@ -863,9 +773,9 @@ def load_manifest(
         user_contract=user_contract,
         ci_lane=ci_lane,
         bundle=raw.get("bundle", f"{raw['name']}.trtfb"),
-        inputs=_build_inputs(raw),
-        preflight=_build_preflight(raw, task_strategy),
-        stages=_build_stages(raw, task_strategy),
+        inputs=_build_inputs(raw, e2e_defaults),
+        preflight=_build_preflight(raw, e2e_defaults),
+        stages=_build_stages(raw, e2e_defaults),
         comparison_profile=raw.get("comparison_profile", "default"),
         threshold_overrides=_build_threshold_overrides(raw),
         determinism=_build_determinism(raw),

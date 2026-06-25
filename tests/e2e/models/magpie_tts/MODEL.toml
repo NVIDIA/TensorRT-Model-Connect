@@ -4,3 +4,10 @@ test_manifests = [
   "manifests/magpie-tts-357m-tp4.json",
   "manifests/magpie-tts-357m.json",
 ]
+
+[e2e_defaults.text_to_audio]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

@@ -83,11 +83,11 @@ else:
 # 4. Run inference with debug_runner
 # ---------------------------------------------------------------------------
 
-from tensorrt_model_connect.debug_runner import TrtRunner  # noqa: E402
+from tensorrt_model_connect.families.qwen.debug_runner import TrtRunner  # noqa: E402
 
 def run_generation(bundle_path, prompt_tokens, max_new_tokens, label):
     """Run autoregressive generation and return (tokens, latency_ms)."""
-    from tensorrt_model_connect.debug_runner import load_section_from_bundle
+    from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
     import json
 
     engine_plan = load_section_from_bundle(bundle_path, "engine_plan")

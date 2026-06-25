@@ -4,12 +4,15 @@
   "hf_id": "OpenGVLab/InternVL3-8B-hf",
   "bundle": "internvl3-8b-vl.trtfb",
   "family": "internvl",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
   "reference_backend": "golden_snapshot",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
   "ci_tier": "nightly_only",
+  "task_eval": {
+    "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
+  },
   "l0_replacement": "internvl3-2b",
   "l0_replacement_reason": "InternVL3-8B is scale coverage; internvl3-2b keeps the InternVL3 VL path for PR L0.",
   "max_cache_length": 384,

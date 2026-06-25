@@ -4,7 +4,7 @@
   "hf_id": "facebook/xglm-564M",
   "bundle": "xglm-564m-tp4.trtfb",
   "family": "xglm",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "xglm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

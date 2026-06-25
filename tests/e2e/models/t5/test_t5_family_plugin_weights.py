@@ -114,4 +114,4 @@ class TestT5Plugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.t5 import plugin
-        assert plugin.runtime_strategy == "text_to_text"
+        assert plugin.runtime_strategy == "t5_text_to_text"

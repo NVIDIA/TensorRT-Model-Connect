@@ -7,7 +7,6 @@ Key files:
 - `trt_engine_lifecycle.*`: engine/context creation and tensor wiring checks.
 - `trt_decode_runtime.*`: common decode-time utilities (sampling, masks).
 - `trt_backend_shared.*`: common decoder generation loop utilities.
-- `device_kv_cache.*`: device-side KV cache and per-step resource management.
 - `step_state.h`: generic recurrent-step state interface.
 - `stb_impl.cpp`: stb implementation unit for image loading/resizing.
 

@@ -128,7 +128,7 @@ class TestBertPlugin:
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.bert import plugin
 
-        assert plugin.runtime_strategy == "encoder_only"
+        assert plugin.runtime_strategy == "bert_encoder_only"
 
     def test_load_weights_keys(self, tmp_path):
         from tensorrt_model_connect.families.bert import plugin

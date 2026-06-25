@@ -15,8 +15,8 @@ void check(bool condition, const char* name) {
 }
 
 void test_flux_construction() {
-    trtmc::DiffusionConfig cfg;
-    trtmc::PreprocessorWeights weights;
+    trtmc::FluxDiffusionConfig cfg;
+    trtmc::FluxPreprocessorWeights weights;
 
     trtmc::FluxPipeline pipeline({}, nullptr, nullptr, cfg, weights, nullptr, nullptr, "test-flux");
 
@@ -25,14 +25,14 @@ void test_flux_construction() {
 }
 
 void test_flux_with_custom_config() {
-    trtmc::DiffusionConfig cfg;
+    trtmc::FluxDiffusionConfig cfg;
     cfg.video_height = 256;
     cfg.video_width = 256;
     cfg.scale_factor_spatial = 8;
     cfg.patch_size = {1, 2, 2};
 
-    trtmc::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtmc::PreprocessorWeights{}, nullptr,
-                                 nullptr, "test-flux-custom");
+    trtmc::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtmc::FluxPreprocessorWeights{},
+                                 nullptr, nullptr, "test-flux-custom");
 
     check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
           "FluxPipeline custom config pipeline_type");

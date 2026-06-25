@@ -8,3 +8,7 @@ aliases = [
 prefixes = [
   "xglm",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "xglm_decoder_kv_cache",
+]

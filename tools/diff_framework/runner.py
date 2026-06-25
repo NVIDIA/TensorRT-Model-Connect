@@ -8,9 +8,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .protocol import DiffResult, TestContext
-from .registry import get_all_tests, get_tests_for_strategy, get_test_by_name
+from .registry import (
+    get_all_tests,
+    get_strategies_for_test,
+    get_tests_for_strategy,
+    get_test_by_name,
+)
 
-DEFAULT_RUNTIME_STRATEGY = "decoder_kv_cache"
+UNDETECTED_RUNTIME_STRATEGY = ""
 
 
 @dataclass(frozen=True)
@@ -35,12 +40,12 @@ def _finalize_detection(
                 raise detection.error
             raise ValueError(detection.message)
         warnings.warn(detection.message, RuntimeWarning, stacklevel=3)
-        return DEFAULT_RUNTIME_STRATEGY
+        return UNDETECTED_RUNTIME_STRATEGY
 
     if detection.status in {"warning", "skip"} and detection.message:
         warnings.warn(detection.message, RuntimeWarning, stacklevel=3)
 
-    return detection.runtime_strategy or DEFAULT_RUNTIME_STRATEGY
+    return detection.runtime_strategy or UNDETECTED_RUNTIME_STRATEGY
 
 
 def _classify_detected_strategy(strategy: str, source: str) -> StrategyDetection:
@@ -78,34 +83,33 @@ def detect_runtime_strategy(
         plugin = find_plugin(config.model_type)
     except Exception as exc:
         detection = StrategyDetection(
-            runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+            runtime_strategy=None,
             status="warning",
             message=(
                 f"Could not detect runtime_strategy for model {model!r}; "
-                f"falling back to {DEFAULT_RUNTIME_STRATEGY!r}. "
+                "no default runtime strategy is assumed. "
                 f"Details: {type(exc).__name__}: {exc}"
             ),
         )
     else:
         if plugin is None:
             detection = StrategyDetection(
-                runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                runtime_strategy=None,
                 status="warning",
                 message=(
-                    f"No family plugin resolved for model {model!r}; falling "
-                    f"back to {DEFAULT_RUNTIME_STRATEGY!r}."
+                    f"No family plugin resolved for model {model!r}; "
+                    "no default runtime strategy is assumed."
                 ),
             )
         else:
             strategy = getattr(plugin, "runtime_strategy", None)
             if not strategy:
                 detection = StrategyDetection(
-                    runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                    runtime_strategy=None,
                     status="warning",
                     message=(
                         f"Family plugin for model {model!r} did not provide "
-                        f"runtime_strategy; falling back to "
-                        f"{DEFAULT_RUNTIME_STRATEGY!r}."
+                        "runtime_strategy; no default runtime strategy is assumed."
                     ),
                 )
             else:
@@ -141,11 +145,11 @@ def detect_runtime_strategy_from_bundle(
 
             if "config.json" not in sections:
                 detection = StrategyDetection(
-                    runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                    runtime_strategy=None,
                     status="warning",
                     message=(
-                        f"Bundle {bundle_path!r} has no config.json; falling "
-                        f"back to {DEFAULT_RUNTIME_STRATEGY!r}."
+                        f"Bundle {bundle_path!r} has no config.json; "
+                        "no default runtime strategy is assumed."
                     ),
                 )
             else:
@@ -155,12 +159,11 @@ def detect_runtime_strategy_from_bundle(
                 strategy = cfg.get("runtime_strategy")
                 if not strategy:
                     detection = StrategyDetection(
-                        runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                        runtime_strategy=None,
                         status="warning",
                         message=(
                             f"Bundle {bundle_path!r} config.json has no "
-                            f"runtime_strategy; falling back to "
-                            f"{DEFAULT_RUNTIME_STRATEGY!r}."
+                            "runtime_strategy; no default runtime strategy is assumed."
                         ),
                     )
                 else:
@@ -195,7 +198,7 @@ def list_tests(runtime_strategy: str | None = None) -> list[dict]:
         {
             "name": cls.name,
             "description": cls.description,
-            "runtime_strategies": cls.runtime_strategies,
+            "runtime_strategies": get_strategies_for_test(cls),
             "requires_bundle": cls.requires_bundle,
             "requires_gpu": cls.requires_gpu,
         }

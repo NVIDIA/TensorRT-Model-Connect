@@ -4,7 +4,7 @@
   "hf_id": "openai/gpt-oss-20b",
   "bundle": "gpt-oss-20b.trtfb",
   "family": "gpt_oss",
-  "runtime_strategy": "decoder_moe",
+  "runtime_strategy": "gpt_oss_decoder_moe",
   "task_strategy": "text_generation_causal",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",

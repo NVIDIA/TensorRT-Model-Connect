@@ -8,7 +8,7 @@ from diff_framework.protocol import DiffResult, TestContext
 class RunnerParityTest:
     name = "runner_parity"
     description = "Cross-validate Python TrtRunner vs C++ trtmc binary"
-    runtime_strategies = ["decoder_kv_cache", "decoder_moe", "ssm_recurrent"]
+    runtime_strategies = []
     requires_bundle = True
     requires_gpu = True
 

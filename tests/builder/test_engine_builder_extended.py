@@ -247,7 +247,7 @@ EXAMPLE_DECODER_FAMILY = "example_family"
 
 class _SplitDecoderPlugin:
     name = EXAMPLE_DECODER_FAMILY
-    runtime_strategy = "decoder_kv_cache"
+    runtime_strategy = "example_family_decoder_kv_cache"
 
     def load_weights(self, model_dir, config, *, precision="fp32"):
         return {}
@@ -504,7 +504,7 @@ class TestBuildBundleOrchestration:
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
-        mock_plugin.runtime_strategy = "decoder_moe"
+        mock_plugin.runtime_strategy = "example_family_decoder_moe"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
 
@@ -531,11 +531,11 @@ class TestBuildBundleOrchestration:
                                 s for s in sections if s.name == "config.json"
                             ][0]
                             cfg = json.loads(config_section.data.decode("utf-8"))
-                            assert cfg["runtime_strategy"] == "decoder_moe"
+                            assert cfg["runtime_strategy"] == "example_family_decoder_moe"
 
                             # Also verify BundleInfo.runtime_strategy
                             info = mock_write.call_args[0][1]
-                            assert info.runtime_strategy == "decoder_moe"
+                            assert info.runtime_strategy == "example_family_decoder_moe"
 
     def test_bundle_info_max_cache_length(self, tmp_path):
         """BundleInfo records the max_cache_length."""
@@ -578,7 +578,7 @@ class TestBuildBundleOrchestration:
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
-        mock_plugin.runtime_strategy = "decoder_kv_cache"
+        mock_plugin.runtime_strategy = "example_family_decoder_kv_cache"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
 
@@ -642,7 +642,7 @@ class TestBuildBundleOrchestration:
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
-        mock_plugin.runtime_strategy = "decoder_kv_cache"
+        mock_plugin.runtime_strategy = "example_family_decoder_kv_cache"
         mock_plugin.load_weights.return_value = {}
         mock_plugin.build_engine.return_value = b"PLAN"
 
@@ -714,6 +714,35 @@ class TestBuildBundleOrchestration:
                             )
 
         assert seen["precision"] == "fp16"
+
+    def test_family_can_opt_out_of_tokenizer_packaging(self, tmp_path):
+        """Non-text families own the tokenizer-packaging opt-out."""
+        model_dir = self._make_model_dir(tmp_path)
+        output_path = str(tmp_path / "output.trtfb")
+
+        class _Plugin:
+            name = "image_family"
+            runtime_strategy = "image_family_runtime"
+            requires_tokenizer = False
+
+            def load_weights(self, model_dir, config, *, precision="fp32"):
+                return {}
+
+            def build_engine(self, config, weights, max_cache_length, *, precision="fp32", verbose=False):
+                return b"PLAN"
+
+        plugin = _Plugin()
+
+        with patch("tensorrt_model_connect.engine_builder.find_plugin", return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version", return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name", return_value=""):
+                    with patch(
+                        "tensorrt_model_connect.engine_builder._ensure_tokenizer_json"
+                    ) as mock_ensure:
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle"):
+                            build_bundle(str(model_dir), output_path)
+
+        mock_ensure.assert_not_called()
 
     def test_split_decoder_builds_use_role_scoped_timing_caches(self, tmp_path, monkeypatch):
         """Split prefill/decode builds should not share the global timing cache."""
@@ -806,6 +835,35 @@ class TestBuildBundleOrchestration:
             def get_diffusion_config(self, config):
                 return {}
 
+            def diffusion_bundle_config(self, config, *, components):
+                cfg = self.get_diffusion_config(config)
+                cfg["num_text_encoders"] = len(components["text_encoders"])
+                return cfg
+
+            def diffusion_bundle_sections(self, components, *, parallel_config=None):
+                from tensorrt_model_connect.parallel_config import rank_denoiser_section
+
+                sections = []
+                for index, (_name, plan) in enumerate(components["text_encoders"]):
+                    sections.append((f"text_encoder_{index}_plan", plan))
+                for rank in range(parallel_config.tp_size):
+                    sections.append((
+                        rank_denoiser_section(rank),
+                        components["denoiser_ranks"][rank],
+                    ))
+                sections.append(("vae_decoder_plan", components["vae_decoder"]))
+                return sections
+
+            def diffusion_tokenizer_add_special_tokens(
+                self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+            ):
+                return False
+
+            def diffusion_tokenizer_bundle_sections(
+                self, model_dir_path, *, ensure_tokenizer_json,
+            ):
+                return []
+
         plugin = _DiffusionPlugin()
         plugin.name = plugin_name
         plugin.runtime_strategy = runtime_strategy
@@ -819,19 +877,15 @@ class TestBuildBundleOrchestration:
                                 return_value="TensorRT: version=11.0.0"):
                         with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                                     return_value="NVIDIA A100"):
-                            with patch(
-                                "tensorrt_model_connect.engine_builder._detect_diffusion_tokenizer_add_special_tokens",
-                                return_value=False,
-                            ):
-                                with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
-                                    build_bundle(
-                                        str(model_dir),
-                                        output_path,
-                                        parallel_config=ParallelConfig(
-                                            mode="tensor_parallel",
-                                            tp_size=4,
-                                        ),
-                                    )
+                            with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                                build_bundle(
+                                    str(model_dir),
+                                    output_path,
+                                    parallel_config=ParallelConfig(
+                                        mode="tensor_parallel",
+                                        tp_size=4,
+                                    ),
+                                )
 
         assert seen["model_type"] == plugin_name
         assert seen["parallel"].enabled

@@ -3,7 +3,7 @@
   "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
   "bundle": "dpr-ctx-encoder.trtfb",
   "family": "dpr",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "dpr_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "dpr_context_embed",
   "user_contract": "embedding_vector",

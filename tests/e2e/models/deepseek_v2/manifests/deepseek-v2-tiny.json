@@ -4,7 +4,7 @@
   "hf_id": "yujiepan/deepseek-v3-tiny-random",
   "bundle": "deepseek-v2-tiny.trtfb",
   "family": "deepseek_v2",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "deepseek_v2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

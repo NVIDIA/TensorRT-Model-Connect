@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Resolve and prepare isolated runtime model plugin directories for E2E.
 
-The E2E model family is not always the same as the runtime plugin owner. For
-example, many text families use the ``text_generation`` runtime plugin. This
+The E2E model family is not always the same as the runtime plugin owner. This
 tool maps selected E2E models to the owning ``src/runtime/models/<id>`` plugin
 and can copy only those DSOs out of a CMake build tree.
 """

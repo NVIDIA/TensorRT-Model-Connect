@@ -354,7 +354,7 @@ def _load_sam3_core_weights(model_dir: str, cfg: dict) -> WeightDict:
 
 class Sam3Plugin:
     name = "sam3"
-    runtime_strategy = "prompted_segmentation"
+    runtime_strategy = "sam3_prompted_segmentation"
     requires_tokenizer = True
 
     def matches(self, model_type: str) -> bool:
@@ -508,7 +508,7 @@ class Sam3Plugin:
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         return {
             "model_type": "sam3",
-            "runtime_strategy": "prompted_segmentation",
+            "runtime_strategy": "sam3_prompted_segmentation",
             "prompted_segmentation_variant": "sam3_text_prompt_pcs",
         }
 

@@ -16,4 +16,4 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("mixtral")
-    assert getattr(plugin, "runtime_strategy", None) == "decoder_moe"
+    assert getattr(plugin, "runtime_strategy", None) == "mixtral_decoder_moe"

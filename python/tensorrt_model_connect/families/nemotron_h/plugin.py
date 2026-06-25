@@ -72,7 +72,7 @@ def _parse_layer_types(pattern: str) -> list[str]:
 
 class NemotronHPlugin:
     name = "nemotron_h"
-    runtime_strategy = "hybrid_mamba_attention"
+    runtime_strategy = "nemotron_h_hybrid_mamba_attention"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in {"nemotron_h", "nemotron_hybrid"}

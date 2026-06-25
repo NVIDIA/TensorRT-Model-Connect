@@ -30,7 +30,7 @@ void check(bool condition, const char* name) {
 }
 
 void test_conditioning_inputs_build_mask_and_null_ids() {
-    trtmc::DiffusionConfig config;
+    trtmc::WanDiffusionConfig config;
     config.use_rope = false;
 
     trtmc::diffusion::WanLayout layout;
@@ -82,7 +82,7 @@ void test_text_conditioning_uses_both_prompt_and_null_prompt() {
 }
 
 void test_conditioning_inputs_skip_attention_mask_when_rope_enabled() {
-    trtmc::DiffusionConfig config;
+    trtmc::WanDiffusionConfig config;
     config.use_rope = true;
 
     trtmc::diffusion::WanLayout layout;

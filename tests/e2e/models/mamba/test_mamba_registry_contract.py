@@ -16,4 +16,4 @@ def _plugin(model_type: str):
 
 def test_runtime_strategy() -> None:
     plugin = _plugin("mamba")
-    assert getattr(plugin, "runtime_strategy", None) == "ssm_recurrent"
+    assert getattr(plugin, "runtime_strategy", None) == "mamba_ssm_recurrent"

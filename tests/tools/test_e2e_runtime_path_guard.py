@@ -48,15 +48,19 @@ def _write_runtime_matrix(tmp_path: Path) -> Path:
             "runtime_strategies": {
                 "unit_new_runtime": {
                     "task_strategy": "text_generation_causal",
+                    "performance_mode": "decode",
                 },
                 "unit_diffusion_runtime": {
                     "task_strategy": "diffusion_media_generation",
+                    "performance_mode": "diffusion",
                 },
                 "unit_enc_dec_runtime": {
                     "task_strategy": "speech_to_text",
+                    "performance_mode": "enc_dec",
                 },
                 "unit_multistage_runtime": {
                     "task_strategy": "text_to_audio",
+                    "performance_mode": "multi_stage",
                 },
             },
         }),
@@ -95,7 +99,7 @@ def test_runtime_strategy_performance_mode_comes_from_metadata(tmp_path: Path) -
 
 
 def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:
-    case = _make_case("decoder_kv_cache")
+    case = _make_case("qwen_decoder_kv_cache")
     ctx = _make_ctx(tmp_path)
     output = StageOutput(
         stage_name="full_generation",
@@ -111,7 +115,7 @@ def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:
 
 
 def test_runtime_guard_rejects_missing_new_runtime_confirmation(tmp_path: Path) -> None:
-    case = _make_case("decoder_kv_cache")
+    case = _make_case("qwen_decoder_kv_cache")
     ctx = _make_ctx(tmp_path)
     output = StageOutput(
         stage_name="full_generation",
@@ -183,7 +187,7 @@ def test_runtime_guard_skips_unknown_strategies(tmp_path: Path) -> None:
 
 
 def test_runtime_guard_ignores_nonzero_cli_parse_errors_without_runtime_markers(tmp_path: Path) -> None:
-    case = _make_case("prompted_segmentation")
+    case = _make_case("unit_prompted_segmentation")
     ctx = _make_ctx(tmp_path)
     output = StageOutput(
         stage_name="full_inference",

@@ -18,7 +18,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
-from .._time_series_trt import (
+from .time_series_trt import (
     add_batch_norm_last_dim,
     add_gelu,
     add_linear,

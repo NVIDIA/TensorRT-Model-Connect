@@ -12,6 +12,25 @@ diffusion_pipeline_classes = [
   "Flux2Pipeline",
   "FluxPipeline",
 ]
+hf_allow_patterns = [
+  "model_index.json",
+  "scheduler/**",
+  "text_encoder/**",
+  "text_encoder_2/**",
+  "transformer/**",
+  "vae/**",
+  "tokenizer/**",
+  "tokenizer_2/**",
+  "*/config.json",
+  "*/model.safetensors",
+  "*/model-*.safetensors",
+  "*/model.safetensors.index.json",
+  "*/diffusion_pytorch_model.safetensors",
+  "*/diffusion_pytorch_model-*.safetensors",
+  "*/diffusion_pytorch_model.safetensors.index.json",
+  "scheduler/*",
+  "tokenizer/*",
+]
 hf_warm_files = [
   "flux-clip-metrics-openclip|laion/CLIP-ViT-B-32-laion2B-s34B-b79K|open_clip_pytorch_model.bin",
 ]

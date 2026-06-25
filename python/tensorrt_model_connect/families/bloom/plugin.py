@@ -31,6 +31,8 @@ from ...parallel_config import normalize_parallel_config
 
 class BloomPlugin:
     name = "bloom"
+    runtime_strategy = "bloom_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "bloom"

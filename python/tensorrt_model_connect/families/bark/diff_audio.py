@@ -615,7 +615,10 @@ def stage4_greedy_parity(args) -> bool:
         from tensorrt_model_connect.engine_builder import _resolve_model
         from tensorrt_model_connect.families.bark.config import ModelConfig
         from tensorrt_model_connect.families import find_plugin
-        from tensorrt_model_connect.debug_runner import TrtRunner, VisionTrtRunner
+        from tensorrt_model_connect.families.bark.debug_runner import (
+            TrtRunner,
+            VisionTrtRunner,
+        )
     except ImportError as e:
         print(f"  SKIP: missing dependency: {e}", file=sys.stderr)
         return True

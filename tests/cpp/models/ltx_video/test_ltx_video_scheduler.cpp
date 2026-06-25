@@ -9,7 +9,7 @@
 // Postconditions: Dynamic shift and terminal sigma fields match expected values
 // =============================================================================
 
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/models/ltx_video/ltx_video_scheduler_helpers.h"
 
 #include <cmath>
 #include <iostream>
@@ -33,7 +33,7 @@ void check_close(float actual, float expected, float tolerance, const char* name
 }
 
 void test_ltx_dynamic_flow_match_scheduler_fields() {
-    trtmc::diffusion::FlowMatchEulerState scheduler;
+    trtmc::diffusion::ltx_video_scheduler::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = 1000;
     scheduler.use_dynamic_shifting = true;
     scheduler.base_shift = 0.95F;

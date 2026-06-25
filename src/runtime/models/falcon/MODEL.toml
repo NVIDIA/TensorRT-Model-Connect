@@ -1,0 +1,6 @@
+id = "falcon"
+runtime_library = "libtrtmc_model_falcon.so"
+runtime_plugins = ["plugin.cpp|register_falcon_plugin"]
+runtime_strategies = ["falcon_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["falcon_decoder_kv_cache"]

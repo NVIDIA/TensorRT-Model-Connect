@@ -6,3 +6,15 @@ test_manifests = [
   "manifests/internvl3-8b-tp4.json",
   "manifests/internvl3-8b.json",
 ]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = ["test_image"]

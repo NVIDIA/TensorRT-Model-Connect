@@ -91,7 +91,7 @@ def _parse_layer_types(raw_types: list[str]) -> list[str]:
 
 class Qwen35Plugin:
     name = "qwen3_5"
-    runtime_strategy = "hybrid_mamba_attention"
+    runtime_strategy = "qwen3_5_hybrid_mamba_attention"
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()

@@ -18,7 +18,6 @@ from typing import Any
 
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..registry import register_runner
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ class OmniMultimodalRunner:
 
     @property
     def strategy_name(self) -> str:
-        return "omni_multimodal"
+        return "qwen3_omni_multimodal"
 
     def run_stage(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
@@ -311,6 +310,3 @@ def _parse_stage_output(stdout: str, stage_name: str) -> dict[str, Any]:
 
 # Primary plugin for auto-discovery
 plugin = OmniMultimodalRunner()
-
-# Explicitly register the composite pipeline runner
-register_runner(CompositePipelineRunner())

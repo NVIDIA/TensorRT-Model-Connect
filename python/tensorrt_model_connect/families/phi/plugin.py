@@ -24,6 +24,8 @@ from .standard_decoder_builder import build_standard_decoder_engine
 
 class PhiPlugin:
     name = "phi"
+    runtime_strategy = "phi_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()

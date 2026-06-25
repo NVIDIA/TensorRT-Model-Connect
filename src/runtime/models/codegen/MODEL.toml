@@ -1,0 +1,6 @@
+id = "codegen"
+runtime_library = "libtrtmc_model_codegen.so"
+runtime_plugins = ["plugin.cpp|register_codegen_plugin"]
+runtime_strategies = ["codegen_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["codegen_decoder_kv_cache"]

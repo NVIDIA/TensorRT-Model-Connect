@@ -1,4 +1,4 @@
-// T5Plugin: handles "text_to_text" strategy.
+// T5Plugin: handles "t5_text_to_text" strategy.
 // Encoder-decoder pipeline with text input for seq2seq tasks (translation, etc.).
 //
 // Pipeline:
@@ -8,9 +8,9 @@
 //   4. Detokenize output
 
 #include "plugin_helpers.h"
+#include "runtime/models/t5/kv_cache.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/distributed_runtime.h"
-#include "trtmc/runtime/kv_cache.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -69,7 +69,7 @@ int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& confi
 class T5Pipeline final : public IPipeline {
   public:
     T5Pipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
-               std::unique_ptr<KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
+               std::unique_ptr<T5KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
                int32_t max_enc_seq_len, int32_t vocab_size, int32_t decoder_start_token_id,
                int32_t eos_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
                std::string model_id_str)
@@ -280,7 +280,7 @@ class T5Pipeline final : public IPipeline {
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<T5KvCache> cache_;
     int32_t hidden_size_;
     int32_t num_decoder_layers_;
     int32_t max_enc_seq_len_;
@@ -348,12 +348,12 @@ class T5Plugin final : public IPipelinePlugin {
         int32_t max_enc_seq_len = ctx.config.max_cache_length;
         int32_t decoder_start_token_id = extract_json_int(json, "decoder_start_token_id", 0);
 
-        // Create KvCache for decoder self-attention
+        // Create T5KvCache for decoder self-attention
         cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
-        auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
+        auto cache = std::make_unique<T5KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())
-            throw std::runtime_error("T5Plugin: failed to create KvCache");
+            throw std::runtime_error("T5Plugin: failed to create T5KvCache");
 
         // Tokenizer
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
@@ -366,6 +366,6 @@ class T5Plugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_t5_plugin, T5Plugin, "text_to_text");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_t5_plugin, T5Plugin, "t5_text_to_text");
 
 } // namespace trtmc

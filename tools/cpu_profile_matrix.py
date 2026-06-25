@@ -14,7 +14,7 @@ Usage:
     # Profile specific strategies only
     python tools/cpu_profile_matrix.py \\
       --engine-dir /path/to/engines \\
-      --strategies decoder_kv_cache decoder_moe
+      --strategies qwen_decoder_kv_cache gpt_oss_decoder_moe
 
     # Override the representative model for a strategy
     python tools/cpu_profile_matrix.py \\
@@ -168,6 +168,7 @@ def _profile_strategy(
         _run_profile, _aggregate,
     )
     from perf_compare import _handler_attr, build_trt_engine, load_trt_from_bundle
+    from tool_helpers import runtime_strategy_from_config
 
     # Resolve bundle path
     bundle_path: str | None = None
@@ -201,8 +202,11 @@ def _profile_strategy(
     if bundle_path:
         print(f"[matrix] [{spec.strategy}] loading bundle: {bundle_path}",
               file=sys.stderr)
-        engine_plan, num_layers, max_cache_length, _, perf_handler = \
+        engine_plan, num_layers, max_cache_length, bundle_config, perf_handler = \
             load_trt_from_bundle(bundle_path)
+        runtime_strategy = str(bundle_config.get("runtime_strategy") or spec.strategy)
+        runner_config = bundle_config
+        runner_bundle_path = bundle_path
         runner_type = _handler_attr(
             perf_handler, "cpu_profile_runner_type", "decoder")
     else:
@@ -212,6 +216,9 @@ def _profile_strategy(
             model_dir, 256, verbose)
         num_layers = config.num_hidden_layers
         max_cache_length = 256
+        runtime_strategy = runtime_strategy_from_config(config)
+        runner_config = config
+        runner_bundle_path = ""
         runner_type = _handler_attr(
             perf_handler, "cpu_profile_runner_type", spec.runner)
 
@@ -224,7 +231,14 @@ def _profile_strategy(
             max_cache_length=max_cache_length,
         )
     else:
-        runner = _TimedDecoderRunner(engine_plan, max_cache_length, num_layers)
+        runner = _TimedDecoderRunner(
+            engine_plan,
+            max_cache_length,
+            num_layers,
+            runtime_strategy,
+            config=runner_config,
+            bundle_path=runner_bundle_path,
+        )
     del engine_plan
     gc.collect()
 

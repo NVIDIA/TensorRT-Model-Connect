@@ -1,348 +1,1093 @@
 {
   "new_runtime_guard_strategies": [
-    "decoder_kv_cache",
-    "decoder_moe",
-    "ssm_recurrent",
+    "qwen_decoder_kv_cache",
+    "deepseek_v2_decoder_kv_cache",
+    "olmo2_decoder_kv_cache",
+    "mixtral_decoder_moe",
+    "gpt_oss_decoder_moe",
+    "qwen_moe_decoder_moe",
+    "bloom_decoder_kv_cache",
+    "codegen_decoder_kv_cache",
+    "falcon_decoder_kv_cache",
+    "gemma_decoder_kv_cache",
+    "glm_decoder_kv_cache",
+    "gpt2_decoder_kv_cache",
+    "gpt_neo_decoder_kv_cache",
+    "gpt_neox_decoder_kv_cache",
+    "granite_decoder_kv_cache",
+    "internlm_decoder_kv_cache",
+    "llama_decoder_kv_cache",
+    "mistral_decoder_kv_cache",
+    "nemotron_decoder_kv_cache",
+    "olmo_decoder_kv_cache",
+    "opt_decoder_kv_cache",
+    "phi_decoder_kv_cache",
+    "phi_moe_decoder_kv_cache",
+    "stablelm_decoder_kv_cache",
+    "starcoder2_decoder_kv_cache",
+    "xglm_decoder_kv_cache",
+    "mamba_ssm_recurrent",
     "rwkv_recurrent",
-    "hybrid_mamba_attention",
-    "encoder_only",
-    "embedding",
-    "reranking",
-    "vision_language",
-    "segmentation",
-    "prompted_segmentation",
-    "image_classification",
-    "object_detection",
-    "neural_operator",
-    "text_to_audio",
-    "speech_to_text",
-    "speech_to_text_rnnt",
-    "speech_to_speech",
-    "omni_multimodal",
-    "diffusion",
+    "nemotron_h_hybrid_mamba_attention",
+    "qwen3_5_hybrid_mamba_attention",
+    "albert_encoder_only",
+    "bert_encoder_only",
+    "convbert_encoder_only",
+    "deberta_encoder_only",
+    "distilbert_encoder_only",
+    "dpr_encoder_only",
+    "electra_encoder_only",
+    "fnet_encoder_only",
+    "modernbert_encoder_only",
+    "mpnet_encoder_only",
+    "roberta_encoder_only",
+    "xlnet_encoder_only",
+    "eagle_vlm_embedding",
+    "eagle_vlm_reranking",
+    "qwen_vl_vision_language",
+    "internvl_vision_language",
+    "deepseek_ocr_vision_language",
+    "locateanything_vision_language",
+    "lance_vision_language",
+    "phi4_multimodal_vision_language",
+    "segformer_segmentation",
+    "sam_prompted_segmentation",
+    "sam3_prompted_segmentation",
+    "timm_vit_image_classification",
+    "whisper_speech_to_text",
+    "canary_speech_to_text",
+    "nemotron_speech_streaming_speech_to_text_rnnt",
+    "personaplex_speech_to_speech",
+    "qwen3_omni_multimodal",
     "patchtst_trt",
     "patchtsmixer_trt",
     "timesfm_trt",
     "chronos_bolt_trt"
   ],
   "runtime_strategies": {
-    "decoder_kv_cache": {
+    "qwen_decoder_kv_cache": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
-      "diff_framework_check_classes": ["LayerDiffTest", "LayerProfileTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
     },
-    "decoder_moe": {
+    "deepseek_v2_decoder_kv_cache": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
-      "diff_framework_check_classes": ["LayerDiffTest", "LayerProfileTest", "LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "olmo2_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "mixtral_decoder_moe": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "gpt_oss_decoder_moe": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "qwen_moe_decoder_moe": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "bloom_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "codegen_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "falcon_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "gemma_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "glm_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "gpt2_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "gpt_neo_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "gpt_neox_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "granite_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "internlm_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "llama_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "mistral_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "nemotron_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "olmo_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "opt_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "phi_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "phi_moe_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "stablelm_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "starcoder2_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
+    "xglm_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LayerDiffTest",
+        "LayerProfileTest",
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
     },
     "nemotron_labs_diffusion": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "Hybrid AR/diffusion decoding uses model-card generation methods not yet represented by the generic layer/logit diff framework."
-    },
-    "diffusion": {
-      "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
-      "runner_class": "diffusion.DiffusionMediaRunner",
-      "comparator_class": "diffusion.DiffusionComparator",
-      "diff_framework_check_classes": ["DiffusionComponentsTest"]
+      "diff_framework_exemption": "Hybrid AR/diffusion decoding uses model-card generation methods not yet represented by the generic layer/logit diff framework.",
+      "performance_mode": "decode"
     },
     "diffusion_flux": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_flux']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_flux'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_ltx": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_ltx']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_ltx'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_pixart": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_pixart_torchtrt": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart_torchtrt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart_torchtrt'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_qwen_image": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_qwen_image']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_qwen_image'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_wan": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_wan']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_wan'].",
+      "performance_mode": "diffusion"
     },
     "diffusion_zimage": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_zimage']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_zimage'].",
+      "performance_mode": "diffusion"
     },
-    "embedding": {
-      "task_strategy": "embedding",
-      "cli_commands": ["embed"],
-      "runner_class": "embedding.EmbeddingRunner",
-      "comparator_class": "embedding.EmbeddingComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['embedding']."
-    },
-    "encoder_only": {
+    "albert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['encoder_only']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['albert_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "hybrid_mamba_attention": {
-      "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
-      "runner_class": "text_generation.TextGenerationCausalRunner",
-      "comparator_class": "text.TextComparator",
+    "bert_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['hybrid_mamba_attention']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['bert_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "neural_operator": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "neural_operator.NeuralOperatorRunner",
-      "comparator_class": "neural_operator.NeuralOperatorComparator",
+    "convbert_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['neural_operator']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['convbert_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "patchtst_trt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "neural_operator.NeuralOperatorRunner",
-      "comparator_class": "neural_operator.NeuralOperatorComparator",
+    "deberta_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtst_trt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['deberta_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "patchtsmixer_trt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "neural_operator.NeuralOperatorRunner",
-      "comparator_class": "neural_operator.NeuralOperatorComparator",
+    "distilbert_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtsmixer_trt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['distilbert_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "timesfm_trt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "neural_operator.NeuralOperatorRunner",
-      "comparator_class": "neural_operator.NeuralOperatorComparator",
+    "dpr_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timesfm_trt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['dpr_encoder_only'].",
+      "performance_mode": "single_pass"
     },
-    "chronos_bolt_trt": {
-      "task_strategy": "neural_operator",
-      "cli_commands": ["solve"],
-      "runner_class": "neural_operator.NeuralOperatorRunner",
-      "comparator_class": "neural_operator.NeuralOperatorComparator",
+    "eagle_vlm_embedding": {
+      "task_strategy": "embedding",
+      "cli_commands": [
+        "embed"
+      ],
+      "runner_class": "embedding.EmbeddingRunner",
+      "comparator_class": "embedding.EmbeddingComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_trt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['eagle_vlm_embedding'].",
+      "performance_mode": "single_pass"
     },
-    "elf_flow": {
-      "task_strategy": "diffusion_text_generation",
-      "cli_commands": ["run", "solve"],
-      "runner_class": "diffusion_text_generation.DiffusionTextGenerationRunner",
-      "comparator_class": "diffusion_text_generation.DiffusionTextGenerationComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['elf_flow']."
-    },
-    "object_detection": {
-      "task_strategy": "object_detection",
-      "cli_commands": ["detect"],
-      "runner_class": "object_detection.ObjectDetectionRunner",
-      "comparator_class": "segmentation.ObjectDetectionComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['object_detection']."
-    },
-    "omni_multimodal": {
-      "task_strategy": "omni_multimodal",
-      "cli_commands": ["run", "embed", "transcribe", "generate-audio", "speak"],
-      "runner_class": "omni.OmniMultimodalRunner",
-      "comparator_class": "omni.OmniComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['omni_multimodal']."
-    },
-    "prompted_segmentation": {
-      "task_strategy": "prompted_segmentation",
-      "cli_commands": ["segment"],
-      "runner_class": "segmentation.PromptedSegmentationRunner",
-      "comparator_class": "segmentation.PromptedSegmentationComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['prompted_segmentation']."
-    },
-    "image_classification": {
-      "task_strategy": "image_classification",
-      "cli_commands": ["classify"],
-      "runner_class": "image_classification.ImageClassificationRunner",
-      "comparator_class": "image_classification.ImageClassificationComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['image_classification']."
-    },
-    "reranking": {
+    "eagle_vlm_reranking": {
       "task_strategy": "reranking",
-      "cli_commands": ["rerank"],
+      "cli_commands": [
+        "rerank"
+      ],
       "runner_class": "reranking.RerankingRunner",
       "comparator_class": "reranking.RerankingComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['reranking']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['eagle_vlm_reranking'].",
+      "performance_mode": "single_pass"
+    },
+    "electra_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['electra_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "fnet_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['fnet_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "modernbert_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['modernbert_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "mpnet_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['mpnet_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "roberta_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['roberta_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "xlnet_encoder_only": {
+      "task_strategy": "encoder_only_nlp",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "encoder_only.EncoderOnlyRunner",
+      "comparator_class": "encoder_only.EncoderOnlyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['xlnet_encoder_only'].",
+      "performance_mode": "single_pass"
+    },
+    "nemotron_h_hybrid_mamba_attention": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['nemotron_h_hybrid_mamba_attention'].",
+      "performance_mode": "decode"
+    },
+    "qwen3_5_hybrid_mamba_attention": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['qwen3_5_hybrid_mamba_attention'].",
+      "performance_mode": "decode"
+    },
+    "patchtst_trt": {
+      "task_strategy": "neural_operator",
+      "cli_commands": [
+        "solve"
+      ],
+      "runner_class": "neural_operator.NeuralOperatorRunner",
+      "comparator_class": "neural_operator.NeuralOperatorComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtst_trt'].",
+      "performance_mode": "single_pass"
+    },
+    "patchtsmixer_trt": {
+      "task_strategy": "neural_operator",
+      "cli_commands": [
+        "solve"
+      ],
+      "runner_class": "neural_operator.NeuralOperatorRunner",
+      "comparator_class": "neural_operator.NeuralOperatorComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['patchtsmixer_trt'].",
+      "performance_mode": "single_pass"
+    },
+    "timesfm_trt": {
+      "task_strategy": "neural_operator",
+      "cli_commands": [
+        "solve"
+      ],
+      "runner_class": "neural_operator.NeuralOperatorRunner",
+      "comparator_class": "neural_operator.NeuralOperatorComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timesfm_trt'].",
+      "performance_mode": "single_pass"
+    },
+    "chronos_bolt_trt": {
+      "task_strategy": "neural_operator",
+      "cli_commands": [
+        "solve"
+      ],
+      "runner_class": "neural_operator.NeuralOperatorRunner",
+      "comparator_class": "neural_operator.NeuralOperatorComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['chronos_bolt_trt'].",
+      "performance_mode": "single_pass"
+    },
+    "elf_flow": {
+      "task_strategy": "diffusion_text_generation",
+      "cli_commands": [
+        "run",
+        "solve"
+      ],
+      "runner_class": "diffusion_text_generation.DiffusionTextGenerationRunner",
+      "comparator_class": "diffusion_text_generation.DiffusionTextGenerationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['elf_flow'].",
+      "performance_mode": "diffusion"
+    },
+    "qwen3_omni_multimodal": {
+      "task_strategy": "omni_multimodal",
+      "cli_commands": [
+        "run",
+        "embed",
+        "transcribe",
+        "generate-audio",
+        "speak"
+      ],
+      "runner_class": "omni.OmniMultimodalRunner",
+      "comparator_class": "omni.OmniComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['qwen3_omni_multimodal'].",
+      "performance_mode": "multi_stage"
+    },
+    "sam_prompted_segmentation": {
+      "task_strategy": "prompted_segmentation",
+      "cli_commands": [
+        "segment"
+      ],
+      "runner_class": "segmentation.PromptedSegmentationRunner",
+      "comparator_class": "segmentation.PromptedSegmentationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam_prompted_segmentation'].",
+      "performance_mode": "single_pass"
+    },
+    "sam3_prompted_segmentation": {
+      "task_strategy": "prompted_segmentation",
+      "cli_commands": [
+        "segment"
+      ],
+      "runner_class": "segmentation.PromptedSegmentationRunner",
+      "comparator_class": "segmentation.PromptedSegmentationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam3_prompted_segmentation'].",
+      "performance_mode": "single_pass"
+    },
+    "timm_vit_image_classification": {
+      "task_strategy": "image_classification",
+      "cli_commands": [
+        "classify"
+      ],
+      "runner_class": "image_classification.ImageClassificationRunner",
+      "comparator_class": "image_classification.ImageClassificationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timm_vit_image_classification'].",
+      "performance_mode": "single_pass"
+    },
+    "qwen_vl_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
+    },
+    "internvl_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
+    },
+    "deepseek_ocr_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
+    },
+    "locateanything_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
+    },
+    "lance_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
+    },
+    "phi4_multimodal_vision_language": {
+      "task_strategy": "vision_language_generation",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "vision_language.VisionLanguageRunner",
+      "comparator_class": "vision_language.VisionLanguageComparator",
+      "diff_framework_check_classes": [
+        "VLPipelineTest"
+      ],
+      "performance_mode": "enc_dec"
     },
     "rwkv_recurrent": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['rwkv_recurrent']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['rwkv_recurrent'].",
+      "performance_mode": "decode"
     },
-    "segmentation": {
+    "segformer_segmentation": {
       "task_strategy": "segmentation",
-      "cli_commands": ["segment"],
+      "cli_commands": [
+        "segment"
+      ],
       "runner_class": "segmentation.SegmentationRunner",
       "comparator_class": "segmentation.SegmentationComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['segmentation']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['segformer_segmentation'].",
+      "performance_mode": "single_pass"
     },
-    "speech_to_speech": {
+    "personaplex_speech_to_speech": {
       "task_strategy": "speech_to_speech",
-      "cli_commands": ["speak"],
+      "cli_commands": [
+        "speak"
+      ],
       "runner_class": "audio_speech.SpeechToSpeechRunner",
       "comparator_class": "speech_to_speech.SpeechToSpeechComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_speech']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['personaplex_speech_to_speech'].",
+      "performance_mode": "multi_stage"
     },
-    "speech_to_text": {
+    "whisper_speech_to_text": {
       "task_strategy": "speech_to_text",
-      "cli_commands": ["transcribe"],
+      "cli_commands": [
+        "transcribe"
+      ],
       "runner_class": "audio_speech.SpeechToTextRunner",
       "comparator_class": "speech_to_text.SpeechToTextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_text']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['whisper_speech_to_text'].",
+      "performance_mode": "enc_dec"
     },
-    "speech_to_text_rnnt": {
+    "canary_speech_to_text": {
       "task_strategy": "speech_to_text",
-      "cli_commands": ["transcribe"],
+      "cli_commands": [
+        "transcribe"
+      ],
       "runner_class": "audio_speech.SpeechToTextRunner",
       "comparator_class": "speech_to_text.SpeechToTextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_text_rnnt']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['canary_speech_to_text'].",
+      "performance_mode": "enc_dec"
     },
-    "ssm_recurrent": {
+    "nemotron_speech_streaming_speech_to_text_rnnt": {
+      "task_strategy": "speech_to_text",
+      "cli_commands": [
+        "transcribe"
+      ],
+      "runner_class": "audio_speech.SpeechToTextRunner",
+      "comparator_class": "speech_to_text.SpeechToTextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['nemotron_speech_streaming_speech_to_text_rnnt'].",
+      "performance_mode": "enc_dec"
+    },
+    "mamba_ssm_recurrent": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
-      "diff_framework_check_classes": ["LogitDiffTest", "PerfBenchmarkTest", "RunnerParityTest"]
+      "diff_framework_check_classes": [
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
     },
     "marian_translation": {
       "task_strategy": "text_generation_causal",
       "performance_mode": "enc_dec",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['marian_translation']."
     },
-    "seq2seq_encoder_decoder": {
+    "bart_seq2seq_encoder_decoder": {
       "task_strategy": "text_generation_causal",
       "performance_mode": "enc_dec",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['seq2seq_encoder_decoder']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['bart_seq2seq_encoder_decoder']."
     },
-    "text_to_audio": {
-      "task_strategy": "text_to_audio",
-      "cli_commands": ["generate-audio"],
-      "runner_class": "audio_speech.TextToAudioRunner",
-      "comparator_class": "text_to_audio.TextToAudioComparator",
+    "m2m_100_seq2seq_encoder_decoder": {
+      "task_strategy": "text_generation_causal",
+      "performance_mode": "enc_dec",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['m2m_100_seq2seq_encoder_decoder']."
     },
     "text_to_audio_bark": {
       "task_strategy": "text_to_audio",
-      "cli_commands": ["generate-audio"],
+      "cli_commands": [
+        "generate-audio"
+      ],
       "runner_class": "audio_speech.TextToAudioRunner",
       "comparator_class": "text_to_audio.TextToAudioComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_bark']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_bark'].",
+      "performance_mode": "multi_stage"
     },
     "text_to_audio_magpie": {
       "task_strategy": "text_to_audio",
-      "cli_commands": ["generate-audio"],
+      "cli_commands": [
+        "generate-audio"
+      ],
       "runner_class": "audio_speech.TextToAudioRunner",
       "comparator_class": "text_to_audio.TextToAudioComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_magpie']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_audio_magpie'].",
+      "performance_mode": "multi_stage"
     },
-    "text_to_text": {
+    "t5_text_to_text": {
       "task_strategy": "text_generation_causal",
       "performance_mode": "enc_dec",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['text_to_text']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['t5_text_to_text']."
     },
     "torchtrt_decoder": {
       "task_strategy": "text_generation_causal",
-      "cli_commands": ["run"],
+      "cli_commands": [
+        "run"
+      ],
       "runner_class": "text_generation.TextGenerationCausalRunner",
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_decoder']."
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_decoder'].",
+      "performance_mode": "decode"
     },
     "torchtrt_diffusion": {
       "task_strategy": "diffusion_media_generation",
-      "cli_commands": ["generate-video"],
+      "cli_commands": [
+        "generate-video"
+      ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_diffusion']."
-    },
-    "vision_language": {
-      "task_strategy": "vision_language_generation",
-      "cli_commands": ["run"],
-      "runner_class": "vision_language.VisionLanguageRunner",
-      "comparator_class": "vision_language.VisionLanguageComparator",
-      "diff_framework_check_classes": ["VLPipelineTest"]
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_diffusion'].",
+      "performance_mode": "diffusion"
     }
   }
 }

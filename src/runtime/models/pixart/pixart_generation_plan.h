@@ -1,7 +1,7 @@
 #pragma once
 
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/pixart/pixart_diffusion_types.h"
+#include "runtime/models/pixart/pixart_scheduler_helpers.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +27,7 @@ struct PixArtLayout {
     int32_t patch_dim{0};
 };
 
-inline PixArtLayout make_pixart_layout(const DiffusionConfig& config) {
+inline PixArtLayout make_pixart_layout(const PixArtDiffusionConfig& config) {
     PixArtLayout layout;
     layout.t_lat = (config.video_num_frames - 1) / config.scale_factor_temporal + 1;
     layout.h_lat = config.video_height / config.scale_factor_spatial;
@@ -58,16 +58,17 @@ struct PixArtGenerationPlan {
     PixArtLayout layout;
     bool use_ddim{false};
     std::size_t latent_count{0};
-    FlowMatchEulerConfig flow_match_config;
+    pixart_scheduler::FlowMatchEulerConfig flow_match_config;
 };
 
-inline PixArtGenerationPlan make_pixart_generation_plan(const DiffusionConfig& config,
+inline PixArtGenerationPlan make_pixart_generation_plan(const PixArtDiffusionConfig& config,
                                                         int32_t requested_steps,
                                                         float requested_guidance) {
     PixArtGenerationPlan plan;
-    plan.num_inference_steps =
-        resolve_requested_steps(requested_steps, config.num_inference_steps, false);
-    plan.guidance_scale = resolve_requested_guidance(requested_guidance, config.guidance_scale);
+    plan.num_inference_steps = pixart_scheduler::resolve_requested_steps(
+        requested_steps, config.num_inference_steps, false);
+    plan.guidance_scale =
+        pixart_scheduler::resolve_requested_guidance(requested_guidance, config.guidance_scale);
     plan.layout = make_pixart_layout(config);
     plan.use_ddim = should_use_pixart_ddim(config.scheduler);
     plan.latent_count =
@@ -85,8 +86,9 @@ inline PixArtGenerationPlan make_pixart_generation_plan(const DiffusionConfig& c
     return plan;
 }
 
-inline FlowMatchEulerState make_pixart_flow_match_scheduler(const PixArtGenerationPlan& plan) {
-    FlowMatchEulerState scheduler;
+inline pixart_scheduler::FlowMatchEulerState
+make_pixart_flow_match_scheduler(const PixArtGenerationPlan& plan) {
+    pixart_scheduler::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = plan.flow_match_config.num_train_timesteps;
     scheduler.shift = plan.flow_match_config.shift;
     scheduler.use_dynamic_shifting = plan.flow_match_config.use_dynamic_shifting;

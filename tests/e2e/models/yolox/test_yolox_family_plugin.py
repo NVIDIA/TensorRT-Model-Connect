@@ -205,7 +205,7 @@ class TestYoloxPluginMatch:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.yolox import plugin
-        assert plugin.runtime_strategy == "object_detection"
+        assert plugin.runtime_strategy == "yolox_object_detection"
 
 
 # ===========================================================================

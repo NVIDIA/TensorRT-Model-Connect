@@ -4,7 +4,7 @@
   "hf_id": "microsoft/Phi-4-multimodal-instruct",
   "bundle": "phi4-multimodal.trtfb",
   "family": "phi4_multimodal",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "phi4_multimodal_vision_language",
   "task_strategy": "vision_language_generation",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",

@@ -1,0 +1,9 @@
+id = "nemotron_speech_streaming"
+runtime_library = "libtrtmc_model_nemotron_speech_streaming.so"
+runtime_plugins = ["plugin.cpp|register_nemotron_speech_streaming_plugin"]
+runtime_strategies = ["nemotron_speech_streaming_speech_to_text_rnnt"]
+runtime_tests = [
+  "test_nemotron_speech_streaming_audio_helpers|test_nemotron_speech_streaming_audio_helpers.cpp|_|audio_helpers.cpp|_",
+  "test_nemotron_speech_streaming_decode_policy|test_nemotron_speech_streaming_decode_policy.cpp|_|_|_",
+  "test_nemotron_speech_streaming_streaming_contract|test_nemotron_speech_streaming_streaming_contract.cpp|_|_|_",
+]

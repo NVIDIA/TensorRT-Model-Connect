@@ -4,7 +4,7 @@
   "hf_id": "openai/gpt-oss-20b",
   "bundle": "gpt-oss-20b-l0-tp4.trtfb",
   "family": "gpt_oss",
-  "runtime_strategy": "decoder_moe",
+  "runtime_strategy": "gpt_oss_decoder_moe",
   "task_strategy": "text_generation_causal",
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "multi_device",

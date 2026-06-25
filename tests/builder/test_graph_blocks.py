@@ -21,7 +21,9 @@ import numpy as np
 import pytest
 
 try:
-    from tensorrt_model_connect import graph_ops, graph_blocks
+    from tests.builder.owned_graph_modules import load_graph_blocks, load_graph_ops
+    graph_blocks = load_graph_blocks()
+    graph_ops = load_graph_ops()
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

@@ -28,6 +28,8 @@ from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engin
 
 class GPTNeoXPlugin:
     name = "gpt_neox"
+    runtime_strategy = "gpt_neox_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("gpt_neox", "gptneox")

@@ -4,7 +4,7 @@
   "hf_id": "nvidia/personaplex-7b-v1",
   "bundle": "personaplex-7b-l0.trtfb",
   "family": "personaplex",
-  "runtime_strategy": "speech_to_speech",
+  "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
   "gated": true,
   "ci_tier": "l0_only",
@@ -21,5 +21,5 @@
   "metadata": {
     "runtime_cli_requires_hf_python": true
   },
-  "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
+  "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, personaplex_speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
 }

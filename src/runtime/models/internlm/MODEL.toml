@@ -1,0 +1,6 @@
+id = "internlm"
+runtime_library = "libtrtmc_model_internlm.so"
+runtime_plugins = ["plugin.cpp|register_internlm_plugin"]
+runtime_strategies = ["internlm_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["internlm_decoder_kv_cache"]

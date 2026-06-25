@@ -4,7 +4,7 @@
   "hf_id": "EleutherAI/gpt-neo-125m",
   "bundle": "gpt-neo-125m-tp4.trtfb",
   "family": "gpt_neo",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "gpt_neo_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

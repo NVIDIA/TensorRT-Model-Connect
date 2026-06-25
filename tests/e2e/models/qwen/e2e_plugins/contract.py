@@ -2,15 +2,141 @@
 
 from __future__ import annotations
 
-from tests.e2e_harness.contracts import MetricResult
-from tests.e2e_harness.plugins.base import (
-    extract_answer,
-    levenshtein_ned,
-    make_fail,
-    make_pass,
-    normalize_text,
+from tests.e2e_harness.contracts import E2ECase, MetricResult, StageOutput, ThresholdProfile
+# Model-owned contract helpers. Keep behavior here so contract semantics do not
+# drift across model families through shared harness code.
+def contract_config(case):
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split()).strip().lower()
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    idx = text.find(prompt)
+    if 0 <= idx <= 2048:
+        return text[idx + len(prompt):].lstrip()
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    if norm_prompt and norm_text.startswith(norm_prompt):
+        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
+    return text
+
+
+_CHAT_ROLE_PREFIXES = (
+    "### response:", "### assistant:", "assistant:",
+    "<|assistant|>", "<|im_start|>assistant\n",
 )
 
+_CHAT_TURN_MARKERS = (
+    "### response:", "### instruction:", "### assistant:",
+    "### user:", "<|assistant|>", "<|user|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def strip_chat_markup(text: str) -> str:
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            break
+    lowered = out.lower()
+    cut = len(out)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    if cut < len(out):
+        out = out[:cut]
+    import re
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
+
+
+def extract_answer(output, prompt: str = "") -> str:
+    raw = output.text or ""
+    if prompt:
+        raw = strip_prompt_echo(raw, prompt)
+    raw = strip_chat_markup(raw)
+    return raw.strip()
+
+
+def levenshtein_ned(a: str, b: str) -> float:
+    if not a and not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,
+                curr[j] + 1,
+                prev[j] + (0 if c1 == c2 else 1),
+            ))
+        prev = curr
+    return prev[-1] / max_len
+
+
+def make_pass(stage_name: str, metrics, rule: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="passed",
+        metrics=metrics,
+        composite_rule=rule,
+        message="Contract verified",
+    )
+
+
+def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="failed",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract verification failed",
+    )
+
+
+def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="skipped",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
+def make_error(stage_name: str, error: str):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="error",
+        message=f"Contract verification error: {error}",
+    )
 
 class QwenPostTrainedChatPlugin:
     reference_families = ["chat_qwen3_posttrained"]
@@ -86,5 +212,98 @@ class QwenPostTrainedChatPlugin:
             f"Qwen chat response diverged: NED={ned:.3f}",
         )
 
+class QwenSamplingPlugin:
+    reference_families = ["sampling_top_p"]
+    user_contract = "sampling"
 
-plugin = QwenPostTrainedChatPlugin()
+    def configure_reference(self, case: E2ECase) -> dict:
+        del case
+        return {}
+
+    def verify(
+        self,
+        trt_output: StageOutput,
+        ref_output: StageOutput,
+        case: E2ECase,
+        threshold: ThresholdProfile,
+    ):
+        del ref_output, threshold
+        stage = trt_output.stage_name
+        if stage != "full_generation":
+            metrics = {
+                "stage_ok": MetricResult(
+                    value=1.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=True,
+                    note=f"{stage} completed",
+                )
+            }
+            return make_pass(stage, metrics, f"{stage} invariant check")
+
+        cpp_rc = int((trt_output.data or {}).get("cpp_returncode", -1))
+        command = [
+            str(x)
+            for x in (trt_output.metadata or {}).get("cpp", {}).get("command", [])
+        ]
+        if not command:
+            command = [str(x) for x in (trt_output.data or {}).get("command", [])]
+
+        prompt = str(case.inputs.get("prompt", ""))
+        text = normalize_text(strip_prompt_echo(trt_output.text or "", prompt))
+        has_text = bool(text)
+        rc_ok = cpp_rc == 0
+
+        required_flags = []
+        if float(case.inputs.get("top_p", 1.0)) < 1.0 - 1e-6:
+            required_flags.append("--top-p")
+        if float(case.inputs.get("temperature", 1.0)) != 1.0:
+            required_flags.append("--temperature")
+        if int(case.inputs.get("top_k", 1)) != 1:
+            required_flags.append("--top-k")
+        if int(case.inputs.get("seed", -1)) >= 0:
+            required_flags.append("--seed")
+
+        missing_flags = [flag for flag in required_flags if flag not in command]
+        flags_ok = not missing_flags
+
+        metrics = {
+            "cpp_returncode_ok": MetricResult(
+                value=1.0 if rc_ok else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=rc_ok,
+                note=f"cpp_returncode={cpp_rc}",
+            ),
+            "has_output": MetricResult(
+                value=1.0 if has_text else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=has_text,
+                note="TRT produced non-empty sampled text",
+            ),
+            "sampling_flags_forwarded": MetricResult(
+                value=1.0 if flags_ok else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=flags_ok,
+                note=(
+                    "missing: " + ", ".join(missing_flags)
+                    if missing_flags
+                    else "all requested flags present"
+                ),
+            ),
+        }
+
+        passed = rc_ok and has_text and flags_ok
+        rule = "cpp_returncode_ok AND has_output AND sampling_flags_forwarded"
+        if passed:
+            return make_pass("full_generation", metrics, rule)
+        return make_fail(
+            "full_generation",
+            metrics,
+            rule,
+            "Top-p sampling contract failed",
+        )
+
+plugin = [QwenPostTrainedChatPlugin(), QwenSamplingPlugin()]

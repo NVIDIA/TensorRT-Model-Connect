@@ -1,11 +1,11 @@
 #include "../../support/mock_trt_engines.h"
 #include "runtime/backend/trt_module_impl.h"
+#include "runtime/models/whisper/kv_cache.h"
 #include "runtime/models/whisper/pipeline.h"
 #include "runtime/models/whisper/plugin_helpers.h"
 #include "runtime/models/whisper/whisper_config.h"
 #include "runtime/models/whisper/whisper_cross_kv_apply.h"
 #include "runtime/models/whisper/whisper_cross_kv_plan.h"
-#include "trtmc/runtime/kv_cache.h"
 
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -44,7 +44,7 @@ void test_whisper_transcribe() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
+    auto cache = std::make_unique<trtmc::WhisperKvCache>(0, 8, 0, stream);
 
     check(encoder->ok(), "whisper encoder ok");
     check(decoder->ok(), "whisper decoder ok");
@@ -77,7 +77,7 @@ void test_whisper_constructor_validates_encoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
+    auto cache = std::make_unique<trtmc::WhisperKvCache>(0, 8, 0, stream);
     trtmc::WhisperConfig wcfg;
     wcfg.mel_length = 4;
     trtmc::MelFilterbank mel_fb;
@@ -126,7 +126,7 @@ void test_whisper_with_cross_kv() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
+    auto cache = std::make_unique<trtmc::WhisperKvCache>(0, 8, 0, stream);
 
     trtmc::WhisperConfig wcfg;
     wcfg.mel_length = 4;

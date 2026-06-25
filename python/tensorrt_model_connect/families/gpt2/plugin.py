@@ -29,6 +29,8 @@ from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engin
 
 class GPT2Plugin:
     name = "gpt2"
+    runtime_strategy = "gpt2_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "gpt2"

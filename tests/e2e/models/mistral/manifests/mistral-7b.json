@@ -4,7 +4,7 @@
   "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
   "bundle": "mistral-7b.trtfb",
   "family": "mistral",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",

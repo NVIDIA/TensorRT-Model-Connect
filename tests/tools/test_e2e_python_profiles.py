@@ -15,7 +15,7 @@ from tests.e2e_harness.python_profiles import (
 )
 
 
-def _make_case(runtime_strategy: str = "decoder_kv_cache", **kwargs) -> E2ECase:
+def _make_case(runtime_strategy: str = "example_decoder_decoder_kv_cache", **kwargs) -> E2ECase:
     defaults = dict(
         name="case-a",
         hf_id="dummy/model",
@@ -42,7 +42,7 @@ def test_resolve_case_python_profiles_defaults_to_base():
 
 def test_resolve_case_profile_names_apply_manifest_profiles():
     case = _make_case(
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="example_decoder_decoder_kv_cache",
         reference_backend="torch_reference",
         execution_profiles={
             "build": "specialized",
@@ -62,7 +62,7 @@ def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatc
     wrapper.write_text("", encoding="utf-8")
     monkeypatch.setenv(profile_env_var("specialized"), str(wrapper))
     case = _make_case(
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="example_decoder_decoder_kv_cache",
         reference_backend="torch_reference",
         execution_profiles={
             "build": "specialized",
@@ -125,7 +125,7 @@ def test_runtime_cli_hf_python_is_manifest_metadata_controlled(tmp_path):
 
 def test_repro_commands_record_profile_exports(tmp_path):
     case = _make_case(
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="example_decoder_decoder_kv_cache",
         task_strategy="text_generation_causal",
     )
     ctx = RunContext(

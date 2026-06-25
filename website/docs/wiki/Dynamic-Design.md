@@ -136,7 +136,7 @@ sequenceDiagram
 
 ## 3. Text Generation Request Flow
 
-Entry point: `TextGenerationPipeline::generate()` in `src/runtime/models/text_generation/pipeline.cpp`.
+Entry point: `TextGenerationPipeline::generate()` in `src/runtime/models/<family>/pipeline.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -181,8 +181,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/models/text_generation/pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
-- `src/runtime/models/text_generation/pipeline.h` -- class declaration
+- `src/runtime/models/<family>/pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
+- `src/runtime/models/<family>/pipeline.h` -- class declaration
 - `src/runtime/core/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
 - `src/runtime/backend/trt_module_impl.cpp` -- `forward()`, `forward_async()`, `bind_external()`
 
@@ -203,29 +203,30 @@ sequenceDiagram
     RP->>RP: tokenizer_->encode(prompt)
     RP->>SM: reset()
     RP->>SM: bind_to(*decoder_)
-    Note over SM: RecurrentState: binds conv_state/ssm_state per layer<br/>HybridState: binds KvCache + RecurrentState tensors
+    Note over SM: Family recurrent state: binds conv_state/ssm_state per layer<br/>Family-owned hybrid state: binds KvCache + family recurrent tensors
     loop Prefill + Decode
         RP->>SM: build_mask(mask)
-        Note over SM: RecurrentState: no-op (no mask needed)<br/>HybridState: delegates to KvCache::build_attention_mask()
+        Note over SM: Family recurrent state: no-op (no mask needed)<br/>Family-owned hybrid state: delegates to KvCache::build_attention_mask()
         RP->>Module: forward({token_id, [mask], [position_id]})
         Module-->>RP: logits
         RP->>SM: advance()
-        Note over SM: RecurrentState: D2D present->state, position++<br/>HybridState: KvCache::advance() + RecurrentState::advance()
+        Note over SM: Family recurrent state: D2D present->state, position++<br/>Family-owned hybrid state: KvCache::advance() + family recurrent advance()
     end
     RP-->>User: TextResult{text, token_ids}
 ```
 
 **Key files:**
-- `src/runtime/models/recurrent/pipeline.h` -- `RecurrentPipeline`
+- `src/runtime/models/<recurrent-family>/pipeline.h` -- family-owned `RecurrentPipeline`
 - `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
-- `src/runtime/models/recurrent/pipeline.cpp` -- `generate()`, `run_step()`
-- `include/trtmc/runtime/recurrent_state.h` -- `RecurrentState` class
+- `src/runtime/models/<recurrent-family>/pipeline.cpp` -- `generate()`, `run_step()`
+- `src/runtime/models/<recurrent-family>/recurrent_state.h` -- family-owned recurrent state class
 
 ---
 
 ## 5. Vision-Language Generation Flow
 
-Entry point: `VLPipeline::generate()` in `src/runtime/models/vision_language/pipeline.cpp`.
+Entry point: `VLPipeline::generate()` in each model-owned
+`src/runtime/models/<vl-family>/pipeline.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -264,9 +265,9 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/models/vision_language/pipeline.h` -- `VLPipeline`, `VLConfig`
-- `src/runtime/models/vision_language/pipeline.cpp` -- `generate()`, `generate_vl_from_ids()`, `run_vision_encoder()`
-- `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
+- `src/runtime/models/<vl-family>/pipeline.h` -- `VLPipeline`, `VLConfig`
+- `src/runtime/models/<vl-family>/pipeline.cpp` -- `generate()`, `generate_vl_from_ids()`, `run_vision_encoder()`
+- `src/runtime/models/<vl-family>/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
 
 ---
 
@@ -289,7 +290,7 @@ sequenceDiagram
     Tok-->>WP: input_ids
     WP->>T5: forward({input_ids})
     T5-->>WP: text_embeddings [seq_len, text_dim]
-    WP->>WP: project_text() via PreprocessorWeights
+    WP->>WP: project_text() via family-owned preprocessor weights
     WP->>WP: Initialize random latent noise [z_dim, t_lat, h_lat, w_lat]
     WP->>WP: patchify(latents) -> patches [num_patches, patch_dim]
     WP->>WP: compute_3d_rope(nt, nh, nw) -> cos, sin
@@ -311,7 +312,7 @@ sequenceDiagram
 - `src/runtime/models/wan/pipeline.cpp` -- `generate_image()`, denoising loop, VAE decode
 - `src/runtime/models/flux/pipeline.cpp` -- FLUX-specific RoPE, timestep embedding, dual tokenizer
 - `src/runtime/models/z_image/pipeline.cpp` -- Z-Image patchify, caption projection
-- `src/runtime/core/flow_match_euler_scheduler.cpp` -- scheduler implementation
+- `src/runtime/models/qwen_image/qwen_image_scheduler.cpp` -- Qwen Image-owned scheduler implementation
 
 ---
 
@@ -391,7 +392,7 @@ Pipeline method errors (e.g., `generate()` on an unsupported pipeline type) thro
 ## 10. Thread Safety
 
 - `g_last_error` in `trtmc_c.cpp` is `thread_local` -- safe for concurrent pipeline creation on different threads.
-- Individual `IPipeline` instances are NOT thread-safe. Each pipeline owns an exclusive CUDA stream and device state (KvCache, RecurrentState, TrtModule execution context). Concurrent `generate()` calls on the same pipeline instance produce undefined behavior.
+- Individual `IPipeline` instances are NOT thread-safe. Each pipeline owns an exclusive CUDA stream and device state (KvCache, family-owned recurrent state, TrtModule execution context). Concurrent `generate()` calls on the same pipeline instance produce undefined behavior.
 - Different pipeline instances on different CUDA streams can run concurrently.
 
 ---
@@ -407,6 +408,6 @@ Each stage in these flows is independently testable:
 | `write_bundle()` / `ReadBundleFile()` | Round-trip in memory | `tests/builder/test_bundle_writer.py`, `tests/cpp/test_bundle_format.cpp` |
 | `parse_base_config()` | Config JSON strings | `tests/cpp/test_config_schema_registry.cpp` |
 | `find_section()` | Synthetic bundles | `tests/cpp/test_bundle_view.cpp` |
-| KvCache state machine | GPU buffer ops | `tests/cpp/test_device_kv_cache.cpp`, `tests/builder/test_cache_state_machine.py` |
+| KvCache state machine | cache update and mask behavior | `tests/cpp/test_kv_cache_new.cpp`, `tests/builder/test_cache_state_machine.py` |
 | TrtModule forward | Real TRT engine | `tests/cpp/test_cuda_buffer.cpp` (buffer ops), E2E tests |
 | Full pipeline | E2E harness | `tests/test_e2e.py` |

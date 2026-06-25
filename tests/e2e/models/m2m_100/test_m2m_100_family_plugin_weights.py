@@ -137,3 +137,4 @@ class TestM2M100Plugin:
         assert plugin.matches("m2m_100")
         assert plugin.matches("nllb")
         assert not plugin.matches("bart")
+        assert plugin.runtime_strategy == "m2m_100_seq2seq_encoder_decoder"

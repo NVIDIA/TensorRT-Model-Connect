@@ -4,7 +4,7 @@
   "hf_id": "microsoft/Phi-tiny-MoE-instruct",
   "bundle": "phi-moe-l0.trtfb",
   "family": "phi_moe",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "phi_moe_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "ci_tier": "l0_only",
   "reference_family": "chat_instruct_template",
@@ -13,7 +13,7 @@
   "prompt": "Name the largest ocean on Earth.",
   "max_new_tokens": 5,
   "trust_remote_code": false,
-  "notes": "PR L0 repro for Phi MoE. Uses the same checkpoint, decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
+  "notes": "PR L0 repro for Phi MoE. Uses the same checkpoint, phi_moe_decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
   "metadata": {
     "contract_config": {
       "use_chat_template": true,

@@ -4,7 +4,7 @@
   "hf_id": "THUDM/glm-4-9b-hf",
   "bundle": "glm-4-9b-l0-tp2.trtfb",
   "family": "glm",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "glm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",

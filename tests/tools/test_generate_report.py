@@ -89,7 +89,7 @@ def _make_result(
             "name": name,
             "hf_id": hf_id,
             "family": family,
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "example_decoder_decoder_kv_cache",
             "task_strategy": task_strategy,
             "reference_backend": "hf_transformers",
             "inputs": {"prompt": prompt},
@@ -309,6 +309,41 @@ class TestLoadAllResults:
         assert "1 Skipped" in html
         assert "Pytest outcome: <strong>XFAIL</strong>" in html
         assert "known representation parity gap" in html
+        assert "Failure type: <strong>compare_fail</strong>" not in html
+
+    def test_model_owned_xfail_result_is_rendered_as_waived_skip(self, tmp_path):
+        mod = _import_report()
+        e2e_root = tmp_path / "e2e_artifacts"
+        artifacts_dir = e2e_root / "artifacts"
+        _write_result(
+            artifacts_dir,
+            "fnet-base",
+            _make_result(
+                name="fnet-base",
+                status="fail",
+                failure_type="compare_fail",
+            ),
+        )
+        _write_junit(
+            e2e_root,
+            """
+            <testcase classname="tests.e2e.models.fnet.test_fnet_e2e"
+                      name="test_model_e2e[fnet-base]">
+              <skipped type="pytest.xfail"
+                       message="(encoder representation parity below minimum contract floor)" />
+            </testcase>
+            """,
+        )
+
+        results = mod.load_all_results(artifacts_dir)
+        assert results[0]["status"] == "skip"
+        assert results[0]["_raw_status"] == "fail"
+
+        html = mod.render_report(results)
+        assert "0 Failed" in html
+        assert "1 Skipped" in html
+        assert "Pytest outcome: <strong>XFAIL</strong>" in html
+        assert "encoder representation parity below minimum contract floor" in html
         assert "Failure type: <strong>compare_fail</strong>" not in html
 
 

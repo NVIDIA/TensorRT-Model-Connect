@@ -3,7 +3,7 @@
 // FluxPipeline: FLUX diffusion pipeline with T5 + CLIP text encoders,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/flux/flux_diffusion_types.h"
 #include "runtime/models/flux/flux_generation_plan.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
@@ -21,7 +21,7 @@ class FluxPipeline final : public IPipeline {
   public:
     FluxPipeline(std::vector<std::unique_ptr<TrtModule>> text_encoders,
                  std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
-                 DiffusionConfig config, PreprocessorWeights weights,
+                 FluxDiffusionConfig config, FluxPreprocessorWeights weights,
                  std::shared_ptr<ITokenizer> tokenizer, std::unique_ptr<ITokenizer> clip_tokenizer,
                  std::string model_id_str, std::shared_ptr<void> distributed_owner = nullptr,
                  int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
@@ -174,8 +174,8 @@ class FluxPipeline final : public IPipeline {
     std::vector<std::unique_ptr<TrtModule>> text_encoders_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
-    DiffusionConfig config_;
-    PreprocessorWeights weights_;
+    FluxDiffusionConfig config_;
+    FluxPreprocessorWeights weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::unique_ptr<ITokenizer> clip_tokenizer_;
     std::string model_id_;

@@ -1,14 +1,17 @@
 # Diffusion Domain Helpers
 
-Shared diffusion math, scheduler, batching, and preprocessing utilities.
+Shared diffusion math and batching utilities.
 Model-specific runtime pipelines live under `src/runtime/models/<model>/`.
+Scheduler policy lives in the owning model folder.
+Preprocessor section parsing and model weight-key loading live in the owning
+model folder.
 
 Key files:
-- `batch_utils.*`: tensor and batch-shape helper functions.
 - `diffusion_math.h`: numeric helpers used by diffusion runtimes.
-- `diffusion_preprocessor.*`: generic preprocessor weight loading.
-- `diffusion_scheduler_helpers.h`: scheduler configuration helpers.
 - `diffusion_types.h`: shared diffusion runtime value types.
+
+Batch/chunk planning and seed fallback policy are model-owned under
+`src/runtime/models/<diffusion-family>/`.
 
 How to understand:
 1. Start at the owning model pipeline in `src/runtime/models/<model>/`.

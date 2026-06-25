@@ -4,7 +4,7 @@
   "hf_id": "Qwen/Qwen3-30B-A3B",
   "bundle": "qwen3-moe-30b-a3b-tp4.trtfb",
   "family": "qwen_moe",
-  "runtime_strategy": "decoder_moe",
+  "runtime_strategy": "qwen_moe_decoder_moe",
   "task_strategy": "text_generation_causal",
   "reference_family": "chat_qwen3_posttrained",
   "user_contract": "chat_response",

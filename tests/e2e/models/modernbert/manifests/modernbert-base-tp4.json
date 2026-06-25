@@ -4,7 +4,7 @@
   "hf_id": "answerdotai/ModernBERT-base",
   "bundle": "modernbert-base-tp4.trtfb",
   "family": "modernbert",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "modernbert_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

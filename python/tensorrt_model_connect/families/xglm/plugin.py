@@ -49,6 +49,8 @@ def _make_sinusoidal_position_embedding(
 
 class XGLMPlugin:
     name = "xglm"
+    runtime_strategy = "xglm_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "xglm"

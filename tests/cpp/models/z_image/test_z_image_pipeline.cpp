@@ -15,8 +15,8 @@ void check(bool condition, const char* name) {
 }
 
 void test_zimage_construction() {
-    trtmc::DiffusionConfig cfg;
-    trtmc::PreprocessorWeights weights;
+    trtmc::ZImageDiffusionConfig cfg;
+    trtmc::ZImageCommonPreprocessorWeights weights;
     trtmc::ZImagePreprocessorWeights z_weights;
 
     trtmc::ZImagePipeline pipeline(nullptr, nullptr, nullptr, cfg, weights, z_weights, nullptr,

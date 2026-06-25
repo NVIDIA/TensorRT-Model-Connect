@@ -109,7 +109,7 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
 
     assert suite["dataset"]["kind"] == "vlm_unified_json"
     assert suite["scoring"]["scorer"] == "ocrbench_v2"
-    assert suite["selectors"]["runtime_strategies"] == ["vision_language"]
+    assert suite["selectors"]["runtime_strategies"] == ["deepseek_ocr_vision_language"]
     assert suite["selectors"]["families"] == ["deepseek_ocr"]
 
 
@@ -139,7 +139,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
             "name": "decoder-chat",
             "hf_id": "example-org/decoder-chat",
             "bundle": "decoder-chat.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
@@ -153,7 +153,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
             "name": "decoder-continuation",
             "hf_id": "example-org/decoder-continuation",
             "bundle": "decoder-continuation.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "causal_base_continuation",
             "user_contract": "continuation_parity",
@@ -169,7 +169,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
 
     selected = {row["model"]: row for row in rows}
     assert any(
-        row["runtime_strategy"] == "decoder_kv_cache"
+        row["runtime_strategy"] == "decoder_family_decoder_kv_cache"
         and row["user_contract"] == "chat_response"
         for row in selected.values()
     )
@@ -192,10 +192,13 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
                 "hf_id": "example-org/example-decoder",
                 "bundle": "example-decoder.trtfb",
                 "family": "example_decoder",
-                "runtime_strategy": "decoder_kv_cache",
+                "runtime_strategy": "example_decoder_decoder_kv_cache",
                 "task_strategy": "text_generation_causal",
                 "reference_family": "chat_example",
                 "user_contract": "chat_response",
+                "task_eval": {
+                    "vlm_fallback_prompt_template": "<image>{prompt}",
+                },
             }
         ),
         encoding="utf-8",
@@ -207,6 +210,9 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     assert records[0]["manifest"].endswith(
         "example_decoder/manifests/example-decoder.json"
     )
+    assert records[0]["task_eval"] == {
+        "vlm_fallback_prompt_template": "<image>{prompt}",
+    }
 
 
 def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
@@ -214,6 +220,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
     suite = dict(task_eval.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
     suite["selectors"] = {
         **suite["selectors"],
+        "runtime_strategies": ["vision_family_vision_language"],
         "families": ["vl_family_primary", "vl_family_secondary"],
         "exclude_families": ["excluded_vl_family"],
     }
@@ -222,7 +229,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "name": "vl-primary",
             "hf_id": "example-org/vl-primary",
             "bundle": "vl-primary.trtfb",
-            "runtime_strategy": "vision_language",
+            "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
             "user_contract": "vl_answer",
@@ -236,7 +243,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "name": "vl-secondary",
             "hf_id": "example-org/vl-secondary",
             "bundle": "vl-secondary.trtfb",
-            "runtime_strategy": "vision_language",
+            "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
             "user_contract": "vl_answer",
@@ -250,7 +257,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "name": "vl-excluded",
             "hf_id": "example-org/vl-excluded",
             "bundle": "vl-excluded.trtfb",
-            "runtime_strategy": "vision_language",
+            "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
             "user_contract": "vl_answer",
@@ -264,7 +271,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "name": "text-decoder",
             "hf_id": "example-org/text-decoder",
             "bundle": "text-decoder.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
@@ -280,7 +287,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
 
     selected = {row["model"]: row for row in rows}
     assert "vl-primary" in selected
-    assert selected["vl-primary"]["runtime_strategy"] == "vision_language"
+    assert selected["vl-primary"]["runtime_strategy"] == "vision_family_vision_language"
     assert "vl-secondary" in selected
     assert "vl-excluded" not in selected
     assert "text-decoder" not in selected
@@ -513,6 +520,20 @@ def test_vlm_reference_prompt_uses_native_messages() -> None:
 
     messages = json.loads(rendered)
     assert messages == request["messages"]
+
+
+def test_vlm_reference_prompt_uses_manifest_owned_fallback_template() -> None:
+    class FakeProcessor:
+        pass
+
+    rendered = task_eval._vlm_chat_text(
+        FakeProcessor(),
+        {},
+        "Which option matches the image?",
+        "<IMG_CONTEXT>\n{prompt}",
+    )
+
+    assert rendered == "<IMG_CONTEXT>\nWhich option matches the image?"
 
 
 def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
@@ -834,7 +855,7 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
             "name": "decoder-chat",
             "hf_id": "example-org/decoder-chat",
             "bundle": "decoder-chat.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
@@ -861,7 +882,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
         "id": "mmlu_five_shot_mcq",
         "selectors": {
             "task_strategies": ["text_generation_causal"],
-            "runtime_strategies": ["decoder_kv_cache"],
+            "runtime_strategies": ["decoder_family_decoder_kv_cache"],
             "user_contracts": ["chat_response"],
         },
     }
@@ -870,7 +891,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
             "name": "decoder-waived",
             "hf_id": "example-org/decoder-waived",
             "bundle": "decoder-waived.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
@@ -884,7 +905,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
             "name": "decoder-active",
             "hf_id": "example-org/decoder-active",
             "bundle": "decoder-active.trtfb",
-            "runtime_strategy": "decoder_kv_cache",
+            "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
             "user_contract": "chat_response",
@@ -1233,13 +1254,20 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
         "trust_remote_code": False,
         "build_args": {},
         "quantization": {},
+        "task_eval": {
+            "vlm_fallback_prompt_template": "<image>{prompt}",
+        },
     }
     calls: list[str] = []
 
     def fake_run_hf(_args, _model, work_dir):
         calls.append("hf")
         prompts = task_eval.load_jsonl(work_dir / "prompts.jsonl")
+        manifest = json.loads(Path(work_dir, "manifest.json").read_text(encoding="utf-8"))
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "sample.jpg")]
+        assert manifest["task_eval"] == {
+            "vlm_fallback_prompt_template": "<image>{prompt}",
+        }
         Path(work_dir, "hf_predictions.json").write_text(
             json.dumps({"responses": [{"sample_id": "test_case_1", "output_text": "J"}]}),
             encoding="utf-8",

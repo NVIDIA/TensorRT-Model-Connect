@@ -1,7 +1,6 @@
 """Text generation causal strategy runner -- TRT inference via C++ binary and debug runner.
 
-Handles decoder_kv_cache, decoder_moe, ssm_recurrent, rwkv_recurrent, and
-hybrid_mamba_attention runtime strategies, all of which map to
+Handles Nemotron Labs Diffusion's nemotron_labs_diffusion runtime strategy, which maps to
 task_strategy="text_generation_causal".
 
 Supported stages:
@@ -666,26 +665,36 @@ class TextGenerationCausalRunner:
             distributed = {bool(_distributed_runtime_config(case))!r}
             tp_size = {int(_distributed_runtime_config(case).get("world_size", _distributed_runtime_config(case).get("tp_size", 1)) or 1)}
 
-            # Create runner from bundle (auto-detects strategy, loads engine)
+            # Create the family-owned runner from bundle metadata.
             from tensorrt_model_connect.debug_runner import (
                 TensorParallelNcclGroup,
-                runner_from_bundle,
+            )
+            from tensorrt_model_connect.families.nemotron_labs_diffusion.debug_runner import (
                 load_config_from_bundle,
+                load_engine_from_bundle,
+                runner_from_bundle as family_runner_from_bundle,
             )
             from tensorrt_model_connect.parallel_config import rank_engine_section
             group = None
             runner = None
             try:
+                config_json = load_config_from_bundle(bundle_path)
+                engine_section = "engine_plan"
+                distributed_communicator = None
                 if distributed:
                     group = TensorParallelNcclGroup(world_size=tp_size)
-                    runner = runner_from_bundle(
-                        bundle_path,
-                        engine_section=rank_engine_section(group.rank),
-                        distributed_communicator=group.communicator,
-                    )
-                else:
-                    runner = runner_from_bundle(bundle_path)
-                config_json = load_config_from_bundle(bundle_path)
+                    engine_section = rank_engine_section(group.rank)
+                    distributed_communicator = group.communicator
+                engine_plan, header = load_engine_from_bundle(
+                    bundle_path, section_name=engine_section)
+                runner = family_runner_from_bundle(
+                    runtime_strategy=str(config_json.get("runtime_strategy") or ""),
+                    config=config_json,
+                    header=header,
+                    engine_plan=engine_plan,
+                    bundle_path=bundle_path,
+                    distributed_communicator=distributed_communicator,
+                )
 
                 # Tokenize
                 from transformers import AutoTokenizer

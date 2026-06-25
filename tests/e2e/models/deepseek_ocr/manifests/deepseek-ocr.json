@@ -4,7 +4,7 @@
   "hf_id": "deepseek-ai/DeepSeek-OCR-2",
   "bundle": "deepseek-ocr.trtfb",
   "family": "deepseek_ocr",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
   "ci_tier": "nightly_only",
   "l0_replacement": "deepseek-ocr-l0",

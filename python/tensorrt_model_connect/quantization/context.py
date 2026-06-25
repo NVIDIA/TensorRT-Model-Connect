@@ -8,7 +8,7 @@ profile's format strategy. When None, all matmuls are plain FP16/FP32.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -25,6 +25,7 @@ class QuantContext:
     """Optional quantization context threaded through graph construction."""
 
     profile: QuantProfile
+    graph_ops: Any | None = None
 
     def maybe_quantized_matmul(
         self,
@@ -42,7 +43,10 @@ class QuantContext:
         delegates to the format's wrap_matmul. Otherwise falls back to a
         plain add_matmul_rhs_constant.
         """
-        from .. import graph_ops
+        graph_ops = self.graph_ops
+        if graph_ops is None:
+            raise RuntimeError(
+                "QuantContext requires the owning family graph_ops module")
 
         if self.profile.should_quantize(weight_name):
             scales = self.profile.scale_map.get(weight_name)
@@ -51,7 +55,8 @@ class QuantContext:
                 scales = LayerScales()
             return self.profile.format.wrap_matmul(
                 network, lhs, rhs_weights, scales,
-                lhs_width=lhs_width, rhs_width=rhs_width, dtype=dtype)
+                lhs_width=lhs_width, rhs_width=rhs_width, dtype=dtype,
+                graph_ops=graph_ops)
 
         # Fallback: plain matmul (layer not quantized)
         return graph_ops.add_matmul_rhs_constant(

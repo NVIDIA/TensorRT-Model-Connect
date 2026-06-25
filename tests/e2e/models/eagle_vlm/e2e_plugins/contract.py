@@ -1,0 +1,261 @@
+"""eagle_vlm-owned encoder/embedding contract plugins."""
+from __future__ import annotations
+
+import numpy as np
+
+from tests.e2e_harness.contracts import MetricResult
+# Model-owned contract helpers. Keep behavior here so contract semantics do not
+# drift across model families through shared harness code.
+def contract_config(case):
+    config = case.metadata.get("contract_config", {})
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split()).strip().lower()
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    idx = text.find(prompt)
+    if 0 <= idx <= 2048:
+        return text[idx + len(prompt):].lstrip()
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    if norm_prompt and norm_text.startswith(norm_prompt):
+        return text[len(prompt):].lstrip() if text.startswith(prompt) else text
+    return text
+
+
+_CHAT_ROLE_PREFIXES = (
+    "### response:", "### assistant:", "assistant:",
+    "<|assistant|>", "<|im_start|>assistant\n",
+)
+
+_CHAT_TURN_MARKERS = (
+    "### response:", "### instruction:", "### assistant:",
+    "### user:", "<|assistant|>", "<|user|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def strip_chat_markup(text: str) -> str:
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            break
+    lowered = out.lower()
+    cut = len(out)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    if cut < len(out):
+        out = out[:cut]
+    import re
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
+
+
+def extract_answer(output, prompt: str = "") -> str:
+    raw = output.text or ""
+    if prompt:
+        raw = strip_prompt_echo(raw, prompt)
+    raw = strip_chat_markup(raw)
+    return raw.strip()
+
+
+def levenshtein_ned(a: str, b: str) -> float:
+    if not a and not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,
+                curr[j] + 1,
+                prev[j] + (0 if c1 == c2 else 1),
+            ))
+        prev = curr
+    return prev[-1] / max_len
+
+
+def make_pass(stage_name: str, metrics, rule: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="passed",
+        metrics=metrics,
+        composite_rule=rule,
+        message="Contract verified",
+    )
+
+
+def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="failed",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract verification failed",
+    )
+
+
+def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="skipped",
+        metrics=metrics,
+        composite_rule=rule,
+        message=message or "Contract validation skipped",
+    )
+
+
+def make_error(stage_name: str, error: str):
+    from tests.e2e_harness.contracts import CompareResult
+    return CompareResult(
+        stage_name=stage_name,
+        status="error",
+        message=f"Contract verification error: {error}",
+    )
+
+_MIN_CONTRACT_COSINE = 0.80
+
+class EagleVlmEmbeddingPlugin:
+    reference_families = ['vl_embed_retrieval']
+    user_contract = "embedding_vector"
+
+    def configure_reference(self, case):
+        return contract_config(case)
+
+    def verify(self, trt_output, ref_output, case, threshold):
+        del case
+        trt_emb = trt_output.data.get("embedding") or trt_output.data.get("cls_embedding")
+        ref_emb = ref_output.data.get("embedding") or ref_output.data.get("cls_embedding")
+
+        if trt_emb is None or ref_emb is None:
+            return make_error("full_inference", "Missing embedding in output data")
+
+        trt_arr = np.asarray(trt_emb, dtype=np.float32).flatten()
+        ref_arr = np.asarray(ref_emb, dtype=np.float32).flatten()
+
+        norm_t = np.linalg.norm(trt_arr)
+        norm_r = np.linalg.norm(ref_arr)
+        cosine = float(np.dot(trt_arr, ref_arr) / (max(norm_t, 1e-12) * max(norm_r, 1e-12)))
+
+        configured_cosine_threshold = threshold.metrics.get(
+            "contract_cosine_threshold",
+            threshold.metrics.get("cls_embedding_cosine", 0.98),
+        )
+        cosine_threshold = max(configured_cosine_threshold, _MIN_CONTRACT_COSINE)
+        note = ""
+        if cosine_threshold != configured_cosine_threshold:
+            note = (
+                f"configured threshold {configured_cosine_threshold} raised to "
+                f"{_MIN_CONTRACT_COSINE} floor"
+            )
+
+        metrics = {
+            "cosine_similarity": MetricResult(
+                value=cosine,
+                threshold=cosine_threshold,
+                operator=">=",
+                passed=cosine >= cosine_threshold,
+                note=note,
+            ),
+        }
+
+        if cosine >= cosine_threshold:
+            return make_pass("full_inference", metrics, "cosine >= threshold")
+        return make_fail(
+            "full_inference",
+            metrics,
+            "cosine >= threshold",
+            f"Embedding diverged: cosine={cosine:.4f}",
+        )
+
+class EagleVlmRerankingPlugin:
+    reference_families = ["vl_rerank"]
+    user_contract = "ranking_order"
+
+    def configure_reference(self, case):
+        del case
+        return {}
+
+    def verify(self, trt_output, ref_output, case, threshold):
+        del case
+        trt_scores = trt_output.data.get("scores", [])
+        ref_scores = ref_output.data.get("scores", [])
+
+        if not trt_scores or not ref_scores:
+            return make_error("full_inference", "Missing scores in output data")
+
+        if len(trt_scores) != len(ref_scores):
+            return make_fail(
+                "full_inference",
+                {},
+                message=f"Score count mismatch: TRT={len(trt_scores)} ref={len(ref_scores)}",
+            )
+
+        trt_order = sorted(range(len(trt_scores)), key=lambda i: -trt_scores[i])
+        ref_order = sorted(range(len(ref_scores)), key=lambda i: -ref_scores[i])
+        n = len(trt_scores)
+        concordant = 0
+        total = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                trt_cmp = (trt_scores[i] > trt_scores[j]) - (trt_scores[i] < trt_scores[j])
+                ref_cmp = (ref_scores[i] > ref_scores[j]) - (ref_scores[i] < ref_scores[j])
+                if trt_cmp == ref_cmp:
+                    concordant += 1
+                total += 1
+
+        agreement = concordant / max(total, 1)
+        top1_match = (trt_order[0] == ref_order[0]) if trt_order and ref_order else False
+        agreement_threshold = threshold.metrics.get("contract_ranking_agreement", 0.9)
+        metrics = {
+            "pairwise_agreement": MetricResult(
+                value=agreement,
+                threshold=agreement_threshold,
+                operator=">=",
+                passed=agreement >= agreement_threshold,
+            ),
+            "top1_match": MetricResult(
+                value=1.0 if top1_match else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=top1_match,
+            ),
+        }
+
+        passed = agreement >= agreement_threshold
+        if passed:
+            return make_pass("full_inference", metrics, "pairwise_agreement >= threshold")
+        return make_fail(
+            "full_inference",
+            metrics,
+            "pairwise_agreement >= threshold",
+            f"Ranking diverged: agreement={agreement:.3f}",
+        )
+
+plugin = [EagleVlmEmbeddingPlugin(), EagleVlmRerankingPlugin()]

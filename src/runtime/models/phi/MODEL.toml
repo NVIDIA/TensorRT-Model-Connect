@@ -1,0 +1,6 @@
+id = "phi"
+runtime_library = "libtrtmc_model_phi.so"
+runtime_plugins = ["plugin.cpp|register_phi_plugin"]
+runtime_strategies = ["phi_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["phi_decoder_kv_cache"]

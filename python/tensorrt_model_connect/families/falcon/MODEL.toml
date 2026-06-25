@@ -10,3 +10,7 @@ aliases = [
 prefixes = [
   "falcon",
 ]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "falcon_decoder_kv_cache",
+]

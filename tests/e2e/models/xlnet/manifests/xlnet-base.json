@@ -3,7 +3,7 @@
   "hf_id": "xlnet/xlnet-base-cased",
   "bundle": "xlnet-base.trtfb",
   "family": "xlnet",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "xlnet_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

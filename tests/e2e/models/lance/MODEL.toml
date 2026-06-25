@@ -3,3 +3,15 @@ plugin = "lance"
 test_manifests = [
   "manifests/lance-3b-x2t-image.json",
 ]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = ["test_image"]

@@ -4,7 +4,7 @@
   "hf_id": "almanach/camembert-base",
   "bundle": "camembert-base.trtfb",
   "family": "roberta",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "roberta_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

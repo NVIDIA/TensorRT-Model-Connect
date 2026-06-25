@@ -15,7 +15,7 @@ def test_qwen3_omni_thinker_marks_hidden_state_output() -> None:
 
 
 def test_qwen3_omni_runtime_feeds_generated_hidden_states_to_talker() -> None:
-    source = (ROOT / "src/runtime/models/omni/pipeline.cpp").read_text()
+    source = (ROOT / "src/runtime/models/qwen3_omni/pipeline.cpp").read_text()
 
     assert 'outputs.find("hidden_state")' in source
     assert "hidden_states_out.insert" in source
@@ -47,7 +47,7 @@ def test_qwen3_omni_builds_stateless_talker_projection() -> None:
 
 
 def test_qwen3_omni_runtime_allows_stateless_talker_engine() -> None:
-    source = (ROOT / "src/runtime/models/omni/plugin.cpp").read_text()
+    source = (ROOT / "src/runtime/models/qwen3_omni/plugin.cpp").read_text()
 
     assert 'talker_module->has_input("cache_k_0")' in source
-    assert "std::make_unique<RecurrentState>" in source
+    assert "std::make_unique<Qwen3OmniRecurrentState>" in source

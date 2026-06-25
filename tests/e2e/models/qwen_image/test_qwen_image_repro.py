@@ -18,7 +18,7 @@ def _make_ctx(tmp_path) -> RunContext:
             name="case-a",
             hf_id="dummy/model",
             family="dummy",
-            runtime_strategy="decoder_kv_cache",
+            runtime_strategy="diffusion_qwen_image",
             bundle="case-a.trtfb",
             stages=[],
         ),

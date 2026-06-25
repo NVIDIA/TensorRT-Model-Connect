@@ -4,7 +4,7 @@
   "hf_id": "Qwen/Qwen3.5-9B",
   "bundle": "qwen35-9b.trtfb",
   "family": "qwen3_5",
-  "runtime_strategy": "hybrid_mamba_attention",
+  "runtime_strategy": "qwen3_5_hybrid_mamba_attention",
   "task_strategy": "text_generation_causal",
   "reference_family": "multimodal_chat_qwen35",
   "user_contract": "chat_response",

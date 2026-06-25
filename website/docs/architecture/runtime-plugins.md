@@ -63,9 +63,10 @@ diffusion_pixart, diffusion_qwen_image, diffusion_wan, diffusion_zimage,
 elf_flow, embedding, encoder_only, hybrid_mamba_attention,
 image_classification, marian_translation, neural_operator, object_detection,
 omni_multimodal, prompted_segmentation, reranking, rwkv_recurrent,
-segmentation, seq2seq_encoder_decoder, speech_to_speech, speech_to_text,
-speech_to_text_rnnt, ssm_recurrent, text_to_audio_bark, text_to_audio_magpie,
-text_to_text, vision_language
+segmentation, bart_seq2seq_encoder_decoder, m2m_100_seq2seq_encoder_decoder,
+speech_to_speech, speech_to_text,
+speech_to_text_rnnt, mamba_ssm_recurrent, text_to_audio_bark, text_to_audio_magpie,
+t5_text_to_text, vision_language
 ```
 
 ## Strategy groups
@@ -73,9 +74,9 @@ text_to_text, vision_language
 | Strategy group | Example keys | Main runtime shape |
 | --- | --- | --- |
 | Decoder text | `decoder_kv_cache`, `decoder_moe` | Tokenize prompt, prefill, decode one token at a time, sample logits, maintain KV cache. |
-| Recurrent text | `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | Similar public API to text generation, but state is recurrent or hybrid rather than pure KV cache. |
+| Recurrent text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` | Similar public API to text generation, but state is recurrent or hybrid rather than pure KV cache. |
 | Encoder and retrieval | `encoder_only`, `embedding`, `reranking`, `neural_operator` | Produce embeddings, scores, hidden states, or numerical solver outputs. |
-| Seq2seq and translation | `seq2seq_encoder_decoder`, `text_to_text`, `marian_translation` | Run encoder-decoder generation rather than decoder-only generation. |
+| Seq2seq and translation | `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder`, `t5_text_to_text`, `marian_translation` | Run encoder-decoder generation rather than decoder-only generation. |
 | Vision and perception | `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection` | Preprocess pixels, run vision components, postprocess text/masks/boxes. |
 | Audio | `speech_to_text`, `speech_to_text_rnnt`, `speech_to_speech`, `text_to_audio_bark`, `text_to_audio_magpie` | Convert between waveforms, acoustic features, tokens, and text/audio output. |
 | Diffusion | `diffusion_flux`, `diffusion_pixart`, `diffusion_wan`, `diffusion_zimage`, `diffusion_qwen_image`, `diffusion_ltx` | Encode prompt, iterate denoiser steps, decode latent images or video frames. |

@@ -44,7 +44,7 @@ def _load_ln(readers, prefix):
 
 class DebertaPlugin:
     name = "deberta"
-    runtime_strategy = "encoder_only"
+    runtime_strategy = "deberta_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "deberta"

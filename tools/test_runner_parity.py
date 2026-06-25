@@ -73,6 +73,17 @@ def _read_bundle_config(bundle: str, sections: dict,
         return json.loads(f.read(meta["size"]).decode("utf-8"))
 
 
+def _read_bundle_section(bundle: str, sections: dict,
+                         data_start: int, name: str) -> bytes:
+    """Read a required raw section from the bundle."""
+    if name not in sections:
+        raise KeyError(f"Bundle {bundle!r} does not contain section {name!r}")
+    with open(bundle, "rb") as f:
+        meta = sections[name]
+        f.seek(data_start + meta["offset"])
+        return f.read(meta["size"])
+
+
 def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
             hf_python: str) -> str:
     """Run C++ trtmc binary, return generated text."""
@@ -95,11 +106,18 @@ def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
 def run_python(bundle: str, prompt: str,
                max_new_tokens: int) -> tuple[str, list[int]]:
     """Run Python debug runner, return (text, token_ids)."""
-    from tensorrt_model_connect.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.families import resolve_debug_runner
 
     header_raw, sections, data_start = _read_bundle_header(bundle)
     tmpdir = _extract_bundle_files(bundle, sections, data_start)
     cfg = _read_bundle_config(bundle, sections, data_start)
+    runtime_strategy = str(cfg.get("runtime_strategy") or "")
+    if not runtime_strategy:
+        raise RuntimeError(
+            "Bundle config.json is missing runtime_strategy; runner parity "
+            "requires a family-owned debug runner strategy."
+        )
+    engine_plan = _read_bundle_section(bundle, sections, data_start, "engine_plan")
 
     # Extract eos_token_id (matches C++ EOS detection)
     eid = cfg.get("eos_token_id", -1)
@@ -111,7 +129,17 @@ def run_python(bundle: str, prompt: str,
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tmpdir, trust_remote_code=True)
 
-    runner = runner_from_bundle(bundle)
+    runner = resolve_debug_runner(
+        runtime_strategy,
+        config=cfg,
+        header=header_raw,
+        engine_plan=engine_plan,
+        bundle_path=bundle,
+    )
+    if runner is None:
+        raise RuntimeError(
+            f"No family-owned debug_runner adapter handles {runtime_strategy!r}"
+        )
 
     # Encode prompt — use add_special_tokens=False to match the C++ runtime,
     # which calls hf_tokenizer.py with add_special_tokens=False.

@@ -1,0 +1,6 @@
+id = "phi_moe"
+runtime_library = "libtrtmc_model_phi_moe.so"
+runtime_plugins = ["plugin.cpp|register_phi_moe_plugin"]
+runtime_strategies = ["phi_moe_decoder_kv_cache"]
+[validation_profiles]
+decoder_debug = ["phi_moe_decoder_kv_cache"]

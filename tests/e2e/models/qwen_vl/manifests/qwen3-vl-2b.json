@@ -4,10 +4,13 @@
   "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
   "bundle": "qwen3-vl-2b.trtfb",
   "family": "qwen_vl",
-  "runtime_strategy": "vision_language",
+  "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
+  "task_eval": {
+    "vlm_fallback_prompt_template": "<|vision_start|><|image_pad|><|vision_end|>{prompt}"
+  },
   "max_cache_length": 256,
   "prompt": "What color is the vehicle in this image? Answer in one word.",
   "max_new_tokens": 10,

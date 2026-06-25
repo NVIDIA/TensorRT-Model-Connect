@@ -4,3 +4,10 @@ test_manifests = [
   "manifests/mixtral-stories-15m-tp2.json",
   "manifests/mixtral-stories-15m.json",
 ]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

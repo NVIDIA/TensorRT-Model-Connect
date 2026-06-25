@@ -91,4 +91,4 @@ class TestDebertaPlugin:
 
     def test_runtime_strategy(self):
         from tensorrt_model_connect.families.deberta import plugin
-        assert plugin.runtime_strategy == "encoder_only"
+        assert plugin.runtime_strategy == "deberta_encoder_only"

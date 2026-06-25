@@ -23,7 +23,7 @@ def test_load_default_validation_models_reads_model_owned_sidecars(tmp_path: Pat
         """
         {
           "models": [
-            {"model": "org/a", "pipeline_type": "decoder_kv_cache", "label": "a"}
+            {"model": "org/a", "pipeline_type": "qwen_decoder_kv_cache", "label": "a"}
           ]
         }
         """,
@@ -43,7 +43,7 @@ def test_load_default_validation_models_reads_model_owned_sidecars(tmp_path: Pat
     models = mod.load_default_validation_models(tmp_path)
 
     assert models == [
-        {"model": "org/a", "pipeline_type": "decoder_kv_cache", "label": "a"},
+        {"model": "org/a", "pipeline_type": "qwen_decoder_kv_cache", "label": "a"},
         {"model": "org/b", "pipeline_type": "embedding", "label": "model_b-1"},
     ]
 

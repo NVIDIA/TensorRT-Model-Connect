@@ -4,7 +4,7 @@
   "hf_id": "tiiuae/Falcon3-1B-Base",
   "bundle": "falcon3-1b.trtfb",
   "family": "llama",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

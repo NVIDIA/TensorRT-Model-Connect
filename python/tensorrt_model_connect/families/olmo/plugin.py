@@ -29,6 +29,8 @@ from .standard_decoder_builder import build_standard_decoder_engine
 
 class OlmoPlugin:
     name = "olmo"
+    runtime_strategy = "olmo_decoder_kv_cache"
+    runtime_capabilities = {"decoder_kv"}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "olmo"

@@ -4,7 +4,7 @@
   "hf_id": "facebook/opt-125m",
   "bundle": "opt-125m.trtfb",
   "family": "opt",
-  "runtime_strategy": "decoder_kv_cache",
+  "runtime_strategy": "opt_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",

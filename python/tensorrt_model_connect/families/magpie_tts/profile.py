@@ -79,55 +79,13 @@ def profile_cpp_binary(bundle_path: str, trtmc_binary: str, prompt: str,
 
 def profile_with_cuda_events(bundle_path: str, prompt: str,
                              max_new_tokens: int, greedy: bool):
-    """Profile using Python debug runner with CUDA event timing."""
-    import importlib.util
-
-    for mod in ("torch", "numpy"):
-        if importlib.util.find_spec(mod) is None:
-            print(f"ERROR: {mod} not available for CUDA event profiling")
-            return None
-
-    try:
-        from tensorrt_model_connect.debug_runner import MagpieTrtRunner
-    except ImportError:
-        print("ERROR: tensorrt_model_connect not available; trying direct import")
-        return None
-
-    print(f"\n{'='*60}")
-    print("CUDA Event Profiling via Python Debug Runner")
-    print(f"{'='*60}")
-
-    # MagpieTrtRunner is a Python-side debug harness that doesn't go
-    # through the C++ pipeline factory, so the audio_magpie.greedy schema
-    # field isn't consulted here. The harness should expose a `greedy`
-    # kwarg if it needs this knob; for the time being this script only
-    # applies greedy mode to the C++ CLI path.
-    _ = greedy  # acknowledged; no runtime consumer in this harness
-
-    # Load bundle and create runner
-    t0 = time.perf_counter()
-    runner = MagpieTrtRunner(bundle_path)
-    t_load = time.perf_counter() - t0
-    print(f"Bundle load time: {t_load:.3f}s")
-
-    # Run tokenization
-    t0 = time.perf_counter()
-    input_ids = runner.tokenize(prompt)
-    t_tok = time.perf_counter() - t0
-    print(f"Tokenization: {t_tok*1000:.1f}ms ({len(input_ids)} tokens)")
-
-    # Run the full pipeline with per-stage timing
-    t0 = time.perf_counter()
-    runner.generate(input_ids, max_new_tokens=max_new_tokens)
-    t_gen = time.perf_counter() - t0
-    print(f"Total generate: {t_gen:.3f}s")
-
-    return {
-        "load_time_s": t_load,
-        "tokenization_ms": t_tok * 1000,
-        "num_tokens": len(input_ids),
-        "generate_time_s": t_gen,
-    }
+    """Reserved for a future Magpie-owned Python debug runner."""
+    _ = (bundle_path, prompt, max_new_tokens, greedy)
+    print(
+        "CUDA event profiling requires a Magpie-owned Python debug runner; "
+        "use C++ binary profiling for now."
+    )
+    return None
 
 
 def main():

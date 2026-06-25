@@ -13,6 +13,7 @@ from __future__ import annotations
 import runpy
 import sys
 import types
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -25,14 +26,30 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 
+DIFFUSION_SCHEDULER_OWNERS = ("flux", "pixart", "wan_t2v", "z_image")
+
+
+@pytest.fixture(params=DIFFUSION_SCHEDULER_OWNERS)
+def scheduler_modules(request: pytest.FixtureRequest):
+    """Return the scheduler module pair owned by one diffusion family."""
+    family = str(request.param)
+    package = import_module(f"tensorrt_model_connect.families.{family}.schedulers")
+    flow = import_module(
+        f"tensorrt_model_connect.families.{family}.schedulers.flow_match_euler"
+    )
+    base = import_module(f"tensorrt_model_connect.families.{family}.schedulers.base")
+    return family, package, flow, base
+
+
 @pytest.mark.unit
-def test_flow_match_set_timesteps_builds_expected_schedule() -> None:
+def test_flow_match_set_timesteps_builds_expected_schedule(scheduler_modules) -> None:
     """Intent: verify deterministic timestep construction for shift=1.
 
     Preconditions: Scheduler is created with default train timesteps and shift.
     Postconditions: Timesteps are decreasing float32 values and sigma appends 0.
     """
-    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    _family, _package, flow, _base = scheduler_modules
+    FlowMatchEulerScheduler = flow.FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=1.0)
     scheduler.set_timesteps(num_inference_steps=4)
@@ -47,13 +64,14 @@ def test_flow_match_set_timesteps_builds_expected_schedule() -> None:
 
 
 @pytest.mark.unit
-def test_flow_match_set_timesteps_with_shift_changes_tail() -> None:
+def test_flow_match_set_timesteps_with_shift_changes_tail(scheduler_modules) -> None:
     """Intent: validate shifted schedule branch is used when shift != 1.
 
     Preconditions: Scheduler is created with non-default shift value.
     Postconditions: Final timestep is larger than unshifted schedule tail.
     """
-    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    _family, _package, flow, _base = scheduler_modules
+    FlowMatchEulerScheduler = flow.FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=2.0)
     scheduler.set_timesteps(num_inference_steps=4)
@@ -64,13 +82,14 @@ def test_flow_match_set_timesteps_with_shift_changes_tail() -> None:
 
 
 @pytest.mark.unit
-def test_flow_match_step_uses_sigma_delta_and_returns_float32() -> None:
+def test_flow_match_step_uses_sigma_delta_and_returns_float32(scheduler_modules) -> None:
     """Intent: verify Euler update uses sigma_next - sigma.
 
     Preconditions: Internal sigma schedule is initialized with two values.
     Postconditions: Step output matches expected update and is float32.
     """
-    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    _family, _package, flow, _base = scheduler_modules
+    FlowMatchEulerScheduler = flow.FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler()
     scheduler._sigmas = np.array([1.0, 0.5], dtype=np.float64)
@@ -90,13 +109,14 @@ def test_flow_match_step_uses_sigma_delta_and_returns_float32() -> None:
 
 
 @pytest.mark.unit
-def test_flow_match_add_noise_is_linear_interpolation() -> None:
+def test_flow_match_add_noise_is_linear_interpolation(scheduler_modules) -> None:
     """Intent: verify add_noise follows z_t = (1-sigma)x + sigma*noise.
 
     Preconditions: Original sample, noise sample, and timestep are provided.
     Postconditions: Output equals the expected convex combination.
     """
-    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    _family, _package, flow, _base = scheduler_modules
+    FlowMatchEulerScheduler = flow.FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000)
     original = np.array([4.0, -4.0], dtype=np.float32)
@@ -109,13 +129,15 @@ def test_flow_match_add_noise_is_linear_interpolation() -> None:
 
 
 @pytest.mark.unit
-def test_get_scheduler_factory_and_unknown_error() -> None:
+def test_get_scheduler_factory_and_unknown_error(scheduler_modules) -> None:
     """Intent: validate scheduler factory dispatch and error branch.
 
     Preconditions: Scheduler name is valid once and invalid once.
     Postconditions: Valid name returns instance; invalid name raises ValueError.
     """
-    from tensorrt_model_connect.schedulers import FlowMatchEulerScheduler, get_scheduler
+    _family, package, _flow, _base = scheduler_modules
+    FlowMatchEulerScheduler = package.FlowMatchEulerScheduler
+    get_scheduler = package.get_scheduler
 
     scheduler = get_scheduler("flow_match_euler", shift=1.5)
     assert isinstance(scheduler, FlowMatchEulerScheduler)
@@ -126,13 +148,14 @@ def test_get_scheduler_factory_and_unknown_error() -> None:
 
 
 @pytest.mark.unit
-def test_scheduler_protocol_declares_required_methods() -> None:
+def test_scheduler_protocol_declares_required_methods(scheduler_modules) -> None:
     """Intent: smoke-test protocol surface for scheduler interface.
 
     Preconditions: Scheduler protocol is importable.
     Postconditions: Protocol exposes all required API method names.
     """
-    from tensorrt_model_connect.schedulers.base import Scheduler
+    _family, _package, _flow, base = scheduler_modules
+    Scheduler = base.Scheduler
 
     assert hasattr(Scheduler, "timesteps")
     assert hasattr(Scheduler, "set_timesteps")

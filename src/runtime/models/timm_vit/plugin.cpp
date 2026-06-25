@@ -57,6 +57,6 @@ class TimmVitPlugin final : public IPipelinePlugin {
 };
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_timm_vit_plugin, TimmVitPlugin,
-                                       "image_classification");
+                                       "timm_vit_image_classification");
 
 } // namespace trtmc

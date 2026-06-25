@@ -34,7 +34,7 @@ void check_close(float actual, float expected, float tolerance, const char* name
 }
 
 void test_wan_generation_plan_derives_layout_and_scheduler_mode() {
-    trtmc::DiffusionConfig config;
+    trtmc::WanDiffusionConfig config;
     config.scheduler = "ddim";
     config.num_inference_steps = 30;
     config.guidance_scale = 6.0F;
@@ -64,7 +64,7 @@ void test_wan_generation_plan_derives_layout_and_scheduler_mode() {
 }
 
 void test_wan_flow_match_scheduler_builds_when_not_using_ddim() {
-    trtmc::DiffusionConfig config;
+    trtmc::WanDiffusionConfig config;
     config.scheduler = "flow_match_euler";
     config.num_inference_steps = 12;
     config.flow_shift = 1.35F;

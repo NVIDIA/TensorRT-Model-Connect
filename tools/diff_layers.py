@@ -17,7 +17,11 @@ import sys
 
 import numpy as np
 
-from tool_helpers import load_hf_model
+from tool_helpers import (
+    load_hf_model,
+    make_family_debug_runner,
+    runtime_strategy_from_config,
+)
 
 
 def build_debug_engine(model_id_or_path, max_cache_length, verbose):
@@ -57,12 +61,12 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
 
 def run_trt_single_step(engine_plan, config, token_id, max_cache_length):
     """Run one TRT step at position 0. Returns dict with all outputs."""
-    from tensorrt_model_connect.debug_runner import TrtRunner
-
-    runner = TrtRunner(
+    runner = make_family_debug_runner(
         engine_plan=engine_plan,
+        runtime_strategy=runtime_strategy_from_config(config),
         max_cache_length=max_cache_length,
         num_layers=config.num_hidden_layers,
+        config=config,
     )
     return runner.step(token_id)
 

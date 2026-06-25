@@ -53,16 +53,17 @@ int32_t decoder_cache_row_width(const TrtModule& module, int32_t fallback) {
     return from_engine > 0 ? from_engine : fallback;
 }
 
-std::unique_ptr<KvCache> make_bark_coarse_kv_cache(const std::string& json, const BaseConfig& base,
-                                                   const TrtModule& module, cudaStream_t stream,
-                                                   DType cache_dtype) {
+std::unique_ptr<BarkKvCache> make_bark_coarse_kv_cache(const std::string& json,
+                                                       const BaseConfig& base,
+                                                       const TrtModule& module, cudaStream_t stream,
+                                                       DType cache_dtype) {
     int32_t hidden = extract_json_int(json, "coarse_hidden_size", base.hidden_size);
     int32_t layers = extract_json_int(json, "coarse_num_layers", base.num_layers);
     int32_t heads = extract_json_int(json, "coarse_num_heads", base.num_heads);
     int32_t hd = (heads > 0) ? hidden / heads : 128;
     int32_t max_cache = extract_json_int(json, "coarse_max_cache_length", base.max_cache_length);
     const int32_t row_width = decoder_cache_row_width(module, heads * hd);
-    return std::make_unique<KvCache>(layers, max_cache, row_width, stream, cache_dtype);
+    return std::make_unique<BarkKvCache>(layers, max_cache, row_width, stream, cache_dtype);
 }
 
 BarkConfig make_bark_config(const PipelineContext& ctx) {
@@ -163,11 +164,11 @@ class BarkPlugin final : public IPipelinePlugin {
         int32_t sem_kv_dim =
             decoder_cache_row_width(*sem_loaded.module, compute_kv_dim(ctx.config));
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> sem_state = std::make_unique<KvCache>(
+        std::unique_ptr<BarkInferenceState> sem_state = std::make_unique<BarkKvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream, cache_dtype);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
-        std::unique_ptr<IInferenceState> coarse_state(make_bark_coarse_kv_cache(
+        std::unique_ptr<BarkInferenceState> coarse_state(make_bark_coarse_kv_cache(
             json, ctx.config, *coarse_loaded.module, stream, cache_dtype));
 
         // Load embeddings

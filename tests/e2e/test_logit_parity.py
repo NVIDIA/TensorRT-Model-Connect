@@ -31,7 +31,7 @@ def test_logit_parity(model_entry):
         or model_entry.get("runtime_strategy") in _SPEECH_RUNTIME_STRATEGIES
     ):
         pytest.skip("Speech model — no text logit parity")
-    if model_entry.get("runtime_strategy") == "vision_language":
+    if str(model_entry.get("runtime_strategy") or "").endswith("_vision_language"):
         pytest.skip("VL model — diff_logits requires decoder-only models")
     if model_entry.get("skip_logit_parity"):
         pytest.skip("Model requires HF auth — skipping logit parity")

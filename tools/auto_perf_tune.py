@@ -249,7 +249,7 @@ def _parse_metric(out: str, metric_name: str) -> float:
 def step_benchmark(bundle: str, prompt: str, max_tokens: int = 100,
                    gpu_argmax: bool = False, dry_run: bool = False,
                    mode: str = "decode",
-                   pipeline_type: str = "decoder_kv_cache",
+                   pipeline_type: str = "",
                    benchmark: dict | None = None) -> float:
     """Benchmark with C++ binary, return performance metric.
 
@@ -301,7 +301,7 @@ def step_benchmark(bundle: str, prompt: str, max_tokens: int = 100,
 def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
                       max_tokens: int = 50, dry_run: bool = False,
                       mode: str = "decode",
-                      pipeline_type: str = "decoder_kv_cache",
+                      pipeline_type: str = "",
                       benchmark: dict | None = None) -> str | None:
     """Run nsys profile, return path to .sqlite or None."""
     nsys = "/tmp/nsys_install/opt/nvidia/nsight-systems-cli/2026.2.1/target-linux-x64/nsys"
@@ -412,7 +412,7 @@ def step_sol(model: str, dtype: str, cache_length: int,
 
 def auto_tune_model(
     model: str,
-    pipeline_type: str = "decoder_kv_cache",
+    pipeline_type: str = "",
     max_cache: int = 256,
     max_tokens: int = 100,
     output_dir: str = "/tmp/auto_perf",
@@ -421,6 +421,8 @@ def auto_tune_model(
     benchmark: dict | None = None,
 ) -> TuneResult:
     """Run full auto-tune loop for one model."""
+    if not pipeline_type:
+        raise ValueError("pipeline_type is required")
     mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
     prompt = DEFAULT_PROMPTS.get(mode, "Hello")
     safe_name = model.split("/")[-1].lower().replace("-", "_")
@@ -642,7 +644,12 @@ def load_default_validation_models(
             if not isinstance(entry, dict) or not entry.get("model"):
                 raise ValueError(f"{path}: entry {index} must be an object with 'model'")
             item = dict(entry)
-            item.setdefault("pipeline_type", "decoder_kv_cache")
+            pipeline_type = str(item.get("pipeline_type") or "")
+            if not pipeline_type:
+                raise ValueError(
+                    f"{path}: entry {index} must declare pipeline_type"
+                )
+            item["pipeline_type"] = pipeline_type
             item.setdefault("label", f"{path.parent.name}-{index}")
             models.append(item)
     return models
@@ -655,7 +662,7 @@ def run_batch(models: list[dict], output_dir: str, dry_run: bool) -> list[TuneRe
         try:
             r = auto_tune_model(
                 model=entry["model"],
-                pipeline_type=entry.get("pipeline_type", "decoder_kv_cache"),
+                pipeline_type=str(entry.get("pipeline_type") or ""),
                 output_dir=f"{output_dir}/{entry.get('label', 'model')}",
                 benchmark=entry.get("benchmark"),
                 dry_run=dry_run,
@@ -705,7 +712,7 @@ def main():
         description="Automated performance tuning for TRT models.")
     parser.add_argument("--model",
                         help="HuggingFace model ID")
-    parser.add_argument("--pipeline-type", default="decoder_kv_cache",
+    parser.add_argument("--pipeline-type", default="",
                         help="Runtime strategy")
     parser.add_argument("--max-cache-length", type=int, default=256)
     parser.add_argument("--max-tokens", type=int, default=100)
@@ -741,6 +748,8 @@ def main():
             json.dump([vars(r) for r in results], f, indent=2)
         print(f"\nResults saved: {out_path}")
     elif args.model:
+        if not args.pipeline_type:
+            parser.error("--pipeline-type is required with --model")
         result = auto_tune_model(
             model=args.model,
             pipeline_type=args.pipeline_type,

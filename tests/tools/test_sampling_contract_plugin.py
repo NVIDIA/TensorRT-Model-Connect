@@ -1,5 +1,8 @@
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
-from tests.e2e_harness.plugins.sampling import plugin
+from tests.e2e.models.qwen.e2e_plugins.contract import QwenSamplingPlugin
+
+
+plugin = QwenSamplingPlugin()
 
 
 def _case() -> E2ECase:
@@ -7,7 +10,7 @@ def _case() -> E2ECase:
         name="example-decoder-topp",
         hf_id="example-org/example-decoder",
         family="example_decoder",
-        runtime_strategy="decoder_kv_cache",
+        runtime_strategy="example_decoder_decoder_kv_cache",
         reference_backend="invariant_only",
         reference_family="sampling_top_p",
         user_contract="sampling",

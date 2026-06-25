@@ -4,7 +4,7 @@
   "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
   "bundle": "nemotron-rerank-vl-1b-v2.trtfb",
   "family": "eagle_vlm",
-  "runtime_strategy": "reranking",
+  "runtime_strategy": "eagle_vlm_reranking",
   "task_strategy": "reranking",
   "reference_family": "vl_rerank",
   "user_contract": "ranking_order",

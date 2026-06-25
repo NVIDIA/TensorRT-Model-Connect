@@ -27,7 +27,8 @@ MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& b
 }
 
 void allocate_cross_kv_buffers(int32_t num_layers, std::size_t buf_size,
-                               std::vector<CudaBuffer>& cross_k, std::vector<CudaBuffer>& cross_v) {
+                               std::vector<MagpieCudaBuffer>& cross_k,
+                               std::vector<MagpieCudaBuffer>& cross_v) {
     cross_k.reserve(static_cast<std::size_t>(num_layers));
     cross_v.reserve(static_cast<std::size_t>(num_layers));
     for (int32_t i = 0; i < num_layers; ++i) {

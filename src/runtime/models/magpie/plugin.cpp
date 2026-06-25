@@ -112,7 +112,7 @@ class MagpiePlugin final : public IPipelinePlugin {
         load_ffi_kernels_from_bundle(ctx.bundle);
 
         auto decoder_runtime = make_magpie_decoder_runtime(ctx);
-        auto shared_stream = std::make_shared<CudaStream>();
+        auto shared_stream = std::make_shared<MagpieCudaStream>();
         if (!shared_stream->ok())
             throw std::runtime_error("MagpiePlugin: failed to create CUDA stream");
 
@@ -142,32 +142,32 @@ class MagpiePlugin final : public IPipelinePlugin {
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, fallback_kv_dim);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(
+        std::unique_ptr<MagpieInferenceState> decoder_state = std::make_unique<MagpieKvCache>(
             magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
         if (!decoder_state->ok())
-            throw std::runtime_error("MagpiePipeline: failed to create decoder KvCache");
+            throw std::runtime_error("MagpiePipeline: failed to create decoder MagpieKvCache");
 
-        std::unique_ptr<IInferenceState> decoder_state_uncond;
+        std::unique_ptr<MagpieInferenceState> decoder_state_uncond;
         if (magpie_cfg.cfg_scale > 1.0F) {
-            decoder_state_uncond =
-                std::make_unique<KvCache>(magpie_cfg.decoder_layers, ctx.config.max_cache_length,
-                                          kv_dim, stream, cache_dtype);
+            decoder_state_uncond = std::make_unique<MagpieKvCache>(magpie_cfg.decoder_layers,
+                                                                   ctx.config.max_cache_length,
+                                                                   kv_dim, stream, cache_dtype);
         }
 
         const std::size_t enc_buf_size = static_cast<std::size_t>(magpie_cfg.max_source_positions) *
                                          static_cast<std::size_t>(magpie_cfg.hidden_size) *
                                          sizeof(float);
 
-        std::vector<CudaBuffer> cross_k, cross_v;
+        std::vector<MagpieCudaBuffer> cross_k, cross_v;
         allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size, cross_k, cross_v);
 
-        std::vector<CudaBuffer> cross_k_uncond, cross_v_uncond;
+        std::vector<MagpieCudaBuffer> cross_k_uncond, cross_v_uncond;
         if (magpie_cfg.cfg_scale > 1.0F)
             allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size, cross_k_uncond,
                                       cross_v_uncond);
 
-        CudaBuffer encoder_output(enc_buf_size);
-        CudaBuffer encoder_output_uncond(magpie_cfg.cfg_scale > 1.0F ? enc_buf_size : 0);
+        MagpieCudaBuffer encoder_output(enc_buf_size);
+        MagpieCudaBuffer encoder_output_uncond(magpie_cfg.cfg_scale > 1.0F ? enc_buf_size : 0);
 
         auto codec_module = extract_optional_module(
             ctx.backend, find_section(ctx.bundle, "codec_engine_plan"), "magpie codec", opts);

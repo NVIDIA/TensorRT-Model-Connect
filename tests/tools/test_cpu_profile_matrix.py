@@ -121,19 +121,19 @@ class TestPrintMatrix:
     def test_prints_all_strategies(self, capsys):
         mod = _import_matrix()
         results = [
-            _make_result("decoder_kv_cache"),
-            _make_result("decoder_moe"),
+            _make_result("qwen_decoder_kv_cache"),
+            _make_result("gpt_oss_decoder_moe"),
             _make_family_result("family_recurrent"),
         ]
         mod._print_matrix(results, "TestGPU", "10.0", "Hello", 10)
         out = capsys.readouterr().out
-        assert "decoder_kv_cache" in out
-        assert "decoder_moe" in out
+        assert "qwen_decoder_kv_cache" in out
+        assert "gpt_oss_decoder_moe" in out
         assert "family_recurrent" in out
 
     def test_shows_bottleneck_row(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache", bottleneck="execute")]
+        results = [_make_result("qwen_decoder_kv_cache", bottleneck="execute")]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         assert "BOTTLENECK" in out
@@ -141,7 +141,7 @@ class TestPrintMatrix:
 
     def test_shows_total_row(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache")]
+        results = [_make_result("qwen_decoder_kv_cache")]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         assert "TOTAL" in out
@@ -155,7 +155,7 @@ class TestPrintMatrix:
 
     def test_decoder_phases_shown_for_decoder(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache")]
+        results = [_make_result("qwen_decoder_kv_cache")]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         assert "mask_build" in out
@@ -163,7 +163,7 @@ class TestPrintMatrix:
 
     def test_mixed_strategies_shows_union_of_phases(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache"), _make_family_result()]
+        results = [_make_result("qwen_decoder_kv_cache"), _make_family_result()]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         # Decoder phases
@@ -179,7 +179,7 @@ class TestPrintMatrix:
 
     def test_analysis_section_printed(self, capsys):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache")]
+        results = [_make_result("qwen_decoder_kv_cache")]
         mod._print_matrix(results, "GPU", "10.0", "test", 10)
         out = capsys.readouterr().out
         assert "Analysis" in out
@@ -193,7 +193,7 @@ class TestPrintMatrix:
 class TestBuildHtml:
     def test_returns_valid_html(self):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache"), _make_family_result()]
+        results = [_make_result("qwen_decoder_kv_cache"), _make_family_result()]
         html = mod._build_html(results, "H100", "10.0", "Hello", 10, 3, 20)
         assert html.startswith("<!DOCTYPE html>")
         assert "<table>" in html
@@ -202,18 +202,18 @@ class TestBuildHtml:
     def test_all_strategies_in_table(self):
         mod = _import_matrix()
         results = [
-            _make_result("decoder_kv_cache"),
-            _make_result("decoder_moe"),
+            _make_result("qwen_decoder_kv_cache"),
+            _make_result("gpt_oss_decoder_moe"),
             _make_family_result("family_recurrent"),
         ]
         html = mod._build_html(results, "H100", "10.0", "test", 10, 3, 20)
-        assert "decoder_kv_cache" in html
-        assert "decoder_moe" in html
+        assert "qwen_decoder_kv_cache" in html
+        assert "gpt_oss_decoder_moe" in html
         assert "family_recurrent" in html
 
     def test_chart_json_embedded(self):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache")]
+        results = [_make_result("qwen_decoder_kv_cache")]
         html = mod._build_html(results, "H100", "10.0", "test", 10, 3, 20)
         assert "const DATA = " in html
         # Extract and validate embedded JSON
@@ -223,11 +223,11 @@ class TestBuildHtml:
         data = json.loads(m.group(1))
         assert "labels" in data
         assert "datasets" in data
-        assert data["labels"] == ["decoder_kv_cache"]
+        assert data["labels"] == ["qwen_decoder_kv_cache"]
 
     def test_bottleneck_highlighted(self):
         mod = _import_matrix()
-        results = [_make_result("decoder_kv_cache", bottleneck="execute")]
+        results = [_make_result("qwen_decoder_kv_cache", bottleneck="execute")]
         html = mod._build_html(results, "H100", "10.0", "test", 10, 3, 20)
         assert "BOTTLENECK" in html
         assert "execute" in html
@@ -263,12 +263,12 @@ class TestProfileStrategyContract:
         Verify those keys cover what _profile_strategy actually returns."""
         required_keys = {"strategy", "model", "runner_type",
                          "num_layers", "phases", "total_ms", "bottleneck"}
-        sample = _make_result("decoder_kv_cache")
+        sample = _make_result("qwen_decoder_kv_cache")
         assert required_keys.issubset(sample.keys())
 
     def test_phase_dict_schema(self):
         """Each phase entry must have phase/mean_ms/pct/samples."""
-        sample = _make_result("decoder_kv_cache")
+        sample = _make_result("qwen_decoder_kv_cache")
         for ph in sample["phases"]:
             assert "phase" in ph
             assert "mean_ms" in ph
@@ -276,6 +276,6 @@ class TestProfileStrategyContract:
             assert "samples" in ph
 
     def test_bottleneck_is_a_phase_name(self):
-        sample = _make_result("decoder_kv_cache", bottleneck="execute")
+        sample = _make_result("qwen_decoder_kv_cache", bottleneck="execute")
         phase_names = {p["phase"] for p in sample["phases"]}
         assert sample["bottleneck"] in phase_names

@@ -3,7 +3,7 @@
 // PixArtPipeline: TRT API PixArt diffusion pipeline.
 // Uses preprocessor weights, a T5 text encoder, DiT denoiser, and VAE decoder.
 
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/pixart/pixart_diffusion_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
@@ -19,8 +19,8 @@ namespace trtmc {
 class PixArtPipeline final : public IPipeline {
   public:
     PixArtPipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> denoiser,
-                   std::unique_ptr<TrtModule> vae, DiffusionConfig config,
-                   PreprocessorWeights weights, std::shared_ptr<ITokenizer> tokenizer,
+                   std::unique_ptr<TrtModule> vae, PixArtDiffusionConfig config,
+                   PixArtPreprocessorWeights weights, std::shared_ptr<ITokenizer> tokenizer,
                    std::string model_id_str, std::shared_ptr<void> distributed_owner = {},
                    int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
 
@@ -50,9 +50,9 @@ class PixArtPipeline final : public IPipeline {
     void compute_3d_rope(int32_t nt, int32_t nh, int32_t nw, std::vector<float>& cos_out,
                          std::vector<float>& sin_out) const;
     bool decode_vae_2d(const std::vector<float>& latents, int32_t c, int32_t h, int32_t w,
-                       VideoResult& result);
+                       PixArtVideoResult& result);
     bool decode_vae_3d(const std::vector<float>& latents, int32_t c, int32_t t, int32_t h,
-                       int32_t w, VideoResult& result);
+                       int32_t w, PixArtVideoResult& result);
 
     int32_t query_vae_output_temporal_dim() const;
     void init_vae_caches();
@@ -65,9 +65,9 @@ class PixArtPipeline final : public IPipeline {
                                       std::vector<float>& text_projected,
                                       std::vector<float>& null_text, std::string& error);
     bool run_pixart_vae_decode(int32_t z_dim, int32_t t_lat, int32_t h_lat, int32_t w_lat,
-                               std::vector<float>& latents, VideoResult& result);
+                               std::vector<float>& latents, PixArtVideoResult& result);
     ImageResult finish_pixart_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat, int32_t w_lat,
-                                         std::vector<float>& latents, VideoResult& result);
+                                         std::vector<float>& latents, PixArtVideoResult& result);
 
     // Keep TP communicator ownership until after TRT modules are destroyed.
     std::shared_ptr<void> distributed_owner_;
@@ -76,8 +76,8 @@ class PixArtPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
-    DiffusionConfig config_;
-    PreprocessorWeights weights_;
+    PixArtDiffusionConfig config_;
+    PixArtPreprocessorWeights weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 

@@ -6,3 +6,10 @@ test_manifests = [
   "manifests/nemotron-labs-diffusion-8b-linear-spec.json",
   "manifests/nemotron-labs-diffusion-8b.json",
 ]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

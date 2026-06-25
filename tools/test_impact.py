@@ -9,7 +9,7 @@ Usage:
     python3 tools/test_impact.py [--base REF] [--head REF] [--json] [--verbose]
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
-    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/text_generation/plugin.cpp
+    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/qwen/plugin.cpp
     python3 tools/test_impact.py --files python/tensorrt_model_connect/families/example/plugin.py --cap 15
 """
 
@@ -28,8 +28,49 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # ---------------------------------------------------------------------------
 
 # Shared placeholder sidecars intentionally contain no plugin object. Their
-# concrete behavior lives in model-owned E2E plugins; these fallback routes keep
-# changes scoped to the same task while preserving the zero-false-negative rule.
+# concrete behavior lives in model-owned E2E plugins; direct edits to these
+# placeholders should validate the structural guard, not fan out to E2E.
+SHARED_PLACEHOLDER_RUNNER_STEMS: Set[str] = {
+    "audio_speech",
+    "diffusion",
+    "diffusion_text_generation",
+    "embedding",
+    "encoder_only",
+    "image_classification",
+    "neural_operator",
+    "object_detection",
+    "omni",
+    "reranking",
+    "segmentation",
+    "text_generation",
+    "vision_language",
+}
+SHARED_PLACEHOLDER_COMPARATOR_STEMS: Set[str] = {
+    "audio",
+    "diffusion",
+    "diffusion_text_generation",
+    "embedding",
+    "encoder_only",
+    "image_classification",
+    "neural_operator",
+    "omni",
+    "reranking",
+    "segmentation",
+    "speech_to_speech",
+    "speech_to_text",
+    "text",
+    "text_to_audio",
+    "vision_language",
+}
+SHARED_PLACEHOLDER_REFERENCE_STEMS: Set[str] = {
+    "custom_python",
+    "golden_snapshot",
+    "hf_diffusers",
+    "hf_transformers",
+    "invariant_only",
+    "nemo_reference",
+    "torch_reference",
+}
 RUNNER_TASK_STRATEGY_FALLBACKS: Dict[str, List[str]] = {
     "diffusion_text_generation": ["diffusion_text_generation"],
     "image_classification": ["image_classification"],
@@ -66,7 +107,7 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
 # Orchestrator modules in python/tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
-    "debug_runner", "diffusion_runner",
+    "debug_runner",
 }
 
 # Patterns for files that never affect E2E or unit tests
@@ -666,15 +707,6 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     scoped_cpp_tokens = {
         "src/runtime/core/gpu_matmul.h": "gpu_matmul",
         "src/runtime/core/gpu_matmul.cpp": "gpu_matmul",
-        "src/runtime/domains/audio/mel_spectrogram.h": (
-            "runtime/domains/audio/mel_spectrogram.h"
-        ),
-        "src/runtime/domains/audio/mel_spectrogram.cpp": (
-            "runtime/domains/audio/mel_spectrogram.h"
-        ),
-        "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h": (
-            "diffusion_denoising_step_seam.h"
-        ),
     }
     for path, token in scoped_cpp_tokens.items():
         strategies: Set[str] = set()
@@ -1132,6 +1164,14 @@ def _unknown_task_strategy_stem(strategy_map_source: StrategyMapSource) -> RuleP
     return _predicate
 
 
+def _placeholder_sidecar_stem(stems: Set[str]) -> RulePredicate:
+    def _predicate(path: str, imap: ImpactMap, match: re.Match[str]) -> bool:
+        del path, imap
+        return match.group(1) in stems
+
+    return _predicate
+
+
 def _task_strategy_models_from_group(
     strategy_map_source: StrategyMapSource,
 ) -> ModelsResolver:
@@ -1316,8 +1356,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             resolver=_match_result("cpp_scoped_helper", _scoped_cpp_helper_models),
             covered_by=(
                 "TestCppScope.test_scoped_cpp_helper_gpu_matmul",
-                "TestCppScope.test_scoped_cpp_helper_audio_mel_spectrogram",
-                "TestCppScope.test_scoped_cpp_helper_diffusion_seam",
             ),
         ),
         ClassificationRule(
@@ -1345,6 +1383,21 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_regex_rule(r"tests/e2e_harness/runners/(__init__)\.py$"),
             resolver=_match_result("harness_runner_init", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=245,
+            name="harness_runner_placeholder",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/runners/(\w+)\.py$",
+                _placeholder_sidecar_stem(SHARED_PLACEHOLDER_RUNNER_STEMS),
+            ),
+            resolver=_match_result(
+                "harness_runner_placeholder",
+                _no_models,
+                unit_tiers_override=["tools"],
+                rebuild_override=False,
+            ),
+            covered_by=("TestHarness.test_harness_runner_placeholder",),
         ),
         ClassificationRule(
             priority=250,
@@ -1377,6 +1430,21 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
+            priority=275,
+            name="harness_comparator_placeholder",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/comparators/(\w+)\.py$",
+                _placeholder_sidecar_stem(SHARED_PLACEHOLDER_COMPARATOR_STEMS),
+            ),
+            resolver=_match_result(
+                "harness_comparator_placeholder",
+                _no_models,
+                unit_tiers_override=["tools"],
+                rebuild_override=False,
+            ),
+            covered_by=("TestHarness.test_harness_comparator_placeholder",),
+        ),
+        ClassificationRule(
             priority=280,
             name="harness_comparator",
             matcher=_regex_rule(
@@ -1406,6 +1474,21 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_regex_rule(r"tests/e2e_harness/references/(__init__)\.py$"),
             resolver=_match_result("harness_reference_init", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
+        ),
+        ClassificationRule(
+            priority=305,
+            name="harness_reference_placeholder",
+            matcher=_regex_rule(
+                r"tests/e2e_harness/references/(\w+)\.py$",
+                _placeholder_sidecar_stem(SHARED_PLACEHOLDER_REFERENCE_STEMS),
+            ),
+            resolver=_match_result(
+                "harness_reference_placeholder",
+                _no_models,
+                unit_tiers_override=["tools"],
+                rebuild_override=False,
+            ),
+            covered_by=("TestHarness.test_harness_reference_placeholder",),
         ),
         ClassificationRule(
             priority=310,
@@ -2423,7 +2506,7 @@ class RuntimeStrategyMatrixRule(DiffRefinementRule):
 
 class HarnessReferenceVlGeneratedOnlyDecodeRule(DiffRefinementRule):
     name = "harness_reference_vl_generated_only_decode"
-    path = "tests/e2e_harness/references/hf_transformers.py"
+    path = "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py"
     allowed_tokens = (
         "decode_vl_generated_text",
         "vl_generation",
@@ -2645,6 +2728,8 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         "python/tensorrt_model_connect/engine_builder.py",
         (
             "detect_diffusion_tokenizer_add_special_tokens",
+            "diffusion_tokenizer_add_special_tokens",
+            "diffusion_tokenizer_bundle_sections",
             "detect_tokenizer_add_special_tokens",
             "detect_add_special",
             "diffusion",

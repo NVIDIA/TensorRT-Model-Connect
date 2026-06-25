@@ -1,7 +1,7 @@
 #pragma once
 
-#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/models/wan/wan_diffusion_types.h"
+#include "runtime/models/wan/wan_scheduler_helpers.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +27,7 @@ struct WanLayout {
     int32_t patch_dim{0};
 };
 
-inline WanLayout make_wan_layout(const DiffusionConfig& config) {
+inline WanLayout make_wan_layout(const WanDiffusionConfig& config) {
     WanLayout layout;
     layout.t_lat = (config.video_num_frames - 1) / config.scale_factor_temporal + 1;
     layout.h_lat = config.video_height / config.scale_factor_spatial;
@@ -58,16 +58,17 @@ struct WanGenerationPlan {
     WanLayout layout;
     bool use_ddim{false};
     std::size_t latent_count{0};
-    FlowMatchEulerConfig flow_match_config;
+    wan_scheduler::FlowMatchEulerConfig flow_match_config;
 };
 
-inline WanGenerationPlan make_wan_generation_plan(const DiffusionConfig& config,
+inline WanGenerationPlan make_wan_generation_plan(const WanDiffusionConfig& config,
                                                   int32_t requested_steps,
                                                   float requested_guidance) {
     WanGenerationPlan plan;
     plan.num_inference_steps =
-        resolve_requested_steps(requested_steps, config.num_inference_steps, false);
-    plan.guidance_scale = resolve_requested_guidance(requested_guidance, config.guidance_scale);
+        wan_scheduler::resolve_requested_steps(requested_steps, config.num_inference_steps, false);
+    plan.guidance_scale =
+        wan_scheduler::resolve_requested_guidance(requested_guidance, config.guidance_scale);
     plan.layout = make_wan_layout(config);
     plan.use_ddim = should_use_wan_ddim(config.scheduler);
     plan.latent_count =
@@ -85,8 +86,9 @@ inline WanGenerationPlan make_wan_generation_plan(const DiffusionConfig& config,
     return plan;
 }
 
-inline FlowMatchEulerState make_wan_flow_match_scheduler(const WanGenerationPlan& plan) {
-    FlowMatchEulerState scheduler;
+inline wan_scheduler::FlowMatchEulerState
+make_wan_flow_match_scheduler(const WanGenerationPlan& plan) {
+    wan_scheduler::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = plan.flow_match_config.num_train_timesteps;
     scheduler.shift = plan.flow_match_config.shift;
     scheduler.use_dynamic_shifting = plan.flow_match_config.use_dynamic_shifting;

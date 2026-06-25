@@ -471,8 +471,7 @@ void trtmc_image_result_free(trtmc_image_result_t* result);
 
 // Generate a batch of images. `prompts` is an array of `num_prompts`
 // null-terminated C strings; `seeds` is an array of `num_seeds` uint32_t
-// per-sample seeds (caller can fill these via the upstream
-// derive_per_sample_seeds helper). `num_prompts` must equal `num_seeds`.
+// per-sample seeds. `num_prompts` must equal `num_seeds`.
 // `out_results` is a caller-owned array of `num_prompts`
 // trtmc_image_result_t that the function fills; each result's `pixels`
 // buffer is malloc'd and must be released with trtmc_image_result_free.

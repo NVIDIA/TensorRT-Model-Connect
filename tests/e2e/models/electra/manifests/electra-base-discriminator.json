@@ -3,7 +3,7 @@
   "hf_id": "google/electra-base-discriminator",
   "bundle": "electra-base-discriminator.trtfb",
   "family": "electra",
-  "runtime_strategy": "encoder_only",
+  "runtime_strategy": "electra_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",

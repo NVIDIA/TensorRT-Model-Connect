@@ -1,0 +1,7 @@
+id = "mpnet"
+runtime_library = "libtrtmc_model_mpnet.so"
+runtime_plugins = ["plugin.cpp|register_mpnet_plugin"]
+runtime_strategies = ["mpnet_encoder_only"]
+runtime_tests = [
+  "test_mpnet_encoder_pipeline|test_mpnet_encoder_pipeline.cpp|trtmc_model_mpnet,trtmc_backend_trt|_|REQUIRES_TRT",
+]
