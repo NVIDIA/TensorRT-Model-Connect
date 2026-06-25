@@ -242,6 +242,47 @@ def test_summary_treats_model_owned_xfail_as_waived_not_active_failure(
     ) in summary
 
 
+def test_summary_expands_grouped_bundle_junit_members(tmp_path: Path) -> None:
+    mod = _import_summary()
+    e2e_root = tmp_path / "e2e_artifacts"
+    artifacts_dir = e2e_root / "artifacts"
+    _write_result(artifacts_dir, "canary-1b-v2", "pass")
+    base_result = json.loads(
+        (artifacts_dir / "canary-1b-v2" / "result.json").read_text(encoding="utf-8")
+    )
+    base_result["case_config"]["bundle"] = "canary-1b-v2.trtfb"
+    (artifacts_dir / "canary-1b-v2" / "result.json").write_text(
+        json.dumps(base_result), encoding="utf-8"
+    )
+    _write_junit(
+        e2e_root,
+        """
+        <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+                  name="test_model_e2e[bundle:canary-1b-v2+canary-1b-v2-asr-probe01+canary-1b-v2-asr-probe02]" />
+        """,
+    )
+
+    results = mod._merge_pytest_outcomes(
+        mod._load_results(artifacts_dir),
+        mod._load_pytest_outcomes(e2e_root),
+    )
+    summary = mod.render_summary(
+        results=results,
+        mode="premerge",
+        report_path=e2e_root / "missing.html",
+        html_artifact_name="html",
+        full_artifact_name="full",
+        run_url="",
+        max_rows=40,
+    )
+
+    assert "| pass | 3 |" in summary
+    assert "### Grouped Bundle Testcases" in summary
+    assert "canary-1b-v2-asr-probe01" in summary
+    assert "canary-1b-v2-asr-probe02" in summary
+    assert "| canary-1b-v2-asr-probe01 |  |  | pass |  |  |" in summary
+
+
 def test_summary_surfaces_model_owned_xpass_from_console_logs(tmp_path: Path) -> None:
     mod = _import_summary()
     e2e_root = tmp_path / "e2e_artifacts"

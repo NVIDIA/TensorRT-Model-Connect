@@ -29,7 +29,7 @@ def _write_manifest(manifest_dir: Path, name: str, **fields: object) -> None:
 
 
 def _test_id(name: str) -> str:
-    return f"tests/test_e2e.py::test_e2e[{name}]"
+    return f"tests/e2e/models/unit_family/test_unit_family_e2e.py::test_model_e2e[{name}]"
 
 
 def test_diffusion_family_strategies_are_large() -> None:
@@ -162,6 +162,53 @@ def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> No
     ]
     assert len(matching_queues) == 1
     assert sorted(matching_queues[0]) == sorted(grouped_ids)
+
+
+def test_bundle_group_entry_summarizes_member_testcases(tmp_path: Path) -> None:
+    for mode in ("a", "b", "c"):
+        _write_manifest(
+            tmp_path,
+            f"shared-mode-{mode}",
+            bundle="shared-bundle.trtfb",
+        )
+    _write_manifest(tmp_path, "unique-mode", bundle="unique-bundle.trtfb")
+
+    summary = schedule_e2e.bundle_selection_summary(
+        [
+            _test_id("bundle:shared-mode-a+shared-mode-b+shared-mode-c"),
+            _test_id("unique-mode"),
+        ],
+        tmp_path,
+    )
+
+    assert summary == {
+        "selected_entries": 2,
+        "selected_testcases": 4,
+        "unique_bundle_identities": 2,
+        "shared_bundle_groups": 1,
+        "testcases_in_shared_bundle_groups": 3,
+        "missing_manifests": 0,
+    }
+
+
+def test_bundle_group_entry_weight_sums_members(tmp_path: Path) -> None:
+    _write_manifest(tmp_path, "small-a", bundle="shared.trtfb")
+    _write_manifest(tmp_path, "large-b", hf_id="org/model-9B", bundle="shared.trtfb")
+    manifests = schedule_e2e._load_manifests(tmp_path)
+
+    assert schedule_e2e._test_weight(
+        _test_id("bundle:small-a+large-b"),
+        manifests,
+        timing_estimates={"small-a": 10.0, "large-b": 20.0},
+    ) == 30.0
+    assert schedule_e2e._test_weight(
+        _test_id("bundle:small-a+large-b"),
+        manifests,
+        timing_estimates=None,
+    ) == (
+        schedule_e2e._SMALL_TEST_WEIGHT
+        + schedule_e2e._LARGE_TEST_WEIGHT
+    )
 
 
 def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path) -> None:
@@ -304,6 +351,22 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
                 raise SystemExit(0)
 
             if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
+                if "--co" in args:
+                    models_file = None
+                    if "--e2e-models-file" in args:
+                        idx = args.index("--e2e-models-file")
+                        models_file = args[idx + 1]
+                    if models_file is None:
+                        raise SystemExit("--e2e-models-file missing")
+                    for line in Path(models_file).read_text(encoding="utf-8").splitlines():
+                        model = line.strip()
+                        if model:
+                            print(
+                                "tests/e2e/models/fake_family/"
+                                f"test_fake_family_e2e.py::test_model_e2e[{model}]"
+                            )
+                    raise SystemExit(0)
+
                 tests = [
                     arg for arg in args
                     if arg.startswith("tests/")

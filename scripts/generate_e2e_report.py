@@ -58,9 +58,14 @@ _CONSOLE_OUTCOME_RE = re.compile(
     r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
 )
 _PYTEST_TO_RESULT_STATUS = {
-    "XFAIL": "skip",
+    "PASSED": "pass",
     "XPASS": "pass",
+    "FAILED": "fail",
+    "ERROR": "error",
+    "SKIPPED": "skip",
+    "XFAIL": "skip",
 }
+_BUNDLE_GROUP_PREFIX = "bundle:"
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -107,7 +112,10 @@ def load_all_results(artifacts_dir: Path) -> List[Dict[str, Any]]:
                 results.append(data)
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"WARNING: skipping {rj}: {exc}", file=sys.stderr)
-    _apply_pytest_waive_outcomes(results, artifacts_dir)
+    results = _merge_pytest_outcomes(
+        results,
+        _load_pytest_outcomes(_e2e_root_from_artifacts_dir(artifacts_dir)),
+    )
     _attach_diffusion_vlm_assessments(results, artifacts_dir)
     return results
 
@@ -121,6 +129,32 @@ def _e2e_root_from_artifacts_dir(artifacts_dir: Path) -> Path:
 def _extract_case_name(text: str) -> str:
     match = _TEST_CASE_RE.search(text)
     return match.group(1) if match else ""
+
+
+def _case_names_from_param(case_name: str) -> List[str]:
+    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
+        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
+        return [part for part in payload.split("+") if part]
+    return [case_name] if case_name else []
+
+
+def _record_pytest_outcome(
+    outcomes: Dict[str, Dict[str, str]],
+    case_name: str,
+    outcome: Dict[str, str],
+) -> None:
+    member_names = _case_names_from_param(case_name)
+    if len(member_names) <= 1:
+        outcomes[case_name] = outcome
+        return
+
+    grouped = {
+        **outcome,
+        "pytest_group": case_name,
+        "pytest_group_members": ",".join(member_names),
+    }
+    for member_name in member_names:
+        outcomes[member_name] = grouped
 
 
 def _clean_pytest_reason(reason: str) -> str:
@@ -138,7 +172,7 @@ def _junit_files(e2e_root: Path) -> List[Path]:
     return [merged] if merged.is_file() else []
 
 
-def _load_pytest_waive_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
+def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
     outcomes: Dict[str, Dict[str, str]] = {}
 
     for xml_path in _junit_files(e2e_root):
@@ -154,15 +188,26 @@ def _load_pytest_waive_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             )
             if not case_name:
                 continue
+            status = "PASSED"
+            reason = ""
+            failure = testcase.find("failure")
+            error = testcase.find("error")
             skipped = testcase.find("skipped")
-            if skipped is None or skipped.attrib.get("type", "") != "pytest.xfail":
-                continue
-            outcomes[case_name] = {
-                "pytest_status": "XFAIL",
-                "reason": _clean_pytest_reason(
-                    skipped.attrib.get("message", "") or (skipped.text or "")),
+            if error is not None:
+                status = "ERROR"
+                reason = error.attrib.get("message", "") or (error.text or "")
+            elif failure is not None:
+                status = "FAILED"
+                reason = failure.attrib.get("message", "") or (failure.text or "")
+            elif skipped is not None:
+                skip_type = skipped.attrib.get("type", "")
+                status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
+                reason = skipped.attrib.get("message", "") or (skipped.text or "")
+            _record_pytest_outcome(outcomes, case_name, {
+                "pytest_status": status,
+                "reason": _clean_pytest_reason(reason),
                 "source": xml_path.name,
-            }
+            })
 
     for log_path in sorted(e2e_root.glob("console-*.log")):
         try:
@@ -175,33 +220,60 @@ def _load_pytest_waive_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             if not match:
                 continue
             case_name, status, rest = match.groups()
-            if status not in {"XFAIL", "XPASS"}:
+            if status not in {"XFAIL", "XPASS"} and case_name not in outcomes:
                 continue
-            outcomes[case_name] = {
+            _record_pytest_outcome(outcomes, case_name, {
                 "pytest_status": status,
                 "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
                 "source": log_path.name,
-            }
+            })
 
     return outcomes
 
 
-def _apply_pytest_waive_outcomes(
-    results: List[Dict[str, Any]], artifacts_dir: Path
-) -> None:
-    outcomes = _load_pytest_waive_outcomes(_e2e_root_from_artifacts_dir(artifacts_dir))
-    if not outcomes:
-        return
+def _merge_pytest_outcomes(
+    results: List[Dict[str, Any]],
+    outcomes: Dict[str, Dict[str, str]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     for result in results:
+        item = dict(result)
         case_name = str(result.get("case_name") or "")
+        if case_name:
+            seen.add(case_name)
         outcome = outcomes.get(case_name)
-        if not outcome:
-            continue
-        result["_pytest_outcome"] = outcome
-        status = outcome.get("pytest_status", "")
+        if outcome:
+            item["_pytest_outcome"] = outcome
+        status = outcome.get("pytest_status", "") if outcome else ""
         if status in _PYTEST_TO_RESULT_STATUS:
-            result["_raw_status"] = result.get("status")
-            result["status"] = _PYTEST_TO_RESULT_STATUS[status]
+            item["_raw_status"] = item.get("status")
+            item["status"] = _PYTEST_TO_RESULT_STATUS[status]
+        merged.append(item)
+
+    for case_name, outcome in sorted(outcomes.items()):
+        if case_name in seen:
+            continue
+        status = _PYTEST_TO_RESULT_STATUS.get(
+            outcome.get("pytest_status", ""), "error")
+        merged.append({
+            "case_name": case_name,
+            "status": status,
+            "failure_type": "pytest_failed"
+            if status in {"fail", "error"} else None,
+            "case_config": {},
+            "stages": {
+                "pytest": {
+                    "status": status,
+                    "message": outcome.get("reason", ""),
+                    "metrics": {},
+                }
+            },
+            "timing": {},
+            "_summary_only": True,
+            "_pytest_outcome": outcome,
+        })
+    return merged
 
 
 def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -1450,14 +1522,23 @@ def render_model_section(
     header = (
         f'<details id="model-{_esc(name)}">'
         f"<summary>{badge} <strong>{_esc(name)}</strong>"
-        f" &mdash; {_esc(family)} / {_esc(task_strategy)}"
     )
+    if family or task_strategy:
+        header += f" &mdash; {_esc(family)} / {_esc(task_strategy)}"
+    elif result.get("_summary_only"):
+        header += " &mdash; pytest-only grouped member"
     if hf_id:
         header += f" <small>({_esc(hf_id)})</small>"
     header += "</summary>"
 
     # Failure info
     body_parts = []
+    if result.get("_summary_only"):
+        body_parts.append(
+            '<p class="summary-only-info">'
+            "This testcase was recovered from pytest/JUnit output; no "
+            "per-case result.json artifact was found for it.</p>"
+        )
     pytest_outcome = result.get("_pytest_outcome")
     pytest_status = ""
     if isinstance(pytest_outcome, dict):
@@ -1558,6 +1639,172 @@ def _total_time_sort_key(result: Dict[str, Any]) -> float:
     return total if total is not None else -1.0
 
 
+def _bundle_group_key(result: Dict[str, Any]) -> str:
+    outcome = result.get("_pytest_outcome")
+    if isinstance(outcome, dict):
+        group_name = str(outcome.get("pytest_group") or "")
+        if group_name:
+            return group_name
+    case_config = result.get("case_config", {}) or {}
+    bundle = str(case_config.get("bundle", "") or "").strip()
+    if bundle:
+        return bundle
+    return ""
+
+
+def _bundle_group_label(group_key: str) -> str:
+    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
+        member_names = _case_names_from_param(group_key)
+        return "pytest group: " + ", ".join(member_names)
+    return group_key
+
+
+def _bundle_group_sort_key(group_key: str, result: Dict[str, Any]) -> Tuple[int, str]:
+    name = str(result.get("case_name", ""))
+    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
+        member_names = _case_names_from_param(group_key)
+        try:
+            return (member_names.index(name), name)
+        except ValueError:
+            return (len(member_names), name)
+    bundle_stem = Path(group_key).stem if group_key else ""
+    return (0 if name == bundle_stem else 1, name)
+
+
+def _grouped_bundle_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for result in results:
+        group_key = _bundle_group_key(result)
+        if not group_key:
+            continue
+        groups.setdefault(group_key, []).append(result)
+    return {
+        key: sorted(items, key=lambda item: _bundle_group_sort_key(key, item))
+        for key, items in sorted(groups.items())
+        if len(items) > 1
+    }
+
+
+def _status_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for result in results:
+        status = str(result.get("status", "error"))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _status_summary(results: List[Dict[str, Any]]) -> str:
+    counts = _status_counts(results)
+    if len(counts) == 1:
+        status = next(iter(counts))
+        return _badge(status)
+    return " ".join(
+        f'<span class="bundle-status">{_esc(status)}: {count}</span>'
+        for status, count in sorted(counts.items())
+    )
+
+
+def _bundle_representative(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for item in items:
+        if not item.get("_summary_only"):
+            return item
+    return items[0]
+
+
+def _summary_sort_key(item: Tuple[Dict[str, Any], List[Dict[str, Any]]]) -> float:
+    representative, _members = item
+    return _total_time_sort_key(representative)
+
+
+def _summary_dashboard_items(
+    results: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    groups = _grouped_bundle_results(results)
+    grouped_names = {
+        str(result.get("case_name") or "")
+        for items in groups.values()
+        for result in items
+    }
+    dashboard_items = [
+        (_bundle_representative(items), items)
+        for items in groups.values()
+    ]
+    for result in results:
+        if str(result.get("case_name") or "") in grouped_names:
+            continue
+        dashboard_items.append((result, [result]))
+    return sorted(dashboard_items, key=_summary_sort_key, reverse=True)
+
+
+def _render_summary_bundle_details(
+    group_key: str,
+    representative: Dict[str, Any],
+    items: List[Dict[str, Any]],
+    family: str,
+    task_strategy: str,
+    key_metric: str,
+    total_time: str,
+) -> str:
+    title = str(representative.get("case_name") or _bundle_group_label(group_key))
+    rows = []
+    for item in items:
+        name = str(item.get("case_name", "unknown"))
+        case_config = item.get("case_config", {}) or {}
+        child_family = case_config.get("family", "")
+        child_task_strategy = case_config.get("task_strategy", "")
+        status = str(item.get("status", "error"))
+        summary_only = " pytest-only" if item.get("_summary_only") else ""
+        rows.append(
+            f'<tr class="summary-bundle-member{summary_only}">'
+            f'<td><a href="#model-{_esc(name)}">{_esc(name)}</a></td>'
+            f"<td>{_badge(status)}</td>"
+            f"<td>{_esc(child_family) or '&mdash;'}</td>"
+            f"<td>{_esc(child_task_strategy) or '&mdash;'}</td>"
+            f"<td>{_esc(_key_metric(item)) or '&mdash;'}</td>"
+            f"<td>{_esc(_total_time(item)) or '&mdash;'}</td>"
+            f"</tr>"
+        )
+    return (
+        '<details class="summary-bundle-details">'
+        '<summary class="summary-bundle-summary">'
+        '<span class="summary-bundle-main">'
+        f'<span class="summary-bundle-title">{_esc(title)}</span>'
+        f'<span class="bundle-count">{len(items)} testcases</span>'
+        "</span>"
+        f"<span>{_esc(family) or '&mdash;'}</span>"
+        f"<span>{_esc(task_strategy) or '&mdash;'}</span>"
+        f"<span>{_status_summary(items)}</span>"
+        f"<span>{key_metric or '&mdash;'}</span>"
+        f"<span>{total_time or '&mdash;'}</span>"
+        "</summary>"
+        '<div class="summary-subtest-wrap">'
+        '<table class="summary-subtest-table">'
+        "<thead><tr>"
+        "<th>Testcase</th><th>Status</th><th>Family</th><th>Task Strategy</th>"
+        "<th>Key Metric</th><th>Time</th>"
+        "</tr></thead><tbody>"
+        + "\n".join(rows)
+        + "</tbody></table></div></details>"
+    )
+
+
+def _render_summary_model_cell(result: Dict[str, Any]) -> str:
+    name = str(result.get("case_name", "unknown"))
+    return f'<a href="#model-{_esc(name)}">{_esc(name)}</a>'
+
+
+def _summary_data_status(members: List[Dict[str, Any]]) -> str:
+    return " ".join(sorted(_status_counts(members)))
+
+
+def _summary_data_name(members: List[Dict[str, Any]]) -> str:
+    return " ".join(
+        str(member.get("case_name", "")).lower()
+        for member in members
+        if member.get("case_name")
+    )
+
+
 def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     """Render the top-of-page summary table with counters and filters."""
     counts: Dict[str, int] = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
@@ -1590,22 +1837,38 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     )
 
     rows: List[str] = []
-    sorted_results = sorted(results, key=_total_time_sort_key, reverse=True)
-    for r in sorted_results:
-        name = r.get("case_name", "unknown")
-        status = r.get("status", "error")
+    for r, members in _summary_dashboard_items(results):
         cc = r.get("case_config", {})
         family = cc.get("family", "")
         task_strategy = cc.get("task_strategy", "")
         km = _key_metric(r)
         tt = _total_time(r)
+        row_attrs = (
+            f'class="summary-row" data-status="{_esc(_summary_data_status(members))}" '
+            f'data-name="{_esc(_summary_data_name(members))}"'
+        )
+        if len(members) > 1:
+            rows.append(
+                f"<tr {row_attrs}>"
+                '<td class="summary-bundle-cell" colspan="6">'
+                + _render_summary_bundle_details(
+                    _bundle_group_key(r),
+                    r,
+                    members,
+                    str(family),
+                    str(task_strategy),
+                    km,
+                    tt,
+                )
+                + "</td></tr>"
+            )
+            continue
         rows.append(
-            f'<tr class="summary-row" data-status="{_esc(status)}" '
-            f'data-name="{_esc(name.lower())}">'
-            f'<td><a href="#model-{_esc(name)}">{_esc(name)}</a></td>'
+            f"<tr {row_attrs}>"
+            f'<td class="summary-model-cell">{_render_summary_model_cell(r)}</td>'
             f"<td>{_esc(family)}</td>"
             f"<td>{_esc(task_strategy)}</td>"
-            f"<td>{_badge(status)}</td>"
+            f"<td>{_status_summary(members)}</td>"
             f"<td>{km}</td>"
             f"<td>{tt}</td>"
             f"</tr>"
