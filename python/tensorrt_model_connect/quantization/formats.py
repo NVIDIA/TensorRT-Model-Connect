@@ -130,8 +130,15 @@ class FP8Format:
         trt = trt_compat.get_trt()
 
         out_trt_dtype = activation.dtype
+        # With fp16 base, materializing the fp8 GEMM result in fp16 overflows
+        # fp16's narrow exponent range on bf16-native models (garbage output):
+        # the running partial sum of many dequantized terms exceeds ~65504.
+        # Dequantize/accumulate in fp32 ONLY for fp16 base, then cast back to the
+        # base dtype. bf16/fp32 base keep their native dtype (range headroom) so
+        # the fast bf16 path sees no perf regression.
+        acc_dtype = trt.float32 if out_trt_dtype == trt.float16 else out_trt_dtype
 
-        # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(work_dtype)
+        # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(acc_dtype)
         weight_const = graph_ops.add_constant(
             network, (lhs_width, rhs_width), weight_array, dtype=dtype)
         w_scale = np.array(
@@ -141,9 +148,9 @@ class FP8Format:
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(weight_const, w_scale_t, trt.fp8)
         dq_w = network.add_dequantize(
-            q_w.get_output(0), w_scale_t, out_trt_dtype)
+            q_w.get_output(0), w_scale_t, acc_dtype)
 
-        # Activation Q/DQ: input -> quantize(FP8) -> dequantize(work_dtype)
+        # Activation Q/DQ: input -> quantize(FP8) -> dequantize(acc_dtype)
         a_scale = np.array(
             [scales.input_scale] if np.isscalar(scales.input_scale)
             else scales.input_scale, dtype=np.float32)
@@ -151,7 +158,7 @@ class FP8Format:
             network, a_scale.shape, a_scale, dtype=np.float32)
         q_a = network.add_quantize(activation, a_scale_t, trt.fp8)
         dq_a = network.add_dequantize(
-            q_a.get_output(0), a_scale_t, out_trt_dtype)
+            q_a.get_output(0), a_scale_t, acc_dtype)
 
         # Matmul on dequantized tensors (TRT fuses Q/DQ + matmul)
         mm = network.add_matrix_multiply(
