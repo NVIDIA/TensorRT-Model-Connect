@@ -152,8 +152,7 @@ class VLPlugin final : public IPipelinePlugin {
         const std::string cache_k_name =
             kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
         int32_t kv_dim = decoder_cache_row_width(*loaded.module, cache_k_name, ctx.config);
-        // FIX: read the engine's ACTUAL cache dtype (qwen_vl pins KV to fp32 regardless of
-        // --precision; deriving from the precision string undersizes the buffers for bf16/fp16).
+        // KV dtype can differ from --precision; size the cache from the engine, not the string.
         DType cache_dtype = loaded.module->tensor_dtype(cache_k_name);
         std::unique_ptr<IInferenceState> state =
             std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
