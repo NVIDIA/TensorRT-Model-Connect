@@ -982,6 +982,8 @@ def build_bundle(
         extra_kwargs['quant_ctx'] = quant_ctx
     if _call_supports_kwarg(plugin.build_engine, 'parallel_config'):
         extra_kwargs['parallel_config'] = parallel
+    if __import__("os").environ.get("TRTMC_QUANT_DBG"):
+        __import__("sys").stderr.write("[QDBG eb] extra_kwargs=%s quant_ctx_None=%s supports_quant_ctx=%s\n" % (list(extra_kwargs.keys()), quant_ctx is None, _call_supports_kwarg(plugin.build_engine, "quant_ctx")))
 
     def _split_timing_cache_scope(role: str) -> str:
         quant_label = quantize or "noquant"

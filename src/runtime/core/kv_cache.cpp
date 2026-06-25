@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
+#include <iostream>
+#include <cstdint>
 #include <stdexcept>
 
 namespace trtmc {
@@ -331,6 +334,28 @@ void KvCache::advance(int32_t n_tokens) {
                             cudaMemcpyDeviceToDevice, stream_);
         }
         // position_ stays at max_length_ (cache is full, all slots visible)
+    }
+
+    if (std::getenv("TRTMC_VL_DBG")) {
+        static int kvdbg_adv = 0;
+        if (kvdbg_adv < 2) {
+            cudaStreamSynchronize(stream_);
+            auto dump = [&](const char* tag, void* dptr) {
+                unsigned char buf[64];
+                cudaMemcpy(buf, dptr, 64, cudaMemcpyDeviceToHost);
+                std::cerr << "[KVDBG] adv=" << kvdbg_adv << " elem_bytes=" << cache_element_size_ << " " << tag << ":";
+                for (int j = 0; j < 8; ++j) {
+                    float v;
+                    if (cache_element_size_ == 2) { uint16_t b = reinterpret_cast<uint16_t*>(buf)[j]; uint32_t u = static_cast<uint32_t>(b) << 16; std::memcpy(&v, &u, 4); }
+                    else { v = reinterpret_cast<float*>(buf)[j]; }
+                    std::cerr << " " << v;
+                }
+                std::cerr << "\n";
+            };
+            dump("present_k0", present_k_[0].data());
+            dump("cache_k0", cache_k_[0].data());
+            ++kvdbg_adv;
+        }
     }
 }
 

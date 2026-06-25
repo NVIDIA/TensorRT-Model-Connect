@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -322,6 +323,17 @@ void VLPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
     auto n = it->second.numel();
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), it->second.data, n * sizeof(float));
+    if (std::getenv("TRTMC_VL_DBG")) {
+        static int vldbg_step = 0;
+        const int32_t* pid = nullptr; const float* msk = nullptr;
+        auto pit = inputs.find("position_id"); if (pit != inputs.end()) pid = static_cast<const int32_t*>(pit->second.data);
+        auto mit = inputs.find("attention_mask"); if (mit != inputs.end()) msk = static_cast<const float*>(mit->second.data);
+        int amax = 0; float mv = logits.empty() ? 0.0f : logits[0];
+        for (std::size_t k = 1; k < logits.size(); ++k) if (logits[k] > mv) { mv = logits[k]; amax = (int)k; }
+        std::cerr << "[VLDBG] step=" << vldbg_step++ << " tok_in=" << token_id << " pos=" << (pid?pid[0]:-1)
+                  << " argmax=" << amax << " maxlogit=" << mv << " mask0=" << (msk?msk[0]:-9.0f)
+                  << " L012=" << logits[0] << "," << logits[1] << "," << logits[2] << "\n";
+    }
 
     state_->advance();
 }
@@ -405,6 +417,17 @@ void VLPipeline::run_text_step_with_embed(int32_t token_id, const float* input_e
     auto n = it->second.numel();
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), it->second.data, n * sizeof(float));
+    if (std::getenv("TRTMC_VL_DBG")) {
+        static int vldbg_step = 0;
+        const int32_t* pid = nullptr; const float* msk = nullptr;
+        auto pit = inputs.find("position_id"); if (pit != inputs.end()) pid = static_cast<const int32_t*>(pit->second.data);
+        auto mit = inputs.find("attention_mask"); if (mit != inputs.end()) msk = static_cast<const float*>(mit->second.data);
+        int amax = 0; float mv = logits.empty() ? 0.0f : logits[0];
+        for (std::size_t k = 1; k < logits.size(); ++k) if (logits[k] > mv) { mv = logits[k]; amax = (int)k; }
+        std::cerr << "[VLDBG] step=" << vldbg_step++ << " tok_in=" << token_id << " pos=" << (pid?pid[0]:-1)
+                  << " argmax=" << amax << " maxlogit=" << mv << " mask0=" << (msk?msk[0]:-9.0f)
+                  << " L012=" << logits[0] << "," << logits[1] << "," << logits[2] << "\n";
+    }
 
     state_->advance();
 }

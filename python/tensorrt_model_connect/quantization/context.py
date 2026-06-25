@@ -44,6 +44,8 @@ class QuantContext:
         """
         from .. import graph_ops
 
+        if __import__("os").environ.get("TRTMC_QUANT_DBG"):
+            __import__("sys").stderr.write("[QDBG] mqm name=%r sq=%s scale=%s dyn=%s\n" % (weight_name, self.profile.should_quantize(weight_name), self.profile.scale_map.get(weight_name) is not None, self.profile.scale_map.dynamic))
         if self.profile.should_quantize(weight_name):
             scales = self.profile.scale_map.get(weight_name)
             if scales is None:
