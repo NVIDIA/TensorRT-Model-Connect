@@ -90,11 +90,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
-if [ -n "$MODELS_FILE" ]; then
-    E2E_SELECTION_ARGS+=(--e2e-models-file "$MODELS_FILE")
-fi
-
 PHYSICAL_GPU_COUNT="$NUM_GPUS"
 GPU_IDS=()
 for ((gpu_id = 0; gpu_id < PHYSICAL_GPU_COUNT; gpu_id++)); do
@@ -179,7 +174,6 @@ echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
 echo "  Collect args:    ${COLLECT_ARGS[*]:-none}"
 echo "  Manifests:       $MANIFEST_DIR"
-echo "  Selection args:  ${E2E_SELECTION_ARGS[*]}"
 echo "  Models file:     ${MODELS_FILE:-none (collect all)}"
 echo "  Tests file:      ${TESTS_FILE:-none}"
 echo ""
@@ -196,8 +190,27 @@ if [ -n "$TESTS_FILE" ] && [ ! -f "$TESTS_FILE" ]; then
     exit 1
 fi
 
-if [ -n "$TESTS_FILE" ]; then
-    # Selective mode: read pytest node IDs from file (one per line).
+E2E_SELECTION_ARGS=()
+if [ -n "$MODELS_FILE" ]; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle --e2e-models-file "$MODELS_FILE")
+elif [ -z "$TESTS_FILE" ]; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
+elif grep -q '::test_model_e2e\[bundle:' "$TESTS_FILE"; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
+fi
+
+echo "  Selection args:  ${E2E_SELECTION_ARGS[*]:-none}"
+if [ -n "$MODELS_FILE" ] && [ -n "$TESTS_FILE" ]; then
+    echo "  Scheduler source: models file (grouped collection); tests file kept as impact record"
+elif [ -n "$TESTS_FILE" ]; then
+    echo "  Scheduler source: tests file"
+else
+    echo "  Scheduler source: pytest collection"
+fi
+echo ""
+
+if [ -n "$TESTS_FILE" ] && [ -z "$MODELS_FILE" ]; then
+    # Explicit node mode: read pytest node IDs from file (one per line).
     TESTS=$(sed '/^$/d' "$TESTS_FILE" | sort)
 else
     # Full/selective model mode: collect only canonical model E2E files. Helper
