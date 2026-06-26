@@ -9,6 +9,14 @@ in C++ — no Python in the hot path.
 Extra scalar arguments (sm_scale, rope params, etc.) are baked into shape_spec
 JSON and passed by the C++ enqueue() as TVMFFIAny scalars.
 """
+if __name__ != "__main__":
+    import pytest
+
+    pytest.skip(
+        "FlashInfer TVM-FFI smoke script requires explicit direct execution.",
+        allow_module_level=True,
+    )
+
 import ctypes as ct
 import json
 import os

@@ -7,6 +7,14 @@ Builds two TRT engines with Qwen3-0.6B attention dimensions:
 
 Runs 100 decode steps (simulating autoregressive generation) and compares latency.
 """
+if __name__ != "__main__":
+    import pytest
+
+    pytest.skip(
+        "FlashInfer TVM-FFI benchmark script requires explicit direct execution.",
+        allow_module_level=True,
+    )
+
 import ctypes as ct
 import os
 import sys

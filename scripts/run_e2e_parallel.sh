@@ -225,9 +225,22 @@ PY
 )
     echo "  Models file:     $MODELS_FILE ($(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l) tests)"
 else
-    # Full mode: collect all tests via pytest
-    TESTS=$("$HF_PYTHON" -m pytest tests/e2e/models --co -q "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" 2>/dev/null \
-        | grep "test_model_e2e\[" | sort)
+    # Full mode: collect only canonical model E2E files. Helper tests and
+    # benchmark scripts under tests/e2e/models may require optional deps that
+    # are unrelated to the nightly model schedule.
+    mapfile -t E2E_COLLECT_FILES < <(
+        find tests/e2e/models -mindepth 2 -maxdepth 2 -type f \
+            -name 'test_*_e2e.py' | sort
+    )
+    if [ "${#E2E_COLLECT_FILES[@]}" -eq 0 ]; then
+        echo "ERROR: No model E2E collection files found." >&2
+        exit 1
+    fi
+    COLLECTED_TESTS=$(
+        "$HF_PYTHON" -m pytest "${E2E_COLLECT_FILES[@]}" --co -q \
+            "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}"
+    )
+    TESTS=$(printf "%s\n" "$COLLECTED_TESTS" | grep "test_model_e2e\[" | sort || true)
 fi
 TOTAL=$(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l)
 

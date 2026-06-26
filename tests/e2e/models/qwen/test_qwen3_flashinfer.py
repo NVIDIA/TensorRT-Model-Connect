@@ -8,6 +8,14 @@ This script:
 4. Runs autoregressive generation via the debug_runner
 5. Compares latency against the baseline (standard decomposed attention)
 """
+if __name__ != "__main__":
+    import pytest
+
+    pytest.skip(
+        "Qwen FlashInfer smoke script requires explicit direct execution.",
+        allow_module_level=True,
+    )
+
 import ctypes as ct
 import os
 import sys
