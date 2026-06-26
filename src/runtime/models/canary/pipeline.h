@@ -38,7 +38,8 @@ class CanaryPipeline final : public IPipeline {
     const char* pipeline_type() const override { return "CanaryPipeline"; }
 
   private:
-    void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length);
+    void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length,
+                     int32_t valid_mel_frames);
     void setup_cross_attention(int32_t actual_enc_seq_len);
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& initial_tokens,
                                      int32_t max_new_tokens);

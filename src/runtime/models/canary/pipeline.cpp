@@ -95,14 +95,17 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
         return TextResult{"[mel extraction failed]", {}};
     }
 
-    // Step 2: Run encoder
+    // Step 2: Run encoder. The mel is chunk-padded, so mel.n_frames is the full
+    // (padded) length; mel.valid_frames is the real audio length, used to mask
+    // the padded tail in self-attention and to zero-pad the cross-attention K/V.
+    const int32_t valid_mel_frames = mel.valid_frames > 0 ? mel.valid_frames : mel.n_frames;
     std::cerr << "[canary] Running encoder ..." << std::endl;
-    run_encoder(mel.data.data(), mel.n_mels, mel.n_frames);
+    run_encoder(mel.data.data(), mel.n_mels, mel.n_frames, valid_mel_frames);
 
     // Compute actual encoder sequence length for masking
     const int32_t mel_full = resolve_canary_expected_mel_length(canary_config_);
     int32_t actual_enc_seq_len = compute_canary_actual_encoder_length(
-        mel.n_frames, mel_full, canary_config_.max_source_positions);
+        valid_mel_frames, mel_full, canary_config_.max_source_positions);
     if (actual_enc_seq_len > 0) {
         std::cerr << "[canary] Actual encoder seq len: " << actual_enc_seq_len << " / "
                   << canary_config_.max_source_positions << std::endl;
@@ -126,7 +129,8 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     return out;
 }
 
-void CanaryPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length) {
+void CanaryPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length,
+                                 int32_t valid_mel_frames) {
     const int32_t expected_length = resolve_canary_expected_mel_length(canary_config_);
     const std::size_t mel_size =
         static_cast<std::size_t>(mel_bins) * static_cast<std::size_t>(expected_length);
@@ -152,7 +156,7 @@ void CanaryPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32_
     std::vector<float> enc_mask;
     if (encoder_->has_input("encoder_mask")) {
         int32_t actual_enc =
-            compute_canary_actual_encoder_length(mel_length, expected_length, enc_seq);
+            compute_canary_actual_encoder_length(valid_mel_frames, expected_length, enc_seq);
         if (actual_enc <= 0)
             actual_enc = enc_seq;
         enc_mask = build_canary_encoder_mask_values(enc_seq, actual_enc);
