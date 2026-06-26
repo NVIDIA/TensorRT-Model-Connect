@@ -241,3 +241,54 @@ suites:
         Intended for local/p2021 validation first. Pass --dataset for
         machine-specific data roots such as
         /localhome/.../trtmc/data/OCRBench_v2_repaired.
+
+  - id: librispeech_clean_asr
+    description: >
+      Local ASR transcript evaluation on LibriSpeech clean test samples. This
+      validates speech-to-text bundles against reference transcripts and records
+      HF-reference agreement separately from transcript accuracy.
+    user_contract: exact_transcript
+    dataset:
+      kind: asr_chat_json
+      default_path: /mnt/data/librispeech_clean_test/librispeech_clean_test.json
+      answer_field: reference
+      subject_field: subset
+      prompt_source: messages
+      audio_source: messages
+      max_audio_per_sample: 1
+    selectors:
+      task_strategies:
+        - speech_to_text
+      runtime_strategies:
+        - whisper_speech_to_text
+        - canary_speech_to_text
+      families:
+        - whisper
+        - canary
+      exclude_families:
+        - nemotron_speech_streaming
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      sample_rate: 16000
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: asr_transcript
+    build:
+      min_max_cache_length: 0
+    gates:
+      max_accuracy_drop_from_hf: 0.05
+      min_prediction_agreement: 0.90
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Intended for local/p2021 validation first. Pass --dataset for
+        machine-specific data roots such as
+        /localhome/local-chaofengw/trtmc/data/updated_datasets.

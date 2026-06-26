@@ -11,6 +11,7 @@ import math
 import os
 import random
 import re
+import shutil
 import traceback
 import subprocess
 import sys
@@ -384,6 +385,20 @@ def _message_image_refs(message: dict[str, Any]) -> list[str]:
     return refs
 
 
+def _message_audio_refs(message: dict[str, Any]) -> list[str]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    refs: list[str] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "audio":
+            continue
+        value = item.get("audio") or item.get("path")
+        if isinstance(value, str):
+            refs.append(value)
+    return refs
+
+
 def _unified_image_ref(item: dict[str, Any]) -> str:
     value = item.get("image") or item.get("path")
     return value if isinstance(value, str) else ""
@@ -557,6 +572,61 @@ def vlm_request_images(dataset_path: Path, request: dict[str, Any]) -> list[Path
     return [resolve_dataset_asset_path(dataset_path, ref) for ref in refs]
 
 
+def asr_request_audio_refs(request: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                refs.extend(_message_audio_refs(msg))
+    if not refs and isinstance(request.get("audio"), str):
+        refs.append(str(request["audio"]))
+    return refs
+
+
+def asr_request_audio(dataset_path: Path, request: dict[str, Any]) -> Path:
+    refs = asr_request_audio_refs(request)
+    if len(refs) != 1:
+        raise ValueError(f"ASR task eval expects exactly one audio asset per sample; found {len(refs)}")
+    return resolve_dataset_asset_path(dataset_path, refs[0])
+
+
+def asr_request_prompt(request: dict[str, Any]) -> str:
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        parts: list[str] = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                parts.extend(_message_text_parts(msg))
+        if parts:
+            return "\n\n".join(part.strip() for part in parts if part.strip())
+    prompt = request.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    return "Please transcribe the following audio."
+
+
+def validate_asr_dataset_assets(
+    dataset_path: Path,
+    indexed: list[tuple[int, dict[str, Any]]],
+) -> None:
+    missing: list[tuple[int, str, str]] = []
+    for dataset_index, request in indexed:
+        sample_id = str(request.get("id") or f"asr_{dataset_index:06d}")
+        for ref in asr_request_audio_refs(request):
+            if not any(candidate.is_file() for candidate in _candidate_dataset_asset_paths(dataset_path, ref)):
+                missing.append((dataset_index, sample_id, ref))
+    if missing:
+        examples = "; ".join(
+            f"dataset_index={idx} sample_id={sample_id} ref={ref!r}"
+            for idx, sample_id, ref in missing[:5]
+        )
+        raise FileNotFoundError(
+            f"ASR dataset has {len(missing)} missing audio asset(s) for "
+            f"{dataset_path}; first missing: {examples}"
+        )
+
+
 def validate_vlm_dataset_assets(
     dataset_path: Path,
     indexed: list[tuple[int, dict[str, Any]]],
@@ -593,6 +663,44 @@ def _resize_image_to_square(src: Path, dst: Path, image_size: int) -> None:
         rgb = image.convert("RGB")
         resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC", Image.BICUBIC)
         rgb.resize((image_size, image_size), resampling).save(dst)
+
+
+def _convert_audio_to_wav(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.suffix.lower() == ".wav":
+        shutil.copyfile(src, dst)
+        return
+    try:
+        import soundfile as sf
+
+        data, sample_rate = sf.read(src, always_2d=False)
+        sf.write(dst, data, sample_rate, subtype="PCM_16")
+        return
+    except Exception:
+        pass
+    try:
+        import torchaudio
+
+        waveform, sample_rate = torchaudio.load(str(src))
+        torchaudio.save(str(dst), waveform, sample_rate)
+        return
+    except Exception:
+        pass
+    converters = [
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), str(dst)],
+        ["sox", str(src), str(dst)],
+        ["flac", "-d", "-f", "-o", str(dst), str(src)],
+    ]
+    for cmd in converters:
+        if not shutil.which(cmd[0]):
+            continue
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return
+    raise RuntimeError(
+        f"Could not convert audio asset {src} to WAV. Install soundfile, torchaudio, "
+        "ffmpeg, sox, or flac in the environment running task eval prepare."
+    )
 
 
 def _normalized_single_user_vlm_request(
@@ -659,6 +767,117 @@ def load_vlm_unified_requests(
     if limit > 0:
         indexed = indexed[:limit]
     return data, indexed
+
+
+def _request_answer_from_field(request: dict[str, Any], answer_field: str) -> str:
+    value: Any = request
+    for part in answer_field.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"ASR request is missing answer field {answer_field!r}")
+        value = value[part]
+    return str(value)
+
+
+def load_asr_chat_requests(
+    dataset_path: Path,
+    *,
+    limit: int = 0,
+    subject: str = "",
+    subject_field: str = "subject",
+    sample_seed: int | None = None,
+) -> tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed = [
+        (idx, req)
+        for idx, req in enumerate(requests)
+        if isinstance(req, dict)
+        and (not subject or str(req.get(subject_field, req.get("subject", ""))) == subject)
+    ]
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    return data, indexed
+
+
+def prepare_asr_chat_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_cfg = suite.get("dataset", {})
+    answer_field = str(dataset_cfg.get("answer_field", "reference"))
+    subject_field = str(dataset_cfg.get("subject_field", "subject"))
+    data, indexed = load_asr_chat_requests(
+        dataset_path,
+        limit=limit,
+        subject=subject,
+        subject_field=subject_field,
+        sample_seed=sample_seed,
+    )
+    validate_asr_dataset_assets(dataset_path, indexed)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+
+    output_requests: list[dict[str, Any]] = []
+    audio_count = 0
+    with prompts_path.open("w", encoding="utf-8") as f:
+        for out_idx, (dataset_index, request) in enumerate(indexed):
+            sample_id = str(request.get("id") or f"asr_{dataset_index:06d}")
+            answer = _request_answer_from_field(request, answer_field)
+            subject_value = str(request.get(subject_field, request.get("subject", "")))
+            source_audio = asr_request_audio(dataset_path, request)
+            output_audio = work_dir / "audio" / _safe_sample_filename(sample_id, ".wav")
+            _convert_audio_to_wav(source_audio, output_audio)
+            audio_count += 1
+            output_request = dict(request)
+            output_request["answer"] = answer
+            output_request["subject"] = subject_value
+            output_request["audio"] = str(output_audio)
+            output_requests.append(output_request)
+            sample = {
+                "sample_id": sample_id,
+                "dataset_index": dataset_index,
+                "eval_index": out_idx,
+                "subject": subject_value,
+                "answer": answer,
+                "prompt": asr_request_prompt(request),
+                "audio": str(output_audio),
+            }
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    answers = _copy_dataset_header(data, output_requests)
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(indexed),
+        "audio_count": audio_count,
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": suite.get("generation", {}),
+        "files": {
+            "answers": str(answers_path),
+            "prompts": str(prompts_path),
+        },
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
 def _prepare_vlm_requests(
@@ -850,6 +1069,16 @@ def prepare_task_dataset(
             sample_seed=sample_seed,
             task_eval_config=task_eval_config,
         )
+    if dataset_kind == "asr_chat_json":
+        return prepare_asr_chat_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
     raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
 
 
@@ -953,6 +1182,25 @@ def predictions_file_valid(
     if require_token_ids:
         return all(isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses)
     return True
+
+
+def _parse_generated_token_ids(text: str) -> list[int] | None:
+    for line in str(text or "").splitlines():
+        if not line.strip().startswith("tokens:"):
+            continue
+        try:
+            return [int(token) for token in line.split(":", 1)[1].strip().split()]
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _parse_transcribe_stdout(text: str) -> str:
+    for line in str(text or "").splitlines():
+        cleaned = re.sub(r"<\|[^|]+\|>", "", line).strip()
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
@@ -1078,6 +1326,77 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
     write_predictions(predictions, rows)
 
 
+def run_asr_trtfb(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    defaults = generation_defaults(work_dir)
+    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
+        defaults.get("max_new_tokens", 100)
+    )
+
+    env = os.environ.copy()
+    if args.cuda_visible_devices:
+        env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+
+    rows: list[dict[str, Any]] = []
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            audio_path = str(prompt_row.get("audio", ""))
+            if not audio_path:
+                raise ValueError(f"ASR TRTFB run expects an audio path for sample {idx}")
+            cmd = [
+                _trtmc_binary_from_args(args),
+                "transcribe",
+                args.bundle,
+                "--audio",
+                audio_path,
+                "--max-new-tokens",
+                str(max_new_tokens),
+            ]
+            if args.hf_python:
+                cmd.extend(["--hf-python", args.hf_python])
+
+            log_f.write(f"$ {' '.join(cmd)}\n")
+            start = time.perf_counter()
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            if proc.stdout:
+                log_f.write(proc.stdout)
+                if not proc.stdout.endswith("\n"):
+                    log_f.write("\n")
+            if proc.stderr:
+                log_f.write(proc.stderr)
+                if not proc.stderr.endswith("\n"):
+                    log_f.write("\n")
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"ASR TRTFB task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                )
+            generated_token_ids = _parse_generated_token_ids(proc.stderr)
+            row = {
+                "sample_id": prompt_row.get("sample_id", f"asr_{idx:06d}"),
+                "output_text": _parse_transcribe_stdout(proc.stdout),
+                "generated_tokens": len(generated_token_ids) if generated_token_ids is not None else None,
+                "generated_token_ids": generated_token_ids,
+                "wall_ms": wall_ms,
+                "source": "trtfb",
+            }
+            rows.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.asr_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+    write_predictions(predictions, rows)
+
+
 def clean_text(text: str) -> str:
     text = re.sub(r"(?:<think>)?.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<\|.*?\|>", "", text)
@@ -1122,6 +1441,194 @@ def request_answer_values(request: dict[str, Any]) -> list[str]:
 
 def is_correct_for_request(prediction: str, request: dict[str, Any]) -> bool:
     return any(is_correct(prediction, answer) for answer in request_answer_values(request))
+
+
+def normalize_asr_transcript(text: str) -> str:
+    text = clean_text(str(text or "")).lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"_", " ", text)
+    return " ".join(text.split())
+
+
+def _edit_breakdown(ref_items: list[Any], hyp_items: list[Any]) -> dict[str, int]:
+    rows = len(ref_items) + 1
+    cols = len(hyp_items) + 1
+    dp = [[0] * cols for _ in range(rows)]
+    for i in range(1, rows):
+        dp[i][0] = i
+    for j in range(1, cols):
+        dp[0][j] = j
+
+    for i in range(1, rows):
+        for j in range(1, cols):
+            sub_cost = 0 if ref_items[i - 1] == hyp_items[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j - 1] + sub_cost,
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+            )
+
+    i = len(ref_items)
+    j = len(hyp_items)
+    matches = substitutions = insertions = deletions = 0
+    while i > 0 or j > 0:
+        if (
+            i > 0
+            and j > 0
+            and ref_items[i - 1] == hyp_items[j - 1]
+            and dp[i][j] == dp[i - 1][j - 1]
+        ):
+            matches += 1
+            i -= 1
+            j -= 1
+        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
+            substitutions += 1
+            i -= 1
+            j -= 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
+            deletions += 1
+            i -= 1
+        else:
+            insertions += 1
+            j -= 1
+
+    return {
+        "matches": matches,
+        "substitutions": substitutions,
+        "insertions": insertions,
+        "deletions": deletions,
+    }
+
+
+def _edit_error_count(breakdown: dict[str, int]) -> int:
+    return int(breakdown["substitutions"] + breakdown["insertions"] + breakdown["deletions"])
+
+
+def _word_error_rate(ref_words: list[str], hyp_words: list[str]) -> tuple[float, dict[str, int]]:
+    breakdown = _edit_breakdown(ref_words, hyp_words)
+    if not ref_words:
+        return (0.0 if not hyp_words else 1.0), breakdown
+    return _edit_error_count(breakdown) / len(ref_words), breakdown
+
+
+def _character_error_rate(ref_text: str, hyp_text: str) -> tuple[float, dict[str, int]]:
+    breakdown = _edit_breakdown(list(ref_text), list(hyp_text))
+    if not ref_text:
+        return (0.0 if not hyp_text else 1.0), breakdown
+    return _edit_error_count(breakdown) / len(ref_text), breakdown
+
+
+def _normalized_edit_distance(prediction: str, reference: str) -> float:
+    if not prediction and not reference:
+        return 0.0
+    max_len = max(len(prediction), len(reference))
+    if max_len == 0:
+        return 0.0
+    breakdown = _edit_breakdown(list(reference), list(prediction))
+    return _edit_error_count(breakdown) / max_len
+
+
+def score_asr_transcript_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    max_wer: float = 0.1,
+    max_cer: float = 0.05,
+    max_ned: float = 0.1,
+) -> dict[str, Any]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            f"Predictions and answers must have the same length: "
+            f"{len(responses)} != {len(requests)}"
+        )
+
+    correct = 0
+    exact = 0
+    skipped = 0
+    subject_stats: dict[str, Counter[str]] = defaultdict(Counter)
+    samples: list[dict[str, Any]] = []
+    sample_wers: list[float] = []
+    sample_cers: list[float] = []
+    sample_neds: list[float] = []
+    for idx, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        output_text = str(response.get("output_text", ""))
+        subject = str(request.get("subject", ""))
+        answer = str(request["answer"])
+        normalized_answer = normalize_asr_transcript(answer)
+        if output_text == ERROR_OUTPUT_TEXT:
+            skipped += 1
+            samples.append({
+                "index": idx,
+                "sample_id": response.get("sample_id", f"sample_{idx}"),
+                "subject": subject,
+                "answer": answer,
+                "normalized_answer": normalized_answer,
+                "prediction": output_text,
+                "normalized_prediction": "",
+                "skipped": True,
+                "correct": False,
+                "score": 0.0,
+            })
+            continue
+
+        normalized_prediction = normalize_asr_transcript(output_text)
+        ref_words = normalized_answer.split()
+        hyp_words = normalized_prediction.split()
+        wer, wer_breakdown = _word_error_rate(ref_words, hyp_words)
+        cer, cer_breakdown = _character_error_rate(normalized_answer, normalized_prediction)
+        ned = _normalized_edit_distance(normalized_prediction, normalized_answer)
+        exact_match = normalized_prediction == normalized_answer
+        ok = bool(exact_match or (wer <= max_wer and cer <= max_cer and ned <= max_ned))
+        correct += int(ok)
+        exact += int(exact_match)
+        sample_wers.append(wer)
+        sample_cers.append(cer)
+        sample_neds.append(ned)
+        subject_stats[subject]["total"] += 1
+        subject_stats[subject]["correct"] += int(ok)
+        samples.append({
+            "index": idx,
+            "sample_id": response.get("sample_id", f"sample_{idx}"),
+            "subject": subject,
+            "answer": answer,
+            "normalized_answer": normalized_answer,
+            "prediction": output_text,
+            "normalized_prediction": normalized_prediction,
+            "word_error_rate": wer,
+            "character_error_rate": cer,
+            "normalized_edit_distance": ned,
+            "wer_breakdown": wer_breakdown,
+            "cer_breakdown": cer_breakdown,
+            "exact_match": exact_match,
+            "skipped": False,
+            "correct": ok,
+            "score": 1.0 if ok else 0.0,
+        })
+
+    valid = len(requests) - skipped
+    subject_accuracy = {}
+    for subject, stats in sorted(subject_stats.items()):
+        total = int(stats["total"])
+        subject_accuracy[subject] = {
+            "accuracy": (int(stats["correct"]) / total) if total else 0.0,
+            "correct": int(stats["correct"]),
+            "total": total,
+        }
+    return {
+        "overall_accuracy": (correct / valid) if valid else 0.0,
+        "exact_match_rate": (exact / valid) if valid else 0.0,
+        "word_error_rate": _mean(sample_wers),
+        "character_error_rate": _mean(sample_cers),
+        "normalized_edit_distance": _mean(sample_neds),
+        "correct": correct,
+        "valid_count": valid,
+        "skipped_count": skipped,
+        "total_count": len(requests),
+        "subject_accuracy": subject_accuracy,
+        "samples": samples,
+    }
 
 
 OCRBENCH_EN_GROUPS = {
@@ -1872,6 +2379,8 @@ def score_predictions(
 ) -> dict[str, Any]:
     if scorer == "ocrbench_v2":
         return score_ocrbench_v2_predictions(predictions_data, answers_data)
+    if scorer == "asr_transcript":
+        return score_asr_transcript_predictions(predictions_data, answers_data)
 
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
@@ -1959,13 +2468,17 @@ def compare_prediction_sets(
     disagreements: list[dict[str, Any]] = []
     for idx, (hf_row, trt_row, req) in enumerate(zip(hf_responses, trt_responses, requests, strict=True)):
         answer = str(req["answer"])
-        hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
-        trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
+        if scorer == "asr_transcript":
+            hf_pred = normalize_asr_transcript(str(hf_row.get("output_text", "")))
+            trt_pred = normalize_asr_transcript(str(trt_row.get("output_text", "")))
+        else:
+            hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
+            trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
         hf_sample = hf_score["samples"][idx]
         trtfb_sample = trtfb_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
         trt_ok = bool(trtfb_sample.get("correct", False))
-        agreement_match = (hf_ok == trt_ok) if scorer == "ocrbench_v2" else (hf_pred == trt_pred)
+        agreement_match = (hf_ok == trt_ok) if scorer in {"ocrbench_v2", "asr_transcript"} else (hf_pred == trt_pred)
         agreement += int(agreement_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
@@ -2052,6 +2565,17 @@ def _is_vlm_dataset_kind(kind: str) -> bool:
     return kind in {"vlm_chat_json", "vlm_unified_json"}
 
 
+def _is_asr_dataset_kind(kind: str) -> bool:
+    return kind in {"asr_chat_json"}
+
+
+def _is_canary_asr_reference(args: argparse.Namespace) -> bool:
+    reference_family = str(getattr(args, "reference_family", "") or "").lower()
+    family = str(getattr(args, "family", "") or "").lower()
+    model = str(getattr(args, "model", "") or "").lower()
+    return reference_family == "asr_canary" or family == "canary" or "canary" in model
+
+
 def _model_dtype(torch_mod: Any, dtype_name: str) -> Any:
     if dtype_name == "float16":
         return torch_mod.float16
@@ -2070,6 +2594,78 @@ def _load_pil_images(image_paths: list[str]) -> list[Any]:
         with Image.open(image_path) as image:
             images.append(image.convert("RGB"))
     return images
+
+
+def _read_wav_float32(path: str) -> tuple[Any, int]:
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("ASR HF reference requires numpy to read WAV audio") from exc
+    import wave
+
+    with wave.open(path, "rb") as wav_f:
+        channels = wav_f.getnchannels()
+        sample_width = wav_f.getsampwidth()
+        sample_rate = wav_f.getframerate()
+        frames = wav_f.readframes(wav_f.getnframes())
+    if sample_width == 2:
+        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        audio = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif sample_width == 1:
+        audio = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise RuntimeError(f"Unsupported WAV sample width {sample_width} bytes for {path}")
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    return audio, sample_rate
+
+
+def _resample_audio(audio: Any, source_sr: int, target_sr: int) -> Any:
+    if source_sr == target_sr:
+        return audio
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("ASR HF reference requires numpy to resample audio") from exc
+    if len(audio) == 0:
+        return audio
+    target_len = max(1, int(len(audio) * target_sr / source_sr))
+    source_x = np.arange(len(audio), dtype=np.float32)
+    target_x = np.linspace(0, len(audio) - 1, target_len, dtype=np.float32)
+    return np.interp(target_x, source_x, audio).astype(np.float32)
+
+
+def _write_wav_pcm16(path: Path, audio: Any, sample_rate: int) -> None:
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("ASR HF reference requires numpy to write WAV audio") from exc
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    audio_array = np.asarray(audio, dtype=np.float32)
+    if audio_array.ndim > 1:
+        audio_array = audio_array.mean(axis=1)
+    pcm = np.clip(audio_array * 32768.0, -32768, 32767).astype("<i2")
+    with wave.open(str(path), "wb") as wav_f:
+        wav_f.setnchannels(1)
+        wav_f.setsampwidth(2)
+        wav_f.setframerate(sample_rate)
+        wav_f.writeframes(pcm.tobytes())
+
+
+def _transcription_text(transcriptions: Any) -> str:
+    value = transcriptions
+    if isinstance(value, list):
+        if not value:
+            return ""
+        value = value[0]
+    if hasattr(value, "text"):
+        return str(value.text)
+    if isinstance(value, dict):
+        return str(value.get("text", ""))
+    return str(value)
 
 
 def _vlm_model_classes(transformers_mod: Any) -> list[Any]:
@@ -2388,9 +2984,231 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
+def run_asr_hf_reference(args: argparse.Namespace) -> None:
+    if _is_canary_asr_reference(args):
+        _run_canary_hf_reference(args)
+        return
+
+    try:
+        import torch
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, logging
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("ASR run-hf requires torch and transformers") from exc
+
+    work_dir = Path(args.work_dir)
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    if len(prompt_rows) != len(answers["requests"]):
+        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
+    defaults = generation_defaults(work_dir)
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
+        defaults.get("max_new_tokens", 100)
+    )
+    seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
+
+    logging.set_verbosity_error()
+    processor = AutoProcessor.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    model_kwargs = {
+        "torch_dtype": _model_dtype(torch, args.dtype),
+        "trust_remote_code": args.trust_remote_code,
+        "local_files_only": args.local_files_only,
+    }
+    if args.device_map:
+        model_kwargs["device_map"] = args.device_map
+    if args.attn_impl:
+        model_kwargs["attn_implementation"] = args.attn_impl
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(args.model, **model_kwargs).eval()
+    if not args.device_map:
+        device = torch.device(args.device)
+        model.to(device)
+    else:
+        device = model.device
+    model_dtype = next(model.parameters()).dtype
+    target_sr = int(getattr(processor.feature_extractor, "sampling_rate", 16000))
+
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, _request in enumerate(answers["requests"]):
+            prompt_row = prompt_rows[idx]
+            audio_path = str(prompt_row.get("audio", ""))
+            if not audio_path:
+                raise ValueError(f"ASR HF reference expects an audio path for sample {idx}")
+            audio, sample_rate = _read_wav_float32(audio_path)
+            audio = _resample_audio(audio, sample_rate, target_sr)
+            inputs = processor(audio, sampling_rate=target_sr, return_tensors="pt")
+            inputs = {
+                key: (
+                    value.to(device=device, dtype=model_dtype)
+                    if hasattr(value, "is_floating_point") and value.is_floating_point()
+                    else value.to(device)
+                    if hasattr(value, "to")
+                    else value
+                )
+                for key, value in inputs.items()
+            }
+            if seed >= 0:
+                torch.manual_seed(seed + idx)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed + idx)
+            start = time.perf_counter()
+            with torch.inference_mode():
+                output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            output_text = processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+            generated_token_ids = [int(token_id) for token_id in output_ids[0].tolist()]
+            row = {
+                "sample_id": prompt_row.get("sample_id", f"asr_{idx:06d}"),
+                "output_text": output_text,
+                "generated_tokens": len(generated_token_ids),
+                "generated_token_ids": generated_token_ids,
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.asr_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+    write_predictions(pred_path, responses)
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _run_canary_hf_reference(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    if len(prompt_rows) != len(answers["requests"]):
+        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
+    defaults = generation_defaults(work_dir)
+    target_sr = int(defaults.get("sample_rate", 16000) or 16000)
+
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    canary_audio_dir = work_dir / "hf_canary_audio"
+
+    try:
+        import nemo.collections.asr as nemo_asr
+    except ImportError:
+        _run_canary_hf_pipeline_reference(
+            args=args,
+            prompt_rows=prompt_rows,
+            raw_path=raw_path,
+            pred_path=pred_path,
+            target_sr=target_sr,
+            canary_audio_dir=canary_audio_dir,
+        )
+        return
+
+    map_location = str(getattr(args, "device", "") or "cpu")
+    model = nemo_asr.models.ASRModel.from_pretrained(args.model, map_location=map_location)
+    try:
+        if map_location and map_location != "cpu" and hasattr(model, "to"):
+            model = model.to(map_location)
+    except Exception:
+        pass
+    model.eval()
+
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
+            audio_path = str(prompt_row.get("audio", ""))
+            if not audio_path:
+                raise ValueError(f"Canary HF reference expects an audio path for sample {idx}")
+            audio, sample_rate = _read_wav_float32(audio_path)
+            audio = _resample_audio(audio, sample_rate, target_sr)
+            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
+            _write_wav_pcm16(mono_path, audio, target_sr)
+            start = time.perf_counter()
+            transcriptions = model.transcribe([str(mono_path)], batch_size=1)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            row = {
+                "sample_id": sample_id,
+                "output_text": _transcription_text(transcriptions),
+                "generated_tokens": None,
+                "generated_token_ids": None,
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.canary_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+    write_predictions(pred_path, responses)
+    del model
+    gc.collect()
+
+
+def _run_canary_hf_pipeline_reference(
+    *,
+    args: argparse.Namespace,
+    prompt_rows: list[dict[str, Any]],
+    raw_path: Path,
+    pred_path: Path,
+    target_sr: int,
+    canary_audio_dir: Path,
+) -> None:
+    try:
+        import torch
+        from transformers import pipeline
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("Canary ASR reference requires NeMo or transformers pipeline") from exc
+
+    device = 0 if str(getattr(args, "device", "")).startswith("cuda") and torch.cuda.is_available() else -1
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=args.model,
+        torch_dtype=_model_dtype(torch, getattr(args, "dtype", "auto")),
+        device=device,
+        model_kwargs={
+            "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
+            "local_files_only": bool(getattr(args, "local_files_only", False)),
+        },
+    )
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
+            audio_path = str(prompt_row.get("audio", ""))
+            if not audio_path:
+                raise ValueError(f"Canary HF pipeline reference expects an audio path for sample {idx}")
+            audio, sample_rate = _read_wav_float32(audio_path)
+            audio = _resample_audio(audio, sample_rate, target_sr)
+            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
+            _write_wav_pcm16(mono_path, audio, target_sr)
+            start = time.perf_counter()
+            result = pipe(str(mono_path))
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            row = {
+                "sample_id": sample_id,
+                "output_text": _transcription_text(result),
+                "generated_tokens": None,
+                "generated_token_ids": None,
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.canary_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+    write_predictions(pred_path, responses)
+
+
 def run_hf_reference(args: argparse.Namespace) -> None:
-    if _is_vlm_dataset_kind(_work_dataset_kind(Path(args.work_dir))):
+    dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_vlm_dataset_kind(dataset_kind):
         run_vlm_hf_reference(args)
+        return
+    if _is_asr_dataset_kind(dataset_kind):
+        run_asr_hf_reference(args)
         return
     try:
         import torch
@@ -2507,8 +3325,12 @@ def run_hf_reference(args: argparse.Namespace) -> None:
 
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
-    if _is_vlm_dataset_kind(_work_dataset_kind(work_dir)):
+    dataset_kind = _work_dataset_kind(work_dir)
+    if _is_vlm_dataset_kind(dataset_kind):
         run_vlm_trtfb(args)
+        return
+    if _is_asr_dataset_kind(dataset_kind):
+        run_asr_trtfb(args)
         return
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
@@ -2759,6 +3581,8 @@ def selected_models_for_suite(
 def _namespace_for_run_hf(args: argparse.Namespace, model: dict[str, Any], work_dir: Path) -> argparse.Namespace:
     return argparse.Namespace(
         model=model["hf_id"],
+        family=model.get("family", ""),
+        reference_family=model.get("reference_family", ""),
         work_dir=str(work_dir),
         predictions="hf_predictions.json",
         raw_output="hf_raw.jsonl",
@@ -2821,6 +3645,8 @@ def run_hf_reference_subprocess(
         str(Path(__file__).resolve()),
         "run-hf",
         "--model", str(hf_args.model),
+        "--family", str(hf_args.family),
+        "--reference-family", str(hf_args.reference_family),
         "--work-dir", str(hf_args.work_dir),
         "--predictions", str(hf_args.predictions),
         "--raw-output", str(hf_args.raw_output),
@@ -2875,6 +3701,7 @@ def eval_one_model(
     if not dataset_path:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
+    dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
     task_eval_config = model.get("task_eval", {})
     if not isinstance(task_eval_config, dict):
@@ -2906,7 +3733,7 @@ def eval_one_model(
         bundle_path = engine_dir / str(model["bundle"])
 
     max_prompt_len = None
-    if not args.skip_prompt_length_check:
+    if not args.skip_prompt_length_check and not _is_asr_dataset_kind(dataset_kind):
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
             model_id=str(model["hf_id"]),
@@ -3257,6 +4084,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run-hf")
     p.add_argument("--model", required=True)
+    p.add_argument("--family", default="")
+    p.add_argument("--reference-family", default="")
     p.add_argument("--work-dir", required=True)
     p.add_argument("--predictions")
     p.add_argument("--raw-output")
@@ -3716,7 +4545,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json", "vlm_unified_json"}:
+    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json", "vlm_unified_json", "asr_chat_json"}:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
     waives = load_waives(Path(args.waives), args.waive_platform) if args.waives else {}

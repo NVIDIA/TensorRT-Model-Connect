@@ -103,6 +103,32 @@ def _write_ocrbench_unified(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_asr_librispeech(path: Path) -> None:
+    audio_path = path.parent / "audio" / "sample.wav"
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_path.write_bytes(b"fake wav bytes")
+    payload = {
+        "dataset": "librispeech_clean_test",
+        "requests": [
+            {
+                "id": "clean_000000",
+                "subset": "test-clean",
+                "reference": "The quick brown fox",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio": "audio/sample.wav"},
+                            {"type": "text", "text": "Transcribe this audio."},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_default_suites_include_ocrbench_v2_unified() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
@@ -111,6 +137,27 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
     assert suite["scoring"]["scorer"] == "ocrbench_v2"
     assert suite["selectors"]["runtime_strategies"] == ["deepseek_ocr_vision_language"]
     assert suite["selectors"]["families"] == ["deepseek_ocr"]
+
+
+def test_default_suites_include_librispeech_clean_asr() -> None:
+    suites = task_eval.load_suites()
+    suite = task_eval.suite_by_id(suites, "librispeech_clean_asr")
+
+    assert suite["dataset"]["kind"] == "asr_chat_json"
+    assert suite["scoring"]["scorer"] == "asr_transcript"
+    assert suite["selectors"]["runtime_strategies"] == [
+        "whisper_speech_to_text",
+        "canary_speech_to_text",
+    ]
+    assert suite["selectors"]["families"] == ["whisper", "canary"]
+
+
+def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
+    suite_ids = {suite["id"] for suite in task_eval.load_suites()}
+
+    assert "librispeech_clean_asr" in suite_ids
+    assert "librispeech_clean_asr_whisper" not in suite_ids
+    assert "librispeech_clean_asr_canary" not in suite_ids
 
 
 def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
@@ -308,6 +355,20 @@ def test_plan_selects_ocrbench_v2_unified_models() -> None:
     assert "locateanything-3b" not in selected
 
 
+def test_plan_selects_librispeech_asr_models() -> None:
+    suites = task_eval.load_suites()
+    models = task_eval.load_manifest_records()
+
+    rows = task_eval.build_plan(suites, models, suite_id="librispeech_clean_asr")
+
+    selected = {row["model"]: row for row in rows}
+    assert "whisper-tiny-fp16" in selected
+    assert selected["whisper-tiny-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
+    assert "canary-1b-v2" in selected
+    assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
+    assert "nemotron-nano-v2-speech-embedded" not in selected
+
+
 def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
@@ -438,6 +499,69 @@ def test_prepare_ocrbench_unified_reports_missing_images(tmp_path: Path) -> None
         assert "images/ocrbench_v2_000000.jpg" in message
     else:
         raise AssertionError("expected missing-image validation failure")
+
+
+def test_prepare_asr_chat_dataset_writes_audio_prompt_jsonl(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "librispeech_clean_test"
+    dataset_dir.mkdir()
+    dataset = dataset_dir / "librispeech_clean_test.json"
+    _write_asr_librispeech(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+
+    outputs = task_eval.prepare_asr_chat_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    prepared_audio = tmp_path / "work" / "audio" / "clean_000000.wav"
+
+    assert prepared_audio.is_file()
+    assert len(answers["requests"]) == 1
+    assert answers["requests"][0]["answer"] == "The quick brown fox"
+    assert answers["requests"][0]["subject"] == "test-clean"
+    assert answers["requests"][0]["audio"] == str(prepared_audio)
+    assert prompts == [{
+        "sample_id": "clean_000000",
+        "dataset_index": 0,
+        "eval_index": 0,
+        "subject": "test-clean",
+        "answer": "The quick brown fox",
+        "prompt": "Transcribe this audio.",
+        "audio": str(prepared_audio),
+    }]
+    assert manifest["suite"] == "librispeech_clean_asr"
+    assert manifest["dataset_kind"] == "asr_chat_json"
+    assert manifest["request_count"] == 1
+    assert manifest["audio_count"] == 1
+
+
+def test_prepare_asr_chat_dataset_reports_missing_audio(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "librispeech_clean_test"
+    dataset_dir.mkdir()
+    dataset = dataset_dir / "librispeech_clean_test.json"
+    _write_asr_librispeech(dataset)
+    (dataset_dir / "audio" / "sample.wav").unlink()
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+
+    try:
+        task_eval.prepare_asr_chat_dataset(
+            dataset_path=dataset,
+            work_dir=tmp_path / "work",
+            suite=suite,
+            limit=1,
+        )
+    except FileNotFoundError as exc:
+        message = str(exc)
+        assert "1 missing audio asset" in message
+        assert "clean_000000" in message
+        assert "audio/sample.wav" in message
+    else:
+        raise AssertionError("expected missing-audio validation failure")
 
 
 def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(
@@ -848,6 +972,70 @@ def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
     assert summary["disagreements"][0]["trtfb_correct"] is False
 
 
+def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
+    answers = {"requests": [
+        {"answer": "Hello, world!", "subject": "test-clean"},
+        {"answer": "The quick brown fox", "subject": "test-clean"},
+    ]}
+    predictions = {"responses": [
+        {"sample_id": "a", "output_text": "hello world"},
+        {"sample_id": "b", "output_text": "the quick brown box"},
+    ]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+
+    assert score["overall_accuracy"] == 0.5
+    assert score["exact_match_rate"] == 0.5
+    assert score["correct"] == 1
+    assert score["samples"][0]["normalized_answer"] == "hello world"
+    assert score["samples"][0]["exact_match"] is True
+    assert score["samples"][1]["word_error_rate"] == 0.25
+    assert score["samples"][1]["correct"] is False
+
+
+def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
+    answers = {"requests": [
+        {"answer": "alpha beta gamma", "subject": "test-clean"},
+        {"answer": "delta epsilon", "subject": "test-clean"},
+    ]}
+    predictions = {"responses": [
+        {"sample_id": "a", "output_text": "wrong words here"},
+        {"sample_id": "b", "output_text": task_eval.ERROR_OUTPUT_TEXT},
+    ]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+
+    assert score["overall_accuracy"] == 0.0
+    assert score["valid_count"] == 1
+    assert score["skipped_count"] == 1
+    assert score["samples"][0]["word_error_rate"] == 1.0
+    assert score["samples"][1]["skipped"] is True
+
+
+def test_asr_transcript_agreement_uses_correctness_thresholds() -> None:
+    answers = {"requests": [
+        {"answer": "alpha beta", "subject": "test-clean"},
+        {"answer": "gamma delta", "subject": "test-clean"},
+    ]}
+    hf = {"responses": [
+        {"sample_id": "same_correctness", "output_text": "alpha beta"},
+        {"sample_id": "hf_correct", "output_text": "gamma delta"},
+    ]}
+    trtfb = {"responses": [
+        {"sample_id": "same_correctness", "output_text": "alpha, beta."},
+        {"sample_id": "hf_correct", "output_text": "totally wrong"},
+    ]}
+
+    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
+
+    assert summary["prediction_agreement_rate"] == 0.5
+    assert summary["agreement_count"] == 1
+    assert summary["buckets"]["both_correct"] == 1
+    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert summary["disagreements"][0]["hf_prediction"] == "gamma delta"
+    assert summary["disagreements"][0]["trtfb_prediction"] == "totally wrong"
+
+
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
     suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
     models = [
@@ -1034,6 +1222,141 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
 
     assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
     assert captured["cmd"][1:3] == [str(Path(task_eval.__file__).resolve()), "run-hf"]
+
+
+def test_run_hf_reference_subprocess_passes_asr_family_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    captured: dict[str, list[str]] = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    args = argparse.Namespace(
+        hf_python="",
+        hf_dtype="auto",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=False,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=None,
+    )
+    model = {
+        "hf_id": "nvidia/canary-1b-v2",
+        "family": "canary",
+        "reference_family": "asr_canary",
+        "trust_remote_code": False,
+    }
+
+    task_eval.run_hf_reference_subprocess(args, model, work_dir)
+
+    assert captured["cmd"][captured["cmd"].index("--family") + 1] == "canary"
+    assert captured["cmd"][captured["cmd"].index("--reference-family") + 1] == "asr_canary"
+
+
+def test_asr_reference_detection_identifies_canary() -> None:
+    assert task_eval._is_canary_asr_reference(argparse.Namespace(
+        model="nvidia/canary-1b-v2",
+        family="",
+        reference_family="",
+    ))
+    assert task_eval._is_canary_asr_reference(argparse.Namespace(
+        model="nvidia/other",
+        family="canary",
+        reference_family="",
+    ))
+    assert task_eval._is_canary_asr_reference(argparse.Namespace(
+        model="nvidia/other",
+        family="",
+        reference_family="asr_canary",
+    ))
+
+
+def test_run_hf_reference_dispatches_asr_workdir(tmp_path: Path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "asr_chat_json"}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_asr(_args):
+        calls.append("asr")
+
+    monkeypatch.setattr(task_eval, "run_asr_hf_reference", fake_asr)
+
+    task_eval.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
+
+    assert calls == ["asr"]
+
+
+def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "asr_chat_json", "generation": {"max_new_tokens": 32}}),
+        encoding="utf-8",
+    )
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake")
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "asr_000000", "audio": str(audio_path)}) + "\n",
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "Hello world\n"
+        stderr = "tokens: 1 2 3\n"
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    args = argparse.Namespace(
+        work_dir=str(work_dir),
+        bundle="bundle.trtfb",
+        trtmc_binary="build/trtmc",
+        raw_output="",
+        predictions="",
+        log="",
+        max_new_tokens=None,
+        cuda_visible_devices="",
+        hf_python="",
+    )
+
+    task_eval.run_asr_trtfb(args)
+
+    assert commands == [[
+        "build/trtmc",
+        "transcribe",
+        "bundle.trtfb",
+        "--audio",
+        str(audio_path),
+        "--max-new-tokens",
+        "32",
+    ]]
+    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+    assert predictions["responses"][0]["output_text"] == "Hello world"
+    assert predictions["responses"][0]["generated_token_ids"] == [1, 2, 3]
 
 
 def test_load_vlm_model_falls_back_between_auto_classes() -> None:
@@ -1336,6 +1659,109 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
     result = task_eval.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf", "build", "trtfb"]
+    assert result["trtfb_accuracy"] == 1.0
+    assert result["prediction_agreement_rate"] == 1.0
+
+
+def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_dir = tmp_path / "librispeech_clean_test"
+    dataset_dir.mkdir()
+    dataset = dataset_dir / "librispeech_clean_test.json"
+    _write_asr_librispeech(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+    model = {
+        "name": "whisper-tiny-fp16",
+        "hf_id": "openai/whisper-tiny",
+        "bundle": "whisper-tiny-fp16.trtfb",
+        "max_cache_length": 64,
+        "precision": "fp16",
+        "trust_remote_code": False,
+        "build_args": {},
+        "quantization": {},
+        "family": "whisper",
+        "reference_family": "asr_whisper",
+        "task_eval": {},
+    }
+    calls: list[str] = []
+
+    def fake_prompt_length(**_kwargs):
+        raise AssertionError("ASR suite should not run text prompt length validation")
+
+    def fake_run_hf(_args, _model, work_dir):
+        calls.append("hf")
+        Path(work_dir, "hf_predictions.json").write_text(
+            json.dumps({"responses": [{"sample_id": "clean_000000", "output_text": "The quick brown fox"}]}),
+            encoding="utf-8",
+        )
+
+    def fake_ensure_bundle(*_args, **kwargs):
+        calls.append("build")
+        bundle = kwargs["bundle_path"]
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_bytes(b"bundle")
+        return bundle, True
+
+    def fake_run_trtfb(args):
+        calls.append("trtfb")
+        prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
+        assert prompts[0]["audio"].endswith("clean_000000.wav")
+        Path(args.work_dir, "trtfb_predictions.json").write_text(
+            json.dumps({"responses": [{"sample_id": "clean_000000", "output_text": "the quick brown fox"}]}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(task_eval, "max_prompt_token_length", fake_prompt_length)
+    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+
+    args = argparse.Namespace(
+        work_root=str(tmp_path / "work"),
+        dataset=str(dataset),
+        limit=1,
+        subject="",
+        sample_seed=None,
+        force_hf=False,
+        force_build=False,
+        build_max_cache_length=None,
+        skip_prompt_length_check=False,
+        bundle="",
+        model=["whisper-tiny-fp16"],
+        engine_dir="",
+        trtmc_binary="build/trtmc",
+        extra_build_arg=[],
+        hf_dtype="auto",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=False,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=123,
+        benchmark_binary="build/trtmc_dataset_benchmark",
+        hf_python="",
+        backend_dir="",
+        kv_cache_size="",
+        config="",
+        set=[],
+        cuda_visible_devices="",
+        chat_template=False,
+    )
+
+    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+
+    assert calls == ["hf", "build", "trtfb"]
+    assert result["mode"] == "asr_transcript"
+    assert result["max_prompt_tokens"] is None
+    assert result["hf_accuracy"] == 1.0
     assert result["trtfb_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
 
