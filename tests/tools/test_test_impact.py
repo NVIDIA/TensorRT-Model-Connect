@@ -570,7 +570,6 @@ class TorchReference:
     (python_package_dir / "encoder_builder.py").write_text("")
     (python_package_dir / "config.py").write_text("")
     (python_package_dir / "checkpoint_mapper.py").write_text("")
-    (python_package_dir / "graph_ops.py").write_text("")
     (tmp_path / "src" / "runtime" / "models" / "decoder_family" / "MODEL.toml").write_text(
         'runtime_strategies = ["decoder_family_decoder_kv_cache"]\n',
         encoding="utf-8",
@@ -837,24 +836,24 @@ class TestSharedModules:
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
 
-    def test_graph_ops_all_models(self, imap):
-        """graph_ops.py -> all models (shared utility, not a builder)."""
+    def test_engine_builder_all_models(self, imap):
+        """engine_builder.py -> all models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/graph_ops.py", imap)
+            "python/tensorrt_model_connect/engine_builder.py", imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
-    def test_shared_builders_directory_all_models(self, imap):
-        """builders/default_decoder.py -> all models."""
+    def test_bundle_writer_all_models(self, imap):
+        """bundle_writer.py -> all models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/builders/default_decoder.py", imap)
+            "python/tensorrt_model_connect/bundle_writer.py", imap)
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
-    def test_shared_builder_utils_all_models(self, imap):
-        """builders/utils.py is shared builder support."""
+    def test_quantization_context_all_models(self, imap):
+        """quantization/context.py -> all models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/builders/utils.py",
+            "python/tensorrt_model_connect/quantization/context.py",
             imap,
         )
         assert match.rule == "shared_builder_module"
@@ -2793,14 +2792,69 @@ class TestCoverageMapIntegration:
         assert "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_plugin" in result.builder_tests
         assert "builder" not in result.fallback_tiers
 
-    def test_unknown_file_triggers_fallback(self, imap):
-        """File not in coverage map triggers tier fallback."""
+    def test_shared_python_file_missing_coverage_triggers_fallback(self, imap):
+        """Shared files missing from the coverage map keep full-tier fallback."""
         coverage_map = {"python/tensorrt_model_connect/config.py": ["tests/builder/test_config.py::test_a"]}
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"], imap,
+            ["python/tensorrt_model_connect/engine_builder.py"], imap,
             coverage_map=coverage_map,
         )
         assert "builder" in result.fallback_tiers
+
+    def test_model_owned_python_missing_coverage_uses_family_tests(
+        self, mock_repo,
+    ):
+        """Model-owned coverage misses do not fan out to the full builder tier."""
+        family_dir = mock_repo / "tests" / "e2e" / "models" / "decoder_family"
+        family_dir.mkdir()
+        (family_dir / "test_decoder_family_builder.py").write_text(
+            "def test_builder():\n    pass\n",
+            encoding="utf-8",
+        )
+        (family_dir / "test_decoder_family_e2e.py").write_text(
+            "def test_model_e2e():\n    pass\n",
+            encoding="utf-8",
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        result = test_impact.analyze_impact(
+            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            imap,
+            coverage_map={},
+            repo_root=mock_repo,
+        )
+
+        assert result.e2e_models == ["decoder-large", "decoder-small"]
+        assert result.e2e_test_ids == [
+            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-large]",
+            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]",
+        ]
+        assert result.builder_tests == [
+            "tests/e2e/models/decoder_family/test_decoder_family_builder.py",
+        ]
+        assert "builder" not in result.fallback_tiers
+
+    def test_changed_model_owned_unit_test_runs_directly(self, mock_repo):
+        """Changed model-owned non-E2E pytest files are direct builder targets."""
+        family_dir = mock_repo / "tests" / "e2e" / "models" / "decoder_family"
+        family_dir.mkdir()
+        (family_dir / "test_decoder_family_builder.py").write_text(
+            "def test_builder():\n    pass\n",
+            encoding="utf-8",
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        result = test_impact.analyze_impact(
+            ["tests/e2e/models/decoder_family/test_decoder_family_builder.py"],
+            imap,
+            coverage_map={},
+            repo_root=mock_repo,
+        )
+
+        assert result.builder_tests == [
+            "tests/e2e/models/decoder_family/test_decoder_family_builder.py",
+        ]
+        assert "builder" not in result.fallback_tiers
 
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
@@ -2835,7 +2889,7 @@ class TestCoverageMapIntegration:
         """Direct tests must not hide fallback required by changed shared builder code."""
         result = test_impact.analyze_impact(
             [
-                "python/tensorrt_model_connect/graph_ops.py",
+                "python/tensorrt_model_connect/engine_builder.py",
                 "tests/builder/test_family_unit.py",
             ],
             imap,

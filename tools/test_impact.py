@@ -1829,6 +1829,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
         if (
             path.startswith("tests/builder/")
             or _is_family_builder_test(path)
+            or _is_model_owned_python_unit_test(path)
         ):
             builder_tests.add(path)
         elif path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
@@ -1854,6 +1855,134 @@ def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
         path = raw_path.replace("\\", "/").strip("/")
         tests.update(_EXPLICIT_TOOLS_TEST_TARGETS.get(path, ()))
     return sorted(tests)
+
+
+def _is_model_owned_python_unit_test(path: str) -> bool:
+    """Return True for model-owned pytest files that are safe as unit targets."""
+    normalized = path.replace("\\", "/").strip("/")
+    if not re.match(r"^tests/e2e/models/[^/]+/test_[^/]+\.py$", normalized):
+        return False
+    return not Path(normalized).name.endswith("_e2e.py")
+
+
+def _repo_relative(path: Path, repo_root: Path) -> str:
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _model_families_for_models(models: List[str], imap: ImpactMap) -> List[str]:
+    families = {
+        str(imap.model_metadata.get(model, {}).get("family", "") or "")
+        for model in models
+    }
+    return sorted(family for family in families if family)
+
+
+def _model_owned_python_test_targets(
+    models: List[str],
+    imap: ImpactMap,
+    repo_root: Optional[Path],
+) -> List[str]:
+    """Return local pytest targets owned by the selected model families."""
+    if repo_root is None:
+        return []
+
+    targets: Set[str] = set()
+    for family in _model_families_for_models(models, imap):
+        model_test_dir = repo_root / "tests" / "e2e" / "models" / family
+        if model_test_dir.is_dir():
+            for test_path in sorted(model_test_dir.glob("test_*.py")):
+                if test_path.name.endswith("_e2e.py"):
+                    continue
+                targets.add(_repo_relative(test_path, repo_root))
+
+        family_package_tests = (
+            repo_root
+            / "python"
+            / "tensorrt_model_connect"
+            / "families"
+            / family
+            / "tests"
+        )
+        if family_package_tests.is_dir():
+            for test_path in sorted(family_package_tests.glob("test_*.py")):
+                targets.add(_repo_relative(test_path, repo_root))
+
+    return sorted(targets)
+
+
+_MODEL_OWNED_COVERAGE_FALLBACK_RULES = {
+    "cpp_runtime_model",
+    "family_package",
+    "family_plugin",
+    "python_profile_requirements",
+    "specialized_builder",
+}
+
+
+def _is_model_owned_coverage_fallback(
+    match: RuleMatch,
+    imap: ImpactMap,
+) -> bool:
+    if match.rule not in _MODEL_OWNED_COVERAGE_FALLBACK_RULES:
+        return False
+    if match.rule in _BROAD_FALLBACK_RULES or match.rule.endswith("_unknown"):
+        return False
+    return _is_narrow_model_set(match.models, imap)
+
+
+def _replace_model_owned_coverage_fallbacks(
+    changed_files: List[str],
+    fallback_files: Dict[str, List[str]],
+    fallback_tiers: List[str],
+    match_by_path: Dict[str, RuleMatch],
+    imap: ImpactMap,
+    repo_root: Optional[Path],
+) -> tuple[List[str], List[str], List[str]]:
+    """Replace model-owned coverage misses with model-owned pytest targets.
+
+    Coverage maps can lag behind newly added model-owned files. Shared files
+    still keep full-tier fallback, but files already classified to a narrow
+    model family should not force unrelated builder or C++ tests.
+    """
+    del changed_files
+
+    builder_targets: Set[str] = set()
+    cpp_targets: Set[str] = set()
+    remaining_fallback_tiers: Set[str] = set(fallback_tiers)
+
+    for tier, paths in fallback_files.items():
+        unresolved_paths: List[str] = []
+        for path in paths:
+            match = match_by_path.get(path)
+            if match is None:
+                match = classify_file(path, imap)
+            if not _is_model_owned_coverage_fallback(match, imap):
+                unresolved_paths.append(path)
+                continue
+            if tier == "builder":
+                builder_targets.update(
+                    _model_owned_python_test_targets(match.models, imap, repo_root)
+                )
+            elif tier == "cpp":
+                # Model-owned C++ misses are covered by the impacted model E2E
+                # selection and isolated plugin build target.
+                pass
+            else:
+                unresolved_paths.append(path)
+
+        if unresolved_paths:
+            remaining_fallback_tiers.add(tier)
+        else:
+            remaining_fallback_tiers.discard(tier)
+
+    return (
+        sorted(builder_targets),
+        sorted(cpp_targets),
+        sorted(remaining_fallback_tiers),
+    )
 
 
 def _filter_models_by_ci_tier(
@@ -1893,6 +2022,7 @@ def analyze_impact(
     all_tiers: Set[str] = set()
     rebuild_cpp = False
     matched_rules: List[Dict] = []
+    match_by_path: Dict[str, RuleMatch] = {}
     diff_text_by_path: Dict[str, str] = {}
     candidate_models: List[str] = []
 
@@ -1924,6 +2054,7 @@ def analyze_impact(
             exact_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
+        match_by_path[fpath] = match
         matched_rules.append({
             "file": fpath,
             "rule": match.rule,
@@ -1956,6 +2087,20 @@ def analyze_impact(
         cpp_tests = sel.cpp_tests
         tools_tests = sel.tools_tests
         fallback_tiers = sel.fallback_tiers
+        model_builder_tests, model_cpp_tests, fallback_tiers = (
+            _replace_model_owned_coverage_fallbacks(
+                changed_files,
+                getattr(sel, "fallback_files", {}),
+                fallback_tiers,
+                match_by_path,
+                imap,
+                repo_root,
+            )
+        )
+        if model_builder_tests:
+            builder_tests = sorted(set(builder_tests).union(model_builder_tests))
+        if model_cpp_tests:
+            cpp_tests = sorted(set(cpp_tests).union(model_cpp_tests))
 
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
     direct_tools_tests = sorted(

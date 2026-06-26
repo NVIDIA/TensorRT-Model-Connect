@@ -7,6 +7,8 @@ GPT-2 uses:
   - Fused QKV via a single c_attn Conv1D weight
   - Conv1D weights are stored as [in, out] (NOT transposed like Linear)
   - Tied word embeddings (wte == lm_head)
+  - Either prefixless weights (wte.weight, h.*) or Transformers
+    GPT2LMHeadModel weights under transformer.*.
 """
 
 from __future__ import annotations
@@ -35,6 +37,18 @@ class GPT2Plugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "gpt2"
 
+    @staticmethod
+    def _detect_prefix(readers) -> str:
+        if _has_tensor(readers, "wte.weight"):
+            return ""
+        if _has_tensor(readers, "transformer.wte.weight"):
+            return "transformer"
+        raise KeyError("Tensor not found: wte.weight")
+
+    @staticmethod
+    def _key(prefix: str, name: str) -> str:
+        return f"{prefix}.{name}" if prefix else name
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
@@ -48,15 +62,16 @@ class GPT2Plugin:
         _head_dim = hidden // num_heads
 
         weights = WeightDict()
+        root = self._detect_prefix(readers)
 
         # Token embedding (wte)
-        embedding = _load_tensor(readers, "wte.weight")
+        embedding = _load_tensor(readers, self._key(root, "wte.weight"))
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (wpe) — learned absolute positions
-        pos_embed = _load_tensor(readers, "wpe.weight")
+        pos_embed = _load_tensor(readers, self._key(root, "wpe.weight"))
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         attention_size = hidden
@@ -64,7 +79,7 @@ class GPT2Plugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
-            hf_prefix = f"h.{layer_idx}"
+            hf_prefix = self._key(root, f"h.{layer_idx}")
 
             # LayerNorm 1 (pre-attention)
             ln1_weight = _load_tensor(readers, f"{hf_prefix}.ln_1.weight")
@@ -135,8 +150,8 @@ class GPT2Plugin:
             weights[f"{prefix}.fc2_bias"] = mlp_proj_bias.astype(np.float32)
 
         # Final LayerNorm
-        ln_f_weight = _load_tensor(readers, "ln_f.weight")
-        ln_f_bias = _load_tensor(readers, "ln_f.bias")
+        ln_f_weight = _load_tensor(readers, self._key(root, "ln_f.weight"))
+        ln_f_bias = _load_tensor(readers, self._key(root, "ln_f.bias"))
         weights["final_norm"] = ln_f_weight.astype(np.float32)
         weights["final_norm_beta"] = ln_f_bias.astype(np.float32)
 

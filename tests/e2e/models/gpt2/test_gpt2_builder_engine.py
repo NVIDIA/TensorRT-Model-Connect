@@ -15,6 +15,8 @@ Intent: Validate the GPT-2 family plugin weight loading including Conv1D transpo
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Conv1D weights are transposed to [out, in], fused QKV is split correctly, position embeddings are loaded, and config aliases (n_embd, n_head) resolve properly.
 """
+import json
+
 import numpy as np
 
 from tests.builder.family_plugin_tester import FamilyPluginTester
@@ -269,4 +271,41 @@ class TestGPT2Engine(FamilyPluginTestMixin):
         np.testing.assert_allclose(
             weights["layer.0.v_bias"], expected_v_bias, atol=1e-6,
             err_msg="v_bias does not match raw c_attn.bias[2*hidden:]",
+        )
+
+    def test_transformer_prefixed_weights_load(self, tester, tmp_path):
+        """Validate DistilGPT2-style transformer.* checkpoint keys.
+
+        DistilGPT2 is a GPT2LMHeadModel checkpoint whose safetensors use
+        transformer.wte.weight, transformer.h.* and transformer.ln_f.*. The
+        plugin should handle that prefix without changing the shared loader.
+        """
+        from safetensors.numpy import save_file
+        from tensorrt_model_connect.config import ModelConfig
+
+        raw = tester.make_hf_tensors()
+        prefixed = {f"transformer.{key}": value for key, value in raw.items()}
+        tmp_path.joinpath("config.json").write_text(
+            json.dumps(tester.get_config_dict()),
+            encoding="utf-8",
+        )
+        save_file(prefixed, str(tmp_path / "model.safetensors"))
+
+        config = ModelConfig.from_dir(tmp_path)
+        weights = tester.get_plugin().load_weights(str(tmp_path), config)
+
+        np.testing.assert_allclose(
+            weights["embedding"],
+            raw["wte.weight"],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            weights["position_embedding"],
+            raw["wpe.weight"],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            weights["layer.0.w_q"],
+            raw["h.0.attn.c_attn.weight"][:, :tester.spec.hidden_size],
+            atol=1e-6,
         )

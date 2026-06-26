@@ -15,7 +15,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
@@ -37,6 +37,7 @@ class SelectionResult:
     builder_tests: List[str] = field(default_factory=list)
     tools_tests: List[str] = field(default_factory=list)
     fallback_tiers: List[str] = field(default_factory=list)
+    fallback_files: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _is_no_impact(path: str) -> bool:
@@ -99,6 +100,7 @@ def select_tests(
     builder_tests: set = set()
     tools_tests: set = set()
     fallback_tiers: set = set()
+    fallback_files: Dict[str, Set[str]] = {}
 
     for path in changed_files:
         path = path.replace("\\", "/").strip("/")
@@ -127,12 +129,17 @@ def select_tests(
                     cpp_tests.add(test_id)
         else:
             fallback_tiers.add(tier)
+            fallback_files.setdefault(tier, set()).add(path)
 
     return SelectionResult(
         cpp_tests=sorted(cpp_tests),
         builder_tests=sorted(builder_tests),
         tools_tests=sorted(tools_tests),
         fallback_tiers=sorted(fallback_tiers),
+        fallback_files={
+            tier: sorted(paths)
+            for tier, paths in sorted(fallback_files.items())
+        },
     )
 
 
@@ -161,6 +168,7 @@ def main() -> int:
             "builder_tests": result.builder_tests,
             "tools_tests": result.tools_tests,
             "fallback_tiers": result.fallback_tiers,
+            "fallback_files": result.fallback_files,
         }, indent=2))
     else:
         if result.cpp_tests:

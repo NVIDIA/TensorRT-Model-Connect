@@ -62,8 +62,8 @@ class TestPythonCollector:
                 "tests/builder/test_config.py::TestModelConfig::test_parse|run": [1, 2, 3],
                 "tests/builder/test_config.py::TestModelConfig::test_vl|run": [1, 5],
             },
-            "python/tensorrt_model_connect/graph_ops.py": {
-                "tests/builder/test_graph_ops.py::TestRoPE::test_basic|run": [10, 20],
+            "python/tensorrt_model_connect/quantization/context.py": {
+                "tests/builder/test_quantization.py::TestQuantContext::test_basic|run": [10, 20],
             },
         })
         result = parse_coverage_db(db_path)
@@ -72,8 +72,8 @@ class TestPythonCollector:
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
         ]
-        assert result["python/tensorrt_model_connect/graph_ops.py"] == [
-            "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
+        assert result["python/tensorrt_model_connect/quantization/context.py"] == [
+            "tests/builder/test_quantization.py::TestQuantContext::test_basic",
         ]
 
     def test_parse_coverage_db_strips_phase(self, tmp_path):
@@ -271,8 +271,8 @@ class TestSelectTests:
                 "tests/builder/test_config.py::TestModelConfig::test_parse",
                 "tests/builder/test_config.py::TestModelConfig::test_vl",
             ],
-            "python/tensorrt_model_connect/graph_ops.py": [
-                "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
+            "python/tensorrt_model_connect/quantization/context.py": [
+                "tests/builder/test_quantization.py::TestQuantContext::test_basic",
             ],
         }
 
@@ -302,6 +302,9 @@ class TestSelectTests:
         """Unknown tensorrt_model_connect/ file triggers builder tier fallback."""
         result = select_tests(["python/tensorrt_model_connect/new_module.py"], sample_map)
         assert "builder" in result.fallback_tiers
+        assert result.fallback_files == {
+            "builder": ["python/tensorrt_model_connect/new_module.py"],
+        }
         assert result.builder_tests == []
 
     def test_direct_python_test_file_runs_directly_without_fallback(self, sample_map):
