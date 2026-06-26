@@ -482,19 +482,40 @@ run_python_builder_tests() {
   if [ "${FULL_E2E:-false}" != "true" ]; then
     python3 -c "
 import json
+from pathlib import Path
+
 d = json.load(open('impact.json'))
-tests = set(d.get('builder_tests', []) + d.get('tools_tests', []))
 fallback = set(d.get('fallback_tiers', []))
-if fallback.intersection({'builder', 'tools'}):
-    tests = []
-else:
-    tests.update({
+builder_fallback = 'builder' in fallback
+tools_fallback = 'tools' in fallback
+
+selected = []
+
+def add(paths):
+    for path in paths:
+        if path and path not in selected:
+            selected.append(path)
+
+if not (builder_fallback and tools_fallback):
+    if builder_fallback:
+        add(['tests/builder/'])
+    else:
+        add(d.get('builder_tests', []))
+
+    if tools_fallback:
+        add(['tests/tools/'])
+        add(str(path) for path in sorted(Path('tests/e2e_harness').glob('test_*.py')))
+    else:
+        add(d.get('tools_tests', []))
+
+    add([
         'tests/tools/test_github_actions_ci.py',
         'tests/tools/test_model_plugin_encapsulation_static.py',
         'tests/tools/test_schedule_e2e.py',
         'tests/tools/test_test_impact.py',
-    })
-for test in sorted(tests):
+    ])
+
+for test in selected:
     print(test)
 " > "$selected_tests_file"
   fi

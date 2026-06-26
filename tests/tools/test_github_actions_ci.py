@@ -392,6 +392,17 @@ def test_impact_stage_reuses_cached_json_for_summary() -> None:
     assert 'tools/test_impact.py "${impact_args[@]}" --verbose' not in text
 
 
+def test_python_builder_fallback_is_per_tier() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "builder_fallback = 'builder' in fallback" in script
+    assert "tools_fallback = 'tools' in fallback" in script
+    assert "if not (builder_fallback and tools_fallback):" in script
+    assert "add(['tests/builder/'])" in script
+    assert "add(['tests/tools/'])" in script
+    assert "Path('tests/e2e_harness').glob('test_*.py')" in script
+    assert "fallback.intersection({'builder', 'tools'})" not in script
+
+
 def test_release_wheel_build_disables_libtorch_linkage() -> None:
     text = (REPO_ROOT / "conanfile.py").read_text()
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
