@@ -206,8 +206,8 @@ The important runtime abstractions are:
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific constructor that reads bundle sections and returns a concrete `IPipeline`. |
 | `IBackend` | `include/trtmc/runtime/trt_backend.h` | Backend DSO interface for deserializing engines and creating `ITrtModule` execution wrappers. |
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution interface used by pipelines without including TensorRT headers. |
-| `IInferenceState` | `include/trtmc/runtime/inference_state.h` | Unified request state abstraction for KV cache, recurrent state, and hybrid state. |
-| `ISampler` | `include/trtmc/runtime/sampler.h` | Token selection abstraction for greedy, top-k, top-p, min-p, and GPU-side sampling paths. |
+| `IInferenceState` | `src/runtime/models/<family>/inference_state.h` | Unified request state abstraction for KV cache, recurrent state, and hybrid state. |
+| `ISampler` | `src/runtime/models/<family>/sampler.h` | Token selection abstraction for greedy, top-k, top-p, min-p, and GPU-side sampling paths. |
 
 Primary source locations:
 
@@ -216,7 +216,7 @@ Primary source locations:
 - `src/runtime/registry/pipeline_registry.cpp`
 - `include/trtmc/runtime/pipeline_plugin.h`
 - `src/runtime/models/`
-- `src/runtime/plugins/`
+- `src/runtime/models/`
 
 ## Request-time flow
 

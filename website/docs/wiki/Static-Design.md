@@ -323,7 +323,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
+| **Files** | `src/runtime/models/<family>/kv_cache.h`, `src/runtime/models/<family>/kv_cache.cpp` |
 | **Purpose** | Autoregressive KV cache state manager. Allocates per-layer K/V device tensors, builds causal attention masks, and binds directly to TrtModule. |
 | **Key API** | `bind_to()` binds `cache_k_{i}`, `cache_v_{i}` (inputs) and `present_k_{i}`, `present_v_{i}` (outputs). `advance()` appends present into cache and increments position. `build_attention_mask()` produces `[max_length]` float mask. |
 | **Retired** | Legacy shared `device_kv_cache.h/cpp`, `DeviceKvCache`, `DeviceResources`, and `run_decoder_step_device()` were removed; concrete decoder cache execution belongs to model-owned runtime code. |
@@ -374,7 +374,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/encoder/pipeline.h`, `src/runtime/models/encoder/pipeline.cpp` |
+| **Files** | `src/runtime/models/<encoder-family>/pipeline.h`, `src/runtime/models/<encoder-family>/pipeline.cpp` |
 | **Purpose** | Single-pass encoder models: BERT (`encode()`), embedding models (`embed()`), reranking models (`rerank()`), neural operators, and object detection. `SegmentPipeline` and `SamPipeline` are in separate files (`segment_pipeline.h/cpp`, `sam_pipeline.h/cpp`). |
 | **Key API** | Mode-driven: `mode_` string selects which IPipeline method is active ("encoder_only", "embedding", "reranking"). |
 
@@ -384,7 +384,7 @@ classDiagram
 |---|---|
 | **Files** | `src/runtime/models/whisper/pipeline.h/cpp`, `bark_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp` |
 | **Purpose** | Five audio pipeline classes. `WhisperPipeline` (`transcribe()`), `BarkPipeline` (`generate_audio()`), `MagpiePipeline` (`generate_audio()`), `SpeechPipeline` (`speak()`), and `OmniPipeline` (`generate_audio()` -- three-stage: thinker->talker->code2wav). |
-| **Plugin dispatch** | Each audio strategy has its own model runtime folder in `src/runtime/models/`: `whisper/`, `bark/`, `magpie/`, `speech/`, `omni/`. Plugins use model-local helper copies such as `audio_helpers.h` inside the owning folder. Audio config types and seam headers live in `src/runtime/domains/audio/`. |
+| **Plugin dispatch** | Each audio strategy has its own model runtime folder in `src/runtime/models/`: `whisper/`, `bark/`, `magpie/`, `personaplex/`, `qwen3_omni/`. Plugins use model-local helper copies such as `audio_helpers.h` inside the owning folder. Audio config types and seam headers live beside the owning model implementation. |
 
 ### UD-PIP-DIFF-01: Diffusion Pipelines
 
@@ -406,7 +406,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/core/trt_decode_runtime.h`, `src/runtime/core/trt_decode_runtime.cpp` |
+| **Files** | `src/runtime/models/<family>/decode_runtime.h`, `src/runtime/models/<family>/decode_runtime.cpp` |
 | **Purpose** | `select_argmax_token()`, `build_attention_mask()`, and engine lifecycle management (`DecoderStepEngine`, tensor validation). Used by legacy backend code. |
 
 ### UD-IMG-01: Image Preprocessor
@@ -427,35 +427,35 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/whisper_config.h`, `src/runtime/domains/audio/whisper_cross_kv_apply.h`, `src/runtime/domains/audio/whisper_cross_kv_plan.h`, `src/runtime/domains/audio/whisper_decode_policy.h`, `src/runtime/domains/audio/whisper_host_plan.h`, `src/runtime/models/whisper/plugin.cpp` |
+| **Files** | `src/runtime/models/whisper/whisper_config.h`, `src/runtime/models/whisper/whisper_cross_kv_apply.h`, `src/runtime/models/whisper/whisper_cross_kv_plan.h`, `src/runtime/models/whisper/whisper_decode_policy.h`, `src/runtime/models/whisper/whisper_host_plan.h`, `src/runtime/models/whisper/plugin.cpp` |
 | **Purpose** | Whisper speech-to-text domain types and pipeline plugin. Config, cross-attention KV plan, host plan for two-stage (encode + decode) inference, and decode policy for stopping criteria. Plugin constructs `WhisperPipeline`. |
 
 ### UD-AUD-BARK-01: Bark Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/bark_config.h`, `src/runtime/domains/audio/bark_generation_plan.h`, `src/runtime/models/bark/plugin.cpp` |
+| **Files** | `src/runtime/models/bark/bark_config.h`, `src/runtime/models/bark/bark_generation_plan.h`, `src/runtime/models/bark/plugin.cpp` |
 | **Purpose** | Bark text-to-audio domain types and pipeline plugin. Generation plan configures the three-stage autoregressive codebook pipeline. Plugin constructs `BarkPipeline`. |
 
 ### UD-AUD-MAGPIE-01: Magpie TTS Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/magpie_codec_plan.h`, `src/runtime/domains/audio/magpie_decode_policy.h`, `src/runtime/domains/audio/magpie_decoder_plan.h`, `src/runtime/domains/audio/magpie_text_completion_policy.h`, `src/runtime/domains/audio/magpie_kernels.cu`, `src/runtime/domains/audio/magpie_kernels.h`, `src/runtime/models/magpie/plugin.cpp` |
+| **Files** | `src/runtime/models/magpie/magpie_codec_plan.h`, `src/runtime/models/magpie/magpie_decode_policy.h`, `src/runtime/models/magpie/magpie_decoder_plan.h`, `src/runtime/models/magpie/magpie_text_completion_policy.h`, `src/runtime/models/magpie/magpie_kernels.cu`, `src/runtime/models/magpie/magpie_kernels.h`, `src/runtime/models/magpie/plugin.cpp` |
 | **Purpose** | Magpie neural TTS domain types and pipeline plugin. Codec plan configures audio codec parameters, decode policy governs autoregressive stopping, decoder plan orchestrates multi-step generation. Custom CUDA kernels accelerate audio processing. Plugin constructs `MagpiePipeline`. |
 
 ### UD-AUD-SPEECH-01: Speech-to-Speech Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/speech_delay_cache.h`, `src/runtime/domains/audio/speech_depth_plan.h`, `src/runtime/domains/audio/speech_generation_policy.h`, `src/runtime/domains/audio/speech_mimi_decode_plan.h`, `src/runtime/domains/audio/speech_runtime_plan.h`, `src/runtime/domains/audio/speech_temporal_embed_plan.h`, `src/runtime/domains/audio/speech_waveform_postprocess.h`, `src/runtime/models/speech/plugin.cpp` |
+| **Files** | `src/runtime/models/personaplex/speech_delay_cache.h`, `src/runtime/models/personaplex/speech_depth_plan.h`, `src/runtime/models/personaplex/speech_generation_policy.h`, `src/runtime/models/personaplex/speech_mimi_decode_plan.h`, `src/runtime/models/personaplex/speech_runtime_plan.h`, `src/runtime/models/personaplex/speech_temporal_embed_plan.h`, `src/runtime/models/personaplex/speech_waveform_postprocess.h`, `src/runtime/models/personaplex/plugin.cpp` |
 | **Purpose** | PersonaPlex speech-to-speech domain types and pipeline plugin. Delay cache manages temporal audio buffering, depth plan configures multi-depth codec decoding, MIMI decode plan handles neural audio codec, temporal embed plan manages time embeddings, and waveform postprocess produces final audio output. Plugin constructs `SpeechPipeline`. |
 
 ### UD-AUD-OMNI-01: Omni Audio Domain
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/domains/audio/omni_audio_plan.h`, `src/runtime/models/omni/plugin.cpp` |
+| **Files** | `src/runtime/models/qwen3_omni/omni_audio_plan.h`, `src/runtime/models/qwen3_omni/plugin.cpp` |
 | **Purpose** | Omni multimodal domain types and pipeline plugin. Audio plan configures the thinker-talker-code2wav three-stage pipeline. Plugin constructs `OmniPipeline`. |
 
 ### UD-AUD-COMMON-01: Audio Common Utilities
@@ -518,14 +518,14 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/encoder/object_detection_plugin.cpp` |
+| **Files** | `src/runtime/models/<detection-family>/plugin.cpp` |
 | **Purpose** | Object detection pipeline plugin. Constructs `EncoderPipeline` configured for detection mode. Handles `object_detection` strategy. |
 
 ### UD-NOP-01: Neural Operator Plugin
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/encoder/plugin.cpp` |
+| **Files** | `src/runtime/models/<encoder-family>/plugin.cpp` |
 | **Purpose** | Neural operator (FNO) support via the encoder plugin. The `neural_operator` strategy is one of four strategies handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline`. |
 
 ### UD-DIFF-HELPER-01: Diffusion Helpers
@@ -539,21 +539,21 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/models/<family>/pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
+| **Files** | `src/runtime/models/<family>/decoded_image.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/models/<family>/pipeline.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
 | **Purpose** | Core runtime helpers not covered by other UD entries. `decoded_image.h` holds decoded pixel data. `device_tensor.cpp` implements GPU tensor memory management. `generation_backend.h` defines the `IGenerationBackend` interface. `step_state.h` defines the `IStepState` interface. `stb_impl.cpp` provides STB image library implementation. `trt_graph_builder.cpp` provides TRT network construction utilities. |
 
 ### UD-ENC-EMBED-01: Embedding Support
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/encoder/plugin.cpp`, `src/runtime/models/encoder/pipeline.h/cpp` |
+| **Files** | `src/runtime/models/<encoder-family>/plugin.cpp`, `src/runtime/models/<encoder-family>/pipeline.h/cpp` |
 | **Purpose** | Embedding extraction for encoder models (Eagle-embed). The `embedding` strategy is handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline` with `embed()` mode for dense vector embedding via single-pass inference with mean pooling. |
 
 ### UD-ENC-RERANK-01: Reranking Support
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/models/encoder/plugin.cpp`, `src/runtime/models/encoder/pipeline.h/cpp` |
+| **Files** | `src/runtime/models/<encoder-family>/plugin.cpp`, `src/runtime/models/<encoder-family>/pipeline.h/cpp` |
 | **Purpose** | Reranking for cross-encoder models (Eagle-rerank). The `reranking` strategy is handled by `encoder_plugin.cpp`, which constructs `EncoderPipeline` with `rerank()` mode for query-document scoring. |
 
 ### UD-UTIL-MEDIA-01: Media I/O Utilities
@@ -567,15 +567,15 @@ classDiagram
 
 ## 4. C++ Runtime Supporting Subsystems
 
-### Audio Domain Types (`src/runtime/domains/audio/`)
+### Model-Owned Audio Types (`src/runtime/models/<audio-family>/`)
 
 | UD ID | Domain files | Plugin | Pipeline |
 |---|---|---|---|
-| `UD-AUD-WHISPER-01` | `whisper_config.h`, `whisper_cross_kv_apply.h`, `whisper_cross_kv_plan.h`, `whisper_decode_policy.h`, `whisper_host_plan.h` | `whisper_plugin.cpp` | `WhisperPipeline` |
-| `UD-AUD-BARK-01` | `bark_config.h`, `bark_generation_plan.h` | `bark_plugin.cpp` | `BarkPipeline` |
-| `UD-AUD-MAGPIE-01` | `magpie_codec_plan.h`, `magpie_decode_policy.h`, `magpie_decoder_plan.h`, `magpie_text_completion_policy.h`, `magpie_kernels.cu/h` | `magpie_plugin.cpp` | `MagpiePipeline` |
-| `UD-AUD-SPEECH-01` | `speech_delay_cache.h`, `speech_depth_plan.h`, `speech_generation_policy.h`, `speech_mimi_decode_plan.h`, `speech_runtime_plan.h`, `speech_temporal_embed_plan.h`, `speech_waveform_postprocess.h` | `speech_plugin.cpp` | `SpeechPipeline` |
-| `UD-AUD-OMNI-01` | `omni_audio_plan.h` | `omni_plugin.cpp` | `OmniPipeline` |
+| `UD-AUD-WHISPER-01` | `whisper/whisper_config.h`, `whisper/whisper_cross_kv_apply.h`, `whisper/whisper_cross_kv_plan.h`, `whisper/whisper_decode_policy.h`, `whisper/whisper_host_plan.h` | `whisper/plugin.cpp` | `WhisperPipeline` |
+| `UD-AUD-BARK-01` | `bark/bark_config.h`, `bark/bark_generation_plan.h` | `bark/plugin.cpp` | `BarkPipeline` |
+| `UD-AUD-MAGPIE-01` | `magpie/magpie_codec_plan.h`, `magpie/magpie_decode_policy.h`, `magpie/magpie_decoder_plan.h`, `magpie/magpie_text_completion_policy.h`, `magpie/magpie_kernels.cu/h` | `magpie/plugin.cpp` | `MagpiePipeline` |
+| `UD-AUD-SPEECH-01` | `personaplex/speech_delay_cache.h`, `personaplex/speech_depth_plan.h`, `personaplex/speech_generation_policy.h`, `personaplex/speech_mimi_decode_plan.h`, `personaplex/speech_runtime_plan.h`, `personaplex/speech_temporal_embed_plan.h`, `personaplex/speech_waveform_postprocess.h` | `personaplex/plugin.cpp` | `SpeechPipeline` |
+| `UD-AUD-OMNI-01` | `qwen3_omni/omni_audio_plan.h` | `qwen3_omni/plugin.cpp` | `OmniPipeline` |
 | `UD-AUD-COMMON-01` | `trtmc_io.hpp`; model-owned audio helpers | Generic WAV I/O plus model-owned audio helpers | Audio pipelines |
 
 ### Recurrent Domain Types (`src/runtime/domains/recurrent/`)
@@ -602,7 +602,7 @@ Behavior-bearing VL preprocessing and decode logic is model-owned under
 | `UD-DET-01` | -- | `object_detection_plugin.cpp` | `EncoderPipeline` |
 | `UD-NOP-01` | -- | `encoder_plugin.cpp` | `EncoderPipeline` |
 
-### Encoder Strategies (via `src/runtime/models/encoder/plugin.cpp`)
+### Encoder Strategies (via `src/runtime/models/<encoder-family>/plugin.cpp`)
 
 | UD ID | Strategy | Pipeline mode |
 |---|---|---|
@@ -694,7 +694,7 @@ Each UD-* identifier links to architecture contracts in
 | UD-BDL-02 | ARCH-BDL | `tests/cpp/test_bundle_view.cpp` |
 | UD-FAC-01 | ARCH-FAC | `tests/cpp/test_pipeline_api.cpp` |
 | UD-MOD-01 | ARCH-MOD | (GPU integration tests via E2E) |
-| UD-KVC-01 | ARCH-KVC | `tests/cpp/test_kv_cache_new.cpp`, `tests/builder/test_cache_state_machine.py` |
+| UD-KVC-01 | ARCH-KVC | `tests/builder/test_cache_state_machine.py` |
 | UD-REC-01 | ARCH-REC | model-owned recurrent tests |
 | UD-TOK-01 | ARCH-TOK | `tests/cpp/test_vocab_tokenizer.cpp`, `tests/cpp/test_bpe_tokenizer.cpp` |
 | UD-PIP-TEXT-01 | ARCH-PIP | E2E: `tests/test_e2e.py` (text_generation_causal models) |
@@ -709,19 +709,19 @@ Each UD-* identifier links to architecture contracts in
 | UD-BLD-CKP-01 | ARCH-BLD | `tests/builder/test_checkpoint_mapper.py` |
 | UD-BLD-GRP-01 | ARCH-BLD | `tests/builder/test_graph_ops.py`, `tests/builder/test_graph_ops_extended.py` |
 | UD-BLD-BLK-01 | ARCH-BLD | `tests/builder/test_graph_blocks.py` |
-| UD-BLD-STD-01 | ARCH-BLD | `tests/builder/test_standard_decoder.py` |
+| UD-BLD-STD-01 | ARCH-BLD | `tests/e2e/models/llama/test_llama_standard_decoder.py` |
 | UD-BLD-BDL-01 | ARCH-BLD | `tests/builder/test_bundle_writer.py` |
 | UD-BLD-ENG-01 | ARCH-BLD | `tests/builder/test_engine_builder_extended.py` |
 | UD-BLD-DBG-01 | ARCH-BLD | `tests/builder/test_debug_runner_extended.py` |
-| UD-AUD-WHISPER-01 | ARCH-PIP-AUD | `tests/cpp/test_whisper_decode_policy.cpp`, `tests/cpp/test_whisper_host_plan.cpp` |
-| UD-AUD-BARK-01 | ARCH-PIP-AUD | `tests/cpp/test_bark_generation_plan.cpp`, `tests/cpp/test_audio_pipeline_new.cpp` |
-| UD-AUD-MAGPIE-01 | ARCH-PIP-AUD | `tests/cpp/test_magpie_codec_plan.cpp`, `tests/cpp/test_magpie_decode_policy.cpp`, `tests/cpp/test_magpie_decoder_plan.cpp`, `tests/cpp/test_magpie_text_completion_policy.cpp` |
-| UD-AUD-SPEECH-01 | ARCH-PIP-AUD | `tests/cpp/test_speech_decode_stop_policy.cpp`, `tests/cpp/test_speech_depth_plan.cpp`, `tests/cpp/test_speech_generation_helpers.cpp`, `tests/cpp/test_speech_mimi_decode_plan.cpp`, `tests/cpp/test_speech_runtime_plan.cpp`, `tests/cpp/test_speech_temporal_embed_plan.cpp`, `tests/cpp/test_speech_subprocess_seam.cpp` |
-| UD-AUD-OMNI-01 | ARCH-PIP-AUD | `tests/cpp/test_omni_audio_plan.cpp` |
+| UD-AUD-WHISPER-01 | ARCH-PIP-AUD | `tests/cpp/models/whisper/test_whisper_decode_policy.cpp`, `tests/cpp/models/whisper/test_whisper_host_plan.cpp` |
+| UD-AUD-BARK-01 | ARCH-PIP-AUD | `tests/cpp/models/bark/test_bark_generation_plan.cpp`, `tests/cpp/models/bark/test_bark_pipeline.cpp` |
+| UD-AUD-MAGPIE-01 | ARCH-PIP-AUD | `tests/cpp/models/magpie/test_magpie_codec_plan.cpp`, `tests/cpp/models/magpie/test_magpie_decode_policy.cpp`, `tests/cpp/models/magpie/test_magpie_decoder_plan.cpp`, `tests/cpp/models/magpie/test_magpie_text_completion_policy.cpp` |
+| UD-AUD-SPEECH-01 | ARCH-PIP-AUD | `tests/cpp/models/personaplex/test_personaplex_speech_decode_stop_policy.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_depth_plan.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_generation_helpers.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_mimi_decode_plan.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_runtime_plan.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_temporal_embed_plan.cpp`, `tests/cpp/models/personaplex/test_personaplex_speech_subprocess_seam.cpp` |
+| UD-AUD-OMNI-01 | ARCH-PIP-AUD | `tests/cpp/models/qwen3_omni/test_qwen3_omni_audio_plan.cpp` |
 | UD-AUD-COMMON-01 | ARCH-PIP-AUD | `tests/cpp/test_trtmc_io.cpp`; model-owned audio helper tests |
 | UD-REC-MAMBA-01 | ARCH-PIP-REC | `tests/cpp/models/mamba/test_mamba_recurrent_pipeline.cpp` |
 | UD-REC-RWKV-01 | ARCH-PIP-REC | `tests/cpp/models/rwkv/test_rwkv_recurrent_pipeline.cpp` |
-| UD-REC-HYBRID-01 | ARCH-PIP-REC | `tests/cpp/test_recurrent_pipeline.cpp` |
+| UD-REC-HYBRID-01 | ARCH-PIP-REC | `tests/cpp/models/mamba/test_mamba_recurrent_pipeline.cpp` |
 | UD-REC-COMMON-01 | ARCH-PIP-REC | `tests/cpp/models/mamba/test_mamba_recurrent_output_initializers.cpp`, `tests/cpp/models/rwkv/test_rwkv_recurrent_output_initializers.cpp`, `tests/cpp/models/nemotron_h/test_nemotron_h_recurrent_output_initializers.cpp`, `tests/cpp/models/qwen3_5/test_qwen3_5_recurrent_output_initializers.cpp` |
 | UD-VL-DECODE-01 | ARCH-PIP-VL | `tests/cpp/models/qwen_vl/test_qwen_vl_vl_pipeline.cpp`, `tests/cpp/models/internvl/test_internvl_vl_pipeline.cpp` |
 | UD-SEG-01 | ARCH-PIP-SEG | `tests/cpp/models/segformer/test_segformer_preprocess_seam.cpp`, `tests/cpp/models/segformer/test_segformer_postprocess_seam.cpp` |
@@ -731,6 +731,6 @@ Each UD-* identifier links to architecture contracts in
 | UD-DIFF-HELPER-01 | ARCH-PIP-DIFF | `tests/cpp/models/flux/test_flux_denoising_step_seam.cpp`, `tests/cpp/models/wan/test_wan_denoising_step_seam.cpp`, `tests/cpp/models/pixart/test_pixart_denoising_step_seam.cpp`, `tests/cpp/models/flux/test_flux_generation_plan.cpp`, `tests/cpp/models/wan/test_wan_generation_plan.cpp`, `tests/cpp/models/wan/test_wan_generation_conditioning.cpp`, `tests/cpp/models/flux/test_flux_pipeline.cpp`, `tests/cpp/models/wan/test_wan_pipeline.cpp`, `tests/cpp/models/z_image/test_z_image_pipeline.cpp`, `tests/cpp/models/ltx_video/test_ltx_video_pipeline.cpp` |
 | UD-QWEN-IMAGE-SCHED-01 | ARCH-PIP-DIFF | `tests/cpp/models/qwen_image/test_qwen_image_flow_match_scheduler.cpp` |
 | UD-CORE-HELPER-01 | ARCH-TRT | `tests/cpp/test_device_tensor.cpp` |
-| UD-ENC-EMBED-01 | ARCH-PIP-ENC | `tests/cpp/test_encoder_pipeline.cpp` |
-| UD-ENC-RERANK-01 | ARCH-PIP-ENC | `tests/cpp/test_encoder_pipeline.cpp` |
+| UD-ENC-EMBED-01 | ARCH-PIP-ENC | `tests/cpp/models/bert/test_bert_encoder_pipeline.cpp` |
+| UD-ENC-RERANK-01 | ARCH-PIP-ENC | `tests/cpp/models/bert/test_bert_encoder_pipeline.cpp` |
 | UD-UTIL-MEDIA-01 | ARCH-UTIL | `tests/cpp/test_wav_reader.cpp` |

@@ -1237,13 +1237,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=14,
             name="standalone_gpu_test_support",
-            matcher=_path_in({
-                "tests/e2e/models/qwen/run_qwen3_fi.py",
-                "tests/e2e/models/qwen/test_flashinfer_plugin.py",
-                "tests/e2e/models/qwen/test_flashinfer_trt_attention.py",
-                "tests/e2e/models/qwen/test_qwen3_flashinfer.py",
-                "tests/test_tvm_ffi_e2e.py",
-            }),
+            matcher=_regex_rule(
+                r"(?:tests/e2e/models/[^/]+/(?:run_[^/]+_fi|"
+                r"test_flashinfer_(?:plugin|trt_attention)|"
+                r"test_[^/]+_flashinfer)\.py|tests/test_tvm_ffi_e2e\.py)$"
+            ),
             resolver=_match_result(
                 "standalone_gpu_test_support", _no_models, ["tools"], False,
             ),

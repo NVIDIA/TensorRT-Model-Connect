@@ -40,7 +40,7 @@ path listed here exists in the source tree.
 | `device_tensor.h` | `DeviceTensor` -- GPU-resident tensor with RAII |
 | `tokenizer_interface.h` | Minimal `ITokenizer` (encode/decode only) |
 
-### `include/trtmc/runtime/domains/audio/`
+### `src/runtime/models/personaplex/`
 
 | File | Purpose |
 |------|---------|
@@ -138,48 +138,30 @@ Common TRT runtime infrastructure.
 | File | Purpose |
 |------|---------|
 | `trt_common.h/cpp` | TRT logger, CudaBuffer (RAII), CudaStream (RAII + move) |
-| `trt_module.cpp` | Legacy `TrtModule` stubs (I/O binding delegates to `ITrtModule` from backend DSO) |
-| `kv_cache.cpp` | `KvCache` implementation (bind_to, advance, mask, reset) |
 | `device_tensor.cpp` | `DeviceTensor` GPU memory management |
-| `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine`, tensor validation |
-| `trt_decode_runtime.h/cpp` | `select_argmax_token()`, `build_attention_mask()` |
+| `cuda_common.h/cpp` | Shared CUDA helper utilities |
 | `trt_graph_builder.cpp` | TRT graph construction helpers |
-| `generation_backend.h` | Legacy generation backend interface |
 | `step_state.h` | Legacy `IStepState` interface |
-| `decoded_image.h` | Decoded image data struct |
 | `stb_impl.cpp` | stb_image implementation |
 
-### `src/runtime/domains/audio/`
+### `src/runtime/models/<audio-family>/`
 
-Audio-family backends and helpers.
+Model-owned audio-family pipelines and helpers.
 
-| File | Purpose |
+Representative folders:
+
+| Folder | Purpose |
 |------|---------|
-| `whisper_backend.h/cpp` | Whisper encoder-decoder backend |
-| `bark_backend.h/cpp` | Bark three-stage TTS backend |
-| `magpie_tts_backend.h/cpp` | Magpie TTS backend |
-| `speech_backend.h/cpp` | Speech-to-speech backend |
-| `omni_backend.h/cpp` | Legacy omni-multimodal backend |
-| `audio_bundle_validation.h/cpp` | Audio bundle section validation |
-| `audio_configs.h` | Audio model configuration structs |
-| `magpie_kernels.cu/h` | CUDA kernels for Magpie |
-| `bark_generation_plan.h` | Bark generation plan |
-| `whisper_cross_kv_apply.h` | Whisper cross-attention KV application |
-| `whisper_cross_kv_plan.h` | Whisper cross-KV plan |
-| `whisper_decode_policy.h` | Whisper decode stopping policy |
-| `whisper_host_plan.h` | Whisper host-side plan |
-| `magpie_codec_plan.h` | Magpie codec plan |
-| `magpie_decode_policy.h` | Magpie decode stopping policy |
-| `magpie_decoder_plan.h` | Magpie decoder plan |
-| `magpie_text_completion_policy.h` | Magpie text completion policy |
-| `speech_delay_cache.h` | Speech delay cache |
-| `speech_depth_plan.h` | Speech depth plan |
-| `speech_generation_policy.h` | Speech generation stopping policy |
-| `speech_mimi_decode_plan.h` | Speech MIMI decode plan |
-| `speech_runtime_plan.h` | Speech runtime plan |
-| `speech_temporal_embed_plan.h` | Speech temporal embedding plan |
-| `speech_waveform_postprocess.h` | Speech waveform postprocessing |
-| `omni_audio_plan.h` | Omni audio plan |
+| `src/runtime/models/whisper/` | Whisper speech-to-text pipeline and helpers |
+| `src/runtime/models/bark/` | Bark text-to-audio pipeline and helpers |
+| `src/runtime/models/magpie/` | Magpie TTS pipeline and helpers |
+| `src/runtime/models/personaplex/` | PersonaPlex speech-to-speech pipeline and helpers |
+| `src/runtime/models/qwen3_omni/` | Qwen3-Omni multimodal audio plan and pipeline |
+
+Representative model-local files include `pipeline.h/cpp`, `plugin.cpp`,
+`decode_runtime.h/cpp`, `audio_helpers.h/cpp`, family config headers, and
+family-specific plan or policy helpers such as `bark_generation_plan.h`,
+`magpie_codec_plan.h`, `speech_runtime_plan.h`, and `omni_audio_plan.h`.
 
 ### `src/runtime/domains/diffusion/`
 
@@ -383,7 +365,7 @@ Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 
-94 test executables. Plain `main()` programs with `check(condition, name)`
+44 test executables. Plain `main()` programs with `check(condition, name)`
 helpers. Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
 
 Covers: bundle format, tokenizers (vocab, HF Python), text/JSON parsers,
@@ -410,7 +392,7 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-197 JSON manifest files are grouped under family-owned `manifests/`
+225 JSON manifest files are grouped under family-owned `manifests/`
 directories and listed by 74 `MODEL.toml` indexes. Each manifest specifies
 `hf_id`, `bundle`, `family`, `runtime_strategy`, `prompt`, `max_new_tokens`,
 and optional fields like `logit_atol`, `trust_remote_code`, `skip`.

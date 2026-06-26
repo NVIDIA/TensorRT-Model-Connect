@@ -486,7 +486,7 @@ The runtime only begins compaction once
 `cache_length_ >= compaction_trigger_length()`, and
 `compaction_trigger_length()` is `kv_budget + divide_length = 3200` for this
 bundle configuration; see
-`src/runtime/core/triattention_kv_cache.cpp`.
+`src/runtime/models/<family>/triattention_kv_cache.cpp`.
 
 Because both prompts are far below `3200`, the tested runs never depend on a
 physical cache capacity larger than `12288`. After compaction starts, the live
@@ -1107,10 +1107,10 @@ At this point the remaining explanations are narrower:
 
 ## Files most directly responsible for the final result
 
-- `src/runtime/core/triattention_kv_cache.cpp`
-- `src/runtime/core/triattention_kernels.cu`
-- `include/trtmc/runtime/triattention_kv_cache.h`
-- `tests/cpp/test_triattention_kv_cache.cpp`
+- `src/runtime/models/<family>/triattention_kv_cache.cpp`
+- `src/runtime/models/<family>/triattention_kernels.cu`
+- `src/runtime/models/<family>/triattention_kv_cache.h`
+- `tests/builder/test_triattention_runtime.py`
 
 ## Short version
 
@@ -1756,7 +1756,7 @@ This makes sense after reading the native runtime code:
 - `cache_length_` only grows in `append_present_to_cache()`
 - prefill tokens do not contribute to `cache_length_`
 - compaction triggering uses `cache_length_ >= compaction_trigger_length()`
-- relevant code: `src/runtime/core/triattention_kv_cache.cpp` around the
+- relevant code: `src/runtime/models/<family>/triattention_kv_cache.cpp` around the
   append/cache-length and compaction-trigger paths
 
 So the earlier Python replay with `count_prompt_tokens=True` was not an
@@ -2263,8 +2263,8 @@ The sampler was then fixed to:
 - call `at::multinomial(..., replacement=false, generator_)` on that full
   tensor
 
-Regression coverage was added in `test_sampler.cpp` to lock in the sparse
-full-vocab behavior.
+Regression coverage was added to lock in the sampler's sparse full-vocab
+behavior.
 
 After that fix:
 
@@ -2343,10 +2343,10 @@ That led to a new exact sparse CUDA sampler:
 
 The implementation is in:
 
-- `src/runtime/core/sparse_multinomial_kernel.cu`
-- `src/runtime/core/sampler.cpp`
+- `src/runtime/models/<family>/sparse_multinomial_kernel.cu`
+- `src/runtime/models/<family>/sampler.cpp`
 
-New regression coverage was added in `test_sampler.cpp` for:
+New sampler regression coverage was added for:
 
 - sparse full-vocab semantics
 - offset progression across repeated draws

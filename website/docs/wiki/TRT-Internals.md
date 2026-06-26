@@ -192,7 +192,7 @@ generate(prompt, cfg):
 
 ### KV-Cache Management
 
-The cache uses a fixed-size buffer per layer, held in device memory (`KvCache` in `include/trtmc/runtime/kv_cache.h`):
+The cache uses a fixed-size buffer per layer, held in device memory (`KvCache` in `src/runtime/models/<family>/kv_cache.h`):
 - Size: `[max_cache_length, kv_dim]` per layer, per K and V, resident on GPU
 - `bind_to(module)` injects cache pointers directly into the TrtModule's execution context
 - `advance()` does D2D async copy of present K/V into cache slots, then increments position
