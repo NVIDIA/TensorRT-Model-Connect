@@ -20,5 +20,8 @@
   "asr_probe_id": "probe_03_clean_48k_mono_resample",
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Cover mono 48k resample path.",
+  "metadata": {
+    "group_by_bundle": true
+  },
   "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode + 48k->16k resample, without stereo downmix."
 }

@@ -1,4 +1,4 @@
-"""Shared execution support for model-owned E2E entrypoints."""
+"""Scoped grouped-bundle execution support for model-owned E2E entrypoints."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from tests.e2e_harness.python_profiles import (
 
 
 _BUNDLE_GROUP_PREFIX = "bundle:"
+_GROUP_BY_BUNDLE_METADATA_KEY = "group_by_bundle"
 
 
 def _parse_e2e_model_filters(values: list[str] | None) -> set[str]:
@@ -46,7 +47,7 @@ def _group_cases_by_bundle(cases) -> list[list]:
     groups: list[list] = []
     bundle_groups: dict[str, list] = {}
     for case in cases:
-        if not case.bundle:
+        if not _case_allows_bundle_group(case):
             groups.append([case])
             continue
         group = bundle_groups.get(case.bundle)
@@ -56,6 +57,11 @@ def _group_cases_by_bundle(cases) -> list[list]:
             groups.append(group)
         group.append(case)
     return [_sort_bundle_group(group) for group in groups]
+
+
+def _case_allows_bundle_group(case) -> bool:
+    metadata = case.metadata or {}
+    return bool(case.bundle and metadata.get(_GROUP_BY_BUNDLE_METADATA_KEY))
 
 
 def _sort_bundle_group(cases) -> list:

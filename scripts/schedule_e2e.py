@@ -41,6 +41,7 @@ _LARGE_TEST_WEIGHT = 300.0
 _EXCLUSIVE_GPU_TEST_WEIGHT = 900.0
 _TIMING_ESTIMATES_FILE = "timing_estimates.json"
 _BUNDLE_GROUP_PREFIX = "bundle:"
+_GROUP_BY_BUNDLE_METADATA_KEY = "group_by_bundle"
 
 
 def _param_billions(hf_id: str) -> float | None:
@@ -152,13 +153,42 @@ def _model_names_from_test_id(test_id: str) -> list[str]:
     return [name]
 
 
+def _is_bundle_group_test_id(test_id: str) -> bool:
+    return _model_name_from_test_id(test_id).startswith(_BUNDLE_GROUP_PREFIX)
+
+
+def _manifest_allows_bundle_group(manifest: dict) -> bool:
+    metadata = manifest.get("metadata", {})
+    return (
+        isinstance(metadata, dict)
+        and bool(metadata.get(_GROUP_BY_BUNDLE_METADATA_KEY))
+    )
+
+
+def _manifest_bundle_group_key(
+    *,
+    name: str,
+    manifest: dict,
+    explicit_bundle_group: bool,
+) -> str:
+    bundle = str(manifest.get("bundle", "") or "").strip()
+    if bundle and (explicit_bundle_group or _manifest_allows_bundle_group(manifest)):
+        return f"bundle:{bundle}"
+    return f"single:{name}"
+
+
 def _bundle_group_key(test_id: str, manifests: dict[str, dict]) -> str:
-    """Return a stable scheduling key for tests that build the same bundle."""
+    """Return a stable scheduling key for tests that intentionally share a bundle."""
+    explicit_bundle_group = _is_bundle_group_test_id(test_id)
     for name in _model_names_from_test_id(test_id):
         manifest = manifests.get(name, {})
-        bundle = str(manifest.get("bundle", "") or "").strip()
-        if bundle:
-            return f"bundle:{bundle}"
+        key = _manifest_bundle_group_key(
+            name=name,
+            manifest=manifest,
+            explicit_bundle_group=explicit_bundle_group,
+        )
+        if key.startswith("bundle:"):
+            return key
     return f"single:{test_id}"
 
 
@@ -189,6 +219,7 @@ def bundle_selection_summary(
     selected_testcases = 0
     for test_id in test_ids:
         names = _model_names_from_test_id(test_id)
+        explicit_bundle_group = _is_bundle_group_test_id(test_id)
         selected_testcases += len(names)
         if not names:
             bundle_to_cases.setdefault(f"single:{test_id}", set())
@@ -200,8 +231,11 @@ def bundle_selection_summary(
                 missing_manifests += 1
                 key = f"missing:{name}"
             else:
-                bundle = str(manifest.get("bundle", "") or "").strip()
-                key = f"bundle:{bundle}" if bundle else f"single:{name}"
+                key = _manifest_bundle_group_key(
+                    name=name,
+                    manifest=manifest,
+                    explicit_bundle_group=explicit_bundle_group,
+                )
             bundle_key = bundle_key or key
             bundle_to_cases.setdefault(key, set()).add(name)
         if bundle_key and len(names) > 1:

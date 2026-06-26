@@ -136,6 +136,10 @@ _BROAD_FALLBACK_RULES = {
     "harness_shared",
     "shared_builder_module",
 }
+_BUNDLE_GROUP_RUNNER_FAMILIES = (
+    "canary",
+    "nemotron_labs_diffusion",
+)
 # TODO: Remove multi_device from the default exclusion once CI has a runner pool
 # that can reserve all GPUs for tensor-parallel E2E cases.
 _DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
@@ -1027,6 +1031,14 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
 
+def _bundle_group_runner_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    models: Set[str] = set()
+    for family in _BUNDLE_GROUP_RUNNER_FAMILIES:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
 def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
@@ -1233,6 +1245,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_regex_rule(r"tests/e2e/models/([^/]+)/thresholds/([^/]+)\.json$"),
             resolver=_match_result("e2e_model_threshold", _e2e_model_threshold_models),
             covered_by=("TestSafetyNet.test_e2e_model_owned_threshold_self",),
+        ),
+        ClassificationRule(
+            priority=9,
+            name="e2e_bundle_group_runner",
+            matcher=_path_in({"tests/e2e/models/_bundle_group_runner.py"}),
+            resolver=_match_result("e2e_bundle_group_runner", _bundle_group_runner_models),
+            covered_by=("TestSafetyNet.test_e2e_bundle_group_runner",),
         ),
         ClassificationRule(
             priority=14,

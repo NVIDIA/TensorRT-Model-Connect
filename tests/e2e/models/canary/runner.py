@@ -8,7 +8,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from tests.e2e_harness.model_case_runner import (
+from tests.e2e.models._bundle_group_runner import (
     model_case_names_for_dir,
     run_model_e2e_case_or_group,
 )

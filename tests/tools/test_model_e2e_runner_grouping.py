@@ -5,20 +5,29 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from tests.e2e_harness import model_case_runner
+from tests.e2e.models import _bundle_group_runner as model_case_runner
 
 
-_RUNNER_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "e2e"
-    / "models"
-    / "canary"
-    / "runner.py"
+def _load_runner(family: str, module_name: str):
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / "e2e"
+        / "models"
+        / family
+        / "runner.py"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, runner_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+canary_runner = _load_runner("canary", "canary_e2e_runner")
+nemotron_speech_runner = _load_runner(
+    "nemotron_speech_streaming",
+    "nemotron_speech_streaming_e2e_runner",
 )
-_SPEC = importlib.util.spec_from_file_location("canary_e2e_runner", _RUNNER_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-canary_runner = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(canary_runner)
 
 
 class _Config:
@@ -63,6 +72,25 @@ def test_canary_runner_collects_shared_bundle_as_one_case() -> None:
     assert "canary-1b-v2" not in case_names
     assert "canary-1b-v2-asr-probe05" not in case_names
     assert "canary-1b-v2-tp4" not in case_names
+
+
+def test_nemotron_speech_runner_does_not_collect_shared_bundle_as_group() -> None:
+    case_names = nemotron_speech_runner.model_case_names(
+        _Config(
+            **{
+                "--e2e-group-by-bundle": True,
+                "--e2e-exclude-ci-tier": [],
+                "--e2e-model": [],
+            }
+        )
+    )
+
+    assert not any(
+        name.startswith("bundle:nemotron-speech-streaming-en-0.6b")
+        for name in case_names
+    )
+    assert "nemotron-speech-streaming-en-0.6b" in case_names
+    assert "nemotron-speech-streaming-en-0.6b-asr-probe01" in case_names
 
 
 def test_grouped_runner_rebuilds_bundle_once(monkeypatch) -> None:

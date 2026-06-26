@@ -225,6 +225,13 @@ class TorchReference:
         {"name": "speech-core", "family": "speech_family", "runtime_strategy": "speech_family_speech_to_text",
          "hf_id": "example/speech-core", "precision": "fp16", "core": True,
          "test_input_audio": "tests/e2e/data/Recording.wav"},
+        {"name": "canary-grouped", "family": "canary", "runtime_strategy": "speech_to_text",
+         "hf_id": "example/canary-grouped", "core": True},
+        {"name": "nld-grouped", "family": "nemotron_labs_diffusion",
+         "runtime_strategy": "nemotron_labs_diffusion", "task_strategy": "text_generation_causal",
+         "hf_id": "example/nld-grouped"},
+        {"name": "speech-streaming-case", "family": "nemotron_speech_streaming",
+         "runtime_strategy": "speech_to_text", "hf_id": "example/speech-streaming-case"},
         {"name": "media-core", "family": "media_family", "runtime_strategy": "diffusion_media_primary",
          "hf_id": "example/media-core", "reference_family": "diffusers_image_gen", "core": True},
         {"name": "media-alt", "family": "media_alt_family", "runtime_strategy": "diffusion_media_secondary",
@@ -1110,6 +1117,16 @@ class TestSafetyNet:
         )
         assert match.rule == "e2e_model_owned_test"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
+
+    def test_e2e_bundle_group_runner(self, imap):
+        """Changing grouped-bundle helper -> only opt-in grouped families."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/_bundle_group_runner.py",
+            imap,
+        )
+        assert match.rule == "e2e_bundle_group_runner"
+        assert match.models == ["canary-grouped", "nld-grouped"]
+        assert "speech-streaming-case" not in match.models
 
     def test_e2e_model_owned_waives_self(self, imap):
         """Changing a model-owned waive file -> only that family's models."""

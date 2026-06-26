@@ -103,6 +103,7 @@ def test_same_bundle_exclusive_tests_stay_in_one_worker_queue(tmp_path: Path) ->
             runtime_strategy="diffusion_text_experiment",
             e2e_parallel_resource="exclusive_gpu",
             bundle="shared-exclusive-bundle.trtfb",
+            metadata={"group_by_bundle": True},
         )
     _write_manifest(
         tmp_path,
@@ -139,6 +140,7 @@ def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> No
             tmp_path,
             f"shared-mode-{mode}",
             bundle="shared-bundle.trtfb",
+            metadata={"group_by_bundle": True},
         )
     _write_manifest(tmp_path, "small-a")
     _write_manifest(tmp_path, "small-b")
@@ -162,6 +164,27 @@ def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> No
     ]
     assert len(matching_queues) == 1
     assert sorted(matching_queues[0]) == sorted(grouped_ids)
+
+
+def test_same_bundle_tests_without_group_metadata_stay_separate(tmp_path: Path) -> None:
+    for mode in ("a", "b", "c"):
+        _write_manifest(
+            tmp_path,
+            f"plain-shared-mode-{mode}",
+            bundle="shared-bundle.trtfb",
+        )
+
+    grouped_ids = [
+        _test_id("plain-shared-mode-a"),
+        _test_id("plain-shared-mode-b"),
+        _test_id("plain-shared-mode-c"),
+    ]
+    groups = schedule_e2e._group_by_bundle(
+        grouped_ids,
+        schedule_e2e._load_manifests(tmp_path),
+    )
+
+    assert [group for _, group in groups] == [[test_id] for test_id in grouped_ids]
 
 
 def test_bundle_group_entry_summarizes_member_testcases(tmp_path: Path) -> None:
