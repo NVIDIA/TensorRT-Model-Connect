@@ -1040,6 +1040,39 @@ int main() {
         check(tok->decode({2, 0}) == "a", "metaspace_decode_leading_space_strip");
     }
 
+    // === 23b. Metaspace decode with SentencePiece marker ===
+    {
+        std::cerr << "\n=== Metaspace Decode SentencePiece Marker ===\n";
+
+        std::string meta_json = R"({
+          "model": {
+            "type": "BPE",
+            "vocab": {
+              "\u2581Hello": 0,
+              "\u2581there": 1,
+              ",": 2,
+              "\u2581how": 3,
+              "\u2581is": 4,
+              "\u2581the": 5,
+              "\u2581weather": 6,
+              "\u2581today": 7,
+              "?": 8
+            },
+            "merges": []
+          },
+          "decoder": {
+            "type": "Metaspace",
+            "replacement": "\u2581",
+            "prepend_scheme": "always"
+          }
+        })";
+
+        auto tok = trtmc::CreateBpeTokenizer(meta_json.data(), meta_json.size(), false);
+        check(tok != nullptr, "metaspace_decode_sentencepiece_create");
+        check(tok->decode({0, 1, 2, 3, 4, 5, 6, 7, 8}) == "Hello there, how is the weather today?",
+              "metaspace_decode_sentencepiece_transcript");
+    }
+
     // === 24. Missing vocab/merges → throw ===
     {
         std::cerr << "\n=== Missing Vocab/Merges ===\n";
