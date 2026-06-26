@@ -1236,6 +1236,21 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=14,
+            name="standalone_gpu_test_support",
+            matcher=_path_in({
+                "tests/e2e/models/qwen/run_qwen3_fi.py",
+                "tests/e2e/models/qwen/test_flashinfer_plugin.py",
+                "tests/e2e/models/qwen/test_flashinfer_trt_attention.py",
+                "tests/e2e/models/qwen/test_qwen3_flashinfer.py",
+                "tests/test_tvm_ffi_e2e.py",
+            }),
+            resolver=_match_result(
+                "standalone_gpu_test_support", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
+        ),
+        ClassificationRule(
+            priority=17,
             name="e2e_model_owned_test",
             matcher=_regex_rule(
                 r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|"
@@ -1633,21 +1648,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_equals("tests/e2e/waives.txt"),
             resolver=_match_result("e2e_waives", _all_models),
             covered_by=("TestHarness.test_waives_diff_can_be_refined",),
-        ),
-        ClassificationRule(
-            priority=415,
-            name="standalone_gpu_test_support",
-            matcher=_path_in({
-                "tests/run_qwen3_fi.py",
-                "tests/test_flashinfer_plugin_e2e.py",
-                "tests/test_flashinfer_trt_attention.py",
-                "tests/test_qwen3_flashinfer_e2e.py",
-                "tests/test_tvm_ffi_e2e.py",
-            }),
-            resolver=_match_result(
-                "standalone_gpu_test_support", _no_models, ["tools"], False,
-            ),
-            covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
         ClassificationRule(
             priority=416,

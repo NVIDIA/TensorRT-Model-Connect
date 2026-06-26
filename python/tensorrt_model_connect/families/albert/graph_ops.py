@@ -1,7 +1,6 @@
-"""1:1 port of src/runtime/trt/trt_graph_ops.cpp to Python TensorRT API.
+"""Family-owned TensorRT graph operations for Python engine builds.
 
-Every function matches the C++ signature semantics exactly. Tensor names and
-shapes must be identical so the C++ runtime can consume the built engine.
+Tensor names and shapes must stay compatible with the C++ bundle runtime.
 """
 
 from __future__ import annotations

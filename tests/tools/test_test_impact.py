@@ -1322,13 +1322,16 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/test_flashinfer_plugin_e2e.py",
-            "tests/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/qwen/run_qwen3_fi.py",
+            "tests/e2e/models/qwen/test_flashinfer_plugin.py",
+            "tests/e2e/models/qwen/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/qwen/test_qwen3_flashinfer.py",
             "tests/test_tvm_ffi_e2e.py",
         ],
     )
     def test_standalone_gpu_tests_do_not_select_models(self, imap, path):
         """Standalone GPU test files should not drive manifest-harness model scope."""
+        assert (REPO_ROOT / path).exists()
         match = test_impact.classify_file(path, imap)
         assert match.rule == "standalone_gpu_test_support"
         assert match.models == []

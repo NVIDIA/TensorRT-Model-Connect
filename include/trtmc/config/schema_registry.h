@@ -6,7 +6,7 @@
 // features in isolation without touching any shared dispatcher, CLI parser, or
 // registry-of-registries.
 //
-// Design contract (see docs/context/2026-04-20-config-registry-status.md):
+// Design contract (see website/docs/context/config-registry-status.md):
 //   - Registration: catalogs *schemas* (field metadata + defaults). No values.
 //   - Session start: the pipeline factory resolves a ConfigBundle by merging
 //     layers (session > platform > bundle defaults > schema defaults) against
