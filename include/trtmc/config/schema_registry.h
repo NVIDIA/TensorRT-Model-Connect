@@ -116,14 +116,14 @@ struct SchemaRegistrar {
 // registration collision between parallel agents immediately.
 #define REGISTER_CONFIG_SCHEMA(schema_literal)                                                     \
     namespace {                                                                                    \
-    static ::trtmc::config::SchemaRegistrar                                                         \
+    static ::trtmc::config::SchemaRegistrar                                                        \
         g_config_schema_registrar_##__COUNTER__(schema_literal);                                   \
     }
 
 // Define a schema factory registration function consumed by the generated
 // manifest source. The function name must match cmake/trtmc_config_schemas.cmake.
 #define REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(RegisterFunction, FactoryFn)                  \
-    void RegisterFunction(::trtmc::config::SchemaRegistry& registry) {                              \
+    void RegisterFunction(::trtmc::config::SchemaRegistry& registry) {                             \
         registry.register_schema(FactoryFn());                                                     \
     }
 
