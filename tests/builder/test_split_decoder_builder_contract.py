@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 
@@ -10,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FAMILIES_DIR = ROOT / "python" / "tensorrt_model_connect" / "families"
 BUILDERS_DIR = ROOT / "python" / "tensorrt_model_connect" / "builders"
 
-SHARED_BUILDER_STUBS = (
+REMOVED_SHARED_BUILDER_MODULES = (
+    BUILDERS_DIR / "__init__.py",
     BUILDERS_DIR / "default_decoder.py",
     BUILDERS_DIR / "default_dual_profile_decoder.py",
     BUILDERS_DIR / "default_dual_profile_decoder_tp.py",
@@ -32,37 +32,13 @@ def _builder_contract_text(path: Path, *, local_module: str) -> str:
     return text
 
 
-def test_shared_builder_modules_are_retired_stubs() -> None:
+def test_shared_builder_modules_are_removed() -> None:
     """Shared builder package must not retain concrete model builder logic."""
-    violations: list[str] = []
-    forbidden_terms = (
-        "import tensorrt",
-        "trt_compat",
-        "graph_ops",
-        "graph_blocks",
-        "create_network",
-        "add_input",
-        "add_output",
-        "profile_mode ==",
-        "_decoder_engine_role",
-        "position_type ==",
-        "mlp_type ==",
-    )
-    forbidden_nodes = (ast.If, ast.For, ast.While, ast.Try, ast.With, ast.Match)
-    for path in SHARED_BUILDER_STUBS:
-        text = path.read_text(encoding="utf-8")
-        if "RetiredSharedBuilderError" not in text:
-            violations.append(f"{path.relative_to(ROOT)}: missing retired-builder error")
-        for term in forbidden_terms:
-            if term in text:
-                violations.append(f"{path.relative_to(ROOT)}: contains {term}")
-        tree = ast.parse(text, filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, forbidden_nodes):
-                violations.append(
-                    f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 0)} "
-                    f"contains {type(node).__name__}"
-                )
+    violations = [
+        str(path.relative_to(ROOT))
+        for path in REMOVED_SHARED_BUILDER_MODULES
+        if path.exists()
+    ]
 
     assert not violations
 

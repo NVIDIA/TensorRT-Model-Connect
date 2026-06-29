@@ -26,12 +26,15 @@ SHARED_CONFIG_SCHEMA_INCLUDES = REPO_ROOT / "include" / "trtmc" / "config" / "sc
 PY_RUNTIME_CONFIG_SCHEMAS = REPO_ROOT / "python" / "tensorrt_model_connect" / "runtime_config" / "schemas"
 BUNDLE_WRITER = REPO_ROOT / "python" / "tensorrt_model_connect" / "bundle_writer.py"
 CONFIG_PY = REPO_ROOT / "python" / "tensorrt_model_connect" / "config.py"
+CHECKPOINT_MAPPER = REPO_ROOT / "python" / "tensorrt_model_connect" / "checkpoint_mapper.py"
 PYTHON_PROFILES = REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.toml"
 ENGINE_BUILDER = REPO_ROOT / "python" / "tensorrt_model_connect" / "engine_builder.py"
 BUILD_CLI = REPO_ROOT / "python" / "tensorrt_model_connect" / "build_cli.py"
 DEBUG_RUNNER = REPO_ROOT / "python" / "tensorrt_model_connect" / "debug_runner.py"
-GRAPH_OPS = REPO_ROOT / "python" / "tensorrt_model_connect" / "graph_ops.py"
-GRAPH_BLOCKS = REPO_ROOT / "python" / "tensorrt_model_connect" / "graph_blocks.py"
+REMOVED_ROOT_GRAPH_HELPERS = (
+    REPO_ROOT / "python" / "tensorrt_model_connect" / "graph_ops.py",
+    REPO_ROOT / "python" / "tensorrt_model_connect" / "graph_blocks.py",
+)
 QUANTIZATION = REPO_ROOT / "python" / "tensorrt_model_connect" / "quantization"
 DEBUG_RUNNER_TEST = REPO_ROOT / "tests" / "builder" / "test_debug_runner.py"
 DEBUG_RUNNER_EXTENDED_TEST = (
@@ -40,17 +43,17 @@ DEBUG_RUNNER_EXTENDED_TEST = (
 SHARED_MANIFEST_VALIDATION_TEST = REPO_ROOT / "tests" / "builder" / "test_manifest_validation.py"
 FP8_CALIBRATE = REPO_ROOT / "python" / "tensorrt_model_connect" / "fp8_calibrate.py"
 SHARED_GENERIC_HELPER_FILES = (
-    GRAPH_OPS,
-    GRAPH_BLOCKS,
     DEBUG_RUNNER,
     REPO_ROOT / "python" / "tensorrt_model_connect" / "triattention_export.py",
     BUILD_CLI,
     REPO_ROOT / "tests" / "builder" / "test_graph_ops_extended.py",
 )
-SHARED_DECODER_BUILDER_FILES = (
+REMOVED_SHARED_BUILDER_FILES = (
+    REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "__init__.py",
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_decoder.py",
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_dual_profile_decoder.py",
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_dual_profile_decoder_tp.py",
+    REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "utils.py",
 )
 CHAT_TEMPLATE_CORE_FILES = (
     REPO_ROOT / "src" / "runtime" / "core" / "chat_template.h",
@@ -227,8 +230,6 @@ SHARED_GENERIC_FIXTURE_TEST_FILES = (
     REPO_ROOT / "tests" / "builder" / "test_cli_coverage.py",
     REPO_ROOT / "tests" / "builder" / "test_config.py",
     REPO_ROOT / "tests" / "builder" / "test_config_coverage.py",
-    REPO_ROOT / "tests" / "builder" / "test_checkpoint_mapper.py",
-    REPO_ROOT / "tests" / "builder" / "test_checkpoint_mapper_coverage.py",
     REPO_ROOT / "tests" / "builder" / "test_quantization.py",
     REPO_ROOT / "tests" / "builder" / "test_parallel_config.py",
     REPO_ROOT / "tests" / "builder" / "test_trt_compat_boundary.py",
@@ -3680,145 +3681,74 @@ def test_shared_debug_diffusion_pipeline_has_no_family_implementation() -> None:
     assert not violations, _format_violations(violations)
 
 
-def test_shared_decoder_builders_describe_capabilities_not_families() -> None:
+def test_root_decoder_builder_package_is_removed() -> None:
     """Trace: ARCH-MODPLUG-001
-    Intent: keep shared decoder builders generic and family-neutral.
-    Preconditions: model-specific decoder usage lives in family plugins.
-    Postconditions: shared builder docs/comments do not name model families.
+    Intent: keep decoder builder behavior out of root shared Python modules.
+    Preconditions: model-specific decoder builders live in family packages.
+    Postconditions: retired root builder package files are absent.
     """
-    forbidden = (
-        "Qwen",
-        "qwen",
-        "LLaMA",
-        "Bark",
-        "bark",
-        "CodeGen",
-        "GPT-J",
-        "GPT-Neo",
-        "OPT",
-        "Bloom",
-        "Falcon",
-        "Mistral",
-        "Gemma",
-        "Phi",
-        "Nemotron",
-        "Mamba",
-        "mamba",
-        "RWKV",
-        "rwkv",
-        "MoE",
-        "moe",
-    )
-    violations = []
-    for path in SHARED_DECODER_BUILDER_FILES:
-        text = path.read_text(encoding="utf-8")
-        violations.extend(
-            (path, 0, f"shared decoder builder contains family term {needle}")
-            for needle in forbidden
-            if needle in text
-        )
+    violations = [
+        (path, 0, "root shared builder package file must not exist")
+        for path in REMOVED_SHARED_BUILDER_FILES
+        if path.exists()
+    ]
 
     assert not violations, _format_violations(violations)
 
 
-def test_shared_decoder_builders_are_retired_stubs() -> None:
+def test_root_graph_helpers_are_removed() -> None:
     """Trace: ARCH-MODPLUG-001
-    Intent: prevent the root builder package from owning decoder behavior.
-    Preconditions: family builder helper copies exist under
-    python/tensorrt_model_connect/families/<family>/.
-    Postconditions: shared decoder builders contain no TensorRT graph-building
-    logic or feature-variant branches.
-    """
-    forbidden_terms = (
-        "trt_compat",
-        "graph_ops",
-        "graph_blocks",
-        "create_network",
-        "add_input",
-        "mark_output",
-        "profile_mode ==",
-        "_decoder_engine_role",
-        "position_type ==",
-        "mlp_type ==",
-        "norm_type ==",
-    )
-    forbidden_nodes = (
-        ast.If,
-        ast.For,
-        ast.AsyncFor,
-        ast.While,
-        ast.Try,
-        ast.With,
-        ast.AsyncWith,
-        ast.Match,
-    )
-    violations = []
-    for path in (*SHARED_DECODER_BUILDER_FILES,
-                 REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "utils.py"):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if "RetiredSharedBuilderError" not in text:
-            violations.append((path, 0, "shared builder is not a retired stub"))
-        for term in forbidden_terms:
-            if term in text:
-                violations.append((path, 0, f"shared builder contains concrete term {term}"))
-        tree = ast.parse(text, filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, forbidden_nodes):
-                violations.append((
-                    path,
-                    getattr(node, "lineno", 0),
-                    f"shared builder contains {type(node).__name__}",
-                ))
-
-    assert not violations, _format_violations(violations)
-
-
-def test_shared_graph_helpers_are_retired_stubs() -> None:
-    """Trace: ARCH-MODPLUG-001
-    Intent: prevent root graph helper modules from owning model graph behavior.
+    Intent: keep graph-building behavior in family-owned helper modules.
     Preconditions: family graph helper copies exist.
-    Postconditions: root graph_ops/graph_blocks are compatibility stubs only.
+    Postconditions: root graph_ops/graph_blocks modules are absent.
     """
-    forbidden_terms = (
-        "trt_compat",
-        "add_input",
-        "add_constant",
-        "add_matrix_multiply",
-        "mark_output",
-        "position_type ==",
-        "mlp_type ==",
-        "norm_type ==",
-        "model_type",
-    )
-    forbidden_nodes = (
-        ast.If,
-        ast.For,
-        ast.AsyncFor,
-        ast.While,
-        ast.Try,
-        ast.With,
-        ast.AsyncWith,
-        ast.Match,
-    )
+    violations = [
+        (path, 0, "root shared graph helper must not exist")
+        for path in REMOVED_ROOT_GRAPH_HELPERS
+        if path.exists()
+    ]
+
+    assert not violations, _format_violations(violations)
+
+
+def test_root_checkpoint_mapper_is_type_only() -> None:
+    """Trace: ARCH-MODPLUG-001
+    Intent: keep checkpoint loading and tensor mapping in family-owned modules.
+    Preconditions: family checkpoint_mapper.py copies own concrete loaders.
+    Postconditions: root checkpoint_mapper.py exposes only the stable WeightDict type.
+    """
+    tree = ast.parse(CHECKPOINT_MAPPER.read_text(encoding="utf-8"),
+                     filename=str(CHECKPOINT_MAPPER))
     violations = []
-    for path, error_name in (
-        (GRAPH_OPS, "RetiredSharedGraphOpsError"),
-        (GRAPH_BLOCKS, "RetiredSharedGraphBlocksError"),
-    ):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if error_name not in text:
-            violations.append((path, 0, "shared graph helper is not a retired stub"))
-        for term in forbidden_terms:
-            if term in text:
-                violations.append((path, 0, f"shared graph helper contains {term}"))
-        tree = ast.parse(text, filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, forbidden_nodes):
-                violations.append((
-                    path,
-                    getattr(node, "lineno", 0),
-                    f"shared graph helper contains {type(node).__name__}",
-                ))
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            violations.append((
+                CHECKPOINT_MAPPER,
+                node.lineno,
+                f"root checkpoint mapper defines helper function {node.name}",
+            ))
+        if isinstance(node, ast.ClassDef) and node.name != "WeightDict":
+            violations.append((
+                CHECKPOINT_MAPPER,
+                node.lineno,
+                f"root checkpoint mapper defines non-protocol class {node.name}",
+            ))
+
+    text = CHECKPOINT_MAPPER.read_text(encoding="utf-8")
+    forbidden = (
+        "load_standard_weights",
+        "_open_safetensors",
+        "_load_tensor",
+        "_has_tensor",
+        "_transpose_2d",
+        "safetensors",
+        "numpy",
+    )
+    violations.extend(
+        (CHECKPOINT_MAPPER, 0, f"root checkpoint mapper contains {needle}")
+        for needle in forbidden
+        if needle in text
+    )
 
     assert not violations, _format_violations(violations)
 

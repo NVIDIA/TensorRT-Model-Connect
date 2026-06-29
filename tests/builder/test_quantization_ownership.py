@@ -22,8 +22,6 @@ SHARED_CORE_FILES = [
     "python/tensorrt_model_connect/quantization/scale_providers.py",
     "python/tensorrt_model_connect/quantization/adapters.py",
     "python/tensorrt_model_connect/quantization/__init__.py",
-    "python/tensorrt_model_connect/graph_blocks.py",
-    "python/tensorrt_model_connect/graph_ops.py",
 ]
 
 # Keep this list to unambiguous, multi-character family names so the regex

@@ -208,8 +208,9 @@ def _drop_imported_module(module_name: str) -> None:
 
 
 def _import_qwen3_with_fake_trt(fake_trt: types.SimpleNamespace):
-    """Import qwen3 builder with a fake checkpoint_mapper to avoid safetensors runtime."""
-    fake_cm = types.ModuleType("tensorrt_model_connect.checkpoint_mapper")
+    """Import qwen3 builder with a fake family checkpoint mapper."""
+    checkpoint_module = "tensorrt_model_connect.families.z_image.checkpoint_mapper"
+    fake_cm = types.ModuleType(checkpoint_module)
 
     class _WeightDict(dict):
         pass
@@ -221,12 +222,12 @@ def _import_qwen3_with_fake_trt(fake_trt: types.SimpleNamespace):
 
     for mod_name in (
         "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
-        "tensorrt_model_connect.checkpoint_mapper",
+        checkpoint_module,
         "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
         _drop_imported_module(mod_name)
-    with patch.dict(sys.modules, {"tensorrt": fake_trt, "tensorrt_model_connect.checkpoint_mapper": fake_cm}):
+    with patch.dict(sys.modules, {"tensorrt": fake_trt, checkpoint_module: fake_cm}):
         return importlib.import_module("tensorrt_model_connect.families.z_image.qwen3_encoder_builder")
 
 

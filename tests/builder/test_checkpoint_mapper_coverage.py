@@ -1,6 +1,6 @@
-"""Coverage-focused tests for checkpoint_mapper helper branches.
+"""Coverage-focused tests for Qwen checkpoint mapper helper branches.
 
-Trace: ARCH-CHK-001, UD-CHK-02
+Trace: ARCH-CHK-001, ARCH-MODPLUG-001, UD-CHK-02
 Intent: Validate edge-case branches in checkpoint_mapper including q/k norm tiling, final norm fallback, QKV bias loading, and compact GQA/MQA K/V shapes.
 Preconditions: tensorrt_model_connect and safetensors are importable; no TRT or GPU required.
 Postconditions: Optional norm weights are tiled per-head, missing final norm defaults to ones, biases are loaded when present, and compact K/V shapes are preserved.
@@ -18,8 +18,8 @@ import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 
-from tensorrt_model_connect import checkpoint_mapper as cm
-from tensorrt_model_connect.config import ModelConfig
+from tensorrt_model_connect.families.qwen import checkpoint_mapper as cm
+from tensorrt_model_connect.families.qwen.config import ModelConfig
 
 
 def _save_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:
