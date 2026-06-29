@@ -168,6 +168,7 @@ def _selector_values(selectors: dict[str, Any], key: str) -> set[str]:
 
 def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bool, str]:
     selectors = suite.get("selectors", {})
+    model_names = _selector_values(selectors, "model_names")
     task_strategies = _selector_values(selectors, "task_strategies")
     runtime_strategies = _selector_values(selectors, "runtime_strategies")
     user_contracts = _selector_values(selectors, "user_contracts")
@@ -175,6 +176,8 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
     families = _selector_values(selectors, "families")
     exclude_families = _selector_values(selectors, "exclude_families")
 
+    if model_names and model["name"] not in model_names:
+        return False, f"model={model['name']} not selected"
     if task_strategies and model["task_strategy"] not in task_strategies:
         return False, f"task_strategy={model['task_strategy']} not selected"
     if runtime_strategies and model["runtime_strategy"] not in runtime_strategies:
@@ -2576,6 +2579,18 @@ def _is_canary_asr_reference(args: argparse.Namespace) -> bool:
     return reference_family == "asr_canary" or family == "canary" or "canary" in model
 
 
+def _is_nemo_asr_reference(args: argparse.Namespace) -> bool:
+    reference_family = str(getattr(args, "reference_family", "") or "").lower()
+    family = str(getattr(args, "family", "") or "").lower()
+    model = str(getattr(args, "model", "") or "").lower()
+    return (
+        _is_canary_asr_reference(args)
+        or family == "nemotron_speech_streaming"
+        or "nemotron-speech-streaming" in model
+        or reference_family == "asr_nemo"
+    )
+
+
 def _model_dtype(torch_mod: Any, dtype_name: str) -> Any:
     if dtype_name == "float16":
         return torch_mod.float16
@@ -2985,8 +3000,8 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
 
 
 def run_asr_hf_reference(args: argparse.Namespace) -> None:
-    if _is_canary_asr_reference(args):
-        _run_canary_hf_reference(args)
+    if _is_nemo_asr_reference(args):
+        _run_nemo_asr_hf_reference(args)
         return
 
     try:
@@ -3081,7 +3096,7 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
-def _run_canary_hf_reference(args: argparse.Namespace) -> None:
+def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
@@ -3097,7 +3112,7 @@ def _run_canary_hf_reference(args: argparse.Namespace) -> None:
     try:
         import nemo.collections.asr as nemo_asr
     except ImportError:
-        _run_canary_hf_pipeline_reference(
+        _run_nemo_asr_hf_pipeline_reference(
             args=args,
             prompt_rows=prompt_rows,
             raw_path=raw_path,
@@ -3122,7 +3137,7 @@ def _run_canary_hf_reference(args: argparse.Namespace) -> None:
             sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
             audio_path = str(prompt_row.get("audio", ""))
             if not audio_path:
-                raise ValueError(f"Canary HF reference expects an audio path for sample {idx}")
+                raise ValueError(f"NeMo ASR HF reference expects an audio path for sample {idx}")
             audio, sample_rate = _read_wav_float32(audio_path)
             audio = _resample_audio(audio, sample_rate, target_sr)
             mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
@@ -3141,13 +3156,13 @@ def _run_canary_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.canary_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[task_eval.nemo_asr_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(pred_path, responses)
     del model
     gc.collect()
 
 
-def _run_canary_hf_pipeline_reference(
+def _run_nemo_asr_hf_pipeline_reference(
     *,
     args: argparse.Namespace,
     prompt_rows: list[dict[str, Any]],
@@ -3160,7 +3175,7 @@ def _run_canary_hf_pipeline_reference(
         import torch
         from transformers import pipeline
     except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("Canary ASR reference requires NeMo or transformers pipeline") from exc
+        raise RuntimeError("NeMo ASR reference requires NeMo or transformers pipeline") from exc
 
     device = 0 if str(getattr(args, "device", "")).startswith("cuda") and torch.cuda.is_available() else -1
     pipe = pipeline(
@@ -3179,7 +3194,7 @@ def _run_canary_hf_pipeline_reference(
             sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
             audio_path = str(prompt_row.get("audio", ""))
             if not audio_path:
-                raise ValueError(f"Canary HF pipeline reference expects an audio path for sample {idx}")
+                raise ValueError(f"NeMo ASR HF pipeline reference expects an audio path for sample {idx}")
             audio, sample_rate = _read_wav_float32(audio_path)
             audio = _resample_audio(audio, sample_rate, target_sr)
             mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
@@ -3198,7 +3213,7 @@ def _run_canary_hf_pipeline_reference(
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.canary_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[task_eval.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(pred_path, responses)
 
 

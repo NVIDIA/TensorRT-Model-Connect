@@ -160,6 +160,23 @@ def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
     assert "librispeech_clean_asr_canary" not in suite_ids
 
 
+def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
+    suites = task_eval.load_suites()
+    suite = task_eval.suite_by_id(suites, "librispeech_clean_asr_streaming")
+
+    assert suite["dataset"]["kind"] == "asr_chat_json"
+    assert suite["scoring"]["scorer"] == "asr_transcript"
+    assert suite["selectors"]["model_names"] == [
+        "nemotron-speech-streaming-en-0.6b"
+    ]
+    assert suite["selectors"]["runtime_strategies"] == [
+        "nemotron_speech_streaming_speech_to_text_rnnt"
+    ]
+    assert suite["selectors"]["families"] == ["nemotron_speech_streaming"]
+    non_streaming = task_eval.suite_by_id(suites, "librispeech_clean_asr")
+    assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
+
+
 def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
     custom = tmp_path / "suites.json"
     custom.write_text(
@@ -367,6 +384,22 @@ def test_plan_selects_librispeech_asr_models() -> None:
     assert "canary-1b-v2" in selected
     assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
     assert "nemotron-nano-v2-speech-embedded" not in selected
+
+
+def test_plan_selects_librispeech_streaming_asr_models() -> None:
+    suites = task_eval.load_suites()
+    models = task_eval.load_manifest_records()
+
+    rows = task_eval.build_plan(suites, models, suite_id="librispeech_clean_asr_streaming")
+
+    selected = {row["model"]: row for row in rows}
+    assert "nemotron-speech-streaming-en-0.6b" in selected
+    assert selected["nemotron-speech-streaming-en-0.6b"]["runtime_strategy"] == (
+        "nemotron_speech_streaming_speech_to_text_rnnt"
+    )
+    assert not any("-asr-probe" in name for name in selected)
+    assert "whisper-tiny-fp16" not in selected
+    assert "canary-1b-v2" not in selected
 
 
 def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
@@ -1283,6 +1316,24 @@ def test_asr_reference_detection_identifies_canary() -> None:
     assert task_eval._is_canary_asr_reference(argparse.Namespace(
         model="nvidia/other",
         family="",
+        reference_family="asr_canary",
+    ))
+
+
+def test_nemo_asr_reference_detection_identifies_streaming() -> None:
+    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
+        model="nvidia/nemotron-speech-streaming-en-0.6b",
+        family="",
+        reference_family="",
+    ))
+    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
+        model="nvidia/other",
+        family="nemotron_speech_streaming",
+        reference_family="",
+    ))
+    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
+        model="nvidia/canary-1b-v2",
+        family="canary",
         reference_family="asr_canary",
     ))
 
