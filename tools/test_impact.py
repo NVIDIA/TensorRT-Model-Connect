@@ -1647,7 +1647,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "scripts/schedule_e2e.py",
                 "scripts/warm_hf_cache.py",
             }),
-            resolver=_match_result("e2e_runner_script", _all_models),
+            resolver=_match_result("e2e_runner_script", _all_models, ["tools"]),
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
         ),
         ClassificationRule(
@@ -1834,6 +1834,23 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     return sorted(builder_tests), sorted(tools_tests)
 
 
+_EXPLICIT_TOOLS_TEST_TARGETS = {
+    "scripts/run_e2e_parallel.sh": (
+        "tests/tools/test_github_actions_ci.py",
+        "tests/tools/test_schedule_e2e.py",
+    ),
+}
+
+
+def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
+    """Return tests for non-Python CI surfaces that coverage cannot observe."""
+    tests: Set[str] = set()
+    for raw_path in changed_files:
+        path = raw_path.replace("\\", "/").strip("/")
+        tests.update(_EXPLICIT_TOOLS_TEST_TARGETS.get(path, ()))
+    return sorted(tests)
+
+
 def _filter_models_by_ci_tier(
     models: List[str],
     imap: ImpactMap,
@@ -1936,6 +1953,9 @@ def analyze_impact(
         fallback_tiers = sel.fallback_tiers
 
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
+    direct_tools_tests = sorted(
+        set(direct_tools_tests).union(_explicit_tools_test_targets(changed_files))
+    )
     if direct_builder_tests:
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
     if direct_tools_tests:

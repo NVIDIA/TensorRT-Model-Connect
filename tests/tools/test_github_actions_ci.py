@@ -142,9 +142,9 @@ def test_python_package_coverage_gate_excludes_family_owned_modules() -> None:
 
 def test_full_e2e_collection_uses_model_e2e_files_with_visible_errors() -> None:
     text = (REPO_ROOT / "scripts" / "run_e2e_parallel.sh").read_text()
-    full_mode = text.split("# Full mode: collect only canonical model E2E files", maxsplit=1)[
-        1
-    ].split("fi\nTOTAL=", maxsplit=1)[0]
+    full_mode = text.split("mapfile -t E2E_COLLECT_FILES", maxsplit=1)[1].split(
+        "\nTOTAL=", maxsplit=1
+    )[0]
     assert "find tests/e2e/models -mindepth 2 -maxdepth 2 -type f" in full_mode
     assert "-name 'test_*_e2e.py'" in full_mode
     assert '"$HF_PYTHON" -m pytest "${E2E_COLLECT_FILES[@]}" --co -q' in full_mode

@@ -1211,6 +1211,7 @@ class TestNoImpact:
         match = test_impact.classify_file("scripts/run_e2e_parallel.sh", imap)
         assert match.rule == "e2e_runner_script"
         assert match.models == imap.all_model_names
+        assert match.unit_tiers == ["tools"]
 
     def test_scripts_no_impact(self, imap):
         """scripts/ -> no E2E tests."""
@@ -2865,6 +2866,22 @@ class TestCoverageMapIntegration:
         assert result.e2e_models == []
         assert result.tools_tests == ["tests/e2e_harness/test_orchestrator_phases.py"]
         assert "tools" not in result.fallback_tiers
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map):
+        """Shell runner edits select tests that Python coverage cannot discover."""
+        result = test_impact.analyze_impact(
+            ["scripts/run_e2e_parallel.sh"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == [
+            "tests/tools/test_github_actions_ci.py",
+            "tests/tools/test_schedule_e2e.py",
+        ]
+        assert result.fallback_tiers == []
 
     def test_github_ci_config_selects_tools_tier(self, imap):
         """CI config edits must not be classified as unit-test no-impact."""
