@@ -4,7 +4,7 @@
   "hf_id": "nvidia/nemotron-3.5-asr-streaming-0.6b",
   "bundle": "nemotron-3.5-asr-streaming-0.6b.trtfb",
   "family": "nemotron_speech_streaming",
-  "runtime_strategy": "speech_to_text_rnnt",
+  "runtime_strategy": "nemotron_speech_streaming_speech_to_text_rnnt",
   "reference_backend": "invariant_only",
   "test_type": "transcription",
   "max_cache_length": 128,
@@ -25,6 +25,6 @@
     "cer": 0.25
   },
   "metadata": {
-    "notes": "Uses invariant_only reference until the CI image is rebuilt with NeMo main (which ships EncDecRNNTBPEModelWithPrompt). Once that lands, flip reference_backend to \"hf_transformers\" so the comparator gates on WER/CER against a live NeMo reference."
+    "notes": "Uses invariant_only reference because the prompt-conditioned NeMo data loader (rnnt_bpe_models_prompt) requires Lhotse cut.supervisions[0].language, which the standard transcribe(audio=[path]) API doesn't populate from target_lang. TRT path is validated via streaming transcribe of Recording.wav; the comparator gates on returncode/sanity invariants only. Future work: thread language into the cut via override_config + custom dataloader, then flip reference_backend back to hf_transformers for live WER/CER."
   }
 }

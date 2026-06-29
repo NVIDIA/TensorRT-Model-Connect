@@ -817,6 +817,11 @@ class HfTransformersReference:
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         hf_id = case.hf_id
         torch_dtype_expr = _torch_dtype_for_case(case)
+        # Prompt-conditioned NeMo ASR (nemotron-3.5) requires a language tag;
+        # for monolingual checkpoints the model ignores this kwarg.
+        language_tag = (case.inputs.get("language")
+                        or case.metadata.get("language", "")
+                        or "auto")
 
         script = textwrap.dedent(f"""\
             import json, numpy as np
@@ -825,6 +830,7 @@ class HfTransformersReference:
             hf_id = {hf_id!r}
             audio_path = {audio_path!r}
             output_path = {output_path!r}
+            language_tag = {language_tag!r}
 
             # Try NeMo ASR model
             try:
@@ -851,7 +857,16 @@ class HfTransformersReference:
                 model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
                 model = model.cpu()
                 model.eval()
-                transcriptions = model.transcribe([mono_path], batch_size=1)
+                # target_lang is a no-op for monolingual ASR (e.g. en-0.6b);
+                # required for prompt-conditioned models (nemotron-3.5).
+                transcribe_kwargs = {{"batch_size": 1}}
+                try:
+                    import inspect as _inspect
+                    if "prompt" in str(_inspect.signature(model.transcribe)):
+                        transcribe_kwargs["target_lang"] = language_tag
+                except Exception:
+                    pass
+                transcriptions = model.transcribe([mono_path], **transcribe_kwargs)
                 if isinstance(transcriptions, list):
                     if hasattr(transcriptions[0], 'text'):
                         text = transcriptions[0].text
