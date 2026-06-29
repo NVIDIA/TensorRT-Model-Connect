@@ -168,7 +168,6 @@ def _selector_values(selectors: dict[str, Any], key: str) -> set[str]:
 
 def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bool, str]:
     selectors = suite.get("selectors", {})
-    model_names = _selector_values(selectors, "model_names")
     task_strategies = _selector_values(selectors, "task_strategies")
     runtime_strategies = _selector_values(selectors, "runtime_strategies")
     user_contracts = _selector_values(selectors, "user_contracts")
@@ -176,8 +175,6 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
     families = _selector_values(selectors, "families")
     exclude_families = _selector_values(selectors, "exclude_families")
 
-    if model_names and model["name"] not in model_names:
-        return False, f"model={model['name']} not selected"
     if task_strategies and model["task_strategy"] not in task_strategies:
         return False, f"task_strategy={model['task_strategy']} not selected"
     if runtime_strategies and model["runtime_strategy"] not in runtime_strategies:
@@ -202,6 +199,7 @@ def build_plan(
     suite_id: str | None = None,
     single_device_only: bool = False,
     include_non_matching: bool = False,
+    use_default_models: bool = True,
     waives: dict[str, tuple[str, str]] | None = None,
     include_waived: bool = False,
 ) -> list[dict[str, Any]]:
@@ -209,8 +207,14 @@ def build_plan(
     rows: list[dict[str, Any]] = []
     waives = waives or {}
     for suite in selected_suites:
+        default_model_names = (
+            _selector_values(suite, "default_model_names") if use_default_models else set()
+        )
         for model in models:
             matched, reason = suite_match_reason(suite, model)
+            if matched and default_model_names and model["name"] not in default_model_names:
+                matched = False
+                reason = f"model={model['name']} is compatible but not selected by default"
             if single_device_only and model["requires_multi_device"]:
                 matched = False
                 reason = "requires multi-device runtime"
@@ -3572,6 +3576,7 @@ def selected_models_for_suite(
         models,
         suite_id=suite["id"],
         single_device_only=single_device_only,
+        use_default_models=not bool(selectors),
         waives=waives,
         include_waived=include_waived or bool(selectors),
     )

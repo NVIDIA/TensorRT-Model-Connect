@@ -166,7 +166,7 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
-    assert suite["selectors"]["model_names"] == [
+    assert suite["default_model_names"] == [
         "nemotron-speech-streaming-en-0.6b"
     ]
     assert suite["selectors"]["runtime_strategies"] == [
@@ -229,7 +229,12 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
         },
     ]
 
-    rows = task_eval.build_plan(suites, models, suite_id="mmlu_five_shot_mcq")
+    rows = task_eval.build_plan(
+        suites,
+        models,
+        suite_id="mmlu_five_shot_mcq",
+        use_default_models=False,
+    )
 
     selected = {row["model"]: row for row in rows}
     assert any(
@@ -279,9 +284,21 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     }
 
 
+def test_default_model_names_match_selected_plan_models() -> None:
+    suites = task_eval.load_suites()
+    models = task_eval.load_manifest_records()
+
+    for suite in suites:
+        rows = task_eval.build_plan(suites, models, suite_id=suite["id"])
+        selected_names = {row["model"] for row in rows if row["selected"]}
+
+        assert selected_names == set(suite["default_model_names"]), suite["id"]
+
+
 def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
     suites = task_eval.load_suites()
     suite = dict(task_eval.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
+    suite.pop("default_model_names")
     suite["selectors"] = {
         **suite["selectors"],
         "runtime_strategies": ["vision_family_vision_language"],
@@ -365,8 +382,8 @@ def test_plan_selects_ocrbench_v2_unified_models() -> None:
 
     selected = {row["model"]: row for row in rows}
     model_by_name = {model["name"]: model for model in models}
-    assert "deepseek-ocr-l0" in selected
-    assert model_by_name["deepseek-ocr-l0"]["reference_backend"] == "golden_snapshot"
+    assert set(selected) == {"deepseek-ocr"}
+    assert model_by_name["deepseek-ocr"]["reference_backend"] == "golden_snapshot"
     assert "qwen25vl-3b" not in selected
     assert "internvl3-2b" not in selected
     assert "locateanything-3b" not in selected
@@ -383,6 +400,11 @@ def test_plan_selects_librispeech_asr_models() -> None:
     assert selected["whisper-tiny-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
     assert "canary-1b-v2" in selected
     assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
+    assert set(selected) == {
+        "whisper-tiny-fp16",
+        "whisper-large-v3-turbo",
+        "canary-1b-v2",
+    }
     assert "nemotron-nano-v2-speech-embedded" not in selected
 
 

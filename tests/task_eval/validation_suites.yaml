@@ -7,6 +7,21 @@ suites:
       user-visible task quality for decoder-style text generation bundles and
       records HF-reference agreement separately from absolute correctness.
     user_contract: multiple_choice_qa
+    default_model_names:
+      - gemma-2-2b
+      - gpt-oss-20b
+      - internlm2-1.8b
+      - nemotron-nano-4b
+      - tinyllama-1.1b
+      - mistral-7b
+      - nemotron-mini-4b
+      - nemotron-h-nano-9b
+      - phi3-mini
+      - phi-moe
+      - qwen3-0.6b-fp16
+      - qwen3-4b-instruct-2507
+      - qwen35-9b
+      - qwen3-moe-30b-a3b
     dataset:
       kind: mmlu_five_shot_json
       default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
@@ -54,6 +69,29 @@ suites:
       measures conversion fidelity for completion models rather than task
       accuracy.
     user_contract: continuation_parity
+    default_model_names:
+      - bart-base
+      - bloom-560m
+      - deepseek-v2-lite
+      - deepseek-v2-tiny
+      - falcon-rw-1b
+      - glm-4-9b
+      - gpt2-125m
+      - gpt-neo-125m
+      - pythia-70m
+      - granite-3.1-2b
+      - falcon3-1b
+      - minitron-4b-depth
+      - minitron-4b-width
+      - mamba-130m
+      - mixtral-stories-15m
+      - nemotron-hindi-4b
+      - olmo-1b
+      - olmo2-1b
+      - opt-125m
+      - rwkv-169m
+      - stablelm2-1.6b
+      - xglm-564m
     dataset:
       kind: mmlu_five_shot_json
       default_path: /mnt/data/MMLU_five_shot/mmlu_dataset.json
@@ -95,6 +133,11 @@ suites:
       with gold option-letter answers and records HF-reference agreement
       separately from absolute correctness.
     user_contract: vl_answer
+    default_model_names:
+      - internvl3-2b
+      - internvl3-8b
+      - qwen25vl-3b
+      - qwen3-vl-2b
     dataset:
       kind: vlm_chat_json
       default_path: /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json
@@ -148,6 +191,11 @@ suites:
       contract and prompts are normalized to a single user image-first message
       so HF native and TRTFB consume the same controlled input shape.
     user_contract: vl_answer
+    default_model_names:
+      - internvl3-2b
+      - internvl3-8b
+      - qwen25vl-3b
+      - qwen3-vl-2b
     dataset:
       kind: vlm_chat_json
       default_path: /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json
@@ -202,6 +250,8 @@ suites:
       validates image-conditioned OCR / visual QA bundles against OCRBench v2
       task-specific gold metrics without requiring dataset-local TRTMC config.
     user_contract: ocr_text
+    default_model_names:
+      - deepseek-ocr
     dataset:
       kind: vlm_unified_json
       default_path: /mnt/data/OCRBench_v2/unified/dataset.json
@@ -248,6 +298,10 @@ suites:
       validates speech-to-text bundles against reference transcripts and records
       HF-reference agreement separately from transcript accuracy.
     user_contract: exact_transcript
+    default_model_names:
+      - whisper-tiny-fp16
+      - whisper-large-v3-turbo
+      - canary-1b-v2
     dataset:
       kind: asr_chat_json
       default_path: /mnt/data/librispeech_clean_test/librispeech_clean_test.json
@@ -298,6 +352,8 @@ suites:
       Local ASR transcript evaluation on LibriSpeech clean test samples for
       streaming/RNNT speech-to-text bundles.
     user_contract: exact_transcript
+    default_model_names:
+      - nemotron-speech-streaming-en-0.6b
     dataset:
       kind: asr_chat_json
       default_path: /mnt/data/librispeech_clean_test/librispeech_clean_test.json
@@ -307,8 +363,6 @@ suites:
       audio_source: messages
       max_audio_per_sample: 1
     selectors:
-      model_names:
-        - nemotron-speech-streaming-en-0.6b
       task_strategies:
         - speech_to_text
       runtime_strategies:
