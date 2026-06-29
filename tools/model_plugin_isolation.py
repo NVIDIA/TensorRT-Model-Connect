@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,13 @@ class RuntimePlugin:
 
 
 _NODE_ID_MODEL_RE = re.compile(r"::test_model_e2e\[([^\]]+)\]")
+
+_MODEL_OWNED_ROOTS = {
+    Path("python/tensorrt_model_connect/families"): "builder_families",
+    Path("src/runtime/models"): "runtime_plugins",
+    Path("tests/e2e/models"): "e2e_families",
+    Path("tests/cpp/models"): "runtime_plugins",
+}
 
 
 def _read_text(path: Path) -> str:
@@ -170,6 +180,176 @@ def plugins_for_models(
     return [selected[key] for key in sorted(selected)]
 
 
+def _git_paths(repo_root: Path, *, include_untracked: bool) -> list[Path]:
+    cmd = ["git", "-C", str(repo_root), "ls-files", "-z", "--cached"]
+    if include_untracked:
+        cmd.extend(["--others", "--exclude-standard"])
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"Could not list source files with git ls-files: {exc}") from exc
+    return sorted(
+        Path(os.fsdecode(raw))
+        for raw in result.stdout.split(b"\0")
+        if raw
+    )
+
+
+def _owner_under(path: Path, root: Path) -> str | None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if len(relative.parts) <= 1:
+        return ""
+    return relative.parts[0]
+
+
+def _include_source_path(path: Path, owners: dict[str, set[str]]) -> bool:
+    for root, owner_group in _MODEL_OWNED_ROOTS.items():
+        owner = _owner_under(path, root)
+        if owner is None or owner == "":
+            continue
+        return owner in owners[owner_group]
+    return True
+
+
+def _copy_source_files(
+    repo_root: Path,
+    output_dir: Path,
+    paths: Iterable[Path],
+    owners: dict[str, set[str]],
+) -> tuple[int, dict[str, int]]:
+    copied = 0
+    excluded = {root.as_posix(): 0 for root in _MODEL_OWNED_ROOTS}
+    for relative in paths:
+        source = repo_root / relative
+        if not source.exists() and not source.is_symlink():
+            continue
+        if not _include_source_path(relative, owners):
+            for root in _MODEL_OWNED_ROOTS:
+                if _owner_under(relative, root) is not None:
+                    excluded[root.as_posix()] += 1
+                    break
+            continue
+
+        destination = output_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            destination.symlink_to(os.readlink(source))
+        elif source.is_file():
+            shutil.copy2(source, destination)
+        copied += 1
+    return copied, excluded
+
+
+def _git_revision(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return result.stdout.strip()
+
+
+def _prepare_output_dir(output_dir: Path, *, clean: bool) -> None:
+    if output_dir.exists():
+        if not clean:
+            raise SystemExit(
+                f"Isolation source output already exists: {output_dir}; pass --clean to replace it"
+            )
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+
+def command_stage_source(args: argparse.Namespace) -> int:
+    """Create a source projection containing only selected model ownership roots."""
+    repo_root = args.repo_root.resolve()
+    output_dir = args.output_dir.resolve()
+    try:
+        repo_root.relative_to(output_dir)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(
+            "Isolation source output must not be the repository root or one of its parents"
+        )
+
+    manifests = discover_e2e_manifests(repo_root)
+    runtime_plugins = discover_runtime_plugins(repo_root)
+    model_names = selected_models(args, manifests)
+    if not model_names and not args.allow_empty:
+        raise SystemExit("No E2E models selected")
+
+    missing_models = sorted(model_names - manifests.keys())
+    if missing_models:
+        raise SystemExit(
+            "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
+        )
+
+    selected_manifests = [manifests[name] for name in sorted(model_names)]
+    selected_plugins = plugins_for_models(model_names, manifests, runtime_plugins)
+    families = {manifest.family for manifest in selected_manifests}
+    runtime_ids = {plugin.model_id for plugin in selected_plugins}
+    owners = {
+        "builder_families": set(families),
+        "runtime_plugins": runtime_ids,
+        "e2e_families": set(families),
+    }
+
+    for family in sorted(families):
+        family_dir = repo_root / "python" / "tensorrt_model_connect" / "families" / family
+        e2e_dir = repo_root / "tests" / "e2e" / "models" / family
+        if not family_dir.is_dir():
+            raise SystemExit(f"Selected builder family directory does not exist: {family_dir}")
+        if not e2e_dir.is_dir():
+            raise SystemExit(f"Selected E2E family directory does not exist: {e2e_dir}")
+    for runtime_id in sorted(runtime_ids):
+        runtime_dir = repo_root / "src" / "runtime" / "models" / runtime_id
+        if not runtime_dir.is_dir():
+            raise SystemExit(f"Selected runtime plugin directory does not exist: {runtime_dir}")
+
+    _prepare_output_dir(output_dir, clean=args.clean)
+    paths = _git_paths(repo_root, include_untracked=args.include_untracked)
+    copied_files, excluded_files = _copy_source_files(
+        repo_root, output_dir, paths, owners
+    )
+
+    manifest = {
+        "schema_version": 1,
+        "source_root": str(repo_root),
+        "source_revision": _git_revision(repo_root),
+        "selected_models": sorted(model_names),
+        "builder_families": sorted(families),
+        "e2e_families": sorted(families),
+        "runtime_plugins": [
+            {
+                "model_id": plugin.model_id,
+                "library": plugin.library,
+                "strategies": list(plugin.strategies),
+                "target": plugin.target,
+            }
+            for plugin in selected_plugins
+        ],
+        "tracked_only": not args.include_untracked,
+        "copied_files": copied_files,
+        "excluded_model_files": excluded_files,
+    }
+    manifest_path = output_dir / ".trtmc-isolation.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"Staged {copied_files} files for models={','.join(sorted(model_names))} "
+        f"families={','.join(sorted(families))} "
+        f"runtime_plugins={','.join(sorted(runtime_ids))} at {output_dir}"
+    )
+    print(manifest_path)
+    return 0
+
+
 def command_targets(args: argparse.Namespace) -> int:
     repo_root = args.repo_root.resolve()
     manifests = discover_e2e_manifests(repo_root)
@@ -231,6 +411,24 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--build-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.set_defaults(func=command_prepare)
+
+    stage_source = subparsers.add_parser(
+        "stage-source",
+        help="Copy a filtered source tree containing only selected model ownership roots",
+    )
+    add_selection_options(stage_source)
+    stage_source.add_argument("--output-dir", type=Path, required=True)
+    stage_source.add_argument(
+        "--clean",
+        action="store_true",
+        help="Replace an existing generated isolation source directory",
+    )
+    stage_source.add_argument(
+        "--include-untracked",
+        action="store_true",
+        help="Include untracked, non-ignored source files in the projection",
+    )
+    stage_source.set_defaults(func=command_stage_source)
     return parser
 
 

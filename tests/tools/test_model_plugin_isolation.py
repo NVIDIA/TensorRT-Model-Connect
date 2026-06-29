@@ -175,3 +175,161 @@ def test_prepare_copies_only_selected_runtime_plugin(tmp_path: Path) -> None:
     copied = output_dir / "llama" / "libtrtmc_model_llama.so"
     assert copied.read_bytes() == b"fake-so"
     assert result.stdout.splitlines() == [f"trtmc_model_llama {copied}"]
+
+
+def _add_projection_fixture_files(repo_root: Path) -> None:
+    files = {
+        "README.md": "generic root\n",
+        "python/tensorrt_model_connect/families/__init__.py": "# registry\n",
+        "python/tensorrt_model_connect/families/base.py": "# protocol\n",
+        "python/tensorrt_model_connect/families/decoder_family/MODEL.toml": (
+            'id = "decoder_family"\n'
+        ),
+        "python/tensorrt_model_connect/families/decoder_family/plugin.py": (
+            "# selected builder\n"
+        ),
+        "python/tensorrt_model_connect/families/sibling/MODEL.toml": 'id = "sibling"\n',
+        "python/tensorrt_model_connect/families/sibling/plugin.py": "# sibling builder\n",
+        "src/runtime/core/core.cpp": "// shared runtime\n",
+        "src/runtime/models/llama/plugin.cpp": "// selected runtime\n",
+        "src/runtime/models/sibling/MODEL.toml": (
+            'id = "sibling"\n'
+            'runtime_library = "libtrtmc_model_sibling.so"\n'
+            'runtime_plugins = ["plugin.cpp|register_sibling"]\n'
+            'runtime_strategies = ["sibling_runtime"]\n'
+        ),
+        "src/runtime/models/sibling/plugin.cpp": "// sibling runtime\n",
+        "tests/e2e_harness/contracts.py": "# shared harness\n",
+        "tests/e2e/models/decoder_family/MODEL.toml": (
+            'id = "decoder_family"\n'
+        ),
+        "tests/e2e/models/decoder_family/runner.py": "# selected E2E\n",
+        "tests/e2e/models/sibling/MODEL.toml": 'id = "sibling"\n',
+        "tests/e2e/models/sibling/runner.py": "# sibling E2E\n",
+        "tests/cpp/models/llama/test_runtime.cpp": "// selected runtime test\n",
+        "tests/cpp/models/sibling/test_runtime.cpp": "// sibling runtime test\n",
+    }
+    for relative, content in files.items():
+        path = repo_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+    subprocess.run(["git", "-C", str(repo_root), "add", "."], check=True)
+
+
+def test_stage_source_masks_sibling_model_roots(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    _add_projection_fixture_files(repo_root)
+    output_dir = tmp_path / "isolated"
+
+    result = _run(
+        "stage-source",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--output-dir",
+        str(output_dir),
+    )
+
+    assert "families=decoder_family" in result.stdout
+    assert "runtime_plugins=llama" in result.stdout
+    assert (output_dir / "README.md").read_text() == "generic root\n"
+    assert (
+        output_dir / "python/tensorrt_model_connect/families/__init__.py"
+    ).is_file()
+    assert (
+        output_dir / "python/tensorrt_model_connect/families/base.py"
+    ).is_file()
+    assert (
+        output_dir
+        / "python/tensorrt_model_connect/families/decoder_family/plugin.py"
+    ).is_file()
+    assert not (
+        output_dir / "python/tensorrt_model_connect/families/sibling"
+    ).exists()
+    assert (output_dir / "src/runtime/models/llama/plugin.cpp").is_file()
+    assert not (output_dir / "src/runtime/models/sibling").exists()
+    assert (
+        output_dir / "tests/e2e/models/decoder_family/runner.py"
+    ).is_file()
+    assert not (output_dir / "tests/e2e/models/sibling").exists()
+    assert (
+        output_dir / "tests/cpp/models/llama/test_runtime.cpp"
+    ).is_file()
+    assert not (output_dir / "tests/cpp/models/sibling").exists()
+
+    manifest = json.loads(
+        (output_dir / ".trtmc-isolation.json").read_text(encoding="utf-8")
+    )
+    assert manifest["selected_models"] == ["decoder-small"]
+    assert manifest["builder_families"] == ["decoder_family"]
+    assert manifest["e2e_families"] == ["decoder_family"]
+    assert manifest["runtime_plugins"] == [
+        {
+            "model_id": "llama",
+            "library": "libtrtmc_model_llama.so",
+            "strategies": ["llama_decoder_kv_cache"],
+            "target": "trtmc_model_llama",
+        }
+    ]
+    assert all(value > 0 for value in manifest["excluded_model_files"].values())
+
+
+def test_stage_source_requires_clean_to_replace_output(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    _add_projection_fixture_files(repo_root)
+    output_dir = tmp_path / "isolated"
+    output_dir.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "stage-source",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "pass --clean to replace it" in result.stderr
+
+
+@pytest.mark.parametrize("output", ["repo", "."])
+def test_stage_source_rejects_output_that_contains_repo(
+    tmp_path: Path,
+    output: str,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    _add_projection_fixture_files(repo_root)
+    output_dir = repo_root if output == "repo" else tmp_path
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "stage-source",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--output-dir",
+            str(output_dir),
+            "--clean",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "must not be the repository root or one of its parents" in result.stderr
