@@ -49,6 +49,20 @@ _MODEL_OWNED_ROOTS = {
     Path("tests/cpp/models"): "runtime_plugins",
 }
 
+_MODEL_OWNED_IMPACT_RULES = frozenset(
+    {
+        "manifest",
+        "e2e_model_index",
+        "e2e_model_threshold",
+        "e2e_model_owned_test",
+        "family_model_index",
+        "family_package",
+        "family_plugin",
+        "python_profile_requirements",
+        "cpp_runtime_model",
+    }
+)
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -143,16 +157,7 @@ def plugins_for_models(
     manifests: dict[str, E2EManifest],
     runtime_plugins: dict[str, RuntimePlugin],
 ) -> list[RuntimePlugin]:
-    strategy_to_plugin: dict[str, RuntimePlugin] = {}
-    for plugin in runtime_plugins.values():
-        for strategy in plugin.strategies:
-            if strategy in strategy_to_plugin:
-                other = strategy_to_plugin[strategy]
-                raise SystemExit(
-                    f"runtime_strategy {strategy!r} is owned by both "
-                    f"{other.model_id!r} and {plugin.model_id!r}"
-                )
-            strategy_to_plugin[strategy] = plugin
+    strategy_to_plugin = _plugins_by_strategy(runtime_plugins)
 
     selected: dict[str, RuntimePlugin] = {}
     missing_models: list[str] = []
@@ -178,6 +183,100 @@ def plugins_for_models(
             + ", ".join(missing_strategies)
         )
     return [selected[key] for key in sorted(selected)]
+
+
+def _plugins_by_strategy(
+    runtime_plugins: dict[str, RuntimePlugin],
+) -> dict[str, RuntimePlugin]:
+    strategy_to_plugin: dict[str, RuntimePlugin] = {}
+    for plugin in runtime_plugins.values():
+        for strategy in plugin.strategies:
+            if strategy in strategy_to_plugin:
+                other = strategy_to_plugin[strategy]
+                raise SystemExit(
+                    f"runtime_strategy {strategy!r} is owned by both "
+                    f"{other.model_id!r} and {plugin.model_id!r}"
+                )
+            strategy_to_plugin[strategy] = plugin
+    return strategy_to_plugin
+
+
+def isolation_groups(
+    model_names: set[str],
+    manifests: dict[str, E2EManifest],
+    runtime_plugins: dict[str, RuntimePlugin],
+) -> list[dict[str, object]]:
+    """Group cases that can share one single-family source projection."""
+    strategy_to_plugin = _plugins_by_strategy(runtime_plugins)
+    grouped: dict[tuple[str, str], list[str]] = {}
+    missing_models: list[str] = []
+    missing_strategies: list[str] = []
+    for model_name in sorted(model_names):
+        manifest = manifests.get(model_name)
+        if manifest is None:
+            missing_models.append(model_name)
+            continue
+        plugin = strategy_to_plugin.get(manifest.runtime_strategy)
+        if plugin is None:
+            missing_strategies.append(f"{model_name}:{manifest.runtime_strategy}")
+            continue
+        grouped.setdefault((manifest.family, plugin.model_id), []).append(model_name)
+
+    if missing_models:
+        raise SystemExit(
+            "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
+        )
+    if missing_strategies:
+        raise SystemExit(
+            "No runtime model plugin owns selected runtime_strategy value(s): "
+            + ", ".join(missing_strategies)
+        )
+
+    groups: list[dict[str, object]] = []
+    for (family, runtime_id), models in sorted(grouped.items()):
+        plugin = runtime_plugins[runtime_id]
+        group_id = f"{family}--{runtime_id}"
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", group_id):
+            raise SystemExit(f"Isolation group has an unsafe identifier: {group_id!r}")
+        groups.append(
+            {
+                "id": group_id,
+                "family": family,
+                "runtime_plugin": {
+                    "model_id": plugin.model_id,
+                    "library": plugin.library,
+                    "strategies": list(plugin.strategies),
+                    "target": plugin.target,
+                },
+                "models": models,
+            }
+        )
+    return groups
+
+
+def model_owned_impact_models(impact: dict[str, object]) -> list[str]:
+    """Return final impacted cases reached through model-owned rules."""
+    selected = {
+        str(model) for model in impact.get("e2e_models", []) if str(model)
+    }
+    for node_id in impact.get("e2e_test_ids", []):
+        match = _NODE_ID_MODEL_RE.search(str(node_id))
+        if match:
+            selected.add(match.group(1))
+
+    owned: set[str] = set()
+    for match in impact.get("matched_rules", []):
+        if not isinstance(match, dict):
+            continue
+        if match.get("rule") not in _MODEL_OWNED_IMPACT_RULES:
+            continue
+        owned.update(str(model) for model in match.get("models", []) if str(model))
+    for replacement in impact.get("l0_replacements", []):
+        if not isinstance(replacement, dict):
+            continue
+        if replacement.get("model") in owned and replacement.get("replacement"):
+            owned.add(str(replacement["replacement"]))
+    return sorted(selected & owned)
 
 
 def _git_paths(repo_root: Path, *, include_untracked: bool) -> list[Path]:
@@ -266,18 +365,19 @@ def _prepare_output_dir(output_dir: Path, *, clean: bool) -> None:
     output_dir.mkdir(parents=True)
 
 
+def _reject_output_containing_repo(repo_root: Path, output_dir: Path) -> None:
+    try:
+        repo_root.relative_to(output_dir)
+    except ValueError:
+        return
+    raise SystemExit("Isolation output must not be the repository root or one of its parents")
+
+
 def command_stage_source(args: argparse.Namespace) -> int:
     """Create a source projection containing only selected model ownership roots."""
     repo_root = args.repo_root.resolve()
     output_dir = args.output_dir.resolve()
-    try:
-        repo_root.relative_to(output_dir)
-    except ValueError:
-        pass
-    else:
-        raise SystemExit(
-            "Isolation source output must not be the repository root or one of its parents"
-        )
+    _reject_output_containing_repo(repo_root, output_dir)
 
     manifests = discover_e2e_manifests(repo_root)
     runtime_plugins = discover_runtime_plugins(repo_root)
@@ -347,6 +447,288 @@ def command_stage_source(args: argparse.Namespace) -> int:
         f"runtime_plugins={','.join(sorted(runtime_ids))} at {output_dir}"
     )
     print(manifest_path)
+    return 0
+
+
+def command_plan(args: argparse.Namespace) -> int:
+    """Write deterministic single-family build groups for selected E2E cases."""
+    repo_root = args.repo_root.resolve()
+    output_dir = args.output_dir.resolve()
+    _reject_output_containing_repo(repo_root, output_dir)
+
+    manifests = discover_e2e_manifests(repo_root)
+    runtime_plugins = discover_runtime_plugins(repo_root)
+    model_names = selected_models(args, manifests)
+    if not model_names and not args.allow_empty:
+        raise SystemExit("No E2E models selected")
+    groups = isolation_groups(model_names, manifests, runtime_plugins)
+
+    _prepare_output_dir(output_dir, clean=args.clean)
+    serialized_groups: list[dict[str, object]] = []
+    for group in groups:
+        group_id = str(group["id"])
+        group_dir = output_dir / "groups" / group_id
+        group_dir.mkdir(parents=True)
+        models = [str(model) for model in group["models"]]
+        models_file = group_dir / "models.txt"
+        models_file.write_text("".join(f"{model}\n" for model in models), encoding="utf-8")
+        group_manifest = dict(group)
+        group_manifest["models_file"] = str(models_file.relative_to(output_dir))
+        group_manifest_path = group_dir / "group.json"
+        group_manifest_path.write_text(
+            json.dumps(group_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        serialized_groups.append(group_manifest)
+
+    plan = {
+        "schema_version": 1,
+        "source_root": str(repo_root),
+        "source_revision": _git_revision(repo_root),
+        "selected_models": sorted(model_names),
+        "groups": serialized_groups,
+    }
+    plan_path = output_dir / "plan.json"
+    plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"Planned {len(model_names)} model(s) in {len(serialized_groups)} "
+        f"single-family isolation group(s)"
+    )
+    print(plan_path)
+    return 0
+
+
+def command_schedule(args: argparse.Namespace) -> int:
+    """Balance isolation groups across fixed single-GPU worker queues."""
+    plan_path = args.plan.resolve()
+    output_dir = args.output_dir.resolve()
+    plan = json.loads(_read_text(plan_path))
+    groups = plan.get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise SystemExit(f"Isolation plan has no groups: {plan_path}")
+    gpu_ids = list(dict.fromkeys(args.gpu_id))
+    if not gpu_ids:
+        raise SystemExit("At least one --gpu-id is required")
+    if any(not re.fullmatch(r"[0-9]+", gpu_id) for gpu_id in gpu_ids):
+        raise SystemExit(f"GPU IDs must be non-negative integers: {gpu_ids}")
+    if args.default_estimate_seconds < 0 or args.build_overhead_seconds < 0:
+        raise SystemExit("Schedule estimates must be non-negative")
+
+    estimates: dict[str, float] = {}
+    if args.timing_estimates is not None and args.timing_estimates.is_file():
+        timing_data = json.loads(_read_text(args.timing_estimates))
+        raw_estimates = timing_data.get("estimates_s", {})
+        if isinstance(raw_estimates, dict):
+            estimates = {
+                str(model): float(seconds)
+                for model, seconds in raw_estimates.items()
+                if isinstance(seconds, (int, float)) and seconds >= 0
+            }
+
+    scheduled_groups: list[dict[str, object]] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            raise SystemExit(f"Isolation plan contains a non-object group: {group!r}")
+        group_id = str(group.get("id") or "")
+        models = group.get("models")
+        if not group_id or not isinstance(models, list) or not models:
+            raise SystemExit(f"Invalid isolation group in {plan_path}: {group!r}")
+        model_names = [str(model) for model in models]
+        estimated_seconds = args.build_overhead_seconds + sum(
+            estimates.get(model, args.default_estimate_seconds)
+            for model in model_names
+        )
+        scheduled_groups.append(
+            {
+                "group_id": group_id,
+                "group_manifest": str(
+                    plan_path.parent / "groups" / group_id / "group.json"
+                ),
+                "models": model_names,
+                "estimated_seconds": estimated_seconds,
+            }
+        )
+
+    assignments: dict[str, list[dict[str, object]]] = {
+        gpu_id: [] for gpu_id in gpu_ids
+    }
+    queue_totals = {gpu_id: 0.0 for gpu_id in gpu_ids}
+    for group in sorted(
+        scheduled_groups,
+        key=lambda item: (-float(item["estimated_seconds"]), str(item["group_id"])),
+    ):
+        gpu_id = min(gpu_ids, key=lambda item: (queue_totals[item], int(item)))
+        assignments[gpu_id].append(group)
+        queue_totals[gpu_id] += float(group["estimated_seconds"])
+
+    _prepare_output_dir(output_dir, clean=args.clean)
+    for gpu_id, queue in assignments.items():
+        queue_path = output_dir / f"gpu-{gpu_id}.txt"
+        queue_path.write_text(
+            "".join(f"{item['group_manifest']}\n" for item in queue),
+            encoding="utf-8",
+        )
+    schedule = {
+        "schema_version": 1,
+        "plan": str(plan_path),
+        "timing_estimates": (
+            str(args.timing_estimates.resolve())
+            if args.timing_estimates is not None
+            else None
+        ),
+        "default_estimate_seconds": args.default_estimate_seconds,
+        "build_overhead_seconds": args.build_overhead_seconds,
+        "assignments": assignments,
+        "queue_estimated_seconds": queue_totals,
+    }
+    schedule_path = output_dir / "schedule.json"
+    schedule_path.write_text(
+        json.dumps(schedule, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"Scheduled {len(scheduled_groups)} isolation group(s) across "
+        f"{len(gpu_ids)} GPU queue(s)"
+    )
+    for gpu_id in gpu_ids:
+        print(
+            f"  GPU {gpu_id}: {len(assignments[gpu_id])} group(s), "
+            f"estimated {queue_totals[gpu_id] / 60:.1f}m"
+        )
+    print(schedule_path)
+    return 0
+
+
+def _returncode_failures(value: object, path: str = "result") -> list[str]:
+    failures: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            item_path = f"{path}.{key}"
+            if key == "returncode" and item != 0:
+                failures.append(f"{item_path} is {item!r}, expected 0")
+            failures.extend(_returncode_failures(item, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            failures.extend(_returncode_failures(item, f"{path}[{index}]"))
+    return failures
+
+
+def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, object]:
+    result_path = artifacts_dir / model_name / "result.json"
+    errors: list[str] = []
+    if not result_path.is_file():
+        return {
+            "model": model_name,
+            "result_path": str(result_path),
+            "passed": False,
+            "errors": ["result.json is missing"],
+        }
+    try:
+        result = json.loads(_read_text(result_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "model": model_name,
+            "result_path": str(result_path),
+            "passed": False,
+            "errors": [f"result.json could not be read: {exc}"],
+        }
+    if not isinstance(result, dict):
+        errors.append("result.json root is not an object")
+        result = {}
+
+    if result.get("case_name") != model_name:
+        errors.append(f"case_name is {result.get('case_name')!r}, expected {model_name!r}")
+    if result.get("status") != "pass":
+        errors.append(f"status is {result.get('status')!r}, expected 'pass'")
+    if result.get("failure_type") not in (None, ""):
+        errors.append(f"failure_type is {result.get('failure_type')!r}")
+
+    stages = result.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        errors.append("stages is missing or empty")
+    else:
+        for stage_name, stage in stages.items():
+            if not isinstance(stage, dict):
+                errors.append(f"stage {stage_name!r} is not an object")
+                continue
+            if stage.get("status") != "passed":
+                errors.append(
+                    f"stage {stage_name!r} status is {stage.get('status')!r}, expected 'passed'"
+                )
+            metrics = stage.get("metrics", {})
+            if not isinstance(metrics, dict):
+                errors.append(f"stage {stage_name!r} metrics is not an object")
+                continue
+            for metric_name, metric in metrics.items():
+                if isinstance(metric, dict) and "passed" in metric:
+                    if metric["passed"] is not True:
+                        errors.append(f"stage {stage_name!r} metric {metric_name!r} did not pass")
+
+    commands = result.get("commands")
+    if commands is not None and not isinstance(commands, list):
+        errors.append("commands is not a list")
+    elif isinstance(commands, list):
+        for index, command in enumerate(commands):
+            if not isinstance(command, dict):
+                errors.append(f"commands[{index}] is not an object")
+            elif command.get("returncode") != 0:
+                errors.append(
+                    f"commands[{index}].returncode is {command.get('returncode')!r}, expected 0"
+                )
+
+    errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
+    errors = list(dict.fromkeys(errors))
+    return {
+        "model": model_name,
+        "result_path": str(result_path),
+        "passed": not errors,
+        "errors": errors,
+    }
+
+
+def command_verify_results(args: argparse.Namespace) -> int:
+    """Require a complete passing E2E artifact for every selected model."""
+    repo_root = args.repo_root.resolve()
+    artifacts_dir = args.artifacts_dir.resolve()
+    manifests = discover_e2e_manifests(repo_root)
+    model_names = selected_models(args, manifests)
+    if not model_names and not args.allow_empty:
+        raise SystemExit("No E2E models selected")
+    missing_models = sorted(model_names - manifests.keys())
+    if missing_models:
+        raise SystemExit(
+            "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
+        )
+
+    results = [
+        _verify_model_result(model_name, artifacts_dir) for model_name in sorted(model_names)
+    ]
+    report = {
+        "schema_version": 1,
+        "artifacts_dir": str(artifacts_dir),
+        "selected_models": sorted(model_names),
+        "passed": all(bool(result["passed"]) for result in results),
+        "results": results,
+    }
+    if args.report is not None:
+        report_path = args.report.resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(report_path)
+
+    for result in results:
+        status = "PASS" if result["passed"] else "FAIL"
+        print(f"{status} {result['model']}")
+        for error in result["errors"]:
+            print(f"  {error}", file=sys.stderr)
+    return 0 if report["passed"] else 1
+
+
+def command_impact_models(args: argparse.Namespace) -> int:
+    """Print impacted cases that came from model-owned classification rules."""
+    impact = json.loads(_read_text(args.impact_json))
+    if not isinstance(impact, dict):
+        raise SystemExit(f"Impact JSON root is not an object: {args.impact_json}")
+    for model_name in model_owned_impact_models(impact):
+        print(model_name)
     return 0
 
 
@@ -429,6 +811,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include untracked, non-ignored source files in the projection",
     )
     stage_source.set_defaults(func=command_stage_source)
+
+    plan = subparsers.add_parser(
+        "plan",
+        help="Group selected E2E cases into single-family build projections",
+    )
+    add_selection_options(plan)
+    plan.add_argument("--output-dir", type=Path, required=True)
+    plan.add_argument(
+        "--clean",
+        action="store_true",
+        help="Replace an existing generated isolation plan directory",
+    )
+    plan.set_defaults(func=command_plan)
+
+    schedule = subparsers.add_parser(
+        "schedule",
+        help="Balance an isolation plan across fixed single-GPU queues",
+    )
+    schedule.add_argument("--plan", type=Path, required=True)
+    schedule.add_argument("--output-dir", type=Path, required=True)
+    schedule.add_argument("--timing-estimates", type=Path)
+    schedule.add_argument("--gpu-id", action="append", default=[])
+    schedule.add_argument("--default-estimate-seconds", type=float, default=600.0)
+    schedule.add_argument("--build-overhead-seconds", type=float, default=60.0)
+    schedule.add_argument(
+        "--clean",
+        action="store_true",
+        help="Replace an existing generated isolation schedule directory",
+    )
+    schedule.set_defaults(func=command_schedule)
+
+    verify_results = subparsers.add_parser(
+        "verify-results",
+        help="Require complete passing E2E artifacts for every selected model",
+    )
+    add_selection_options(verify_results)
+    verify_results.add_argument("--artifacts-dir", type=Path, required=True)
+    verify_results.add_argument("--report", type=Path)
+    verify_results.set_defaults(func=command_verify_results)
+
+    impact_models = subparsers.add_parser(
+        "impact-models",
+        help="Print final impacted E2E cases reached through model-owned rules",
+    )
+    impact_models.add_argument("--impact-json", type=Path, required=True)
+    impact_models.set_defaults(func=command_impact_models)
     return parser
 
 

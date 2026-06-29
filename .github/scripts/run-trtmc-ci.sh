@@ -608,6 +608,398 @@ run_graph_op_tests() {
   run_with_timeout "${GRAPH_OP_TIMEOUT:-20m}" python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
 }
 
+cmake_cache_value() {
+  local cache_file="$1"
+  local variable="$2"
+  local key value
+  while IFS='=' read -r key value; do
+    if [[ "$key" == "$variable:"* ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < "$cache_file"
+  return 1
+}
+
+configure_isolated_model_build() {
+  local source_dir="$1"
+  local build_dir="$2"
+  local reusable_cache="$TRTMC_REUSE_CMAKE_BUILD_DIR/CMakeCache.txt"
+  if [ ! -f "$reusable_cache" ]; then
+    echo "ERROR: reusable CMake cache is missing: $reusable_cache" >&2
+    return 1
+  fi
+  local cmake_args=(
+    -S "$source_dir"
+    -B "$build_dir"
+    -DCMAKE_BUILD_TYPE=Release
+    -DTRTMC_BUILD_TESTS=OFF
+    -DTRTMC_BUILD_BENCHMARKS=OFF
+    -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF
+  )
+  local cache_value
+  local variable
+
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  for variable in \
+    TRTMC_TRT_BACKEND_ABI \
+    TRTMC_TRT_INCLUDE_DIR \
+    TRTMC_TRT_LIBRARY \
+    TRTMC_CUDA_INCLUDE_DIR \
+    TRTMC_CUDART_LIBRARY \
+    CMAKE_CUDA_ARCHITECTURES; do
+    cache_value="$(cmake_cache_value "$reusable_cache" "$variable" || true)"
+    if [ -n "$cache_value" ]; then
+      cmake_args+=("-D${variable}=${cache_value}")
+    fi
+  done
+
+  local nlohmann_source="$TRTMC_REUSE_CMAKE_BUILD_DIR/_deps/nlohmann_json-src"
+  if [ -d "$nlohmann_source" ]; then
+    cmake_args+=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$nlohmann_source")
+  fi
+
+  local conan_toolchain=""
+  local search_root
+  for search_root in \
+    "${TRTMC_REUSE_CONAN_OUT_DIR:-}" \
+    "$TRTMC_REUSE_CMAKE_BUILD_DIR"; do
+    if [ -n "$search_root" ] && [ -d "$search_root" ]; then
+      conan_toolchain="$(find "$search_root" -name conan_toolchain.cmake -print -quit)"
+      if [ -n "$conan_toolchain" ]; then
+        cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=$conan_toolchain")
+        break
+      fi
+    fi
+  done
+  run_with_timeout "${SELECTIVE_E2E_CONFIGURE_TIMEOUT:-10m}" cmake "${cmake_args[@]}"
+}
+
+discover_isolation_gpu_ids() {
+  local -a gpu_lines=()
+  mapfile -t gpu_lines < <(nvidia-smi -L 2>/dev/null)
+  local gpu_count="${#gpu_lines[@]}"
+  local hf_python="${HF_PYTHON:-/opt/venv/bin/python}"
+  local -a healthy_gpu_ids=()
+  local gpu_id
+  for ((gpu_id = 0; gpu_id < gpu_count; gpu_id++)); do
+    if CUDA_VISIBLE_DEVICES="$gpu_id" "$hf_python" - <<'PY' >/dev/null 2>&1
+import tensorrt as trt
+
+logger = trt.Logger(trt.Logger.ERROR)
+if trt.Builder(logger) is None:
+    raise SystemExit(1)
+PY
+    then
+      healthy_gpu_ids+=("$gpu_id")
+    else
+      echo "WARN: GPU $gpu_id failed TensorRT builder health check" >&2
+    fi
+  done
+  if [ "${#healthy_gpu_ids[@]}" -eq 0 ]; then
+    echo "ERROR: no GPU passed the TensorRT builder health check" >&2
+    return 1
+  fi
+
+  local exclude_gpu0="${TRTMC_E2E_EXCLUDE_GPU0:-}"
+  if [ -z "$exclude_gpu0" ]; then
+    if [ -n "${GITHUB_RUN_ID:-}" ]; then
+      exclude_gpu0=1
+    else
+      exclude_gpu0=0
+    fi
+  fi
+  if [ "$exclude_gpu0" != "0" ] && [ "${#healthy_gpu_ids[@]}" -gt 1 ]; then
+    local -a filtered_gpu_ids=()
+    for gpu_id in "${healthy_gpu_ids[@]}"; do
+      if [ "$gpu_id" != "0" ]; then
+        filtered_gpu_ids+=("$gpu_id")
+      fi
+    done
+    healthy_gpu_ids=("${filtered_gpu_ids[@]}")
+  fi
+  printf '%s\n' "${healthy_gpu_ids[@]}"
+}
+
+run_isolated_e2e_group() {
+  local group_manifest="$1"
+  local result_dir="$2"
+  local gpu_id="$3"
+  local group_dir
+  group_dir="$(dirname "$group_manifest")"
+  local group_id model_target family
+  local -a group_config
+  mapfile -t group_config < <(python3 - "$group_manifest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+group = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(group["id"])
+print(group["runtime_plugin"]["target"])
+print(group["family"])
+PY
+)
+  group_id="${group_config[0]}"
+  model_target="${group_config[1]}"
+  family="${group_config[2]}"
+
+  local models_file="$group_dir/models.txt"
+  local source_dir="$group_dir/source"
+  local build_dir="$group_dir/build"
+  local engine_dir="$group_dir/engines"
+  local model_plugin_dir="$group_dir/model_plugins"
+  local audit_dir="$result_dir/model_isolation/$group_id"
+
+  echo "=== Isolated E2E group: $group_id on GPU $gpu_id ==="
+  if ! python3 tools/model_plugin_isolation.py stage-source \
+    --models-file "$models_file" \
+    --output-dir "$source_dir" \
+    --clean; then
+    return 1
+  fi
+  mkdir -p "$audit_dir"
+  cp "$group_manifest" "$audit_dir/group.json"
+  cp "$source_dir/.trtmc-isolation.json" "$audit_dir/source-projection.json"
+
+  if ! configure_isolated_model_build "$source_dir" "$build_dir"; then
+    return 1
+  fi
+  if ! run_with_timeout "${SELECTIVE_E2E_BUILD_TIMEOUT:-30m}" \
+    cmake --build "$build_dir" \
+      --parallel "${TRTMC_ISOLATION_BUILD_JOBS:-16}" \
+      --target trtmc trtmc_backend_trt "$model_target"; then
+    return 1
+  fi
+
+  local -a built_model_dsos
+  mapfile -t built_model_dsos < <(
+    find "$build_dir/models" -type f -name 'libtrtmc_model_*.so' -print
+  )
+  if [ "${#built_model_dsos[@]}" -ne 1 ]; then
+    echo "ERROR: isolated build $group_id produced ${#built_model_dsos[@]} model DSOs; expected exactly 1" >&2
+    printf '  %s\n' "${built_model_dsos[@]}" >&2
+    return 1
+  fi
+
+  if ! python3 "$source_dir/tools/model_plugin_isolation.py" prepare \
+    --repo-root "$source_dir" \
+    --models-file "$models_file" \
+    --build-dir "$build_dir" \
+    --output-dir "$model_plugin_dir"; then
+    return 1
+  fi
+
+  local isolated_library_path="$build_dir"
+  local library
+  for library in "${TRTMC_TRT_LIBRARY:-}" "${TRTMC_CUDART_LIBRARY:-}"; do
+    if [ -n "$library" ]; then
+      isolated_library_path="${isolated_library_path}:$(dirname "$library")"
+    fi
+  done
+
+  mkdir -p "$engine_dir" "$result_dir/artifacts"
+  local -a group_test_files
+  mapfile -t group_test_files < <(
+    find "$source_dir/tests/e2e/models/$family" \
+      -maxdepth 1 -type f -name 'test_*_e2e.py' | sort
+  )
+  if [ "${#group_test_files[@]}" -ne 1 ]; then
+    echo "ERROR: $group_id has ${#group_test_files[@]} canonical E2E files; expected 1" >&2
+    printf '  %s\n' "${group_test_files[@]}" >&2
+    return 1
+  fi
+  local -a model_filter_args=()
+  local model
+  while IFS= read -r model; do
+    if [ -n "$model" ]; then
+      model_filter_args+=(--e2e-model "$model")
+    fi
+  done < "$models_file"
+
+  local e2e_rc=0
+  pushd "$source_dir" >/dev/null
+  if run_with_timeout "${SELECTIVE_E2E_GROUP_TIMEOUT:-1h}" env \
+      CUDA_VISIBLE_DEVICES="$gpu_id" \
+      HF_HUB_OFFLINE=1 \
+      PYTHONNOUSERSITE=1 \
+      PYTHONPATH="$source_dir/python:$source_dir" \
+      LD_LIBRARY_PATH="$isolated_library_path" \
+      "${HF_PYTHON:-/opt/venv/bin/python}" -m pytest \
+        "${group_test_files[@]}" -v \
+        --rootdir "$source_dir" \
+        -c "$source_dir/pyproject.toml" \
+        --engine-dir "$engine_dir" \
+        --trtmc-binary "$build_dir/trtmc" \
+        --hf-python "${HF_PYTHON:-/opt/venv/bin/python}" \
+        --e2e-artifacts-dir "$result_dir/artifacts" \
+        --model-plugin-dir "$model_plugin_dir" \
+        --e2e-group-by-bundle \
+        --e2e-models-file "$models_file" \
+        "${model_filter_args[@]}" \
+        --rebuild-engines \
+        --junitxml="$audit_dir/junit.xml"; then
+    e2e_rc=0
+  else
+    e2e_rc=$?
+  fi
+  popd >/dev/null
+
+  local verification_rc=0
+  if python3 "$source_dir/tools/model_plugin_isolation.py" verify-results \
+      --repo-root "$source_dir" \
+      --models-file "$models_file" \
+      --artifacts-dir "$result_dir/artifacts" \
+      --report "$audit_dir/verification.json"; then
+    verification_rc=0
+  else
+    verification_rc=$?
+  fi
+
+  if [ "$e2e_rc" -ne 0 ]; then
+    return "$e2e_rc"
+  fi
+  return "$verification_rc"
+}
+
+run_isolated_e2e_group_logged() {
+  local group_manifest="$1"
+  local result_dir="$2"
+  local gpu_id="$3"
+  local group_dir
+  group_dir="$(dirname "$group_manifest")"
+  local group_id
+  group_id="$(basename "$group_dir")"
+  local audit_dir="$result_dir/model_isolation/$group_id"
+  mkdir -p "$audit_dir"
+  local started_at
+  started_at="$(date +%s)"
+  local group_rc=0
+  if run_isolated_e2e_group "$group_manifest" "$result_dir" "$gpu_id" \
+      > "$audit_dir/console.log" 2>&1; then
+    group_rc=0
+  else
+    group_rc=$?
+  fi
+  local elapsed=$(( $(date +%s) - started_at ))
+  if [ "$group_rc" -eq 0 ]; then
+    echo "PASS isolated group=$group_id gpu=$gpu_id elapsed=${elapsed}s"
+    if [ "${TRTMC_ISOLATION_KEEP_WORKTREES:-0}" = "0" ]; then
+      rm -rf \
+        "$group_dir/source" \
+        "$group_dir/build" \
+        "$group_dir/engines" \
+        "$group_dir/model_plugins"
+    fi
+  else
+    echo "FAIL isolated group=$group_id gpu=$gpu_id rc=$group_rc elapsed=${elapsed}s" >&2
+    tail -n 120 "$audit_dir/console.log" >&2 || true
+  fi
+  return "$group_rc"
+}
+
+run_isolated_gpu_queue() {
+  local gpu_id="$1"
+  local queue_file="$2"
+  local result_dir="$3"
+  local queue_rc=0
+  local group_manifest
+  while IFS= read -r group_manifest; do
+    if [ -z "$group_manifest" ]; then
+      continue
+    fi
+    if ! run_isolated_e2e_group_logged "$group_manifest" "$result_dir" "$gpu_id"; then
+      queue_rc=1
+    fi
+  done < "$queue_file"
+  return "$queue_rc"
+}
+
+run_model_owned_isolation_e2e() {
+  local models_file="$1"
+  local result_dir="$2"
+  local isolation_root="$PWD/$(ci_state_dir)/model-isolation"
+  rm -rf "$isolation_root" "$result_dir/model_isolation"
+  mkdir -p "$result_dir/model_isolation"
+  python3 tools/model_plugin_isolation.py plan \
+    --models-file "$models_file" \
+    --output-dir "$isolation_root" \
+    --clean
+
+  local -a gpu_ids
+  mapfile -t gpu_ids < <(discover_isolation_gpu_ids)
+  if [ "${#gpu_ids[@]}" -eq 0 ]; then
+    return 1
+  fi
+  local max_parallel="${TRTMC_ISOLATION_MAX_PARALLEL_GROUPS:-${#gpu_ids[@]}}"
+  if ! [[ "$max_parallel" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: TRTMC_ISOLATION_MAX_PARALLEL_GROUPS must be a positive integer" >&2
+    return 1
+  fi
+  if [ "$max_parallel" -lt "${#gpu_ids[@]}" ]; then
+    gpu_ids=("${gpu_ids[@]:0:max_parallel}")
+  fi
+
+  if [ -z "${TRTMC_ISOLATION_BUILD_JOBS:-}" ]; then
+    local total_build_jobs="${TRTMC_ISOLATION_TOTAL_BUILD_JOBS:-16}"
+    if ! [[ "$total_build_jobs" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: TRTMC_ISOLATION_TOTAL_BUILD_JOBS must be a positive integer" >&2
+      return 1
+    fi
+    local build_jobs=$(( total_build_jobs / ${#gpu_ids[@]} ))
+    if [ "$build_jobs" -lt 2 ]; then
+      build_jobs=2
+    fi
+    export TRTMC_ISOLATION_BUILD_JOBS="$build_jobs"
+  elif ! [[ "$TRTMC_ISOLATION_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: TRTMC_ISOLATION_BUILD_JOBS must be a positive integer" >&2
+    return 1
+  fi
+  echo "Isolation workers: GPUs=${gpu_ids[*]} build_jobs_per_worker=$TRTMC_ISOLATION_BUILD_JOBS"
+
+  local schedule_dir="$isolation_root/schedule"
+  local schedule_args=(
+    schedule
+    --plan "$isolation_root/plan.json"
+    --output-dir "$schedule_dir"
+    --timing-estimates tests/e2e/timing_estimates.json
+    --default-estimate-seconds "${TRTMC_ISOLATION_DEFAULT_ESTIMATE_S:-600}"
+    --build-overhead-seconds "${TRTMC_ISOLATION_BUILD_ESTIMATE_S:-60}"
+    --clean
+  )
+  local gpu_id
+  for gpu_id in "${gpu_ids[@]}"; do
+    schedule_args+=(--gpu-id "$gpu_id")
+  done
+  python3 tools/model_plugin_isolation.py "${schedule_args[@]}"
+  cp "$schedule_dir/schedule.json" "$result_dir/model_isolation/schedule.json"
+
+  local isolation_rc=0
+  local -a queue_pids=()
+  local -a queue_gpu_ids=()
+  for gpu_id in "${gpu_ids[@]}"; do
+    (
+      trap - EXIT
+      run_isolated_gpu_queue \
+        "$gpu_id" \
+        "$schedule_dir/gpu-$gpu_id.txt" \
+        "$result_dir"
+    ) &
+    queue_pids+=("$!")
+    queue_gpu_ids+=("$gpu_id")
+  done
+  local index
+  for index in "${!queue_pids[@]}"; do
+    if ! wait "${queue_pids[$index]}"; then
+      isolation_rc=1
+      echo "ERROR: isolated GPU queue ${queue_gpu_ids[$index]} failed" >&2
+    fi
+  done
+  return "$isolation_rc"
+}
+
 run_selective_e2e() {
   if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ] || [ "${FULL_E2E:-false}" = "true" ]; then
     echo "Skipping: selective E2E only runs for pull_request events without full_e2e"
@@ -616,9 +1008,15 @@ run_selective_e2e() {
 
   python3 -c "
 import json
+import re
 d = json.load(open('impact.json'))
-models = d.get('e2e_models', [])
+models = set(d.get('e2e_models', []))
 test_ids = d.get('e2e_test_ids', [])
+for test_id in test_ids:
+    match = re.search(r'::test_model_e2e\[([^]]+)\]', test_id)
+    if match:
+        models.add(match.group(1))
+models = sorted(models)
 with open('e2e_models.txt', 'w') as f:
     for m in models:
         f.write(m + '\n')
@@ -633,6 +1031,10 @@ if len(models) > 10:
 if test_ids:
     print(f'Selective E2E node IDs: {len(test_ids)}')
 "
+  python3 tools/model_plugin_isolation.py impact-models \
+    --impact-json impact.json > e2e_isolation_models.txt
+  echo "Model-owned isolation E2E: $(wc -l < e2e_isolation_models.txt) models"
+  sed 's/^/  isolated: /' e2e_isolation_models.txt
   local model_count
   model_count=$(wc -l < e2e_models.txt)
   if [ "$model_count" -eq 0 ]; then
@@ -643,28 +1045,67 @@ if test_ids:
 
   export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
   configure_e2e_timing_cache
-  local model_plugin_dir="$PWD/e2e_artifacts/model_plugins"
-  echo "=== Preparing isolated runtime model plugins ==="
-  prepare_model_plugin_dir "$model_plugin_dir" --models-file e2e_models.txt
-
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
-  echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
-  local args=(
+
+  echo "=== Phase 2: standard selective E2E for the full conservative impact set ==="
+  load_wheel_build_metadata
+  local result_dir="$PWD/e2e_artifacts"
+  rm -rf "$result_dir"
+  mkdir -p "$result_dir/artifacts"
+  local full_model_plugin_dir="$result_dir/model_plugins"
+  prepare_model_plugin_dir "$full_model_plugin_dir" --models-file e2e_models.txt
+  local standard_args=(
     --engine-dir "$ENGINE_DIR"
-    --result-dir e2e_artifacts
+    --result-dir "$result_dir"
     --trtmc-binary "$(command -v trtmc)"
     --workers-per-gpu 4
     --models-file e2e_models.txt
-    --model-plugin-dir "$model_plugin_dir"
+    --model-plugin-dir "$full_model_plugin_dir"
   )
   if [ -s e2e_test_ids.txt ]; then
-    args+=(--tests-file e2e_test_ids.txt)
+    standard_args+=(--tests-file e2e_test_ids.txt)
   fi
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
-    args+=(--rebuild-engines)
+    standard_args+=(--rebuild-engines)
   fi
-  run_e2e_with_diffusion_vlm "${SELECTIVE_E2E_TIMEOUT:-4h}" "${args[@]}"
+  local standard_rc=0
+  if run_with_timeout \
+      "${SELECTIVE_E2E_STANDARD_TIMEOUT:-${SELECTIVE_E2E_TIMEOUT:-4h}}" \
+      env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${standard_args[@]}"; then
+    standard_rc=0
+  else
+    standard_rc=$?
+    echo "ERROR: standard selective E2E failed with code $standard_rc" >&2
+  fi
+
+  local isolation_count
+  isolation_count=$(wc -l < e2e_isolation_models.txt)
+  local isolation_rc=0
+  if [ "$isolation_count" -gt 0 ]; then
+    echo "=== Phase 3: strict model-owned isolation E2E ==="
+    if ! run_model_owned_isolation_e2e \
+      e2e_isolation_models.txt \
+      "$result_dir"; then
+      isolation_rc=1
+    fi
+  else
+    echo "No model-owned E2E cases changed -- strict isolation rerun not required"
+  fi
+
+  local vlm_rc=0
+  if run_diffusion_vlm_assessment; then
+    vlm_rc=0
+  else
+    vlm_rc=$?
+  fi
+  if [ "$standard_rc" -ne 0 ]; then
+    return "$standard_rc"
+  fi
+  if [ "$isolation_rc" -ne 0 ]; then
+    return "$isolation_rc"
+  fi
+  return "$vlm_rc"
 }
 
 run_full_e2e() {

@@ -446,11 +446,47 @@ def test_ci_cpp_test_build_reuses_wheel_conan_tree() -> None:
     assert "wheel_build_metadata_file" in script
 
 
-def test_ci_prepares_isolated_model_plugins_for_e2e() -> None:
+def test_selective_e2e_builds_and_runs_single_family_source_projections() -> None:
     script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "tools/model_plugin_isolation.py prepare" in script
-    assert "trtmc_model_plugins" in script
-    assert 'prepare_model_plugin_dir "$model_plugin_dir" --models-file e2e_models.txt' in script
+    selective = script.split("run_selective_e2e() {", maxsplit=1)[1].split(
+        "\nrun_full_e2e() {", maxsplit=1
+    )[0]
+    group_runner = script.split("run_isolated_e2e_group() {", maxsplit=1)[1].split(
+        "\nrun_selective_e2e() {", maxsplit=1
+    )[0]
+
+    assert "tools/model_plugin_isolation.py plan" in group_runner
+    assert "tools/model_plugin_isolation.py" in selective
+    assert "run_model_owned_isolation_e2e" in selective
+    assert "impact-models" in selective
+    assert "e2e_isolation_models.txt" in selective
+    assert './scripts/run_e2e_parallel.sh "${standard_args[@]}"' in selective
+    assert 'prepare_model_plugin_dir "$full_model_plugin_dir"' in selective
+    assert 'schedule_args=(' in group_runner
+    assert "run_isolated_gpu_queue" in group_runner
+    assert "queue_pids" in group_runner
+    assert "tools/model_plugin_isolation.py stage-source" in group_runner
+    assert "configure_isolated_model_build" in group_runner
+    assert "CMAKE_TOOLCHAIN_FILE" in script
+    assert "FETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON" in script
+    assert '--target trtmc trtmc_backend_trt "$model_target"' in group_runner
+    assert 'PYTHONPATH="$source_dir/python:$source_dir' in group_runner
+    assert 'LD_LIBRARY_PATH="$isolated_library_path"' in group_runner
+    assert '--trtmc-binary "$build_dir/trtmc"' in group_runner
+    assert '--engine-dir "$engine_dir"' in group_runner
+    assert '--model-plugin-dir "$model_plugin_dir"' in group_runner
+    assert 'CUDA_VISIBLE_DEVICES="$gpu_id"' in group_runner
+    assert '--rootdir "$source_dir"' in group_runner
+    assert '--e2e-models-file "$models_file"' in group_runner
+    assert '"${model_filter_args[@]}"' in group_runner
+    assert "scripts/run_e2e_parallel.sh" not in group_runner
+    assert "verify-results" in group_runner
+    assert "expected exactly 1" in group_runner
+    assert "prepare_model_plugin_dir" not in group_runner
+
+
+def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert 'prepare_model_plugin_dir "$model_plugin_dir" --all' in script
     assert '--model-plugin-dir "$model_plugin_dir"' in script
 

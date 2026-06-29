@@ -198,7 +198,7 @@ jobs:
 
       - name: Selective E2E tests
         if: ${{ github.event_name == 'pull_request' && env.FULL_E2E != 'true' }}
-        timeout-minutes: 240
+        timeout-minutes: 300
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
 
       - name: Write CI summary
