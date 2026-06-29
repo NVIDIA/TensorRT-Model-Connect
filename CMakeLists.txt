@@ -51,6 +51,23 @@ if(DEFINED ENV{CUDA_HOME})
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/lib64")
 endif()
 
+# The TensorRT pip wheel (tensorrt_cu13) ships libnvinfer.so under a Python
+# site-packages tensorrt_libs/ tree. Ask Python where so CMake can find it
+# without manual hints. Mirrors the apache-tvm-ffi discovery below.
+find_program(_trtmc_python NAMES python3.12 python3 python)
+if(_trtmc_python)
+  execute_process(
+    COMMAND "${_trtmc_python}" -c
+      "import importlib.util,sys; s=importlib.util.find_spec('tensorrt_libs'); sys.stdout.write(s.submodule_search_locations[0] if s else '')"
+    OUTPUT_VARIABLE _trtmc_tensorrt_libs_pkg
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_trtmc_tensorrt_libs_pkg)
+    list(APPEND _trtmc_default_search_paths "${_trtmc_tensorrt_libs_pkg}")
+  endif()
+endif()
+
 find_path(TRTMC_TRT_INCLUDE_DIR NvInferRuntime.h
   PATHS ${_trtmc_default_search_paths}
   PATH_SUFFIXES "" include include/zapped_headers
@@ -317,6 +334,24 @@ option(TRTMC_ENABLE_TVM_FFI "Enable TVM-FFI kernel bridge plugin" ON)
 set(_trtmc_has_tvm_ffi FALSE)
 
 if(TRTMC_ENABLE_TVM_FFI)
+  # apache-tvm-ffi is distributed as a pip wheel that ships its headers + .so
+  # under the Python site-packages tvm_ffi/{include,lib}/ tree. Ask Python
+  # where that is so cmake can find it without manual TRTMC_TVM_FFI_*_DIR.
+  if(_trtmc_python)
+    execute_process(
+      COMMAND "${_trtmc_python}" -c
+        "import importlib.util; s=importlib.util.find_spec('tvm_ffi'); import sys; sys.stdout.write(s.submodule_search_locations[0] if s else '')"
+      OUTPUT_VARIABLE _trtmc_tvm_ffi_pkg
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(_trtmc_tvm_ffi_pkg)
+      list(APPEND _trtmc_default_search_paths
+           "${_trtmc_tvm_ffi_pkg}/include"
+           "${_trtmc_tvm_ffi_pkg}/lib")
+    endif()
+  endif()
+
   find_path(TRTMC_TVM_FFI_INCLUDE_DIR tvm/ffi/c_api.h
     PATHS ${_trtmc_default_search_paths}
     PATH_SUFFIXES "" include
@@ -435,6 +470,21 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   target_compile_definitions(trtmc_tvm_ffi_plugin PRIVATE TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
   target_compile_options(trtmc_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
+endif()
+
+# --- Optional: vendored diffusion CUDA kernels as TVM-FFI modules ---
+# Off by default. Requires TVM-FFI. Each kernel builds as a standalone .so
+# that the diffusion TRT graph loads via graph_ops.add_tvm_ffi_kernel().
+option(TRTMC_BUILD_DIFFUSION_KERNELS
+       "Build vendored optimized diffusion CUDA kernels (TVM-FFI modules)" OFF)
+
+if(TRTMC_BUILD_DIFFUSION_KERNELS)
+  if(NOT _trtmc_has_tvm_ffi)
+    message(FATAL_ERROR
+      "TRTMC_BUILD_DIFFUSION_KERNELS=ON requires TVM-FFI (TRTMC_ENABLE_TVM_FFI=ON, "
+      "and a discoverable libtvm_ffi). Found none.")
+  endif()
+  add_subdirectory(src/runtime/domains/diffusion/kernels)
 endif()
 
 # --- Backend DSO: standard TRT ---

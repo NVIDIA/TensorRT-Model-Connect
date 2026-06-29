@@ -33,6 +33,7 @@ global modulation tables) are handled externally by the runtime.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -93,6 +94,33 @@ def _np_reduced_dtype():
 def _fp16_compute() -> bool:
     """True when strongly typed FLUX.2 is using FP16 as its compute dtype."""
     return _CAST_DTYPE == trt.float16
+
+
+def _fused_dit_kernels_enabled() -> bool:
+    """True when the vendored fused DiT kernels should replace TRT-native ops.
+
+    Preconditions:
+      1. Build was invoked with TRTMC_FUSED_DIT_KERNELS=1.
+      2. _CAST_DTYPE is fp16 or bf16 (the kernel exports both).
+    """
+    return (
+        os.environ.get("TRTMC_FUSED_DIT_KERNELS") == "1"
+        and _CAST_DTYPE in (trt.float16, trt.bfloat16)
+    )
+
+
+def _fused_kernel_dtype_suffix() -> str:
+    """Match _CAST_DTYPE to the kernel's exported global function suffix."""
+    return "bf16" if _CAST_DTYPE == trt.bfloat16 else "fp16"
+
+
+def _trt_dtype_to_str(d) -> str:
+    """TRT dtype → plugin output-spec dtype string."""
+    if d == trt.bfloat16:
+        return "bfloat16"
+    if d == trt.float16:
+        return "float16"
+    return "float32"
 
 
 def _make_reduced_weights(data_fp32, shape):
@@ -285,6 +313,20 @@ def build_flux2_dit_engine(
 
     eps_t = _add_constant_reduced(network, (1, 1), np.array([eps], dtype=np.float32))
 
+    # When the fused QK-norm+RoPE kernel is enabled, preserve fp32 slices of
+    # cos/sin BEFORE the cast — the vendored CUDA kernel reads fp32 directly.
+    # The legacy reduced-precision path below is unaffected.
+    if _fused_dit_kernels_enabled():
+        rotary_cos_fp32 = rotary_cos
+        rotary_sin_fp32 = rotary_sin
+        txt_cos_fp32 = network.add_slice(rotary_cos_fp32, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+        txt_sin_fp32 = network.add_slice(rotary_sin_fp32, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+        img_cos_fp32 = network.add_slice(rotary_cos_fp32, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
+        img_sin_fp32 = network.add_slice(rotary_sin_fp32, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
+    else:
+        rotary_cos_fp32 = rotary_sin_fp32 = None
+        txt_cos_fp32 = txt_sin_fp32 = img_cos_fp32 = img_sin_fp32 = None
+
     # Cast FP32 inputs to the reduced compute dtype at the boundary.
     rotary_cos = network.add_cast(rotary_cos, _CAST_DTYPE).get_output(0)
     rotary_sin = network.add_cast(rotary_sin, _CAST_DTYPE).get_output(0)
@@ -440,22 +482,26 @@ def build_flux2_dit_engine(
         v_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_v_proj")
 
         # QK norm
-        q_img = _rms_norm_per_head_seq(network, q_img, num_heads, head_dim, weights[f"{p}.attn.norm_q.weight"], eps_t, num_img_tokens)
-        k_img = _rms_norm_per_head_seq(network, k_img, num_heads, head_dim, weights[f"{p}.attn.norm_k.weight"], eps_t, num_img_tokens)
-        q_txt = _rms_norm_per_head_seq(network, q_txt, num_heads, head_dim, weights[f"{p}.attn.norm_added_q.weight"], eps_t, text_seq_len)
-        k_txt = _rms_norm_per_head_seq(network, k_txt, num_heads, head_dim, weights[f"{p}.attn.norm_added_k.weight"], eps_t, text_seq_len)
+        # QK norm + RoPE (fused into one kernel call per tensor when
+        # TRTMC_FUSED_DIT_KERNELS=1; otherwise legacy two-step).
+        q_img = _fused_rms_norm_rope_per_tensor(
+            network, q_img, weights[f"{p}.attn.norm_q.weight"],
+            img_cos, img_sin, img_cos_fp32, img_sin_fp32,
+            num_heads, head_dim, num_img_tokens, eps_t, eps)
+        k_img = _fused_rms_norm_rope_per_tensor(
+            network, k_img, weights[f"{p}.attn.norm_k.weight"],
+            img_cos, img_sin, img_cos_fp32, img_sin_fp32,
+            num_heads, head_dim, num_img_tokens, eps_t, eps)
+        q_txt = _fused_rms_norm_rope_per_tensor(
+            network, q_txt, weights[f"{p}.attn.norm_added_q.weight"],
+            txt_cos, txt_sin, txt_cos_fp32, txt_sin_fp32,
+            num_heads, head_dim, text_seq_len, eps_t, eps)
+        k_txt = _fused_rms_norm_rope_per_tensor(
+            network, k_txt, weights[f"{p}.attn.norm_added_k.weight"],
+            txt_cos, txt_sin, txt_cos_fp32, txt_sin_fp32,
+            num_heads, head_dim, text_seq_len, eps_t, eps)
 
-        # Apply RoPE to image Q, K
-        q_img = _apply_native_rope_from_full_cache(
-            network, q_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
-        k_img = _apply_native_rope_from_full_cache(
-            network, k_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
-
-        # Apply RoPE to text Q, K
-        q_txt = _apply_native_rope_from_full_cache(
-            network, q_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
-        k_txt = _apply_native_rope_from_full_cache(
-            network, k_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
+        # (RoPE merged into _fused_rms_norm_rope_per_tensor above.)
 
         # Concatenate: [text, image] for joint attention
         q_cat = network.add_concatenation([q_txt, q_img])
@@ -556,15 +602,15 @@ def build_flux2_dit_engine(
         mlp_hidden = network.add_elementwise(
             mlp_gate_act, mlp_value, trt.ElementWiseOperation.PROD).get_output(0)
 
-        # QK norm
-        q_s = _rms_norm_per_head_seq(network, q_s, num_heads, head_dim, weights[f"{p}.attn.norm_q.weight"], eps_t, total_seq)
-        k_s = _rms_norm_per_head_seq(network, k_s, num_heads, head_dim, weights[f"{p}.attn.norm_k.weight"], eps_t, total_seq)
-
-        # Apply RoPE (full sequence: text + image cos/sin)
-        q_s = _apply_native_rope_from_full_cache(
-            network, q_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
-        k_s = _apply_native_rope_from_full_cache(
-            network, k_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
+        # QK norm + RoPE — single-stream uses full-sequence cos/sin (text+image).
+        q_s = _fused_rms_norm_rope_per_tensor(
+            network, q_s, weights[f"{p}.attn.norm_q.weight"],
+            rotary_cos, rotary_sin, rotary_cos_fp32, rotary_sin_fp32,
+            num_heads, head_dim, total_seq, eps_t, eps)
+        k_s = _fused_rms_norm_rope_per_tensor(
+            network, k_s, weights[f"{p}.attn.norm_k.weight"],
+            rotary_cos, rotary_sin, rotary_cos_fp32, rotary_sin_fp32,
+            num_heads, head_dim, total_seq, eps_t, eps)
 
         attn_out_s = _mha(
             network, q_s, k_s, v_s, num_heads, head_dim, total_seq,
@@ -822,6 +868,42 @@ def _apply_native_rope_from_full_cache(
     return graph_ops.add_apply_rope_native_from_full_cache(
         network, x, num_heads, head_dim, cos_vals, sin_vals,
         seq_len, interleaved=True)
+
+
+def _fused_rms_norm_rope_per_tensor(
+    network, x, weight, cos_reduced, sin_reduced, cos_fp32, sin_fp32,
+    num_heads, head_dim, seq_len, eps_t, eps,
+):
+    """Per-tensor RMS norm + interleaved RoPE in one kernel.
+
+    With TRTMC_FUSED_DIT_KERNELS=1 and cast_dtype in {fp16, bf16}, dispatches a
+    single TVM-FFI kernel — collapses 2 TRT op chains (RMS norm + RoPE) into one
+    device call. The kernel is templated per dtype; the suffix picks the matching
+    export. Otherwise: legacy two-step (RMS-norm helper → RoPE helper), byte-for-
+    byte identical to before.
+    """
+    if _fused_dit_kernels_enabled():
+        # Weight: [1, head_dim] in current reduced precision.
+        weight_t = _add_constant_reduced(network, (1, head_dim), weight)
+        dtype_str = _trt_dtype_to_str(_CAST_DTYPE)
+        outputs = graph_ops.add_tvm_ffi_kernel(
+            network,
+            kernel_name=f"trtmc.dit_rms_norm_rope_{_fused_kernel_dtype_suffix()}",
+            inputs=[x, weight_t, cos_fp32, sin_fp32],
+            output_specs=[{"dims": "same_as_input_0", "dtype": dtype_str}],
+            extra_args=[
+                {"type": "int", "value": num_heads},
+                {"type": "int", "value": head_dim},
+                {"type": "float", "value": eps},
+            ],
+        )
+        return outputs[0]
+
+    # Legacy path — preserved verbatim.
+    x = _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_len)
+    x = _apply_native_rope_from_full_cache(
+        network, x, cos_reduced, sin_reduced, num_heads, head_dim, seq_len)
+    return x
 
 
 def _attention_fp8_scales(prefix: str | None):

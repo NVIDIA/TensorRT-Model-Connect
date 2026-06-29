@@ -197,7 +197,11 @@ def build_mistral_encoder_engine(
         work_np_dtype = np.float16
         work_trt_dtype = trt.float16
     elif precision == "bf16":
-        work_np_dtype = np.float16
+        # Use ml_dtypes.bfloat16 so weights are stored in bf16; pairing fp16
+        # numpy arrays with bf16 TRT layers triggers strongly-typed mismatch
+        # errors (ElementWise SUM requires same input types).
+        import ml_dtypes
+        work_np_dtype = ml_dtypes.bfloat16
         work_trt_dtype = trt.bfloat16
     else:
         work_np_dtype = np.float32
@@ -232,7 +236,15 @@ def build_mistral_encoder_engine(
 
     # --- Attention mask: causal + padding ---
     # Build causal mask: upper triangular with -1e9 above diagonal
-    mask_value = -1e9 if work_np_dtype == np.float32 else np.finfo(work_np_dtype).min
+    # np.finfo doesn't accept ml_dtypes.bfloat16 ("not inexact"); ml_dtypes
+    # ships its own finfo for that case.
+    if work_np_dtype == np.float32:
+        mask_value = -1e9
+    else:
+        import ml_dtypes
+        finfo = (ml_dtypes.finfo
+                 if work_np_dtype == ml_dtypes.bfloat16 else np.finfo)
+        mask_value = float(finfo(work_np_dtype).min)
     causal_mask_np = np.zeros((max_seq_len, max_seq_len), dtype=work_np_dtype)
     for i in range(max_seq_len):
         for j in range(i + 1, max_seq_len):

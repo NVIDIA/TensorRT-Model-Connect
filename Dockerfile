@@ -44,6 +44,13 @@ RUN pip install -U pip && \
 # 13.0 Python stack pulled by PyTorch.
 RUN pip install "cuda-python==13.0.3"
 
+# Apache TVM-FFI: the kernel-bridge ABI that lets compiled CUDA modules
+# (FlashInfer, vendored diffusion kernels) be called from TRT plugins
+# without a Python callback. Headers + libtvm_ffi.so ship in the wheel at
+# /opt/venv/lib/python3.12/site-packages/tvm_ffi/{include,lib}/. CMake
+# discovers them via a Python-spec lookup in the venv (see CMakeLists.txt).
+RUN pip install "apache-tvm-ffi==0.1.12"
+
 # Core Python deps
 RUN pip install \
     "transformers==5.2.0" \
