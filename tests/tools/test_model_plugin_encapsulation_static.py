@@ -8174,14 +8174,23 @@ def test_model_owned_python_does_not_import_sibling_models() -> None:
                     if not module.startswith(prefix):
                         continue
                     imported_owner = module[len(prefix):].split(".", 1)[0]
-                    if imported_owner and imported_owner != owner:
-                        violations.append(
-                            (
-                                path,
-                                getattr(node, "lineno", 0),
-                                f"imports sibling model module {module}",
-                            )
+                    if not imported_owner or imported_owner == owner:
+                        continue
+                    # Allow leading-underscore "private" sibling modules — by
+                    # convention these are shared utilities co-located with
+                    # the model packages but not owned by any single family
+                    # (e.g. tests.e2e.models._bundle_group_runner). The
+                    # encapsulation rule applies to coupling between two
+                    # model OWNERS; shared utilities are intentionally shared.
+                    if imported_owner.startswith("_"):
+                        continue
+                    violations.append(
+                        (
+                            path,
+                            getattr(node, "lineno", 0),
+                            f"imports sibling model module {module}",
                         )
+                    )
 
     assert not violations, _format_violations(violations)
 
