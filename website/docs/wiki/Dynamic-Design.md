@@ -129,7 +129,7 @@ sequenceDiagram
 - `include/trtmc/runtime/pipeline_factory.h` -- `PipelineFactory` class declaration
 - `include/trtmc/runtime/pipeline_registry.h` -- `PipelineRegistry`, manifest registration macro
 - `include/trtmc/runtime/pipeline_plugin.h` -- `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
-- `src/runtime/plugins/` -- 20 manifest-registered plugin files (25 strategies total)
+- `src/runtime/models/` -- 20 manifest-registered plugin files (25 strategies total)
 - `src/bundle/bundle_format.cpp` -- `ReadBundleFile()`, `HasBundleMagic()`
 
 ---
@@ -183,7 +183,7 @@ sequenceDiagram
 **Key files:**
 - `src/runtime/models/<family>/pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
 - `src/runtime/models/<family>/pipeline.h` -- class declaration
-- `src/runtime/core/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
+- `src/runtime/models/<family>/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
 - `src/runtime/backend/trt_module_impl.cpp` -- `forward()`, `forward_async()`, `bind_external()`
 
 ---
@@ -217,7 +217,7 @@ sequenceDiagram
 
 **Key files:**
 - `src/runtime/models/<recurrent-family>/pipeline.h` -- family-owned `RecurrentPipeline`
-- `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
+- `src/runtime/models/<family>/inference_state.h` -- `IInferenceState` interface
 - `src/runtime/models/<recurrent-family>/pipeline.cpp` -- `generate()`, `run_step()`
 - `src/runtime/models/<recurrent-family>/recurrent_state.h` -- family-owned recurrent state class
 
@@ -340,7 +340,7 @@ sequenceDiagram
 - `src/runtime/models/bark/pipeline.h/cpp` -- `BarkPipeline`
 - `src/runtime/models/whisper/pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp`
 - `src/runtime/models/bark/plugin.cpp`, `whisper_plugin.cpp`, `magpie_plugin.cpp`, `speech_plugin.cpp`, `omni_plugin.cpp`
-- `src/runtime/domains/audio/bark_config.h`, `bark_generation_plan.h`
+- `src/runtime/models/bark/bark_config.h`, `bark_generation_plan.h`
 
 ---
 
@@ -371,8 +371,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/models/omni/pipeline.h/cpp` -- `OmniPipeline`, `OmniConfig`
-- `src/runtime/models/omni/plugin.cpp` -- `OmniPlugin`
+- `src/runtime/models/qwen3_omni/pipeline.h/cpp` -- `OmniPipeline`, `OmniConfig`
+- `src/runtime/models/qwen3_omni/plugin.cpp` -- `OmniPlugin`
 
 ---
 
@@ -408,6 +408,6 @@ Each stage in these flows is independently testable:
 | `write_bundle()` / `ReadBundleFile()` | Round-trip in memory | `tests/builder/test_bundle_writer.py`, `tests/cpp/test_bundle_format.cpp` |
 | `parse_base_config()` | Config JSON strings | `tests/cpp/test_config_schema_registry.cpp` |
 | `find_section()` | Synthetic bundles | `tests/cpp/test_bundle_view.cpp` |
-| KvCache state machine | cache update and mask behavior | `tests/cpp/test_kv_cache_new.cpp`, `tests/builder/test_cache_state_machine.py` |
+| KvCache state machine | cache update and mask behavior | `tests/builder/test_cache_state_machine.py`, `tests/builder/test_cache_state_machine.py` |
 | TrtModule forward | Real TRT engine | `tests/cpp/test_cuda_buffer.cpp` (buffer ops), E2E tests |
 | Full pipeline | E2E harness | `tests/test_e2e.py` |

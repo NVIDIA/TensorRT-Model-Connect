@@ -15,7 +15,7 @@ purpose, dependency profile, and speed:
 | 2. C++ runtime unit | `tests/cpp/` | 92 | 70+ | Mix | ~8 s | C++ runtime correctness |
 | 3. Tools self-tests | `tests/tools/` | 62 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Model E2E | `tests/e2e/models/<family>/` + `tests/e2e_harness/` | 197 manifests + 74 indexes | 197 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Model E2E | `tests/e2e/models/<family>/` + `tests/e2e_harness/` | 225 manifests + 74 indexes | 197 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -236,9 +236,9 @@ Graph-op tests use the `trt_runner` fixture from `conftest.py`: a `build_fn(netw
 
 | File | What it tests |
 |------|---------------|
-| `test_standard_decoder.py` | Tensor naming contract, debug outputs |
+| `tests/e2e/models/llama/test_llama_standard_decoder.py` | Tensor naming contract, debug outputs |
 | `test_vision_compute.py` | Vision encoder tests |
-| `test_vision_compute_extended.py` | Vision RoPE, DeepStack config, patch embed, spatial merge |
+| `tests/e2e/models/qwen_vl/test_qwen_vl_vision_compute_extended.py` | Vision RoPE, DeepStack config, patch embed, spatial merge |
 
 ---
 
@@ -301,18 +301,16 @@ and skip gracefully (exit 0).
 | `test_cuda_buffer.cpp` | RAII alloc, move semantics, data round-trip (with index on mismatch) | GPU |
 | `test_cuda_stream.cpp` | RAII stream, move semantics | GPU |
 | `test_device_tensor.cpp` | GPU-resident tensor operations | GPU |
-| `test_kv_cache_new.cpp` | Additional KV cache tests | GPU |
+| `tests/builder/test_cache_state_machine.py` | Cache state machine and mask behavior | No |
 
 #### TRT engine and runtime tests
 
 | File | What it tests | GPU? |
 |------|---------------|:--:|
-| `test_trt_engine_lifecycle.cpp` | `layer_tensor_name`, constants | TRT |
-| `test_trt_engine_lifecycle_fake_engine.cpp` | Engine lifecycle with fake engines | TRT |
 | `test_trt_logger.cpp` | Severity names, error storage, explicit config controls | TRT |
 | `test_trt_module.cpp` | TrtModule construction, tensor binding, lifecycle | TRT |
 | `test_trt_runtime_lifetime.cpp` | TRT runtime lifetime management | TRT |
-| `test_decode_runtime.cpp` | Argmax, mask building | TRT |
+| `tests/cpp/models/personaplex/test_personaplex_decode_runtime.cpp` | Argmax, mask building | TRT |
 | `tests/cpp/models/qwen_image/test_qwen_image_flow_match_scheduler.cpp` | Qwen Image-owned Flow-matching Euler scheduler | No |
 
 #### Pipeline and plugin tests
@@ -324,7 +322,7 @@ and skip gracefully (exit 0).
 | `test_c_abi_entry.cpp` | C ABI entry point | TRT |
 | `test_c_abi_runtime_regression.cpp` | C ABI runtime regression tests | TRT |
 | `tests/cpp/models/llama/test_llama_pipeline.cpp` | Text generation pipeline | TRT |
-| `test_encoder_pipeline.cpp` | Encoder pipeline (BERT, embedding, reranking) | TRT |
+| `tests/cpp/models/bert/test_bert_encoder_pipeline.cpp` | Encoder pipeline (BERT example) | TRT |
 | `test_recurrent_pipeline.cpp` | Recurrent pipeline (Mamba, RWKV, hybrid) | TRT |
 | `tests/cpp/models/*/test_*_recurrent_pipeline.cpp` | Model-owned recurrent state management through recurrent pipelines | TRT |
 | `tests/cpp/models/*/test_*_recurrent_output_initializers.cpp` | Model-owned recurrent output initializers and step contracts | No |
@@ -334,32 +332,32 @@ and skip gracefully (exit 0).
 
 | File | What it tests | GPU? |
 |------|---------------|:--:|
-| `test_audio_bundle_validation.cpp` | Bundle section validation for audio models | No |
-| `test_audio_pipeline_new.cpp` | Audio pipeline construction | TRT |
-| `test_bark_generation_plan.cpp` | Bark multi-stage codebook generation plan | No |
+| `tests/cpp/test_bundle_e2e.cpp` | Bundle build + load validation for model pipelines | TRT |
+| `tests/cpp/models/bark/test_bark_pipeline.cpp` | Bark audio pipeline construction | TRT |
+| `tests/cpp/models/bark/test_bark_generation_plan.cpp` | Bark multi-stage codebook generation plan | No |
 | `models/whisper/test_whisper_mel_spectrogram.cpp` | Whisper-owned mel spectrogram feature extraction | No |
 | `models/canary/test_canary_mel_spectrogram.cpp` | Canary-owned mel spectrogram feature extraction | No |
 | `models/nemotron_speech_streaming/test_nemotron_speech_streaming_audio_helpers.cpp` | RNNT-owned mel spectrogram feature extraction | No |
-| `test_whisper_decode_policy.cpp` | Whisper decode policy | No |
-| `test_whisper_host_plan.cpp` | Whisper host plan | No |
-| `test_magpie_codec_plan.cpp` | Magpie TTS codec plan | No |
-| `test_magpie_decode_policy.cpp` | Magpie TTS decode policy | No |
-| `test_magpie_decoder_plan.cpp` | Magpie TTS decoder plan | No |
-| `test_magpie_text_completion_policy.cpp` | Magpie TTS text completion policy | No |
-| `test_omni_audio_plan.cpp` | Omni multimodal audio plan | No |
+| `tests/cpp/models/whisper/test_whisper_decode_policy.cpp` | Whisper decode policy | No |
+| `tests/cpp/models/whisper/test_whisper_host_plan.cpp` | Whisper host plan | No |
+| `tests/cpp/models/magpie/test_magpie_codec_plan.cpp` | Magpie TTS codec plan | No |
+| `tests/cpp/models/magpie/test_magpie_decode_policy.cpp` | Magpie TTS decode policy | No |
+| `tests/cpp/models/magpie/test_magpie_decoder_plan.cpp` | Magpie TTS decoder plan | No |
+| `tests/cpp/models/magpie/test_magpie_text_completion_policy.cpp` | Magpie TTS text completion policy | No |
+| `tests/cpp/models/qwen3_omni/test_qwen3_omni_audio_plan.cpp` | Qwen3-Omni multimodal audio plan | No |
 | `test_wav_reader.cpp` | WAV file reading | No |
 
 #### Speech domain tests
 
 | File | What it tests | GPU? |
 |------|---------------|:--:|
-| `test_speech_decode_stop_policy.cpp` | Speech decode stop policy | No |
-| `test_speech_depth_plan.cpp` | Speech depth plan | No |
-| `test_speech_generation_helpers.cpp` | Speech generation helpers | No |
-| `test_speech_mimi_decode_plan.cpp` | Speech MIMI decode plan | No |
-| `test_speech_runtime_plan.cpp` | Speech runtime plan | No |
-| `test_speech_subprocess_seam.cpp` | Speech subprocess seam | No |
-| `test_speech_temporal_embed_plan.cpp` | Speech temporal embedding plan | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_decode_stop_policy.cpp` | PersonaPlex speech decode stop policy | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_depth_plan.cpp` | PersonaPlex speech depth plan | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_generation_helpers.cpp` | PersonaPlex speech generation helpers | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_mimi_decode_plan.cpp` | PersonaPlex speech MIMI decode plan | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_runtime_plan.cpp` | PersonaPlex speech runtime plan | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_subprocess_seam.cpp` | PersonaPlex speech subprocess seam | No |
+| `tests/cpp/models/personaplex/test_personaplex_speech_temporal_embed_plan.cpp` | PersonaPlex speech temporal embedding plan | No |
 
 #### Diffusion domain tests
 
@@ -501,7 +499,7 @@ harness provides contracts and orchestration.
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --model-plugin-dir ./build/models --rebuild-engines
 
-# All 197 models with artifact output
+# All 225 models with artifact output
 .venv/bin/python -m pytest tests/e2e/models -v \
   --engine-dir /mnt/storage/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
@@ -543,7 +541,7 @@ tests/e2e/models/*/MODEL.toml        # Per-family manifest indexes
 tests/e2e/models/*/runner.py         # Model-owned pytest runner
 tests/e2e/models/*/test_*_e2e.py     # Model-owned pytest entrypoint
 tests/e2e/models/*/e2e_plugins/*.py  # Optional model-owned runner/reference/comparator plugins
-tests/e2e/models/*/manifests/*.json  # 197 per-model JSON manifests
+tests/e2e/models/*/manifests/*.json  # 225 per-model JSON manifests
 tests/e2e/models/*/thresholds/*.json # Model-owned threshold sidecars
 tests/e2e/models/*/waives.txt        # Optional model-owned waives
 tests/e2e_harness/
@@ -722,7 +720,7 @@ ctest --test-dir build --output-on-failure
 **What's covered**:
 - Python: 98 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
 - Tools: 63 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
-- C++: 94 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
+- C++: 44 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, under 1 min)
 
@@ -767,7 +765,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 197 models, force-rebuild every bundle. Gold-standard regression gate.
+All 225 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/e2e/models -v \

@@ -346,6 +346,43 @@ class TestLoadAllResults:
         assert "encoder representation parity below minimum contract floor" in html
         assert "Failure type: <strong>compare_fail</strong>" not in html
 
+    def test_grouped_bundle_junit_members_are_rendered(self, tmp_path):
+        mod = _import_report()
+        e2e_root = tmp_path / "e2e_artifacts"
+        artifacts_dir = e2e_root / "artifacts"
+        base_result = _make_result(
+            name="canary-1b-v2",
+            task_strategy="speech_to_text",
+            family="canary",
+            hf_id="nvidia/canary-1b-v2",
+        )
+        base_result["case_config"]["bundle"] = "canary-1b-v2.trtfb"
+        _write_result(artifacts_dir, "canary-1b-v2", base_result)
+        _write_junit(
+            e2e_root,
+            """
+            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+                      name="test_model_e2e[bundle:canary-1b-v2+canary-1b-v2-asr-probe01+canary-1b-v2-asr-probe02]" />
+            """,
+        )
+
+        results = mod.load_all_results(artifacts_dir)
+        names = {result["case_name"] for result in results}
+        assert names == {
+            "canary-1b-v2",
+            "canary-1b-v2-asr-probe01",
+            "canary-1b-v2-asr-probe02",
+        }
+
+        html = mod.render_report(results)
+        assert "Grouped Bundle Testcases" not in html
+        assert html.count('class="summary-row"') == 1
+        assert 'class="summary-bundle-details"' in html
+        assert 'class="summary-subtest-table"' in html
+        assert "canary-1b-v2-asr-probe01" in html
+        assert "canary-1b-v2-asr-probe02" in html
+        assert "3 testcases" in html
+
 
 # ---------------------------------------------------------------------------
 # Tests: encode_file_base64
@@ -1337,3 +1374,27 @@ class TestSummaryDashboard:
         assert html.index('href="#model-slow"') < html.index('href="#model-medium"')
         assert html.index('href="#model-medium"') < html.index('href="#model-fast"')
         assert html.index('href="#model-fast"') < html.index('href="#model-missing"')
+
+    def test_grouped_bundle_renders_as_single_expandable_row(self):
+        mod = _import_report()
+        base = _make_result(name="canary-1b-v2", timing={"build_s": 5.0})
+        probe1 = _make_result(name="canary-1b-v2-asr-probe01", timing={})
+        probe2 = _make_result(name="canary-1b-v2-asr-probe02", timing={})
+        outcome = {
+            "pytest_status": "PASSED",
+            "pytest_group": (
+                "bundle:canary-1b-v2+canary-1b-v2-asr-probe01+"
+                "canary-1b-v2-asr-probe02"
+            ),
+        }
+        for result in (base, probe1, probe2):
+            result["_pytest_outcome"] = outcome
+
+        html = mod.render_summary_dashboard([base, probe1, probe2])
+
+        assert html.count('class="summary-row"') == 1
+        assert 'class="summary-bundle-details"' in html
+        assert "3 testcases" in html
+        assert 'href="#model-canary-1b-v2-asr-probe01"' in html
+        assert 'href="#model-canary-1b-v2-asr-probe02"' in html
+        assert 'data-name="canary-1b-v2 canary-1b-v2-asr-probe01 canary-1b-v2-asr-probe02"' in html

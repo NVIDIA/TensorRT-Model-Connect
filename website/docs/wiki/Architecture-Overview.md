@@ -162,7 +162,7 @@ Python diffusion noise schedulers live beside the family-owned diffusion runners
 for example `python/tensorrt_model_connect/families/flux/schedulers/`. The shared
 C++ runtime core does not own a scheduler implementation. Qwen Image carries the
 C++ `FlowMatchEulerScheduler` copy it uses in
-`src/runtime/models/qwen_image/qwen_image_scheduler.{h,cpp}`.
+`src/runtime/models/qwen_image/qwen_image_scheduler.h/cpp`.
 
 ---
 
@@ -408,13 +408,13 @@ Each decoder family owns its own `TextGenerationPipeline` copy under `src/runtim
 
 | Class | Header | Composition |
 |-------|--------|-------------|
-| `WhisperPipeline` | `whisper_pipeline.h` | Legacy `WhisperBackend` + mel filterbank + `ITokenizer` |
-| `BarkPipeline` | `bark_pipeline.h` | Legacy `BarkBackend` + `ITokenizer` |
-| `MagpiePipeline` | `magpie_pipeline.h` | Legacy `MagpieTTSBackend` + `ITokenizer` |
-| `SpeechPipeline` | `speech_pipeline.h` | Legacy `SpeechToSpeechBackend` |
-| `OmniPipeline` | `omni_pipeline.h` | `TrtModule` (thinker) + `KvCache` + `TrtModule` (talker) + `KvCache` + `TrtModule` (code2wav) + `ITokenizer` |
+| `WhisperPipeline` | `src/runtime/models/whisper/pipeline.h` | Model-owned speech-to-text pipeline helpers + `ITokenizer` |
+| `BarkPipeline` | `src/runtime/models/bark/pipeline.h` | Model-owned Bark TTS helpers + `ITokenizer` |
+| `MagpiePipeline` | `src/runtime/models/magpie/pipeline.h` | Model-owned Magpie TTS helpers + `ITokenizer` |
+| `SpeechPipeline` | `src/runtime/models/personaplex/pipeline.h` | Model-owned PersonaPlex speech-to-speech helpers |
+| `OmniPipeline` | `src/runtime/models/qwen3_omni/pipeline.h` | `TrtModule` (thinker) + `KvCache` + `TrtModule` (talker) + `KvCache` + `TrtModule` (code2wav) + `ITokenizer` |
 
-Note: Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes in `src/runtime/domains/audio/`. `OmniPipeline` is fully migrated to the `TrtModule` + `KvCache` composition pattern.
+Audio runtime helpers now live in the owning model folder under `src/runtime/models/<audio-family>/`.
 
 ---
 
@@ -436,8 +436,8 @@ The `model.forward()` abstraction for TensorRT engines. Wraps an engine + execut
 
 ### 8.2 KvCache
 
-- **Header**: `include/trtmc/runtime/kv_cache.h`
-- **Implementation**: `src/runtime/core/kv_cache.cpp`
+- **Header**: `src/runtime/models/<family>/kv_cache.h`
+- **Implementation**: `src/runtime/models/<family>/kv_cache.cpp`
 
 Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key_values`. Manages:
 
@@ -493,12 +493,12 @@ All implementations live in `src/tokenizer/`. The public API is `trtmc/tokenizer
 
 ## 9. Backend Executor Organization
 
-Backend executor code lives in `src/runtime/core/` and `src/runtime/domains/` organized by modality:
+Backend executor code lives in shared runtime folders plus model-owned runtime folders:
 
 | Directory | Contents |
 |-----------|----------|
-| `src/runtime/core/` | Shared infrastructure: `TrtModule`, `KvCache`, `DeviceTensor`, TRT common utilities, decode runtime (argmax, mask building), engine lifecycle |
-| `src/runtime/domains/audio/` | Whisper, Bark, MagpieTTS, Speech-to-Speech, Omni backends and supporting types |
+| `src/runtime/core/` | Shared infrastructure: `DeviceTensor`, CUDA common utilities, step-state interfaces, STB image implementation, and TRT graph builder helpers |
+| `src/runtime/models/<audio-family>/` | Whisper, Bark, MagpieTTS, PersonaPlex speech-to-speech, and Qwen3-Omni audio pipeline helpers and supporting types |
 | `src/runtime/domains/diffusion/` | Diffusion denoising step seam, preprocessor wire-format helpers, math utilities, shared value types |
 | `src/runtime/domains/encoder/` | Encoder, embedding, and reranking backends |
 | `src/runtime/domains/multimodal/` | VL backend, vision engine, image preprocessor (4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`) |
@@ -517,11 +517,11 @@ The former `FastPathModelConfig` monolithic struct has been replaced by `BaseCon
 
 The former centralized `pipeline_factory.cpp` (~700 LOC) has been replaced by a registry-based dispatch (`src/runtime/registry/pipeline_factory.cpp`, ~124 LOC). Each strategy plugin exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`; the generated registrar source calls those functions explicitly. Adding a new strategy requires a new `.cpp` file and one manifest entry -- no edits to the factory or any central dispatch logic. This item is resolved.
 
-### 10.3 Legacy Audio Backends
+### 10.3 Audio Runtime Ownership
 
-Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes (`WhisperBackend`, `BarkBackend`, `MagpieTTSBackend`, `SpeechToSpeechBackend` in `src/runtime/domains/audio/`) that predate the `TrtModule` + `KvCache` composition pattern. `OmniPipeline` is the only audio pipeline that has been migrated to the new pattern.
+Whisper, Bark, Magpie, PersonaPlex, and Qwen3-Omni own their audio helper types in model-local runtime folders. Some implementation patterns still differ across families, but the stale shared audio-backend ownership model has been retired.
 
-**Impact**: The legacy backends duplicate patterns (engine loading, cache management, decode loops) that are now handled generically by `TrtModule` and `KvCache`.
+**Impact**: New audio runtime work should extend the owning model folder and avoid reintroducing shared audio backend dispatch.
 
 ### 10.4 Perception Backends vs Pipeline Classes
 
@@ -580,7 +580,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtmc/bundle.h` | BundleInfo, InspectBundle |
 | `include/trtmc/tokenizer.h` | ITokenizer interface |
 | `include/trtmc/runtime/trt_module.h` | TrtModule abstraction |
-| `include/trtmc/runtime/kv_cache.h` | KvCache state manager |
+| `src/runtime/models/<family>/kv_cache.h` | KvCache state manager |
 | `src/runtime/models/<recurrent-family>/recurrent_state.h` | family-owned recurrent state manager |
 | `include/trtmc/runtime/tensor.h` | Tensor, TensorMap, TensorInfo types |
 | `include/trtmc/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
@@ -588,8 +588,8 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtmc/runtime/pipeline_registry.h` | PipelineRegistry singleton, manifest registration macro |
 | `include/trtmc/runtime/pipeline_plugin.h` | IPipelinePlugin interface, BaseConfig, PipelineContext |
 | `include/trtmc/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
-| `include/trtmc/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
-| `include/trtmc/runtime/domains/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
+| `src/runtime/models/personaplex/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
+| `src/runtime/models/personaplex/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
 | `src/runtime/models/<vl-family>/image_transform_helper.h` | Family-owned image transformation utilities for VL preprocessing |
 
 ### C++ Runtime -- Registry and Plugins
@@ -599,7 +599,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/registry/pipeline_registry.cpp` | PipelineRegistry singleton |
 | `src/runtime/registry/pipeline_plugin.cpp` | BaseConfig parsing (parse_base_config) |
 | `src/runtime/models/<family>/plugin.cpp` | decoder_kv_cache, decoder_moe |
-| `src/runtime/models/encoder/plugin.cpp` | encoder_only, embedding, reranking, neural_operator |
+| `src/runtime/models/<encoder-family>/plugin.cpp` | encoder_only, embedding, reranking, neural_operator |
 | `src/runtime/models/mamba/plugin.cpp` | mamba_ssm_recurrent |
 | `src/runtime/models/rwkv/plugin.cpp` | rwkv_recurrent |
 | `src/runtime/models/nemotron_h/plugin.cpp`, `src/runtime/models/qwen3_5/plugin.cpp` | hybrid Mamba-attention strategies |
@@ -607,12 +607,12 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/models/segformer/plugin.cpp` | segformer_segmentation |
 | `src/runtime/models/sam/plugin.cpp` | sam_prompted_segmentation |
 | `src/runtime/models/sam3/plugin.cpp` | sam3_prompted_segmentation |
-| `src/runtime/models/encoder/object_detection_plugin.cpp` | object_detection |
+| `src/runtime/models/<detection-family>/plugin.cpp` | object_detection |
 | `src/runtime/models/whisper/plugin.cpp` | speech_to_text |
 | `src/runtime/models/bark/plugin.cpp` | text_to_audio_bark |
 | `src/runtime/models/magpie/plugin.cpp` | text_to_audio_magpie |
-| `src/runtime/models/speech/plugin.cpp` | speech_to_speech |
-| `src/runtime/models/omni/plugin.cpp` | omni_multimodal |
+| `src/runtime/models/personaplex/plugin.cpp` | speech_to_speech |
+| `src/runtime/models/qwen3_omni/plugin.cpp` | omni_multimodal |
 | `src/runtime/models/t5/plugin.cpp` | t5_text_to_text |
 | `src/runtime/models/marian/plugin.cpp` | marian_translation |
 | `src/runtime/models/bart/plugin.cpp` | bart_seq2seq_encoder_decoder |
@@ -631,13 +631,13 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/bundle/bundle_format.cpp` | Bundle reader |
 | `src/bundle/bundle_view.h` | find_section(), find_sections_by_prefix() |
 | `src/runtime/backend/trt_module_impl.cpp` | TrtModule implementation |
-| `src/runtime/core/kv_cache.cpp` | KvCache implementation |
+| `src/runtime/models/<family>/kv_cache.cpp` | KvCache implementation |
 | `src/runtime/models/<recurrent-family>/recurrent_state.cpp` | family-owned recurrent state implementation |
 | `src/runtime/models/qwen_image/qwen_image_scheduler.cpp` | Qwen Image-owned FlowMatchEulerScheduler implementation |
 | `src/runtime/models/<family>/pipeline.h` | TextGenerationPipeline |
 | `src/runtime/models/<recurrent-family>/pipeline.h` | family-owned RecurrentPipeline |
 | `src/runtime/models/<vl-family>/pipeline.h` | Family-owned VLPipeline |
-| `src/runtime/models/encoder/pipeline.h` | EncoderPipeline |
+| `src/runtime/models/<encoder-family>/pipeline.h` | EncoderPipeline |
 | `src/runtime/models/segformer/segment_pipeline.h` | SegmentPipeline |
 | `src/runtime/models/sam/sam_pipeline.h` | SamPipeline |
 | `src/runtime/models/sam3/sam3_pipeline.h` | Sam3Pipeline |
@@ -647,8 +647,8 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/models/whisper/pipeline.h` | WhisperPipeline |
 | `src/runtime/models/bark/pipeline.h` | BarkPipeline |
 | `src/runtime/models/magpie/pipeline.h` | MagpiePipeline |
-| `src/runtime/models/speech/pipeline.h` | SpeechPipeline |
-| `src/runtime/models/omni/pipeline.h` | OmniPipeline |
+| `src/runtime/models/personaplex/pipeline.h` | SpeechPipeline |
+| `src/runtime/models/qwen3_omni/pipeline.h` | OmniPipeline |
 | `src/tokenizer/vocab_tokenizer.cpp` | VocabTokenizer |
 | `src/tokenizer/bpe_tokenizer.cpp` | BpeTokenizer (native C++) |
 | `src/tokenizer/wordpiece_tokenizer.cpp` | WordPieceTokenizer (native C++) |

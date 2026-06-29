@@ -59,8 +59,8 @@ raw JSON, never know about CLI flags.
 Phase 4a (new, added to plan): pure rename of `override` in identifiers
 and comments. Grep scope:
 - `python/tensorrt_model_connect/triattention_export.py`
-- `include/trtmc/runtime/triattention_kv_cache.h`
-- `src/runtime/core/triattention_kv_cache.cpp`
+- `src/runtime/models/<family>/triattention_kv_cache.h`
+- `src/runtime/models/<family>/triattention_kv_cache.cpp`
 - `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py`
 - worklog entries and any test names
 
@@ -144,7 +144,7 @@ imports, `build_cli.py`, and all internal imports updated.
 ### Phase 4 — Cluster migration
 - [x] Phase 4a: `override` rename
   - Skipped as a standalone commit: the `triattention_override_*`
-    helpers in `src/runtime/core/triattention_kv_cache.cpp` will be
+    helpers in `src/runtime/models/<family>/triattention_kv_cache.cpp` will be
     deleted (not renamed) when Cluster A's env-var removal lands.
     Rename + delete would churn the same lines twice; the single
     deletion commit is the cleaner diff. New code in the config
@@ -829,7 +829,7 @@ Commit chain:
   the registry only. TRTMC_TRIATTN_* env vars deleted entirely; the only
   supported input channels are bundle `defaults:`, CLI `--config <file>`,
   and `--set triattention.<field>=<value>`.
-- `include/trtmc/runtime/triattention_kv_cache.h`:
+- `src/runtime/models/<family>/triattention_kv_cache.h`:
   * `TriAttentionConfig` grows 12 debug/profile fields (debug, profile,
     runtime_bucket_rows, disable_gpu_selection, disable_gpu_compaction,
     disable_gpu_state, zero_tail, dump_keep_path, dump_compaction_index,
@@ -839,7 +839,7 @@ Commit chain:
     runtime_config=nullptr)` signature grows an optional
     `ConfigBundle*` parameter; legacy JSON path still works for
     pre-migration bundles that lack `defaults:`.
-- `src/runtime/core/triattention_kv_cache.cpp`:
+- `src/runtime/models/<family>/triattention_kv_cache.cpp`:
   * Deleted `triattention_debug_enabled`, `triattention_profile_enabled`,
     `triattention_disable_gpu_{selection,compaction,state}`,
     `triattention_dump_{keep_path,compaction_index,score_cache_enabled,
@@ -917,8 +917,8 @@ Commit chain:
 - Commit: pending end-of-tick.
 - Next tick (10) — swap TriAttention env-var readers for
   `ctx.runtime_config->get<T>("triattention", …)` queries. Target
-  `src/runtime/core/triattention_kv_cache.cpp` and
-  `include/trtmc/runtime/triattention_kv_cache.h`. Delete the env-var
+  `src/runtime/models/<family>/triattention_kv_cache.cpp` and
+  `src/runtime/models/<family>/triattention_kv_cache.h`. Delete the env-var
   helpers (`triattention_override_*` and bare `std::getenv` reads) in
   the same commit. Scope gate: the Python builder path still provides
   a way to populate the bundle `defaults:` block for TriAttention
@@ -1030,7 +1030,7 @@ Commit chain:
        (`include/trtmc/config/schemas/triattention.h` + registration in a
        new `.cpp` file added to the force-link anchor list).
     4. Swap the `TRTMC_TRIATTN_*` env-var readers in
-       `src/runtime/core/triattention_kv_cache.cpp` for ConfigBundle
+       `src/runtime/models/<family>/triattention_kv_cache.cpp` for ConfigBundle
        queries. Similarly for the Python build path.
     5. Delete the env-var readers (hard removal with no shims).
     6. Validate per-cluster tests still pass.

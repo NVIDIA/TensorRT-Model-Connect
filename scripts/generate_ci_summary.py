@@ -28,6 +28,7 @@ _CONSOLE_OUTCOME_RE = re.compile(
     r"tests/e2e/models/[^\s:]+::test_model_e2e)\[([^\]]+)\]\s+"
     r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
 )
+_BUNDLE_GROUP_PREFIX = "bundle:"
 _METRIC_PRIORITY = (
     "logit_cosine_p5",
     "token_agreement_rate",
@@ -72,6 +73,32 @@ def _e2e_root_from_artifacts_dir(artifacts_dir: Path) -> Path:
 def _extract_case_name(text: str) -> str:
     match = _TEST_CASE_RE.search(text)
     return match.group(1) if match else ""
+
+
+def _case_names_from_param(case_name: str) -> list[str]:
+    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
+        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
+        return [part for part in payload.split("+") if part]
+    return [case_name] if case_name else []
+
+
+def _record_pytest_outcome(
+    outcomes: dict[str, dict[str, str]],
+    case_name: str,
+    outcome: dict[str, str],
+) -> None:
+    member_names = _case_names_from_param(case_name)
+    if len(member_names) <= 1:
+        outcomes[case_name] = outcome
+        return
+
+    grouped = {
+        **outcome,
+        "pytest_group": case_name,
+        "pytest_group_members": ",".join(member_names),
+    }
+    for member_name in member_names:
+        outcomes[member_name] = grouped
 
 
 def _clean_pytest_reason(reason: str) -> str:
@@ -123,11 +150,11 @@ def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
                 skip_type = skipped.attrib.get("type", "")
                 status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
                 reason = skipped.attrib.get("message", "") or (skipped.text or "")
-            outcomes[case_name] = {
+            _record_pytest_outcome(outcomes, case_name, {
                 "pytest_status": status,
                 "reason": _clean_pytest_reason(reason),
                 "source": source,
-            }
+            })
 
     for log_path in sorted(e2e_root.glob("console-*.log")):
         try:
@@ -142,11 +169,11 @@ def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
             case_name, status, rest = match.groups()
             reason = _clean_pytest_reason(rest.split("[", 1)[0])
             if status in {"XPASS", "XFAIL"} or case_name not in outcomes:
-                outcomes[case_name] = {
+                _record_pytest_outcome(outcomes, case_name, {
                     "pytest_status": status,
                     "reason": reason,
                     "source": log_path.name,
-                }
+                })
 
     return outcomes
 
@@ -310,6 +337,82 @@ def _sort_key(result: dict[str, Any]) -> tuple[int, float, str]:
     return (status_rank, -(total or 0.0), str(result.get("case_name", "")))
 
 
+def _bundle_group_key(result: dict[str, Any]) -> str:
+    outcome = result.get("_pytest_outcome")
+    if isinstance(outcome, dict):
+        group_name = str(outcome.get("pytest_group") or "")
+        if group_name:
+            return group_name
+    case_config = result.get("case_config", {}) or {}
+    bundle = str(case_config.get("bundle", "") or "").strip()
+    if bundle:
+        return bundle
+    return ""
+
+
+def _bundle_group_label(group_key: str) -> str:
+    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
+        return "pytest group: " + ", ".join(_case_names_from_param(group_key))
+    return group_key
+
+
+def _bundle_group_sort_key(group_key: str, result: dict[str, Any]) -> tuple[int, str]:
+    name = str(result.get("case_name", ""))
+    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
+        member_names = _case_names_from_param(group_key)
+        try:
+            return (member_names.index(name), name)
+        except ValueError:
+            return (len(member_names), name)
+    bundle_stem = Path(group_key).stem if group_key else ""
+    return (0 if name == bundle_stem else 1, name)
+
+
+def _grouped_bundle_results(
+    results: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        group_key = _bundle_group_key(result)
+        if not group_key:
+            continue
+        groups.setdefault(group_key, []).append(result)
+    return {
+        key: sorted(items, key=lambda item: _bundle_group_sort_key(key, item))
+        for key, items in sorted(groups.items())
+        if len(items) > 1
+    }
+
+
+def _bundle_group_row(group_key: str, items: list[dict[str, Any]]) -> str:
+    status_counts: dict[str, int] = {}
+    for item in items:
+        status = _status(item)
+        status_counts[status] = status_counts.get(status, 0) + 1
+    status_summary = ", ".join(
+        f"{status}={count}" for status, count in sorted(status_counts.items())
+    )
+    testcase_lines = []
+    for item in items:
+        name = str(item.get("case_name", "unknown"))
+        metric = _key_metric(item)
+        timing = _total_time(item)
+        detail = f"`{name}` ({_status(item)}"
+        if metric:
+            detail += f", {metric}"
+        if timing:
+            detail += f", {timing}"
+        detail += ")"
+        testcase_lines.append(detail)
+    cols = [
+        _md(_bundle_group_label(group_key)),
+        str(len(items)),
+        _md(status_summary),
+        "<br>".join(testcase_lines),
+    ]
+    return "| " + " | ".join(cols) + " |"
+
+
 def render_summary(
     *,
     results: list[dict[str, Any]],
@@ -350,6 +453,18 @@ def render_summary(
     ]
     lines.extend(_render_table(["Status", "Count"], count_rows))
     lines.append("")
+
+    grouped_bundles = _grouped_bundle_results(results)
+    if grouped_bundles:
+        lines.append("### Grouped Bundle Testcases")
+        rows = [
+            _bundle_group_row(group_key, items)
+            for group_key, items in grouped_bundles.items()
+        ]
+        lines.extend(
+            _render_table(["Bundle", "Testcases", "Statuses", "Members"], rows)
+        )
+        lines.append("")
 
     failures = [
         r for r in results

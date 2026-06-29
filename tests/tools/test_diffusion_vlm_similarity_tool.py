@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from tools.evaluate_diffusion_vlm_similarity import (
+    _LoadingWeightsProgressFilter,
     _apply_gate,
     _discover_pairs,
     _load_assessment_config,
@@ -120,6 +121,26 @@ def test_parse_json_normalizes_internvl_quality_key_typo():
 """)
 
     assert parsed["hf_visual_quality_0_to_5"] == 5
+
+
+def test_loading_weights_progress_filter_drops_only_progress_lines():
+    class Sink:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, text):
+            self.parts.append(text)
+
+        def flush(self):
+            pass
+
+    sink = Sink()
+    filtered = _LoadingWeightsProgressFilter(sink)
+    filtered.write("before\n")
+    filtered.write("Loading weights:   0%|          | 1/824 [00:00<?, ?it/s]\r")
+    filtered.write("after\n")
+
+    assert "".join(sink.parts) == "before\nafter\n"
 
 
 def test_parse_json_recovers_scores_from_truncated_vlm_json():

@@ -15,7 +15,9 @@ function filterModels() {
   for (var i = 0; i < rows.length; i++) {
     var name = rows[i].getAttribute('data-name') || '';
     var status = rows[i].getAttribute('data-status') || '';
-    var show = (!q || name.indexOf(q) >= 0) && (!s || status === s);
+    var statuses = status.split(/\s+/);
+    var show = (!q || name.indexOf(q) >= 0) &&
+      (!s || statuses.indexOf(s) >= 0);
     rows[i].style.display = show ? '' : 'none';
   }
 }

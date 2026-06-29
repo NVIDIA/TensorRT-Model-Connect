@@ -8,14 +8,9 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-import pytest
-
-from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
-from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
-from tests.e2e_harness.orchestrator import E2EOrchestrator
-from tests.e2e_harness.python_profiles import (
-    resolve_case_profile_names,
-    resolve_case_python_profiles,
+from tests.e2e.models._bundle_group_runner import (
+    model_case_names_for_dir,
+    run_model_e2e_case_or_group,
 )
 
 _MODEL_DIR = Path(__file__).resolve().parent
@@ -162,114 +157,25 @@ def _case_matches_e2e_model(case, filters: set[str]) -> bool:
 
 
 def model_case_names(config=None) -> list[str]:
-    strategy_filter = None
-    core_only = False
-    multi_device_only = False
-    excluded_ci_tiers = set()
-    model_filters: set[str] = set()
-
-    if config is not None:
-        strategy_filter = config.getoption("--e2e-task-strategy", default=None)
-        model_filters = _parse_e2e_model_filters(
-            config.getoption("--e2e-model", default=[]) or []
-        )
-        core_only = config.getoption("--e2e-core-only", default=False)
-        multi_device_only = config.getoption("--multi-device-only", default=False)
-        excluded_ci_tiers = set(
-            config.getoption("--e2e-exclude-ci-tier", default=[]) or []
-        )
-
-    cases = load_all_manifests(_MODEL_DIR, task_strategy_filter=strategy_filter)
-
-    if model_filters:
-        cases = [case for case in cases if _case_matches_e2e_model(case, model_filters)]
-
-    if excluded_ci_tiers:
-        cases = [
-            case for case in cases
-            if str(case.metadata.get("ci_tier", "")) not in excluded_ci_tiers
-        ]
-
-    if multi_device_only:
-        cases = [case for case in cases if _is_multi_device_case(case)]
-    else:
-        cases = [case for case in cases if not _is_multi_device_case(case)]
-
-    if core_only:
-        cases = [case for case in cases if case.metadata.get("core", False)]
-
-    return [case.name for case in cases]
+    return model_case_names_for_dir(
+        config=config,
+        model_dir=_MODEL_DIR,
+        case_matches_model=_case_matches_e2e_model,
+        is_multi_device_case=_is_multi_device_case,
+    )
 
 
 def run_model_e2e(case_name: str, request) -> None:
-    if case_name == "__no_models__":
-        pytest.skip("No model manifests found")
-
-    config = request.config
-    waives = _load_waives(config.getoption("--e2e-platform", default=""))
-    if case_name in waives:
-        action, reason = waives[case_name]
-        if action == "SKIP":
-            pytest.skip(reason)
-        if action == "XFAIL":
-            request.node.add_marker(pytest.mark.xfail(reason=reason, strict=False))
-
-    case = get_case_by_name(case_name, _MODEL_DIR)
-    if case is None:
-        pytest.fail(f"Case not found in {_MODEL_DIR}: {case_name}")
-
-    skip_reason = case.metadata.get("skip_reason", "")
-    if skip_reason:
-        pytest.skip(skip_reason)
-
-    base_python = _resolve_hf_python(config)
-    profile_names = resolve_case_profile_names(case)
-    profile_paths = resolve_case_python_profiles(case, base_python)
-
-    ctx = RunContext(
-        case=case,
-        artifacts_dir=_resolve_artifacts_dir(config),
-        binary_path=_resolve_binary(config),
-        hf_python=base_python,
-        build_python=profile_paths["build"],
-        runtime_python=profile_paths["runtime"],
-        reference_python=profile_paths["reference"],
-        build_profile=profile_names["build"],
-        runtime_profile=profile_names["runtime"],
-        reference_profile=profile_names["reference"],
-        ld_library_path=_resolve_ld_library_path(),
-        engine_dir=_resolve_engine_dir(config),
-        model_plugin_dir=_resolve_model_plugin_dir(config),
-        rebuild=config.getoption("--rebuild-engines", default=False),
-        verbose=config.getoption("verbose", default=0) > 0,
+    run_model_e2e_case_or_group(
+        case_name=case_name,
+        request=request,
+        model_dir=_MODEL_DIR,
+        load_waives=_load_waives,
+        resolve_hf_python=_resolve_hf_python,
+        resolve_artifacts_dir=_resolve_artifacts_dir,
+        resolve_binary=_resolve_binary,
+        resolve_ld_library_path=_resolve_ld_library_path,
+        resolve_engine_dir=_resolve_engine_dir,
+        resolve_model_plugin_dir=_resolve_model_plugin_dir,
+        model_plugin_dir_env=_model_plugin_dir_env,
     )
-
-    orchestrator = E2EOrchestrator()
-    with _model_plugin_dir_env(ctx.model_plugin_dir):
-        result = orchestrator.run(case, ctx)
-
-    if result.status == E2EStatus.SKIP.value:
-        skip_detail = ""
-        if result.determinism and "preflight" in result.determinism:
-            failed = [d for d in result.determinism["preflight"] if not d.get("passed")]
-            if failed:
-                skip_detail = "; ".join(d.get("message", "") for d in failed)
-        pytest.skip(
-            f"Case {case_name} skipped: {skip_detail}"
-            if skip_detail else f"Case {case_name} skipped"
-        )
-    if result.status == E2EStatus.PASS.value:
-        return
-
-    failed_stages = [
-        f"  {name} [{cr.status}]: {cr.message}"
-        for name, cr in result.stages.items()
-        if cr.status in (StageStatus.FAILED.value, StageStatus.ERROR.value)
-    ]
-    failure_msg = (
-        f"E2E failed for {case_name} "
-        f"(failure_type={result.failure_type}, "
-        f"oracle_level={result.oracle_level}):\n"
-    )
-    failure_msg += "\n".join(failed_stages) if failed_stages else f"  status={result.status}"
-    pytest.fail(failure_msg)
