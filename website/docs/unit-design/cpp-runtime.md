@@ -46,7 +46,7 @@ Built-in plugins are registered through generated manifest calls. Ad hoc static 
 
 ## Plugins
 
-`src/runtime/plugins/` files parse strategy-specific config and assemble pipelines. They own the boundary between generic bundle metadata and concrete runtime classes.
+`src/runtime/models/` files parse strategy-specific config and assemble pipelines. They own the boundary between generic bundle metadata and concrete runtime classes.
 
 Examples:
 

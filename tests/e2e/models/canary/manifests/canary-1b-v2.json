@@ -13,5 +13,8 @@
   "prompt": "test",
   "max_new_tokens": 50,
   "trust_remote_code": false,
+  "metadata": {
+    "group_by_bundle": true
+  },
   "test_input_audio": "data/Recording.wav"
 }

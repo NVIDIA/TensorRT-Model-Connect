@@ -130,6 +130,41 @@ def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
     assert "tests/e2e_harness/test_*.py" in text
 
 
+def test_python_package_coverage_gate_excludes_family_owned_modules() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "write_python_package_gate_coverage_config" in text
+    assert "*/tensorrt_model_connect/families/*" in text
+    assert 'python_cov_config="coverage/python-package-gate.coveragerc"' in text
+    assert '--cov-config="$python_cov_config"' in text
+    assert "PYTHON_COVERAGE_MIN_LINE" in text
+    assert "PYTHON_COVERAGE_MIN_BRANCH" in text
+
+
+def test_full_e2e_collection_uses_model_e2e_files_with_visible_errors() -> None:
+    text = (REPO_ROOT / "scripts" / "run_e2e_parallel.sh").read_text()
+    full_mode = text.split("mapfile -t E2E_COLLECT_FILES", maxsplit=1)[1].split(
+        "\nTOTAL=", maxsplit=1
+    )[0]
+    assert "find tests/e2e/models -mindepth 2 -maxdepth 2 -type f" in full_mode
+    assert "-name 'test_*_e2e.py'" in full_mode
+    assert '"$HF_PYTHON" -m pytest "${E2E_COLLECT_FILES[@]}" --co -q' in full_mode
+    assert 'grep "test_model_e2e\\[" | sort || true' in full_mode
+    assert "2>/dev/null" not in full_mode
+
+
+def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
+    for relpath in (
+        "tests/e2e/models/qwen/test_flashinfer_plugin.py",
+        "tests/e2e/models/qwen/test_flashinfer_trt_attention.py",
+        "tests/e2e/models/qwen/test_qwen3_flashinfer.py",
+    ):
+        text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+        assert 'if __name__ != "__main__":' in text
+        assert "pytest.skip(" in text
+        assert "allow_module_level=True" in text
+        assert text.index("pytest.skip(") < text.index("import tvm_ffi")
+
+
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
     premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()

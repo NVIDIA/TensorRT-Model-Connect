@@ -452,6 +452,28 @@ write_skipped_python_coverage() {
   echo "$reason" > coverage/python-coverage.txt
 }
 
+write_python_package_gate_coverage_config() {
+  local config_path="$1"
+  cat > "$config_path" <<'EOF'
+[run]
+source =
+    tensorrt_model_connect
+branch = True
+omit =
+    */tests/*
+    */__pycache__/*
+    */tensorrt_model_connect/families/*
+
+[report]
+show_missing = True
+precision = 1
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.
+    raise NotImplementedError
+EOF
+}
+
 run_python_builder_tests() {
   python -m pip install --disable-pip-version-check --quiet "pytest-cov>=6.0"
   mkdir -p coverage
@@ -486,7 +508,15 @@ for test in tests:
 
   local cov_args=()
   if [ "$python_coverage_required" = "true" ]; then
-    cov_args=(--cov=tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml)
+    local python_cov_config="coverage/python-package-gate.coveragerc"
+    write_python_package_gate_coverage_config "$python_cov_config"
+    cov_args=(
+      --cov=tensorrt_model_connect
+      --cov-branch
+      --cov-config="$python_cov_config"
+      --cov-report=term-missing
+      --cov-report=xml:coverage/python-cobertura.xml
+    )
   fi
   if [ -s "$selected_tests_file" ]; then
     mapfile -t selected_python_tests < "$selected_tests_file"

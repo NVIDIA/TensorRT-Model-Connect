@@ -9,8 +9,11 @@ image independently.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +52,32 @@ _NON_PHOTO_DESCRIPTION_TERMS = (
     "silhouette",
 )
 _INVALID_REFERENCE_SCORE_CAP = 2.0
+
+
+class _LoadingWeightsProgressFilter:
+    """Drop tqdm weight-loading progress while preserving other output."""
+
+    def __init__(self, wrapped: Any) -> None:
+        self._wrapped = wrapped
+
+    def write(self, text: str) -> int:
+        if "Loading weights:" not in text:
+            self._wrapped.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self._wrapped.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._wrapped, "isatty", lambda: False)())
+
+
+@contextlib.contextmanager
+def _suppress_loading_weights_progress():
+    filtered_stdout = _LoadingWeightsProgressFilter(sys.stdout)
+    filtered_stderr = _LoadingWeightsProgressFilter(sys.stderr)
+    with contextlib.redirect_stdout(filtered_stdout), contextlib.redirect_stderr(filtered_stderr):
+        yield
 
 
 def _default_assessment_config_path() -> Path:
@@ -330,6 +359,9 @@ Keep "reason" under 30 words."""
 
 
 def main() -> int:
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -370,19 +402,20 @@ def main() -> int:
         raise SystemExit(f"No TRT/HF diffusion frame pairs found in {args.artifacts_dir}")
 
     dtype = torch.bfloat16 if args.device.startswith("cuda") else torch.float32
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        local_files_only=args.local_files_only,
-        dtype=dtype,
-        trust_remote_code=True,
-    ).to(args.device)
-    processor = AutoProcessor.from_pretrained(
-        model_id,
-        local_files_only=args.local_files_only,
-        trust_remote_code=True,
-        min_pixels=224 * 224,
-        max_pixels=max_side * max_side,
-    )
+    with _suppress_loading_weights_progress():
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            local_files_only=args.local_files_only,
+            dtype=dtype,
+            trust_remote_code=True,
+        ).to(args.device)
+        processor = AutoProcessor.from_pretrained(
+            model_id,
+            local_files_only=args.local_files_only,
+            trust_remote_code=True,
+            min_pixels=224 * 224,
+            max_pixels=max_side * max_side,
+        )
 
     results = []
     any_gate_failed = False

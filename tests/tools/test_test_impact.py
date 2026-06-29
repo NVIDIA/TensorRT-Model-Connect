@@ -225,6 +225,13 @@ class TorchReference:
         {"name": "speech-core", "family": "speech_family", "runtime_strategy": "speech_family_speech_to_text",
          "hf_id": "example/speech-core", "precision": "fp16", "core": True,
          "test_input_audio": "tests/e2e/data/Recording.wav"},
+        {"name": "canary-grouped", "family": "canary", "runtime_strategy": "speech_to_text",
+         "hf_id": "example/canary-grouped", "core": True},
+        {"name": "nld-grouped", "family": "nemotron_labs_diffusion",
+         "runtime_strategy": "nemotron_labs_diffusion", "task_strategy": "text_generation_causal",
+         "hf_id": "example/nld-grouped"},
+        {"name": "speech-streaming-case", "family": "nemotron_speech_streaming",
+         "runtime_strategy": "speech_to_text", "hf_id": "example/speech-streaming-case"},
         {"name": "media-core", "family": "media_family", "runtime_strategy": "diffusion_media_primary",
          "hf_id": "example/media-core", "reference_family": "diffusers_image_gen", "core": True},
         {"name": "media-alt", "family": "media_alt_family", "runtime_strategy": "diffusion_media_secondary",
@@ -1111,6 +1118,16 @@ class TestSafetyNet:
         assert match.rule == "e2e_model_owned_test"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
+    def test_e2e_bundle_group_runner(self, imap):
+        """Changing grouped-bundle helper -> only opt-in grouped families."""
+        match = test_impact.classify_file(
+            "tests/e2e/models/_bundle_group_runner.py",
+            imap,
+        )
+        assert match.rule == "e2e_bundle_group_runner"
+        assert match.models == ["canary-grouped", "nld-grouped"]
+        assert "speech-streaming-case" not in match.models
+
     def test_e2e_model_owned_waives_self(self, imap):
         """Changing a model-owned waive file -> only that family's models."""
         match = test_impact.classify_file(
@@ -1194,6 +1211,7 @@ class TestNoImpact:
         match = test_impact.classify_file("scripts/run_e2e_parallel.sh", imap)
         assert match.rule == "e2e_runner_script"
         assert match.models == imap.all_model_names
+        assert match.unit_tiers == ["tools"]
 
     def test_scripts_no_impact(self, imap):
         """scripts/ -> no E2E tests."""
@@ -1322,8 +1340,10 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/test_flashinfer_plugin_e2e.py",
-            "tests/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/decoder_family/run_decoder_fi.py",
+            "tests/e2e/models/decoder_family/test_flashinfer_plugin.py",
+            "tests/e2e/models/decoder_family/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/decoder_family/test_decoder_flashinfer.py",
             "tests/test_tvm_ffi_e2e.py",
         ],
     )
@@ -2846,6 +2866,22 @@ class TestCoverageMapIntegration:
         assert result.e2e_models == []
         assert result.tools_tests == ["tests/e2e_harness/test_orchestrator_phases.py"]
         assert "tools" not in result.fallback_tiers
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map):
+        """Shell runner edits select tests that Python coverage cannot discover."""
+        result = test_impact.analyze_impact(
+            ["scripts/run_e2e_parallel.sh"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == [
+            "tests/tools/test_github_actions_ci.py",
+            "tests/tools/test_schedule_e2e.py",
+        ]
+        assert result.fallback_tiers == []
 
     def test_github_ci_config_selects_tools_tier(self, imap):
         """CI config edits must not be classified as unit-test no-impact."""

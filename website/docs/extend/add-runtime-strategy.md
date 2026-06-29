@@ -10,7 +10,7 @@ If the task contract is new, add a model runtime folder under `src/runtime/model
 
 ## 2. Add a plugin
 
-Create `src/runtime/plugins/<strategy>_plugin.cpp` implementing `IPipelinePlugin`.
+Create `src/runtime/models/<strategy>_plugin.cpp` implementing `IPipelinePlugin`.
 
 The plugin should:
 

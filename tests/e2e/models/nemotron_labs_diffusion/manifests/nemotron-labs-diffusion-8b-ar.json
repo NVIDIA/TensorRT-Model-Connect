@@ -20,6 +20,7 @@
     "temperature": 0.0
   },
   "metadata": {
+    "group_by_bundle": true,
     "contract_config": {
       "use_chat_template": true,
       "enable_thinking": false,

@@ -180,63 +180,65 @@ echo ""
 
 # --- Collect test IDs ---------------------------------------------------------
 
-if [ -n "$TESTS_FILE" ] && [ -f "$TESTS_FILE" ]; then
-    # Selective mode: read pytest node IDs from file (one per line).
-    TESTS=$(sed '/^$/d' "$TESTS_FILE" | sort)
-    echo "  Tests file:      $TESTS_FILE ($(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l) tests)"
-elif [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
-    # Selective compatibility mode: read model names and resolve model-owned node IDs.
-    TESTS=$("$HF_PYTHON" - "$MODELS_FILE" <<'PY' | sort
-import json
-import sys
-from pathlib import Path
-
-models_file = Path(sys.argv[1])
-models_dir = Path("tests/e2e/models")
-model_to_family: dict[str, str] = {}
-
-for manifest_path in sorted({*models_dir.glob("*.json"), *models_dir.glob("*/manifests/*.json")}):
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        continue
-    name = str(data.get("name", manifest_path.stem) or "")
-    family = str(data.get("family", "") or "")
-    if name and family:
-        model_to_family[name] = family
-
-ok = True
-for raw in models_file.read_text(encoding="utf-8").splitlines():
-    model = raw.strip()
-    if not model:
-        continue
-    if model.startswith("tests/"):
-        print(model)
-        continue
-    family = model_to_family.get(model)
-    if not family:
-        print(f"ERROR: no E2E family found for model {model!r}", file=sys.stderr)
-        ok = False
-        continue
-    print(f"tests/e2e/models/{family}/test_{family}_e2e.py::test_model_e2e[{model}]")
-
-raise SystemExit(0 if ok else 1)
-PY
-)
-    echo "  Models file:     $MODELS_FILE ($(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l) tests)"
-else
-    # Full mode: collect all tests via pytest
-    TESTS=$("$HF_PYTHON" -m pytest tests/e2e/models --co -q "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" 2>/dev/null \
-        | grep "test_model_e2e\[" | sort)
-fi
-TOTAL=$(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l)
-
-if [ "$TOTAL" -eq 0 ]; then
-    echo "ERROR: No tests collected. Check --task-strategy filter." >&2
+if [ -n "$MODELS_FILE" ] && [ ! -f "$MODELS_FILE" ]; then
+    echo "ERROR: Models file not found: $MODELS_FILE" >&2
     exit 1
 fi
 
-echo "Collected $TOTAL tests"
+if [ -n "$TESTS_FILE" ] && [ ! -f "$TESTS_FILE" ]; then
+    echo "ERROR: Tests file not found: $TESTS_FILE" >&2
+    exit 1
+fi
+
+E2E_SELECTION_ARGS=()
+if [ -n "$MODELS_FILE" ]; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle --e2e-models-file "$MODELS_FILE")
+elif [ -z "$TESTS_FILE" ]; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
+elif grep -q '::test_model_e2e\[bundle:' "$TESTS_FILE"; then
+    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
+fi
+
+echo "  Selection args:  ${E2E_SELECTION_ARGS[*]:-none}"
+if [ -n "$MODELS_FILE" ] && [ -n "$TESTS_FILE" ]; then
+    echo "  Scheduler source: models file (grouped collection); tests file kept as impact record"
+elif [ -n "$TESTS_FILE" ]; then
+    echo "  Scheduler source: tests file"
+else
+    echo "  Scheduler source: pytest collection"
+fi
+echo ""
+
+if [ -n "$TESTS_FILE" ] && [ -z "$MODELS_FILE" ]; then
+    # Explicit node mode: read pytest node IDs from file (one per line).
+    TESTS=$(sed '/^$/d' "$TESTS_FILE" | sort)
+else
+    # Full/selective model mode: collect only canonical model E2E files. Helper
+    # tests and benchmark scripts under tests/e2e/models may require optional
+    # deps that are unrelated to the model schedule.
+    mapfile -t E2E_COLLECT_FILES < <(
+        find tests/e2e/models -mindepth 2 -maxdepth 2 -type f \
+            -name 'test_*_e2e.py' | sort
+    )
+    if [ "${#E2E_COLLECT_FILES[@]}" -eq 0 ]; then
+        echo "ERROR: No model E2E collection files found." >&2
+        exit 1
+    fi
+    COLLECTED_TESTS=$(
+        "$HF_PYTHON" -m pytest "${E2E_COLLECT_FILES[@]}" --co -q \
+            "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" "${E2E_SELECTION_ARGS[@]}"
+    )
+    TESTS=$(printf "%s\n" "$COLLECTED_TESTS" | grep "test_model_e2e\[" | sort || true)
+fi
+
+TOTAL=$(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l)
+
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR: No E2E entries collected. Check --task-strategy filter." >&2
+    exit 1
+fi
+
+echo "Collected $TOTAL E2E scheduler entries"
 
 # --- Schedule tests across GPUs × workers ------------------------------------
 
@@ -334,7 +336,7 @@ print_progress() {
         eta_str=" | ETA $(format_duration "$eta")"
     fi
 
-    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | ${CURRENT_PHASE} workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
+    echo "[progress $(date +%H:%M:%S)] entries ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | ${CURRENT_PHASE} workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
 }
 
 run_schedule_phase() {
@@ -370,7 +372,7 @@ PY
 
         LABEL="gpu${GPU_ID}-${phase_name}-w${WORKER_IDX}"
         PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
-        echo "  $LABEL: $WORKER_COUNT tests"
+        echo "  $LABEL: $WORKER_COUNT entries"
 
         (
             export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
@@ -381,6 +383,7 @@ PY
                 --hf-python "$HF_PYTHON" \
                 --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
                 --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
+                "${E2E_SELECTION_ARGS[@]}" \
                 "${EXTRA_ARGS[@]}" \
                 > "$RESULT_DIR/console-${LABEL}.log" 2>&1
         ) &
@@ -515,7 +518,7 @@ PY
 
         label="gpu${gpu_id}-${phase_name}-w${worker_idx}"
         physical_gpu_id="${GPU_IDS[$gpu_id]}"
-        echo "  $label: $worker_count tests"
+        echo "  $label: $worker_count entries"
 
         (
             export CUDA_VISIBLE_DEVICES=$physical_gpu_id
@@ -526,6 +529,7 @@ PY
                 --hf-python "$HF_PYTHON" \
                 --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
                 --junitxml="$RESULT_DIR/junit-${label}.xml" \
+                "${E2E_SELECTION_ARGS[@]}" \
                 "${EXTRA_ARGS[@]}" \
                 > "$RESULT_DIR/console-${label}.log" 2>&1
         ) &

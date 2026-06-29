@@ -849,12 +849,17 @@ class BpeTokenizer final : public ITokenizer {
     std::string decode_metaspace(const std::string& joined) const {
         std::string result;
         const std::string g_char = utf32_to_utf8(0x0120);
+        const std::string spiece_char = "\xe2\x96\x81"; // U+2581
         size_t pos = 0;
         while (pos < joined.size()) {
             if (pos + g_char.size() <= joined.size() &&
                 joined.compare(pos, g_char.size(), g_char) == 0) {
                 result.push_back(' ');
                 pos += g_char.size();
+            } else if (pos + spiece_char.size() <= joined.size() &&
+                       joined.compare(pos, spiece_char.size(), spiece_char) == 0) {
+                result.push_back(' ');
+                pos += spiece_char.size();
             } else {
                 result.push_back(joined[pos]);
                 ++pos;

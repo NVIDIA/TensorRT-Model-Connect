@@ -136,6 +136,10 @@ _BROAD_FALLBACK_RULES = {
     "harness_shared",
     "shared_builder_module",
 }
+_BUNDLE_GROUP_RUNNER_FAMILIES = (
+    "canary",
+    "nemotron_labs_diffusion",
+)
 # TODO: Remove multi_device from the default exclusion once CI has a runner pool
 # that can reserve all GPUs for tensor-parallel E2E cases.
 _DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
@@ -1027,6 +1031,14 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
 
+def _bundle_group_runner_models(context: RuleContext, imap: ImpactMap) -> List[str]:
+    del context
+    models: Set[str] = set()
+    for family in _BUNDLE_GROUP_RUNNER_FAMILIES:
+        models.update(imap.family_to_models.get(family, []))
+    return sorted(models)
+
+
 def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
@@ -1235,7 +1247,27 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestSafetyNet.test_e2e_model_owned_threshold_self",),
         ),
         ClassificationRule(
+            priority=9,
+            name="e2e_bundle_group_runner",
+            matcher=_path_in({"tests/e2e/models/_bundle_group_runner.py"}),
+            resolver=_match_result("e2e_bundle_group_runner", _bundle_group_runner_models),
+            covered_by=("TestSafetyNet.test_e2e_bundle_group_runner",),
+        ),
+        ClassificationRule(
             priority=14,
+            name="standalone_gpu_test_support",
+            matcher=_regex_rule(
+                r"(?:tests/e2e/models/[^/]+/(?:run_[^/]+_fi|"
+                r"test_flashinfer_(?:plugin|trt_attention)|"
+                r"test_[^/]+_flashinfer)\.py|tests/test_tvm_ffi_e2e\.py)$"
+            ),
+            resolver=_match_result(
+                "standalone_gpu_test_support", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
+        ),
+        ClassificationRule(
+            priority=17,
             name="e2e_model_owned_test",
             matcher=_regex_rule(
                 r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|"
@@ -1615,7 +1647,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "scripts/schedule_e2e.py",
                 "scripts/warm_hf_cache.py",
             }),
-            resolver=_match_result("e2e_runner_script", _all_models),
+            resolver=_match_result("e2e_runner_script", _all_models, ["tools"]),
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
         ),
         ClassificationRule(
@@ -1633,21 +1665,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_equals("tests/e2e/waives.txt"),
             resolver=_match_result("e2e_waives", _all_models),
             covered_by=("TestHarness.test_waives_diff_can_be_refined",),
-        ),
-        ClassificationRule(
-            priority=415,
-            name="standalone_gpu_test_support",
-            matcher=_path_in({
-                "tests/run_qwen3_fi.py",
-                "tests/test_flashinfer_plugin_e2e.py",
-                "tests/test_flashinfer_trt_attention.py",
-                "tests/test_qwen3_flashinfer_e2e.py",
-                "tests/test_tvm_ffi_e2e.py",
-            }),
-            resolver=_match_result(
-                "standalone_gpu_test_support", _no_models, ["tools"], False,
-            ),
-            covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
         ClassificationRule(
             priority=416,
@@ -1817,6 +1834,23 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     return sorted(builder_tests), sorted(tools_tests)
 
 
+_EXPLICIT_TOOLS_TEST_TARGETS = {
+    "scripts/run_e2e_parallel.sh": (
+        "tests/tools/test_github_actions_ci.py",
+        "tests/tools/test_schedule_e2e.py",
+    ),
+}
+
+
+def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
+    """Return tests for non-Python CI surfaces that coverage cannot observe."""
+    tests: Set[str] = set()
+    for raw_path in changed_files:
+        path = raw_path.replace("\\", "/").strip("/")
+        tests.update(_EXPLICIT_TOOLS_TEST_TARGETS.get(path, ()))
+    return sorted(tests)
+
+
 def _filter_models_by_ci_tier(
     models: List[str],
     imap: ImpactMap,
@@ -1919,6 +1953,9 @@ def analyze_impact(
         fallback_tiers = sel.fallback_tiers
 
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
+    direct_tools_tests = sorted(
+        set(direct_tools_tests).union(_explicit_tools_test_targets(changed_files))
+    )
     if direct_builder_tests:
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
     if direct_tools_tests:

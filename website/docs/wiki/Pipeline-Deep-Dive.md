@@ -227,12 +227,12 @@ Each runtime model folder owns the helper code it needs:
 **Key files:**
 - `src/runtime/models/<family>/pipeline.h` -- `TextGenerationPipeline`
 - `src/runtime/models/<recurrent-family>/pipeline.h` -- family-owned `RecurrentPipeline`
-- `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
+- `src/runtime/models/<family>/inference_state.h` -- `IInferenceState` interface
 - `src/runtime/models/mamba/recurrent_state.h` -- `MambaRecurrentState`
 - `src/runtime/models/rwkv/recurrent_state.h` -- `RwkvRecurrentState`
 - `src/runtime/models/nemotron_h/hybrid_state.h` -- `NemotronHHybridState` (KvCache + NemotronHRecurrentState)
 - `src/runtime/models/qwen3_5/hybrid_state.h` -- `Qwen35HybridState` (KvCache + Qwen35RecurrentState)
-- `include/trtmc/runtime/kv_cache.h` -- `KvCache`
+- `src/runtime/models/<family>/kv_cache.h` -- `KvCache`
 
 ### 4.2 Vision and Perception Plugins
 
@@ -296,9 +296,9 @@ Each runtime model folder owns the helper code it needs:
 - Returns `OmniPipeline(thinker, thinker_cache, talker, talker_cache, code2wav, config, stream, tokenizer, model_id)`.
 
 **Key files:**
-- `src/runtime/models/whisper/pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`
+- `src/runtime/models/whisper/pipeline.h`, `src/runtime/models/bark/pipeline.h`, `src/runtime/models/magpie/pipeline.h`, `src/runtime/models/personaplex/pipeline.h`, `src/runtime/models/qwen3_omni/pipeline.h`
 - `src/runtime/models/<audio-model>/audio_helpers.h` -- model-local audio loading helpers
-- `src/runtime/domains/audio/` -- audio config types and seam headers
+- `src/runtime/models/<audio-family>/` -- model-owned audio config types and seam headers
 
 ### 4.5 Encoder and Seq2Seq Plugins
 
@@ -318,8 +318,8 @@ Each runtime model folder owns the helper code it needs:
 - Defines `M2M100Pipeline` inline (M2M-100/NLLB encoder-decoder).
 
 **Key files:**
-- `src/runtime/models/encoder/pipeline.h` -- `EncoderPipeline`
-- `src/runtime/models/encoder/pipeline.cpp` -- implementations
+- `src/runtime/models/<encoder-family>/pipeline.h` -- `EncoderPipeline`
+- `src/runtime/models/<encoder-family>/pipeline.cpp` -- implementations
 
 ---
 
@@ -370,8 +370,8 @@ execution context. Called by `pipeline_factory.cpp` after engine deserialization
 
 ## 6. KvCache Lifecycle
 
-**Header:** `include/trtmc/runtime/kv_cache.h`
-**Implementation:** `src/runtime/core/kv_cache.cpp`
+**Header:** `src/runtime/models/<family>/kv_cache.h`
+**Implementation:** `src/runtime/models/<family>/kv_cache.cpp`
 
 ### 6.1 Construction
 
@@ -458,7 +458,7 @@ Zeros all state and present buffers.
 
 ## 8. IInferenceState: Unifying KvCache and Family-Owned Recurrent State
 
-**Defined in:** `include/trtmc/runtime/inference_state.h`
+**Defined in:** `src/runtime/models/<family>/inference_state.h`
 
 ```cpp
 class IInferenceState {
@@ -478,7 +478,7 @@ Three concrete implementations:
 
 | Class | Header | Used by | Mask? |
 |-------|--------|---------|-------|
-| `KvCache` | `include/trtmc/runtime/kv_cache.h` | Standard decoders, VL | Yes |
+| `KvCache` | `src/runtime/models/<family>/kv_cache.h` | Standard decoders, VL | Yes |
 | `MambaRecurrentState` | `src/runtime/models/mamba/recurrent_state.h` | Mamba | No |
 | `RwkvRecurrentState` | `src/runtime/models/rwkv/recurrent_state.h` | RWKV | No |
 | `NemotronHHybridState` | `src/runtime/models/nemotron_h/hybrid_state.h` | Nemotron-H | Yes (delegates to KvCache) |
@@ -609,11 +609,11 @@ each plugin reads only the fields it requires.
 | RecurrentPipeline | `src/runtime/models/<recurrent-family>/pipeline.h`, `.cpp` |
 | VLPipeline | `src/runtime/models/<vl-family>/pipeline.h`, `.cpp` |
 | Diffusion pipelines | `src/runtime/models/flux/pipeline.h`, `src/runtime/models/wan/pipeline.h`, `src/runtime/models/z_image/pipeline.h`, `src/runtime/models/pixart/pipeline.h`, `.cpp` |
-| Audio pipelines | `src/runtime/models/whisper/pipeline.h`, `src/runtime/models/bark/pipeline.h`, `src/runtime/models/magpie/pipeline.h`, `src/runtime/models/speech/pipeline.h`, `src/runtime/models/omni/pipeline.h`, `.cpp` |
+| Audio pipelines | `src/runtime/models/whisper/pipeline.h`, `src/runtime/models/bark/pipeline.h`, `src/runtime/models/magpie/pipeline.h`, `src/runtime/models/personaplex/pipeline.h`, `src/runtime/models/qwen3_omni/pipeline.h`, `.cpp` |
 | Segment/SAM pipelines | `src/runtime/models/segformer/segment_pipeline.h`, `src/runtime/models/sam/sam_pipeline.h`, `src/runtime/models/sam3/sam3_pipeline.h`, `.cpp` |
-| Encoder pipelines | `src/runtime/models/encoder/pipeline.h`, `.cpp` |
+| Encoder pipelines | `src/runtime/models/<encoder-family>/pipeline.h`, `.cpp` |
 | TrtModule | `include/trtmc/runtime/trt_module.h`, `src/runtime/backend/trt_module_impl.cpp` |
-| KvCache | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
+| KvCache | `src/runtime/models/<family>/kv_cache.h`, `src/runtime/models/<family>/kv_cache.cpp` |
 | Family recurrent state | `src/runtime/models/mamba/recurrent_state.h`, `src/runtime/models/rwkv/recurrent_state.h`, `src/runtime/models/nemotron_h/recurrent_state.h`, `src/runtime/models/qwen3_5/recurrent_state.h`, `src/runtime/models/qwen3_omni/recurrent_state.h` |
 | Bundle format | `src/bundle/bundle_format.h`, `.cpp` |
 | Image preprocessor | `src/runtime/models/<vl-family>/image_preprocessor.h`, `.cpp` |

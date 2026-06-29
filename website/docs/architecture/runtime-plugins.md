@@ -94,7 +94,7 @@ Each plugin source calls `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(...)` with the 
 ```mermaid
 flowchart TD
   Manifest["cmake/trtmc_pipeline_plugins.cmake"] --> Generated["generated registrar source"]
-  PluginCpp["src/runtime/plugins/*_plugin.cpp"] --> Macro["REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST"]
+  PluginCpp["src/runtime/models/*_plugin.cpp"] --> Macro["REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST"]
   Macro --> Generated
   Generated --> Registry["PipelineRegistry::register_plugin"]
   Registry --> Lookup["lookup(runtime_strategy)"]

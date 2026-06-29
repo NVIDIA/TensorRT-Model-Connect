@@ -50,7 +50,7 @@ and then top-p/min-p inside those candidates.
 
 ## Testing
 
-Unit tests: `tests/cpp/test_sampler.cpp`
+Unit tests: `tests/tools/test_sampling_contract_plugin.py`
 - `test_top_p_nucleus_restricts_candidates` -- with logits {5,3,1,0.5,0.1}
   and top_p=0.7, verifies only token 0 (the nucleus) is ever sampled
 - `test_top_p_disabled_allows_full_topk` -- top_p=1.0 allows all candidates

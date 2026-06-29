@@ -17,7 +17,7 @@ title: Source Layout
 | `src/runtime/core/` | Device tensors, caches, samplers, CUDA helpers, schedulers. |
 | `src/runtime/domains/` | Modality-specific helpers and generation plans. |
 | `src/runtime/models/` | Model runtime folders containing strategy plugins and concrete `IPipeline` implementations. |
-| `src/runtime/plugins/` | Shared runtime plugin helpers. |
+| `src/runtime/models/` | Shared runtime plugin helpers. |
 | `src/runtime/registry/` | Pipeline factory, registry, and base config parsing. |
 | `src/tokenizer/` | Native tokenizers. |
 | `python/tensorrt_model_connect/` | Python builder package. |

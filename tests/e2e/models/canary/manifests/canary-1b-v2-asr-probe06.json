@@ -20,5 +20,8 @@
   "asr_probe_id": "probe_06_leading_trailing_silence_48k_stereo",
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Cover non-speech padding around valid speech.",
+  "metadata": {
+    "group_by_bundle": true
+  },
   "notes": "Nightly ASR coverage probe for Model Connect input handling: Longer waveform decode + silence handling + transcript stability."
 }

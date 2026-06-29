@@ -2,7 +2,8 @@
 
 Replaces the former ``TRTMC_TRIATTN_*`` env vars and the fragment of bundle
 ``config.json`` previously parsed by
-``src/runtime/core/triattention_kv_cache.cpp::parse_triattention_bundle_config``.
+family-local ``src/runtime/models/<family>/triattention_kv_cache.cpp``
+parsers.
 
 Each field declares which config layers may supply a value. The former
 ``TRTMC_TRIATTN_OVERRIDE_*`` env vars (they baked the "override" frame into

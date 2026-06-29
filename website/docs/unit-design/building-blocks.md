@@ -134,8 +134,8 @@ flowchart TB
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution and tensor introspection without TensorRT headers. | Pipelines and runtime core. |
 | `Tensor` | `include/trtmc/runtime/tensor.h` | CPU-side tensor view. | Pipeline input/output binding. |
 | `DeviceTensor` | `include/trtmc/runtime/device_tensor.h` | Owned GPU tensor storage. | Runtime core and pipelines. |
-| `IInferenceState` | `include/trtmc/runtime/inference_state.h` | Per-sequence decode state. | Text/recurrent/hybrid pipelines. |
-| `ISampler` | `include/trtmc/runtime/sampler.h` | Token selection from logits. | Text-generation pipelines. |
+| `IInferenceState` | `src/runtime/models/<family>/inference_state.h` | Per-sequence decode state. | Text/recurrent/hybrid pipelines. |
+| `ISampler` | `src/runtime/models/<family>/sampler.h` | Token selection from logits. | Text-generation pipelines. |
 | `ConfigBundle` | `include/trtmc/config/config_bundle.h` | Resolved layered runtime config. | Factory and migrated plugins. |
 
 ## How the blocks interact during text generation

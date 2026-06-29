@@ -29,7 +29,7 @@ def _write_manifest(manifest_dir: Path, name: str, **fields: object) -> None:
 
 
 def _test_id(name: str) -> str:
-    return f"tests/test_e2e.py::test_e2e[{name}]"
+    return f"tests/e2e/models/unit_family/test_unit_family_e2e.py::test_model_e2e[{name}]"
 
 
 def test_diffusion_family_strategies_are_large() -> None:
@@ -103,6 +103,7 @@ def test_same_bundle_exclusive_tests_stay_in_one_worker_queue(tmp_path: Path) ->
             runtime_strategy="diffusion_text_experiment",
             e2e_parallel_resource="exclusive_gpu",
             bundle="shared-exclusive-bundle.trtfb",
+            metadata={"group_by_bundle": True},
         )
     _write_manifest(
         tmp_path,
@@ -139,6 +140,7 @@ def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> No
             tmp_path,
             f"shared-mode-{mode}",
             bundle="shared-bundle.trtfb",
+            metadata={"group_by_bundle": True},
         )
     _write_manifest(tmp_path, "small-a")
     _write_manifest(tmp_path, "small-b")
@@ -162,6 +164,74 @@ def test_same_bundle_shared_tests_stay_in_one_worker_queue(tmp_path: Path) -> No
     ]
     assert len(matching_queues) == 1
     assert sorted(matching_queues[0]) == sorted(grouped_ids)
+
+
+def test_same_bundle_tests_without_group_metadata_stay_separate(tmp_path: Path) -> None:
+    for mode in ("a", "b", "c"):
+        _write_manifest(
+            tmp_path,
+            f"plain-shared-mode-{mode}",
+            bundle="shared-bundle.trtfb",
+        )
+
+    grouped_ids = [
+        _test_id("plain-shared-mode-a"),
+        _test_id("plain-shared-mode-b"),
+        _test_id("plain-shared-mode-c"),
+    ]
+    groups = schedule_e2e._group_by_bundle(
+        grouped_ids,
+        schedule_e2e._load_manifests(tmp_path),
+    )
+
+    assert [group for _, group in groups] == [[test_id] for test_id in grouped_ids]
+
+
+def test_bundle_group_entry_summarizes_member_testcases(tmp_path: Path) -> None:
+    for mode in ("a", "b", "c"):
+        _write_manifest(
+            tmp_path,
+            f"shared-mode-{mode}",
+            bundle="shared-bundle.trtfb",
+        )
+    _write_manifest(tmp_path, "unique-mode", bundle="unique-bundle.trtfb")
+
+    summary = schedule_e2e.bundle_selection_summary(
+        [
+            _test_id("bundle:shared-mode-a+shared-mode-b+shared-mode-c"),
+            _test_id("unique-mode"),
+        ],
+        tmp_path,
+    )
+
+    assert summary == {
+        "selected_entries": 2,
+        "selected_testcases": 4,
+        "unique_bundle_identities": 2,
+        "shared_bundle_groups": 1,
+        "testcases_in_shared_bundle_groups": 3,
+        "missing_manifests": 0,
+    }
+
+
+def test_bundle_group_entry_weight_sums_members(tmp_path: Path) -> None:
+    _write_manifest(tmp_path, "small-a", bundle="shared.trtfb")
+    _write_manifest(tmp_path, "large-b", hf_id="org/model-9B", bundle="shared.trtfb")
+    manifests = schedule_e2e._load_manifests(tmp_path)
+
+    assert schedule_e2e._test_weight(
+        _test_id("bundle:small-a+large-b"),
+        manifests,
+        timing_estimates={"small-a": 10.0, "large-b": 20.0},
+    ) == 30.0
+    assert schedule_e2e._test_weight(
+        _test_id("bundle:small-a+large-b"),
+        manifests,
+        timing_estimates=None,
+    ) == (
+        schedule_e2e._SMALL_TEST_WEIGHT
+        + schedule_e2e._LARGE_TEST_WEIGHT
+    )
 
 
 def test_phase_schedule_keeps_shared_workers_after_exclusive_gpus(tmp_path: Path) -> None:
@@ -304,6 +374,22 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
                 raise SystemExit(0)
 
             if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
+                if "--co" in args:
+                    models_file = None
+                    if "--e2e-models-file" in args:
+                        idx = args.index("--e2e-models-file")
+                        models_file = args[idx + 1]
+                    if models_file is None:
+                        raise SystemExit("--e2e-models-file missing")
+                    for line in Path(models_file).read_text(encoding="utf-8").splitlines():
+                        model = line.strip()
+                        if model:
+                            print(
+                                "tests/e2e/models/fake_family/"
+                                f"test_fake_family_e2e.py::test_model_e2e[{model}]"
+                            )
+                    raise SystemExit(0)
+
                 tests = [
                     arg for arg in args
                     if arg.startswith("tests/")
@@ -442,6 +528,166 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
         "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
     }
     assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
+
+
+def test_run_e2e_parallel_collects_grouped_entries_when_models_file_is_present(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    fake_python = bin_dir / "fake-python"
+    fake_python.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import html
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            if args and args[0] == "-":
+                sys.stdin.read()
+                raise SystemExit(0)
+
+            if len(args) >= 2 and args[:2] == ["-m", "pytest"]:
+                if "--co" in args:
+                    assert "--e2e-group-by-bundle" in args
+                    assert "--e2e-models-file" in args
+                    models_file = args[args.index("--e2e-models-file") + 1]
+                    selected = set(
+                        line.strip()
+                        for line in Path(models_file).read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    )
+                    if {"group-a", "group-b"} <= selected:
+                        print(
+                            "tests/e2e/models/fake_family/"
+                            "test_fake_family_e2e.py::test_model_e2e[bundle:group-a+group-b]"
+                        )
+                    if "solo" in selected:
+                        print(
+                            "tests/e2e/models/fake_family/"
+                            "test_fake_family_e2e.py::test_model_e2e[solo]"
+                        )
+                    raise SystemExit(0)
+
+                tests = [
+                    arg for arg in args
+                    if arg.startswith("tests/")
+                    and (
+                        "::test_e2e[" in arg
+                        or "::test_model_e2e[" in arg
+                    )
+                ]
+                stale = [test for test in tests if "[group-a]" in test or "[group-b]" in test]
+                if stale:
+                    raise SystemExit(f"stale ungrouped IDs scheduled: {stale}")
+
+                junit_path = None
+                for arg in args:
+                    if arg.startswith("--junitxml="):
+                        junit_path = arg.split("=", 1)[1]
+                        break
+                for test in tests:
+                    print(f"{test} PASSED")
+                print(f"=== {len(tests)} passed in 0.01s ===")
+                if junit_path:
+                    cases = "".join(
+                        f'<testcase classname="e2e" name="{html.escape(test)}" />'
+                        for test in tests
+                    )
+                    Path(junit_path).write_text(
+                        f'<testsuites><testsuite tests="{len(tests)}">'
+                        f"{cases}</testsuite></testsuites>",
+                        encoding="utf-8",
+                    )
+                raise SystemExit(0)
+
+            raise SystemExit(f"unexpected fake-python args: {args}")
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    _write_manifest(
+        manifest_dir,
+        "group-a",
+        family="fake_family",
+        bundle="shared.trtfb",
+    )
+    _write_manifest(
+        manifest_dir,
+        "group-b",
+        family="fake_family",
+        bundle="shared.trtfb",
+    )
+    _write_manifest(manifest_dir, "solo", family="fake_family")
+
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("group-a\ngroup-b\nsolo\n", encoding="utf-8")
+    tests_file = tmp_path / "tests.txt"
+    tests_file.write_text(
+        "\n".join([
+            "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[group-a]",
+            "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[group-b]",
+            "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[solo]",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    result_dir = tmp_path / "results"
+    env = os.environ.copy()
+    env["NUM_GPUS"] = "1"
+    env["TRTMC_E2E_EXCLUDE_GPU0"] = "0"
+    env["TRTMC_E2E_MANIFEST_DIR"] = str(manifest_dir)
+
+    completed = subprocess.run(
+        [
+            str(repo_root / "scripts" / "run_e2e_parallel.sh"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--result-dir",
+            str(result_dir),
+            "--trtmc-binary",
+            str(tmp_path / "trtmc"),
+            "--hf-python",
+            str(fake_python),
+            "--workers-per-gpu",
+            "1",
+            "--models-file",
+            str(models_file),
+            "--tests-file",
+            str(tests_file),
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout
+    assert "Scheduler source: models file (grouped collection)" in completed.stdout
+
+    schedule = json.loads((result_dir / "schedule.json").read_text(encoding="utf-8"))
+    scheduled = {
+        test
+        for phase in schedule["phases"]
+        for gpu_workers in phase["schedule"].values()
+        for worker_tests in gpu_workers
+        for test in worker_tests
+    }
+    assert scheduled == {
+        "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[bundle:group-a+group-b]",
+        "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[solo]",
+    }
 
 
 def test_gpt_oss_20b_is_marked_exclusive_gpu() -> None:
