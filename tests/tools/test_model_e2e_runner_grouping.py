@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from tests.e2e.models import _bundle_group_runner as model_case_runner
+from tests.e2e_harness import bundle_group_runner as model_case_runner
 
 
 def _load_runner(family: str, module_name: str):

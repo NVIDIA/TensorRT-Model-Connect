@@ -130,6 +130,17 @@ def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
     assert "tests/e2e_harness/test_*.py" in text
 
 
+def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    for test_path in (
+        "tests/tools/test_github_actions_ci.py",
+        "tests/tools/test_model_plugin_encapsulation_static.py",
+        "tests/tools/test_schedule_e2e.py",
+        "tests/tools/test_test_impact.py",
+    ):
+        assert test_path in text
+
+
 def test_python_package_coverage_gate_excludes_family_owned_modules() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "write_python_package_gate_coverage_config" in text

@@ -8186,6 +8186,21 @@ def test_model_owned_python_does_not_import_sibling_models() -> None:
     assert not violations, _format_violations(violations)
 
 
+def test_e2e_models_root_has_no_shared_python_helpers() -> None:
+    """Trace: ARCH-MODPLUG-001
+    Intent: keep shared E2E harness helpers out of model-owned namespace.
+    Preconditions: tests/e2e/models contains model-family directories.
+    Postconditions: root Python helpers live under tests/e2e_harness instead.
+    """
+    violations = [
+        (path, 0, "shared E2E Python helpers belong under tests/e2e_harness")
+        for path in sorted(E2E_MODELS.glob("*.py"))
+        if path.name != "__init__.py"
+    ]
+
+    assert not violations, _format_violations(violations)
+
+
 def test_model_owned_unit_tests_do_not_live_under_tests_tools() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: keep concrete model unit tests with their owning model.

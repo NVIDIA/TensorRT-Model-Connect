@@ -229,6 +229,52 @@ else
             "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" "${E2E_SELECTION_ARGS[@]}"
     )
     TESTS=$(printf "%s\n" "$COLLECTED_TESTS" | grep "test_model_e2e\[" | sort || true)
+    if [ -n "$MODELS_FILE" ]; then
+        TESTS=$(
+            printf "%s\n" "$TESTS" | python3 -c '
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+BUNDLE_PREFIX = "bundle:"
+
+
+def names_from_param(value: str) -> list[str]:
+    if value.startswith(BUNDLE_PREFIX):
+        return [name for name in value[len(BUNDLE_PREFIX):].split("+") if name]
+    return [value] if value else []
+
+
+def names_from_line(raw: str) -> list[str]:
+    value = raw.split("#", 1)[0].strip()
+    if not value:
+        return []
+    if "[" in value and "]" in value:
+        value = value.rsplit("[", 1)[1].split("]", 1)[0]
+    return names_from_param(value)
+
+
+selected = {
+    name
+    for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    for name in names_from_line(raw)
+}
+
+for raw in sys.stdin:
+    test_id = raw.strip()
+    if not test_id:
+        continue
+    match = re.search(r"\[(.+?)\]", test_id)
+    if not match:
+        continue
+    names = names_from_param(match.group(1))
+    if names and all(name in selected for name in names):
+        print(test_id)
+' "$MODELS_FILE"
+        )
+    fi
 fi
 
 TOTAL=$(printf "%s\n" "$TESTS" | sed '/^$/d' | wc -l)

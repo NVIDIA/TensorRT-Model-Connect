@@ -1121,11 +1121,12 @@ class TestSafetyNet:
     def test_e2e_bundle_group_runner(self, imap):
         """Changing grouped-bundle helper -> only opt-in grouped families."""
         match = test_impact.classify_file(
-            "tests/e2e/models/_bundle_group_runner.py",
+            "tests/e2e_harness/bundle_group_runner.py",
             imap,
         )
         assert match.rule == "e2e_bundle_group_runner"
         assert match.models == ["canary-grouped", "nld-grouped"]
+        assert match.unit_tiers == ["tools"]
         assert "speech-streaming-case" not in match.models
 
     def test_e2e_model_owned_waives_self(self, imap):
@@ -2881,6 +2882,19 @@ class TestCoverageMapIntegration:
             "tests/tools/test_github_actions_ci.py",
             "tests/tools/test_schedule_e2e.py",
         ]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_bundle_group_runner_selects_grouping_tests(self, imap, coverage_map):
+        """Shared bundle helper edits select tests that Python coverage cannot infer."""
+        result = test_impact.analyze_impact(
+            ["tests/e2e_harness/bundle_group_runner.py"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_model_e2e_runner_grouping.py"]
         assert result.fallback_tiers == []
 
     def test_github_ci_config_selects_tools_tier(self, imap):
