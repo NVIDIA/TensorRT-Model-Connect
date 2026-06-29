@@ -508,6 +508,33 @@ class TestManifestValidation:
         assert len(matches) == 1
         assert matches[0].gating is False
 
+    def test_explicit_asset_preflight_path_is_model_local(self, tmp_path):
+        model_dir = tmp_path / "image_family"
+        manifests_dir = model_dir / "manifests"
+        manifests_dir.mkdir(parents=True)
+        asset = model_dir / "data" / "test_img.jpeg"
+        asset.parent.mkdir()
+        asset.write_bytes(b"image")
+        manifest_path = manifests_dir / "image-model.json"
+        manifest_path.write_text(json.dumps({
+            "name": "image-model",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "test_image": "data/test_img.jpeg",
+            "preflight_requirements": [
+                {
+                    "kind": "asset_exists",
+                    "args": {"path": "data/test_img.jpeg"},
+                    "gating": True,
+                },
+            ],
+        }), encoding="utf-8")
+
+        case = load_manifest(manifest_path)
+
+        assert case.preflight[0].args["path"] == str(asset)
+
     def test_bool_not_accepted_as_int(self, tmp_path):
         """Boolean values should not pass the int type check."""
         data = {

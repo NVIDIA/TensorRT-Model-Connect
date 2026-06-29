@@ -99,6 +99,21 @@ def _resolve_model_asset_paths(value: Any, model_test_dir: Path, key: str = "") 
     return value
 
 
+def _resolve_preflight_asset_paths(manifest: dict[str, Any], model_test_dir: Path) -> None:
+    requirements = manifest.get("preflight_requirements")
+    if not isinstance(requirements, list):
+        return
+    for requirement in requirements:
+        if not isinstance(requirement, dict) or requirement.get("kind") != "asset_exists":
+            continue
+        args = requirement.get("args")
+        if not isinstance(args, dict):
+            continue
+        path = args.get("path")
+        if isinstance(path, str):
+            args["path"] = _resolve_model_asset_path(path, model_test_dir)
+
+
 def _read_model_index(index_path: Path) -> dict[str, Any]:
     text = index_path.read_text(encoding="utf-8")
     if tomllib is not None:
@@ -732,6 +747,7 @@ def load_manifest(
     raw = _merge_threshold_sidecar(raw, path)
     model_test_dir = _model_test_dir_from_manifest_path(path)
     raw = _resolve_model_asset_paths(raw, model_test_dir)
+    _resolve_preflight_asset_paths(raw, model_test_dir)
 
     _validate_manifest(raw, str(path))
 
