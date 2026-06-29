@@ -1249,8 +1249,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=9,
             name="e2e_bundle_group_runner",
-            matcher=_path_in({"tests/e2e/models/_bundle_group_runner.py"}),
-            resolver=_match_result("e2e_bundle_group_runner", _bundle_group_runner_models),
+            matcher=_path_in({"tests/e2e_harness/bundle_group_runner.py"}),
+            resolver=_match_result(
+                "e2e_bundle_group_runner", _bundle_group_runner_models, ["tools"]
+            ),
             covered_by=("TestSafetyNet.test_e2e_bundle_group_runner",),
         ),
         ClassificationRule(
@@ -1838,6 +1840,9 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
     "scripts/run_e2e_parallel.sh": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
+    ),
+    "tests/e2e_harness/bundle_group_runner.py": (
+        "tests/tools/test_model_e2e_runner_grouping.py",
     ),
 }
 
