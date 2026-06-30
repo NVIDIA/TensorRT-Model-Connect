@@ -14,14 +14,14 @@ from typing import Any
 
 import numpy as np
 
-from .checkpoint_mapper import WeightDict
-from .model_config import ModelConfig
+from .weights import WeightDict
+from .model.components.config import ModelConfig
 from .config import resolve_elf_config
 
 
 class _TensorStore:
     def __init__(self, model_dir: str | Path):
-        from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
+        from .weights import _has_tensor, _load_tensor, _open_safetensors
 
         self._has_tensor = _has_tensor
         self._load_tensor = _load_tensor
@@ -34,7 +34,8 @@ class _TensorStore:
             self._arrays = _load_local_elf_arrays(model_path)
             if self._arrays is None:
                 raise FileNotFoundError(
-                    f"No ELF safetensors, npz, or local GitHub checkpoint found in {model_path}")
+                    f"No ELF safetensors, npz, or local GitHub checkpoint found in {model_path}"
+                )
 
     def has(self, name: str) -> bool:
         if self._arrays is not None:
@@ -262,14 +263,10 @@ class ELFPlugin:
         weights["t_emb_tokens"] = proj("t_emb_tokens")
 
         if cfg["num_self_cond_cfg_tokens"] > 0:
-            weights["self_cond_cfg_embedder.mlp_0.w"] = proj(
-                "self_cond_cfg_embedder.mlp_0.kernel")
-            weights["self_cond_cfg_embedder.mlp_0.b"] = proj(
-                "self_cond_cfg_embedder.mlp_0.bias")
-            weights["self_cond_cfg_embedder.mlp_2.w"] = proj(
-                "self_cond_cfg_embedder.mlp_2.kernel")
-            weights["self_cond_cfg_embedder.mlp_2.b"] = proj(
-                "self_cond_cfg_embedder.mlp_2.bias")
+            weights["self_cond_cfg_embedder.mlp_0.w"] = proj("self_cond_cfg_embedder.mlp_0.kernel")
+            weights["self_cond_cfg_embedder.mlp_0.b"] = proj("self_cond_cfg_embedder.mlp_0.bias")
+            weights["self_cond_cfg_embedder.mlp_2.w"] = proj("self_cond_cfg_embedder.mlp_2.kernel")
+            weights["self_cond_cfg_embedder.mlp_2.b"] = proj("self_cond_cfg_embedder.mlp_2.bias")
             weights["self_cond_cfg_tokens"] = proj("self_cond_cfg_tokens")
 
         if cfg["num_model_mode_tokens"] > 0:
@@ -314,10 +311,11 @@ class ELFPlugin:
         verbose: bool = False,
     ) -> bytes:
         del quant_ctx
-        from .builder import build_elf_flow_engine
+        from .model.model import build_elf_flow_engine
 
         return build_elf_flow_engine(
-            config, weights, max_cache_length, precision=precision, verbose=verbose)
+            config, weights, max_cache_length, precision=precision, verbose=verbose
+        )
 
     def build_extra_engines(
         self,
@@ -335,7 +333,7 @@ class ELFPlugin:
             return {}
 
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .t5_encoder_builder import (
+        from .model.components.text_encoder import (
             build_t5_encoder_engine,
             load_jax_t5_encoder_weights,
         )
@@ -343,7 +341,8 @@ class ELFPlugin:
         cfg = resolve_elf_config(config)
         with timed_weight_loading(build_timing, "elf_t5_encoder"):
             t5_weights = load_jax_t5_encoder_weights(
-                str(encoder_checkpoint), precision=precision, num_layers=6)
+                str(encoder_checkpoint), precision=precision, num_layers=6
+            )
         with timed_trt_compile(build_timing, "elf_t5_encoder"):
             t5_plan = build_t5_encoder_engine(
                 t5_weights,

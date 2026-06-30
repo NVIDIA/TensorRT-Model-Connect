@@ -116,7 +116,7 @@ def _make_whisper_tp_weights(
 
 def _whisper_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.whisper.decoder_tp_builder",
+        "tensorrt_model_connect.families.whisper.model.parallel",
         reason="TensorRT is required for Whisper TP builder tests",
     )
 

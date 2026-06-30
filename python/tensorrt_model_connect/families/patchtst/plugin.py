@@ -9,8 +9,8 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import (
+from .model import model as graph_ops
+from .weights import (
     WeightDict,
     _load_tensor,
     _open_safetensors,
@@ -18,7 +18,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
-from .time_series_trt import (
+from .model.model import (
     add_batch_norm_last_dim,
     add_gelu,
     add_linear,
@@ -45,8 +45,8 @@ def _config_value(config: Any, key: str, fallback: Any = None) -> Any:
 
 def _normalize_task_type(config: Any) -> str:
     explicit = str(
-        _config_value(config, "patchtst_task",
-                      _config_value(config, "task_type", ""))).lower()
+        _config_value(config, "patchtst_task", _config_value(config, "task_type", ""))
+    ).lower()
     if explicit:
         if "class" in explicit:
             return "classification"
@@ -82,11 +82,15 @@ def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
-        dtype = np.float32 if (
-            name.endswith(("running_mean", "running_var"))
-            or ".norm" in name
-            or "layernorm" in name
-        ) else target_dtype
+        dtype = (
+            np.float32
+            if (
+                name.endswith(("running_mean", "running_var"))
+                or ".norm" in name
+                or "layernorm" in name
+            )
+            else target_dtype
+        )
         weights[name] = np.ascontiguousarray(arr, dtype=dtype)
     return weights
 
@@ -100,7 +104,9 @@ def _num_patches(raw: dict[str, Any]) -> int:
 
 def _require_supported(raw: dict[str, Any], task_type: str) -> None:
     if task_type not in {"forecast", "regression"}:
-        raise NotImplementedError("PatchTST native TRT builder currently supports forecast/regression profiles")
+        raise NotImplementedError(
+            "PatchTST native TRT builder currently supports forecast/regression profiles"
+        )
     if not bool(raw.get("share_embedding", True)):
         raise NotImplementedError("PatchTST native TRT builder requires share_embedding=True")
     if not bool(raw.get("share_projection", True)):
@@ -111,12 +117,17 @@ def _require_supported(raw: dict[str, Any], task_type: str) -> None:
         raise NotImplementedError("PatchTST native TRT builder requires pre_norm=True")
     if str(raw.get("activation_function", "gelu")).lower() != "gelu":
         raise NotImplementedError("PatchTST native TRT builder currently supports GELU FFN only")
-    if str(raw.get("scaling", "std")).lower() not in {"std", "true"} and raw.get("scaling") is not True:
+    if (
+        str(raw.get("scaling", "std")).lower() not in {"std", "true"}
+        and raw.get("scaling") is not True
+    ):
         raise NotImplementedError("PatchTST native TRT builder currently supports std scaling")
     if str(raw.get("norm_type", "batchnorm")).lower() not in {"batchnorm", "layernorm"}:
         raise NotImplementedError("PatchTST native TRT builder supports batchnorm/layernorm only")
     if task_type == "forecast" and raw.get("loss") != "mse":
-        raise NotImplementedError("PatchTST forecast native TRT builder currently supports MSE heads")
+        raise NotImplementedError(
+            "PatchTST forecast native TRT builder currently supports MSE heads"
+        )
 
 
 def _linear_key(prefix: str, name: str) -> tuple[str, str | None]:
@@ -136,7 +147,9 @@ def _apply_distribution_domain_map(
         return [tensors[0], add_squareplus(network, tensors[1])]
     if distribution == "student_t":
         if len(tensors) != 3:
-            raise ValueError("PatchTST student_t regression head expects df, loc, and scale tensors")
+            raise ValueError(
+                "PatchTST student_t regression head expects df, loc, and scale tensors"
+            )
         two = add_scalar(network, tuple(tensors[0].shape), 2.0, dtype=np.float32)
         df = network.add_elementwise(
             add_squareplus(network, tensors[0]), two, trt.ElementWiseOperation.SUM
@@ -144,10 +157,13 @@ def _apply_distribution_domain_map(
         return [df, tensors[1], add_squareplus(network, tensors[2])]
     if distribution == "negative_binomial":
         if len(tensors) != 2:
-            raise ValueError("PatchTST negative_binomial regression head expects total_count and logits tensors")
+            raise ValueError(
+                "PatchTST negative_binomial regression head expects total_count and logits tensors"
+            )
         return [add_squareplus(network, tensors[0]), tensors[1]]
     raise NotImplementedError(
-        f"PatchTST native TRT regression builder does not support {distribution_output!r} distribution heads")
+        f"PatchTST native TRT regression builder does not support {distribution_output!r} distribution heads"
+    )
 
 
 def _add_norm(
@@ -212,8 +228,14 @@ def _add_encoder_layer(
         row_t = row.get_output(0)
 
         normed = _add_norm(
-            network, row_t, weights, layer_idx=layer_idx,
-            norm_name="norm_sublayer1", hidden_size=hidden_size, raw=raw)
+            network,
+            row_t,
+            weights,
+            layer_idx=layer_idx,
+            norm_name="norm_sublayer1",
+            hidden_size=hidden_size,
+            raw=raw,
+        )
         qw, qb = _linear_key(prefix, "self_attn.q_proj")
         kw, kb = _linear_key(prefix, "self_attn.k_proj")
         vw, vb = _linear_key(prefix, "self_attn.v_proj")
@@ -237,8 +259,14 @@ def _add_encoder_layer(
         row_t = network.add_elementwise(row_t, attn, trt.ElementWiseOperation.SUM).get_output(0)
 
         normed = _add_norm(
-            network, row_t, weights, layer_idx=layer_idx,
-            norm_name="norm_sublayer3", hidden_size=hidden_size, raw=raw)
+            network,
+            row_t,
+            weights,
+            layer_idx=layer_idx,
+            norm_name="norm_sublayer3",
+            hidden_size=hidden_size,
+            raw=raw,
+        )
         fw0, fb0 = _linear_key(prefix, "ff.0")
         fw1, fb1 = _linear_key(prefix, "ff.3")
         ff = add_linear(network, normed, weights[fw0], weights.get(fb0), precision=precision)
@@ -277,10 +305,8 @@ def _build_patchtst_network(
     seq_len = num_patches + (1 if use_cls_token else 0)
 
     builder, network = create_network(verbose=verbose)
-    past_values = network.add_input(
-        "past_values", trt.float32, (1, context_length, channels))
-    observed = network.add_input(
-        "past_observed_mask", trt.float32, (1, context_length, channels))
+    past_values = network.add_input("past_values", trt.float32, (1, context_length, channels))
+    observed = network.add_input("past_observed_mask", trt.float32, (1, context_length, channels))
 
     scaled, loc, scale = add_std_scale(
         network,
@@ -306,27 +332,36 @@ def _build_patchtst_network(
     pos = weights["model.encoder.positional_encoder.position_enc"].astype(np.float32)
     if use_cls_token:
         patch_pos = graph_ops.add_constant(
-            network, (1, 1, num_patches, hidden_size),
-            pos[1:, :].reshape(1, 1, num_patches, hidden_size), dtype=np.float32)
-        hidden = network.add_elementwise(hidden, patch_pos, trt.ElementWiseOperation.SUM).get_output(0)
+            network,
+            (1, 1, num_patches, hidden_size),
+            pos[1:, :].reshape(1, 1, num_patches, hidden_size),
+            dtype=np.float32,
+        )
+        hidden = network.add_elementwise(
+            hidden, patch_pos, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         cls = weights["model.encoder.positional_encoder.cls_token"].astype(np.float32)
         cls_pos = cls.reshape(1, 1, 1, hidden_size) + pos[:1, :].reshape(1, 1, 1, hidden_size)
         cls_pos = np.tile(cls_pos, (1, channels, 1, 1))
         cls_t = graph_ops.add_constant(
-            network, (1, channels, 1, hidden_size), cls_pos, dtype=np.float32)
+            network, (1, channels, 1, hidden_size), cls_pos, dtype=np.float32
+        )
         cat = network.add_concatenation([cls_t, hidden])
         cat.axis = 2
         hidden = cat.get_output(0)
     else:
         pos_t = graph_ops.add_constant(
-            network, (1, 1, num_patches, hidden_size),
-            pos.reshape(1, 1, num_patches, hidden_size), dtype=np.float32)
+            network,
+            (1, 1, num_patches, hidden_size),
+            pos.reshape(1, 1, num_patches, hidden_size),
+            dtype=np.float32,
+        )
         hidden = network.add_elementwise(hidden, pos_t, trt.ElementWiseOperation.SUM).get_output(0)
 
     for layer_idx in range(depth):
         hidden = _add_encoder_layer(
-            network, hidden, weights, layer_idx=layer_idx,
-            raw=raw, precision=precision)
+            network, hidden, weights, layer_idx=layer_idx, raw=raw, precision=precision
+        )
 
     if task_type == "forecast":
         channel_outputs: list[trt.ITensor] = []
@@ -369,7 +404,9 @@ def _build_patchtst_network(
         add_named_output(network, y, "prediction_outputs")
     else:
         if str(raw.get("pooling_type", "mean")).lower() != "mean":
-            raise NotImplementedError("PatchTST regression native TRT builder supports mean pooling only")
+            raise NotImplementedError(
+                "PatchTST regression native TRT builder supports mean pooling only"
+            )
         pooled = network.add_reduce(
             hidden, trt.ReduceOperation.AVG, 1 << 2, keep_dims=False
         ).get_output(0)
@@ -415,7 +452,8 @@ def _build_patchtst_network(
             add_named_output(network, cat.get_output(0), "regression_outputs")
 
     return build_serialized_network(
-        builder, network, precision=precision, verbose=verbose, tag="patchtst")
+        builder, network, precision=precision, verbose=verbose, tag="patchtst"
+    )
 
 
 class PatchTSTPlugin:
@@ -451,13 +489,13 @@ class PatchTSTPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="PatchTST replicated tensor-parallel bundles")
+                parallel, feature="PatchTST replicated tensor-parallel bundles"
+            )
             cached = maybe_return_replicated_tp_plan(weights, parallel)
             if cached is not None:
                 return cached
 
-        plan = _build_patchtst_network(
-            config, weights, precision=precision, verbose=verbose)
+        plan = _build_patchtst_network(config, weights, precision=precision, verbose=verbose)
         cache_replicated_tp_plan(weights, parallel, plan)
         return plan
 

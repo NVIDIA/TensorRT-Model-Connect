@@ -9,7 +9,7 @@ from tests.builder.test_debug_runner import _make_bundle_bytes
 
 
 def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> None:
-    from tensorrt_model_connect.families.bart.debug_runner import (
+    from tensorrt_model_connect.families.bart.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -35,7 +35,7 @@ def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> Non
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.bart.debug_runner.Seq2SeqTrtRunner",
+        "tensorrt_model_connect.families.bart.model.runtime.Seq2SeqTrtRunner",
         return_value="bart-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

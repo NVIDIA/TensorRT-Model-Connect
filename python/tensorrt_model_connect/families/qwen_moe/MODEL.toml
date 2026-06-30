@@ -11,7 +11,7 @@ aliases = [
 prefixes = [
   "qwen_moe",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runner = "model/runtime.py|runner_from_bundle"
 debug_runtime_strategies = [
   "qwen_moe_decoder_moe",
 ]

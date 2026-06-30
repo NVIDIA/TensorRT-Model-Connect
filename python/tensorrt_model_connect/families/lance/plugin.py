@@ -31,26 +31,28 @@ forwards ``precision`` so bf16/fp16 build true reduced-precision engines.
 
 Checkpoint layout: the Lance HF repo is not a flat HF checkpoint (it nests
 ``Lance_3B/llm_config.json`` and a separate ``Qwen2.5-VL-ViT/`` dir). Run
-``python -m tensorrt_model_connect.families.lance.prepare_model`` to stage a
+``python -m tools.families.lance.prepare_model`` to stage a
 directory this plugin can build:
 ``config.json`` (model_type=lance), ``model.safetensors``, the tokenizer files,
 and the ViT at ``vision/model.safetensors``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     load_standard_weights,
     _open_safetensors,
     _load_tensor,
 )
+
 # Reuse the Qwen-VL vision encoder shape. The decoder builder is local so the
 # Lance family does not depend on another family's text-builder package.
-from .default_decoder import build_standard_decoder_engine
-from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
+from .model.model import build_standard_decoder_engine
+from .model.components.vision import build_qwen_vl_vision_engine
 
 # Standard Qwen2.5-VL ViT input size; the runtime resizes images to this.
 _DEFAULT_FIXED_IMAGE_SIZE = 448
@@ -84,28 +86,43 @@ class LancePlugin:
         )
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            verbose=verbose, quant_ctx=quant_ctx, embed_input=True,
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
             debug_layer_outputs=debug_layer_outputs,
         )
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
             return None
         vision_weights = _load_lance_vision_weights(model_dir)
         return build_qwen_vl_vision_engine(
-            vision_config, vision_weights,
+            vision_config,
+            vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
             verbose=verbose,
         )
@@ -144,7 +161,7 @@ def _load_lance_vision_weights(model_dir: str) -> WeightDict:
     if not (vit_dir / "model.safetensors").exists():
         raise FileNotFoundError(
             f"Lance ViT weights not found at {vit_dir}/model.safetensors. "
-            "Run python -m tensorrt_model_connect.families.lance.prepare_model "
+            "Run python -m tools.families.lance.prepare_model "
             "to stage the model."
         )
     readers = _open_safetensors(vit_dir)

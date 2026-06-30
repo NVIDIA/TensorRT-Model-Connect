@@ -31,7 +31,7 @@ _VOCAB = 24
 
 def _fnet_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.fnet.tp_builder",
+        "tensorrt_model_connect.families.fnet.model.parallel",
         reason="TensorRT is required for FNet TP builder tests",
     )
 

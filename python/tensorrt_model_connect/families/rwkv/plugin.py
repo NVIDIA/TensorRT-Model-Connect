@@ -51,14 +51,14 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from .model import model as graph_ops
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -66,6 +66,7 @@ from ...parallel_config import (
 
 
 trt = trt_compat.get_trt()
+
 
 class RwkvPlugin:
     name = "rwkv"
@@ -75,7 +76,9 @@ class RwkvPlugin:
         return model_type.lower() == "rwkv"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load RWKV weights from safetensors."""
         model_dir_path = Path(model_dir)
@@ -106,105 +109,116 @@ class RwkvPlugin:
         else:
             raise ValueError(
                 "Cannot detect RWKV weight key prefix. Expected "
-                "'rwkv.embeddings.weight' or 'backbone.embeddings.weight'")
+                "'rwkv.embeddings.weight' or 'backbone.embeddings.weight'"
+            )
 
         # Embedding
         embedding = _load_tensor(readers, embed_key)
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         # Pre-layer norm (block 0 only in some RWKV-4 variants)
         pre_ln_key = f"{block_prefix}.0.pre_ln.weight"
         if _has_tensor(readers, pre_ln_key):
-            weights["pre_ln_weight"] = _load_tensor(
-                readers, pre_ln_key).astype(np.float32)
-            weights["pre_ln_bias"] = _load_tensor(
-                readers, f"{block_prefix}.0.pre_ln.bias").astype(np.float32)
+            weights["pre_ln_weight"] = _load_tensor(readers, pre_ln_key).astype(np.float32)
+            weights["pre_ln_bias"] = _load_tensor(readers, f"{block_prefix}.0.pre_ln.bias").astype(
+                np.float32
+            )
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             hf_block = f"{block_prefix}.{layer_idx}"
 
             # LayerNorm 1 (before time-mixing)
-            weights[f"{prefix}.attn_norm"] = _load_tensor(
-                readers, f"{hf_block}.ln1.weight").astype(np.float32)
+            weights[f"{prefix}.attn_norm"] = _load_tensor(readers, f"{hf_block}.ln1.weight").astype(
+                np.float32
+            )
             weights[f"{prefix}.attn_norm_beta"] = _load_tensor(
-                readers, f"{hf_block}.ln1.bias").astype(np.float32)
+                readers, f"{hf_block}.ln1.bias"
+            ).astype(np.float32)
 
             # LayerNorm 2 (before channel-mixing)
-            weights[f"{prefix}.ffn_norm"] = _load_tensor(
-                readers, f"{hf_block}.ln2.weight").astype(np.float32)
+            weights[f"{prefix}.ffn_norm"] = _load_tensor(readers, f"{hf_block}.ln2.weight").astype(
+                np.float32
+            )
             weights[f"{prefix}.ffn_norm_beta"] = _load_tensor(
-                readers, f"{hf_block}.ln2.bias").astype(np.float32)
+                readers, f"{hf_block}.ln2.bias"
+            ).astype(np.float32)
 
             # Time-mixing parameters
             # HF stores time_decay in log-space; the model applies -exp(time_decay)
-            raw_time_decay = _load_tensor(
-                readers, f"{hf_block}.{attn_key}.time_decay").astype(np.float32)
+            raw_time_decay = _load_tensor(readers, f"{hf_block}.{attn_key}.time_decay").astype(
+                np.float32
+            )
             weights[f"{prefix}.time_decay"] = -np.exp(raw_time_decay)
             weights[f"{prefix}.time_first"] = _load_tensor(
-                readers, f"{hf_block}.{attn_key}.time_first").astype(np.float32)
+                readers, f"{hf_block}.{attn_key}.time_first"
+            ).astype(np.float32)
             weights[f"{prefix}.time_mix_key"] = _load_tensor(
-                readers, f"{hf_block}.{attn_key}.time_mix_key").astype(np.float32)
+                readers, f"{hf_block}.{attn_key}.time_mix_key"
+            ).astype(np.float32)
             weights[f"{prefix}.time_mix_value"] = _load_tensor(
-                readers, f"{hf_block}.{attn_key}.time_mix_value").astype(np.float32)
+                readers, f"{hf_block}.{attn_key}.time_mix_value"
+            ).astype(np.float32)
             weights[f"{prefix}.time_mix_receptance"] = _load_tensor(
-                readers, f"{hf_block}.{attn_key}.time_mix_receptance").astype(np.float32)
+                readers, f"{hf_block}.{attn_key}.time_mix_receptance"
+            ).astype(np.float32)
 
             # Attention projections (transpose for TRT matmul)
             weights[f"{prefix}.w_attn_k"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{attn_key}.key.weight"),
-                "attn_k")
+                _load_tensor(readers, f"{hf_block}.{attn_key}.key.weight"), "attn_k"
+            )
             weights[f"{prefix}.w_attn_v"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{attn_key}.value.weight"),
-                "attn_v")
+                _load_tensor(readers, f"{hf_block}.{attn_key}.value.weight"), "attn_v"
+            )
             weights[f"{prefix}.w_attn_r"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{attn_key}.receptance.weight"),
-                "attn_r")
+                _load_tensor(readers, f"{hf_block}.{attn_key}.receptance.weight"), "attn_r"
+            )
             weights[f"{prefix}.w_attn_o"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{attn_key}.output.weight"),
-                "attn_o")
+                _load_tensor(readers, f"{hf_block}.{attn_key}.output.weight"), "attn_o"
+            )
 
             # Channel-mixing (FFN) parameters
             weights[f"{prefix}.time_mix_ffn_key"] = _load_tensor(
-                readers, f"{hf_block}.{ffn_key}.time_mix_key").astype(np.float32)
+                readers, f"{hf_block}.{ffn_key}.time_mix_key"
+            ).astype(np.float32)
             weights[f"{prefix}.time_mix_ffn_receptance"] = _load_tensor(
-                readers, f"{hf_block}.{ffn_key}.time_mix_receptance").astype(np.float32)
+                readers, f"{hf_block}.{ffn_key}.time_mix_receptance"
+            ).astype(np.float32)
 
             # FFN projections (transpose for TRT matmul)
             weights[f"{prefix}.w_ffn_k"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{ffn_key}.key.weight"),
-                "ffn_k")
+                _load_tensor(readers, f"{hf_block}.{ffn_key}.key.weight"), "ffn_k"
+            )
             weights[f"{prefix}.w_ffn_v"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{ffn_key}.value.weight"),
-                "ffn_v")
+                _load_tensor(readers, f"{hf_block}.{ffn_key}.value.weight"), "ffn_v"
+            )
             weights[f"{prefix}.w_ffn_r"] = _transpose_2d(
-                _load_tensor(readers, f"{hf_block}.{ffn_key}.receptance.weight"),
-                "ffn_r")
+                _load_tensor(readers, f"{hf_block}.{ffn_key}.receptance.weight"), "ffn_r"
+            )
 
         # Final LayerNorm
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         if _has_tensor(readers, final_norm_bias_key):
-            weights["final_norm_beta"] = _load_tensor(
-                readers, final_norm_bias_key).astype(np.float32)
+            weights["final_norm_beta"] = _load_tensor(readers, final_norm_bias_key).astype(
+                np.float32
+            )
         else:
             weights["final_norm_beta"] = np.zeros(hidden, dtype=np.float32)
 
         # LM head (may be tied to embeddings)
         lm_head_key = "head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_lm_head"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_lm_head"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             # Tied embeddings: [vocab, hidden] -> [hidden, vocab]
-            weights["w_lm_head"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+            weights["w_lm_head"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         # Store RWKV-specific dimensions for engine builder
         weights["_intermediate_size"] = intermediate  # type: ignore[assignment]
@@ -212,9 +226,14 @@ class RwkvPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -241,12 +260,13 @@ class RwkvPlugin:
         """
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="RWKV tensor-parallel builds")
-            from .tp_builder import build_rwkv_tp_engine
+            require_tensorrt_11_for_tensor_parallel(parallel, feature="RWKV tensor-parallel builds")
+            from .model.parallel import build_rwkv_tp_engine
 
             return build_rwkv_tp_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -277,20 +297,20 @@ class RwkvPlugin:
         max_state_inputs = []
         for i in range(num_layers):
             attn_s = network.add_input(
-                graph_ops.layer_tensor_name("attn_state", i),
-                trt.float32, (1, hidden))
+                graph_ops.layer_tensor_name("attn_state", i), trt.float32, (1, hidden)
+            )
             ff_s = network.add_input(
-                graph_ops.layer_tensor_name("ff_state", i),
-                trt.float32, (1, hidden))
+                graph_ops.layer_tensor_name("ff_state", i), trt.float32, (1, hidden)
+            )
             num_s = network.add_input(
-                graph_ops.layer_tensor_name("num_state", i),
-                trt.float32, (1, hidden))
+                graph_ops.layer_tensor_name("num_state", i), trt.float32, (1, hidden)
+            )
             den_s = network.add_input(
-                graph_ops.layer_tensor_name("den_state", i),
-                trt.float32, (1, hidden))
+                graph_ops.layer_tensor_name("den_state", i), trt.float32, (1, hidden)
+            )
             max_s = network.add_input(
-                graph_ops.layer_tensor_name("max_state", i),
-                trt.float32, (1, hidden))
+                graph_ops.layer_tensor_name("max_state", i), trt.float32, (1, hidden)
+            )
             attn_state_inputs.append(attn_s)
             ff_state_inputs.append(ff_s)
             num_state_inputs.append(num_s)
@@ -300,15 +320,13 @@ class RwkvPlugin:
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
-        embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
 
         eps_tensor = graph_ops.add_constant(
-            network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+        )
 
-        one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+        one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
 
         # -----------------------------------------------------------
         # Embedding lookup
@@ -319,9 +337,13 @@ class RwkvPlugin:
         # Optional pre-layer norm (some RWKV-4 variants)
         if "pre_ln_weight" in weights:
             hidden_state = graph_ops.add_layer_norm(
-                network, hidden_state, hidden,
-                weights["pre_ln_weight"], weights["pre_ln_bias"],
-                eps_tensor)
+                network,
+                hidden_state,
+                hidden,
+                weights["pre_ln_weight"],
+                weights["pre_ln_bias"],
+                eps_tensor,
+            )
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -362,21 +384,26 @@ class RwkvPlugin:
             present_max_outputs.append(result["present_max"])
 
             if debug_layer_outputs:
-                _mark_debug_output(
-                    network, hidden_state, f"debug_hidden_{layer_idx}")
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
         # -----------------------------------------------------------
         # Final LayerNorm
         # -----------------------------------------------------------
         hidden_state = graph_ops.add_layer_norm(
-            network, hidden_state, hidden,
-            weights["final_norm"], weights["final_norm_beta"], eps_tensor)
+            network,
+            hidden_state,
+            hidden,
+            weights["final_norm"],
+            weights["final_norm_beta"],
+            eps_tensor,
+        )
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"])
+            network, hidden_state, hidden, vocab, weights["w_lm_head"]
+        )
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -407,9 +434,11 @@ class RwkvPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc build] Building RWKV TRT engine ({num_layers} layers, "
-                  f"hidden={hidden}, intermediate={intermediate}) ...",
-                  file=sys.stderr)
+            print(
+                f"[trtmc build] Building RWKV TRT engine ({num_layers} layers, "
+                f"hidden={hidden}, intermediate={intermediate}) ...",
+                file=sys.stderr,
+            )
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -457,10 +486,13 @@ def _add_rwkv_layer(
 
     # ===== 1. LayerNorm (with bias) =====
     normed_attn = graph_ops.add_layer_norm(
-        network, hidden, hidden_size,
+        network,
+        hidden,
+        hidden_size,
         weights[f"{prefix}.attn_norm"],
         weights[f"{prefix}.attn_norm_beta"],
-        eps_tensor)
+        eps_tensor,
+    )
     # normed_attn: [1, hidden_size]
 
     # The normed output before time-shift becomes present_attn for next step
@@ -471,160 +503,141 @@ def _add_rwkv_layer(
 
     def _time_shift_blend(normed, prev_state, mix_weights_key):
         """Element-wise lerp: mix * normed + (1 - mix) * prev_state."""
-        mix = graph_ops.add_constant(
-            network, (1, hidden_size), weights[mix_weights_key])
-        one_minus_mix = network.add_elementwise(
-            one_const, mix, trt.ElementWiseOperation.SUB)
-        cur_part = network.add_elementwise(
-            normed, mix, trt.ElementWiseOperation.PROD)
+        mix = graph_ops.add_constant(network, (1, hidden_size), weights[mix_weights_key])
+        one_minus_mix = network.add_elementwise(one_const, mix, trt.ElementWiseOperation.SUB)
+        cur_part = network.add_elementwise(normed, mix, trt.ElementWiseOperation.PROD)
         prev_part = network.add_elementwise(
-            prev_state, one_minus_mix.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            prev_state, one_minus_mix.get_output(0), trt.ElementWiseOperation.PROD
+        )
         blended = network.add_elementwise(
-            cur_part.get_output(0), prev_part.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            cur_part.get_output(0), prev_part.get_output(0), trt.ElementWiseOperation.SUM
+        )
         return blended.get_output(0)
 
-    xk = _time_shift_blend(normed_attn, attn_state_in,
-                           f"{prefix}.time_mix_key")
-    xv = _time_shift_blend(normed_attn, attn_state_in,
-                           f"{prefix}.time_mix_value")
-    xr = _time_shift_blend(normed_attn, attn_state_in,
-                           f"{prefix}.time_mix_receptance")
+    xk = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_key")
+    xv = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_value")
+    xr = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_receptance")
 
     # ===== 3. Projections =====
     # R = sigmoid(xr @ w_attn_r)
     r_proj = graph_ops.add_matmul_rhs_constant(
-        network, xr, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_r"])
+        network, xr, hidden_size, hidden_size, weights[f"{prefix}.w_attn_r"]
+    )
     r_gate = network.add_activation(r_proj, trt.ActivationType.SIGMOID)
 
     # K = xk @ w_attn_k
     k_proj = graph_ops.add_matmul_rhs_constant(
-        network, xk, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_k"])
+        network, xk, hidden_size, hidden_size, weights[f"{prefix}.w_attn_k"]
+    )
     # K: [1, hidden_size]
 
     # V = xv @ w_attn_v
     v_proj = graph_ops.add_matmul_rhs_constant(
-        network, xv, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_v"])
+        network, xv, hidden_size, hidden_size, weights[f"{prefix}.w_attn_v"]
+    )
     # V: [1, hidden_size]
 
     # ===== 4. WKV recurrence (numerically stable) =====
-    time_decay = graph_ops.add_constant(
-        network, (1, hidden_size), weights[f"{prefix}.time_decay"])
-    time_first = graph_ops.add_constant(
-        network, (1, hidden_size), weights[f"{prefix}.time_first"])
+    time_decay = graph_ops.add_constant(network, (1, hidden_size), weights[f"{prefix}.time_decay"])
+    time_first = graph_ops.add_constant(network, (1, hidden_size), weights[f"{prefix}.time_first"])
 
     # decay_plus_max = max_state_in + time_decay
-    decay_plus_max = network.add_elementwise(
-        max_state_in, time_decay, trt.ElementWiseOperation.SUM)
+    decay_plus_max = network.add_elementwise(max_state_in, time_decay, trt.ElementWiseOperation.SUM)
 
     # tf_plus_k = time_first + K
-    tf_plus_k = network.add_elementwise(
-        time_first, k_proj, trt.ElementWiseOperation.SUM)
+    tf_plus_k = network.add_elementwise(time_first, k_proj, trt.ElementWiseOperation.SUM)
 
     # ---- WKV output (uses time_first as bonus, NO decay) ----
     # HF: max_for_output = max(max_state, key + time_first)
     # time_decay is ONLY used in the state update, not the output.
     q_out = network.add_elementwise(
-        tf_plus_k.get_output(0), max_state_in,
-        trt.ElementWiseOperation.MAX)
+        tf_plus_k.get_output(0), max_state_in, trt.ElementWiseOperation.MAX
+    )
 
     # e2 = exp(key + time_first - q)
     tf_k_minus_q = network.add_elementwise(
-        tf_plus_k.get_output(0), q_out.get_output(0),
-        trt.ElementWiseOperation.SUB)
-    exp_tf_k = network.add_unary(
-        tf_k_minus_q.get_output(0), trt.UnaryOperation.EXP)
+        tf_plus_k.get_output(0), q_out.get_output(0), trt.ElementWiseOperation.SUB
+    )
+    exp_tf_k = network.add_unary(tf_k_minus_q.get_output(0), trt.UnaryOperation.EXP)
 
     # e1 = exp(max_state - q)  (NO time_decay here)
     ms_minus_q = network.add_elementwise(
-        max_state_in, q_out.get_output(0),
-        trt.ElementWiseOperation.SUB)
-    exp_dpm = network.add_unary(
-        ms_minus_q.get_output(0), trt.UnaryOperation.EXP)
+        max_state_in, q_out.get_output(0), trt.ElementWiseOperation.SUB
+    )
+    exp_dpm = network.add_unary(ms_minus_q.get_output(0), trt.UnaryOperation.EXP)
 
     # wkv_num = exp(tf+k-q) * V + exp(dpm-q) * num_state
     term1_num = network.add_elementwise(
-        exp_tf_k.get_output(0), v_proj,
-        trt.ElementWiseOperation.PROD)
+        exp_tf_k.get_output(0), v_proj, trt.ElementWiseOperation.PROD
+    )
     term2_num = network.add_elementwise(
-        exp_dpm.get_output(0), num_state_in,
-        trt.ElementWiseOperation.PROD)
+        exp_dpm.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
+    )
     wkv_num = network.add_elementwise(
-        term1_num.get_output(0), term2_num.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        term1_num.get_output(0), term2_num.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     # wkv_den = exp(tf+k-q) + exp(dpm-q) * den_state
     term2_den = network.add_elementwise(
-        exp_dpm.get_output(0), den_state_in,
-        trt.ElementWiseOperation.PROD)
+        exp_dpm.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
+    )
     wkv_den = network.add_elementwise(
-        exp_tf_k.get_output(0), term2_den.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        exp_tf_k.get_output(0), term2_den.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     # wkv = wkv_num / wkv_den
     wkv = network.add_elementwise(
-        wkv_num.get_output(0), wkv_den.get_output(0),
-        trt.ElementWiseOperation.DIV)
+        wkv_num.get_output(0), wkv_den.get_output(0), trt.ElementWiseOperation.DIV
+    )
 
     # ---- State update (does NOT use time_first) ----
     # q2 = max(K, decay_plus_max)
-    q2 = network.add_elementwise(
-        k_proj, decay_plus_max.get_output(0),
-        trt.ElementWiseOperation.MAX)
+    q2 = network.add_elementwise(k_proj, decay_plus_max.get_output(0), trt.ElementWiseOperation.MAX)
 
     # exp(K - q2)
-    k_minus_q2 = network.add_elementwise(
-        k_proj, q2.get_output(0),
-        trt.ElementWiseOperation.SUB)
-    exp_k_q2 = network.add_unary(
-        k_minus_q2.get_output(0), trt.UnaryOperation.EXP)
+    k_minus_q2 = network.add_elementwise(k_proj, q2.get_output(0), trt.ElementWiseOperation.SUB)
+    exp_k_q2 = network.add_unary(k_minus_q2.get_output(0), trt.UnaryOperation.EXP)
 
     # exp(decay_plus_max - q2)
     dpm_minus_q2 = network.add_elementwise(
-        decay_plus_max.get_output(0), q2.get_output(0),
-        trt.ElementWiseOperation.SUB)
-    exp_dpm_q2 = network.add_unary(
-        dpm_minus_q2.get_output(0), trt.UnaryOperation.EXP)
+        decay_plus_max.get_output(0), q2.get_output(0), trt.ElementWiseOperation.SUB
+    )
+    exp_dpm_q2 = network.add_unary(dpm_minus_q2.get_output(0), trt.UnaryOperation.EXP)
 
     # present_num = exp(K-q2)*V + exp(dpm-q2)*num_state
     st_term1 = network.add_elementwise(
-        exp_k_q2.get_output(0), v_proj,
-        trt.ElementWiseOperation.PROD)
+        exp_k_q2.get_output(0), v_proj, trt.ElementWiseOperation.PROD
+    )
     st_term2 = network.add_elementwise(
-        exp_dpm_q2.get_output(0), num_state_in,
-        trt.ElementWiseOperation.PROD)
+        exp_dpm_q2.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
+    )
     present_num = network.add_elementwise(
-        st_term1.get_output(0), st_term2.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        st_term1.get_output(0), st_term2.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     # present_den = exp(K-q2) + exp(dpm-q2)*den_state
     st_den_term2 = network.add_elementwise(
-        exp_dpm_q2.get_output(0), den_state_in,
-        trt.ElementWiseOperation.PROD)
+        exp_dpm_q2.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
+    )
     present_den = network.add_elementwise(
-        exp_k_q2.get_output(0), st_den_term2.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        exp_k_q2.get_output(0), st_den_term2.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     # present_max = q2
     present_max = q2.get_output(0)
 
     # ===== 5. Gated output + residual =====
     gated = network.add_elementwise(
-        r_gate.get_output(0), wkv.get_output(0),
-        trt.ElementWiseOperation.PROD)
+        r_gate.get_output(0), wkv.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
     # out_proj: [1, hidden_size] @ w_attn_o -> [1, hidden_size]
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_o"])
+        network, gated.get_output(0), hidden_size, hidden_size, weights[f"{prefix}.w_attn_o"]
+    )
 
     # Residual add
-    residual_attn = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    residual_attn = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
     hidden_after_attn = residual_attn.get_output(0)
 
     # ================================================================
@@ -633,44 +646,45 @@ def _add_rwkv_layer(
 
     # ===== 1. LayerNorm =====
     normed_ffn = graph_ops.add_layer_norm(
-        network, hidden_after_attn, hidden_size,
+        network,
+        hidden_after_attn,
+        hidden_size,
         weights[f"{prefix}.ffn_norm"],
         weights[f"{prefix}.ffn_norm_beta"],
-        eps_tensor)
+        eps_tensor,
+    )
 
     # The normed output before time-shift becomes present_ff for next step
     present_ff = normed_ffn
 
     # ===== 2. Time-shift for key and receptance =====
-    xk_ffn = _time_shift_blend(normed_ffn, ff_state_in,
-                               f"{prefix}.time_mix_ffn_key")
-    xr_ffn = _time_shift_blend(normed_ffn, ff_state_in,
-                               f"{prefix}.time_mix_ffn_receptance")
+    xk_ffn = _time_shift_blend(normed_ffn, ff_state_in, f"{prefix}.time_mix_ffn_key")
+    xr_ffn = _time_shift_blend(normed_ffn, ff_state_in, f"{prefix}.time_mix_ffn_receptance")
 
     # ===== 3. Key projection + squared ReLU =====
     k_ffn = graph_ops.add_matmul_rhs_constant(
-        network, xk_ffn, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_ffn_k"])
+        network, xk_ffn, hidden_size, intermediate_size, weights[f"{prefix}.w_ffn_k"]
+    )
     k_activated = graph_ops.add_activation(network, k_ffn, "squared_relu")
 
     # ===== 4. Receptance gate =====
     r_ffn = graph_ops.add_matmul_rhs_constant(
-        network, xr_ffn, hidden_size, hidden_size,
-        weights[f"{prefix}.w_ffn_r"])
+        network, xr_ffn, hidden_size, hidden_size, weights[f"{prefix}.w_ffn_r"]
+    )
     r_ffn_gate = network.add_activation(r_ffn, trt.ActivationType.SIGMOID)
 
     # ===== 5. Value projection + gating + residual =====
     kv_ffn = graph_ops.add_matmul_rhs_constant(
-        network, k_activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_ffn_v"])
+        network, k_activated, intermediate_size, hidden_size, weights[f"{prefix}.w_ffn_v"]
+    )
     gated_ffn = network.add_elementwise(
-        r_ffn_gate.get_output(0), kv_ffn,
-        trt.ElementWiseOperation.PROD)
+        r_ffn_gate.get_output(0), kv_ffn, trt.ElementWiseOperation.PROD
+    )
 
     # Residual add
     residual_ffn = network.add_elementwise(
-        hidden_after_attn, gated_ffn.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        hidden_after_attn, gated_ffn.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     return {
         "hidden": residual_ffn.get_output(0),

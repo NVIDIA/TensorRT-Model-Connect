@@ -24,7 +24,7 @@ class TestQwenEngine(FamilyPluginTestMixin):
 
 def _qwen_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.qwen.dual_profile_decoder_tp_builder",
+        "tensorrt_model_connect.families.qwen.model.parallel",
         reason="TensorRT is required for Qwen TP builder tests",
     )
 

@@ -11,7 +11,7 @@ class TestWhisperTrtRunnerCleanup:
     """Verify WhisperTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.families.whisper.debug_runner import WhisperTrtRunner
+        from tools.families.whisper.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         runner.num_layers = 1
@@ -30,7 +30,7 @@ class TestWhisperTrtRunnerCleanup:
         runner.stream = 5555
 
         mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.families.whisper.debug_runner.cudart", mock_cudart):
+        with patch("tools.families.whisper.debug_runner.cudart", mock_cudart):
             runner.__del__()
             del runner._d_logits
 
@@ -40,7 +40,7 @@ class TestWhisperTrtRunnerCleanup:
         mock_cudart.cudaStreamDestroy.assert_called_once_with(5555)
 
     def test_del_noop_before_init(self):
-        from tensorrt_model_connect.families.whisper.debug_runner import WhisperTrtRunner
+        from tools.families.whisper.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         runner.__del__()
@@ -50,7 +50,7 @@ class TestWhisperTrtRunnerGenerate:
     """Verify WhisperTrtRunner.generate() calls step() correctly."""
 
     def test_generate_prefill_then_decode(self):
-        from tensorrt_model_connect.families.whisper.debug_runner import WhisperTrtRunner
+        from tools.families.whisper.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         call_log = []

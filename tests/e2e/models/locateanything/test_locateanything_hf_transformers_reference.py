@@ -69,7 +69,7 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert "Tokenizer.from_file" in script
     assert "model_max_length" in script
     assert "def batch_decode" in script
-    assert "tensorrt_model_connect.families.locateanything.vl_debug_runner" in script
+    assert "tools.families.locateanything.vl_debug_runner" in script
     assert "preprocess_image_inputs_for_trt" in script
     assert 'preprocessor_type="patchify_chw"' in script
     assert 'image_pads = "<IMG_CONTEXT>" * 256' in script

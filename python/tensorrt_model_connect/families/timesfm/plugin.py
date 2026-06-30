@@ -8,8 +8,8 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import (
+from .model import model as graph_ops
+from .weights import (
     WeightDict,
     _load_tensor,
     _open_safetensors,
@@ -17,7 +17,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
-from .time_series_trt import (
+from .model.model import (
     add_linear,
     add_named_output,
     add_scalar,
@@ -31,13 +31,6 @@ from .time_series_trt import (
 trt = trt_compat.get_trt()
 
 
-def _context_length(config, fallback: int) -> int:
-    value = getattr(config, "context_length", 0) or fallback
-    if value <= 0:
-        value = fallback
-    return int(value)
-
-
 def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
     readers = _open_safetensors(Path(model_dir))
     target_dtype = _target_np_dtype(precision)
@@ -45,22 +38,32 @@ def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
-        dtype = np.float32 if (
-            name.endswith("layer_norm.weight")
-            or name.endswith("layer_norm.bias")
-            or name.endswith("layernorm.weight")
-            or name.endswith("input_layernorm.weight")
-            or name.endswith("scaling")
-        ) else target_dtype
+        dtype = (
+            np.float32
+            if (
+                name.endswith("layer_norm.weight")
+                or name.endswith("layer_norm.bias")
+                or name.endswith("layernorm.weight")
+                or name.endswith("input_layernorm.weight")
+                or name.endswith("scaling")
+            )
+            else target_dtype
+        )
         weights[name] = np.ascontiguousarray(arr, dtype=dtype)
     return weights
 
 
 def _require_supported(raw: dict) -> None:
     if bool(raw.get("use_positional_embedding", False)):
-        raise NotImplementedError("TimesFM native TRT builder does not support positional embedding profiles")
-    if int(raw.get("hidden_size", 0)) != int(raw.get("num_attention_heads", 1)) * int(raw.get("head_dim", 0)):
-        raise NotImplementedError("TimesFM native TRT builder requires hidden_size == heads * head_dim")
+        raise NotImplementedError(
+            "TimesFM native TRT builder does not support positional embedding profiles"
+        )
+    if int(raw.get("hidden_size", 0)) != int(raw.get("num_attention_heads", 1)) * int(
+        raw.get("head_dim", 0)
+    ):
+        raise NotImplementedError(
+            "TimesFM native TRT builder requires hidden_size == heads * head_dim"
+        )
 
 
 def _patchify_2d(
@@ -157,11 +160,12 @@ def _add_padding_mask(
     ).get_output(0)
     causal = np.triu(np.ones((num_patches, num_patches), dtype=np.float32), k=1) * -1.0e9
     causal_t = graph_ops.add_constant(
-        network, (1, 1, num_patches, num_patches),
-        causal.reshape(1, 1, num_patches, num_patches), dtype=np.float32)
-    mask = network.add_elementwise(
-        pad_mask, causal_t, trt.ElementWiseOperation.SUM
-    ).get_output(0)
+        network,
+        (1, 1, num_patches, num_patches),
+        causal.reshape(1, 1, num_patches, num_patches),
+        dtype=np.float32,
+    )
+    mask = network.add_elementwise(pad_mask, causal_t, trt.ElementWiseOperation.SUM).get_output(0)
     mask_heads = network.add_concatenation([mask] * num_heads)
     mask_heads.axis = 1
     return patched_padding, mask_heads.get_output(0)
@@ -193,28 +197,38 @@ def _add_decoder_layer(
         add_scalar(network, (1, 1, 1), float(raw.get("rms_norm_eps", 1.0e-6))),
         dtype=np.float32,
     )
-    q = add_linear(network, norm, weights[f"{prefix}.self_attn.q_proj.weight"],
-                   weights.get(f"{prefix}.self_attn.q_proj.bias"), precision=precision)
-    k = add_linear(network, norm, weights[f"{prefix}.self_attn.k_proj.weight"],
-                   weights.get(f"{prefix}.self_attn.k_proj.bias"), precision=precision)
-    v = add_linear(network, norm, weights[f"{prefix}.self_attn.v_proj.weight"],
-                   weights.get(f"{prefix}.self_attn.v_proj.bias"), precision=precision)
-    qh = _heads_from_rows(
-        network, q, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
-    kh = _heads_from_rows(
-        network, k, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
-    vh = _heads_from_rows(
-        network, v, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
+    q = add_linear(
+        network,
+        norm,
+        weights[f"{prefix}.self_attn.q_proj.weight"],
+        weights.get(f"{prefix}.self_attn.q_proj.bias"),
+        precision=precision,
+    )
+    k = add_linear(
+        network,
+        norm,
+        weights[f"{prefix}.self_attn.k_proj.weight"],
+        weights.get(f"{prefix}.self_attn.k_proj.bias"),
+        precision=precision,
+    )
+    v = add_linear(
+        network,
+        norm,
+        weights[f"{prefix}.self_attn.v_proj.weight"],
+        weights.get(f"{prefix}.self_attn.v_proj.bias"),
+        precision=precision,
+    )
+    qh = _heads_from_rows(network, q, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
+    kh = _heads_from_rows(network, k, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
+    vh = _heads_from_rows(network, v, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
     scale = _softplus_np(weights[f"{prefix}.self_attn.scaling"].astype(np.float32))
     scale = scale * (1.442695041 / np.sqrt(float(head_dim)))
     scale_t = graph_ops.add_constant(
-        network, (1, 1, 1, head_dim),
-        scale.reshape(1, 1, 1, head_dim), dtype=np.float32)
+        network, (1, 1, 1, head_dim), scale.reshape(1, 1, 1, head_dim), dtype=np.float32
+    )
     qh = network.add_elementwise(qh, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
-    ctx = graph_ops.add_attention_core(
-        network, qh, kh, vh, causal=False, mask=attn_mask, scale=1.0)
-    ctx_rows = _rows_from_heads(
-        network, ctx, hidden_size=hidden_size, seq_len=num_patches)
+    ctx = graph_ops.add_attention_core(network, qh, kh, vh, causal=False, mask=attn_mask, scale=1.0)
+    ctx_rows = _rows_from_heads(network, ctx, hidden_size=hidden_size, seq_len=num_patches)
     attn_out = add_linear(
         network,
         ctx_rows,
@@ -283,9 +297,11 @@ def _build_timesfm_network(
     freq = network.add_input("freq", trt.int32, (1,))
 
     patched_inputs = _patchify_2d(
-        network, past_values, num_patches=num_patches, patch_length=patch_length)
+        network, past_values, num_patches=num_patches, patch_length=patch_length
+    )
     patched_pads_i = _patchify_2d(
-        network, padding, num_patches=num_patches, patch_length=patch_length)
+        network, padding, num_patches=num_patches, patch_length=patch_length
+    )
     patched_pads = network.add_cast(patched_pads_i, trt.float32).get_output(0)
     valid = network.add_elementwise(
         add_scalar(network, (1, num_patches, patch_length), 1.0),
@@ -297,11 +313,11 @@ def _build_timesfm_network(
     ).get_output(0)
 
     last_values = network.add_slice(
-        patched_inputs, start=(0, num_patches - 1, 0),
-        shape=(1, 1, patch_length), stride=(1, 1, 1)).get_output(0)
+        patched_inputs, start=(0, num_patches - 1, 0), shape=(1, 1, patch_length), stride=(1, 1, 1)
+    ).get_output(0)
     last_valid = network.add_slice(
-        valid, start=(0, num_patches - 1, 0),
-        shape=(1, 1, patch_length), stride=(1, 1, 1)).get_output(0)
+        valid, start=(0, num_patches - 1, 0), shape=(1, 1, patch_length), stride=(1, 1, 1)
+    ).get_output(0)
     denom = network.add_reduce(
         last_valid, trt.ReduceOperation.SUM, 1 << 2, keep_dims=True
     ).get_output(0)
@@ -309,17 +325,27 @@ def _build_timesfm_network(
         denom, add_scalar(network, (1, 1, 1), 1.0), trt.ElementWiseOperation.MAX
     ).get_output(0)
     masked_sum = network.add_reduce(
-        network.add_elementwise(last_values, last_valid, trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ReduceOperation.SUM, 1 << 2, keep_dims=True,
+        network.add_elementwise(last_values, last_valid, trt.ElementWiseOperation.PROD).get_output(
+            0
+        ),
+        trt.ReduceOperation.SUM,
+        1 << 2,
+        keep_dims=True,
     ).get_output(0)
     mu = network.add_elementwise(masked_sum, denom, trt.ElementWiseOperation.DIV).get_output(0)
     centered_last = network.add_elementwise(
-        last_values, mu, trt.ElementWiseOperation.SUB).get_output(0)
+        last_values, mu, trt.ElementWiseOperation.SUB
+    ).get_output(0)
     centered_last = network.add_elementwise(
-        centered_last, last_valid, trt.ElementWiseOperation.PROD).get_output(0)
+        centered_last, last_valid, trt.ElementWiseOperation.PROD
+    ).get_output(0)
     var = network.add_reduce(
-        network.add_elementwise(centered_last, centered_last, trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ReduceOperation.SUM, 1 << 2, keep_dims=True,
+        network.add_elementwise(
+            centered_last, centered_last, trt.ElementWiseOperation.PROD
+        ).get_output(0),
+        trt.ReduceOperation.SUM,
+        1 << 2,
+        keep_dims=True,
     ).get_output(0)
     var = network.add_elementwise(var, denom, trt.ElementWiseOperation.DIV).get_output(0)
     sigma = network.add_unary(var, trt.UnaryOperation.SQRT).get_output(0)
@@ -334,12 +360,14 @@ def _build_timesfm_network(
         sigma,
         trt.ElementWiseOperation.DIV,
     ).get_output(0)
-    normalized = network.add_elementwise(normalized, valid, trt.ElementWiseOperation.PROD).get_output(0)
+    normalized = network.add_elementwise(
+        normalized, valid, trt.ElementWiseOperation.PROD
+    ).get_output(0)
     concat = network.add_concatenation([normalized, patched_pads])
     concat.axis = 2
     hidden = _add_residual_block(
-        network, concat.get_output(0), weights,
-        prefix="decoder.input_ff_layer", precision=precision)
+        network, concat.get_output(0), weights, prefix="decoder.input_ff_layer", precision=precision
+    )
 
     freq_w = graph_ops.add_constant(
         network,
@@ -355,7 +383,8 @@ def _build_timesfm_network(
     ).get_output(0)
 
     patched_padding, attn_mask = _add_padding_mask(
-        network, patched_pads, num_patches=num_patches, num_heads=num_heads)
+        network, patched_pads, num_patches=num_patches, num_heads=num_heads
+    )
     for layer_idx in range(int(raw.get("num_hidden_layers", 1))):
         hidden = _add_decoder_layer(
             network,
@@ -369,25 +398,27 @@ def _build_timesfm_network(
         )
 
     last_hidden = network.add_slice(
-        hidden, start=(0, num_patches - 1, 0),
-        shape=(1, 1, hidden_size), stride=(1, 1, 1)).get_output(0)
+        hidden, start=(0, num_patches - 1, 0), shape=(1, 1, hidden_size), stride=(1, 1, 1)
+    ).get_output(0)
     forecast = _add_residual_block(
-        network, last_hidden, weights,
-        prefix="horizon_ff_layer", precision=precision)
+        network, last_hidden, weights, prefix="horizon_ff_layer", precision=precision
+    )
     full = network.add_shuffle(forecast)
     full.reshape_dims = (1, horizon, quantile_count + 1)
     full_t = full.get_output(0)
     full_t = network.add_elementwise(full_t, sigma, trt.ElementWiseOperation.PROD).get_output(0)
     full_t = network.add_elementwise(full_t, mu, trt.ElementWiseOperation.SUM).get_output(0)
     mean = network.add_slice(
-        full_t, start=(0, 0, 0), shape=(1, horizon, 1), stride=(1, 1, 1)).get_output(0)
+        full_t, start=(0, 0, 0), shape=(1, horizon, 1), stride=(1, 1, 1)
+    ).get_output(0)
     mean_shuf = network.add_shuffle(mean)
     mean_shuf.reshape_dims = (1, horizon)
     add_named_output(network, mean_shuf.get_output(0), "mean_predictions")
     add_named_output(network, full_t, "full_predictions")
 
     return build_serialized_network(
-        builder, network, precision=precision, verbose=verbose, tag="timesfm")
+        builder, network, precision=precision, verbose=verbose, tag="timesfm"
+    )
 
 
 class TimesFmPlugin:
@@ -422,13 +453,13 @@ class TimesFmPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="TimesFM replicated tensor-parallel bundles")
+                parallel, feature="TimesFM replicated tensor-parallel bundles"
+            )
             cached = maybe_return_replicated_tp_plan(weights, parallel)
             if cached is not None:
                 return cached
 
-        plan = _build_timesfm_network(
-            config, weights, precision=precision, verbose=verbose)
+        plan = _build_timesfm_network(config, weights, precision=precision, verbose=verbose)
         cache_replicated_tp_plan(weights, parallel, plan)
         return plan
 

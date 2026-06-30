@@ -33,7 +33,7 @@ _VOCAB = 24
 
 def _xlnet_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.xlnet.tp_builder",
+        "tensorrt_model_connect.families.xlnet.model.parallel",
         reason="TensorRT is required for XLNet TP builder tests",
     )
 

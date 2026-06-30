@@ -22,7 +22,7 @@ import sys
 import time
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict
+from .weights import WeightDict
 
 
 def _register_flux2_attention_quantizers() -> None:
@@ -35,8 +35,7 @@ def _register_flux2_attention_quantizers() -> None:
         from modelopt.torch.quantization.nn import QuantModuleRegistry
     except Exception as exc:  # pragma: no cover - optional Diffusers/ModelOpt deps
         print(
-            "[fp8-calibrate] Skipping FLUX.2 MHA quantizer registration: "
-            f"{exc}",
+            f"[fp8-calibrate] Skipping FLUX.2 MHA quantizer registration: {exc}",
             file=sys.stderr,
         )
         return
@@ -50,8 +49,7 @@ def _register_flux2_attention_quantizers() -> None:
             from modelopt.torch.quantization.plugins.diffusers import _QuantAttention
     except Exception as exc:  # pragma: no cover - private ModelOpt API drift
         print(
-            "[fp8-calibrate] ModelOpt Diffusers MHA quantizer is unavailable: "
-            f"{exc}",
+            f"[fp8-calibrate] ModelOpt Diffusers MHA quantizer is unavailable: {exc}",
             file=sys.stderr,
         )
         return
@@ -131,10 +129,12 @@ class FluxPlugin:
     _FLUX2_TEXT_SEQ_LEN = 512
 
     def _flux2_text_seq_len(self, config: ModelConfig) -> int:
-        text_seq_len = int(config.raw.get(
-            "text_seq_len",
-            config.raw.get("max_cache_length", self._FLUX2_TEXT_SEQ_LEN),
-        ))
+        text_seq_len = int(
+            config.raw.get(
+                "text_seq_len",
+                config.raw.get("max_cache_length", self._FLUX2_TEXT_SEQ_LEN),
+            )
+        )
         return max(1, min(text_seq_len, self._FLUX2_TEXT_SEQ_LEN))
 
     # Mistral 3 text encoder defaults for FLUX.2
@@ -154,7 +154,9 @@ class FluxPlugin:
         return mt in ("flux", "flux.1", "flux.2", "flux_t2i")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load weight paths from diffusers-format directory."""
         from pathlib import Path
@@ -171,11 +173,11 @@ class FluxPlugin:
             weights["_transformer_dir"] = str(model_path / "transformer")
             weights["_vae_dir"] = str(model_path / "vae")
         else:
-            raise ValueError(
-                f"Expected diffusers format with model_index.json in {model_dir}")
+            raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
 
         # Read transformer config to get exact architecture params
         import json
+
         transformer_config_path = model_path / "transformer" / "config.json"
         if transformer_config_path.exists():
             tc = json.loads(transformer_config_path.read_text())
@@ -196,18 +198,29 @@ class FluxPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
     ) -> bytes:
-        raise NotImplementedError(
-            "FLUX uses build_components(), not build_engine()")
+        raise NotImplementedError("FLUX uses build_components(), not build_engine()")
 
     def build_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
-        fp8_scales: dict | None = None, build_timing: dict | None = None,
-        parallel_config=None, max_batch_size: int = 1,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        fp8_scales: dict | None = None,
+        build_timing: dict | None = None,
+        parallel_config=None,
+        max_batch_size: int = 1,
     ) -> dict:
         """Build all component engines.
 
@@ -215,8 +228,11 @@ class FluxPlugin:
         to the appropriate builders.
         """
         # TP + batch>1 is out of scope for the diffusion-batch series.
-        if max_batch_size > 1 and parallel_config is not None and getattr(
-                parallel_config, "enabled", False):
+        if (
+            max_batch_size > 1
+            and parallel_config is not None
+            and getattr(parallel_config, "enabled", False)
+        ):
             raise NotImplementedError(
                 "FLUX tensor-parallel + max_batch_size > 1 is not supported "
                 "in this release; build with either TP=1 or max_batch_size=1."
@@ -231,31 +247,51 @@ class FluxPlugin:
         # Detect FLUX.2 via transformer config
         if _is_flux2(tc):
             return self._build_flux2_components(
-                model_dir, config, weights, tc=tc, verbose=verbose,
-                fp8_scales=fp8_scales, precision=precision,
-                build_timing=build_timing, parallel_config=parallel_config,
-                max_batch_size=max_batch_size)
+                model_dir,
+                config,
+                weights,
+                tc=tc,
+                verbose=verbose,
+                fp8_scales=fp8_scales,
+                precision=precision,
+                build_timing=build_timing,
+                parallel_config=parallel_config,
+                max_batch_size=max_batch_size,
+            )
 
         return self._build_flux1_components(
-            model_dir, config, weights, tc=tc, verbose=verbose,
-            precision=precision, build_timing=build_timing,
+            model_dir,
+            config,
+            weights,
+            tc=tc,
+            verbose=verbose,
+            precision=precision,
+            build_timing=build_timing,
             parallel_config=parallel_config,
-            max_batch_size=max_batch_size)
+            max_batch_size=max_batch_size,
+        )
 
     def _build_flux1_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        tc: dict,
+        precision: str = "fp32",
+        verbose: bool = False,
         build_timing: dict | None = None,
         parallel_config=None,
         max_batch_size: int = 1,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from .clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
-        from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
-        from .flux_dit_tp_builder import (
-            build_flux_dit_engine as build_flux_dit_tp_engine)
+        from .model.components.t5_encoder import build_t5_encoder_engine, load_t5_weights
+        from .model.components.clip_encoder import build_clip_encoder_engine, load_clip_weights
+        from .model.components.flux import build_flux_dit_engine, load_flux_dit_weights
+        from .model.components.flux_parallel import (
+            build_flux_dit_engine as build_flux_dit_tp_engine,
+        )
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
@@ -264,8 +300,7 @@ class FluxPlugin:
         from pathlib import Path
 
         parallel = normalize_parallel_config(parallel_config)
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Flux tensor-parallel builds")
+        require_tensorrt_11_for_tensor_parallel(parallel, feature="Flux tensor-parallel builds")
 
         # Per-component batch policy (design Decision C / E):
         # - DiT honours max_batch_size with opt = min(N, 4).
@@ -280,8 +315,9 @@ class FluxPlugin:
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
 
-        dit_dim = tc.get("num_attention_heads", self._DIT_NUM_HEADS) * \
-                  tc.get("attention_head_dim", self._DIT_HEAD_DIM)
+        dit_dim = tc.get("num_attention_heads", self._DIT_NUM_HEADS) * tc.get(
+            "attention_head_dim", self._DIT_HEAD_DIM
+        )
         num_heads = tc.get("num_attention_heads", self._DIT_NUM_HEADS)
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
         num_single_layers = tc.get("num_single_layers", self._DIT_NUM_SINGLE_LAYERS)
@@ -319,22 +355,19 @@ class FluxPlugin:
                         clip_weights = load_clip_weights(
                             clip_dir,
                             hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
-                            num_layers=clip_cfg.get(
-                                "num_hidden_layers", self._CLIP_LAYERS),
+                            num_layers=clip_cfg.get("num_hidden_layers", self._CLIP_LAYERS),
                         )
                     with timed_trt_compile(build_timing, "clip_encoder"):
                         clip_plan = build_clip_encoder_engine(
                             clip_weights,
                             hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
-                            num_heads=clip_cfg.get(
-                                "num_attention_heads", self._CLIP_HEADS),
+                            num_heads=clip_cfg.get("num_attention_heads", self._CLIP_HEADS),
                             intermediate_size=clip_cfg.get(
-                                "intermediate_size", self._CLIP_INTERMEDIATE),
-                            num_layers=clip_cfg.get(
-                                "num_hidden_layers", self._CLIP_LAYERS),
+                                "intermediate_size", self._CLIP_INTERMEDIATE
+                            ),
+                            num_layers=clip_cfg.get("num_hidden_layers", self._CLIP_LAYERS),
                             vocab_size=clip_cfg.get("vocab_size", self._CLIP_VOCAB),
-                            max_seq_len=clip_cfg.get(
-                                "max_position_embeddings", self._CLIP_MAX_SEQ),
+                            max_seq_len=clip_cfg.get("max_position_embeddings", self._CLIP_MAX_SEQ),
                             verbose=verbose,
                         )
                     text_encoders.append(("clip", clip_plan))
@@ -428,8 +461,10 @@ class FluxPlugin:
             if parallel.enabled:
                 dit_rank_plans = {}
                 for rank in range(parallel.tp_size):
-                    print(f"[flux] Building FLUX DiT TP rank {rank}/{parallel.tp_size} ...",
-                          file=sys.stderr)
+                    print(
+                        f"[flux] Building FLUX DiT TP rank {rank}/{parallel.tp_size} ...",
+                        file=sys.stderr,
+                    )
                     dit_rank_plans[rank] = build_flux_dit_tp_engine(
                         dit_weights,
                         dim=dit_dim,
@@ -457,7 +492,8 @@ class FluxPlugin:
 
         # 4. VAE decoder - native TRT engine
         # VAE always builds B=1 per Decision E (pipeline slices at runtime).
-        from .flux_vae_builder import build_flux_vae_decoder_engine
+        from .model.components.vae import build_flux_vae_decoder_engine
+
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
             latent_channels=self._VAE_LATENT_CHANNELS,
@@ -491,8 +527,14 @@ class FluxPlugin:
         return out
 
     def _build_flux2_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        tc: dict,
+        precision: str = "fp32",
+        verbose: bool = False,
         fp8_scales: dict | None = None,
         build_timing: dict | None = None,
         parallel_config=None,
@@ -507,20 +549,22 @@ class FluxPlugin:
         te_mbs = min(dit_mbs * 2, 8)
         vae_mbs = 1
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .mistral_encoder_builder import (
-            build_mistral_encoder_engine, load_mistral_encoder_weights)
-        from .flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
-        from .flux2_dit_tp_builder import (
-            build_flux2_dit_engine as build_flux2_dit_tp_engine)
-        from .flux_vae_builder import build_flux_vae_decoder_engine
+        from .model.components.mistral_encoder import (
+            build_mistral_encoder_engine,
+            load_mistral_encoder_weights,
+        )
+        from .model.components.flux2 import build_flux2_dit_engine, load_flux2_dit_weights
+        from .model.components.flux2_parallel import (
+            build_flux2_dit_engine as build_flux2_dit_tp_engine,
+        )
+        from .model.components.vae import build_flux_vae_decoder_engine
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
         )
 
         parallel = normalize_parallel_config(parallel_config)
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Flux.2 tensor-parallel builds")
+        require_tensorrt_11_for_tensor_parallel(parallel, feature="Flux.2 tensor-parallel builds")
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -528,8 +572,9 @@ class FluxPlugin:
         print("[flux] Detected FLUX.2 architecture", file=sys.stderr)
 
         # DiT params from transformer config
-        dit_dim = tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS) * \
-                  tc.get("attention_head_dim", self._DIT_HEAD_DIM)
+        dit_dim = tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS) * tc.get(
+            "attention_head_dim", self._DIT_HEAD_DIM
+        )
         num_heads = tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS)
         num_layers = tc.get("num_layers", self._FLUX2_DIT_NUM_LAYERS)
         num_single_layers = tc.get("num_single_layers", self._FLUX2_DIT_NUM_SINGLE_LAYERS)
@@ -557,9 +602,11 @@ class FluxPlugin:
         num_img_tokens = (h_lat // pack_size) * (w_lat // pack_size)
         text_seq_len = self._flux2_text_seq_len(config)
 
-        print(f"[flux] FLUX.2 spatial: img={img_h}x{img_w}, "
-              f"h_lat={h_lat}x{w_lat}, img_tokens={num_img_tokens}",
-              file=sys.stderr)
+        print(
+            f"[flux] FLUX.2 spatial: img={img_h}x{img_w}, "
+            f"h_lat={h_lat}x{w_lat}, img_tokens={num_img_tokens}",
+            file=sys.stderr,
+        )
         build_start = time.perf_counter()
 
         text_encoders = []
@@ -605,8 +652,9 @@ class FluxPlugin:
                 fp8_scales=fp8_scales,
             )
 
-        _cast_dtype = "bf16" if fp8_scales is not None else (
-            "bf16" if precision == "bf16" else "fp16")
+        _cast_dtype = (
+            "bf16" if fp8_scales is not None else ("bf16" if precision == "bf16" else "fp16")
+        )
 
         # packed_channels = z_dim * patch_h * patch_w (2x2 packing)
         packed_channels = vae_latent_channels * 4
@@ -617,14 +665,17 @@ class FluxPlugin:
         import gc
         import os
         import tempfile
+
         dit_plan = None
         _dit_tmp = None
         _dit_rank_tmps = {}
         with timed_trt_compile(build_timing, "flux2_dit"):
             if parallel.enabled:
                 for rank in range(parallel.tp_size):
-                    print(f"[flux] Building FLUX.2 DiT TP rank "
-                          f"{rank}/{parallel.tp_size} ...", file=sys.stderr)
+                    print(
+                        f"[flux] Building FLUX.2 DiT TP rank {rank}/{parallel.tp_size} ...",
+                        file=sys.stderr,
+                    )
                     rank_plan = build_flux2_dit_tp_engine(
                         dit_weights,
                         dim=dit_dim,
@@ -642,8 +693,7 @@ class FluxPlugin:
                         fp8_scales=fp8_scales,
                         parallel_config=parallel.for_rank(rank),
                     )
-                    rank_tmp = tempfile.NamedTemporaryFile(
-                        suffix=f".rank{rank}.plan", delete=False)
+                    rank_tmp = tempfile.NamedTemporaryFile(suffix=f".rank{rank}.plan", delete=False)
                     rank_tmp.write(rank_plan)
                     rank_tmp.close()
                     _dit_rank_tmps[rank] = rank_tmp.name
@@ -651,6 +701,7 @@ class FluxPlugin:
                     gc.collect()
                     try:
                         import torch
+
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                     except ImportError:
@@ -683,6 +734,7 @@ class FluxPlugin:
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except ImportError:
@@ -691,8 +743,10 @@ class FluxPlugin:
         # 2. Mistral 3 text encoder
         _te_tmp = None
         if te_dir:
-            print(f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
-                  file=sys.stderr)
+            print(
+                f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
+                file=sys.stderr,
+            )
             with timed_weight_loading(build_timing, "mistral_encoder"):
                 mistral_weights = load_mistral_encoder_weights(
                     te_dir,
@@ -732,6 +786,7 @@ class FluxPlugin:
             gc.collect()
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except ImportError:
@@ -751,29 +806,33 @@ class FluxPlugin:
             build_timing=build_timing,
             timing_component="vae_decoder",
         )
-        print(f"[flux] FLUX.2 VAE engine built [{time.perf_counter() - t0:.1f}s]",
-              file=sys.stderr)
+        print(f"[flux] FLUX.2 VAE engine built [{time.perf_counter() - t0:.1f}s]", file=sys.stderr)
 
         # 4. Load VAE BN stats (FLUX.2 uses BN denorm instead of scaling)
         import numpy as _np
         from pathlib import Path as _Path
+
         _vae_weights = {}
         _vae_st_files = sorted(_Path(vae_dir).glob("*.safetensors"))
         if _vae_st_files:
             from safetensors import safe_open as _safe_open
+
             with timed_weight_loading(build_timing, "vae_bn"):
                 for _f in _vae_st_files:
                     with _safe_open(str(_f), framework="numpy") as _r:
                         if "bn.running_mean" in _r.keys():
                             _vae_weights["bn.running_mean"] = _r.get_tensor(
-                                "bn.running_mean").astype(_np.float32)
+                                "bn.running_mean"
+                            ).astype(_np.float32)
                         if "bn.running_var" in _r.keys():
-                            _vae_weights["bn.running_var"] = _r.get_tensor(
-                                "bn.running_var").astype(_np.float32)
+                            _vae_weights["bn.running_var"] = _r.get_tensor("bn.running_var").astype(
+                                _np.float32
+                            )
 
         # 5. Serialize preprocessor weights
         preprocessor_weights = _serialize_flux2_preprocessor(
-            dit_weights, vae_bn_weights=_vae_weights)
+            dit_weights, vae_bn_weights=_vae_weights
+        )
 
         # Reload encoder plan from temp file if spilled to save GPU memory
         if _te_tmp is not None and text_encoders and text_encoders[0][1] is None:
@@ -793,8 +852,10 @@ class FluxPlugin:
                 dit_plan = _f.read()
             os.unlink(_dit_tmp.name)
 
-        print(f"[flux] FLUX.2 components built [{time.perf_counter() - build_start:.1f}s]",
-              file=sys.stderr)
+        print(
+            f"[flux] FLUX.2 components built [{time.perf_counter() - build_start:.1f}s]",
+            file=sys.stderr,
+        )
 
         out = {
             "text_encoders": text_encoders,
@@ -813,7 +874,9 @@ class FluxPlugin:
             }
         return out
 
-    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None
+    ) -> list[tuple[str, bytes]]:
         from ...parallel_config import normalize_parallel_config, rank_denoiser_section
 
         parallel = normalize_parallel_config(parallel_config)
@@ -841,7 +904,10 @@ class FluxPlugin:
         return cfg
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         from pathlib import Path
 
@@ -853,15 +919,22 @@ class FluxPlugin:
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
         token_filenames = (
-            "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json", "vocab.json",
-            "merges.txt", "spiece.model", "tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+            "tokenizer.model",
         )
         sections: list[tuple[str, bytes]] = []
         embedded: set[str] = set()
@@ -914,7 +987,8 @@ class FluxPlugin:
             "diffusion_backend_type": "flux_2d",
             "scheduler": "flow_match_euler",
             "num_inference_steps": config.raw.get(
-                "num_inference_steps", 28 if guidance_embeds else 4),
+                "num_inference_steps", 28 if guidance_embeds else 4
+            ),
             "guidance_scale": 3.5 if guidance_embeds else 0.0,
             "flow_shift": 3.0,
             "use_dynamic_shifting": 1,
@@ -925,8 +999,8 @@ class FluxPlugin:
             "video_height": img_h,
             "video_width": img_w,
             "video_num_frames": 1,
-            "dit_dim": tc.get("num_attention_heads", self._DIT_NUM_HEADS) * \
-                       tc.get("attention_head_dim", self._DIT_HEAD_DIM),
+            "dit_dim": tc.get("num_attention_heads", self._DIT_NUM_HEADS)
+            * tc.get("attention_head_dim", self._DIT_HEAD_DIM),
             "dit_num_heads": tc.get("num_attention_heads", self._DIT_NUM_HEADS),
             "dit_num_layers": tc.get("num_layers", self._DIT_NUM_LAYERS),
             "patch_size": [1, 2, 2],  # FLUX packs 2x2 latent patches into tokens
@@ -971,8 +1045,8 @@ class FluxPlugin:
             "video_height": img_h,
             "video_width": img_w,
             "video_num_frames": 1,
-            "dit_dim": tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS) * \
-                       tc.get("attention_head_dim", self._DIT_HEAD_DIM),
+            "dit_dim": tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS)
+            * tc.get("attention_head_dim", self._DIT_HEAD_DIM),
             "dit_num_heads": tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS),
             "dit_num_layers": tc.get("num_layers", self._FLUX2_DIT_NUM_LAYERS),
             "patch_size": [1, 2, 2],
@@ -991,7 +1065,6 @@ class FluxPlugin:
             "num_vae_caches": 0,
         }
 
-
     # ------------------------------------------------------------------
     # FP8 quantization support
     # ------------------------------------------------------------------
@@ -999,10 +1072,13 @@ class FluxPlugin:
     # Layers to exclude from FP8 (kept in BF16): embedders, norms, modulation.
     _FP8_EXCLUDE = re.compile(
         r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder"
-        r"|norm_out|time_guidance_embed|stream_modulation).*)")
+        r"|norm_out|time_guidance_embed|stream_modulation).*)"
+    )
 
     def fp8_calibrate(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> dict[str, dict[str, float]]:
         """Run FP8 E4M3 calibration for FLUX.2-dev.
 
@@ -1013,11 +1089,10 @@ class FluxPlugin:
         import torch
         from ...fp8_calibrate import FP8_MHA_CONFIG, run_fp8_calibration
 
-        print("[fp8-calibrate] Loading FLUX.2-dev transformer ...",
-              file=sys.stderr)
+        print("[fp8-calibrate] Loading FLUX.2-dev transformer ...", file=sys.stderr)
         from diffusers import Flux2Pipeline
-        pipe = Flux2Pipeline.from_pretrained(
-            model_dir, torch_dtype=torch.bfloat16)
+
+        pipe = Flux2Pipeline.from_pretrained(model_dir, torch_dtype=torch.bfloat16)
         model = pipe.transformer.cpu().eval()
         del pipe
 
@@ -1030,8 +1105,9 @@ class FluxPlugin:
         text_seq = self._flux2_text_seq_len(config)
         packed_ch = 32 * 4  # z_dim * 2x2 patch
         # Encoder dim = Mistral hidden * num_extract_layers (5120 * 3 = 15360)
-        encoder_dim = tc.get("joint_attention_dim",
-                             self._MISTRAL_HIDDEN * len(self._MISTRAL_EXTRACT_LAYERS))
+        encoder_dim = tc.get(
+            "joint_attention_dim", self._MISTRAL_HIDDEN * len(self._MISTRAL_EXTRACT_LAYERS)
+        )
 
         def calibration_loop(m: torch.nn.Module) -> None:
             timesteps = torch.linspace(50, 950, 8)
@@ -1040,31 +1116,30 @@ class FluxPlugin:
             for t in timesteps:
                 for _ in range(4):
                     inputs = {
-                        "hidden_states": torch.randn(
-                            1, num_img, packed_ch, dtype=torch.bfloat16),
+                        "hidden_states": torch.randn(1, num_img, packed_ch, dtype=torch.bfloat16),
                         "encoder_hidden_states": torch.randn(
-                            1, text_seq, encoder_dim,
-                            dtype=torch.bfloat16),
-                        "timestep": torch.tensor(
-                            [t.item() / 1000.0], dtype=torch.float32),
-                        "guidance": torch.tensor(
-                            [3.5], dtype=torch.float32),
-                        "txt_ids": torch.zeros(
-                            text_seq, 4, dtype=torch.bfloat16),
-                        "img_ids": torch.zeros(
-                            num_img, 4, dtype=torch.bfloat16),
+                            1, text_seq, encoder_dim, dtype=torch.bfloat16
+                        ),
+                        "timestep": torch.tensor([t.item() / 1000.0], dtype=torch.float32),
+                        "guidance": torch.tensor([3.5], dtype=torch.float32),
+                        "txt_ids": torch.zeros(text_seq, 4, dtype=torch.bfloat16),
+                        "img_ids": torch.zeros(num_img, 4, dtype=torch.bfloat16),
                     }
                     with torch.no_grad():
                         m(**inputs)
                     done += 1
                     if done % 4 == 0:
-                        print(f"  [fp8-calibrate] {done}/{total} "
-                              f"(t={t.item():.0f})", file=sys.stderr)
+                        print(
+                            f"  [fp8-calibrate] {done}/{total} (t={t.item():.0f})", file=sys.stderr
+                        )
 
         return run_fp8_calibration(
-            model, calibration_loop, self._FP8_EXCLUDE,
+            model,
+            calibration_loop,
+            self._FP8_EXCLUDE,
             config=FP8_MHA_CONFIG,
-            pre_quantize_hook=_register_flux2_attention_quantizers)
+            pre_quantize_hook=_register_flux2_attention_quantizers,
+        )
 
 
 def _is_flux2(tc: dict) -> bool:
@@ -1158,37 +1233,6 @@ def _serialize_flux2_preprocessor(
         result += part
 
     return result
-
-
-def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
-    """Build a minimal VAE placeholder engine.
-
-    Actual VAE decoding for FLUX is done via Python subprocess
-    using diffusers AutoencoderKL. This placeholder engine exists
-    only to satisfy the bundle format requirement for a vae_decoder_plan.
-    """
-    from tensorrt_model_connect import trt_compat
-    trt = trt_compat.get_trt()
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
-
-    # Simple identity: input [C, H, W] -> output [C, H, W]
-    inp = network.add_input("latents", trt.float32, (latent_channels, h_lat, w_lat))
-    identity = network.add_identity(inp)
-    out = identity.get_output(0)
-    cast_out = network.add_cast(out, trt.float32)
-    out_final = cast_out.get_output(0)
-    out_final.name = "output"
-    network.mark_output(out_final)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("VAE placeholder engine build failed")
-    return bytes(plan)
 
 
 def _serialize_flux_preprocessor(dit_weights: dict, guidance_embeds: bool) -> bytes:

@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _dpr_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.dpr.tp_builder",
+        "tensorrt_model_connect.families.dpr.model.parallel",
         reason="TensorRT is required for DPR TP builder tests",
     )
 

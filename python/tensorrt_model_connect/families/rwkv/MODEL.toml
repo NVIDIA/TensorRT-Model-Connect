@@ -8,7 +8,7 @@ aliases = [
 prefixes = [
   "rwkv",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runner = "model/runtime.py|runner_from_bundle"
 debug_runtime_strategies = [
   "rwkv_recurrent",
 ]

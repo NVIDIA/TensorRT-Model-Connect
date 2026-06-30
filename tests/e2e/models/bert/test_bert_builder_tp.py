@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _bert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.bert.tp_builder",
+        "tensorrt_model_connect.families.bert.model.model",
         reason="TensorRT is required for BERT TP builder tests",
     )
 

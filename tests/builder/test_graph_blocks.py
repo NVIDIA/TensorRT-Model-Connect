@@ -366,6 +366,13 @@ class TestAddGeluFcMlp:
 
     def test_silu_activation(self, trt_runner):
         """GELU FC MLP with activation='silu' instead of default gelu_new."""
+        from tests.builder.owned_graph_modules import load_owned_callable
+
+        add_gelu_fc_mlp = load_owned_callable(
+            "model/model.py",
+            "add_gelu_fc_mlp",
+            "activation",
+        )
         rng = np.random.RandomState(42)
         hidden_size, mlp_size, seq = 32, 64, 4
 
@@ -379,7 +386,7 @@ class TestAddGeluFcMlp:
         }
 
         def build(net, inp):
-            out = graph_blocks.add_gelu_fc_mlp(
+            out = add_gelu_fc_mlp(
                 net, inp["x"],
                 weights=weights, prefix="mlp",
                 hidden_size=hidden_size, mlp_size=mlp_size,

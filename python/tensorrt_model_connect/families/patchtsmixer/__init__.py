@@ -1,3 +1,3 @@
-from .plugin import PatchTSMixerPlugin, plugin
+from .plugin import plugin
 
-__all__ = ["PatchTSMixerPlugin", "plugin"]
+__all__ = ["plugin"]

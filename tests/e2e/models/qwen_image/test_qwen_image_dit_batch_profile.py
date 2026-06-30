@@ -202,7 +202,7 @@ if "tensorrt" not in sys.modules:
 
 
 def _tiny_cfg():
-    from tensorrt_model_connect.families.qwen_image.qwen_image_dit_builder import (
+    from tensorrt_model_connect.families.qwen_image.model.model import (
         QwenImageDiTConfig,
     )
 
@@ -374,7 +374,7 @@ def test_max_batch_size_four_uses_dynamic_dim_and_calls_profile(
 ):
     pytest.importorskip("numpy")
     pytest.importorskip("ml_dtypes")
-    from tensorrt_model_connect.families.qwen_image.qwen_image_dit_builder import (
+    from tensorrt_model_connect.families.qwen_image.model.model import (
         build_qwen_image_dit_engine,
     )
 
@@ -416,7 +416,7 @@ def test_not_implemented_error_guard_is_gone(monkeypatch, tmp_path):
     """
     pytest.importorskip("numpy")
     pytest.importorskip("ml_dtypes")
-    from tensorrt_model_connect.families.qwen_image.qwen_image_dit_builder import (
+    from tensorrt_model_connect.families.qwen_image.model.model import (
         build_qwen_image_dit_engine,
     )
 

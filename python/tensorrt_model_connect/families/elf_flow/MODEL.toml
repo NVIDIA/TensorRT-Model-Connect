@@ -1,7 +1,7 @@
 id = "elf_flow"
 plugin = "elf_flow"
 module = "plugin"
-config_adapter = "model_config.py|config_from_dir"
+config_adapter = "model/components/config.py|config_from_dir"
 hf_allow_patterns = [
   "*.yml",
   "*.yaml",

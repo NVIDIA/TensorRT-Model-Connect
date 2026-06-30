@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -54,7 +54,9 @@ class XlnetPlugin:
         return model_type.lower() == "xlnet"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -95,14 +97,18 @@ class XlnetPlugin:
             weights[f"{prefix}.seg_embed"] = seg.astype(np.float32)
 
             weights[f"{prefix}.attn_norm"] = _load_tensor(
-                readers, f"{hf_prefix}.rel_attn.layer_norm.weight").astype(np.float32)
+                readers, f"{hf_prefix}.rel_attn.layer_norm.weight"
+            ).astype(np.float32)
             weights[f"{prefix}.attn_norm_beta"] = _load_tensor(
-                readers, f"{hf_prefix}.rel_attn.layer_norm.bias").astype(np.float32)
+                readers, f"{hf_prefix}.rel_attn.layer_norm.bias"
+            ).astype(np.float32)
 
             weights[f"{prefix}.ff_norm"] = _load_tensor(
-                readers, f"{hf_prefix}.ff.layer_norm.weight").astype(np.float32)
+                readers, f"{hf_prefix}.ff.layer_norm.weight"
+            ).astype(np.float32)
             weights[f"{prefix}.ff_norm_beta"] = _load_tensor(
-                readers, f"{hf_prefix}.ff.layer_norm.bias").astype(np.float32)
+                readers, f"{hf_prefix}.ff.layer_norm.bias"
+            ).astype(np.float32)
 
             fc1_w = _load_tensor(readers, f"{hf_prefix}.ff.layer_1.weight")
             fc1_b = _load_tensor(readers, f"{hf_prefix}.ff.layer_1.bias")
@@ -117,29 +123,36 @@ class XlnetPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="XLNet tensor-parallel builds")
+                parallel, feature="XLNet tensor-parallel builds"
+            )
             if quant_ctx is not None:
                 raise ValueError("XLNet tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_xlnet_engine
+            from .model.parallel import build_tp_xlnet_engine
+
             return build_tp_xlnet_engine(
-                config, weights,
+                config,
+                weights,
                 max_seq_length=max_cache_length,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
-        from .xlnet_builder import build_xlnet_engine
-        return build_xlnet_engine(
-            config, weights,
-            max_seq_length=max_cache_length,
-            verbose=verbose)
+        from .model.model import build_xlnet_engine
+
+        return build_xlnet_engine(config, weights, max_seq_length=max_cache_length, verbose=verbose)
 
 
 plugin = XlnetPlugin()

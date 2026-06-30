@@ -9,8 +9,8 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import (
+from .model import model as graph_ops
+from .weights import (
     WeightDict,
     _load_tensor,
     _open_safetensors,
@@ -19,7 +19,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
-from .time_series_trt import (
+from .model.model import (
     add_gelu,
     add_linear,
     add_named_output,
@@ -58,18 +58,26 @@ def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
-        if arr.ndim == 2 and "relative_attention_bias" not in name and (
-            ".SelfAttention." in name
-            or ".EncDecAttention." in name
-            or ".DenseReluDense." in name
+        if (
+            arr.ndim == 2
+            and "relative_attention_bias" not in name
+            and (
+                ".SelfAttention." in name
+                or ".EncDecAttention." in name
+                or ".DenseReluDense." in name
+            )
         ):
             weights[name] = _transpose_2d(arr, name, precision=precision)
         else:
-            dtype = np.float32 if (
-                name.endswith("layer_norm.weight")
-                or name.endswith("final_layer_norm.weight")
-                or "relative_attention_bias" in name
-            ) else target_dtype
+            dtype = (
+                np.float32
+                if (
+                    name.endswith("layer_norm.weight")
+                    or name.endswith("final_layer_norm.weight")
+                    or "relative_attention_bias" in name
+                )
+                else target_dtype
+            )
             weights[name] = np.ascontiguousarray(arr, dtype=dtype)
     return weights
 
@@ -127,11 +135,12 @@ def _make_encoder_mask(
     max_distance: int,
 ) -> trt.ITensor:
     one = add_scalar(network, (1, seq_len), 1.0)
+    invalid = network.add_elementwise(one, attention_mask, trt.ElementWiseOperation.SUB).get_output(
+        0
+    )
     invalid = network.add_elementwise(
-        one, attention_mask, trt.ElementWiseOperation.SUB
-    ).get_output(0)
-    invalid = network.add_elementwise(
-        invalid, add_scalar(network, (1, seq_len), -1.0e9),
+        invalid,
+        add_scalar(network, (1, seq_len), -1.0e9),
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     mask = network.add_shuffle(invalid)
@@ -146,7 +155,8 @@ def _make_encoder_mask(
         )
         bias = rel_bias[buckets.flatten()].reshape(seq_len, seq_len, num_heads).transpose(2, 0, 1)
         bias_t = graph_ops.add_constant(
-            network, (1, num_heads, seq_len, seq_len),
+            network,
+            (1, num_heads, seq_len, seq_len),
             bias.reshape(1, num_heads, seq_len, seq_len).astype(np.float32),
             dtype=np.float32,
         )
@@ -174,11 +184,14 @@ def _add_t5_attention_rows(
     kv_in = hidden if kv is None else kv
     kv_seq = q_seq if kv_seq is None else kv_seq
     q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, num_heads * head_dim, weights[f"{prefix}.q.weight"])
+        network, hidden, hidden_size, num_heads * head_dim, weights[f"{prefix}.q.weight"]
+    )
     k = graph_ops.add_matmul_rhs_constant(
-        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.k.weight"])
+        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.k.weight"]
+    )
     v = graph_ops.add_matmul_rhs_constant(
-        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.v.weight"])
+        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.v.weight"]
+    )
     ctx = graph_ops.add_attention_from_rows(
         network,
         q,
@@ -192,7 +205,8 @@ def _add_t5_attention_rows(
         scale=1.0,
     )
     return graph_ops.add_matmul_rhs_constant(
-        network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"])
+        network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"]
+    )
 
 
 def _add_t5_ffn(
@@ -205,12 +219,16 @@ def _add_t5_ffn(
     d_ff: int,
     eps_t: trt.ITensor,
 ) -> trt.ITensor:
-    norm = graph_ops.add_rms_norm(network, hidden, hidden_size, weights[f"{prefix}.layer_norm.weight"], eps_t)
+    norm = graph_ops.add_rms_norm(
+        network, hidden, hidden_size, weights[f"{prefix}.layer_norm.weight"], eps_t
+    )
     ff = graph_ops.add_matmul_rhs_constant(
-        network, norm, hidden_size, d_ff, weights[f"{prefix}.DenseReluDense.wi.weight"])
+        network, norm, hidden_size, d_ff, weights[f"{prefix}.DenseReluDense.wi.weight"]
+    )
     ff = network.add_activation(ff, trt.ActivationType.RELU).get_output(0)
     ff = graph_ops.add_matmul_rhs_constant(
-        network, ff, d_ff, hidden_size, weights[f"{prefix}.DenseReluDense.wo.weight"])
+        network, ff, d_ff, hidden_size, weights[f"{prefix}.DenseReluDense.wo.weight"]
+    )
     return network.add_elementwise(hidden, ff, trt.ElementWiseOperation.SUM).get_output(0)
 
 
@@ -270,7 +288,8 @@ def _add_encoder(
             eps_t=eps_t,
         )
     return graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights["encoder.final_layer_norm.weight"], eps_t)
+        network, hidden, hidden_size, weights["encoder.final_layer_norm.weight"], eps_t
+    )
 
 
 def _add_decoder(
@@ -289,14 +308,17 @@ def _add_decoder(
     d_ff = int(raw.get("d_ff", 1024))
     num_layers = int(raw.get("num_decoder_layers", raw.get("num_layers", 4)))
     shared = graph_ops.add_constant(
-        network, tuple(weights["shared.weight"].shape), weights["shared.weight"], dtype=np.float32)
-    token_id = graph_ops.add_constant(
-        network, (1,), np.array([0], dtype=np.int32), dtype=np.int32)
+        network, tuple(weights["shared.weight"].shape), weights["shared.weight"], dtype=np.float32
+    )
+    token_id = graph_ops.add_constant(network, (1,), np.array([0], dtype=np.int32), dtype=np.int32)
     hidden = network.add_gather(shared, token_id, 0).get_output(0)
 
     one_mask = graph_ops.add_constant(
-        network, (1, num_heads, 1, 1), np.zeros((1, num_heads, 1, 1), dtype=np.float32),
-        dtype=np.float32)
+        network,
+        (1, num_heads, 1, 1),
+        np.zeros((1, num_heads, 1, 1), dtype=np.float32),
+        dtype=np.float32,
+    )
     cross_mask = _make_encoder_mask(
         network,
         encoder_mask,
@@ -307,14 +329,14 @@ def _add_decoder(
         max_distance=int(raw.get("relative_attention_max_distance", 128)),
     )
     cross_mask_slice = network.add_slice(
-        cross_mask, start=(0, 0, 0, 0), shape=(1, num_heads, 1, seq_len),
-        stride=(1, 1, 1, 1)).get_output(0)
+        cross_mask, start=(0, 0, 0, 0), shape=(1, num_heads, 1, seq_len), stride=(1, 1, 1, 1)
+    ).get_output(0)
 
     for layer_idx in range(num_layers):
         pfx = f"decoder.block.{layer_idx}"
         norm = graph_ops.add_rms_norm(
-            network, hidden, hidden_size,
-            weights[f"{pfx}.layer.0.layer_norm.weight"], eps_t)
+            network, hidden, hidden_size, weights[f"{pfx}.layer.0.layer_norm.weight"], eps_t
+        )
         attn = _add_t5_attention_rows(
             network,
             norm,
@@ -328,8 +350,8 @@ def _add_decoder(
         )
         hidden = network.add_elementwise(hidden, attn, trt.ElementWiseOperation.SUM).get_output(0)
         norm = graph_ops.add_rms_norm(
-            network, hidden, hidden_size,
-            weights[f"{pfx}.layer.1.layer_norm.weight"], eps_t)
+            network, hidden, hidden_size, weights[f"{pfx}.layer.1.layer_norm.weight"], eps_t
+        )
         cross = _add_t5_attention_rows(
             network,
             norm,
@@ -354,7 +376,8 @@ def _add_decoder(
             eps_t=eps_t,
         )
     return graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights["decoder.final_layer_norm.weight"], eps_t)
+        network, hidden, hidden_size, weights["decoder.final_layer_norm.weight"], eps_t
+    )
 
 
 def _build_chronos_network(
@@ -367,11 +390,14 @@ def _build_chronos_network(
     raw = config.raw
     chronos = _chronos_raw_config(config)
     context_length = _first_positive_int(
-        chronos, ("context_length", "input_length", "max_context_length"), 2048)
+        chronos, ("context_length", "input_length", "max_context_length"), 2048
+    )
     patch_size = int(chronos.get("input_patch_size", 16))
     patch_stride = int(chronos.get("input_patch_stride", patch_size))
     if patch_size != patch_stride:
-        raise NotImplementedError("Chronos-Bolt native TRT builder requires non-overlapping input patches")
+        raise NotImplementedError(
+            "Chronos-Bolt native TRT builder requires non-overlapping input patches"
+        )
     num_patches = context_length // patch_size
     seq_len = num_patches + (1 if bool(chronos.get("use_reg_token", False)) else 0)
     hidden_size = int(raw.get("d_model", 256))
@@ -390,23 +416,30 @@ def _build_chronos_network(
 
     denom = network.add_reduce(mask, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
     denom = network.add_elementwise(
-        denom, add_scalar(network, (1, 1), 1.0), trt.ElementWiseOperation.MAX).get_output(0)
+        denom, add_scalar(network, (1, 1), 1.0), trt.ElementWiseOperation.MAX
+    ).get_output(0)
     loc = network.add_reduce(
-        context_zero, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
+        context_zero, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+    ).get_output(0)
     loc = network.add_elementwise(loc, denom, trt.ElementWiseOperation.DIV).get_output(0)
-    centered = network.add_elementwise(context_zero, loc, trt.ElementWiseOperation.SUB).get_output(0)
+    centered = network.add_elementwise(context_zero, loc, trt.ElementWiseOperation.SUB).get_output(
+        0
+    )
     centered = network.add_elementwise(centered, mask, trt.ElementWiseOperation.PROD).get_output(0)
     var = network.add_reduce(
         network.add_elementwise(centered, centered, trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ReduceOperation.SUM, 1 << 1, keep_dims=True,
+        trt.ReduceOperation.SUM,
+        1 << 1,
+        keep_dims=True,
     ).get_output(0)
     var = network.add_elementwise(var, denom, trt.ElementWiseOperation.DIV).get_output(0)
     scale = network.add_unary(var, trt.UnaryOperation.SQRT).get_output(0)
     scale = network.add_elementwise(
-        scale, add_scalar(network, (1, 1), 1.0e-5),
-        trt.ElementWiseOperation.MAX).get_output(0)
-    normalized = network.add_elementwise(
-        centered, scale, trt.ElementWiseOperation.DIV).get_output(0)
+        scale, add_scalar(network, (1, 1), 1.0e-5), trt.ElementWiseOperation.MAX
+    ).get_output(0)
+    normalized = network.add_elementwise(centered, scale, trt.ElementWiseOperation.DIV).get_output(
+        0
+    )
 
     norm3 = network.add_shuffle(normalized)
     norm3.reshape_dims = (1, context_length, 1)
@@ -433,7 +466,8 @@ def _build_chronos_network(
     )
     patch_mask = network.add_shuffle(patch_mask).get_output(0)
     patch_mask_sum = network.add_reduce(
-        patch_mask, trt.ReduceOperation.SUM, 1 << 3, keep_dims=False).get_output(0)
+        patch_mask, trt.ReduceOperation.SUM, 1 << 3, keep_dims=False
+    ).get_output(0)
     patch_mask_flat = network.add_shuffle(patch_mask_sum)
     patch_mask_flat.reshape_dims = (1, num_patches)
     attention_mask = network.add_elementwise(
@@ -446,9 +480,13 @@ def _build_chronos_network(
     cat = network.add_concatenation([patches, patch_mask])
     cat.axis = 3
     emb = _add_residual_block(
-        network, cat.get_output(0), weights,
-        prefix="input_patch_embedding", precision=precision,
-        activation=str(raw.get("dense_act_fn", "relu")).lower())
+        network,
+        cat.get_output(0),
+        weights,
+        prefix="input_patch_embedding",
+        precision=precision,
+        activation=str(raw.get("dense_act_fn", "relu")).lower(),
+    )
     emb2 = network.add_shuffle(emb)
     emb2.reshape_dims = (num_patches, hidden_size)
     emb = emb2.get_output(0)
@@ -459,22 +497,33 @@ def _build_chronos_network(
         cat_emb = network.add_concatenation([emb, reg_t])
         cat_emb.axis = 0
         emb = cat_emb.get_output(0)
-        one = graph_ops.add_constant(network, (1, 1), np.ones((1, 1), dtype=np.float32), dtype=np.float32)
+        one = graph_ops.add_constant(
+            network, (1, 1), np.ones((1, 1), dtype=np.float32), dtype=np.float32
+        )
         cat_mask = network.add_concatenation([attention_mask, one])
         cat_mask.axis = 1
         attention_mask = cat_mask.get_output(0)
 
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([float(raw.get("layer_norm_epsilon", 1.0e-6))], dtype=np.float32),
-        dtype=np.float32)
+        network,
+        (1, 1),
+        np.array([float(raw.get("layer_norm_epsilon", 1.0e-6))], dtype=np.float32),
+        dtype=np.float32,
+    )
     encoder_hidden = _add_encoder(
-        network, emb, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t)
+        network, emb, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t
+    )
     decoder_hidden = _add_decoder(
-        network, encoder_hidden, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t)
+        network, encoder_hidden, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t
+    )
     preds = _add_residual_block(
-        network, decoder_hidden, weights,
-        prefix="output_patch_embedding", precision=precision,
-        activation=str(raw.get("dense_act_fn", "relu")).lower())
+        network,
+        decoder_hidden,
+        weights,
+        prefix="output_patch_embedding",
+        precision=precision,
+        activation=str(raw.get("dense_act_fn", "relu")).lower(),
+    )
     pred_shuf = network.add_shuffle(preds)
     pred_shuf.reshape_dims = (1, num_quantiles, prediction_length)
     pred_t = pred_shuf.get_output(0)
@@ -483,13 +532,16 @@ def _build_chronos_network(
     loc3 = network.add_shuffle(loc)
     loc3.reshape_dims = (1, 1, 1)
     pred_t = network.add_elementwise(
-        pred_t, scale3.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        pred_t, scale3.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
     pred_t = network.add_elementwise(
-        pred_t, loc3.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+        pred_t, loc3.get_output(0), trt.ElementWiseOperation.SUM
+    ).get_output(0)
     add_named_output(network, pred_t, "quantile_preds")
 
     return build_serialized_network(
-        builder, network, precision=precision, verbose=verbose, tag="chronos_bolt")
+        builder, network, precision=precision, verbose=verbose, tag="chronos_bolt"
+    )
 
 
 class ChronosBoltPlugin:
@@ -545,13 +597,13 @@ class ChronosBoltPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="Chronos-Bolt replicated tensor-parallel bundles")
+                parallel, feature="Chronos-Bolt replicated tensor-parallel bundles"
+            )
             cached = maybe_return_replicated_tp_plan(weights, parallel)
             if cached is not None:
                 return cached
 
-        plan = _build_chronos_network(
-            config, weights, precision=precision, verbose=verbose)
+        plan = _build_chronos_network(config, weights, precision=precision, verbose=verbose)
         cache_replicated_tp_plan(weights, parallel, plan)
         return plan
 

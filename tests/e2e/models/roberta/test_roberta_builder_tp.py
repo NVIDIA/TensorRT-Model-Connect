@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _roberta_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.roberta.tp_builder",
+        "tensorrt_model_connect.families.roberta.model.parallel",
         reason="TensorRT is required for RoBERTa TP builder tests",
     )
 

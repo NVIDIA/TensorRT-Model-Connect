@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -18,8 +18,8 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
 
 
 class PhiPlugin:
@@ -29,12 +29,12 @@ class PhiPlugin:
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
-        return (mt.startswith("phi")
-                and mt != "phimoe"
-                and mt not in ("phi4mm", "phi4_multimodal"))
+        return mt.startswith("phi") and mt != "phimoe" and mt not in ("phi4mm", "phi4_multimodal")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load Phi-3 weights, splitting fused qkv_proj and gate_up_proj."""
         model_dir_path = Path(model_dir)
@@ -55,7 +55,8 @@ class PhiPlugin:
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -66,26 +67,24 @@ class PhiPlugin:
             hf_prefix = f"model.layers.{layer_idx}"
 
             # Norms (1D, no transpose)
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # ---- Fused QKV projection ----
             # Shape: [q_dim + 2*kv_dim, hidden]
-            qkv_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.qkv_proj.weight")
+            qkv_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.qkv_proj.weight")
             total_qkv = qkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
             assert total_qkv == expected_qkv, (
                 f"Layer {layer_idx} qkv_proj rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
+                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})"
+            )
 
-            q_raw = qkv_raw[:q_dim, :]              # [q_dim, hidden]
-            k_raw = qkv_raw[q_dim:q_dim+kv_dim, :]  # [kv_dim, hidden]
-            v_raw = qkv_raw[q_dim+kv_dim:, :]       # [kv_dim, hidden]
+            q_raw = qkv_raw[:q_dim, :]  # [q_dim, hidden]
+            k_raw = qkv_raw[q_dim : q_dim + kv_dim, :]  # [kv_dim, hidden]
+            v_raw = qkv_raw[q_dim + kv_dim :, :]  # [kv_dim, hidden]
             del qkv_raw
 
             if attention_size == 0:
@@ -102,15 +101,13 @@ class PhiPlugin:
             weights[f"{prefix}.w_v"] = v_t
 
             # Output projection (separate, not fused)
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
             weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
             del o_raw
 
             # ---- Fused gate_up projection ----
             # Shape: [2 * intermediate_size, hidden]
-            gate_up_raw = _load_tensor(
-                readers, f"{hf_prefix}.mlp.gate_up_proj.weight")
+            gate_up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_up_proj.weight")
             intermediate = gate_up_raw.shape[0] // 2
             if mlp_size == 0:
                 mlp_size = intermediate
@@ -124,24 +121,21 @@ class PhiPlugin:
             del gate_raw, up_raw
 
             # Down projection (separate, not fused)
-            down_raw = _load_tensor(
-                readers, f"{hf_prefix}.mlp.down_proj.weight")
+            down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
             weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
             del down_raw
 
         # Final norm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             # Tied embeddings
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
@@ -153,31 +147,43 @@ class PhiPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="Phi tensor-parallel builds")
+            require_tensorrt_11_for_tensor_parallel(parallel, feature="Phi tensor-parallel builds")
             if quant_ctx is not None:
-                raise ValueError(
-                    "Phi tensor-parallel builds do not support quantization")
+                raise ValueError("Phi tensor-parallel builds do not support quantization")
             if debug_layer_outputs:
-                raise ValueError(
-                    "Phi tensor-parallel builds do not support debug_layer_outputs")
+                raise ValueError("Phi tensor-parallel builds do not support debug_layer_outputs")
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length, precision=precision,
-                quant_ctx=quant_ctx, verbose=verbose,
-                parallel_config=parallel)
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = PhiPlugin()

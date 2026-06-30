@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tensorrt_model_connect.families.qwen.checkpoint_mapper import (
+from tensorrt_model_connect.families.qwen.weights import (
     _transpose_2d,
     _repeat_head_norm,
     _has_tensor,

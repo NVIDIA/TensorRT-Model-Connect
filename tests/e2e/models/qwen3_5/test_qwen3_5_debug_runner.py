@@ -30,7 +30,7 @@ def _make_bundle_bytes(
 
 
 def test_qwen3_5_hybrid_dispatch_uses_qwen3_5_owned_runner(tmp_path):
-    from tensorrt_model_connect.families.qwen3_5.debug_runner import (
+    from tensorrt_model_connect.families.qwen3_5.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -55,7 +55,7 @@ def test_qwen3_5_hybrid_dispatch_uses_qwen3_5_owned_runner(tmp_path):
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.qwen3_5.debug_runner.HybridTrtRunner",
+        "tensorrt_model_connect.families.qwen3_5.model.runtime.HybridTrtRunner",
         return_value="qwen3_5-hybrid-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

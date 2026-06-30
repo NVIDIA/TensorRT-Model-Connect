@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.families.elf_flow.validate_replay_artifact import (
+from tools.families.elf_flow.validate_replay_artifact import (
     validate_artifact,
 )
 

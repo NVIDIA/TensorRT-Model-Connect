@@ -36,7 +36,7 @@ _KERNEL = 3
 
 def _convbert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.convbert.tp_builder",
+        "tensorrt_model_connect.families.convbert.model.parallel",
         reason="TensorRT is required for ConvBERT TP builder tests",
     )
 

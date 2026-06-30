@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -25,8 +25,8 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
-from .standard_decoder_builder import build_standard_decoder_engine
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
 
 
 class GPTNeoPlugin:
@@ -38,7 +38,9 @@ class GPTNeoPlugin:
         return model_type.lower() == "gpt_neo"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -54,7 +56,8 @@ class GPTNeoPlugin:
         # Token embedding (wte)
         embedding = _load_tensor(readers, "transformer.wte.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (wpe) — learned absolute positions
@@ -81,12 +84,9 @@ class GPTNeoPlugin:
             weights[f"{prefix}.post_attn_norm_beta"] = ln2_bias.astype(np.float32)
 
             # Separate Q/K/V projections — standard Linear [out, in] layout
-            q_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.attention.q_proj.weight")
-            k_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.attention.k_proj.weight")
-            v_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.attention.v_proj.weight")
+            q_w = _load_tensor(readers, f"{hf_prefix}.attn.attention.q_proj.weight")
+            k_w = _load_tensor(readers, f"{hf_prefix}.attn.attention.k_proj.weight")
+            v_w = _load_tensor(readers, f"{hf_prefix}.attn.attention.v_proj.weight")
 
             # Transpose [out, in] -> [in, out]
             weights[f"{prefix}.w_q"] = _transpose_2d(q_w, "q_proj")
@@ -94,32 +94,24 @@ class GPTNeoPlugin:
             weights[f"{prefix}.w_v"] = _transpose_2d(v_w, "v_proj")
 
             # Output projection (Linear with bias)
-            o_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.attention.out_proj.weight")
-            o_b = _load_tensor(
-                readers, f"{hf_prefix}.attn.attention.out_proj.bias")
+            o_w = _load_tensor(readers, f"{hf_prefix}.attn.attention.out_proj.weight")
+            o_b = _load_tensor(readers, f"{hf_prefix}.attn.attention.out_proj.bias")
             weights[f"{prefix}.w_o"] = _transpose_2d(o_w, "o_proj")
             weights[f"{prefix}.o_bias"] = o_b.astype(np.float32)
 
             # MLP: c_fc and c_proj — nn.Linear [out, in] layout
-            mlp_fc_weight = _load_tensor(
-                readers, f"{hf_prefix}.mlp.c_fc.weight")
-            mlp_fc_bias = _load_tensor(
-                readers, f"{hf_prefix}.mlp.c_fc.bias")
-            mlp_proj_weight = _load_tensor(
-                readers, f"{hf_prefix}.mlp.c_proj.weight")
-            mlp_proj_bias = _load_tensor(
-                readers, f"{hf_prefix}.mlp.c_proj.bias")
+            mlp_fc_weight = _load_tensor(readers, f"{hf_prefix}.mlp.c_fc.weight")
+            mlp_fc_bias = _load_tensor(readers, f"{hf_prefix}.mlp.c_fc.bias")
+            mlp_proj_weight = _load_tensor(readers, f"{hf_prefix}.mlp.c_proj.weight")
+            mlp_proj_bias = _load_tensor(readers, f"{hf_prefix}.mlp.c_proj.bias")
 
             if mlp_size == 0:
                 mlp_size = mlp_fc_weight.shape[0]
 
             # Linear: [out, in] -> transpose to [in, out]
-            weights[f"{prefix}.w_fc1"] = _transpose_2d(
-                mlp_fc_weight, "c_fc")
+            weights[f"{prefix}.w_fc1"] = _transpose_2d(mlp_fc_weight, "c_fc")
             weights[f"{prefix}.fc1_bias"] = mlp_fc_bias.astype(np.float32)
-            weights[f"{prefix}.w_fc2"] = _transpose_2d(
-                mlp_proj_weight, "c_proj")
+            weights[f"{prefix}.w_fc2"] = _transpose_2d(mlp_proj_weight, "c_proj")
             weights[f"{prefix}.fc2_bias"] = mlp_proj_bias.astype(np.float32)
 
         # Final LayerNorm
@@ -134,8 +126,7 @@ class GPTNeoPlugin:
             weights["w_out"] = _transpose_2d(lm_head, "lm_head")
         else:
             # Tied: reuse embedding [vocab, hidden] -> transpose to [hidden, vocab]
-            weights["w_out"] = np.ascontiguousarray(
-                embedding.T.astype(np.float32))
+            weights["w_out"] = np.ascontiguousarray(embedding.T.astype(np.float32))
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
@@ -144,34 +135,37 @@ class GPTNeoPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
-                position_type="learned",
-                activation="gelu_new",
-                scale_attn_weights=False,
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="learned",
-            activation="gelu_new",
-            scale_attn_weights=False,
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = GPTNeoPlugin()

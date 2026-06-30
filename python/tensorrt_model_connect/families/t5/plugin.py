@@ -5,11 +5,12 @@ import sys
 from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
-from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
-from . import graph_ops
+from .weights import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
+from .model import model as graph_ops
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 trt = trt_compat.get_trt()
+
 
 class T5Plugin:
     name = "t5"
@@ -19,7 +20,7 @@ class T5Plugin:
         return model_type.lower() in ("t5",)
 
     def ensure_tokenizer_json(self, model_dir, *, previous_error=None):
-        from .tokenizer_json import ensure_tokenizer_json
+        from .weights.tokenizer_json import ensure_tokenizer_json
 
         return ensure_tokenizer_json(model_dir, previous_error=previous_error)
 
@@ -56,7 +57,9 @@ class T5Plugin:
 
         enc_rel_bias_key = "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
         if _has_tensor(readers, enc_rel_bias_key):
-            weights["enc_rel_attn_bias"] = _load_tensor(readers, enc_rel_bias_key).astype(np.float32)
+            weights["enc_rel_attn_bias"] = _load_tensor(readers, enc_rel_bias_key).astype(
+                np.float32
+            )
 
         for i in range(enc_layers):
             hf = f"encoder.block.{i}"
@@ -64,20 +67,38 @@ class T5Plugin:
             for proj in ("q", "k", "v", "o"):
                 w = _load_tensor(readers, f"{hf}.layer.0.SelfAttention.{proj}.weight")
                 weights[f"{pfx}.w_{proj}"] = _transpose_2d(w, f"enc_{proj}")
-            weights[f"{pfx}.attn_norm"] = _load_tensor(readers, f"{hf}.layer.0.layer_norm.weight").astype(np.float32)
-            weights[f"{pfx}.w_fc1"] = _transpose_2d(_load_tensor(readers, f"{hf}.layer.1.DenseReluDense.wi.weight"), "enc_fc1")
-            weights[f"{pfx}.w_fc2"] = _transpose_2d(_load_tensor(readers, f"{hf}.layer.1.DenseReluDense.wo.weight"), "enc_fc2")
-            weights[f"{pfx}.ffn_norm"] = _load_tensor(readers, f"{hf}.layer.1.layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.attn_norm"] = _load_tensor(
+                readers, f"{hf}.layer.0.layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.layer.1.DenseReluDense.wi.weight"), "enc_fc1"
+            )
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.layer.1.DenseReluDense.wo.weight"), "enc_fc2"
+            )
+            weights[f"{pfx}.ffn_norm"] = _load_tensor(
+                readers, f"{hf}.layer.1.layer_norm.weight"
+            ).astype(np.float32)
 
-        weights["enc_final_norm"] = _load_tensor(readers, "encoder.final_layer_norm.weight").astype(np.float32)
+        weights["enc_final_norm"] = _load_tensor(readers, "encoder.final_layer_norm.weight").astype(
+            np.float32
+        )
 
-        dec_self_rel_bias_key = "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+        dec_self_rel_bias_key = (
+            "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+        )
         if _has_tensor(readers, dec_self_rel_bias_key):
-            weights["dec_self_rel_attn_bias"] = _load_tensor(readers, dec_self_rel_bias_key).astype(np.float32)
+            weights["dec_self_rel_attn_bias"] = _load_tensor(readers, dec_self_rel_bias_key).astype(
+                np.float32
+            )
 
-        dec_cross_rel_bias_key = "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"
+        dec_cross_rel_bias_key = (
+            "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"
+        )
         if _has_tensor(readers, dec_cross_rel_bias_key):
-            weights["dec_cross_rel_attn_bias"] = _load_tensor(readers, dec_cross_rel_bias_key).astype(np.float32)
+            weights["dec_cross_rel_attn_bias"] = _load_tensor(
+                readers, dec_cross_rel_bias_key
+            ).astype(np.float32)
 
         for i in range(dec_layers):
             hf = f"decoder.block.{i}"
@@ -85,16 +106,28 @@ class T5Plugin:
             for proj in ("q", "k", "v", "o"):
                 w = _load_tensor(readers, f"{hf}.layer.0.SelfAttention.{proj}.weight")
                 weights[f"{pfx}.w_{proj}"] = _transpose_2d(w, f"dec_{proj}")
-            weights[f"{pfx}.input_norm"] = _load_tensor(readers, f"{hf}.layer.0.layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.input_norm"] = _load_tensor(
+                readers, f"{hf}.layer.0.layer_norm.weight"
+            ).astype(np.float32)
             for proj in ("q", "k", "v", "o"):
                 w = _load_tensor(readers, f"{hf}.layer.1.EncDecAttention.{proj}.weight")
                 weights[f"{pfx}.cross_w_{proj}"] = _transpose_2d(w, f"xattn_{proj}")
-            weights[f"{pfx}.cross_attn_norm"] = _load_tensor(readers, f"{hf}.layer.1.layer_norm.weight").astype(np.float32)
-            weights[f"{pfx}.w_fc1"] = _transpose_2d(_load_tensor(readers, f"{hf}.layer.2.DenseReluDense.wi.weight"), "dec_fc1")
-            weights[f"{pfx}.w_fc2"] = _transpose_2d(_load_tensor(readers, f"{hf}.layer.2.DenseReluDense.wo.weight"), "dec_fc2")
-            weights[f"{pfx}.post_attn_norm"] = _load_tensor(readers, f"{hf}.layer.2.layer_norm.weight").astype(np.float32)
+            weights[f"{pfx}.cross_attn_norm"] = _load_tensor(
+                readers, f"{hf}.layer.1.layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.layer.2.DenseReluDense.wi.weight"), "dec_fc1"
+            )
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.layer.2.DenseReluDense.wo.weight"), "dec_fc2"
+            )
+            weights[f"{pfx}.post_attn_norm"] = _load_tensor(
+                readers, f"{hf}.layer.2.layer_norm.weight"
+            ).astype(np.float32)
 
-        weights["final_norm"] = _load_tensor(readers, "decoder.final_layer_norm.weight").astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, "decoder.final_layer_norm.weight").astype(
+            np.float32
+        )
         if _has_tensor(readers, "lm_head.weight"):
             weights["w_out"] = _transpose_2d(_load_tensor(readers, "lm_head.weight"), "lm_head")
         else:
@@ -102,22 +135,32 @@ class T5Plugin:
         return weights
 
     def build_engine(
-        self, config, weights, max_cache_length, *, verbose=False,
-        debug_layer_outputs=False, parallel_config=None,
+        self,
+        config,
+        weights,
+        max_cache_length,
+        *,
+        verbose=False,
+        debug_layer_outputs=False,
+        parallel_config=None,
     ):
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="T5 tensor-parallel decoder builds")
-            from .decoder_tp_builder import build_t5_tp_decoder_engine
+                parallel, feature="T5 tensor-parallel decoder builds"
+            )
+            from .model.parallel import build_t5_tp_decoder_engine
+
             return build_t5_tp_decoder_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs,
                 parallel_config=parallel,
             )
 
-        weights['_max_cache_length'] = max_cache_length
+        weights["_max_cache_length"] = max_cache_length
         dl = weights["_dec_layers"]
         nh = weights["_num_heads"]
         dkv = weights["_d_kv"]
@@ -133,8 +176,7 @@ class T5Plugin:
         msp = max_cache_length
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network(
-            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = builder.create_builder_config()
         tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         tc.clear_flag(trt.BuilderFlag.TF32)
@@ -143,12 +185,24 @@ class T5Plugin:
         attn_mask = network.add_input("attention_mask", trt.float32, (1, aw))
         ck_in, cv_in = [], []
         for i in range(dl):
-            ck_in.append(network.add_input(graph_ops.layer_tensor_name("cache_k", i), trt.float32, (max_cache_length, asz)))
-            cv_in.append(network.add_input(graph_ops.layer_tensor_name("cache_v", i), trt.float32, (max_cache_length, asz)))
+            ck_in.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cache_k", i), trt.float32, (max_cache_length, asz)
+                )
+            )
+            cv_in.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cache_v", i), trt.float32, (max_cache_length, asz)
+                )
+            )
         xk_in, xv_in = [], []
         for i in range(dl):
-            xk_in.append(network.add_input(graph_ops.layer_tensor_name("cross_k", i), trt.float32, (msp, h)))
-            xv_in.append(network.add_input(graph_ops.layer_tensor_name("cross_v", i), trt.float32, (msp, h)))
+            xk_in.append(
+                network.add_input(graph_ops.layer_tensor_name("cross_k", i), trt.float32, (msp, h))
+            )
+            xv_in.append(
+                network.add_input(graph_ops.layer_tensor_name("cross_v", i), trt.float32, (msp, h))
+            )
         # Encoder attention mask for cross-attention: [msp] float32, 0.0 valid, -1e9 padding
         enc_mask_input = network.add_input("encoder_mask", trt.float32, (msp,))
         enc_mask_reshape = network.add_shuffle(enc_mask_input)
@@ -164,7 +218,31 @@ class T5Plugin:
         pk_out, pv_out = [], []
         for li in range(dl):
             pfx = f"layer.{li}"
-            r = _add_t5_decoder_layer(network=network, hidden=hs, cache_k=ck_in[li], cache_v=cv_in[li], cross_k=xk_in[li], cross_v=xv_in[li], attention_mask=attn_mask, position_id=position_id, eps_tensor=et, weights=weights, prefix=pfx, hidden_size=h, num_heads=nh, head_dim=hd, attention_size=asz, ffn_dim=dff, max_cache_length=max_cache_length, max_source_positions=msp, dec_self_rel_bias=dsrb, dec_cross_rel_bias=dxrb, num_buckets=nb, max_distance=md, enc_mask=enc_mask_3d)
+            r = _add_t5_decoder_layer(
+                network=network,
+                hidden=hs,
+                cache_k=ck_in[li],
+                cache_v=cv_in[li],
+                cross_k=xk_in[li],
+                cross_v=xv_in[li],
+                attention_mask=attn_mask,
+                position_id=position_id,
+                eps_tensor=et,
+                weights=weights,
+                prefix=pfx,
+                hidden_size=h,
+                num_heads=nh,
+                head_dim=hd,
+                attention_size=asz,
+                ffn_dim=dff,
+                max_cache_length=max_cache_length,
+                max_source_positions=msp,
+                dec_self_rel_bias=dsrb,
+                dec_cross_rel_bias=dxrb,
+                num_buckets=nb,
+                max_distance=md,
+                enc_mask=enc_mask_3d,
+            )
             hs = r["hidden"]
             pk_out.append(r["present_k"])
             pv_out.append(r["present_v"])
@@ -180,7 +258,10 @@ class T5Plugin:
             network.mark_output(pk_out[i])
             network.mark_output(pv_out[i])
         if verbose:
-            print(f"[trtmc build] T5 decoder ({dl}L, h={h}, heads={nh}, d_kv={dkv}, ffn={dff}, cache={max_cache_length})", file=sys.stderr)
+            print(
+                f"[trtmc build] T5 decoder ({dl}L, h={h}, heads={nh}, d_kv={dkv}, ffn={dff}, cache={max_cache_length})",
+                file=sys.stderr,
+            )
         plan = builder.build_serialized_network(network, tc)
         if plan is None:
             raise RuntimeError("TRT T5 decoder build failed")
@@ -192,7 +273,17 @@ class T5Plugin:
     def get_vl_config(self, config):
         raw = config.raw
         nl = raw.get("num_layers", config.num_hidden_layers)
-        return {"encoder_layers": raw.get("num_encoder_layers", nl), "decoder_layers": raw.get("num_decoder_layers", nl), "max_source_positions": raw.get("n_positions", 512), "max_target_positions": raw.get("n_positions", 512), "has_vision_engine": True, "is_encoder_decoder": True, "d_kv": raw.get("d_kv", 64), "d_ff": raw.get("d_ff", config.intermediate_size), "relative_attention_num_buckets": raw.get("relative_attention_num_buckets", 32)}
+        return {
+            "encoder_layers": raw.get("num_encoder_layers", nl),
+            "decoder_layers": raw.get("num_decoder_layers", nl),
+            "max_source_positions": raw.get("n_positions", 512),
+            "max_target_positions": raw.get("n_positions", 512),
+            "has_vision_engine": True,
+            "is_encoder_decoder": True,
+            "d_kv": raw.get("d_kv", 64),
+            "d_ff": raw.get("d_ff", config.intermediate_size),
+            "relative_attention_num_buckets": raw.get("relative_attention_num_buckets", 32),
+        }
 
 
 def _build_t5_encoder(config, weights, *, verbose=False):
@@ -210,8 +301,7 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     asz = nh * hd
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     tc.clear_flag(trt.BuilderFlag.TF32)
@@ -228,18 +318,36 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     rpb = None
     if "enc_rel_attn_bias" in weights:
         bt = weights["enc_rel_attn_bias"]
-        bi = graph_ops.make_t5_relative_position_bias(num_heads=nh, max_seq_len=msl, num_buckets=nb, max_distance=md)
+        bi = graph_ops.make_t5_relative_position_bias(
+            num_heads=nh, max_seq_len=msl, num_buckets=nb, max_distance=md
+        )
         bv = bt[bi.flatten()].reshape(msl, msl, nh).transpose(2, 0, 1)
         rpb = graph_ops.add_constant(network, bv.shape, bv.astype(np.float32))
     for li in range(el):
         pfx = f"enc_layer.{li}"
         normed = graph_ops.add_rms_norm(network, hs, h, weights[f"{pfx}.attn_norm"], et)
-        attn = _add_t5_enc_sa(network, normed, weights[f"{pfx}.w_q"], weights[f"{pfx}.w_k"], weights[f"{pfx}.w_v"], weights[f"{pfx}.w_o"], h, nh, hd, asz, msl, rpb, enc_mask_broadcast)
+        attn = _add_t5_enc_sa(
+            network,
+            normed,
+            weights[f"{pfx}.w_q"],
+            weights[f"{pfx}.w_k"],
+            weights[f"{pfx}.w_v"],
+            weights[f"{pfx}.w_o"],
+            h,
+            nh,
+            hd,
+            asz,
+            msl,
+            rpb,
+            enc_mask_broadcast,
+        )
         hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
         fn = graph_ops.add_rms_norm(network, hs, h, weights[f"{pfx}.ffn_norm"], et)
         f1 = graph_ops.add_matmul_rhs_constant(network, fn, h, dff, weights[f"{pfx}.w_fc1"])
         a = network.add_activation(f1, trt.ActivationType.RELU)
-        f2 = graph_ops.add_matmul_rhs_constant(network, a.get_output(0), dff, h, weights[f"{pfx}.w_fc2"])
+        f2 = graph_ops.add_matmul_rhs_constant(
+            network, a.get_output(0), dff, h, weights[f"{pfx}.w_fc2"]
+        )
         hs = network.add_elementwise(hs, f2, trt.ElementWiseOperation.SUM).get_output(0)
     hs = graph_ops.add_rms_norm(network, hs, h, weights["enc_final_norm"], et)
     hs.name = "encoder_output"
@@ -260,7 +368,9 @@ def _add_t5_enc_sa(network, hidden, wq, wk, wv, wo, h, nh, hd, asz, sl, rpb=None
     if rpb is not None:
         mask = rpb
         if attn_mask is not None:
-            mask = network.add_elementwise(mask, attn_mask, trt.ElementWiseOperation.SUM).get_output(0)
+            mask = network.add_elementwise(
+                mask, attn_mask, trt.ElementWiseOperation.SUM
+            ).get_output(0)
         mask_4d = network.add_shuffle(mask)
         mask_4d.reshape_dims = (1, nh, sl, sl)
         mask = mask_4d.get_output(0)
@@ -269,15 +379,37 @@ def _add_t5_enc_sa(network, hidden, wq, wk, wv, wo, h, nh, hd, asz, sl, rpb=None
         mask_4d.reshape_dims = (1, 1, 1, sl)
         mask = mask_4d.get_output(0)
     cf = graph_ops.add_attention_from_rows(
-        network, q, k, v,
-        num_heads=nh, head_dim=hd,
-        q_seq=sl, kv_seq=sl,
-        mask=mask,
-        scale=1.0)
+        network, q, k, v, num_heads=nh, head_dim=hd, q_seq=sl, kv_seq=sl, mask=mask, scale=1.0
+    )
     return graph_ops.add_matmul_rhs_constant(network, cf, asz, h, wo)
 
 
-def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v, attention_mask, position_id, eps_tensor, weights, prefix, hidden_size, num_heads, head_dim, attention_size, ffn_dim, max_cache_length, max_source_positions, dec_self_rel_bias, dec_cross_rel_bias, num_buckets, max_distance, enc_mask=None):
+def _add_t5_decoder_layer(
+    *,
+    network,
+    hidden,
+    cache_k,
+    cache_v,
+    cross_k,
+    cross_v,
+    attention_mask,
+    position_id,
+    eps_tensor,
+    weights,
+    prefix,
+    hidden_size,
+    num_heads,
+    head_dim,
+    attention_size,
+    ffn_dim,
+    max_cache_length,
+    max_source_positions,
+    dec_self_rel_bias,
+    dec_cross_rel_bias,
+    num_buckets,
+    max_distance,
+    enc_mask=None,
+):
     h, nh, hd, asz = hidden_size, num_heads, head_dim, attention_size
     aw = max_cache_length + 1
     msp = max_source_positions
@@ -302,24 +434,35 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
         m3 = network.add_shuffle(attention_mask)
         m3.reshape_dims = (1, 1, aw)
         mask_3d = network.add_elementwise(
-            br.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
+            br.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM
+        )
         mask_4d = network.add_shuffle(mask_3d.get_output(0))
         mask_4d.reshape_dims = (1, nh, 1, aw)
         self_mask = mask_4d.get_output(0)
     else:
         self_mask = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     cf = graph_ops.add_attention_from_rows(
-        network, q, ak.get_output(0), av.get_output(0),
-        num_heads=nh, head_dim=hd,
-        q_seq=1, kv_seq=aw,
+        network,
+        q,
+        ak.get_output(0),
+        av.get_output(0),
+        num_heads=nh,
+        head_dim=hd,
+        q_seq=1,
+        kv_seq=aw,
         mask=self_mask,
-        scale=1.0)
+        scale=1.0,
+    )
     sa = graph_ops.add_matmul_rhs_constant(network, cf, asz, h, weights[f"{prefix}.w_o"])
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
     cn = graph_ops.add_rms_norm(network, psa, h, weights[f"{prefix}.cross_attn_norm"], eps_tensor)
     cq = graph_ops.add_matmul_rhs_constant(network, cn, h, asz, weights[f"{prefix}.cross_w_q"])
-    ckp = graph_ops.add_matmul_rhs_constant(network, cross_k, h, asz, weights[f"{prefix}.cross_w_k"])
-    cvp = graph_ops.add_matmul_rhs_constant(network, cross_v, h, asz, weights[f"{prefix}.cross_w_v"])
+    ckp = graph_ops.add_matmul_rhs_constant(
+        network, cross_k, h, asz, weights[f"{prefix}.cross_w_k"]
+    )
+    cvp = graph_ops.add_matmul_rhs_constant(
+        network, cross_v, h, asz, weights[f"{prefix}.cross_w_v"]
+    )
     if dec_cross_rel_bias is not None:
         xbi = _make_t5_cross_buckets(aw, msp, num_buckets, max_distance)
         xbv = dec_cross_rel_bias[xbi.flatten()].reshape(aw, msp, nh).transpose(2, 0, 1)
@@ -327,7 +470,9 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
         xbr = network.add_gather(xbc, position_id, 1)
         cross_mask = xbr.get_output(0)
         if enc_mask is not None:
-            cross_mask = network.add_elementwise(cross_mask, enc_mask, trt.ElementWiseOperation.SUM).get_output(0)
+            cross_mask = network.add_elementwise(
+                cross_mask, enc_mask, trt.ElementWiseOperation.SUM
+            ).get_output(0)
         cross_mask_4d = network.add_shuffle(cross_mask)
         cross_mask_4d.reshape_dims = (1, nh, 1, msp)
         cross_mask = cross_mask_4d.get_output(0)
@@ -338,17 +483,25 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
     else:
         cross_mask = None
     ccf = graph_ops.add_attention_from_rows(
-        network, cq, ckp, cvp,
-        num_heads=nh, head_dim=hd,
-        q_seq=1, kv_seq=msp,
+        network,
+        cq,
+        ckp,
+        cvp,
+        num_heads=nh,
+        head_dim=hd,
+        q_seq=1,
+        kv_seq=msp,
         mask=cross_mask,
-        scale=1.0)
+        scale=1.0,
+    )
     ca = graph_ops.add_matmul_rhs_constant(network, ccf, asz, h, weights[f"{prefix}.cross_w_o"])
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
     fn = graph_ops.add_rms_norm(network, pca, h, weights[f"{prefix}.post_attn_norm"], eps_tensor)
     f1 = graph_ops.add_matmul_rhs_constant(network, fn, h, ffn_dim, weights[f"{prefix}.w_fc1"])
     act = network.add_activation(f1, trt.ActivationType.RELU)
-    f2 = graph_ops.add_matmul_rhs_constant(network, act.get_output(0), ffn_dim, h, weights[f"{prefix}.w_fc2"])
+    f2 = graph_ops.add_matmul_rhs_constant(
+        network, act.get_output(0), ffn_dim, h, weights[f"{prefix}.w_fc2"]
+    )
     out = network.add_elementwise(pca, f2, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 

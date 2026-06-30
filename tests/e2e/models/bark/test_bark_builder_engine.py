@@ -117,7 +117,7 @@ def _make_bark_tp_weights(
 
 def _bark_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.bark.decoder_tp_builder",
+        "tensorrt_model_connect.families.bark.model.parallel",
         reason="TensorRT is required for Bark TP builder tests",
     )
 

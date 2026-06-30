@@ -9,7 +9,7 @@ aliases = [
 prefixes = [
   "m2m_100",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runner = "model/runtime.py|runner_from_bundle"
 debug_runtime_strategies = [
   "m2m_100_seq2seq_encoder_decoder",
 ]

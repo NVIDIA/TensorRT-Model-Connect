@@ -1,3 +1,3 @@
-from .plugin import ChronosBoltPlugin, plugin
+from .plugin import plugin
 
-__all__ = ["ChronosBoltPlugin", "plugin"]
+__all__ = ["plugin"]

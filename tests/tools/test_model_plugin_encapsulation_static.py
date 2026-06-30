@@ -18,6 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_MODELS = REPO_ROOT / "src" / "runtime" / "models"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
+FAMILY_TOOLS = REPO_ROOT / "tools" / "families"
 E2E_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
 CMAKE_ROOT = REPO_ROOT / "CMakeLists.txt"
 CONFIG_SCHEMA_CMAKE = REPO_ROOT / "cmake" / "trtmc_config_schemas.cmake"
@@ -237,28 +238,28 @@ SHARED_GENERIC_FIXTURE_TEST_FILES = (
 )
 ROOT_MODEL_SCRIPT_WRAPPERS = {
     REPO_ROOT / "scripts" / "magpie_tokenizer.py": (
-        FAMILIES / "magpie_tts" / "magpie_tokenizer.py"
+        FAMILIES / "magpie_tts" / "weights" / "magpie_tokenizer.py"
     ),
     REPO_ROOT / "scripts" / "magpie_codec_bridge.py": (
-        FAMILIES / "magpie_tts" / "codec_bridge.py"
+        FAMILY_TOOLS / "magpie_tts" / "codec_bridge.py"
     ),
     REPO_ROOT / "scripts" / "profile_magpie_tts.py": (
-        FAMILIES / "magpie_tts" / "profile.py"
+        FAMILY_TOOLS / "magpie_tts" / "profile.py"
     ),
     REPO_ROOT / "scripts" / "prepare_lance_model.py": (
-        FAMILIES / "lance" / "prepare_model.py"
+        FAMILY_TOOLS / "lance" / "prepare_model.py"
     ),
     REPO_ROOT / "scripts" / "_build_fp8_onnx_monolithic.py": (
-        FAMILIES / "flux" / "build_fp8_onnx_monolithic.py"
+        FAMILY_TOOLS / "flux" / "build_fp8_onnx_monolithic.py"
     ),
     REPO_ROOT / "scripts" / "_inject_fp8_qdq_proto.py": (
-        FAMILIES / "flux" / "inject_fp8_qdq_proto.py"
+        FAMILY_TOOLS / "flux" / "inject_fp8_qdq_proto.py"
     ),
     REPO_ROOT / "scripts" / "_mk_fp8_bf16_bundle.py": (
-        FAMILIES / "flux" / "mk_fp8_bf16_bundle.py"
+        FAMILY_TOOLS / "flux" / "mk_fp8_bf16_bundle.py"
     ),
     REPO_ROOT / "tools" / "diff_personaplex.py": (
-        FAMILIES / "personaplex" / "diff_personaplex.py"
+        FAMILY_TOOLS / "personaplex" / "diff_personaplex.py"
     ),
 }
 MODEL_OWNED_BUILDER_TESTS = {
@@ -589,20 +590,20 @@ SHARED_GITHUB_CI_FILES = (
 )
 DIFFUSION_VLM_SIMILARITY_TOOL = REPO_ROOT / "tools" / "evaluate_diffusion_vlm_similarity.py"
 MODEL_OWNED_DIFF_VL_HANDLERS = (
-    FAMILIES / "qwen_vl" / "diff_vl.py",
-    FAMILIES / "locateanything" / "diff_vl.py",
+    FAMILY_TOOLS / "qwen_vl" / "diff_vl.py",
+    FAMILY_TOOLS / "locateanything" / "diff_vl.py",
 )
 MODEL_OWNED_DIFF_LOGITS_HANDLERS = (
-    FAMILIES / "whisper" / "diff_logits.py",
+    FAMILY_TOOLS / "whisper" / "diff_logits.py",
 )
 MODEL_OWNED_DIFF_AUDIO_HANDLERS = (
-    FAMILIES / "bark" / "diff_audio.py",
+    FAMILY_TOOLS / "bark" / "diff_audio.py",
 )
 MODEL_OWNED_DIFF_T5_HANDLERS = (
-    FAMILIES / "wan_t2v" / "diff_t5.py",
+    FAMILY_TOOLS / "wan_t2v" / "diff_t5.py",
 )
 MODEL_OWNED_DEBUG_DIFFUSION_PIPELINE_HANDLERS = (
-    FAMILIES / "wan_t2v" / "debug_diffusion_pipeline.py",
+    FAMILY_TOOLS / "wan_t2v" / "debug_diffusion_pipeline.py",
 )
 MODEL_OWNED_E2E_CONTRACT_PLUGINS = (
     E2E_MODELS / "sam" / "e2e_plugins" / "contract.py",
@@ -617,8 +618,8 @@ MODEL_OWNED_E2E_PROMPTED_SEGMENTATION_RUNTIME_PLUGINS = (
     E2E_MODELS / "sam3" / "e2e_plugins" / "repro.py",
 )
 MODEL_OWNED_DIFFUSION_VALIDATE_HANDLERS = (
-    FAMILIES / "wan_t2v" / "validate_t5.py",
-    FAMILIES / "wan_t2v" / "validate_dit.py",
+    FAMILY_TOOLS / "wan_t2v" / "validate_t5.py",
+    FAMILY_TOOLS / "wan_t2v" / "validate_dit.py",
 )
 CPP_TESTS = REPO_ROOT / "tests" / "cpp"
 
@@ -2979,10 +2980,10 @@ def test_shared_diff_vl_tool_uses_family_owned_debug_runners() -> None:
             vl_families.add(manifest_path.parents[1].name)
 
     violations.extend(
-        (FAMILIES / family / "vl_debug_runner.py", 0,
-         "vision-language family missing model-owned VL debug runner")
+        (FAMILY_TOOLS / family / "vl_debug_runner.py", 0,
+         "vision-language family missing owned VL debug runner")
         for family in sorted(vl_families)
-        if not (FAMILIES / family / "vl_debug_runner.py").is_file()
+        if not (FAMILY_TOOLS / family / "vl_debug_runner.py").is_file()
     )
 
     assert not violations, _format_violations(violations)
@@ -3014,8 +3015,8 @@ def test_shared_diff_logits_tool_has_no_family_reference_implementations() -> No
     violations.extend(
         (path, 0, "missing model-owned logit diff handler")
         for path in MODEL_OWNED_DIFF_LOGITS_HANDLERS + (
-            FAMILIES / "mamba" / "diff_logits.py",
-            FAMILIES / "rwkv" / "diff_logits.py",
+            FAMILY_TOOLS / "mamba" / "diff_logits.py",
+            FAMILY_TOOLS / "rwkv" / "diff_logits.py",
         )
         if not path.is_file()
     )
@@ -3193,7 +3194,7 @@ def test_shared_perf_tools_use_family_perf_hooks() -> None:
         )
 
     expected_hooks = (
-        FAMILIES / "mamba" / "perf_hooks.py",
+        FAMILY_TOOLS / "mamba" / "perf_hooks.py",
     )
     violations.extend(
         (path, 0, "missing model-owned performance hook")
@@ -3497,7 +3498,7 @@ def test_personaplex_diff_tool_is_family_owned() -> None:
     Postconditions: no root compatibility tool carries model-specific dispatch.
     """
     violations = []
-    owned_tool = FAMILIES / "personaplex" / "diff_personaplex.py"
+    owned_tool = FAMILY_TOOLS / "personaplex" / "diff_personaplex.py"
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing PersonaPlex-owned diff tool"))
     root_tool = REPO_ROOT / "tools" / "diff_personaplex.py"
@@ -3518,7 +3519,7 @@ def test_qwen_aime_benchmark_tool_is_family_owned() -> None:
     Postconditions: no root compatibility tool carries model-specific dispatch.
     """
     violations = []
-    owned_tool = FAMILIES / "qwen" / "benchmark_qwen3_8b_aime25_vs_hf.py"
+    owned_tool = FAMILY_TOOLS / "qwen" / "benchmark_qwen3_8b_aime25_vs_hf.py"
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned AIME benchmark"))
     if SHARED_QWEN_AIME_BENCHMARK_TOOL.exists():
@@ -3558,7 +3559,7 @@ def test_qwen_flashinfer_benchmark_tool_is_family_owned() -> None:
     Postconditions: no root compatibility tool carries model-specific dispatch.
     """
     violations = []
-    owned_tool = FAMILIES / "qwen" / "bench_flashinfer_e2e.py"
+    owned_tool = FAMILY_TOOLS / "qwen" / "bench_flashinfer_e2e.py"
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned FlashInfer benchmark"))
     if SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL.exists():
@@ -3803,31 +3804,30 @@ def test_quantization_uses_family_graph_ops_plumbing() -> None:
 def test_time_series_trt_helpers_are_family_owned() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: keep time-series TRT builder utility behavior in each family.
-    Preconditions: time-series families provide local time_series_trt.py files.
+    Preconditions: time-series families provide local model.py implementations.
     Postconditions: no model plugin imports the retired shared helper.
     """
     owners = ("chronos_bolt", "patchtst", "patchtsmixer", "timesfm")
     violations = []
     retired_helper = FAMILIES / "_time_series_trt.py"
-    retired_text = retired_helper.read_text(encoding="utf-8", errors="ignore")
-    if "RetiredSharedFamilyHelperError" not in retired_text:
-        violations.append((retired_helper, 0, "shared time-series helper is not retired"))
+    if retired_helper.exists():
+        violations.append((retired_helper, 0, "shared time-series helper must be absent"))
     for family in owners:
-        helper = FAMILIES / family / "time_series_trt.py"
+        helper = FAMILIES / family / "model" / "model.py"
         plugin = FAMILIES / family / "plugin.py"
         if not helper.is_file():
-            violations.append((helper, 0, "missing family-owned time-series helper"))
+            violations.append((helper, 0, "missing family-owned model implementation"))
             continue
         helper_text = helper.read_text(encoding="utf-8", errors="ignore")
-        if "from . import graph_ops" not in helper_text:
-            violations.append((helper, 0, "time-series helper must import local graph_ops"))
-        if "from .checkpoint_mapper import" not in helper_text:
-            violations.append((helper, 0, "time-series helper must import local checkpoint mapper"))
+        if "# Time Series Trt" not in helper_text:
+            violations.append((helper, 0, "missing merged time-series implementation"))
+        if "from ..weights import" not in helper_text:
+            violations.append((helper, 0, "model must import local checkpoint mapper"))
         plugin_text = plugin.read_text(encoding="utf-8", errors="ignore")
         if "from .._time_series_trt import" in plugin_text:
             violations.append((plugin, 0, "imports retired shared time-series helper"))
-        if "from .time_series_trt import" not in plugin_text:
-            violations.append((plugin, 0, "missing family-owned time-series helper import"))
+        if "from .model.model import" not in plugin_text:
+            violations.append((plugin, 0, "missing family-owned model import"))
 
     assert not violations, _format_violations(violations)
 
@@ -4339,9 +4339,9 @@ def test_engine_builder_uses_declared_family_capabilities() -> None:
             ))
 
     expected_tokenizer_adapters = (
-        FAMILIES / "marian" / "tokenizer_json.py",
-        FAMILIES / "m2m_100" / "tokenizer_json.py",
-        FAMILIES / "t5" / "tokenizer_json.py",
+        FAMILIES / "marian" / "weights" / "tokenizer_json.py",
+        FAMILIES / "m2m_100" / "weights" / "tokenizer_json.py",
+        FAMILIES / "t5" / "weights" / "tokenizer_json.py",
     )
     violations.extend(
         (path, 0, "missing family-owned tokenizer conversion adapter")
@@ -4350,9 +4350,9 @@ def test_engine_builder_uses_declared_family_capabilities() -> None:
     )
 
     expected_nemo_adapters = (
-        FAMILIES / "magpie_tts" / "nemo_archive.py",
-        FAMILIES / "canary" / "nemo_archive.py",
-        FAMILIES / "nemotron_speech_streaming" / "nemo_archive.py",
+        FAMILIES / "magpie_tts" / "weights" / "nemo_archive.py",
+        FAMILIES / "canary" / "weights" / "nemo_archive.py",
+        FAMILIES / "nemotron_speech_streaming" / "weights" / "nemo_archive.py",
     )
     violations.extend(
         (path, 0, "missing family-owned NeMo archive adapter")
@@ -4660,19 +4660,19 @@ def test_python_profile_details_are_family_owned() -> None:
 
     expected = {
         "internlm": (
-            "internlm|families/internlm/python_profile_requirements/internlm.lock.txt|families/internlm/python_profile_verify.py|true",
+            "internlm|families/internlm/profiles/requirements/internlm.lock.txt|families/internlm/profiles/verify.py|true",
             "build|internlm",
             "runtime|internlm",
             "reference|internlm",
-            FAMILIES / "internlm" / "python_profile_requirements" / "internlm.lock.txt",
-            FAMILIES / "internlm" / "python_profile_verify.py",
+            FAMILIES / "internlm" / "profiles" / "requirements" / "internlm.lock.txt",
+            FAMILIES / "internlm" / "profiles" / "verify.py",
         ),
         "chronos_bolt": (
-            "chronos|families/chronos_bolt/python_profile_requirements/chronos.lock.txt|families/chronos_bolt/python_profile_verify.py|true",
+            "chronos|families/chronos_bolt/profiles/requirements/chronos.lock.txt|families/chronos_bolt/profiles/verify.py|true",
             "build|chronos",
             "reference|chronos",
-            FAMILIES / "chronos_bolt" / "python_profile_requirements" / "chronos.lock.txt",
-            FAMILIES / "chronos_bolt" / "python_profile_verify.py",
+            FAMILIES / "chronos_bolt" / "profiles" / "requirements" / "chronos.lock.txt",
+            FAMILIES / "chronos_bolt" / "profiles" / "verify.py",
         ),
     }
     for family, entries in expected.items():
@@ -4759,8 +4759,7 @@ def test_shared_builder_config_uses_family_metadata_for_model_specific_formats()
     for family_dir in sorted(FAMILIES.iterdir()):
         if not family_dir.is_dir() or family_dir.name == "elf_flow":
             continue
-        for filename in ("config.py", "model_config.py"):
-            path = family_dir / filename
+        for path in (family_dir / "config.py", family_dir / "model" / "model_config.py"):
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -4773,7 +4772,7 @@ def test_shared_builder_config_uses_family_metadata_for_model_specific_formats()
     elf_manifest = FAMILIES / "elf_flow" / "MODEL.toml"
     elf_text = elf_manifest.read_text(encoding="utf-8")
     for needle in (
-        'config_adapter = "model_config.py|config_from_dir"',
+        'config_adapter = "model/components/config.py|config_from_dir"',
         "hf_allow_patterns",
         "checkpoint_*",
         "model.npz",
@@ -5726,21 +5725,20 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
         if needle in text
     ]
     expected_owned_files = (
-        FAMILIES / "mamba" / "debug_runner.py",
-        FAMILIES / "rwkv" / "debug_runner.py",
-        FAMILIES / "nemotron_h" / "debug_runner.py",
-        FAMILIES / "nemotron_labs_diffusion" / "debug_runner.py",
-        FAMILIES / "qwen3_5" / "debug_runner.py",
-        FAMILIES / "whisper" / "debug_runner.py",
-        FAMILIES / "qwen_image" / "debug_runner.py",
-        FAMILIES / "bark" / "debug_runner.py",
-        FAMILIES / "segformer" / "debug_runner.py",
-        FAMILIES / "elf_flow" / "debug_runner.py",
-        FAMILIES / "qwen" / "debug_runner.py",
-        FAMILIES / "marian" / "debug_runner.py",
-        FAMILIES / "bart" / "debug_runner.py",
-        FAMILIES / "m2m_100" / "debug_runner.py",
-        FAMILIES / "t5" / "debug_runner.py",
+        FAMILIES / "mamba" / "model" / "runtime.py",
+        FAMILIES / "rwkv" / "model" / "runtime.py",
+        FAMILIES / "nemotron_h" / "model" / "runtime.py",
+        FAMILIES / "nemotron_labs_diffusion" / "model" / "runtime.py",
+        FAMILIES / "qwen3_5" / "model" / "runtime.py",
+        FAMILY_TOOLS / "whisper" / "debug_runner.py",
+        FAMILY_TOOLS / "bark" / "debug_runner.py",
+        FAMILY_TOOLS / "segformer" / "debug_runner.py",
+        FAMILY_TOOLS / "elf_flow" / "debug_runner.py",
+        FAMILIES / "qwen" / "model" / "runtime.py",
+        FAMILIES / "marian" / "model" / "runtime.py",
+        FAMILIES / "bart" / "model" / "runtime.py",
+        FAMILIES / "m2m_100" / "model" / "runtime.py",
+        FAMILIES / "t5" / "model" / "runtime.py",
     )
     violations.extend(
         (path, 0, "missing model-owned debug runner")
@@ -5760,9 +5758,9 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
             continue
         family_dir = plugin_path.parent
         manifest = family_dir / "MODEL.toml"
-        debug_runner = family_dir / "debug_runner.py"
+        debug_runner = family_dir / "model" / "runtime.py"
         manifest_text = manifest.read_text(encoding="utf-8")
-        if 'debug_runner = "debug_runner.py|runner_from_bundle"' not in manifest_text:
+        if 'debug_runner = "model/runtime.py|runner_from_bundle"' not in manifest_text:
             violations.append(
                 (manifest, 0, "decoder family missing model-owned debug_runner metadata")
             )
@@ -6191,7 +6189,7 @@ def test_diffusion_runner_and_scheduler_are_family_owned() -> None:
             violations.append((path, 0, "shared diffusion runner/scheduler must be retired"))
 
     for owner in owners:
-        family_dir = FAMILIES / owner
+        family_dir = FAMILY_TOOLS / owner
         required = (
             family_dir / "diffusion_runner.py",
             family_dir / "schedulers" / "__init__.py",
@@ -6218,11 +6216,11 @@ def test_diffusion_runner_and_scheduler_are_family_owned() -> None:
             for needle in shared_imports:
                 if needle in text:
                     violations.append((runner_path, 0, f"imports retired shared {needle}"))
-            expected = f"tensorrt_model_connect.families.{owner}.diffusion_runner"
+            expected = f"tools.families.{owner}.diffusion_runner"
             if expected not in text:
                 violations.append((runner_path, 0, "missing family-owned diffusion runner import"))
 
-    for path in sorted(FAMILIES.glob("*/debug_diffusion_pipeline.py")):
+    for path in sorted(FAMILY_TOOLS.glob("*/debug_diffusion_pipeline.py")):
         text = path.read_text(encoding="utf-8", errors="ignore")
         for needle in (
             "tensorrt_model_connect.diffusion_runner",
@@ -7245,7 +7243,7 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
             / "runners"
             / "text_generation.py"
         )
-        family_debug_runner = FAMILIES / family / "debug_runner.py"
+        family_debug_runner = FAMILIES / family / "model" / "runtime.py"
         if not runner_path.is_file():
             violations.append((runner_path, 0, "missing model-owned text runner"))
             continue
@@ -7256,7 +7254,7 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
             continue
         text = runner_path.read_text(encoding="utf-8")
         expected_import = (
-            f"from tensorrt_model_connect.families.{family}.debug_runner import"
+            f"from tensorrt_model_connect.families.{family}.model.runtime import"
         )
         if expected_import not in text:
             violations.append(
@@ -7351,7 +7349,7 @@ def test_family_debug_runners_do_not_import_shared_debug_runner_module() -> None
     runner helpers, readers, dispatchers, or runner classes.
     """
     violations = []
-    for path in sorted(FAMILIES.glob("*/debug_runner.py")):
+    for path in sorted(FAMILIES.glob("*/model/runtime.py")):
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text, filename=str(path))
         for node in ast.walk(tree):
@@ -8898,23 +8896,19 @@ def test_family_builders_do_not_import_sibling_or_forbidden_shared_helpers() -> 
                             module, owner, family_ids, path, node.lineno, violations
                         )
                     else:
-                        if node.level >= 2 and not module:
-                            for alias in node.names:
-                                if alias.name in _FORBIDDEN_SHARED_BUILDER_MODULES:
-                                    violations.append((
-                                        path,
-                                        node.lineno,
-                                        f"imports shared helper {'.' * node.level}{alias.name}",
-                                    ))
-                        _check_relative_import(
-                            module,
-                            node.level,
-                            owner,
-                            family_ids,
-                            path,
-                            node.lineno,
-                            violations,
-                        )
+                        relative_modules = [module] if module else [
+                            alias.name for alias in node.names
+                        ]
+                        for relative_module in relative_modules:
+                            _check_relative_import(
+                                relative_module,
+                                node.level,
+                                owner,
+                                family_ids,
+                                path,
+                                node.lineno,
+                                violations,
+                            )
 
     assert not violations, _format_violations(violations)
 
@@ -8951,10 +8945,12 @@ def _check_relative_import(
     violations: list[tuple[Path, int, str]],
 ) -> None:
     first = module.split(".", 1)[0] if module else ""
-    if level == 2 and first in family_ids and first != owner:
-        violations.append((path, line_no, f"imports sibling family ..{module}"))
-    if level >= 3 and first in _FORBIDDEN_SHARED_BUILDER_MODULES:
-        violations.append((path, line_no, f"imports shared helper ...{module}"))
+    package_depth = len(path.relative_to(FAMILIES / owner).parent.parts)
+    levels_outside_owner = max(0, (level - 1) - package_depth)
+    if levels_outside_owner == 1 and first in family_ids and first != owner:
+        violations.append((path, line_no, f"imports sibling family {'.' * level}{module}"))
+    if levels_outside_owner >= 2 and first in _FORBIDDEN_SHARED_BUILDER_MODULES:
+        violations.append((path, line_no, f"imports shared helper {'.' * level}{module}"))
 
 
 def test_model_owned_e2e_assets_are_local_and_complete() -> None:

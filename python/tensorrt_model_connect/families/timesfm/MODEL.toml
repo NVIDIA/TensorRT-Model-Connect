@@ -1,0 +1,5 @@
+id = "timesfm"
+plugin = "timesfm"
+module = "plugin"
+aliases = ["timesfm"]
+prefixes = ["timesfm"]

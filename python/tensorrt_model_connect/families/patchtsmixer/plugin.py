@@ -9,8 +9,8 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import (
+from .model import model as graph_ops
+from .weights import (
     WeightDict,
     _load_tensor,
     _open_safetensors,
@@ -18,7 +18,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
-from .time_series_trt import (
+from .model.model import (
     add_gelu,
     add_linear,
     add_named_output,
@@ -94,19 +94,31 @@ def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
 
 def _require_supported(raw: dict[str, Any], task_kind: str) -> None:
     if task_kind != "prediction":
-        raise NotImplementedError("PatchTSMixer native TRT builder currently supports prediction profiles")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder currently supports prediction profiles"
+        )
     if bool(raw.get("self_attn", False)):
-        raise NotImplementedError("PatchTSMixer native TRT builder does not support self_attn profiles")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder does not support self_attn profiles"
+        )
     if str(raw.get("mode", "common_channel")).lower() != "common_channel":
-        raise NotImplementedError("PatchTSMixer native TRT builder currently supports common_channel mode")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder currently supports common_channel mode"
+        )
     if "layer" not in str(raw.get("norm_mlp", "LayerNorm")).lower():
-        raise NotImplementedError("PatchTSMixer native TRT builder currently supports LayerNorm mixer blocks")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder currently supports LayerNorm mixer blocks"
+        )
     if not bool(raw.get("gated_attn", False)):
-        raise NotImplementedError("PatchTSMixer native TRT builder currently expects gated_attn=True")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder currently expects gated_attn=True"
+        )
     if str(raw.get("loss", "mse")).lower() != "mse":
         raise NotImplementedError("PatchTSMixer native TRT builder currently supports MSE heads")
     if raw.get("prediction_channel_indices") not in (None, [], ()):
-        raise NotImplementedError("PatchTSMixer native TRT builder does not support channel-filtered heads")
+        raise NotImplementedError(
+            "PatchTSMixer native TRT builder does not support channel-filtered heads"
+        )
 
 
 def _add_layer_norm(
@@ -214,16 +226,12 @@ def _add_mixer_layer(
         hidden_size=hidden_size,
         eps=eps,
     )
-    x = _transpose_last_two(
-        network, x, shape=(1, channels, hidden_size, num_patches))
-    x = _add_mlp(
-        network, x, weights,
-        prefix=f"{prefix}.patch_mixer.mlp", precision=precision)
+    x = _transpose_last_two(network, x, shape=(1, channels, hidden_size, num_patches))
+    x = _add_mlp(network, x, weights, prefix=f"{prefix}.patch_mixer.mlp", precision=precision)
     x = _add_gated_block(
-        network, x, weights,
-        prefix=f"{prefix}.patch_mixer.gating_block", precision=precision)
-    x = _transpose_last_two(
-        network, x, shape=(1, channels, num_patches, hidden_size))
+        network, x, weights, prefix=f"{prefix}.patch_mixer.gating_block", precision=precision
+    )
+    x = _transpose_last_two(network, x, shape=(1, channels, num_patches, hidden_size))
     hidden = network.add_elementwise(residual, x, trt.ElementWiseOperation.SUM).get_output(0)
 
     residual = hidden
@@ -235,12 +243,10 @@ def _add_mixer_layer(
         hidden_size=hidden_size,
         eps=eps,
     )
-    x = _add_mlp(
-        network, x, weights,
-        prefix=f"{prefix}.feature_mixer.mlp", precision=precision)
+    x = _add_mlp(network, x, weights, prefix=f"{prefix}.feature_mixer.mlp", precision=precision)
     x = _add_gated_block(
-        network, x, weights,
-        prefix=f"{prefix}.feature_mixer.gating_block", precision=precision)
+        network, x, weights, prefix=f"{prefix}.feature_mixer.gating_block", precision=precision
+    )
     return network.add_elementwise(residual, x, trt.ElementWiseOperation.SUM).get_output(0)
 
 
@@ -264,10 +270,8 @@ def _build_patchtsmixer_network(
     num_layers = int(raw.get("num_layers", 1))
 
     builder, network = create_network(verbose=verbose)
-    past_values = network.add_input(
-        "past_values", trt.float32, (1, context_length, channels))
-    observed = network.add_input(
-        "observed_mask", trt.float32, (1, context_length, channels))
+    past_values = network.add_input("past_values", trt.float32, (1, context_length, channels))
+    observed = network.add_input("observed_mask", trt.float32, (1, context_length, channels))
 
     scaled, loc, scale = add_std_scale(
         network,
@@ -321,7 +325,8 @@ def _build_patchtsmixer_network(
     add_named_output(network, y, "prediction_outputs")
 
     return build_serialized_network(
-        builder, network, precision=precision, verbose=verbose, tag="patchtsmixer")
+        builder, network, precision=precision, verbose=verbose, tag="patchtsmixer"
+    )
 
 
 class PatchTSMixerPlugin:
@@ -357,13 +362,13 @@ class PatchTSMixerPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="PatchTSMixer replicated tensor-parallel bundles")
+                parallel, feature="PatchTSMixer replicated tensor-parallel bundles"
+            )
             cached = maybe_return_replicated_tp_plan(weights, parallel)
             if cached is not None:
                 return cached
 
-        plan = _build_patchtsmixer_network(
-            config, weights, precision=precision, verbose=verbose)
+        plan = _build_patchtsmixer_network(config, weights, precision=precision, verbose=verbose)
         cache_replicated_tp_plan(weights, parallel, plan)
         return plan
 

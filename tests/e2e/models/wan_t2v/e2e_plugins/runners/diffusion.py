@@ -196,7 +196,7 @@ class DiffusionMediaRunner:
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
             import numpy as np
-            from tensorrt_model_connect.families.wan_t2v.diffusion_runner import DiffusionRunner
+            from tools.families.wan_t2v.diffusion_runner import DiffusionRunner
 
             runner = DiffusionRunner({bundle_path!r})
             prompt_text = {prompt_text!r}

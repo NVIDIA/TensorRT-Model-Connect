@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _electra_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.electra.tp_builder",
+        "tensorrt_model_connect.families.electra.model.parallel",
         reason="TensorRT is required for ELECTRA TP builder tests",
     )
 

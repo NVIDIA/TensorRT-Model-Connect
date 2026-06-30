@@ -196,9 +196,7 @@ def build_evolve_prompt(
 
     ### Python builder (engine construction):
     - `python/tensorrt_model_connect/families/{family_name}/plugin.py` — family plugin config
-    - `python/tensorrt_model_connect/families/{family_name}/standard_decoder_builder.py` — builder parameters
-    - `python/tensorrt_model_connect/families/{family_name}/graph_ops.py` — TRT graph operations (atomic ops)
-    - `python/tensorrt_model_connect/families/{family_name}/graph_blocks.py` — composable graph blocks
+    - `python/tensorrt_model_connect/families/{family_name}/model/model.py` — model builder, TRT graph operations, and composable blocks
     - `python/tensorrt_model_connect/engine_builder.py` — build orchestrator
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
@@ -212,7 +210,7 @@ def build_evolve_prompt(
     - `tools/perf_compare.py` — benchmarking tool
     - `tools/cpu_profile.py` — CPU phase profiling
     - `tools/diff_logits.py` — correctness checker
-    - `python/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
+    - `python/tensorrt_model_connect/families/{family_name}/model/runtime.py` — Python TRT inference runner, when the family needs one
     - `python/tensorrt_model_connect/config.py` — ModelConfig dataclass
 
     ## CRITICAL RULES
@@ -441,18 +439,18 @@ def _build_search_space(focus_area: str | None = None) -> str:
           Phase 0 result: +1.2% (noise level).
 
         - **Fused QKV**: Concat Q/K/V weights, single matmul.
-          File: `graph_blocks.py:add_attention_block`
+          File: `model.py:add_attention_block`
           Phase 0 result: 0% (TRT internally fuses same-input matmuls).
 
         - **Fused Gate+Up**: Concat gate+up weights, single matmul.
-          File: `graph_blocks.py:add_swiglu_mlp`
+          File: `model.py:add_swiglu_mlp`
           Phase 0 result: 0% (same reason).
 
         - **Attention scale fusion**: Fold 1/sqrt(head_dim) into Q weights.
           File: Family plugin `load_weights()`.
 
         - **Alternative norm**: Rewrite RMSNorm using `add_reduce` ops.
-          File: `graph_ops.py:add_rms_norm`
+          File: `model.py:add_rms_norm`
 
         Correctness: `--atol 1e-3` for graph changes without precision changes.
         """))

@@ -67,7 +67,7 @@ def _import_with_fake_trt(module_name: str):
 @pytest.mark.unit
 def test_encodec_fuse_weight_norm_matches_manual_formula() -> None:
     """Bark encodec weight-norm fusion is deterministic."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bark.encodec_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bark.model.components.codec")
 
     g = np.array([[[2.0]], [[4.0]]], dtype=np.float32)
     v = np.array(

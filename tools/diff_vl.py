@@ -61,12 +61,7 @@ def _detect_model_type(model_id: str) -> str:
 @lru_cache(maxsize=1)
 def _family_diff_vl_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned VL diff handlers from family folders."""
-    family_root = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
+    family_root = Path(__file__).resolve().parent / "families"
     modules: list[ModuleType] = []
     for handler_path in sorted(family_root.glob("*/diff_vl.py")):
         module_name = f"_trtmc_diff_vl_{handler_path.parent.name}"
@@ -129,15 +124,14 @@ def _load_family_vl_debug_runner(bundle_path: str) -> ModuleType:
         )
     module_path = (
         Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
+        / "tools"
         / "families"
         / family
         / "vl_debug_runner.py"
     )
     if not module_path.is_file():
         raise RuntimeError(
-            f"Family {family!r} does not provide owned vl_debug_runner.py"
+            f"Family {family!r} does not provide an owned VL debug runner"
         )
     module_name = f"_trtmc_vl_debug_runner_{family}"
     spec = importlib.util.spec_from_file_location(module_name, module_path)

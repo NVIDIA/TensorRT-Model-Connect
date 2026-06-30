@@ -207,7 +207,6 @@ def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace):
     """Import a tensorrt_model_connect module while tensorrt is mocked."""
     for mod_name in (
         module_name,
-        "tensorrt_model_connect.graph_ops",
         "tensorrt_model_connect.graph_blocks",
     ):
         _drop_imported_module(mod_name)
@@ -233,16 +232,16 @@ def _fake_tensor_fn(prefix: str):
 
 
 @pytest.mark.unit
-def test_build_encoder_engine_success_passes_rel_pos_bias_and_activation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intent: verify encoder builder top-level orchestration with mocked layer helper.
+def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intent: verify BERT encoder orchestration with a mocked layer helper.
 
-    Preconditions: `_add_encoder_layer` is monkeypatched to a recording stub and weights include relative bias.
-    Postconditions: Layer helper receives expected hidden-act/rel-bias values and engine bytes are returned.
+    Preconditions: `_add_encoder_layer` is monkeypatched to a recording stub.
+    Postconditions: Layer helper receives BERT activation values and engine bytes are returned.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model", fake_trt)
 
-    monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
+    monkeypatch.setattr(mod, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))
 
     layer_calls: list[dict[str, object]] = []
@@ -270,7 +269,6 @@ def test_build_encoder_engine_success_passes_rel_pos_bias_and_activation(monkeyp
         "token_type_embedding": np.zeros((3, 4), dtype=np.float32),
         "embed_norm": np.ones((4,), dtype=np.float32),
         "embed_norm_beta": np.zeros((4,), dtype=np.float32),
-        "relative_position_bias": np.zeros((2, 5, 5), dtype=np.float32),
     }
 
     plan = mod.build_encoder_engine(config, weights, max_seq_length=5, verbose=True)
@@ -294,9 +292,9 @@ def test_build_encoder_engine_raises_when_builder_returns_none(monkeypatch: pyte
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model", fake_trt)
 
-    monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
+    monkeypatch.setattr(mod, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))
     monkeypatch.setattr(mod, "_add_encoder_layer", _fake_tensor_fn("layer"))
 

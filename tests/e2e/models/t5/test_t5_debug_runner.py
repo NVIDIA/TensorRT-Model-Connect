@@ -9,7 +9,7 @@ from tests.builder.test_debug_runner import _make_bundle_bytes
 
 
 def test_t5_text_to_text_engine_section_and_communicator_forwarded(tmp_path) -> None:
-    from tensorrt_model_connect.families.t5.debug_runner import (
+    from tensorrt_model_connect.families.t5.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -35,7 +35,7 @@ def test_t5_text_to_text_engine_section_and_communicator_forwarded(tmp_path) -> 
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.t5.debug_runner.Seq2SeqTrtRunner",
+        "tensorrt_model_connect.families.t5.model.runtime.Seq2SeqTrtRunner",
         return_value="t5-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

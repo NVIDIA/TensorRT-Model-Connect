@@ -40,7 +40,7 @@ def _make_bundle_bytes(
 
 
 def test_marian_debug_runner_owns_translation_strategy(tmp_path):
-    from tensorrt_model_connect.families.marian.debug_runner import (
+    from tensorrt_model_connect.families.marian.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -65,7 +65,7 @@ def test_marian_debug_runner_owns_translation_strategy(tmp_path):
     path.write_bytes(bundle)
 
     communicator = object()
-    adapter = import_module("tensorrt_model_connect.families.marian.debug_runner")
+    adapter = import_module("tensorrt_model_connect.families.marian.model.runtime")
     with patch.object(adapter, "Seq2SeqTrtRunner",
                       return_value="marian-debug-runner") as mock_runner:
         config_json = load_config_from_bundle(str(path))

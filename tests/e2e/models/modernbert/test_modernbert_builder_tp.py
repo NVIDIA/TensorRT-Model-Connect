@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _modernbert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.modernbert.tp_builder",
+        "tensorrt_model_connect.families.modernbert.model.parallel",
         reason="TensorRT is required for ModernBERT TP builder tests",
     )
 

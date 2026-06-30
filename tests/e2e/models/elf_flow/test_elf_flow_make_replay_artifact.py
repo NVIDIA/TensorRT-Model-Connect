@@ -5,8 +5,8 @@ import json
 import struct
 from pathlib import Path
 
-from tensorrt_model_connect.families.elf_flow.make_replay_artifact import build_artifact
-from tensorrt_model_connect.families.elf_flow.validate_replay_artifact import (
+from tools.families.elf_flow.make_replay_artifact import build_artifact
+from tools.families.elf_flow.validate_replay_artifact import (
     validate_artifact,
 )
 

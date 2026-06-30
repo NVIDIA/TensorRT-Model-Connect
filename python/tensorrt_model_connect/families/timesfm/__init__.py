@@ -1,3 +1,3 @@
-from .plugin import TimesFmPlugin, plugin
+from .plugin import plugin
 
-__all__ = ["TimesFmPlugin", "plugin"]
+__all__ = ["plugin"]

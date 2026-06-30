@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _albert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.albert.tp_builder",
+        "tensorrt_model_connect.families.albert.model.parallel",
         reason="TensorRT is required for ALBERT TP builder tests",
     )
 

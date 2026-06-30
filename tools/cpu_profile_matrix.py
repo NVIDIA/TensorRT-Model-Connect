@@ -59,12 +59,7 @@ class StrategySpec(NamedTuple):
 
 
 def _family_root() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
+    return Path(__file__).resolve().parent / "families"
 
 
 @lru_cache(maxsize=1)

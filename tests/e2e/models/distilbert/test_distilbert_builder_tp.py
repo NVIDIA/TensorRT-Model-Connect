@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _distilbert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.distilbert.tp_builder",
+        "tensorrt_model_connect.families.distilbert.model.tp_builder",
         reason="TensorRT is required for DistilBERT TP builder tests",
     )
 

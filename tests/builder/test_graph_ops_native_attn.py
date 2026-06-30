@@ -2,7 +2,7 @@
 
 Intent:
     Verify that add_layer_norm_native, make_rope_table_half_dim,
-    add_apply_rope_native, and _add_attention_core produce numerically
+    add_apply_rope_native, and add_attention_core produce numerically
     correct output matching their existing reference implementations.
 
 Preconditions:
@@ -210,21 +210,18 @@ class TestMakeRopeTableHalfDim:
         (16, 64, 10000.0),
         (32, 128, 500000.0),
     ])
-    def test_values_match_full_dim_table_head0(self, max_S, head_dim, rope_theta):
-        """Values in half-dim table should match the first head's entries in
-        the full-dim table for both cos and sin."""
-        num_heads = 4
-        hidden_size = num_heads * head_dim
-
+    def test_values_match_reference(self, max_S, head_dim, rope_theta):
+        """Half-dim values match direct inverse-frequency evaluation."""
+        positions = np.arange(max_S, dtype=np.float64)[:, None]
+        dimensions = np.arange(0, head_dim, 2, dtype=np.float64)[None, :]
+        angles = positions * (rope_theta ** (-dimensions / head_dim))
         for cosine in (True, False):
-            full = graph_ops.make_rope_table(
-                max_S, hidden_size, num_heads, rope_theta, cosine)
             half = graph_ops.make_rope_table_half_dim(
                 max_S, head_dim, rope_theta, cosine)
-            # full[:, 0:head_dim//2] is the first half of head 0
+            expected = np.cos(angles) if cosine else np.sin(angles)
             np.testing.assert_allclose(
-                half, full[:, :head_dim // 2], atol=1e-6,
-                err_msg=f"cosine={cosine}: half-dim mismatch vs full table head-0")
+                half, expected.astype(np.float32), atol=1e-6,
+                err_msg=f"cosine={cosine}: half-dim mismatch")
 
     def test_partial_rotary_factor(self):
         max_S, head_dim = 16, 64
@@ -383,7 +380,7 @@ def _ref_sdpa(q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 class TestAddAttentionCore:
     """
-    Intent: _add_attention_core (IAttention with decomposable=True) matches
+    Intent: add_attention_core (IAttention with decomposable=True) matches
             numpy SDPA within tolerance for various head/sequence shapes.
     Preconditions: TRT + GPU; STRONGLY_TYPED network.
     Postconditions: Output within 2e-4 absolute error of numpy SDPA.
@@ -403,7 +400,7 @@ class TestAddAttentionCore:
         v = rng.standard_normal((B, H, kv_S, D)).astype(np.float32)
 
         def build(network, trt_inputs):
-            ctx = graph_ops._add_attention_core(
+            ctx = graph_ops.add_attention_core(
                 network,
                 trt_inputs["q"], trt_inputs["k"], trt_inputs["v"],
                 causal=False)
@@ -428,7 +425,7 @@ class TestAddAttentionCore:
         v = rng.standard_normal((B, H, kv_S, D)).astype(np.float16)
 
         def build(network, trt_inputs):
-            ctx = graph_ops._add_attention_core(
+            ctx = graph_ops.add_attention_core(
                 network,
                 trt_inputs["q"], trt_inputs["k"], trt_inputs["v"],
                 causal=False,
@@ -455,7 +452,7 @@ class TestAddAttentionCore:
         v = rng.standard_normal((B, H, kv_S, D)).astype(np.float32)
 
         def build_nc(network, trt_inputs):
-            ctx = graph_ops._add_attention_core(
+            ctx = graph_ops.add_attention_core(
                 network, trt_inputs["q"], trt_inputs["k"], trt_inputs["v"],
                 causal=False)
             return {"out": ctx}
@@ -482,7 +479,7 @@ class TestAddAttentionCore:
             mask_t = graph_ops.add_constant(
                 network, (B, H, 1, kv_S),
                 mask.astype(np.float32))
-            ctx = graph_ops._add_attention_core(
+            ctx = graph_ops.add_attention_core(
                 network, trt_inputs["q"], trt_inputs["k"], trt_inputs["v"],
                 causal=False, mask=mask_t)
             return {"out": ctx}

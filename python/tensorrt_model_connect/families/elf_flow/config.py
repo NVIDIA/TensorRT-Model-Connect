@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from .model_config import ModelConfig
+    from .model.components.config import ModelConfig
 
 
 ELF_VARIANTS: dict[str, tuple[int, int, int]] = {
@@ -32,10 +32,7 @@ def resolve_elf_config(config: "ModelConfig", max_seq_length: int | None = None)
         or 512
     )
     hidden_size = int(
-        config.hidden_size
-        or raw.get("hidden_size")
-        or raw.get("elf_hidden_size")
-        or default_hidden
+        config.hidden_size or raw.get("hidden_size") or raw.get("elf_hidden_size") or default_hidden
     )
     depth = int(
         config.num_hidden_layers
@@ -51,7 +48,8 @@ def resolve_elf_config(config: "ModelConfig", max_seq_length: int | None = None)
     )
     if hidden_size % num_heads != 0:
         raise ValueError(
-            f"ELF hidden_size={hidden_size} must be divisible by num_heads={num_heads}")
+            f"ELF hidden_size={hidden_size} must be divisible by num_heads={num_heads}"
+        )
 
     max_length = int(
         raw.get("_elf_engine_max_length")
@@ -63,8 +61,10 @@ def resolve_elf_config(config: "ModelConfig", max_seq_length: int | None = None)
     )
     max_input_length = int(raw.get("max_input_length") or raw.get("elf_max_input_length") or 0)
     self_cond_prob = float(raw.get("self_cond_prob", 0.5))
-    input_dim = int(raw.get("elf_input_dim") or (
-        2 * text_encoder_dim if self_cond_prob > 0.0 else text_encoder_dim))
+    input_dim = int(
+        raw.get("elf_input_dim")
+        or (2 * text_encoder_dim if self_cond_prob > 0.0 else text_encoder_dim)
+    )
 
     num_time_tokens = int(raw.get("num_time_tokens", 4))
     if num_time_tokens <= 0:

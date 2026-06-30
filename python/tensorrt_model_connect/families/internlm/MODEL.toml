@@ -3,7 +3,7 @@ plugin = "internlm"
 module = "plugin"
 capabilities = ["split_decoder_roles"]
 python_profile_specs = [
-  "internlm|families/internlm/python_profile_requirements/internlm.lock.txt|families/internlm/python_profile_verify.py|true",
+  "internlm|families/internlm/profiles/requirements/internlm.lock.txt|families/internlm/profiles/verify.py|true",
 ]
 default_execution_profiles = [
   "build|internlm",
@@ -17,7 +17,7 @@ aliases = [
 prefixes = [
   "internlm",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runner = "model/runtime.py|runner_from_bundle"
 debug_runtime_strategies = [
   "internlm_decoder_kv_cache",
 ]

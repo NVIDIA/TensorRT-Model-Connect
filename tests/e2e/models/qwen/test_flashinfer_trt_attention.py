@@ -242,7 +242,7 @@ def build_decomposed_attention_engine():
 # --- Build TRT engine with FlashInfer plugin ---
 def build_flashinfer_attention_engine():
     """Build TRT engine using FlashInfer via TvmFfiKernel plugin."""
-    from tensorrt_model_connect.families.qwen.graph_ops import add_tvm_ffi_kernel
+    from tensorrt_model_connect.families.qwen.model.model import add_tvm_ffi_kernel
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

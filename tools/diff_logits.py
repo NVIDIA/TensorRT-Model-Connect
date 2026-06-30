@@ -40,12 +40,7 @@ STANDARD_PROMPTS = [
 @lru_cache(maxsize=1)
 def _family_diff_logits_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned logit diff hooks from family folders."""
-    family_root = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
+    family_root = Path(__file__).resolve().parent / "families"
     modules: list[ModuleType] = []
     for handler_path in sorted(family_root.glob("*/diff_logits.py")):
         module_name = f"_trtmc_diff_logits_{handler_path.parent.name}"

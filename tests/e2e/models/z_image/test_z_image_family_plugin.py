@@ -128,27 +128,27 @@ def test_build_components_calls_all_subbuilders(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+        "tensorrt_model_connect.families.z_image.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+            "tensorrt_model_connect.families.z_image.model.components.text_encoder",
             load_qwen3_encoder_weights=load_qwen3_encoder_weights,
             build_qwen3_encoder_engine=build_qwen3_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+        "tensorrt_model_connect.families.z_image.model.components.dit",
         _module(
-            "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+            "tensorrt_model_connect.families.z_image.model.components.dit",
             load_z_image_dit_weights=load_z_image_dit_weights,
             build_z_image_dit_engine=build_z_image_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.vae_2d_builder",
+        "tensorrt_model_connect.families.z_image.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.z_image.vae_2d_builder",
+            "tensorrt_model_connect.families.z_image.model.components.vae",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )
@@ -219,35 +219,35 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+        "tensorrt_model_connect.families.z_image.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.z_image.qwen3_encoder_builder",
+            "tensorrt_model_connect.families.z_image.model.components.text_encoder",
             load_qwen3_encoder_weights=load_qwen3_encoder_weights,
             build_qwen3_encoder_engine=build_qwen3_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+        "tensorrt_model_connect.families.z_image.model.components.dit",
         _module(
-            "tensorrt_model_connect.families.z_image.z_image_dit_builder",
+            "tensorrt_model_connect.families.z_image.model.components.dit",
             load_z_image_dit_weights=load_z_image_dit_weights,
             build_z_image_dit_engine=build_z_image_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.z_image_dit_tp_builder",
+        "tensorrt_model_connect.families.z_image.model.parallel",
         _module(
-            "tensorrt_model_connect.families.z_image.z_image_dit_tp_builder",
+            "tensorrt_model_connect.families.z_image.model.parallel",
             build_z_image_dit_engine=build_z_image_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.z_image.vae_2d_builder",
+        "tensorrt_model_connect.families.z_image.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.z_image.vae_2d_builder",
+            "tensorrt_model_connect.families.z_image.model.components.vae",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )

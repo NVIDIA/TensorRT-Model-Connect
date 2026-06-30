@@ -669,7 +669,7 @@ class TextGenerationCausalRunner:
             from tensorrt_model_connect.debug_runner import (
                 TensorParallelNcclGroup,
             )
-            from tensorrt_model_connect.families.nemotron.debug_runner import (
+            from tensorrt_model_connect.families.nemotron.model.runtime import (
                 load_config_from_bundle,
                 load_engine_from_bundle,
                 runner_from_bundle as family_runner_from_bundle,

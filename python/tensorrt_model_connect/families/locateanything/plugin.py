@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _has_tensor,
     _load_tensor,
@@ -27,7 +27,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .default_decoder import build_standard_decoder_engine
+from .model.model import build_standard_decoder_engine
 
 if TYPE_CHECKING:
     from ...quantization.context import QuantContext
@@ -66,12 +66,13 @@ class LocateAnythingPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="LocateAnything tensor-parallel builds")
+                parallel, feature="LocateAnything tensor-parallel builds"
+            )
             if debug_layer_outputs:
                 raise ValueError(
-                    "LocateAnything tensor-parallel builds do not support "
-                    "debug layer outputs")
-            from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
+                    "LocateAnything tensor-parallel builds do not support debug layer outputs"
+                )
+            from .model.parallel import build_qwen_vl_tp_decoder_engine
 
             return build_qwen_vl_tp_decoder_engine(
                 config,
@@ -79,7 +80,6 @@ class LocateAnythingPlugin:
                 max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
-                embed_input=True,
                 deepstack_num_levels=0,
                 verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs,
@@ -92,7 +92,6 @@ class LocateAnythingPlugin:
             max_cache_length,
             precision=precision,
             quant_ctx=quant_ctx,
-            embed_input=True,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs,
         )
@@ -106,11 +105,11 @@ class LocateAnythingPlugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> bytes | None:
-        from .vision_builder import build_locateanything_vision_engine
+        from .model.components.vision import build_locateanything_vision_engine
 
         return build_locateanything_vision_engine(
-            model_dir, config, fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
-            verbose=verbose)
+            model_dir, config, fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE, verbose=verbose
+        )
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         vision_config = config.raw.get("vision_config")
@@ -132,7 +131,8 @@ class LocateAnythingPlugin:
 
         return {
             "image_token_id": config.raw.get(
-                "image_token_index", config.raw.get("image_token_id", 151665)),
+                "image_token_index", config.raw.get("image_token_id", 151665)
+            ),
             "fixed_image_size": fixed_image_size,
             "patch_size": patch_size,
             "merge_size": merge_h,
@@ -207,7 +207,8 @@ def _load_locateanything_text_weights(
     )
     embedding = _load_tensor(readers, embed_key)
     assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+    )
     weights["embedding"] = embedding.astype(np.float32)
 
     layer_prefix = _detect_layer_prefix(readers)
@@ -220,9 +221,11 @@ def _load_locateanything_text_weights(
         hf_prefix = f"{layer_prefix}.{layer_idx}"
 
         weights[f"{prefix}.input_norm"] = _load_tensor(
-            readers, f"{hf_prefix}.input_layernorm.weight").astype(np.float32)
+            readers, f"{hf_prefix}.input_layernorm.weight"
+        ).astype(np.float32)
         weights[f"{prefix}.post_attn_norm"] = _load_tensor(
-            readers, f"{hf_prefix}.post_attention_layernorm.weight").astype(np.float32)
+            readers, f"{hf_prefix}.post_attention_layernorm.weight"
+        ).astype(np.float32)
 
         q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
         k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
@@ -246,8 +249,9 @@ def _load_locateanything_text_weights(
         ]:
             full_key = f"{hf_prefix}.{weight_key}"
             if _has_tensor(readers, full_key):
-                weights[f"{prefix}.{proj_name}"] = _load_tensor(
-                    readers, full_key).astype(np.float32)
+                weights[f"{prefix}.{proj_name}"] = _load_tensor(readers, full_key).astype(
+                    np.float32
+                )
 
         gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
         up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")

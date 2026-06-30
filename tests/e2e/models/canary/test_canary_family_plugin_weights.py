@@ -77,7 +77,7 @@ class TestCanaryPlugin:
     @staticmethod
     def _tp_builder_module():
         return pytest.importorskip(
-            "tensorrt_model_connect.families.canary.decoder_tp_builder",
+            "tensorrt_model_connect.families.canary.model.parallel",
             reason="TensorRT is required for Canary TP builder tests",
         )
 

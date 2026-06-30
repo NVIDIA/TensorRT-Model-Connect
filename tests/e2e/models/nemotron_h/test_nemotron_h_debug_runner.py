@@ -30,7 +30,7 @@ def _make_bundle_bytes(
 
 
 def test_hybrid_engine_section_and_communicator_forwarded(tmp_path):
-    from tensorrt_model_connect.families.nemotron_h.debug_runner import (
+    from tensorrt_model_connect.families.nemotron_h.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -55,7 +55,7 @@ def test_hybrid_engine_section_and_communicator_forwarded(tmp_path):
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.nemotron_h.debug_runner.HybridTrtRunner",
+        "tensorrt_model_connect.families.nemotron_h.model.runtime.HybridTrtRunner",
         return_value="hybrid-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

@@ -32,7 +32,7 @@ _VOCAB = 24
 
 def _mpnet_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.mpnet.tp_builder",
+        "tensorrt_model_connect.families.mpnet.model.parallel",
         reason="TensorRT is required for MPNet TP builder tests",
     )
 

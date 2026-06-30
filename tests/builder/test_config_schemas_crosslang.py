@@ -80,6 +80,15 @@ def test_load_all_populates_triattention():
     assert len(schema.fields) > 0
 
 
+def test_load_all_populates_model_owned_audio_schemas():
+    """Family sidecars are discovered without importing their TRT plugins."""
+    loaded = load_all()
+
+    assert {"audio_bark", "audio_magpie"} <= set(loaded)
+    assert lookup("audio_bark") is not None
+    assert lookup("audio_magpie") is not None
+
+
 def test_triattention_field_set_matches_cpp():
     """Python and C++ schema files declare the same field names."""
     load_all()

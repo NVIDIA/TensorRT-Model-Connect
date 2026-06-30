@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -29,7 +29,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.model import build_standard_decoder_engine
 
 if TYPE_CHECKING:
     pass
@@ -47,7 +47,9 @@ class InternVLPlugin:
         return mt in ("internvl_chat", "internvl3", "internvl")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load text decoder weights (Qwen2 pattern).
 
@@ -57,9 +59,14 @@ class InternVLPlugin:
         return _load_internvl_text_weights(model_dir, config)
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -67,30 +74,42 @@ class InternVLPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="InternVL tensor-parallel builds")
+                parallel, feature="InternVL tensor-parallel builds"
+            )
             if debug_layer_outputs:
-                raise ValueError("InternVL tensor-parallel builds do not support debug layer outputs")
-            from .tp_builder import build_dual_profile_tp_decoder_engine
+                raise ValueError(
+                    "InternVL tensor-parallel builds do not support debug layer outputs"
+                )
+            from .model.parallel import build_dual_profile_tp_decoder_engine
+
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
-                norm_type="rmsnorm",
-                mlp_type="swiglu",
-                position_type="rope",
-                activation="silu",
-                embed_input=True,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision, verbose=verbose,
-            quant_ctx=quant_ctx, embed_input=True,
-            debug_layer_outputs=debug_layer_outputs)
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
@@ -98,11 +117,15 @@ class InternVLPlugin:
 
         vision_weights = _load_vision_and_projector_weights(model_dir, config)
 
-        from .internvit_vision_builder import build_internvit_vision_engine
+        from .model.components.vision import build_internvit_vision_engine
+
         return build_internvit_vision_engine(
-            config.raw, vision_config, vision_weights,
+            config.raw,
+            vision_config,
+            vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         vision_config = config.raw.get("vision_config")
@@ -110,7 +133,9 @@ class InternVLPlugin:
             return None
 
         patch_size_raw = vision_config.get("patch_size", 14)
-        patch_size = patch_size_raw[0] if isinstance(patch_size_raw, (list, tuple)) else patch_size_raw
+        patch_size = (
+            patch_size_raw[0] if isinstance(patch_size_raw, (list, tuple)) else patch_size_raw
+        )
         fixed_image_size = _DEFAULT_FIXED_IMAGE_SIZE
         downsample_ratio = config.raw.get("downsample_ratio", 0.5)
 
@@ -147,8 +172,10 @@ class InternVLPlugin:
 # Text decoder weight loading
 # ---------------------------------------------------------------------------
 
+
 def _load_internvl_text_weights(
-    model_dir: str, config: ModelConfig,
+    model_dir: str,
+    config: ModelConfig,
 ) -> WeightDict:
     """Load InternVL3 text decoder weights.
 
@@ -175,7 +202,8 @@ def _load_internvl_text_weights(
 
     embedding = _load_tensor(readers, embed_key)
     assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+    )
     weights["embedding"] = embedding.astype(np.float32)
 
     # Determine layer prefix
@@ -198,10 +226,8 @@ def _load_internvl_text_weights(
         hf_prefix = f"{layer_prefix}.{layer_idx}"
 
         # Norms
-        input_norm = _load_tensor(
-            readers, f"{hf_prefix}.input_layernorm.weight")
-        post_norm = _load_tensor(
-            readers, f"{hf_prefix}.post_attention_layernorm.weight")
+        input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
+        post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
         weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
@@ -222,7 +248,6 @@ def _load_internvl_text_weights(
         v_t = _transpose_2d(v_raw, "v_proj")
         o_t = _transpose_2d(o_raw, "o_proj")
 
-
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_t
         weights[f"{prefix}.w_v"] = v_t
@@ -240,12 +265,9 @@ def _load_internvl_text_weights(
                 weights[f"{prefix}.{proj_name}"] = raw
 
         # SwiGLU MLP
-        gate_raw = _load_tensor(
-            readers, f"{hf_prefix}.mlp.gate_proj.weight")
-        up_raw = _load_tensor(
-            readers, f"{hf_prefix}.mlp.up_proj.weight")
-        down_raw = _load_tensor(
-            readers, f"{hf_prefix}.mlp.down_proj.weight")
+        gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
+        up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
+        down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
 
         if mlp_size == 0:
             mlp_size = gate_raw.shape[0]
@@ -258,14 +280,11 @@ def _load_internvl_text_weights(
     final_norm_key = f"{layer_prefix.rsplit('.layers', 1)[0]}.norm.weight"
     alt_final_norm_key = "language_model.model.norm.weight"
     if _has_tensor(readers, final_norm_key):
-        weights["final_norm"] = _load_tensor(
-            readers, final_norm_key).astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
     elif _has_tensor(readers, alt_final_norm_key):
-        weights["final_norm"] = _load_tensor(
-            readers, alt_final_norm_key).astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, alt_final_norm_key).astype(np.float32)
     elif _has_tensor(readers, "model.norm.weight"):
-        weights["final_norm"] = _load_tensor(
-            readers, "model.norm.weight").astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, "model.norm.weight").astype(np.float32)
     else:
         weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
@@ -274,8 +293,7 @@ def _load_internvl_text_weights(
     if not _has_tensor(readers, lm_head_key):
         lm_head_key = "lm_head.weight"
     if _has_tensor(readers, lm_head_key):
-        weights["w_out"] = _transpose_2d(
-            _load_tensor(readers, lm_head_key), "lm_head")
+        weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
     else:
         weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
@@ -290,8 +308,10 @@ def _load_internvl_text_weights(
 # Vision + projector weight loading
 # ---------------------------------------------------------------------------
 
+
 def _load_vision_and_projector_weights(
-    model_dir: str, config: ModelConfig,
+    model_dir: str,
+    config: ModelConfig,
 ) -> WeightDict:
     """Load vision encoder + MLP projector weights."""
     from pathlib import Path
@@ -302,10 +322,12 @@ def _load_vision_and_projector_weights(
     weights = WeightDict()
     for reader in readers:
         for key in reader.keys():
-            if (key.startswith("vision_tower.")
-                    or key.startswith("multi_modal_projector.")
-                    or key.startswith("visual.")
-                    or key.startswith("mlp1.")):
+            if (
+                key.startswith("vision_tower.")
+                or key.startswith("multi_modal_projector.")
+                or key.startswith("visual.")
+                or key.startswith("mlp1.")
+            ):
                 weights[key] = _load_tensor([reader], key)
 
     return weights

@@ -1,7 +1,7 @@
 id = "chronos_bolt"
 plugin = "chronos_bolt"
 python_profile_specs = [
-  "chronos|families/chronos_bolt/python_profile_requirements/chronos.lock.txt|families/chronos_bolt/python_profile_verify.py|true",
+  "chronos|families/chronos_bolt/profiles/requirements/chronos.lock.txt|families/chronos_bolt/profiles/verify.py|true",
 ]
 default_execution_profiles = [
   "build|chronos",

@@ -2,7 +2,7 @@
 """Denoiser validation entrypoint.
 
 Concrete validation behavior is owned by model-family modules under
-``python/tensorrt_model_connect/families/*/validate_dit.py``. This shared tool
+``tools/families/*/validate_dit.py``. This shared tool
 only discovers and dispatches to those handlers.
 """
 
@@ -18,12 +18,7 @@ from typing import Any
 
 
 def _family_root() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
+    return Path(__file__).resolve().parent / "families"
 
 
 @lru_cache(maxsize=1)

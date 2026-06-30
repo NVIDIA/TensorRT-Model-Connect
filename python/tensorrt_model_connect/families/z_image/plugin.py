@@ -28,7 +28,7 @@ from __future__ import annotations
 import sys
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict
+from .weights import WeightDict
 
 
 class ZImagePlugin:
@@ -73,7 +73,9 @@ class ZImagePlugin:
         return mt in ("z_image", "zimage", "z-image", "zimagepipeline")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         from pathlib import Path
 
@@ -88,38 +90,51 @@ class ZImagePlugin:
             weights["_tokenizer_dir"] = str(model_path / "tokenizer")
             weights["_model_dir"] = str(model_path)
         else:
-            raise ValueError(
-                f"Expected diffusers format with model_index.json in {model_dir}")
+            raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
 
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
     ) -> bytes:
-        raise NotImplementedError(
-            "Z-Image uses build_components(), not build_engine()")
+        raise NotImplementedError("Z-Image uses build_components(), not build_engine()")
 
     def build_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
-        parallel_config=None, max_batch_size: int = 1, **_kwargs,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        parallel_config=None,
+        max_batch_size: int = 1,
+        **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .qwen3_encoder_builder import (
-            build_qwen3_encoder_engine, load_qwen3_encoder_weights)
-        from .z_image_dit_builder import (
-            build_z_image_dit_engine, load_z_image_dit_weights)
-        from .z_image_dit_tp_builder import (
-            build_z_image_dit_engine as build_z_image_dit_tp_engine)
-        from .vae_2d_builder import build_vae_2d_decoder_engine
+        from .model.components.text_encoder import (
+            build_qwen3_encoder_engine,
+            load_qwen3_encoder_weights,
+        )
+        from .model.components.dit import build_z_image_dit_engine, load_z_image_dit_weights
+        from .model.parallel import (
+            build_z_image_dit_engine as build_z_image_dit_tp_engine,
+        )
+        from .model.components.vae import build_vae_2d_decoder_engine
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
             validate_dit_tp,
         )
+
         build_timing = _kwargs.get("build_timing")
         parallel = normalize_parallel_config(parallel_config)
         # TP + batch>1 is out of scope for this PR series.
@@ -128,8 +143,7 @@ class ZImagePlugin:
                 "Z-Image tensor-parallel + max_batch_size > 1 is not supported "
                 "in this release; build with either TP=1 or max_batch_size=1."
             )
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Z-Image tensor-parallel builds")
+        require_tensorrt_11_for_tensor_parallel(parallel, feature="Z-Image tensor-parallel builds")
 
         # Per-component batch policy (Decisions C / E).
         dit_mbs = int(max_batch_size)
@@ -162,9 +176,11 @@ class ZImagePlugin:
         ph, pw = self._PATCH_SIZE[1], self._PATCH_SIZE[2]
         num_patches = (h_lat // ph) * (w_lat // pw)
 
-        print(f"[z-image] Latent size: {h_lat}x{w_lat}, "
-              f"patches: {num_patches} ({h_lat//ph}x{w_lat//pw})",
-              file=sys.stderr)
+        print(
+            f"[z-image] Latent size: {h_lat}x{w_lat}, "
+            f"patches: {num_patches} ({h_lat // ph}x{w_lat // pw})",
+            file=sys.stderr,
+        )
 
         # 1. Qwen3 text encoder
         print("[z-image] Loading Qwen3 text encoder weights ...", file=sys.stderr)
@@ -282,7 +298,9 @@ class ZImagePlugin:
             }
         return out
 
-    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None
+    ) -> list[tuple[str, bytes]]:
         from ...parallel_config import normalize_parallel_config, rank_denoiser_section
 
         parallel = normalize_parallel_config(parallel_config)
@@ -310,7 +328,10 @@ class ZImagePlugin:
         return cfg
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         from pathlib import Path
 
@@ -322,15 +343,22 @@ class ZImagePlugin:
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
         token_filenames = (
-            "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json", "vocab.json",
-            "merges.txt", "spiece.model", "tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+            "tokenizer.model",
         )
         sections: list[tuple[str, bytes]] = []
         embedded: set[str] = set()

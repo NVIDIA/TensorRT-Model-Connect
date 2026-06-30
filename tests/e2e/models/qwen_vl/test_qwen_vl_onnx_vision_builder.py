@@ -120,7 +120,7 @@ def test_onnx_builder_raises_parser_error_with_details() -> None:
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
     mod = _import_with_fake_trt(
-        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder",
+        "tools.families.qwen_vl.onnx_vision_builder",
         fake_trt=fake_trt,
     )
 
@@ -192,7 +192,7 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
     mod = _import_with_fake_trt(
-        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder",
+        "tools.families.qwen_vl.onnx_vision_builder",
         fake_trt=fake_trt,
     )
 
@@ -209,7 +209,7 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
 @pytest.mark.unit
 def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
     """Qwen-VL trace helper reports missing dependencies and vision module."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
+    mod = _import_with_fake_trt("tools.families.qwen_vl.onnx_vision_builder")
 
     class _NoGrad:
         def __enter__(self):
@@ -252,7 +252,7 @@ def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
 @pytest.mark.unit
 def test_trace_hf_vision_encoder_success_path_with_mocked_export() -> None:
     """Qwen-VL trace helper delegates exported ONNX bytes to TRT builder."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
+    mod = _import_with_fake_trt("tools.families.qwen_vl.onnx_vision_builder")
 
     class _NoGrad:
         def __enter__(self):

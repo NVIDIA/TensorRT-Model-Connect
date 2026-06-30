@@ -1,0 +1,5 @@
+id = "sam3"
+plugin = "sam3"
+module = "plugin"
+aliases = ["sam3"]
+prefixes = ["sam3"]

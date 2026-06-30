@@ -1395,7 +1395,7 @@ FlowMatchEulerScheduler build_scheduler(const QwenImageDiffusionConfig& dc, int 
 } // namespace
 
 // Combine pos + neg noise predictions via true-CFG and apply Qwen-Image's
-// per-token L2 renormalization. Matches families/qwen_image/debug_runner.py exactly:
+// per-token L2 renormalization. Matches the Qwen-Image reference algorithm:
 //   comb = neg + cfg*(pos - neg)
 //   noise = comb * (||pos|| / max(||comb||, 1e-8))   per-token
 //

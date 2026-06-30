@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-"""Unit tests for every graph_ops function against HuggingFace references.
+"""Focused graph_ops checks against Hugging Face references.
 
-Tests every parameter combination of:
+Tests retained family-owned operations for:
   - compute_alibi_slopes: power-of-2 (8,16) and non-power-of-2 (6,12)
-  - make_rope_table: interleaved × partial_rotary_factor × cosine
-  - make_rotate_half_matrix: interleaved × partial_rotary_factor
   - add_rms_norm: vs torch manual RMSNorm
   - add_rms_norm_per_head: vs torch per-head RMSNorm
   - add_layer_norm: vs torch.nn.LayerNorm
   - add_gelu_new: vs HF NewGELUActivation (tanh approx)
   - add_activation(silu): vs torch.nn.SiLU
   - add_activation(relu): vs torch.nn.ReLU
-  - add_apply_rope (rotated-half): vs rotated-half reference
-  - add_apply_rope (interleaved): vs interleaved-pair reference
 
 Run inside the container:
     python3 tools/test_graph_ops.py
@@ -20,9 +16,9 @@ Run inside the container:
 
 from __future__ import annotations
 
+import importlib
 import math
 import sys
-import importlib
 from pathlib import Path
 
 import numpy as np
@@ -39,16 +35,27 @@ except ImportError:
 sys.path.insert(0, "python")
 
 
-def _load_owned_graph_ops():
-    families = Path("python") / "tensorrt_model_connect" / "families"
-    for family_dir in sorted(families.iterdir()):
-        if (family_dir / "MODEL.toml").is_file() and (family_dir / "graph_ops.py").is_file():
-            return importlib.import_module(
-                f"tensorrt_model_connect.families.{family_dir.name}.graph_ops")
-    raise RuntimeError("No family-owned graph_ops.py found")
+class _OwnedGraphOps:
+    """Resolve each operation from a family that actually retains it."""
+
+    def __init__(self):
+        families = Path("python") / "tensorrt_model_connect" / "families"
+        self._module_names = [
+            f"tensorrt_model_connect.families.{family_dir.name}.model.model"
+            for family_dir in sorted(families.iterdir())
+            if (family_dir / "plugin.py").is_file()
+            and (family_dir / "model" / "model.py").is_file()
+        ]
+
+    def __getattr__(self, name: str):
+        for module_name in self._module_names:
+            module = importlib.import_module(module_name)
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"No family-owned graph_ops.py defines {name}")
 
 
-graph_ops = _load_owned_graph_ops()
+graph_ops = _OwnedGraphOps()
 
 
 # ---------------------------------------------------------------
@@ -86,7 +93,6 @@ def _run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndar
     for name, tensor in trt_outputs.items():
         tensor.name = name
         network.mark_output(tensor)
-        tensor.dtype = trt.float32
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -156,166 +162,6 @@ def test_alibi_slopes():
         assert np.allclose(ours, ref, atol=1e-7), \
             f"n={n}: max diff {np.abs(ours - ref).max():.2e}"
     print("  PASS  compute_alibi_slopes (11 head counts)")
-
-
-# ---------------------------------------------------------------
-# 2. make_rope_table — vs HF reference implementations
-# ---------------------------------------------------------------
-
-def _rotated_half_rope_table(max_len, hidden, num_heads, theta, cosine):
-    """Rotated-half RoPE: pairs (d, d+half_rotary)."""
-    head_dim = hidden // num_heads
-    half = head_dim // 2
-    inv_freq = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
-    table = np.full((max_len, hidden), 1.0 if cosine else 0.0, dtype=np.float32)
-    for pos in range(max_len):
-        for h in range(num_heads):
-            for i in range(half):
-                angle = pos * inv_freq[i]
-                val = float(np.cos(angle) if cosine else np.sin(angle))
-                table[pos, h * head_dim + i] = val
-                table[pos, h * head_dim + half + i] = val
-    return table
-
-
-def _hf_rope_table_interleaved(max_len, hidden, num_heads, theta, cosine,
-                                partial_factor=1.0):
-    """Interleaved RoPE: repeat_interleave, pairs (d, d+1)."""
-    head_dim = hidden // num_heads
-    rotary_ndims = int(head_dim * partial_factor)
-    half = rotary_ndims // 2
-    inv_freq = 1.0 / (theta ** (np.arange(0, rotary_ndims, 2, dtype=np.float64) / rotary_ndims))
-    table = np.full((max_len, hidden), 1.0 if cosine else 0.0, dtype=np.float32)
-    for pos in range(max_len):
-        for h in range(num_heads):
-            for i in range(half):
-                angle = pos * inv_freq[i]
-                val = float(np.cos(angle) if cosine else np.sin(angle))
-                # repeat_interleave: dim 2*i and 2*i+1 share freq i
-                table[pos, h * head_dim + 2 * i] = val
-                table[pos, h * head_dim + 2 * i + 1] = val
-    return table
-
-
-def test_rope_table():
-    params = dict(max_cache_length=16, hidden_size=64, num_attention_heads=4,
-                  rope_theta=10000.0)
-    # Standard rotated-half, full RoPE
-    for cosine in [True, False]:
-        ours = graph_ops.make_rope_table(**params, cosine=cosine)
-        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, cosine)
-        assert np.allclose(ours, ref, atol=1e-6), \
-            f"rotated-half cos={cosine}: max diff {np.abs(ours - ref).max():.2e}"
-
-    # Interleaved, full RoPE
-    for cosine in [True, False]:
-        ours = graph_ops.make_rope_table(**params, cosine=cosine, interleaved=True)
-        ref = _hf_rope_table_interleaved(16, 64, 4, 10000.0, cosine)
-        assert np.allclose(ours, ref, atol=1e-6), \
-            f"interleaved cos={cosine}: max diff {np.abs(ours - ref).max():.2e}"
-
-    # Partial rotary (factor=0.5), standard
-    ours = graph_ops.make_rope_table(
-        16, 64, 4, 10000.0, True, partial_rotary_factor=0.5)
-    head_dim = 16
-    # Non-rotary dims (last 8 per head) should be 1.0 (cosine default)
-    for h in range(4):
-        assert np.all(ours[:, h * head_dim + 8 : h * head_dim + 16] == 1.0), \
-            "Partial rotary: non-rotary dims not 1.0"
-
-    # Partial rotary (factor=0.5), interleaved
-    ours_i = graph_ops.make_rope_table(
-        16, 64, 4, 10000.0, True, partial_rotary_factor=0.5, interleaved=True)
-    ref_i = _hf_rope_table_interleaved(16, 64, 4, 10000.0, True, 0.5)
-    assert np.allclose(ours_i, ref_i, atol=1e-6), \
-        f"interleaved partial: max diff {np.abs(ours_i - ref_i).max():.2e}"
-
-    # Partial rotary (factor=0.25)
-    ours_025 = graph_ops.make_rope_table(
-        8, 128, 2, 10000.0, True, partial_rotary_factor=0.25)
-    hd = 64
-    rotary_nd = 16
-    for h in range(2):
-        # Non-rotary dims should be 1.0
-        assert np.all(ours_025[:, h * hd + rotary_nd : h * hd + hd] == 1.0)
-
-    print("  PASS  make_rope_table (6 combinations: rotated/interleaved × cos/sin × partial)")
-
-
-# ---------------------------------------------------------------
-# 3. make_rotate_half_matrix — vs HF rotate_half / rotate_every_two
-# ---------------------------------------------------------------
-
-def _hf_rotate_half(x: np.ndarray) -> np.ndarray:
-    """Rotated-half reference: swap first/second halves with sign flip."""
-    half = x.shape[-1] // 2
-    x1, x2 = x[..., :half], x[..., half:]
-    return np.concatenate([-x2, x1], axis=-1)
-
-
-def _hf_rotate_every_two(x: np.ndarray) -> np.ndarray:
-    """Interleaved-pair reference: pair adjacent dims."""
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    stacked = np.stack([-x2, x1], axis=-1)
-    return stacked.reshape(x.shape)
-
-
-def test_rotate_half_matrix():
-    rng = np.random.RandomState(42)
-
-    # Standard rotated-half, full RoPE
-    for hidden, heads in [(64, 4), (128, 8), (768, 12)]:
-        mat = graph_ops.make_rotate_half_matrix(hidden, heads)
-        x = rng.randn(1, hidden).astype(np.float32)
-        ours = x @ mat
-        # Reference: per-head rotate_half
-        hd = hidden // heads
-        ref_parts = []
-        for h in range(heads):
-            ref_parts.append(_hf_rotate_half(x[:, h*hd:(h+1)*hd]))
-        ref = np.concatenate(ref_parts, axis=-1)
-        assert np.allclose(ours, ref, atol=1e-6), \
-            f"rotated-half h={hidden} n={heads}: max diff {np.abs(ours - ref).max():.2e}"
-
-    # Interleaved, full RoPE
-    for hidden, heads in [(64, 4), (128, 8)]:
-        mat = graph_ops.make_rotate_half_matrix(hidden, heads, interleaved=True)
-        x = rng.randn(1, hidden).astype(np.float32)
-        ours = x @ mat
-        hd = hidden // heads
-        ref_parts = []
-        for h in range(heads):
-            ref_parts.append(_hf_rotate_every_two(x[:, h*hd:(h+1)*hd]))
-        ref = np.concatenate(ref_parts, axis=-1)
-        assert np.allclose(ours, ref, atol=1e-6), \
-            f"interleaved h={hidden} n={heads}: max diff {np.abs(ours - ref).max():.2e}"
-
-    # Partial rotary (factor=0.5), standard
-    mat_p = graph_ops.make_rotate_half_matrix(64, 4, partial_rotary_factor=0.5)
-    x = rng.randn(1, 64).astype(np.float32)
-    ours_p = x @ mat_p
-    hd = 16
-    rotary = 8
-    for h in range(4):
-        base = h * hd
-        # Rotary dims: should match rotate_half on first 8 dims
-        ref_rot = _hf_rotate_half(x[:, base:base+rotary])
-        assert np.allclose(ours_p[:, base:base+rotary], ref_rot, atol=1e-6)
-        # Non-rotary dims: should be identity (pass-through)
-        assert np.allclose(ours_p[:, base+rotary:base+hd], x[:, base+rotary:base+hd], atol=1e-6)
-
-    # Partial rotary (factor=0.5), interleaved
-    mat_pi = graph_ops.make_rotate_half_matrix(64, 4, partial_rotary_factor=0.5,
-                                                interleaved=True)
-    ours_pi = x @ mat_pi
-    for h in range(4):
-        base = h * hd
-        ref_rot_i = _hf_rotate_every_two(x[:, base:base+rotary])
-        assert np.allclose(ours_pi[:, base:base+rotary], ref_rot_i, atol=1e-6)
-        assert np.allclose(ours_pi[:, base+rotary:base+hd], x[:, base+rotary:base+hd], atol=1e-6)
-
-    print("  PASS  make_rotate_half_matrix (7 combinations: rotated/interleaved × sizes × partial)")
 
 
 # ---------------------------------------------------------------
@@ -471,116 +317,6 @@ def test_activations():
 
 
 # ---------------------------------------------------------------
-# 9. add_apply_rope — rotated-half and interleaved
-# ---------------------------------------------------------------
-
-def _apply_rope_rotated_half_ref(x, cos, sin, head_dim):
-    """Rotated-half: pairs (d, d+half)."""
-    half = head_dim // 2
-    x1, x2 = x[..., :half], x[..., half:]
-    rotated = np.concatenate([-x2, x1], axis=-1)
-    return x * cos + rotated * sin
-
-
-def _hf_apply_rope_codegen(x, cos_interleaved, sin_interleaved):
-    """Interleaved-pair: pairs (d, d+1)."""
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    rotated = np.stack([-x2, x1], axis=-1).reshape(x.shape)
-    return x * cos_interleaved + rotated * sin_interleaved
-
-
-def test_apply_rope():
-    rng = np.random.RandomState(42)
-    hidden = 64
-    heads = 4
-    head_dim = 16
-    max_len = 8
-
-    for interleaved in [False, True]:
-        for pos in [0, 3, 7]:
-            x_np = rng.randn(1, hidden).astype(np.float32)
-            cos_tbl = graph_ops.make_rope_table(
-                max_len, hidden, heads, 10000.0, True, interleaved=interleaved)
-            sin_tbl = graph_ops.make_rope_table(
-                max_len, hidden, heads, 10000.0, False, interleaved=interleaved)
-            rot_mat = graph_ops.make_rotate_half_matrix(
-                hidden, heads, interleaved=interleaved)
-
-            def build(net, inp, ct=cos_tbl, st=sin_tbl, rm=rot_mat):
-                cos_t = graph_ops.add_constant(net, ct.shape, ct)
-                sin_t = graph_ops.add_constant(net, st.shape, st)
-                rot_t = graph_ops.add_constant(net, rm.shape, rm)
-                out = graph_ops.add_apply_rope(net, inp["x"], inp["pos"], cos_t, sin_t, rot_t)
-                return {"out": out}
-
-            pos_np = np.array([pos], dtype=np.int32)
-            result = _run_trt_graph(build, {"x": x_np, "pos": pos_np})
-            trt_out = result["out"].flatten()
-
-            # Reference: per-head application
-            cos_row = cos_tbl[pos]  # [hidden]
-            sin_row = sin_tbl[pos]  # [hidden]
-            ref_parts = []
-            for h in range(heads):
-                s = h * head_dim
-                e = s + head_dim
-                xh = x_np[0, s:e]
-                ch = cos_row[s:e]
-                sh = sin_row[s:e]
-                if interleaved:
-                    rh = _hf_apply_rope_codegen(xh, ch, sh)
-                else:
-                    rh = _apply_rope_rotated_half_ref(xh, ch, sh, head_dim)
-                ref_parts.append(rh)
-            ref = np.concatenate(ref_parts)
-
-            assert np.allclose(trt_out, ref, atol=1e-5), \
-                f"rope interleaved={interleaved} pos={pos}: " \
-                f"max diff {np.abs(trt_out - ref).max():.2e}"
-
-    # Partial rotary (factor=0.5), standard
-    pf = 0.5
-    cos_tbl_p = graph_ops.make_rope_table(max_len, hidden, heads, 10000.0, True,
-                                           partial_rotary_factor=pf)
-    sin_tbl_p = graph_ops.make_rope_table(max_len, hidden, heads, 10000.0, False,
-                                           partial_rotary_factor=pf)
-    rot_mat_p = graph_ops.make_rotate_half_matrix(hidden, heads, partial_rotary_factor=pf)
-    x_np = rng.randn(1, hidden).astype(np.float32)
-
-    def build_p(net, inp):
-        cos_t = graph_ops.add_constant(net, cos_tbl_p.shape, cos_tbl_p)
-        sin_t = graph_ops.add_constant(net, sin_tbl_p.shape, sin_tbl_p)
-        rot_t = graph_ops.add_constant(net, rot_mat_p.shape, rot_mat_p)
-        out = graph_ops.add_apply_rope(net, inp["x"], inp["pos"], cos_t, sin_t, rot_t)
-        return {"out": out}
-
-    pos_np = np.array([3], dtype=np.int32)
-    result = _run_trt_graph(build_p, {"x": x_np, "pos": pos_np})
-    trt_out = result["out"].flatten()
-
-    # Reference: partial rotary — first 8 dims get RoPE, last 8 are identity
-    rotary_nd = int(head_dim * pf)
-    cos_row_p = cos_tbl_p[3]
-    sin_row_p = sin_tbl_p[3]
-    ref_parts = []
-    for h in range(heads):
-        s = h * head_dim
-        xh = x_np[0, s:s+head_dim]
-        ch = cos_row_p[s:s+head_dim]
-        sh = sin_row_p[s:s+head_dim]
-        # RoPE applied to first rotary_nd dims
-        xr = _apply_rope_rotated_half_ref(
-            xh[:rotary_nd], ch[:rotary_nd], sh[:rotary_nd], rotary_nd)
-        ref_parts.append(np.concatenate([xr, xh[rotary_nd:]]))
-    ref = np.concatenate(ref_parts)
-    assert np.allclose(trt_out, ref, atol=1e-5), \
-        f"rope partial=0.5: max diff {np.abs(trt_out - ref).max():.2e}"
-
-    print("  PASS  add_apply_rope (7 combinations: rotated/interleaved × positions × partial)")
-
-
-# ---------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------
 
@@ -588,19 +324,13 @@ def main():
     print("graph_ops unit tests vs HuggingFace references")
     print("=" * 55)
 
-    # Pure numpy tests (no TRT needed)
+    # Pure NumPy plus TensorRT graph checks.
     test_alibi_slopes()
-    test_rope_table()
-    test_rotate_half_matrix()
-
-    # TRT graph op tests
     test_rms_norm()
     test_rms_norm_per_head()
     test_layer_norm()
     test_gelu_new()
     test_activations()
-    test_apply_rope()
-
     print("=" * 55)
     print("ALL PASS")
 

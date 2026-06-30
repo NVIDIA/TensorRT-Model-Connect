@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -26,7 +26,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .encoder_builder import build_encoder_engine
+from .model.model import build_encoder_engine
 
 
 def _load_ln(readers, prefix):
@@ -59,7 +59,9 @@ class ElectraPlugin:
         return model_type.lower() == "electra"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -82,7 +84,9 @@ class ElectraPlugin:
         if embedding_size != hidden:
             proj_w = _load_tensor(readers, _bpfx(root, "embeddings_project.weight"))
             proj_b = _load_tensor(readers, _bpfx(root, "embeddings_project.bias"))
-            embedding = embedding.astype(np.float32) @ proj_w.T.astype(np.float32) + proj_b.astype(np.float32)
+            embedding = embedding.astype(np.float32) @ proj_w.T.astype(np.float32) + proj_b.astype(
+                np.float32
+            )
 
         weights["embedding"] = embedding.astype(np.float32)
 
@@ -90,7 +94,9 @@ class ElectraPlugin:
         if embedding_size != hidden and pos_embed.shape[1] == embedding_size:
             proj_w = _load_tensor(readers, _bpfx(root, "embeddings_project.weight"))
             proj_b = _load_tensor(readers, _bpfx(root, "embeddings_project.bias"))
-            pos_embed = pos_embed.astype(np.float32) @ proj_w.T.astype(np.float32) + proj_b.astype(np.float32)
+            pos_embed = pos_embed.astype(np.float32) @ proj_w.T.astype(np.float32) + proj_b.astype(
+                np.float32
+            )
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         tt_key = _bpfx(root, "embeddings.token_type_embeddings.weight")
@@ -100,7 +106,9 @@ class ElectraPlugin:
             if embedding_size != hidden and tt_embed.shape[1] == embedding_size:
                 proj_w = _load_tensor(readers, _bpfx(root, "embeddings_project.weight"))
                 proj_b = _load_tensor(readers, _bpfx(root, "embeddings_project.bias"))
-                tt_embed = tt_embed.astype(np.float32) @ proj_w.T.astype(np.float32) + proj_b.astype(np.float32)
+                tt_embed = tt_embed.astype(np.float32) @ proj_w.T.astype(
+                    np.float32
+                ) + proj_b.astype(np.float32)
             weights["token_type_embedding"] = tt_embed.astype(np.float32)
         else:
             weights["token_type_embedding"] = np.zeros((type_vocab_size, hidden), dtype=np.float32)
@@ -120,13 +128,21 @@ class ElectraPlugin:
             weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
             weights[f"{prefix}.w_v"] = np.ascontiguousarray(v_w.T.astype(np.float32))
 
-            weights[f"{prefix}.q_bias"] = _load_tensor(readers, f"{hf_prefix}.attention.self.query.bias").astype(np.float32)
-            weights[f"{prefix}.k_bias"] = _load_tensor(readers, f"{hf_prefix}.attention.self.key.bias").astype(np.float32)
-            weights[f"{prefix}.v_bias"] = _load_tensor(readers, f"{hf_prefix}.attention.self.value.bias").astype(np.float32)
+            weights[f"{prefix}.q_bias"] = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.query.bias"
+            ).astype(np.float32)
+            weights[f"{prefix}.k_bias"] = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.key.bias"
+            ).astype(np.float32)
+            weights[f"{prefix}.v_bias"] = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.value.bias"
+            ).astype(np.float32)
 
             o_w = _load_tensor(readers, f"{hf_prefix}.attention.output.dense.weight")
             weights[f"{prefix}.w_o"] = np.ascontiguousarray(o_w.T.astype(np.float32))
-            weights[f"{prefix}.o_bias"] = _load_tensor(readers, f"{hf_prefix}.attention.output.dense.bias").astype(np.float32)
+            weights[f"{prefix}.o_bias"] = _load_tensor(
+                readers, f"{hf_prefix}.attention.output.dense.bias"
+            ).astype(np.float32)
 
             attn_ln_w, attn_ln_b = _load_ln(readers, f"{hf_prefix}.attention.output.LayerNorm")
             weights[f"{prefix}.post_attn_norm"] = attn_ln_w
@@ -148,29 +164,36 @@ class ElectraPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="ELECTRA tensor-parallel builds")
+                parallel, feature="ELECTRA tensor-parallel builds"
+            )
             if quant_ctx is not None:
-                raise ValueError(
-                    "ELECTRA tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_encoder_engine
+                raise ValueError("ELECTRA tensor-parallel builds do not support quantization")
+            from .model.parallel import build_tp_encoder_engine
+
             return build_tp_encoder_engine(
-                config, weights,
+                config,
+                weights,
                 max_seq_length=max_cache_length,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         return build_encoder_engine(
-            config, weights,
-            max_seq_length=max_cache_length,
-            verbose=verbose)
+            config, weights, max_seq_length=max_cache_length, verbose=verbose
+        )
 
 
 plugin = ElectraPlugin()

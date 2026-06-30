@@ -15,13 +15,14 @@ Currently implements T2I only. The plugin claims the Edit pipeline classes
 upfront so the image-edit path can be added later as a code branch rather
 than a new plugin.
 """
+
 from __future__ import annotations
 
 import json
 import os
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict
+from .weights import WeightDict
 
 
 def _load_qwen25vl_visual_weights(text_encoder_dir: str) -> WeightDict:
@@ -74,8 +75,7 @@ def _resolve_edit_condition_image_size(config: ModelConfig) -> tuple[int, int] |
     image_path = Path(str(raw_path))
     if not image_path.is_file():
         raise FileNotFoundError(
-            "Qwen-Image Edit condition image override does not exist: "
-            f"{image_path}"
+            f"Qwen-Image Edit condition image override does not exist: {image_path}"
         )
     with Image.open(image_path) as image:
         width, height = image.size
@@ -94,20 +94,24 @@ class QwenImagePlugin:
     # Lowercase-normalized model_type tokens that identify this family.
     # Edit variants are claimed upfront so the image-edit path can be added
     # later as a code branch.
-    _MATCH_TOKENS = frozenset({
-        "qwen_image",
-        "qwenimage",
-        "qwen-image",
-        "qwen_image_edit",
-        "qwenimageedit",
-        "qwen-image-edit",
-    })
+    _MATCH_TOKENS = frozenset(
+        {
+            "qwen_image",
+            "qwenimage",
+            "qwen-image",
+            "qwen_image_edit",
+            "qwenimageedit",
+            "qwen-image-edit",
+        }
+    )
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in self._MATCH_TOKENS
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Resolve component subdirectories from a diffusers-format checkpoint."""
         from pathlib import Path
@@ -115,8 +119,7 @@ class QwenImagePlugin:
         model_path = Path(model_dir)
         if not (model_path / "model_index.json").exists():
             raise ValueError(
-                f"Qwen-Image requires diffusers format (model_index.json "
-                f"missing in {model_dir})"
+                f"Qwen-Image requires diffusers format (model_index.json missing in {model_dir})"
             )
 
         weights = WeightDict()
@@ -130,18 +133,28 @@ class QwenImagePlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "bf16",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "bf16",
+        quant_ctx=None,
+        verbose: bool = False,
     ) -> bytes:
-        raise NotImplementedError(
-            "Qwen-Image uses build_components(), not build_engine()"
-        )
+        raise NotImplementedError("Qwen-Image uses build_components(), not build_engine()")
 
     def build_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "bf16", verbose: bool = False,
-        parallel_config=None, max_batch_size: int = 1, **_kwargs,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "bf16",
+        verbose: bool = False,
+        parallel_config=None,
+        max_batch_size: int = 1,
+        **_kwargs,
     ) -> dict:
         """Build TRT engines and bundle blobs for a Qwen-Image T2I checkpoint.
 
@@ -174,8 +187,11 @@ class QwenImagePlugin:
         # TP + batch>1 is out of scope for this PR series. Qwen-Image does
         # not currently support diffusion TP, but the guard mirrors the
         # other families for symmetry.
-        if max_batch_size > 1 and parallel_config is not None and getattr(
-                parallel_config, "enabled", False):
+        if (
+            max_batch_size > 1
+            and parallel_config is not None
+            and getattr(parallel_config, "enabled", False)
+        ):
             raise NotImplementedError(
                 "Qwen-Image tensor-parallel + max_batch_size > 1 is not "
                 "supported in this release; build with either TP=1 or "
@@ -196,25 +212,25 @@ class QwenImagePlugin:
         te_opt = 1
         vae_mbs = 1
 
-        from .qwen_image_bundle_config import build_bundle_config
-        from .qwen25_vl_text_encoder_builder import (
+        from .model.components.bundle_config import build_bundle_config
+        from .model.components.text_encoder import (
             build_qwen25vl_text_encoder_engine,
             load_qwen25vl_text_encoder_weights,
         )
-        from .qwen_image_dit_builder import (
+        from .model.model import (
             build_qwen_image_dit_engine,
             load_qwen_image_dit_weights,
         )
-        from .qwen_image_preprocessor import (
+        from .model.components.preprocessor import (
             extract_preprocessor_source,
             pack_qwen_image_preprocessor_weights,
         )
-        from .qwen_image_vae_builder import (
+        from .model.components.vae import (
             build_qwen_image_vae_encoder_engine,
             build_qwen_image_vae_decoder_engine,
             load_qwen_image_vae_weights,
         )
-        from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
+        from .model.components.vision import build_qwen_vl_vision_engine
 
         repo = Path(weights.get("_model_dir") or model_dir)
 
@@ -247,12 +263,10 @@ class QwenImagePlugin:
         vision_encoder_cfg = bundle_cfg.get("vision_encoder", {})
         vision_patch = int(vision_encoder_cfg.get("patch_size", 14))
         vision_height = int(
-            vision_encoder_cfg.get("image_height")
-            or vision_encoder_cfg.get("image_size", 448)
+            vision_encoder_cfg.get("image_height") or vision_encoder_cfg.get("image_size", 448)
         )
         vision_width = int(
-            vision_encoder_cfg.get("image_width")
-            or vision_encoder_cfg.get("image_size", 448)
+            vision_encoder_cfg.get("image_width") or vision_encoder_cfg.get("image_size", 448)
         )
 
         # Latent grid pre-patchify, then packed-token grid post-patchify.
@@ -289,9 +303,7 @@ class QwenImagePlugin:
         text_cfg, text_w = load_qwen25vl_text_encoder_weights(
             repo / "text_encoder",
             max_seq_len=n_text,
-            apply_final_norm=bool(
-                bundle_cfg["text_encoder"].get("apply_final_norm", True)
-            ),
+            apply_final_norm=bool(bundle_cfg["text_encoder"].get("apply_final_norm", True)),
         )
         with tempfile.NamedTemporaryFile(
             suffix=".plan", delete=False, prefix="qwen_image_text_"
@@ -317,9 +329,7 @@ class QwenImagePlugin:
                 )
                 if is_edit
                 else None,
-                vision_spatial_merge_size=int(
-                    bundle_cfg["vision_encoder"]["merge_size"]
-                )
+                vision_spatial_merge_size=int(bundle_cfg["vision_encoder"]["merge_size"])
                 if is_edit
                 else 2,
                 vision_tokens_per_second=int(vision_cfg.get("tokens_per_second", 2)),
@@ -333,15 +343,13 @@ class QwenImagePlugin:
         # Free the weight tensors before the next builder allocates more.
         del text_w
         print(
-            f"[qwen-image]   text encoder plan: "
-            f"{len(text_engine_bytes) / (1024 * 1024):.1f} MB",
+            f"[qwen-image]   text encoder plan: {len(text_engine_bytes) / (1024 * 1024):.1f} MB",
             file=sys.stderr,
         )
 
         # 3. MMDiT denoiser engine.
         print(
-            f"[qwen-image] Loading MMDiT denoiser weights "
-            f"from {repo / 'transformer'} ...",
+            f"[qwen-image] Loading MMDiT denoiser weights from {repo / 'transformer'} ...",
             file=sys.stderr,
         )
         dit_cfg, dit_w = load_qwen_image_dit_weights(repo / "transformer")
@@ -356,8 +364,12 @@ class QwenImagePlugin:
                 file=sys.stderr,
             )
             build_qwen_image_dit_engine(
-                dit_cfg, dit_w, dit_plan_path,
-                h_lat=h_lat, w_lat=w_lat, n_text=n_text,
+                dit_cfg,
+                dit_w,
+                dit_plan_path,
+                h_lat=h_lat,
+                w_lat=w_lat,
+                n_text=n_text,
                 image_token_shapes=image_token_shapes,
                 verbose=verbose,
                 max_batch_size=dit_mbs,
@@ -368,8 +380,7 @@ class QwenImagePlugin:
             dit_plan_path.unlink(missing_ok=True)
         del dit_w
         print(
-            f"[qwen-image]   denoiser plan: "
-            f"{len(dit_engine_bytes) / (1024 * 1024):.1f} MB",
+            f"[qwen-image]   denoiser plan: {len(dit_engine_bytes) / (1024 * 1024):.1f} MB",
             file=sys.stderr,
         )
 
@@ -377,8 +388,7 @@ class QwenImagePlugin:
         vision_engine_bytes = None
         if is_edit:
             print(
-                f"[qwen-image] Loading Qwen2.5-VL visual weights "
-                f"from {repo / 'text_encoder'} ...",
+                f"[qwen-image] Loading Qwen2.5-VL visual weights from {repo / 'text_encoder'} ...",
                 file=sys.stderr,
             )
             vision_w = _load_qwen25vl_visual_weights(str(repo / "text_encoder"))
@@ -396,8 +406,7 @@ class QwenImagePlugin:
             )
             del vision_w
             print(
-                f"[qwen-image]   vision plan: "
-                f"{len(vision_engine_bytes) / (1024 * 1024):.1f} MB",
+                f"[qwen-image]   vision plan: {len(vision_engine_bytes) / (1024 * 1024):.1f} MB",
                 file=sys.stderr,
             )
 
@@ -418,16 +427,18 @@ class QwenImagePlugin:
                 file=sys.stderr,
             )
             build_qwen_image_vae_decoder_engine(
-                vae_cfg, vae_w, vae_plan_path,
-                h_lat=latent_h, w_lat=latent_w,
+                vae_cfg,
+                vae_w,
+                vae_plan_path,
+                h_lat=latent_h,
+                w_lat=latent_w,
                 verbose=verbose,
             )
             vae_engine_bytes = vae_plan_path.read_bytes()
         finally:
             vae_plan_path.unlink(missing_ok=True)
         print(
-            f"[qwen-image]   vae decoder plan: "
-            f"{len(vae_engine_bytes) / (1024 * 1024):.1f} MB",
+            f"[qwen-image]   vae decoder plan: {len(vae_engine_bytes) / (1024 * 1024):.1f} MB",
             file=sys.stderr,
         )
 
@@ -439,8 +450,7 @@ class QwenImagePlugin:
                 vae_encoder_plan_path = Path(f.name)
             try:
                 print(
-                    f"[qwen-image] Building VAE encoder engine "
-                    f"(image={cond_h}x{cond_w}) ...",
+                    f"[qwen-image] Building VAE encoder engine (image={cond_h}x{cond_w}) ...",
                     file=sys.stderr,
                 )
                 build_qwen_image_vae_encoder_engine(
@@ -455,8 +465,7 @@ class QwenImagePlugin:
             finally:
                 vae_encoder_plan_path.unlink(missing_ok=True)
             print(
-                f"[qwen-image]   vae encoder plan: "
-                f"{len(vae_encoder_bytes) / (1024 * 1024):.1f} MB",
+                f"[qwen-image]   vae encoder plan: {len(vae_encoder_bytes) / (1024 * 1024):.1f} MB",
                 file=sys.stderr,
             )
         del vae_w
@@ -491,7 +500,9 @@ class QwenImagePlugin:
             }
         return components
 
-    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None
+    ) -> list[tuple[str, bytes]]:
         del parallel_config
         sections: list[tuple[str, bytes]] = []
         for index, (_name, plan) in enumerate(components["text_encoders"]):
@@ -510,7 +521,10 @@ class QwenImagePlugin:
         return {"num_text_encoders": len(components["text_encoders"])}
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         from pathlib import Path
 
@@ -522,15 +536,22 @@ class QwenImagePlugin:
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
         token_filenames = (
-            "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json", "vocab.json",
-            "merges.txt", "spiece.model", "tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+            "tokenizer.model",
         )
         sections: list[tuple[str, bytes]] = []
         embedded: set[str] = set()

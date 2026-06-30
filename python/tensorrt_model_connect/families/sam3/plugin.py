@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .weights import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 from .config import ModelConfig
 
 
@@ -112,25 +112,24 @@ def _resolve_sam3_config(raw: dict) -> dict:
         "vision_layer_norm_eps": float(vision_backbone.get("layer_norm_eps", 1e-6)),
         "vision_hidden_act": str(vision_backbone.get("hidden_act", "gelu")),
         "vision_global_attn_indexes": list(
-            vision_backbone.get("global_attn_indexes", [7, 15, 23, 31])),
+            vision_backbone.get("global_attn_indexes", [7, 15, 23, 31])
+        ),
         "fpn_hidden_size": int(vision.get("fpn_hidden_size", 256))
-        if isinstance(vision, dict) else 256,
+        if isinstance(vision, dict)
+        else 256,
         "num_queries": int(detr_decoder.get("num_queries", 200)),
-        "detr_hidden_size": int(detr_decoder.get(
-            "hidden_size", detr_encoder.get("hidden_size", 256))),
+        "detr_hidden_size": int(
+            detr_decoder.get("hidden_size", detr_encoder.get("hidden_size", 256))
+        ),
         "detr_encoder_layers": int(detr_encoder.get("num_layers", 6)),
         "detr_encoder_num_heads": int(detr_encoder.get("num_attention_heads", 8)),
-        "detr_encoder_intermediate_size": int(
-            detr_encoder.get("intermediate_size", 2048)),
-        "detr_encoder_layer_norm_eps": float(
-            detr_encoder.get("layer_norm_eps", 1e-6)),
+        "detr_encoder_intermediate_size": int(detr_encoder.get("intermediate_size", 2048)),
+        "detr_encoder_layer_norm_eps": float(detr_encoder.get("layer_norm_eps", 1e-6)),
         "detr_encoder_hidden_act": str(detr_encoder.get("hidden_act", "relu")),
         "detr_decoder_layers": int(detr_decoder.get("num_layers", 6)),
         "detr_decoder_num_heads": int(detr_decoder.get("num_attention_heads", 8)),
-        "detr_decoder_intermediate_size": int(
-            detr_decoder.get("intermediate_size", 2048)),
-        "detr_decoder_layer_norm_eps": float(
-            detr_decoder.get("layer_norm_eps", 1e-6)),
+        "detr_decoder_intermediate_size": int(detr_decoder.get("intermediate_size", 2048)),
+        "detr_decoder_layer_norm_eps": float(detr_decoder.get("layer_norm_eps", 1e-6)),
         "detr_decoder_hidden_act": str(detr_decoder.get("hidden_act", "relu")),
         "low_res_mask_size": int(raw.get("low_res_mask_size", 288)),
         "mask_hidden_size": int(mask_decoder.get("hidden_size", 256)),
@@ -164,18 +163,20 @@ def _load_sam3_text_weights(model_dir: str, cfg: dict) -> WeightDict:
         return _transpose(load(suffix))
 
     weights["text_model.embeddings.token_embedding.weight"] = load(
-        "text_encoder.text_model.embeddings.token_embedding.weight")
+        "text_encoder.text_model.embeddings.token_embedding.weight"
+    )
     weights["text_model.embeddings.position_embedding.weight"] = load(
-        "text_encoder.text_model.embeddings.position_embedding.weight")
+        "text_encoder.text_model.embeddings.position_embedding.weight"
+    )
 
     for layer_idx in range(cfg["text_num_layers"]):
         src = f"text_encoder.text_model.encoder.layers.{layer_idx}"
         dst = f"text_model.encoder.layers.{layer_idx}"
         for proj in ("q_proj", "k_proj", "v_proj", "out_proj"):
             weights[f"{dst}.self_attn.{proj}.weight"] = load_linear(
-                f"{src}.self_attn.{proj}.weight")
-            weights[f"{dst}.self_attn.{proj}.bias"] = load(
-                f"{src}.self_attn.{proj}.bias")
+                f"{src}.self_attn.{proj}.weight"
+            )
+            weights[f"{dst}.self_attn.{proj}.bias"] = load(f"{src}.self_attn.{proj}.bias")
         for norm in ("layer_norm1", "layer_norm2"):
             weights[f"{dst}.{norm}.weight"] = load(f"{src}.{norm}.weight")
             weights[f"{dst}.{norm}.bias"] = load(f"{src}.{norm}.bias")
@@ -185,9 +186,11 @@ def _load_sam3_text_weights(model_dir: str, cfg: dict) -> WeightDict:
         weights[f"{dst}.mlp.fc2.bias"] = load(f"{src}.mlp.fc2.bias")
 
     weights["text_model.final_layer_norm.weight"] = load(
-        "text_encoder.text_model.final_layer_norm.weight")
+        "text_encoder.text_model.final_layer_norm.weight"
+    )
     weights["text_model.final_layer_norm.bias"] = load(
-        "text_encoder.text_model.final_layer_norm.bias")
+        "text_encoder.text_model.final_layer_norm.bias"
+    )
     weights["text_projection.weight"] = load_linear("text_projection.weight")
     cfg["_text_projection_dim"] = int(weights["text_projection.weight"].shape[1])
     if any(_has_tensor(readers, f"{prefix}text_projection.bias") for prefix in _TEXT_PREFIXES):
@@ -214,14 +217,17 @@ def _load_sam3_vision_weights(model_dir: str, cfg: dict) -> WeightDict:
         return _transpose(load(suffix))
 
     weights["vision.patch_embed.weight"] = load(
-        "vision_encoder.backbone.embeddings.patch_embeddings.projection.weight")
+        "vision_encoder.backbone.embeddings.patch_embeddings.projection.weight"
+    )
     bias = _load_optional(
-        readers, "vision_encoder.backbone.embeddings.patch_embeddings.projection.bias")
+        readers, "vision_encoder.backbone.embeddings.patch_embeddings.projection.bias"
+    )
     if bias is not None:
         weights["vision.patch_embed.bias"] = bias
 
     weights["vision.position_embeddings"] = load(
-        "vision_encoder.backbone.embeddings.position_embeddings")
+        "vision_encoder.backbone.embeddings.position_embeddings"
+    )
     weights["vision.pre_layer_norm.weight"] = load("vision_encoder.backbone.layer_norm.weight")
     weights["vision.pre_layer_norm.bias"] = load("vision_encoder.backbone.layer_norm.bias")
 
@@ -233,9 +239,9 @@ def _load_sam3_vision_weights(model_dir: str, cfg: dict) -> WeightDict:
             weights[f"{dst}.{norm}.bias"] = load(f"{src}.{norm}.bias")
         for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
             weights[f"{dst}.attention.{proj}.weight"] = load_linear(
-                f"{src}.attention.{proj}.weight")
-            weights[f"{dst}.attention.{proj}.bias"] = load(
-                f"{src}.attention.{proj}.bias")
+                f"{src}.attention.{proj}.weight"
+            )
+            weights[f"{dst}.attention.{proj}.bias"] = load(f"{src}.attention.{proj}.bias")
         weights[f"{dst}.mlp.fc1.weight"] = load_linear(f"{src}.mlp.fc1.weight")
         weights[f"{dst}.mlp.fc1.bias"] = load(f"{src}.mlp.fc1.bias")
         weights[f"{dst}.mlp.fc2.weight"] = load_linear(f"{src}.mlp.fc2.weight")
@@ -322,10 +328,8 @@ def _load_sam3_core_weights(model_dir: str, cfg: dict) -> WeightDict:
     load_decoder_mlp("box_rpb_embed_x", "detr_decoder.box_rpb_embed_x", 2)
     load_decoder_mlp("box_rpb_embed_y", "detr_decoder.box_rpb_embed_y", 2)
 
-    load_decoder_mlp("dot_product_scoring.text_mlp",
-                     "dot_product_scoring.text_mlp", 2)
-    load_norm("dot_product_scoring.text_mlp_out_norm",
-              "dot_product_scoring.text_mlp_out_norm")
+    load_decoder_mlp("dot_product_scoring.text_mlp", "dot_product_scoring.text_mlp", 2)
+    load_norm("dot_product_scoring.text_mlp_out_norm", "dot_product_scoring.text_mlp_out_norm")
     load_linear("dot_product_scoring.text_proj", "dot_product_scoring.text_proj")
     load_linear("dot_product_scoring.query_proj", "dot_product_scoring.query_proj")
 
@@ -336,18 +340,19 @@ def _load_sam3_core_weights(model_dir: str, cfg: dict) -> WeightDict:
         weights[f"{dst}.bias"] = load(f"{src}.bias")
         load_norm(
             f"mask_decoder.pixel_decoder.norms.{layer_idx}",
-            f"mask_decoder.pixel_decoder.norms.{layer_idx}")
+            f"mask_decoder.pixel_decoder.norms.{layer_idx}",
+        )
     for layer_idx in range(3):
         load_linear(
             f"mask_decoder.mask_embedder.layers.{layer_idx}",
-            f"mask_decoder.mask_embedder.layers.{layer_idx}")
+            f"mask_decoder.mask_embedder.layers.{layer_idx}",
+        )
     weights["mask_decoder.instance_projection.weight"] = load(
-        "mask_decoder.instance_projection.weight")
-    weights["mask_decoder.instance_projection.bias"] = load(
-        "mask_decoder.instance_projection.bias")
+        "mask_decoder.instance_projection.weight"
+    )
+    weights["mask_decoder.instance_projection.bias"] = load("mask_decoder.instance_projection.bias")
     load_attention("mask_decoder.prompt_cross_attn", "mask_decoder.prompt_cross_attn")
-    load_norm("mask_decoder.prompt_cross_attn_norm",
-              "mask_decoder.prompt_cross_attn_norm")
+    load_norm("mask_decoder.prompt_cross_attn_norm", "mask_decoder.prompt_cross_attn_norm")
 
     return weights
 
@@ -379,7 +384,7 @@ class Sam3Plugin:
         parallel_config=None,
     ) -> bytes:
         del max_cache_length, precision, quant_ctx, parallel_config
-        from .text_encoder_builder import build_sam3_text_encoder_engine
+        from .model.components.text_encoder import build_sam3_text_encoder_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
         return build_sam3_text_encoder_engine(
@@ -406,7 +411,7 @@ class Sam3Plugin:
         verbose: bool = False,
     ) -> bytes | None:
         del weights, precision
-        from .vision_encoder_builder import build_sam3_vision_encoder_engine
+        from .model.components.vision_encoder import build_sam3_vision_encoder_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
         vision_weights = _load_sam3_vision_weights(model_dir, cfg)
@@ -438,7 +443,7 @@ class Sam3Plugin:
         verbose: bool = False,
     ) -> dict[str, bytes] | None:
         del weights, max_cache_length, precision
-        from .core_builder import build_sam3_core_engine
+        from .model.model import build_sam3_core_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
         model_dir = str(config.raw.get("_model_dir", ""))
@@ -476,7 +481,8 @@ class Sam3Plugin:
             "sam3_text_max_position_embeddings": cfg["text_max_position_embeddings"],
             "sam3_text_hidden_size": cfg["text_hidden_size"],
             "sam3_text_projection_dim": int(
-                cfg.get("_text_projection_dim", cfg["detr_hidden_size"])),
+                cfg.get("_text_projection_dim", cfg["detr_hidden_size"])
+            ),
             "sam3_text_bos_token_id": cfg["text_bos_token_id"],
             "sam3_text_eos_token_id": cfg["text_eos_token_id"],
             "sam3_text_pad_token_id": cfg["text_pad_token_id"],

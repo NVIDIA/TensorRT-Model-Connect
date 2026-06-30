@@ -1,7 +1,6 @@
-"""Extended tests for graph_ops -- pure NumPy helpers (no GPU).
+"""Extended tests for family-owned graph helpers.
 
-Covers _yarn_correction_dim, compute_alibi_slopes (extended cases),
-make_bucketed_relative_position_bias, and make_yarn_rope_table.
+Covers the retained pure-NumPy helpers and less common TensorRT graph ops.
 
 Trace: ARCH-GRP-001, UD-GRP-OPS-EXT
 Intent: Validate pure-NumPy graph op helpers (YaRN correction, bucketed relative-position bias, ALiBi slopes, RoPE tables)
@@ -16,14 +15,8 @@ import pytest
 from tests.builder.conftest import requires_trt
 
 try:
-    from tests.builder.owned_graph_modules import load_graph_ops
-    graph_ops = load_graph_ops(
-        "_yarn_correction_dim",
-        "compute_alibi_slopes",
-        "make_bucketed_relative_position_bias",
-        "make_yarn_rope_table",
-        "make_rope_query_scale_table",
-    )
+    from tests.builder.owned_graph_modules import load_graph_ops, load_owned_callable
+    graph_ops = load_graph_ops()
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -156,372 +149,6 @@ class TestComputeAlibiSlopesExtended:
             slopes = graph_ops.compute_alibi_slopes(n)
             assert np.all(slopes > 0), f"n={n}: all slopes should be > 0"
             assert np.all(slopes < 1), f"n={n}: all slopes should be < 1"
-
-
-# ===================================================================
-# 3. make_bucketed_relative_position_bias
-# ===================================================================
-
-class TestMakeBucketedRelativePositionBias:
-    """Tests for make_bucketed_relative_position_bias.
-
-    The return is [max_seq_len, max_seq_len] int32 bucket indices.  The
-    num_heads parameter is retained for call-site symmetry with attention
-    helpers but is not needed for bucket construction.
-    """
-
-    def test_output_shape(self):
-        """Verify output shape is [max_seq_len, max_seq_len]."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        assert result.shape == (16, 16)
-        assert result.dtype == np.int32
-
-    def test_values_in_range(self):
-        """All bucket indices should be in [0, num_buckets)."""
-        num_buckets = 32
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=32, num_buckets=num_buckets, max_distance=128
-        )
-        assert np.all(result >= 0)
-        assert np.all(result < num_buckets)
-
-    def test_diagonals_constant(self):
-        """bias[i][j] depends only on j-i, so each diagonal should be constant."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        seq_len = 16
-        for offset in range(-seq_len + 1, seq_len):
-            diag = np.diag(result, k=offset)
-            assert np.all(diag == diag[0]), (
-                f"Diagonal offset={offset} is not constant: {diag}"
-            )
-
-    def test_bidirectional_symmetry(self):
-        """Positive and negative relative positions should map to different bucket halves.
-
-        For bidirectional=True with num_buckets=32:
-        - Positive offsets (j > i, i.e. looking right): bucket indices in [16, 31]
-        - Negative offsets (j < i, i.e. looking left): bucket indices in [0, 15]
-        - Zero offset (diagonal): bucket index for n=0
-        """
-        num_buckets = 32
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=num_buckets, max_distance=128
-        )
-        half_buckets = num_buckets // 2
-
-        # Check upper triangle (j > i => relative_position > 0 => n < 0 =>
-        # offset by num_bkts//2 in bidirectional mode)
-        for i in range(16):
-            for j in range(i + 1, 16):
-                assert result[i, j] >= half_buckets, (
-                    f"result[{i}][{j}]={result[i, j]} should be >= {half_buckets}"
-                )
-
-        # Check lower triangle (j < i => relative_position < 0 => n > 0 =>
-        # no offset)
-        for i in range(1, 16):
-            for j in range(i):
-                assert result[i, j] < half_buckets, (
-                    f"result[{i}][{j}]={result[i, j]} should be < {half_buckets}"
-                )
-
-    def test_max_seq_len_1(self):
-        """max_seq_len=1 should return a single-element array."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=1, num_buckets=32, max_distance=128
-        )
-        assert result.shape == (1, 1)
-        # Relative position is 0; for bidirectional n=-0=0, n<0 is False,
-        # so no half-bucket offset. n=abs(0)=0, is_small=True, ret=0.
-        assert result[0, 0] == 0
-
-    def test_num_buckets_2_minimal(self):
-        """Minimal num_buckets=2 triggers division by zero in log scaling.
-
-        With bidirectional=True, num_bkts becomes 1, max_exact becomes 0,
-        causing log(max_dist/0) → ZeroDivisionError. This is a known edge
-        case that does not occur for supported bucket counts.
-        """
-        with pytest.raises((ZeroDivisionError, FloatingPointError)):
-            graph_ops.make_bucketed_relative_position_bias(
-                num_heads=4, max_seq_len=8, num_buckets=2, max_distance=128
-            )
-
-    def test_diagonal_is_zero_relative(self):
-        """The main diagonal (j==i) should have consistent bucket index.
-
-        At i==j, relative_position = 0. In bidirectional mode:
-        n = -0 = 0, n<0 is False => no offset. abs(0) = 0, is_small = True.
-        ret = 0.
-        """
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        diag = np.diag(result)
-        np.testing.assert_array_equal(diag, 0)
-
-    @pytest.mark.parametrize("num_buckets", [8, 16, 32, 64])
-    def test_various_num_buckets(self, num_buckets):
-        """Values in range for different num_buckets settings."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=4, max_seq_len=16, num_buckets=num_buckets, max_distance=128
-        )
-        assert np.all(result >= 0)
-        assert np.all(result < num_buckets)
-
-    def test_adjacent_positions_monotonic(self):
-        """For increasing distance, bucket indices should be non-decreasing.
-
-        Looking at a fixed row i, as j increases from i+1 onward (positive
-        offsets in upper half), the bucket should be non-decreasing.
-        Similarly for the lower half.
-        """
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=32, num_buckets=32, max_distance=128
-        )
-        # Upper triangle: row 0, columns 1..31
-        row = result[0, 1:]
-        diffs = np.diff(row)
-        assert np.all(diffs >= 0), "Bucket indices should be non-decreasing with distance"
-
-        # Lower triangle: column 0, rows 1..31
-        col = result[1:, 0]
-        diffs = np.diff(col)
-        assert np.all(diffs >= 0), "Bucket indices should be non-decreasing with distance"
-
-
-# ===================================================================
-# 4. make_yarn_rope_table
-# ===================================================================
-
-class TestMakeYarnRopeTable:
-    """Tests for make_yarn_rope_table."""
-
-    def test_output_shape(self):
-        """Verify output shape is [max_cache_length, hidden_size] float32."""
-        table = graph_ops.make_yarn_rope_table(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, cosine=True, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        assert table.shape == (16, 64)
-        assert table.dtype == np.float32
-
-    def test_cos_sin_pythagorean_identity(self):
-        """cos^2 + sin^2 should be approximately 1.0 for each position/dim."""
-        kwargs = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        cos_table = graph_ops.make_yarn_rope_table(cosine=True, **kwargs)
-        sin_table = graph_ops.make_yarn_rope_table(cosine=False, **kwargs)
-        identity = cos_table ** 2 + sin_table ** 2
-        np.testing.assert_allclose(identity, 1.0, atol=1e-5)
-
-    def test_max_cache_length_0_returns_default(self):
-        """Edge: max_cache_length=0 should return a (0, hidden_size) table."""
-        table = graph_ops.make_yarn_rope_table(
-            max_cache_length=0, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, cosine=True, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        assert table.shape == (0, 64)
-
-    def test_hidden_not_divisible_by_heads_returns_default(self):
-        """Edge: hidden_size not divisible by num_heads returns default table."""
-        cos_table = graph_ops.make_yarn_rope_table(
-            max_cache_length=16, hidden_size=65, num_attention_heads=4,
-            rope_theta=10000.0, cosine=True, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        # Default for cosine=True is all 1.0
-        np.testing.assert_array_equal(cos_table, np.ones((16, 65), dtype=np.float32))
-
-        sin_table = graph_ops.make_yarn_rope_table(
-            max_cache_length=16, hidden_size=65, num_attention_heads=4,
-            rope_theta=10000.0, cosine=False, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        # Default for cosine=False is all 0.0
-        np.testing.assert_array_equal(sin_table, np.zeros((16, 65), dtype=np.float32))
-
-    def test_position_zero_is_trivial(self):
-        """At position 0, cos(0)=1 and sin(0)=0 for all dims in head."""
-        kwargs = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-        )
-        cos_table = graph_ops.make_yarn_rope_table(cosine=True, **kwargs)
-        sin_table = graph_ops.make_yarn_rope_table(cosine=False, **kwargs)
-        # At position 0, angle = 0 * inv_freq = 0 for all freqs
-        np.testing.assert_allclose(cos_table[0, :], 1.0, atol=1e-6)
-        np.testing.assert_allclose(sin_table[0, :], 0.0, atol=1e-6)
-
-    def test_scaling_factor_1_matches_standard_rope(self):
-        """With scaling_factor=1.0, YaRN should match standard RoPE.
-
-        When scaling_factor=1.0, freq_inter == freq_extra, so the ramp
-        blending has no effect and inv_freq == freq_extra == standard inv_freq.
-        """
-        kwargs_common = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0,
-        )
-        # YaRN with scaling_factor=1.0
-        yarn_cos = graph_ops.make_yarn_rope_table(
-            cosine=True, scaling_factor=1.0,
-            original_max_position_embeddings=4096,
-            beta_fast=32.0, beta_slow=1.0,
-            **kwargs_common,
-        )
-        # Standard RoPE
-        std_cos = graph_ops.make_rope_table(cosine=True, **kwargs_common)
-
-        np.testing.assert_allclose(yarn_cos, std_cos, atol=1e-5)
-
-    def test_scaling_factor_1_sin_matches_standard(self):
-        """Sin variant: scaling_factor=1.0 YaRN matches standard RoPE."""
-        kwargs_common = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0,
-        )
-        yarn_sin = graph_ops.make_yarn_rope_table(
-            cosine=False, scaling_factor=1.0,
-            original_max_position_embeddings=4096,
-            beta_fast=32.0, beta_slow=1.0,
-            **kwargs_common,
-        )
-        std_sin = graph_ops.make_rope_table(cosine=False, **kwargs_common)
-        np.testing.assert_allclose(yarn_sin, std_sin, atol=1e-5)
-
-    def test_interleaved_output_shape(self):
-        """Interleaved mode should produce same shape output."""
-        table = graph_ops.make_yarn_rope_table(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, cosine=True, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-            interleaved=True,
-        )
-        assert table.shape == (16, 64)
-        assert table.dtype == np.float32
-
-    def test_interleaved_cos_sin_identity(self):
-        """cos^2 + sin^2 = 1 in interleaved mode too."""
-        kwargs = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0, scaling_factor=2.0,
-            original_max_position_embeddings=4096, beta_fast=32.0, beta_slow=1.0,
-            interleaved=True,
-        )
-        cos_table = graph_ops.make_yarn_rope_table(cosine=True, **kwargs)
-        sin_table = graph_ops.make_yarn_rope_table(cosine=False, **kwargs)
-        identity = cos_table ** 2 + sin_table ** 2
-        np.testing.assert_allclose(identity, 1.0, atol=1e-5)
-
-    def test_scaling_factor_gt1_differs_from_standard(self):
-        """With scaling_factor > 1.0, YaRN output should differ from standard RoPE
-        (at least for positions > 0 where angles are non-zero)."""
-        kwargs_common = dict(
-            max_cache_length=16, hidden_size=64, num_attention_heads=4,
-            rope_theta=10000.0,
-        )
-        yarn_cos = graph_ops.make_yarn_rope_table(
-            cosine=True, scaling_factor=4.0,
-            original_max_position_embeddings=4096,
-            beta_fast=32.0, beta_slow=1.0,
-            **kwargs_common,
-        )
-        std_cos = graph_ops.make_rope_table(cosine=True, **kwargs_common)
-        # At position 0 both are 1.0, but at later positions they should differ
-        # (unless ramp happens to produce identity, which is unlikely for sf=4)
-        diff = np.abs(yarn_cos[1:, :] - std_cos[1:, :])
-        assert np.max(diff) > 1e-3, "YaRN with sf=4 should differ from standard RoPE"
-
-    def test_reference_inv_freq_computation(self):
-        """Verify the YaRN inv_freq computation against a manual reference.
-
-        Uses max_cache_length=16, hidden_size=64, num_heads=4, rope_theta=10000,
-        scaling_factor=2.0, original_max_pos=4096, beta_fast=32, beta_slow=1.
-        """
-        max_cache = 16
-        hidden = 64
-        num_heads = 4
-        theta = 10000.0
-        sf = 2.0
-        orig_max_pos = 4096
-        beta_fast = 32.0
-        beta_slow = 1.0
-        head_dim = hidden // num_heads  # 16
-        half = head_dim // 2  # 8
-
-        # Standard frequencies
-        freq_extra = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
-        freq_inter = freq_extra / sf
-
-        # Correction dims
-        low = max(int(np.floor(graph_ops._yarn_correction_dim(
-            beta_fast, head_dim, theta, orig_max_pos))), 0)
-        high = min(int(np.ceil(graph_ops._yarn_correction_dim(
-            beta_slow, head_dim, theta, orig_max_pos))), half - 1)
-        ramp = np.clip((np.arange(half, dtype=np.float64) - low) / max(high - low, 1), 0.0, 1.0)
-        inv_freq = freq_inter * ramp + freq_extra * (1 - ramp)
-
-        # Build reference table manually for cos
-        ref_cos = np.ones((max_cache, hidden), dtype=np.float32)
-        for pos in range(max_cache):
-            for head in range(num_heads):
-                for d in range(head_dim):
-                    freq_idx = d % half
-                    angle = pos * inv_freq[freq_idx]
-                    ref_cos[pos, head * head_dim + d] = float(np.cos(angle))
-
-        actual_cos = graph_ops.make_yarn_rope_table(
-            max_cache_length=max_cache, hidden_size=hidden,
-            num_attention_heads=num_heads, rope_theta=theta, cosine=True,
-            scaling_factor=sf, original_max_position_embeddings=orig_max_pos,
-            beta_fast=beta_fast, beta_slow=beta_slow,
-        )
-        np.testing.assert_allclose(actual_cos, ref_cos, atol=1e-6)
-
-
-# ===================================================================
-# 4b. make_rope_query_scale_table
-# ===================================================================
-
-class TestMakeRopeQueryScaleTable:
-    """Tests for the per-position RoPE query scale table."""
-
-    def test_values_match_hf_formula(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=10,
-            beta=0.1,
-            original_max_position_embeddings=4,
-        )
-        positions = np.arange(10, dtype=np.float64)
-        expected = 1.0 + 0.1 * np.log1p(np.floor(positions / 4.0))
-        np.testing.assert_allclose(table[:, 0], expected.astype(np.float32), atol=1e-7)
-
-    def test_positions_before_original_window_are_unscaled(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=4,
-            beta=0.1,
-            original_max_position_embeddings=4,
-        )
-        np.testing.assert_allclose(table, np.ones((4, 1), dtype=np.float32))
-
-    def test_zero_beta_disables_scaling(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=8,
-            beta=0.0,
-            original_max_position_embeddings=4,
-        )
-        np.testing.assert_allclose(table, np.ones((8, 1), dtype=np.float32))
 
 
 # ===================================================================
@@ -907,21 +534,25 @@ class TestAddBatchNorm2d:
 
 
 # ===================================================================
-# 11. add_group_norm 2D (TRT)
+# 11. family-owned 4D GroupNorm (TRT)
 # ===================================================================
 
 @requires_trt
 class TestAddGroupNorm:
-    def test_2d_identity_params(self, trt_runner):
-        """2D: [4, 8], num_groups=2, gamma=1, beta=0 -> per-group normalized."""
+    def test_4d_identity_params(self, trt_runner):
+        """NCHW GroupNorm with identity affine parameters normalizes each group."""
+        add_group_norm = load_owned_callable(
+            "model/components/vae.py",
+            "_add_group_norm_4d",
+        )
         rng = np.random.RandomState(42)
         num_ch, num_groups = 8, 2
-        x_np = rng.randn(4, num_ch).astype(np.float32)
+        x_np = rng.randn(2, num_ch, 3, 3).astype(np.float32)
         gamma = np.ones(num_ch, dtype=np.float32)
         beta = np.zeros(num_ch, dtype=np.float32)
 
         def build(net, inp):
-            out = graph_ops.add_group_norm(
+            out = add_group_norm(
                 net, inp["x"], num_ch, num_groups, gamma, beta, eps=1e-5)
             return {"out": out}
 
@@ -929,41 +560,39 @@ class TestAddGroupNorm:
         out = result["out"]
 
         # Verify: per-group mean ~0, std ~1
-        group_size = num_ch // num_groups
-        for g in range(num_groups):
-            group_slice = out[:, g * group_size:(g + 1) * group_size]
-            means = group_slice.mean(axis=-1)
-            stds = group_slice.std(axis=-1)
-            np.testing.assert_allclose(means, 0.0, atol=1e-4)
-            np.testing.assert_allclose(stds, 1.0, atol=0.1)
+        grouped = out.reshape(2, num_groups, num_ch // num_groups, 3, 3)
+        np.testing.assert_allclose(grouped.mean(axis=(2, 3, 4)), 0.0, atol=1e-4)
+        np.testing.assert_allclose(grouped.std(axis=(2, 3, 4)), 1.0, atol=0.1)
 
-    def test_2d_vs_torch(self, trt_runner):
-        """2D: compare against manual group normalization."""
+    def test_4d_vs_torch(self, trt_runner):
+        """Family-owned NCHW GroupNorm matches PyTorch."""
         import torch
+        import torch.nn.functional as functional
 
+        add_group_norm = load_owned_callable(
+            "model/components/vae.py",
+            "_add_group_norm_4d",
+        )
         rng = np.random.RandomState(42)
         num_ch, num_groups = 8, 2
-        x_np = rng.randn(4, num_ch).astype(np.float32)
+        x_np = rng.randn(2, num_ch, 3, 3).astype(np.float32)
         gamma = rng.randn(num_ch).astype(np.float32)
         beta = rng.randn(num_ch).astype(np.float32)
         eps = 1e-5
 
         def build(net, inp):
-            out = graph_ops.add_group_norm(
+            out = add_group_norm(
                 net, inp["x"], num_ch, num_groups, gamma, beta, eps=eps)
             return {"out": out}
 
         result = trt_runner(build, {"x": x_np})
-
-        # Manual reference
-        x_t = torch.tensor(x_np)
-        group_size = num_ch // num_groups
-        x_grouped = x_t.reshape(4, num_groups, group_size)
-        mean = x_grouped.mean(dim=-1, keepdim=True)
-        var = x_grouped.var(dim=-1, unbiased=False, keepdim=True)
-        normalized = (x_grouped - mean) / torch.sqrt(var + eps)
-        normalized = normalized.reshape(4, num_ch)
-        ref = (normalized * torch.tensor(gamma) + torch.tensor(beta)).numpy()
+        ref = functional.group_norm(
+            torch.tensor(x_np),
+            num_groups,
+            torch.tensor(gamma),
+            torch.tensor(beta),
+            eps,
+        ).numpy()
 
         np.testing.assert_allclose(result["out"], ref, atol=1e-4)
 

@@ -1,0 +1,1 @@
+"""Family-owned specialized components."""

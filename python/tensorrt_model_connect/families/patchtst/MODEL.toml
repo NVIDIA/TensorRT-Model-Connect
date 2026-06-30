@@ -1,0 +1,5 @@
+id = "patchtst"
+plugin = "patchtst"
+module = "plugin"
+aliases = ["patchtst"]
+prefixes = ["patchtst"]
