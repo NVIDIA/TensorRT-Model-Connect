@@ -5,6 +5,7 @@
   "bundle": "nemotron-3.5-asr-streaming-0.6b.trtfb",
   "family": "nemotron_speech_streaming",
   "runtime_strategy": "nemotron_speech_streaming_speech_to_text_rnnt",
+  "task_strategy": "speech_to_text",
   "reference_backend": "invariant_only",
   "test_type": "transcription",
   "max_cache_length": 128,
