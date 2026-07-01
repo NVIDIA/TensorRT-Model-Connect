@@ -23,8 +23,7 @@ from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.xlnet.plugin import XlnetPlugin
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
-xlnet_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.xlnet.plugin")
+xlnet_plugin = importlib.import_module("tensorrt_model_connect.families.xlnet.plugin")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -36,7 +35,7 @@ _VOCAB = 24
 
 def _xlnet_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.xlnet.tp_builder",
+        "tensorrt_model_connect.families.xlnet.model.parallel",
         reason="TensorRT is required for XLNet TP builder tests",
     )
 
@@ -77,9 +76,11 @@ def _make_encoder_weights(
 ) -> WeightDict:
     d_head = hidden // heads
     attn = heads * d_head
-    weights = WeightDict({
-        "embedding": _matrix(vocab, hidden),
-    })
+    weights = WeightDict(
+        {
+            "embedding": _matrix(vocab, hidden),
+        }
+    )
     for layer_idx in range(layers):
         prefix = f"layer.{layer_idx}"
         for idx, proj in enumerate(["q", "k", "v", "o", "r"]):
@@ -87,8 +88,9 @@ def _make_encoder_weights(
         weights[f"{prefix}.r_w_bias"] = _matrix(heads, d_head, 100)
         weights[f"{prefix}.r_r_bias"] = _matrix(heads, d_head, 200)
         weights[f"{prefix}.r_s_bias"] = _matrix(heads, d_head, 300)
-        weights[f"{prefix}.seg_embed"] = np.arange(
-            2 * heads * d_head, dtype=np.float32).reshape(2, heads, d_head)
+        weights[f"{prefix}.seg_embed"] = np.arange(2 * heads * d_head, dtype=np.float32).reshape(
+            2, heads, d_head
+        )
         weights[f"{prefix}.attn_norm"] = np.ones(hidden, dtype=np.float32)
         weights[f"{prefix}.attn_norm_beta"] = np.zeros(hidden, dtype=np.float32)
         weights[f"{prefix}.ff_norm"] = np.ones(hidden, dtype=np.float32)
