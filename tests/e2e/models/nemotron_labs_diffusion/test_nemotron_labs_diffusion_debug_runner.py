@@ -30,7 +30,7 @@ def _make_bundle_bytes(
 
 
 def test_nemotron_labs_diffusion_dispatch_uses_owned_runner(tmp_path):
-    from tensorrt_model_connect.families.nemotron_labs_diffusion.debug_runner import (
+    from tensorrt_model_connect.families.nemotron_labs_diffusion.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -54,7 +54,7 @@ def test_nemotron_labs_diffusion_dispatch_uses_owned_runner(tmp_path):
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.nemotron_labs_diffusion.debug_runner.TrtRunner",
+        "tensorrt_model_connect.families.nemotron_labs_diffusion.model.runtime.TrtRunner",
         return_value="nemotron-labs-diffusion-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

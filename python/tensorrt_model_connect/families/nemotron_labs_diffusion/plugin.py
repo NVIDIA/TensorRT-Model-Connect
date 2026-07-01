@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from safetensors import safe_open
 
-from .checkpoint_mapper import WeightDict, load_standard_weights
+from .weights import WeightDict, load_standard_weights
 from .config import ModelConfig
 
 build_standard_decoder_engine = None
@@ -23,9 +23,10 @@ build_standard_decoder_engine = None
 def _get_standard_decoder_builder():
     global build_standard_decoder_engine
     if build_standard_decoder_engine is None:
-        from .default_decoder import (
+        from .model.model import (
             build_standard_decoder_engine as imported_builder,
         )
+
         build_standard_decoder_engine = imported_builder
     return build_standard_decoder_engine
 
@@ -158,7 +159,8 @@ def _merge_linear_spec_lora(
     if target_modules != {"o_proj"}:
         raise ValueError(
             "Nemotron Labs Diffusion linear_spec_lora currently supports only "
-            f"target_modules=['o_proj'], got {sorted(target_modules)}")
+            f"target_modules=['o_proj'], got {sorted(target_modules)}"
+        )
     rank = int(lora_cfg.get("r", 0))
     if rank <= 0:
         raise ValueError("LoRA rank must be positive")
