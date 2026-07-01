@@ -44,14 +44,14 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from .model import model as graph_ops
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -83,8 +83,6 @@ def _resolve_sam_config(raw: dict) -> dict:
         "image_size": vision_config.get("image_size", 1024),
         "patch_size": vision_config.get("patch_size", 16),
         "mlp_dim": vision_config.get("mlp_dim", 3072),
-        "window_size": vision_config.get("window_size", 14),
-        "global_attn_indexes": vision_config.get("global_attn_indexes", [2, 5, 8, 11]),
         # Prompt encoder
         "prompt_hidden_size": prompt_encoder_config.get("hidden_size", 256),
         "image_embedding_size": prompt_encoder_config.get("image_embedding_size", 64),
@@ -93,12 +91,13 @@ def _resolve_sam_config(raw: dict) -> dict:
         "decoder_hidden_size": mask_decoder_config.get("hidden_size", 256),
         "num_multimask_outputs": mask_decoder_config.get("num_multimask_outputs", 3),
         "decoder_num_heads": mask_decoder_config.get("num_attention_heads", 8),
-        "decoder_depth": mask_decoder_config.get("num_hidden_layers",
-            mask_decoder_config.get("depth", 2)),
-        "decoder_mlp_dim": mask_decoder_config.get("mlp_dim",
-            mask_decoder_config.get("hidden_size", 256) * 8),
-        "attention_downsample_rate": mask_decoder_config.get(
-            "attention_downsample_rate", 2),
+        "decoder_depth": mask_decoder_config.get(
+            "num_hidden_layers", mask_decoder_config.get("depth", 2)
+        ),
+        "decoder_mlp_dim": mask_decoder_config.get(
+            "mlp_dim", mask_decoder_config.get("hidden_size", 256) * 8
+        ),
+        "attention_downsample_rate": mask_decoder_config.get("attention_downsample_rate", 2),
     }
 
 
@@ -111,7 +110,9 @@ class SamPlugin:
         return model_type.lower() in ("sam",)
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load SAM weights from safetensors."""
         model_dir_path = Path(model_dir)
@@ -130,14 +131,15 @@ class SamPlugin:
 
         # Patch embedding: Conv2d [hidden, 3, patch_size, patch_size]
         weights["encoder.patch_embed.weight"] = _load_tensor(
-            readers, "vision_encoder.patch_embed.projection.weight").astype(np.float32)
+            readers, "vision_encoder.patch_embed.projection.weight"
+        ).astype(np.float32)
         weights["encoder.patch_embed.bias"] = _load_tensor(
-            readers, "vision_encoder.patch_embed.projection.bias").astype(np.float32)
+            readers, "vision_encoder.patch_embed.projection.bias"
+        ).astype(np.float32)
 
         # Learned absolute position embedding
         # Shape: [1, image_size/patch_size, image_size/patch_size, hidden]
-        pos_embed = _load_tensor(
-            readers, "vision_encoder.pos_embed").astype(np.float32)
+        pos_embed = _load_tensor(readers, "vision_encoder.pos_embed").astype(np.float32)
         weights["encoder.pos_embed"] = pos_embed
 
         # Shared image embedding for prompt encoder (sinusoidal PE coefficients)
@@ -152,19 +154,21 @@ class SamPlugin:
 
             # Layer norms
             weights[f"{w_prefix}.norm1.weight"] = _load_tensor(
-                readers, f"{hf_prefix}.layer_norm1.weight").astype(np.float32)
+                readers, f"{hf_prefix}.layer_norm1.weight"
+            ).astype(np.float32)
             weights[f"{w_prefix}.norm1.bias"] = _load_tensor(
-                readers, f"{hf_prefix}.layer_norm1.bias").astype(np.float32)
+                readers, f"{hf_prefix}.layer_norm1.bias"
+            ).astype(np.float32)
             weights[f"{w_prefix}.norm2.weight"] = _load_tensor(
-                readers, f"{hf_prefix}.layer_norm2.weight").astype(np.float32)
+                readers, f"{hf_prefix}.layer_norm2.weight"
+            ).astype(np.float32)
             weights[f"{w_prefix}.norm2.bias"] = _load_tensor(
-                readers, f"{hf_prefix}.layer_norm2.bias").astype(np.float32)
+                readers, f"{hf_prefix}.layer_norm2.bias"
+            ).astype(np.float32)
 
             # Fused QKV projection [3*hidden, hidden]
-            qkv_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.qkv.weight").astype(np.float32)
-            qkv_b = _load_tensor(
-                readers, f"{hf_prefix}.attn.qkv.bias").astype(np.float32)
+            qkv_w = _load_tensor(readers, f"{hf_prefix}.attn.qkv.weight").astype(np.float32)
+            qkv_b = _load_tensor(readers, f"{hf_prefix}.attn.qkv.bias").astype(np.float32)
 
             # Split into Q, K, V [hidden, hidden] each (transposed)
             q_w, k_w, v_w = np.split(qkv_w, 3, axis=0)
@@ -178,19 +182,19 @@ class SamPlugin:
             weights[f"{w_prefix}.attn.v.bias"] = v_b.flatten().astype(np.float32)
 
             # Output projection
-            o_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.proj.weight").astype(np.float32)
-            o_b = _load_tensor(
-                readers, f"{hf_prefix}.attn.proj.bias").astype(np.float32)
+            o_w = _load_tensor(readers, f"{hf_prefix}.attn.proj.weight").astype(np.float32)
+            o_b = _load_tensor(readers, f"{hf_prefix}.attn.proj.bias").astype(np.float32)
             weights[f"{w_prefix}.attn.o.weight"] = _transpose_2d(o_w, "o")
             weights[f"{w_prefix}.attn.o.bias"] = o_b.flatten().astype(np.float32)
 
             # Relative position embeddings (for windowed attention)
             if _has_tensor(readers, f"{hf_prefix}.attn.rel_pos_h"):
                 weights[f"{w_prefix}.attn.rel_pos_h"] = _load_tensor(
-                    readers, f"{hf_prefix}.attn.rel_pos_h").astype(np.float32)
+                    readers, f"{hf_prefix}.attn.rel_pos_h"
+                ).astype(np.float32)
                 weights[f"{w_prefix}.attn.rel_pos_w"] = _load_tensor(
-                    readers, f"{hf_prefix}.attn.rel_pos_w").astype(np.float32)
+                    readers, f"{hf_prefix}.attn.rel_pos_w"
+                ).astype(np.float32)
 
             # MLP
             fc1_w = _load_tensor(readers, f"{hf_prefix}.mlp.lin1.weight")
@@ -204,65 +208,85 @@ class SamPlugin:
 
         # Neck: 2x Conv2d projections (hidden -> decoder_hidden)
         weights["encoder.neck.conv1.weight"] = _load_tensor(
-            readers, "vision_encoder.neck.conv1.weight").astype(np.float32)
+            readers, "vision_encoder.neck.conv1.weight"
+        ).astype(np.float32)
         if _has_tensor(readers, "vision_encoder.neck.conv1.bias"):
             weights["encoder.neck.conv1.bias"] = _load_tensor(
-                readers, "vision_encoder.neck.conv1.bias").astype(np.float32)
+                readers, "vision_encoder.neck.conv1.bias"
+            ).astype(np.float32)
         weights["encoder.neck.conv2.weight"] = _load_tensor(
-            readers, "vision_encoder.neck.conv2.weight").astype(np.float32)
+            readers, "vision_encoder.neck.conv2.weight"
+        ).astype(np.float32)
         if _has_tensor(readers, "vision_encoder.neck.conv2.bias"):
             weights["encoder.neck.conv2.bias"] = _load_tensor(
-                readers, "vision_encoder.neck.conv2.bias").astype(np.float32)
+                readers, "vision_encoder.neck.conv2.bias"
+            ).astype(np.float32)
 
         # Neck LayerNorms (applied between convs in NHWC format)
         # SAM neck: Conv2d -> LN -> Conv2d -> LN
         # HF stores them as neck.layer_norm1 and neck.layer_norm2
         weights["encoder.neck.ln1.weight"] = _load_tensor(
-            readers, "vision_encoder.neck.layer_norm1.weight").astype(np.float32)
+            readers, "vision_encoder.neck.layer_norm1.weight"
+        ).astype(np.float32)
         weights["encoder.neck.ln1.bias"] = _load_tensor(
-            readers, "vision_encoder.neck.layer_norm1.bias").astype(np.float32)
+            readers, "vision_encoder.neck.layer_norm1.bias"
+        ).astype(np.float32)
         weights["encoder.neck.ln2.weight"] = _load_tensor(
-            readers, "vision_encoder.neck.layer_norm2.weight").astype(np.float32)
+            readers, "vision_encoder.neck.layer_norm2.weight"
+        ).astype(np.float32)
         weights["encoder.neck.ln2.bias"] = _load_tensor(
-            readers, "vision_encoder.neck.layer_norm2.bias").astype(np.float32)
+            readers, "vision_encoder.neck.layer_norm2.bias"
+        ).astype(np.float32)
 
         # --- Prompt encoder ---
         # Point embeddings: 4 types (bg, fg, top-left, bottom-right)
         for i in range(4):
-            weights[f"prompt.point_embed.{i}"] = _load_tensor(
-                readers, f"prompt_encoder.point_embed.{i}.weight"
-            ).flatten().astype(np.float32)
+            weights[f"prompt.point_embed.{i}"] = (
+                _load_tensor(readers, f"prompt_encoder.point_embed.{i}.weight")
+                .flatten()
+                .astype(np.float32)
+            )
 
-        weights["prompt.not_a_point_embed"] = _load_tensor(
-            readers, "prompt_encoder.not_a_point_embed.weight"
-        ).flatten().astype(np.float32)
+        weights["prompt.not_a_point_embed"] = (
+            _load_tensor(readers, "prompt_encoder.not_a_point_embed.weight")
+            .flatten()
+            .astype(np.float32)
+        )
 
-        weights["prompt.no_mask_embed"] = _load_tensor(
-            readers, "prompt_encoder.no_mask_embed.weight"
-        ).flatten().astype(np.float32)
+        weights["prompt.no_mask_embed"] = (
+            _load_tensor(readers, "prompt_encoder.no_mask_embed.weight")
+            .flatten()
+            .astype(np.float32)
+        )
 
         # Mask embed conv layers (HF: prompt_encoder.mask_embed.conv{1,2,3})
         for i in range(3):
             hf_conv = f"prompt_encoder.mask_embed.conv{i + 1}"
             if _has_tensor(readers, f"{hf_conv}.weight"):
                 weights[f"prompt.mask_down.{i}.weight"] = _load_tensor(
-                    readers, f"{hf_conv}.weight").astype(np.float32)
+                    readers, f"{hf_conv}.weight"
+                ).astype(np.float32)
                 weights[f"prompt.mask_down.{i}.bias"] = _load_tensor(
-                    readers, f"{hf_conv}.bias").astype(np.float32)
+                    readers, f"{hf_conv}.bias"
+                ).astype(np.float32)
         # Mask embed layer norms (HF: prompt_encoder.mask_embed.layer_norm{1,2})
         for i in range(1, 3):
             hf_ln = f"prompt_encoder.mask_embed.layer_norm{i}"
             if _has_tensor(readers, f"{hf_ln}.weight"):
                 weights[f"prompt.mask_down_ln.{i}.weight"] = _load_tensor(
-                    readers, f"{hf_ln}.weight").astype(np.float32)
+                    readers, f"{hf_ln}.weight"
+                ).astype(np.float32)
                 weights[f"prompt.mask_down_ln.{i}.bias"] = _load_tensor(
-                    readers, f"{hf_ln}.bias").astype(np.float32)
+                    readers, f"{hf_ln}.bias"
+                ).astype(np.float32)
 
         # --- Mask decoder ---
-        weights["decoder.iou_token"] = _load_tensor(
-            readers, "mask_decoder.iou_token.weight").flatten().astype(np.float32)
+        weights["decoder.iou_token"] = (
+            _load_tensor(readers, "mask_decoder.iou_token.weight").flatten().astype(np.float32)
+        )
         weights["decoder.mask_tokens"] = _load_tensor(
-            readers, "mask_decoder.mask_tokens.weight").astype(np.float32)
+            readers, "mask_decoder.mask_tokens.weight"
+        ).astype(np.float32)
 
         # Two-way transformer layers
         for layer_idx in range(decoder_depth):
@@ -272,17 +296,13 @@ class SamPlugin:
             # Self-attention on tokens
             for proj in ("q", "k", "v"):
                 proj_name = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}[proj]
-                w = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.{proj_name}.weight")
-                b = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.{proj_name}.bias")
+                w = _load_tensor(readers, f"{hf_prefix}.self_attn.{proj_name}.weight")
+                b = _load_tensor(readers, f"{hf_prefix}.self_attn.{proj_name}.bias")
                 weights[f"{w_prefix}.self_attn.{proj}.weight"] = _transpose_2d(w, f"sa_{proj}")
                 weights[f"{w_prefix}.self_attn.{proj}.bias"] = b.flatten().astype(np.float32)
 
-            sa_o_w = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.out_proj.weight")
-            sa_o_b = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.out_proj.bias")
+            sa_o_w = _load_tensor(readers, f"{hf_prefix}.self_attn.out_proj.weight")
+            sa_o_b = _load_tensor(readers, f"{hf_prefix}.self_attn.out_proj.bias")
             weights[f"{w_prefix}.self_attn.o.weight"] = _transpose_2d(sa_o_w, "sa_o")
             weights[f"{w_prefix}.self_attn.o.bias"] = sa_o_b.flatten().astype(np.float32)
 
@@ -290,16 +310,16 @@ class SamPlugin:
             for proj in ("q", "k", "v"):
                 proj_name = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}[proj]
                 w = _load_tensor(
-                    readers, f"{hf_prefix}.cross_attn_token_to_image.{proj_name}.weight")
-                b = _load_tensor(
-                    readers, f"{hf_prefix}.cross_attn_token_to_image.{proj_name}.bias")
+                    readers, f"{hf_prefix}.cross_attn_token_to_image.{proj_name}.weight"
+                )
+                b = _load_tensor(readers, f"{hf_prefix}.cross_attn_token_to_image.{proj_name}.bias")
                 weights[f"{w_prefix}.cross_t2i.{proj}.weight"] = _transpose_2d(w, f"t2i_{proj}")
                 weights[f"{w_prefix}.cross_t2i.{proj}.bias"] = b.flatten().astype(np.float32)
 
             t2i_o_w = _load_tensor(
-                readers, f"{hf_prefix}.cross_attn_token_to_image.out_proj.weight")
-            t2i_o_b = _load_tensor(
-                readers, f"{hf_prefix}.cross_attn_token_to_image.out_proj.bias")
+                readers, f"{hf_prefix}.cross_attn_token_to_image.out_proj.weight"
+            )
+            t2i_o_b = _load_tensor(readers, f"{hf_prefix}.cross_attn_token_to_image.out_proj.bias")
             weights[f"{w_prefix}.cross_t2i.o.weight"] = _transpose_2d(t2i_o_w, "t2i_o")
             weights[f"{w_prefix}.cross_t2i.o.bias"] = t2i_o_b.flatten().astype(np.float32)
 
@@ -307,16 +327,16 @@ class SamPlugin:
             for proj in ("q", "k", "v"):
                 proj_name = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}[proj]
                 w = _load_tensor(
-                    readers, f"{hf_prefix}.cross_attn_image_to_token.{proj_name}.weight")
-                b = _load_tensor(
-                    readers, f"{hf_prefix}.cross_attn_image_to_token.{proj_name}.bias")
+                    readers, f"{hf_prefix}.cross_attn_image_to_token.{proj_name}.weight"
+                )
+                b = _load_tensor(readers, f"{hf_prefix}.cross_attn_image_to_token.{proj_name}.bias")
                 weights[f"{w_prefix}.cross_i2t.{proj}.weight"] = _transpose_2d(w, f"i2t_{proj}")
                 weights[f"{w_prefix}.cross_i2t.{proj}.bias"] = b.flatten().astype(np.float32)
 
             i2t_o_w = _load_tensor(
-                readers, f"{hf_prefix}.cross_attn_image_to_token.out_proj.weight")
-            i2t_o_b = _load_tensor(
-                readers, f"{hf_prefix}.cross_attn_image_to_token.out_proj.bias")
+                readers, f"{hf_prefix}.cross_attn_image_to_token.out_proj.weight"
+            )
+            i2t_o_b = _load_tensor(readers, f"{hf_prefix}.cross_attn_image_to_token.out_proj.bias")
             weights[f"{w_prefix}.cross_i2t.o.weight"] = _transpose_2d(i2t_o_w, "i2t_o")
             weights[f"{w_prefix}.cross_i2t.o.bias"] = i2t_o_b.flatten().astype(np.float32)
 
@@ -325,9 +345,11 @@ class SamPlugin:
                 hf_ln = f"{hf_prefix}.layer_{ln_name}"
                 if _has_tensor(readers, f"{hf_ln}.weight"):
                     weights[f"{w_prefix}.{ln_name}.weight"] = _load_tensor(
-                        readers, f"{hf_ln}.weight").astype(np.float32)
+                        readers, f"{hf_ln}.weight"
+                    ).astype(np.float32)
                     weights[f"{w_prefix}.{ln_name}.bias"] = _load_tensor(
-                        readers, f"{hf_ln}.bias").astype(np.float32)
+                        readers, f"{hf_ln}.bias"
+                    ).astype(np.float32)
 
             # MLP in decoder layer
             mlp_fc1_w = _load_tensor(readers, f"{hf_prefix}.mlp.lin1.weight")
@@ -355,26 +377,34 @@ class SamPlugin:
 
         # Final layer norms
         weights["decoder.final_norm.weight"] = _load_tensor(
-            readers, "mask_decoder.transformer.layer_norm_final_attn.weight").astype(np.float32)
+            readers, "mask_decoder.transformer.layer_norm_final_attn.weight"
+        ).astype(np.float32)
         weights["decoder.final_norm.bias"] = _load_tensor(
-            readers, "mask_decoder.transformer.layer_norm_final_attn.bias").astype(np.float32)
+            readers, "mask_decoder.transformer.layer_norm_final_attn.bias"
+        ).astype(np.float32)
 
         # Output upscaling (ConvTranspose2d layers)
         weights["decoder.upscale.conv1.weight"] = _load_tensor(
-            readers, "mask_decoder.upscale_conv1.weight").astype(np.float32)
+            readers, "mask_decoder.upscale_conv1.weight"
+        ).astype(np.float32)
         if _has_tensor(readers, "mask_decoder.upscale_conv1.bias"):
             weights["decoder.upscale.conv1.bias"] = _load_tensor(
-                readers, "mask_decoder.upscale_conv1.bias").astype(np.float32)
+                readers, "mask_decoder.upscale_conv1.bias"
+            ).astype(np.float32)
         # LayerNorm between upsample convs
         weights["decoder.upscale.ln.weight"] = _load_tensor(
-            readers, "mask_decoder.upscale_layer_norm.weight").astype(np.float32)
+            readers, "mask_decoder.upscale_layer_norm.weight"
+        ).astype(np.float32)
         weights["decoder.upscale.ln.bias"] = _load_tensor(
-            readers, "mask_decoder.upscale_layer_norm.bias").astype(np.float32)
+            readers, "mask_decoder.upscale_layer_norm.bias"
+        ).astype(np.float32)
         weights["decoder.upscale.conv2.weight"] = _load_tensor(
-            readers, "mask_decoder.upscale_conv2.weight").astype(np.float32)
+            readers, "mask_decoder.upscale_conv2.weight"
+        ).astype(np.float32)
         if _has_tensor(readers, "mask_decoder.upscale_conv2.bias"):
             weights["decoder.upscale.conv2.bias"] = _load_tensor(
-                readers, "mask_decoder.upscale_conv2.bias").astype(np.float32)
+                readers, "mask_decoder.upscale_conv2.bias"
+            ).astype(np.float32)
 
         # Output hypernetworks MLPs (one per mask output)
         # HF uses: proj_in, layers.0, proj_out (3-layer MLP naming)
@@ -413,9 +443,14 @@ class SamPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         """Build TRT engine for SAM image encoder.
@@ -426,12 +461,16 @@ class SamPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="SAM encoder tensor-parallel MLP builds")
+                parallel, feature="SAM encoder tensor-parallel MLP builds"
+            )
             if quant_ctx is not None:
                 raise ValueError("SAM tensor-parallel builds do not support quantization")
-            from .sam_tp_builder import build_sam_tp_encoder_engine
+            from .model.parallel import build_sam_tp_encoder_engine
+
             return build_sam_tp_encoder_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -446,8 +485,6 @@ class SamPlugin:
         mlp_dim = sam_cfg["mlp_dim"]
         image_size = sam_cfg["image_size"]
         patch_size = sam_cfg["patch_size"]
-        window_size = sam_cfg["window_size"]
-        global_attn_indexes = set(sam_cfg["global_attn_indexes"])
         decoder_hidden = sam_cfg["decoder_hidden_size"]
         work_np_dtype, work_trt_dtype = _precision_types(precision)
 
@@ -460,8 +497,7 @@ class SamPlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
-        eps_t = graph_ops.add_constant(
-            network, (1, 1), np.array([1e-6], dtype=np.float32))
+        eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
 
         # Input: [1, 3, image_size, image_size]
         pixel_values = network.add_input(
@@ -491,16 +527,14 @@ class SamPlugin:
             network, (1, grid_size, grid_size, hidden), pos_embed,
             dtype=work_np_dtype)
         pos_sum = network.add_elementwise(
-            to_nhwc.get_output(0), pos_c, trt.ElementWiseOperation.SUM)
+            to_nhwc.get_output(0), pos_c, trt.ElementWiseOperation.SUM
+        )
 
         hidden_state = pos_sum.get_output(0)
 
         # Transformer layers
         for layer_idx in range(num_layers):
             w_prefix = f"encoder.layer{layer_idx}"
-            use_global_attn = layer_idx in global_attn_indexes
-            use_window = not use_global_attn
-
             # Pre-attention LayerNorm
             norm1_w = weights[f"{w_prefix}.norm1.weight"]
             norm1_b = weights[f"{w_prefix}.norm1.bias"]
@@ -517,22 +551,12 @@ class SamPlugin:
             normed_4d = network.add_shuffle(normed)
             normed_4d.reshape_dims = (1, grid_size, grid_size, hidden)
 
-            if use_window:
-                # Window partition + attention + unpartition
-                attn_out_4d = self._build_windowed_attention(
-                    network, normed_4d.get_output(0), weights, w_prefix,
-                    grid_size, hidden, num_heads, head_dim, window_size,
-                    dtype=work_np_dtype)
-            else:
-                # Global attention
-                attn_out_4d = self._build_global_attention(
-                    network, normed_4d.get_output(0), weights, w_prefix,
-                    grid_size, hidden, num_heads, head_dim, seq_len,
-                    dtype=work_np_dtype)
+            attn_out_4d = self._build_attention_2d(
+                network, normed_4d.get_output(0), weights, w_prefix,
+                grid_size, hidden, num_heads, head_dim, dtype=work_np_dtype)
 
             # Residual
-            res1 = network.add_elementwise(
-                hidden_state, attn_out_4d, trt.ElementWiseOperation.SUM)
+            res1 = network.add_elementwise(hidden_state, attn_out_4d, trt.ElementWiseOperation.SUM)
 
             # Post-attention MLP
             norm2_w = weights[f"{w_prefix}.norm2.weight"]
@@ -547,18 +571,14 @@ class SamPlugin:
 
             # MLP: FC1 -> GELU -> FC2
             fc1 = graph_ops.add_matmul_rhs_constant(
-                network, normed2, hidden, mlp_dim,
-                weights[f"{w_prefix}.mlp.fc1.weight"])
-            fc1 = graph_ops.add_bias_sum(
-                network, fc1, mlp_dim,
-                weights[f"{w_prefix}.mlp.fc1.bias"])
+                network, normed2, hidden, mlp_dim, weights[f"{w_prefix}.mlp.fc1.weight"]
+            )
+            fc1 = graph_ops.add_bias_sum(network, fc1, mlp_dim, weights[f"{w_prefix}.mlp.fc1.bias"])
             gelu = graph_ops.add_gelu_new(network, fc1)
             fc2 = graph_ops.add_matmul_rhs_constant(
-                network, gelu, mlp_dim, hidden,
-                weights[f"{w_prefix}.mlp.fc2.weight"])
-            fc2 = graph_ops.add_bias_sum(
-                network, fc2, hidden,
-                weights[f"{w_prefix}.mlp.fc2.bias"])
+                network, gelu, mlp_dim, hidden, weights[f"{w_prefix}.mlp.fc2.weight"]
+            )
+            fc2 = graph_ops.add_bias_sum(network, fc2, hidden, weights[f"{w_prefix}.mlp.fc2.bias"])
 
             # Reshape MLP output back to 4D
             fc2_4d = network.add_shuffle(fc2)
@@ -566,7 +586,8 @@ class SamPlugin:
 
             # Residual
             res2 = network.add_elementwise(
-                res1.get_output(0), fc2_4d.get_output(0), trt.ElementWiseOperation.SUM)
+                res1.get_output(0), fc2_4d.get_output(0), trt.ElementWiseOperation.SUM
+            )
             hidden_state = res2.get_output(0)
 
         # Neck: [1, H, W, hidden] -> [1, decoder_hidden, H, W]
@@ -575,10 +596,12 @@ class SamPlugin:
         to_nchw.first_transpose = trt.Permutation([0, 3, 1, 2])
 
         neck_c1_w = weights["encoder.neck.conv1.weight"]
-        neck_c1_b = weights.get("encoder.neck.conv1.bias",
-                                np.zeros(decoder_hidden, dtype=np.float32))
+        neck_c1_b = weights.get(
+            "encoder.neck.conv1.bias", np.zeros(decoder_hidden, dtype=np.float32)
+        )
         neck_conv1 = network.add_convolution_nd(
-            to_nchw.get_output(0), num_output_maps=decoder_hidden,
+            to_nchw.get_output(0),
+            num_output_maps=decoder_hidden,
             kernel_shape=(1, 1),
             kernel=trt.Weights(np.ascontiguousarray(
                 neck_c1_w, dtype=work_np_dtype)),
@@ -591,7 +614,9 @@ class SamPlugin:
         flat_n1 = network.add_shuffle(to_nhwc_n1.get_output(0))
         flat_n1.reshape_dims = (seq_len, decoder_hidden)
         ln1_out = graph_ops.add_layer_norm(
-            network, flat_n1.get_output(0), decoder_hidden,
+            network,
+            flat_n1.get_output(0),
+            decoder_hidden,
             weights["encoder.neck.ln1.weight"],
             weights["encoder.neck.ln1.bias"], eps_t, dtype=work_np_dtype)
         unflat_n1 = network.add_shuffle(ln1_out)
@@ -601,10 +626,12 @@ class SamPlugin:
 
         # Conv2: 3x3, decoder_hidden -> decoder_hidden
         neck_c2_w = weights["encoder.neck.conv2.weight"]
-        neck_c2_b = weights.get("encoder.neck.conv2.bias",
-                                np.zeros(decoder_hidden, dtype=np.float32))
+        neck_c2_b = weights.get(
+            "encoder.neck.conv2.bias", np.zeros(decoder_hidden, dtype=np.float32)
+        )
         neck_conv2 = network.add_convolution_nd(
-            to_nchw_n1.get_output(0), num_output_maps=decoder_hidden,
+            to_nchw_n1.get_output(0),
+            num_output_maps=decoder_hidden,
             kernel_shape=(3, 3),
             kernel=trt.Weights(np.ascontiguousarray(
                 neck_c2_w, dtype=work_np_dtype)),
@@ -618,7 +645,9 @@ class SamPlugin:
         flat_n2 = network.add_shuffle(to_nhwc_n2.get_output(0))
         flat_n2.reshape_dims = (seq_len, decoder_hidden)
         ln2_out = graph_ops.add_layer_norm(
-            network, flat_n2.get_output(0), decoder_hidden,
+            network,
+            flat_n2.get_output(0),
+            decoder_hidden,
             weights["encoder.neck.ln2.weight"],
             weights["encoder.neck.ln2.bias"], eps_t, dtype=work_np_dtype)
         unflat_n2 = network.add_shuffle(ln2_out)
@@ -645,8 +674,13 @@ class SamPlugin:
         return bytes(plan)
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         """Build TRT engine for SAM mask decoder.
 
@@ -689,13 +723,14 @@ class SamPlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
-        eps_t = graph_ops.add_constant(
-            network, (1, 1), np.array([1e-6], dtype=np.float32))
+        eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
 
         # --- Inputs ---
         image_embeddings_in = network.add_input(
-            "image_embeddings", trt.float32,
-            (1, decoder_hidden, image_embedding_size, image_embedding_size))
+            "image_embeddings",
+            trt.float32,
+            (1, decoder_hidden, image_embedding_size, image_embedding_size),
+        )
         sparse_prompt = network.add_input(
             "sparse_prompt_embeddings", trt.float32,
             (num_sparse_fixed, decoder_hidden))
@@ -713,8 +748,7 @@ class SamPlugin:
         #          PE = cat(sin(2*pi*B), cos(2*pi*B))
         shared_pe = weights["prompt.shared_image_pe"]  # [2, num_pos_feats]
         # Build grid: [H, W, 2] with values in [0,1]
-        grid = np.zeros((image_embedding_size, image_embedding_size, 2),
-                        dtype=np.float32)
+        grid = np.zeros((image_embedding_size, image_embedding_size, 2), dtype=np.float32)
         for gy in range(image_embedding_size):
             for gx in range(image_embedding_size):
                 grid[gy, gx, 0] = (gx + 0.5) / image_embedding_size
@@ -752,10 +786,9 @@ class SamPlugin:
         # --- Build output tokens and concatenate with sparse prompt ---
         iou_token = weights["decoder.iou_token"]
         mask_tokens = weights["decoder.mask_tokens"]
-        output_tokens_np = np.zeros(
-            (num_output_tokens, decoder_hidden), dtype=np.float32)
+        output_tokens_np = np.zeros((num_output_tokens, decoder_hidden), dtype=np.float32)
         output_tokens_np[0] = iou_token[:decoder_hidden]
-        output_tokens_np[1:1 + num_mask_outputs] = mask_tokens[:num_mask_outputs]
+        output_tokens_np[1 : 1 + num_mask_outputs] = mask_tokens[:num_mask_outputs]
 
         output_tokens = graph_ops.add_constant(
             network, (num_output_tokens, decoder_hidden), output_tokens_np,
@@ -778,7 +811,7 @@ class SamPlugin:
 
         for layer_idx in range(decoder_depth):
             w_prefix = f"decoder.layer{layer_idx}"
-            skip_first_layer_pe = (layer_idx == 0)
+            skip_first_layer_pe = layer_idx == 0
 
             # --- Self-attention on queries ---
             if skip_first_layer_pe:
@@ -788,26 +821,36 @@ class SamPlugin:
             else:
                 # Q = queries + query_point_embedding
                 sa_q = network.add_elementwise(
-                    queries, tokens_init,
-                    trt.ElementWiseOperation.SUM).get_output(0)
+                    queries, tokens_init, trt.ElementWiseOperation.SUM
+                ).get_output(0)
                 sa_k = sa_q  # same as Q for self-attention
 
             sa_out = self._build_attention(
-                network, sa_q, sa_k,
-                total_tokens, total_tokens,
-                decoder_hidden, num_heads, head_dim,
-                weights, f"{w_prefix}.self_attn",
-                value_input=queries)
+                network,
+                sa_q,
+                sa_k,
+                total_tokens,
+                total_tokens,
+                decoder_hidden,
+                num_heads,
+                head_dim,
+                weights,
+                f"{w_prefix}.self_attn",
+                value_input=queries,
+            )
 
             # HF SAM: layer 0 replaces queries (no residual), other layers add residual
             if skip_first_layer_pe:
                 queries = sa_out  # No residual for layer 0
             else:
                 queries = network.add_elementwise(
-                    queries, sa_out, trt.ElementWiseOperation.SUM).get_output(0)
+                    queries, sa_out, trt.ElementWiseOperation.SUM
+                ).get_output(0)
             # LN1 (post-norm)
             queries = graph_ops.add_layer_norm(
-                network, queries, decoder_hidden,
+                network,
+                queries,
+                decoder_hidden,
                 weights[f"{w_prefix}.norm1.weight"],
                 weights[f"{w_prefix}.norm1.bias"], eps_t,
                 dtype=work_np_dtype)
@@ -815,51 +858,71 @@ class SamPlugin:
             # --- Cross-attention: token-to-image ---
             # Q = queries + query_point_embedding (tokens_init)
             t2i_q = network.add_elementwise(
-                queries, tokens_init,
-                trt.ElementWiseOperation.SUM).get_output(0)
+                queries, tokens_init, trt.ElementWiseOperation.SUM
+            ).get_output(0)
             # K = keys + key_point_embedding (image_pe)
             t2i_k = network.add_elementwise(
-                keys, image_pe_flat_c,
-                trt.ElementWiseOperation.SUM).get_output(0)
+                keys, image_pe_flat_c, trt.ElementWiseOperation.SUM
+            ).get_output(0)
 
             t2i_out = self._build_attention(
-                network, t2i_q, t2i_k,
-                total_tokens, img_seq,
-                decoder_hidden, num_heads, head_dim,
-                weights, f"{w_prefix}.cross_t2i",
+                network,
+                t2i_q,
+                t2i_k,
+                total_tokens,
+                img_seq,
+                decoder_hidden,
+                num_heads,
+                head_dim,
+                weights,
+                f"{w_prefix}.cross_t2i",
                 proj_dim=cross_attn_dim,
-                value_input=keys)
+                value_input=keys,
+            )
 
             # Residual + LN2
             queries = network.add_elementwise(
-                queries, t2i_out, trt.ElementWiseOperation.SUM).get_output(0)
+                queries, t2i_out, trt.ElementWiseOperation.SUM
+            ).get_output(0)
             queries = graph_ops.add_layer_norm(
-                network, queries, decoder_hidden,
+                network,
+                queries,
+                decoder_hidden,
                 weights[f"{w_prefix}.norm2.weight"],
                 weights[f"{w_prefix}.norm2.bias"], eps_t,
                 dtype=work_np_dtype)
 
             # --- MLP on queries ---
             mlp_out = graph_ops.add_matmul_rhs_constant(
-                network, queries, decoder_hidden, decoder_mlp_dim,
-                weights[f"{w_prefix}.mlp.fc1.weight"])
+                network,
+                queries,
+                decoder_hidden,
+                decoder_mlp_dim,
+                weights[f"{w_prefix}.mlp.fc1.weight"],
+            )
             mlp_out = graph_ops.add_bias_sum(
-                network, mlp_out, decoder_mlp_dim,
-                weights[f"{w_prefix}.mlp.fc1.bias"])
-            mlp_out = network.add_activation(
-                mlp_out, trt.ActivationType.RELU).get_output(0)
+                network, mlp_out, decoder_mlp_dim, weights[f"{w_prefix}.mlp.fc1.bias"]
+            )
+            mlp_out = network.add_activation(mlp_out, trt.ActivationType.RELU).get_output(0)
             mlp_out = graph_ops.add_matmul_rhs_constant(
-                network, mlp_out, decoder_mlp_dim, decoder_hidden,
-                weights[f"{w_prefix}.mlp.fc2.weight"])
+                network,
+                mlp_out,
+                decoder_mlp_dim,
+                decoder_hidden,
+                weights[f"{w_prefix}.mlp.fc2.weight"],
+            )
             mlp_out = graph_ops.add_bias_sum(
-                network, mlp_out, decoder_hidden,
-                weights[f"{w_prefix}.mlp.fc2.bias"])
+                network, mlp_out, decoder_hidden, weights[f"{w_prefix}.mlp.fc2.bias"]
+            )
 
             # Residual + LN3
             queries = network.add_elementwise(
-                queries, mlp_out, trt.ElementWiseOperation.SUM).get_output(0)
+                queries, mlp_out, trt.ElementWiseOperation.SUM
+            ).get_output(0)
             queries = graph_ops.add_layer_norm(
-                network, queries, decoder_hidden,
+                network,
+                queries,
+                decoder_hidden,
                 weights[f"{w_prefix}.norm3.weight"],
                 weights[f"{w_prefix}.norm3.bias"], eps_t,
                 dtype=work_np_dtype)
@@ -867,26 +930,36 @@ class SamPlugin:
             # --- Cross-attention: image-to-token ---
             # Q = keys + key_point_embedding (image_pe)
             i2t_q = network.add_elementwise(
-                keys, image_pe_flat_c,
-                trt.ElementWiseOperation.SUM).get_output(0)
+                keys, image_pe_flat_c, trt.ElementWiseOperation.SUM
+            ).get_output(0)
             # K = queries + query_point_embedding (tokens_init)
             i2t_k = network.add_elementwise(
-                queries, tokens_init,
-                trt.ElementWiseOperation.SUM).get_output(0)
+                queries, tokens_init, trt.ElementWiseOperation.SUM
+            ).get_output(0)
 
             i2t_out = self._build_attention(
-                network, i2t_q, i2t_k,
-                img_seq, total_tokens,
-                decoder_hidden, num_heads, head_dim,
-                weights, f"{w_prefix}.cross_i2t",
+                network,
+                i2t_q,
+                i2t_k,
+                img_seq,
+                total_tokens,
+                decoder_hidden,
+                num_heads,
+                head_dim,
+                weights,
+                f"{w_prefix}.cross_i2t",
                 proj_dim=cross_attn_dim,
-                value_input=queries)
+                value_input=queries,
+            )
 
             # Residual on keys + LN4
-            keys = network.add_elementwise(
-                keys, i2t_out, trt.ElementWiseOperation.SUM).get_output(0)
+            keys = network.add_elementwise(keys, i2t_out, trt.ElementWiseOperation.SUM).get_output(
+                0
+            )
             keys = graph_ops.add_layer_norm(
-                network, keys, decoder_hidden,
+                network,
+                keys,
+                decoder_hidden,
                 weights[f"{w_prefix}.norm4.weight"],
                 weights[f"{w_prefix}.norm4.bias"], eps_t,
                 dtype=work_np_dtype)
@@ -894,54 +967,64 @@ class SamPlugin:
         # --- Final cross-attention: token-to-image ---
         # Q = queries + point_embeddings (tokens_init)
         final_q = network.add_elementwise(
-            queries, tokens_init,
-            trt.ElementWiseOperation.SUM).get_output(0)
+            queries, tokens_init, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         # K = keys + image_pe
         final_k = network.add_elementwise(
-            keys, image_pe_flat_c,
-            trt.ElementWiseOperation.SUM).get_output(0)
+            keys, image_pe_flat_c, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
         final_t2i = self._build_attention(
-            network, final_q, final_k,
-            total_tokens, img_seq,
-            decoder_hidden, num_heads, head_dim,
-            weights, "decoder.final_t2i",
+            network,
+            final_q,
+            final_k,
+            total_tokens,
+            img_seq,
+            decoder_hidden,
+            num_heads,
+            head_dim,
+            weights,
+            "decoder.final_t2i",
             proj_dim=cross_attn_dim,
-            value_input=keys)
+            value_input=keys,
+        )
 
         queries = network.add_elementwise(
-            queries, final_t2i, trt.ElementWiseOperation.SUM).get_output(0)
+            queries, final_t2i, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         queries = graph_ops.add_layer_norm(
-            network, queries, decoder_hidden,
+            network,
+            queries,
+            decoder_hidden,
             weights["decoder.final_norm.weight"],
             weights["decoder.final_norm.bias"], eps_t,
             dtype=work_np_dtype)
 
         # --- Extract mask tokens and IoU token ---
         iou_tok_slice = network.add_slice(
-            queries, start=(0, 0), shape=(1, decoder_hidden), stride=(1, 1))
+            queries, start=(0, 0), shape=(1, decoder_hidden), stride=(1, 1)
+        )
         iou_token_out = iou_tok_slice.get_output(0)
 
         mask_tok_slice = network.add_slice(
-            queries, start=(1, 0),
-            shape=(num_mask_outputs, decoder_hidden), stride=(1, 1))
+            queries, start=(1, 0), shape=(num_mask_outputs, decoder_hidden), stride=(1, 1)
+        )
         mask_tokens_out = mask_tok_slice.get_output(0)
 
         # --- Upscale image embeddings ---
         # keys: [img_seq, C] -> [1, C, H, W]
         img_up_s = network.add_shuffle(keys)
-        img_up_s.reshape_dims = (
-            1, image_embedding_size, image_embedding_size, decoder_hidden)
+        img_up_s.reshape_dims = (1, image_embedding_size, image_embedding_size, decoder_hidden)
         img_up_t = network.add_shuffle(img_up_s.get_output(0))
         img_up_t.first_transpose = trt.Permutation([0, 3, 1, 2])
 
         # ConvTranspose2d 1: [1, 256, 64, 64] -> [1, 64, 128, 128]
         up1_out_ch = decoder_hidden // 4
         up1_w = weights["decoder.upscale.conv1.weight"]
-        up1_b = weights.get("decoder.upscale.conv1.bias",
-                            np.zeros(up1_out_ch, dtype=np.float32))
+        up1_b = weights.get("decoder.upscale.conv1.bias", np.zeros(up1_out_ch, dtype=np.float32))
         up1_conv = network.add_deconvolution_nd(
-            img_up_t.get_output(0), num_output_maps=up1_out_ch,
+            img_up_t.get_output(0),
+            num_output_maps=up1_out_ch,
             kernel_shape=(2, 2),
             kernel=trt.Weights(np.ascontiguousarray(
                 up1_w, dtype=work_np_dtype)),
@@ -955,7 +1038,9 @@ class SamPlugin:
         up1_flat = network.add_shuffle(up1_nhwc.get_output(0))
         up1_flat.reshape_dims = (128 * 128, up1_out_ch)
         up1_ln = graph_ops.add_layer_norm(
-            network, up1_flat.get_output(0), up1_out_ch,
+            network,
+            up1_flat.get_output(0),
+            up1_out_ch,
             weights["decoder.upscale.ln.weight"],
             weights["decoder.upscale.ln.bias"], eps_t,
             dtype=work_np_dtype)
@@ -967,15 +1052,16 @@ class SamPlugin:
         # GELU activation (HF: self.activation = nn.GELU())
         # GELU is element-wise, apply on NCHW then feed to conv2
         up1_act = network.add_activation(
-            up1_nchw.get_output(0), trt.ActivationType.GELU_ERF).get_output(0)
+            up1_nchw.get_output(0), trt.ActivationType.GELU_ERF
+        ).get_output(0)
 
         # ConvTranspose2d 2: [1, 64, 128, 128] -> [1, 32, 256, 256]
         up2_out_ch = decoder_hidden // 8
         up2_w = weights["decoder.upscale.conv2.weight"]
-        up2_b = weights.get("decoder.upscale.conv2.bias",
-                            np.zeros(up2_out_ch, dtype=np.float32))
+        up2_b = weights.get("decoder.upscale.conv2.bias", np.zeros(up2_out_ch, dtype=np.float32))
         up2_conv = network.add_deconvolution_nd(
-            up1_act, num_output_maps=up2_out_ch,
+            up1_act,
+            num_output_maps=up2_out_ch,
             kernel_shape=(2, 2),
             kernel=trt.Weights(np.ascontiguousarray(
                 up2_w, dtype=work_np_dtype)),
@@ -985,7 +1071,8 @@ class SamPlugin:
 
         # GELU on conv2 output (NCHW)
         up2_act = network.add_activation(
-            up2_conv.get_output(0), trt.ActivationType.GELU_ERF).get_output(0)
+            up2_conv.get_output(0), trt.ActivationType.GELU_ERF
+        ).get_output(0)
 
         # Permute NCHW -> NHWC -> flatten to [H*W, C] for dot product
         # This is critical: the dot product expects [pixel, channel] layout
@@ -999,8 +1086,8 @@ class SamPlugin:
         mask_outputs = []
         for i in range(num_mask_outputs):
             mt_slice = network.add_slice(
-                mask_tokens_out, start=(i, 0),
-                shape=(1, decoder_hidden), stride=(1, 1))
+                mask_tokens_out, start=(i, 0), shape=(1, decoder_hidden), stride=(1, 1)
+            )
             mt = mt_slice.get_output(0)
 
             for j in range(3):
@@ -1008,20 +1095,17 @@ class SamPlugin:
                 b_key = f"decoder.hyper_mlp.{i}.{j}.bias"
                 out_dim = weights[b_key].shape[0]
                 in_dim = weights[w_key].shape[0]
-                mt = graph_ops.add_matmul_rhs_constant(
-                    network, mt, in_dim, out_dim, weights[w_key])
-                mt = graph_ops.add_bias_sum(
-                    network, mt, out_dim, weights[b_key])
+                mt = graph_ops.add_matmul_rhs_constant(network, mt, in_dim, out_dim, weights[w_key])
+                mt = graph_ops.add_bias_sum(network, mt, out_dim, weights[b_key])
                 if j < 2:
-                    mt = network.add_activation(
-                        mt, trt.ActivationType.RELU).get_output(0)
+                    mt = network.add_activation(mt, trt.ActivationType.RELU).get_output(0)
 
             # Dot product: [256*256, up2_out_ch] @ [up2_out_ch, 1]
             mt_t = network.add_shuffle(mt)
             mt_t.first_transpose = trt.Permutation([1, 0])
             mask_logits = network.add_matrix_multiply(
-                up2_features, trt.MatrixOperation.NONE,
-                mt_t.get_output(0), trt.MatrixOperation.NONE)
+                up2_features, trt.MatrixOperation.NONE, mt_t.get_output(0), trt.MatrixOperation.NONE
+            )
             mask_2d = network.add_shuffle(mask_logits.get_output(0))
             mask_2d.reshape_dims = (1, 256, 256)
             mask_outputs.append(mask_2d.get_output(0))
@@ -1041,12 +1125,10 @@ class SamPlugin:
             b_key = f"decoder.iou_head.{j}.bias"
             out_dim = weights[b_key].shape[0]
             in_dim = weights[w_key].shape[0]
-            iou = graph_ops.add_matmul_rhs_constant(
-                network, iou, in_dim, out_dim, weights[w_key])
+            iou = graph_ops.add_matmul_rhs_constant(network, iou, in_dim, out_dim, weights[w_key])
             iou = graph_ops.add_bias_sum(network, iou, out_dim, weights[b_key])
             if j < 2:
-                iou = network.add_activation(
-                    iou, trt.ActivationType.RELU).get_output(0)
+                iou = network.add_activation(iou, trt.ActivationType.RELU).get_output(0)
 
         iou_out = network.add_shuffle(iou)
         iou_out.reshape_dims = (num_mask_outputs,)
@@ -1102,10 +1184,16 @@ class SamPlugin:
 
     @staticmethod
     def _build_attention(
-        network, q_input, kv_input,
-        q_seq, kv_seq,
-        hidden, num_heads, head_dim,
-        weights, prefix,
+        network,
+        q_input,
+        kv_input,
+        q_seq,
+        kv_seq,
+        hidden,
+        num_heads,
+        head_dim,
+        weights,
+        prefix,
         proj_dim=None,
         value_input=None,
     ):
@@ -1124,47 +1212,45 @@ class SamPlugin:
         v_source = value_input if value_input is not None else kv_input
 
         q = graph_ops.add_matmul_rhs_constant(
-            network, q_input, hidden, proj, weights[f"{prefix}.q.weight"])
-        q = graph_ops.add_bias_sum(
-            network, q, proj, weights[f"{prefix}.q.bias"])
+            network, q_input, hidden, proj, weights[f"{prefix}.q.weight"]
+        )
+        q = graph_ops.add_bias_sum(network, q, proj, weights[f"{prefix}.q.bias"])
 
         k = graph_ops.add_matmul_rhs_constant(
-            network, kv_input, hidden, proj, weights[f"{prefix}.k.weight"])
-        k = graph_ops.add_bias_sum(
-            network, k, proj, weights[f"{prefix}.k.bias"])
+            network, kv_input, hidden, proj, weights[f"{prefix}.k.weight"]
+        )
+        k = graph_ops.add_bias_sum(network, k, proj, weights[f"{prefix}.k.bias"])
 
         v = graph_ops.add_matmul_rhs_constant(
-            network, v_source, hidden, proj, weights[f"{prefix}.v.weight"])
-        v = graph_ops.add_bias_sum(
-            network, v, proj, weights[f"{prefix}.v.bias"])
+            network, v_source, hidden, proj, weights[f"{prefix}.v.weight"]
+        )
+        v = graph_ops.add_bias_sum(network, v, proj, weights[f"{prefix}.v.bias"])
 
         ctx_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=num_heads, head_dim=p_head_dim,
-            q_seq=q_seq, kv_seq=kv_seq,
-            scale=attn_scale)
+            network,
+            q,
+            k,
+            v,
+            num_heads=num_heads,
+            head_dim=p_head_dim,
+            q_seq=q_seq,
+            kv_seq=kv_seq,
+            scale=attn_scale,
+        )
 
         out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat, proj, hidden,
-            weights[f"{prefix}.o.weight"])
-        out = graph_ops.add_bias_sum(
-            network, out, hidden, weights[f"{prefix}.o.bias"])
+            network, ctx_flat, proj, hidden, weights[f"{prefix}.o.weight"]
+        )
+        out = graph_ops.add_bias_sum(network, out, hidden, weights[f"{prefix}.o.bias"])
         return out
 
     @staticmethod
-    def _build_windowed_attention(
+    def _build_attention_2d(
         network, inp_4d, weights, w_prefix,
-        grid_size, hidden, num_heads, head_dim, window_size,
+        grid_size, hidden, num_heads, head_dim,
         dtype=np.float32,
     ):
-        """Build windowed attention for SAM ViT layers.
-
-        For simplicity, we treat windowed attention as global attention
-        over the full sequence. This is mathematically correct (windowed
-        attention is a subset of global attention) but less efficient.
-        A proper windowed implementation would partition into windows,
-        but TRT's static shape requirements make this complex.
-        """
+        """Build the existing full-grid SAM ViT attention path."""
         seq_len = grid_size * grid_size
         attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
@@ -1173,22 +1259,19 @@ class SamPlugin:
         flat.reshape_dims = (seq_len, hidden)
 
         q = graph_ops.add_matmul_rhs_constant(
-            network, flat.get_output(0), hidden, hidden,
-            weights[f"{w_prefix}.attn.q.weight"])
-        q = graph_ops.add_bias_sum(
-            network, q, hidden, weights[f"{w_prefix}.attn.q.bias"])
+            network, flat.get_output(0), hidden, hidden, weights[f"{w_prefix}.attn.q.weight"]
+        )
+        q = graph_ops.add_bias_sum(network, q, hidden, weights[f"{w_prefix}.attn.q.bias"])
 
         k = graph_ops.add_matmul_rhs_constant(
-            network, flat.get_output(0), hidden, hidden,
-            weights[f"{w_prefix}.attn.k.weight"])
-        k = graph_ops.add_bias_sum(
-            network, k, hidden, weights[f"{w_prefix}.attn.k.bias"])
+            network, flat.get_output(0), hidden, hidden, weights[f"{w_prefix}.attn.k.weight"]
+        )
+        k = graph_ops.add_bias_sum(network, k, hidden, weights[f"{w_prefix}.attn.k.bias"])
 
         v = graph_ops.add_matmul_rhs_constant(
-            network, flat.get_output(0), hidden, hidden,
-            weights[f"{w_prefix}.attn.v.weight"])
-        v = graph_ops.add_bias_sum(
-            network, v, hidden, weights[f"{w_prefix}.attn.v.bias"])
+            network, flat.get_output(0), hidden, hidden, weights[f"{w_prefix}.attn.v.weight"]
+        )
+        v = graph_ops.add_bias_sum(network, v, hidden, weights[f"{w_prefix}.attn.v.bias"])
 
         q_h = network.add_shuffle(q)
         q_h.reshape_dims = (seq_len, num_heads, head_dim)
@@ -1203,13 +1286,17 @@ class SamPlugin:
         v_h.second_transpose = trt.Permutation([1, 0, 2])
 
         score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
+            q_h.get_output(0),
+            trt.MatrixOperation.NONE,
+            k_h.get_output(0),
+            trt.MatrixOperation.TRANSPOSE,
+        )
         scale_c = graph_ops.add_constant(
             network, (1, 1, 1), np.array([attn_scale], dtype=dtype),
             dtype=dtype)
         scaled = network.add_elementwise(
-            score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
+            score.get_output(0), scale_c, trt.ElementWiseOperation.PROD
+        )
 
         # Add decomposed relative position bias if available
         # HF: rel_h = einsum("bhwc,hkc->bhwk", q_reshaped, rel_pos_h)
@@ -1272,8 +1359,8 @@ class SamPlugin:
 
             # Batched matmul: [H, N*W, D] @ [H, D, K] -> [H, N*W, K]
             rel_h_mm = network.add_matrix_multiply(
-                q_perm_h.get_output(0), trt.MatrixOperation.NONE,
-                rp_h_c, trt.MatrixOperation.NONE)
+                q_perm_h.get_output(0), trt.MatrixOperation.NONE, rp_h_c, trt.MatrixOperation.NONE
+            )
             # Reshape: [H, N*W, K] -> [H, N, W, K] -> permute [N, H, W, K]
             rel_h_4d = network.add_shuffle(rel_h_mm.get_output(0))
             rel_h_4d.reshape_dims = (grid_size, num_heads, grid_size, grid_size)
@@ -1292,8 +1379,8 @@ class SamPlugin:
                 network, rp_w_t.shape, rp_w_t, dtype=dtype)
 
             rel_w_mm = network.add_matrix_multiply(
-                q_perm_w.get_output(0), trt.MatrixOperation.NONE,
-                rp_w_c, trt.MatrixOperation.NONE)
+                q_perm_w.get_output(0), trt.MatrixOperation.NONE, rp_w_c, trt.MatrixOperation.NONE
+            )
             # [W, N*H, K] -> [W, N, H, K] -> [N, H, W, K]
             rel_w_4d = network.add_shuffle(rel_w_mm.get_output(0))
             rel_w_4d.reshape_dims = (grid_size, num_heads, grid_size, grid_size)
@@ -1312,15 +1399,15 @@ class SamPlugin:
             rel_w_5d.reshape_dims = (num_heads, grid_size, grid_size, 1, grid_size)
 
             rel_bias = network.add_elementwise(
-                rel_h_5d.get_output(0), rel_w_5d.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                rel_h_5d.get_output(0), rel_w_5d.get_output(0), trt.ElementWiseOperation.SUM
+            )
             # [N, H, W, K_h, K_w] -> [N, H*W, K_h*K_w]
             rel_bias_flat = network.add_shuffle(rel_bias.get_output(0))
             rel_bias_flat.reshape_dims = (num_heads, seq_len, seq_len)
 
             scaled = network.add_elementwise(
-                scaled.get_output(0), rel_bias_flat.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                scaled.get_output(0), rel_bias_flat.get_output(0), trt.ElementWiseOperation.SUM
+            )
 
         # Relative 2D positional bias is generated from Q before softmax, so
         # this is not representable as a static/native IAttention mask.
@@ -1328,34 +1415,25 @@ class SamPlugin:
         softmax.axes = 1 << 2
 
         ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
+            softmax.get_output(0),
+            trt.MatrixOperation.NONE,
+            v_h.get_output(0),
+            trt.MatrixOperation.NONE,
+        )
 
         ctx_flat = network.add_shuffle(ctx.get_output(0))
         ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
         ctx_flat.reshape_dims = (seq_len, hidden)
 
         out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0), hidden, hidden,
-            weights[f"{w_prefix}.attn.o.weight"])
-        out = graph_ops.add_bias_sum(
-            network, out, hidden, weights[f"{w_prefix}.attn.o.bias"])
+            network, ctx_flat.get_output(0), hidden, hidden, weights[f"{w_prefix}.attn.o.weight"]
+        )
+        out = graph_ops.add_bias_sum(network, out, hidden, weights[f"{w_prefix}.attn.o.bias"])
 
         # Reshape back to 4D: [H*W, C] -> [1, H, W, C]
         out_4d = network.add_shuffle(out)
         out_4d.reshape_dims = (1, grid_size, grid_size, hidden)
         return out_4d.get_output(0)
-
-    @staticmethod
-    def _build_global_attention(
-        network, inp_4d, weights, w_prefix,
-        grid_size, hidden, num_heads, head_dim, seq_len,
-        dtype=np.float32,
-    ):
-        """Build global attention (same as windowed but explicitly global)."""
-        return SamPlugin._build_windowed_attention(
-            network, inp_4d, weights, w_prefix,
-            grid_size, hidden, num_heads, head_dim, 0, dtype=dtype)
 
     @staticmethod
     def _get_rel_pos(q_size, k_size, rel_pos):
@@ -1372,9 +1450,10 @@ class SamPlugin:
         # Interpolate rel_pos to max_rel_dist if needed
         if rel_pos.shape[0] != max_rel_dist:
             from scipy.interpolate import interp1d
+
             x_old = np.linspace(0, 1, rel_pos.shape[0])
             x_new = np.linspace(0, 1, max_rel_dist)
-            f = interp1d(x_old, rel_pos, axis=0, kind='linear')
+            f = interp1d(x_old, rel_pos, axis=0, kind="linear")
             rel_pos_resized = f(x_new).astype(np.float32)
         else:
             rel_pos_resized = rel_pos
@@ -1389,7 +1468,12 @@ class SamPlugin:
 
     @staticmethod
     def _compute_decomposed_rel_pos_bias(
-        rel_pos_h, rel_pos_w, height, width, num_heads, head_dim,
+        rel_pos_h,
+        rel_pos_w,
+        height,
+        width,
+        num_heads,
+        head_dim,
     ):
         """Compute decomposed relative position bias as a numpy constant.
 
