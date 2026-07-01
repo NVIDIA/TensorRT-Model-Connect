@@ -44,7 +44,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -52,12 +52,13 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...build_timing import timed_trt_compile
-from . import graph_ops
-from . import graph_blocks
-from .standard_decoder_builder import _mark_debug_output
+from .model import model as graph_ops
+from .model import model as graph_blocks
+from .model.model import _mark_debug_output
 
 
 trt = trt_compat.get_trt()
+
 
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
@@ -75,7 +76,9 @@ class Qwen3OmniPlugin:
         return mt in ("qwen3_omni", "qwen3_omni_moe", "qwen3omni")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load Qwen3-Omni weights from safetensors.
 
@@ -96,17 +99,18 @@ class Qwen3OmniPlugin:
         head_dim = config.head_dim
 
         # MoE config lives in thinker_config.text_config for Qwen3-Omni
-        thinker_text = (config.raw.get("thinker_config", {})
-                        .get("text_config", {}))
-        num_experts = (thinker_text.get("num_experts")
-                       or config.raw.get("num_local_experts")
-                       or config.raw.get("num_experts", 8))
-        num_experts_per_tok = (thinker_text.get("num_experts_per_tok")
-                               or config.raw.get("num_experts_per_tok", 2))
+        thinker_text = config.raw.get("thinker_config", {}).get("text_config", {})
+        num_experts = (
+            thinker_text.get("num_experts")
+            or config.raw.get("num_local_experts")
+            or config.raw.get("num_experts", 8)
+        )
+        num_experts_per_tok = thinker_text.get("num_experts_per_tok") or config.raw.get(
+            "num_experts_per_tok", 2
+        )
         # moe_intermediate_size is per-expert intermediate; intermediate_size
         # from config may be the same value for MoE models.
-        intermediate_size = (thinker_text.get("moe_intermediate_size")
-                             or config.intermediate_size)
+        intermediate_size = thinker_text.get("moe_intermediate_size") or config.intermediate_size
 
         weights = WeightDict()
 
@@ -115,18 +119,20 @@ class Qwen3OmniPlugin:
             for c in candidates:
                 if _has_tensor(readers, c):
                     return c
-            raise KeyError(
-                f"None of {candidates} found in safetensors")
+            raise KeyError(f"None of {candidates} found in safetensors")
 
         # Embedding (thinker shared embedding)
-        embed_key = _find_key([
-            "thinker.model.embed_tokens.weight",
-            "model.thinker.embed_tokens.weight",
-            "model.embed_tokens.weight",
-        ])
+        embed_key = _find_key(
+            [
+                "thinker.model.embed_tokens.weight",
+                "model.thinker.embed_tokens.weight",
+                "model.embed_tokens.weight",
+            ]
+        )
         embedding = _load_tensor(readers, embed_key)
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         attention_size = 0
@@ -149,23 +155,17 @@ class Qwen3OmniPlugin:
             hf_prefix = f"{hf_layer_base}.{layer_idx}"
 
             # RMSNorm weights
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
 
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # Q/K/V/O projections (separate, no biases)
-            q_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
@@ -202,46 +202,36 @@ class Qwen3OmniPlugin:
             if _has_tensor(readers, router_key):
                 # MoE layer
                 router_raw = _load_tensor(readers, router_key)
-                weights[f"{prefix}.router"] = _transpose_2d(
-                    router_raw, "router")
+                weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router")
                 del router_raw
 
                 for e in range(num_experts):
                     if moe_expert_fmt == "mlp":
                         # Qwen3-Omni: mlp.experts.{e}.gate_proj/up_proj/down_proj
                         exp_prefix = f"{hf_prefix}.mlp.experts.{e}"
-                        gate_raw = _load_tensor(
-                            readers, f"{exp_prefix}.gate_proj.weight")
-                        up_raw = _load_tensor(
-                            readers, f"{exp_prefix}.up_proj.weight")
-                        down_raw = _load_tensor(
-                            readers, f"{exp_prefix}.down_proj.weight")
+                        gate_raw = _load_tensor(readers, f"{exp_prefix}.gate_proj.weight")
+                        up_raw = _load_tensor(readers, f"{exp_prefix}.up_proj.weight")
+                        down_raw = _load_tensor(readers, f"{exp_prefix}.down_proj.weight")
                     else:
                         # Mixtral-style: block_sparse_moe.experts.{e}.w1/w3/w2
-                        exp_prefix = (
-                            f"{hf_prefix}.block_sparse_moe.experts.{e}")
-                        gate_raw = _load_tensor(
-                            readers, f"{exp_prefix}.w1.weight")
-                        up_raw = _load_tensor(
-                            readers, f"{exp_prefix}.w3.weight")
-                        down_raw = _load_tensor(
-                            readers, f"{exp_prefix}.w2.weight")
+                        exp_prefix = f"{hf_prefix}.block_sparse_moe.experts.{e}"
+                        gate_raw = _load_tensor(readers, f"{exp_prefix}.w1.weight")
+                        up_raw = _load_tensor(readers, f"{exp_prefix}.w3.weight")
+                        down_raw = _load_tensor(readers, f"{exp_prefix}.w2.weight")
 
                     weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate")
-                    weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
-                        up_raw, f"expert_{e}_up")
+                        gate_raw, f"expert_{e}_gate"
+                    )
+                    weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(up_raw, f"expert_{e}_up")
                     weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
-                        down_raw, f"expert_{e}_down")
+                        down_raw, f"expert_{e}_down"
+                    )
                     del gate_raw, up_raw, down_raw
             else:
                 # Dense SwiGLU MLP (some layers may not be MoE)
-                gate_raw = _load_tensor(
-                    readers, f"{hf_prefix}.mlp.gate_proj.weight")
-                up_raw = _load_tensor(
-                    readers, f"{hf_prefix}.mlp.up_proj.weight")
-                down_raw = _load_tensor(
-                    readers, f"{hf_prefix}.mlp.down_proj.weight")
+                gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
+                up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
+                down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
 
                 weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
                 weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
@@ -249,32 +239,25 @@ class Qwen3OmniPlugin:
 
         # Final norm
         final_norm_key = None
-        for cand in ["thinker.model.norm.weight",
-                      "model.thinker.norm.weight",
-                      "model.norm.weight"]:
+        for cand in ["thinker.model.norm.weight", "model.thinker.norm.weight", "model.norm.weight"]:
             if _has_tensor(readers, cand):
                 final_norm_key = cand
                 break
         if final_norm_key is not None:
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head
         lm_head_key = None
-        for cand in ["thinker.lm_head.weight",
-                      "lm_head.weight",
-                      "model.thinker.lm_head.weight"]:
+        for cand in ["thinker.lm_head.weight", "lm_head.weight", "model.thinker.lm_head.weight"]:
             if _has_tensor(readers, cand):
                 lm_head_key = cand
                 break
         if lm_head_key is not None:
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
-            weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size
         weights["_num_experts"] = num_experts
@@ -316,31 +299,29 @@ class Qwen3OmniPlugin:
             for key in reader.keys():
                 # Audio tower weights
                 if key.startswith("thinker.audio_tower."):
-                    canon = key[len("thinker."):]
+                    canon = key[len("thinker.") :]
                     weights[f"audio.{canon}"] = _load_tensor([reader], key)
                 elif key.startswith("model.thinker.audio_tower."):
-                    canon = key[len("model.thinker."):]
+                    canon = key[len("model.thinker.") :]
                     weights[f"audio.{canon}"] = _load_tensor([reader], key)
                 # Talker weights
                 elif key.startswith("talker."):
-                    weights[f"talker.{key[len('talker.'):]}"] = (
-                        _load_tensor([reader], key))
+                    weights[f"talker.{key[len('talker.') :]}"] = _load_tensor([reader], key)
                 elif key.startswith("model.talker."):
-                    weights[f"talker.{key[len('model.talker.'):]}"] = (
-                        _load_tensor([reader], key))
+                    weights[f"talker.{key[len('model.talker.') :]}"] = _load_tensor([reader], key)
                 # Code2Wav weights
                 elif key.startswith("code2wav."):
-                    weights[f"code2wav.{key[len('code2wav.'):]}"] = (
-                        _load_tensor([reader], key))
+                    weights[f"code2wav.{key[len('code2wav.') :]}"] = _load_tensor([reader], key)
                 elif key.startswith("model.code2wav."):
-                    weights[f"code2wav.{key[len('model.code2wav.'):]}"] = (
-                        _load_tensor([reader], key))
+                    weights[f"code2wav.{key[len('model.code2wav.') :]}"] = _load_tensor(
+                        [reader], key
+                    )
                 # Vision encoder weights
                 elif key.startswith("thinker.visual."):
-                    canon = key[len("thinker."):]
+                    canon = key[len("thinker.") :]
                     weights[f"vision.{canon}"] = _load_tensor([reader], key)
                 elif key.startswith("model.thinker.visual."):
-                    canon = key[len("model.thinker."):]
+                    canon = key[len("model.thinker.") :]
                     weights[f"vision.{canon}"] = _load_tensor([reader], key)
 
         return weights
@@ -349,9 +330,11 @@ class Qwen3OmniPlugin:
         """Detect audio encoder dimensions from weight shapes."""
         # Detect the first conv layer. Qwen3-Omni uses conv2d1, not conv1.
         conv_key = None
-        for cand in ["thinker.audio_tower.conv2d1.weight",
-                      "thinker.audio_tower.conv1.weight",
-                      "model.thinker.audio_tower.conv1.weight"]:
+        for cand in [
+            "thinker.audio_tower.conv2d1.weight",
+            "thinker.audio_tower.conv1.weight",
+            "model.thinker.audio_tower.conv1.weight",
+        ]:
             if _has_tensor(readers, cand):
                 conv_key = cand
                 break
@@ -365,15 +348,9 @@ class Qwen3OmniPlugin:
         # Count encoder layers (try both prefixes)
         num_layers = 0
         audio_layer_base = "thinker.audio_tower.layers"
-        if not _has_tensor(
-            readers,
-            f"{audio_layer_base}.0.self_attn.q_proj.weight"
-        ):
+        if not _has_tensor(readers, f"{audio_layer_base}.0.self_attn.q_proj.weight"):
             audio_layer_base = "model.thinker.audio_tower.layers"
-        while _has_tensor(
-            readers,
-            f"{audio_layer_base}.{num_layers}.self_attn.q_proj.weight"
-        ):
+        while _has_tensor(readers, f"{audio_layer_base}.{num_layers}.self_attn.q_proj.weight"):
             num_layers += 1
 
         # Detect num_heads from Q projection shape
@@ -411,24 +388,15 @@ class Qwen3OmniPlugin:
 
         talker_raw = config.raw.get("talker_config", {})
         talker_text = talker_raw.get("text_config", {})
-        input_hidden = (
-            talker_raw.get("thinker_hidden_size")
-            or config.hidden_size
-        )
+        input_hidden = talker_raw.get("thinker_hidden_size") or config.hidden_size
         decoder_hidden = talker_text.get("hidden_size", talker_hidden)
 
         # Detect layer prefix
         talker_layer_base = "talker.model.layers"
-        if not _has_tensor(
-            readers,
-            f"{talker_layer_base}.0.input_layernorm.weight"
-        ):
+        if not _has_tensor(readers, f"{talker_layer_base}.0.input_layernorm.weight"):
             talker_layer_base = "model.talker.layers"
         num_layers = 0
-        while _has_tensor(
-            readers,
-            f"{talker_layer_base}.{num_layers}.input_layernorm.weight"
-        ):
+        while _has_tensor(readers, f"{talker_layer_base}.{num_layers}.input_layernorm.weight"):
             num_layers += 1
 
         # Count RVQ codebook heads (try both prefixes)
@@ -488,9 +456,7 @@ class Qwen3OmniPlugin:
         if not _has_tensor(readers, f"{upsample_base}.0.weight"):
             upsample_base = "model.code2wav.upsample_blocks"
         n_upsample = 0
-        while _has_tensor(
-            readers, f"{upsample_base}.{n_upsample}.weight"
-        ):
+        while _has_tensor(readers, f"{upsample_base}.{n_upsample}.weight"):
             n_upsample += 1
 
         # Look for codebook embedding (try both prefixes)
@@ -512,9 +478,14 @@ class Qwen3OmniPlugin:
         }
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build TRT engine for Thinker MoE decoder (primary engine).
@@ -524,8 +495,7 @@ class Qwen3OmniPlugin:
         """
         attention_size: int = weights.get("_attention_size", config.attention_size)
         num_experts: int = weights.get("_num_experts", 8)
-        moe_intermediate: int = weights.get("_moe_intermediate_size",
-                                             config.intermediate_size)
+        moe_intermediate: int = weights.get("_moe_intermediate_size", config.intermediate_size)
         top_k: int = weights.get("_num_experts_per_tok", 2)
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -534,7 +504,8 @@ class Qwen3OmniPlugin:
         num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
-            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+        )
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -546,14 +517,11 @@ class Qwen3OmniPlugin:
         # Inputs
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
 
         # VL embed_input (for vision/audio feature injection)
-        input_embed_tensor = network.add_input(
-            "input_embed", trt.float32, (1, hidden))
-        use_input_embed_tensor = network.add_input(
-            "use_input_embed", trt.float32, (1,))
+        input_embed_tensor = network.add_input("input_embed", trt.float32, (1, hidden))
+        use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (1,))
 
         # KV cache inputs
         cache_k_inputs = []
@@ -561,30 +529,33 @@ class Qwen3OmniPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
         # Shared constants
-        embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True)
+            attention_window, head_dim, config.rope_theta, True
+        )
         sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False)
-        cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
-        sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            attention_window, head_dim, config.rope_theta, False
+        )
+        cos_half_tensor = graph_ops.add_constant(network, cos_half_np.shape, cos_half_np)
+        sin_half_tensor = graph_ops.add_constant(network, sin_half_np.shape, sin_half_np)
 
         eps_tensor = graph_ops.add_constant(
-            network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+        )
 
         # Embedding lookup with input_embed override for VL/audio
         gather = network.add_gather(embedding_table, token_id, 0)
@@ -593,20 +564,19 @@ class Qwen3OmniPlugin:
         # Conditional: (1 - flag) * token_embed + flag * input_embed
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (1, 1)
-        one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+        one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
         inv_flag = network.add_elementwise(
-            one_const, flag_broadcast.get_output(0),
-            trt.ElementWiseOperation.SUB)
+            one_const, flag_broadcast.get_output(0), trt.ElementWiseOperation.SUB
+        )
         tok_part = network.add_elementwise(
-            inv_flag.get_output(0), token_embed,
-            trt.ElementWiseOperation.PROD)
+            inv_flag.get_output(0), token_embed, trt.ElementWiseOperation.PROD
+        )
         embed_part = network.add_elementwise(
-            flag_broadcast.get_output(0), input_embed_tensor,
-            trt.ElementWiseOperation.PROD)
+            flag_broadcast.get_output(0), input_embed_tensor, trt.ElementWiseOperation.PROD
+        )
         hidden_sum = network.add_elementwise(
-            tok_part.get_output(0), embed_part.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            tok_part.get_output(0), embed_part.get_output(0), trt.ElementWiseOperation.SUM
+        )
         hidden_state = hidden_sum.get_output(0)
 
         if debug_layer_outputs:
@@ -621,16 +591,22 @@ class Qwen3OmniPlugin:
 
             # Attention block via graph_blocks
             attn = graph_blocks.add_attention_block(
-                network, hidden_state, cache_k_inputs[layer_idx],
-                cache_v_inputs[layer_idx], attention_mask, position_id,
-                weights=weights, prefix=prefix,
-                hidden_size=hidden, attention_size=attention_size,
+                network,
+                hidden_state,
+                cache_k_inputs[layer_idx],
+                cache_v_inputs[layer_idx],
+                attention_mask,
+                position_id,
+                weights=weights,
+                prefix=prefix,
+                hidden_size=hidden,
+                attention_size=attention_size,
                 kv_attention_size=kv_attention_size,
-                num_heads=num_heads, head_dim=head_dim,
+                num_heads=num_heads,
+                head_dim=head_dim,
                 num_kv_heads=num_kv_heads,
                 max_cache_length=max_cache_length,
                 eps_tensor=eps_tensor,
-                norm_type="rmsnorm", position_type="rope",
                 cos_half_tensor=cos_half_tensor,
                 sin_half_tensor=sin_half_tensor,
                 rotary_embedding_dim=head_dim,
@@ -642,48 +618,52 @@ class Qwen3OmniPlugin:
 
             # Residual after attention
             residual1 = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM)
+                hidden_state, attn_out, trt.ElementWiseOperation.SUM
+            )
             post_attn = residual1.get_output(0)
 
             # Post-attention norm
             norm2 = graph_blocks.apply_norm(
-                network, post_attn, hidden,
+                network,
+                post_attn,
+                hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, "rmsnorm")
+                eps_tensor,
+                "rmsnorm",
+            )
 
             # Check if this is an MoE or dense layer
             if f"{prefix}.router" in weights:
                 # MoE block
                 moe_out = _add_omni_moe_block(
-                    network, norm2, weights, prefix,
-                    hidden, num_experts, moe_intermediate, top_k)
+                    network, norm2, weights, prefix, hidden, num_experts, moe_intermediate, top_k
+                )
             else:
                 # Dense SwiGLU MLP
                 moe_out = graph_blocks.add_swiglu_mlp(
-                    network, norm2, weights=weights, prefix=prefix,
+                    network,
+                    norm2,
+                    weights=weights,
+                    prefix=prefix,
                     hidden_size=hidden,
-                    mlp_size=weights[f"{prefix}.w_gate"].shape[1])
+                    mlp_size=weights[f"{prefix}.w_gate"].shape[1],
+                )
 
             # Residual
-            residual2 = network.add_elementwise(
-                post_attn, moe_out, trt.ElementWiseOperation.SUM)
+            residual2 = network.add_elementwise(post_attn, moe_out, trt.ElementWiseOperation.SUM)
             hidden_state = residual2.get_output(0)
 
             if debug_layer_outputs:
-                _mark_debug_output(
-                    network, residual1.get_output(0),
-                    f"debug_post_attn_{layer_idx}")
-                _mark_debug_output(
-                    network, hidden_state,
-                    f"debug_hidden_{layer_idx}")
+                _mark_debug_output(network, residual1.get_output(0), f"debug_post_attn_{layer_idx}")
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
         # Final norm
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = graph_blocks.apply_norm(
-                network, hidden_state, hidden, final_norm, None,
-                eps_tensor, "rmsnorm")
+                network, hidden_state, hidden, final_norm, None, eps_tensor, "rmsnorm"
+            )
 
         hidden_out = network.add_identity(hidden_state).get_output(0)
         hidden_out.name = "hidden_state"
@@ -691,7 +671,8 @@ class Qwen3OmniPlugin:
 
         # LM head
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, hidden_state, hidden, vocab, weights["w_out"]
+        )
         b_out = np.zeros(vocab, dtype=np.float32)
         logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
 
@@ -708,11 +689,14 @@ class Qwen3OmniPlugin:
             network.mark_output(pv)
 
         if verbose:
-            print(f"[trtmc build] Building Qwen3-Omni Thinker MoE engine "
-                  f"({num_layers} layers, hidden={hidden}, "
-                  f"attn={attention_size}, experts={num_experts}, "
-                  f"top_k={top_k}, inter={moe_intermediate}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+            print(
+                f"[trtmc build] Building Qwen3-Omni Thinker MoE engine "
+                f"({num_layers} layers, hidden={hidden}, "
+                f"attn={attention_size}, experts={num_experts}, "
+                f"top_k={top_k}, inter={moe_intermediate}, "
+                f"cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -721,8 +705,13 @@ class Qwen3OmniPlugin:
         return bytes(plan)
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         """Build Thinker vision encoder (reuses Qwen VL vision builder)."""
         vision_config = config.raw.get("vision_config")
@@ -734,7 +723,7 @@ class Qwen3OmniPlugin:
             return None
 
         # Load vision weights from safetensors
-        from .checkpoint_mapper import _open_safetensors, _load_tensor
+        from .weights import _open_safetensors, _load_tensor
 
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -743,7 +732,7 @@ class Qwen3OmniPlugin:
         for reader in readers:
             for key in reader.keys():
                 if key.startswith("model.thinker.visual."):
-                    canon = key[len("model.thinker."):]
+                    canon = key[len("model.thinker.") :]
                     vision_weights[canon] = _load_tensor([reader], key)
                 elif key.startswith("visual."):
                     vision_weights[key] = _load_tensor([reader], key)
@@ -756,21 +745,25 @@ class Qwen3OmniPlugin:
         fixed_image_size = 448
 
         if deepstack_indexes:
-            from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
+            from .model.components.vision import build_qwen3_vl_vision_engine
+
             return build_qwen3_vl_vision_engine(
-                vision_config, vision_weights,
-                fixed_image_size=fixed_image_size,
-                verbose=verbose)
+                vision_config, vision_weights, fixed_image_size=fixed_image_size, verbose=verbose
+            )
         else:
-            from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
+            from .model.components.vision import build_qwen_vl_vision_engine
+
             return build_qwen_vl_vision_engine(
-                vision_config, vision_weights,
-                fixed_image_size=fixed_image_size,
-                verbose=verbose)
+                vision_config, vision_weights, fixed_image_size=fixed_image_size, verbose=verbose
+            )
 
     def build_extra_engines(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
         verbose: bool = False,
         build_timing: dict | None = None,
     ) -> dict:
@@ -781,11 +774,9 @@ class Qwen3OmniPlugin:
         audio_cfg = weights.get("_audio_encoder_cfg", {})
         if audio_cfg and audio_cfg.get("num_layers", 0) > 0:
             if verbose:
-                print("[trtmc build]   Building audio encoder engine ...",
-                      file=sys.stderr)
+                print("[trtmc build]   Building audio encoder engine ...", file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_audio_encoder"):
-                audio_plan = _build_audio_encoder_engine(
-                    weights, audio_cfg, verbose=verbose)
+                audio_plan = _build_audio_encoder_engine(weights, audio_cfg, verbose=verbose)
             if audio_plan is not None:
                 result["audio_encoder_plan"] = audio_plan
 
@@ -793,12 +784,11 @@ class Qwen3OmniPlugin:
         talker_cfg = weights.get("_talker_cfg", {})
         if talker_cfg and talker_cfg.get("num_layers", 0) > 0:
             if verbose:
-                print("[trtmc build]   Building Talker engine ...",
-                      file=sys.stderr)
+                print("[trtmc build]   Building Talker engine ...", file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_talker_decoder"):
                 talker_plan = _build_talker_engine(
-                    weights, talker_cfg, config, max_cache_length,
-                    verbose=verbose)
+                    weights, talker_cfg, config, max_cache_length, verbose=verbose
+                )
             if talker_plan is not None:
                 result["talker_engine_plan"] = talker_plan
 
@@ -806,11 +796,9 @@ class Qwen3OmniPlugin:
         code2wav_cfg = weights.get("_code2wav_cfg", {})
         if code2wav_cfg and code2wav_cfg.get("n_upsample_blocks", 0) > 0:
             if verbose:
-                print("[trtmc build]   Building Code2Wav engine ...",
-                      file=sys.stderr)
+                print("[trtmc build]   Building Code2Wav engine ...", file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_code2wav_decoder"):
-                code2wav_plan = _build_code2wav_engine(
-                    weights, code2wav_cfg, verbose=verbose)
+                code2wav_plan = _build_code2wav_engine(weights, code2wav_cfg, verbose=verbose)
             if code2wav_plan is not None:
                 result["code2wav_engine_plan"] = code2wav_plan
 
@@ -879,32 +867,23 @@ class Qwen3OmniPlugin:
         overrides["intermediate_size"] = config.intermediate_size
 
         # Thinker MoE config
-        overrides["num_local_experts"] = self._thinker_cfg.get(
-            "num_experts", 8)
-        overrides["num_experts_per_tok"] = self._thinker_cfg.get(
-            "num_experts_per_tok", 2)
+        overrides["num_local_experts"] = self._thinker_cfg.get("num_experts", 8)
+        overrides["num_experts_per_tok"] = self._thinker_cfg.get("num_experts_per_tok", 2)
 
         # Audio output config (flat keys matching C++ fast_path_config parser)
         overrides["audio_sample_rate"] = 24000
-        overrides["omni_n_codebooks"] = self._talker_cfg.get(
-            "n_codebooks", 8)
-        overrides["omni_codebook_size"] = self._talker_cfg.get(
-            "codebook_size", 2048)
+        overrides["omni_n_codebooks"] = self._talker_cfg.get("n_codebooks", 8)
+        overrides["omni_codebook_size"] = self._talker_cfg.get("codebook_size", 2048)
 
         # Talker config (flat keys for C++ parser)
-        overrides["omni_talker_hidden_size"] = self._talker_cfg.get(
-            "hidden_size", 0)
-        overrides["omni_talker_num_layers"] = self._talker_cfg.get(
-            "num_layers", 0)
+        overrides["omni_talker_hidden_size"] = self._talker_cfg.get("hidden_size", 0)
+        overrides["omni_talker_num_layers"] = self._talker_cfg.get("num_layers", 0)
         overrides["omni_talker_max_cache_length"] = 1024
 
         # Audio encoder config (flat keys for C++ parser)
-        overrides["omni_audio_embed_dim"] = self._audio_encoder_cfg.get(
-            "embed_dim", 1280)
-        overrides["omni_audio_num_mel"] = self._audio_encoder_cfg.get(
-            "num_mel_bins", 128)
-        overrides["omni_audio_num_layers"] = self._audio_encoder_cfg.get(
-            "num_layers", 0)
+        overrides["omni_audio_embed_dim"] = self._audio_encoder_cfg.get("embed_dim", 1280)
+        overrides["omni_audio_num_mel"] = self._audio_encoder_cfg.get("num_mel_bins", 128)
+        overrides["omni_audio_num_layers"] = self._audio_encoder_cfg.get("num_layers", 0)
         overrides["omni_audio_num_frames"] = 1500
 
         return overrides
@@ -913,6 +892,7 @@ class Qwen3OmniPlugin:
 # ---------------------------------------------------------------------------
 # MoE block for Omni (standard top-k softmax, same as Mixtral pattern)
 # ---------------------------------------------------------------------------
+
 
 def _add_swiglu_expert(
     network: trt.INetworkDefinition,
@@ -924,19 +904,16 @@ def _add_swiglu_expert(
     w_down: np.ndarray,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+    gate = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_gate)
+    up = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_up)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down
+    )
     return down
 
 
@@ -953,31 +930,32 @@ def _add_omni_moe_block(
     """Add MoE block with standard top-k softmax routing (same as Mixtral)."""
     # Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])
+        network, inp, hidden_size, num_experts, weights[f"{prefix}.router"]
+    )
 
     # Softmax over router logits
     sm = network.add_softmax(router_logits)
     sm.axes = 1 << 1
 
     # TopK selection
-    topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX,
-                            top_k, 1 << 1)
+    topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX, top_k, 1 << 1)
     top_values = topk.get_output(0)
     top_indices = topk.get_output(1)
 
     # Renormalize
-    sum_val = network.add_reduce(
-        top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+    sum_val = network.add_reduce(top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
     norm_weights = network.add_elementwise(
-        top_values, sum_val.get_output(0),
-        trt.ElementWiseOperation.DIV)
+        top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
+    )
 
     # Compute all expert outputs and stack
     expert_outputs = []
     for e in range(num_experts):
         exp_out = _add_swiglu_expert(
-            network, inp, hidden_size, moe_intermediate,
+            network,
+            inp,
+            hidden_size,
+            moe_intermediate,
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
@@ -991,28 +969,26 @@ def _add_omni_moe_block(
     # Gather and scale each selected expert, then sum
     result = None
     for k in range(top_k):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
+        idx_slice = network.add_slice(top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
         idx_flat = network.add_shuffle(idx_slice.get_output(0))
         idx_flat.reshape_dims = (1,)
 
         w_slice = network.add_slice(
-            norm_weights.get_output(0),
-            start=(0, k), shape=(1, 1), stride=(1, 1))
+            norm_weights.get_output(0), start=(0, k), shape=(1, 1), stride=(1, 1)
+        )
 
-        expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
+        expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
 
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            expert_out.get_output(0), w_slice.get_output(0), trt.ElementWiseOperation.PROD
+        )
 
         if result is None:
             result = scaled_expert.get_output(0)
         else:
             sum_layer = network.add_elementwise(
-                result, scaled_expert.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                result, scaled_expert.get_output(0), trt.ElementWiseOperation.SUM
+            )
             result = sum_layer.get_output(0)
 
     return result
@@ -1021,6 +997,7 @@ def _add_omni_moe_block(
 # ---------------------------------------------------------------------------
 # Audio encoder builder (Whisper-like)
 # ---------------------------------------------------------------------------
+
 
 def _build_audio_encoder_engine(
     weights: WeightDict,
@@ -1048,12 +1025,10 @@ def _build_audio_encoder_engine(
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
-    eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-5], dtype=np.float32))
+    eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
 
     # Input: mel spectrogram [1, num_mel, max_audio_len]
-    mel_input = network.add_input(
-        "mel_features", trt.float32, (1, num_mel, max_audio_len))
+    mel_input = network.add_input("mel_features", trt.float32, (1, num_mel, max_audio_len))
 
     # Conv1: [1, num_mel, T] -> [1, embed_dim, T]
     conv1_w = weights.get("audio.audio_tower.conv1.weight")
@@ -1063,14 +1038,19 @@ def _build_audio_encoder_engine(
 
     conv1_w_np = conv1_w.astype(np.float32)
     conv1 = network.add_convolution_nd(
-        mel_input, embed_dim, (3,),
+        mel_input,
+        embed_dim,
+        (3,),
         trt.Weights(np.ascontiguousarray(conv1_w_np)),
-        trt.Weights(conv1_b.astype(np.float32) if conv1_b is not None
-                    else np.zeros(embed_dim, dtype=np.float32)))
+        trt.Weights(
+            conv1_b.astype(np.float32)
+            if conv1_b is not None
+            else np.zeros(embed_dim, dtype=np.float32)
+        ),
+    )
     conv1.padding_nd = (1,)
 
-    gelu1 = network.add_activation(
-        conv1.get_output(0), trt.ActivationType.RELU)
+    gelu1 = network.add_activation(conv1.get_output(0), trt.ActivationType.RELU)
 
     # Conv2: stride 2 downsampling
     conv2_w = weights.get("audio.audio_tower.conv2.weight")
@@ -1078,14 +1058,19 @@ def _build_audio_encoder_engine(
     if conv2_w is not None:
         conv2_w_np = conv2_w.astype(np.float32)
         conv2 = network.add_convolution_nd(
-            gelu1.get_output(0), embed_dim, (3,),
+            gelu1.get_output(0),
+            embed_dim,
+            (3,),
             trt.Weights(np.ascontiguousarray(conv2_w_np)),
-            trt.Weights(conv2_b.astype(np.float32) if conv2_b is not None
-                        else np.zeros(embed_dim, dtype=np.float32)))
+            trt.Weights(
+                conv2_b.astype(np.float32)
+                if conv2_b is not None
+                else np.zeros(embed_dim, dtype=np.float32)
+            ),
+        )
         conv2.stride_nd = (2,)
         conv2.padding_nd = (1,)
-        gelu2 = network.add_activation(
-            conv2.get_output(0), trt.ActivationType.RELU)
+        gelu2 = network.add_activation(conv2.get_output(0), trt.ActivationType.RELU)
         hidden = gelu2.get_output(0)
     else:
         hidden = gelu1.get_output(0)
@@ -1103,11 +1088,10 @@ def _build_audio_encoder_engine(
         pos_w = weights[pos_key].astype(np.float32)
         # Truncate to num_frames if needed
         if pos_w.shape[0] >= num_frames:
-            pos_const = graph_ops.add_constant(
-                network, (num_frames, embed_dim),
-                pos_w[:num_frames])
+            pos_const = graph_ops.add_constant(network, (num_frames, embed_dim), pos_w[:num_frames])
             hidden = network.add_elementwise(
-                hidden, pos_const, trt.ElementWiseOperation.SUM).get_output(0)
+                hidden, pos_const, trt.ElementWiseOperation.SUM
+            ).get_output(0)
 
     # Transformer encoder layers (simplified: LayerNorm -> Self-Attn -> Residual -> LayerNorm -> MLP -> Residual)
     for layer_idx in range(num_layers):
@@ -1119,11 +1103,15 @@ def _build_audio_encoder_engine(
         if ln1_w is None:
             continue
         normed = graph_ops.add_layer_norm(
-            network, hidden, embed_dim,
+            network,
+            hidden,
+            embed_dim,
             ln1_w.astype(np.float32),
-            ln1_b.astype(np.float32) if ln1_b is not None
-                else np.zeros(embed_dim, dtype=np.float32),
-            eps_tensor)
+            ln1_b.astype(np.float32)
+            if ln1_b is not None
+            else np.zeros(embed_dim, dtype=np.float32),
+            eps_tensor,
+        )
 
         # Self-attention Q/K/V projections
         q_w = weights.get(f"{lp}.self_attn.q_proj.weight")
@@ -1135,45 +1123,59 @@ def _build_audio_encoder_engine(
             continue
 
         attn_out = graph_ops.add_self_attention_block_with_rope(
-            network, normed,
+            network,
+            normed,
             w_q=q_w.astype(np.float32).T.copy(),
             w_k=k_w.astype(np.float32).T.copy(),
             w_v=v_w.astype(np.float32).T.copy(),
-            w_o=o_w.astype(np.float32).T.copy() if o_w is not None
-                else np.zeros((embed_dim, embed_dim), dtype=np.float32),
+            w_o=o_w.astype(np.float32).T.copy()
+            if o_w is not None
+            else np.zeros((embed_dim, embed_dim), dtype=np.float32),
             hidden_size=embed_dim,
             num_heads=num_heads,
             seq_length=num_frames,
             cos_table=np.ones((num_frames, embed_dim), dtype=np.float32),
             sin_table=np.zeros((num_frames, embed_dim), dtype=np.float32),
-            q_bias=(weights.get(f"{lp}.self_attn.q_proj.bias") or
-                    np.zeros(0, dtype=np.float32)).astype(np.float32)
-                if weights.get(f"{lp}.self_attn.q_proj.bias") is not None else None,
-            k_bias=(weights.get(f"{lp}.self_attn.k_proj.bias") or
-                    np.zeros(0, dtype=np.float32)).astype(np.float32)
-                if weights.get(f"{lp}.self_attn.k_proj.bias") is not None else None,
-            v_bias=(weights.get(f"{lp}.self_attn.v_proj.bias") or
-                    np.zeros(0, dtype=np.float32)).astype(np.float32)
-                if weights.get(f"{lp}.self_attn.v_proj.bias") is not None else None,
-            o_bias=(weights.get(f"{lp}.self_attn.out_proj.bias") or
-                    np.zeros(0, dtype=np.float32)).astype(np.float32)
-                if weights.get(f"{lp}.self_attn.out_proj.bias") is not None else None,
+            q_bias=(
+                weights.get(f"{lp}.self_attn.q_proj.bias") or np.zeros(0, dtype=np.float32)
+            ).astype(np.float32)
+            if weights.get(f"{lp}.self_attn.q_proj.bias") is not None
+            else None,
+            k_bias=(
+                weights.get(f"{lp}.self_attn.k_proj.bias") or np.zeros(0, dtype=np.float32)
+            ).astype(np.float32)
+            if weights.get(f"{lp}.self_attn.k_proj.bias") is not None
+            else None,
+            v_bias=(
+                weights.get(f"{lp}.self_attn.v_proj.bias") or np.zeros(0, dtype=np.float32)
+            ).astype(np.float32)
+            if weights.get(f"{lp}.self_attn.v_proj.bias") is not None
+            else None,
+            o_bias=(
+                weights.get(f"{lp}.self_attn.out_proj.bias") or np.zeros(0, dtype=np.float32)
+            ).astype(np.float32)
+            if weights.get(f"{lp}.self_attn.out_proj.bias") is not None
+            else None,
         )
 
         # Residual
-        hidden = network.add_elementwise(
-            hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(
+            0
+        )
 
         # Post-attention LayerNorm
         ln2_w = weights.get(f"{lp}.final_layer_norm.weight")
         ln2_b = weights.get(f"{lp}.final_layer_norm.bias")
         normed2 = graph_ops.add_layer_norm(
-            network, hidden, embed_dim,
-            ln2_w.astype(np.float32) if ln2_w is not None
-                else np.ones(embed_dim, dtype=np.float32),
-            ln2_b.astype(np.float32) if ln2_b is not None
-                else np.zeros(embed_dim, dtype=np.float32),
-            eps_tensor)
+            network,
+            hidden,
+            embed_dim,
+            ln2_w.astype(np.float32) if ln2_w is not None else np.ones(embed_dim, dtype=np.float32),
+            ln2_b.astype(np.float32)
+            if ln2_b is not None
+            else np.zeros(embed_dim, dtype=np.float32),
+            eps_tensor,
+        )
 
         # MLP: fc1 -> GELU -> fc2
         fc1_w = weights.get(f"{lp}.fc1.weight")
@@ -1184,31 +1186,33 @@ def _build_audio_encoder_engine(
         if fc1_w is not None and fc2_w is not None:
             mlp_hidden = fc1_w.shape[0]
             fc1 = graph_ops.add_matmul_rhs_constant(
-                network, normed2, embed_dim, mlp_hidden,
-                fc1_w.astype(np.float32).T.copy())
+                network, normed2, embed_dim, mlp_hidden, fc1_w.astype(np.float32).T.copy()
+            )
             if fc1_b is not None:
-                fc1 = graph_ops.add_bias_sum(
-                    network, fc1, mlp_hidden, fc1_b.astype(np.float32))
+                fc1 = graph_ops.add_bias_sum(network, fc1, mlp_hidden, fc1_b.astype(np.float32))
             activated = graph_ops.add_gelu_new(network, fc1)
             fc2 = graph_ops.add_matmul_rhs_constant(
-                network, activated, mlp_hidden, embed_dim,
-                fc2_w.astype(np.float32).T.copy())
+                network, activated, mlp_hidden, embed_dim, fc2_w.astype(np.float32).T.copy()
+            )
             if fc2_b is not None:
-                fc2 = graph_ops.add_bias_sum(
-                    network, fc2, embed_dim, fc2_b.astype(np.float32))
+                fc2 = graph_ops.add_bias_sum(network, fc2, embed_dim, fc2_b.astype(np.float32))
 
             # Residual
-            hidden = network.add_elementwise(
-                hidden, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+            hidden = network.add_elementwise(hidden, fc2, trt.ElementWiseOperation.SUM).get_output(
+                0
+            )
 
     # Output
     hidden.name = "audio_features"
     network.mark_output(hidden)
 
     if verbose:
-        print(f"[trtmc build] Building Qwen3-Omni audio encoder "
-              f"({num_layers} layers, embed={embed_dim}, "
-              f"mel={num_mel}, frames={num_frames}) ...", file=sys.stderr)
+        print(
+            f"[trtmc build] Building Qwen3-Omni audio encoder "
+            f"({num_layers} layers, embed={embed_dim}, "
+            f"mel={num_mel}, frames={num_frames}) ...",
+            file=sys.stderr,
+        )
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
@@ -1219,6 +1223,7 @@ def _build_audio_encoder_engine(
 # ---------------------------------------------------------------------------
 # Talker engine builder (RVQ codec predictor)
 # ---------------------------------------------------------------------------
+
 
 def _build_talker_engine(
     weights: WeightDict,
@@ -1246,10 +1251,12 @@ def _build_talker_engine(
         return None
 
     if verbose:
-        print(f"[trtmc build]   Talker projection: layers={num_layers}, "
-              f"hidden={talker_hidden}, vocab={talker_vocab}, "
-              f"codebooks={n_codebooks}, cb_size={codebook_size}",
-              file=sys.stderr)
+        print(
+            f"[trtmc build]   Talker projection: layers={num_layers}, "
+            f"hidden={talker_hidden}, vocab={talker_vocab}, "
+            f"codebooks={n_codebooks}, cb_size={codebook_size}",
+            file=sys.stderr,
+        )
 
     input_hidden = talker_cfg.get("hidden_size", talker_hidden)
     decoder_hidden = talker_cfg.get("decoder_hidden_size", talker_hidden)
@@ -1261,61 +1268,56 @@ def _build_talker_engine(
         return None
 
     lm_head_keys = [
-        f"talker.code_predictor.lm_head.{i}.weight"
-        for i in range(max(n_codebooks - 1, 0))
+        f"talker.code_predictor.lm_head.{i}.weight" for i in range(max(n_codebooks - 1, 0))
     ]
     if any(k not in weights for k in lm_head_keys):
         return None
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
-    input_embed = network.add_input(
-        "input_embed", trt.float32, (input_hidden,))
+    input_embed = network.add_input("input_embed", trt.float32, (input_hidden,))
     hidden_in = network.add_shuffle(input_embed)
     hidden_in.reshape_dims = (1, input_hidden)
     hidden = hidden_in.get_output(0)
 
-    fc1_w = _transpose_2d(
-        weights["talker.hidden_projection.linear_fc1.weight"], "talker_fc1")
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, hidden, input_hidden, input_hidden, fc1_w)
+    fc1_w = _transpose_2d(weights["talker.hidden_projection.linear_fc1.weight"], "talker_fc1")
+    fc1 = graph_ops.add_matmul_rhs_constant(network, hidden, input_hidden, input_hidden, fc1_w)
     fc1_b = weights.get("talker.hidden_projection.linear_fc1.bias")
     if fc1_b is not None:
-        fc1 = graph_ops.add_bias_sum(
-            network, fc1, input_hidden, fc1_b.astype(np.float32))
+        fc1 = graph_ops.add_bias_sum(network, fc1, input_hidden, fc1_b.astype(np.float32))
 
     sigmoid = network.add_activation(fc1, trt.ActivationType.SIGMOID)
-    silu = network.add_elementwise(
-        fc1, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    silu = network.add_elementwise(fc1, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
 
-    fc2_w = _transpose_2d(
-        weights["talker.hidden_projection.linear_fc2.weight"], "talker_fc2")
+    fc2_w = _transpose_2d(weights["talker.hidden_projection.linear_fc2.weight"], "talker_fc2")
     hidden = graph_ops.add_matmul_rhs_constant(
-        network, silu.get_output(0), input_hidden, decoder_hidden, fc2_w)
+        network, silu.get_output(0), input_hidden, decoder_hidden, fc2_w
+    )
     fc2_b = weights.get("talker.hidden_projection.linear_fc2.bias")
     if fc2_b is not None:
-        hidden = graph_ops.add_bias_sum(
-            network, hidden, decoder_hidden, fc2_b.astype(np.float32))
+        hidden = graph_ops.add_bias_sum(network, hidden, decoder_hidden, fc2_b.astype(np.float32))
 
     codec_head = weights["talker.codec_head.weight"]
     head_parts = []
     first_head_rows = min(codebook_size, codec_head.shape[0])
     if first_head_rows < codebook_size:
         return None
-    first_head = _transpose_2d(
-        codec_head[:codebook_size], "talker_codec_head")
-    head_parts.append(graph_ops.add_matmul_rhs_constant(
-        network, hidden, decoder_hidden, codebook_size, first_head))
+    first_head = _transpose_2d(codec_head[:codebook_size], "talker_codec_head")
+    head_parts.append(
+        graph_ops.add_matmul_rhs_constant(
+            network, hidden, decoder_hidden, codebook_size, first_head
+        )
+    )
 
     for i, key in enumerate(lm_head_keys):
         head = _transpose_2d(weights[key], f"talker_lm_head_{i}")
-        head_parts.append(graph_ops.add_matmul_rhs_constant(
-            network, hidden, decoder_hidden, codebook_size, head))
+        head_parts.append(
+            graph_ops.add_matmul_rhs_constant(network, hidden, decoder_hidden, codebook_size, head)
+        )
 
     if len(head_parts) == 1:
         logits = head_parts[0]
@@ -1336,6 +1338,7 @@ def _build_talker_engine(
 # ---------------------------------------------------------------------------
 # Code2Wav engine builder (ConvNet waveform synthesizer)
 # ---------------------------------------------------------------------------
+
 
 def _build_code2wav_engine(
     weights: WeightDict,
@@ -1364,8 +1367,7 @@ def _build_code2wav_engine(
 
     # Input: codec tokens [n_codebooks, max_frames] int32
     n_codebooks = 8
-    codec_input = network.add_input(
-        "codec_tokens", trt.int32, (n_codebooks, max_frames))
+    codec_input = network.add_input("codec_tokens", trt.int32, (n_codebooks, max_frames))
 
     # Codebook embedding lookup
     embed_key = "code2wav.codebook_embed.weight"
@@ -1373,8 +1375,7 @@ def _build_code2wav_engine(
         return None
 
     embed_w = weights[embed_key].astype(np.float32)
-    embed_table = graph_ops.add_constant(
-        network, (codebook_vocab, embed_dim), embed_w)
+    embed_table = graph_ops.add_constant(network, (codebook_vocab, embed_dim), embed_w)
 
     # For now, just lookup first codebook and sum all
     # This is a simplified version — full implementation would handle
@@ -1389,8 +1390,8 @@ def _build_code2wav_engine(
 
     # Sum across codebooks
     summed = network.add_reduce(
-        reshaped.get_output(0), trt.ReduceOperation.SUM, 1 << 0,
-        keep_dims=False)
+        reshaped.get_output(0), trt.ReduceOperation.SUM, 1 << 0, keep_dims=False
+    )
     hidden = summed.get_output(0)  # [max_frames, embed_dim]
 
     # Transpose to [1, embed_dim, max_frames] for convolutions
@@ -1414,16 +1415,20 @@ def _build_code2wav_engine(
         stride = kernel_size // 2 if kernel_size > 1 else 1
 
         deconv = network.add_deconvolution_nd(
-            hidden, out_channels, (kernel_size,),
+            hidden,
+            out_channels,
+            (kernel_size,),
             trt.Weights(np.ascontiguousarray(up_w_np)),
-            trt.Weights(weights[up_b_key].astype(np.float32)
-                        if up_b_key in weights
-                        else np.zeros(out_channels, dtype=np.float32)))
+            trt.Weights(
+                weights[up_b_key].astype(np.float32)
+                if up_b_key in weights
+                else np.zeros(out_channels, dtype=np.float32)
+            ),
+        )
         deconv.stride_nd = (stride,)
         deconv.padding_nd = ((kernel_size - stride) // 2,)
 
-        relu = network.add_activation(
-            deconv.get_output(0), trt.ActivationType.RELU)
+        relu = network.add_activation(deconv.get_output(0), trt.ActivationType.RELU)
         hidden = relu.get_output(0)
         total_upsample *= stride
 
@@ -1432,10 +1437,12 @@ def _build_code2wav_engine(
     network.mark_output(hidden)
 
     if verbose:
-        print(f"[trtmc build] Building Qwen3-Omni Code2Wav engine "
-              f"({n_upsample} upsample blocks, embed={embed_dim}, "
-              f"max_frames={max_frames}, upsample={total_upsample}x) ...",
-              file=sys.stderr)
+        print(
+            f"[trtmc build] Building Qwen3-Omni Code2Wav engine "
+            f"({n_upsample} upsample blocks, embed={embed_dim}, "
+            f"max_frames={max_frames}, upsample={total_upsample}x) ...",
+            file=sys.stderr,
+        )
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
