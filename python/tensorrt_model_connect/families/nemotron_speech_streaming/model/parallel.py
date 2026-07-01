@@ -18,17 +18,19 @@ import sys
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
+from . import model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ....parallel_config import ParallelConfig
 
 
-def _slice_lstm_gate_columns(arr: np.ndarray, hidden: int, parallel: "ParallelConfig") -> np.ndarray:
+def _slice_lstm_gate_columns(
+    arr: np.ndarray, hidden: int, parallel: "ParallelConfig"
+) -> np.ndarray:
     """Slice i/f/g/o gate columns for this rank while preserving gate order."""
     rank = parallel.rank
     tp = parallel.tp_size
@@ -37,9 +39,9 @@ def _slice_lstm_gate_columns(arr: np.ndarray, hidden: int, parallel: "ParallelCo
     end = start + local_hidden
     parts = [
         arr[..., start:end],
-        arr[..., hidden + start:hidden + end],
-        arr[..., 2 * hidden + start:2 * hidden + end],
-        arr[..., 3 * hidden + start:3 * hidden + end],
+        arr[..., hidden + start : hidden + end],
+        arr[..., 2 * hidden + start : 2 * hidden + end],
+        arr[..., 3 * hidden + start : 3 * hidden + end],
     ]
     return np.ascontiguousarray(np.concatenate(parts, axis=-1))
 
@@ -54,7 +56,8 @@ def _validate_predictor_tp(weights: "WeightDict", parallel: "ParallelConfig") ->
     if hidden % parallel.tp_size != 0:
         raise ValueError(
             "Nemotron Speech Streaming TP predictor requires pred_hidden divisible by "
-            f"tp_size ({hidden} vs {parallel.tp_size})")
+            f"tp_size ({hidden} vs {parallel.tp_size})"
+        )
     for layer in range(int(weights["_pred_layers"])):
         pfx = f"pred.{layer}"
         expected = (hidden, 4 * hidden)
@@ -63,8 +66,8 @@ def _validate_predictor_tp(weights: "WeightDict", parallel: "ParallelConfig") ->
                 raise ValueError(f"{key} shape must be {expected}; got {weights[key].shape}")
         if tuple(weights[f"{pfx}.bias"].shape) != (1, 4 * hidden):
             raise ValueError(
-                f"{pfx}.bias shape must be {(1, 4 * hidden)}; "
-                f"got {weights[f'{pfx}.bias'].shape}")
+                f"{pfx}.bias shape must be {(1, 4 * hidden)}; got {weights[f'{pfx}.bias'].shape}"
+            )
 
 
 def _add_rank_full_state(network, local, hidden: int, parallel: "ParallelConfig"):
@@ -73,43 +76,61 @@ def _add_rank_full_state(network, local, hidden: int, parallel: "ParallelConfig"
     end = start + local_hidden
     parts = []
     if start > 0:
-        parts.append(graph_ops.add_constant(
-            network, (1, start), np.zeros((1, start), dtype=np.float32)))
+        parts.append(
+            graph_ops.add_constant(network, (1, start), np.zeros((1, start), dtype=np.float32))
+        )
     parts.append(local)
     if end < hidden:
         suffix = hidden - end
-        parts.append(graph_ops.add_constant(
-            network, (1, suffix), np.zeros((1, suffix), dtype=np.float32)))
+        parts.append(
+            graph_ops.add_constant(network, (1, suffix), np.zeros((1, suffix), dtype=np.float32))
+        )
     cat = network.add_concatenation(parts)
     cat.axis = 1
     return add_all_reduce_sum(network, cat.get_output(0), parallel.tp_size)
 
 
-def _add_lstm_cell_tp(network, x, h_prev, c_prev, weights, pfx: str, hidden: int,
-                      parallel: "ParallelConfig"):
+def _add_lstm_cell_tp(
+    network, x, h_prev, c_prev, weights, pfx: str, hidden: int, parallel: "ParallelConfig"
+):
     local_hidden = hidden // parallel.tp_size
     w_ih = graph_ops.add_constant(
-        network, (hidden, 4 * local_hidden),
-        _slice_lstm_gate_columns(weights[f"{pfx}.w_ih_t"], hidden, parallel))
+        network,
+        (hidden, 4 * local_hidden),
+        _slice_lstm_gate_columns(weights[f"{pfx}.w_ih_t"], hidden, parallel),
+    )
     w_hh = graph_ops.add_constant(
-        network, (hidden, 4 * local_hidden),
-        _slice_lstm_gate_columns(weights[f"{pfx}.w_hh_t"], hidden, parallel))
+        network,
+        (hidden, 4 * local_hidden),
+        _slice_lstm_gate_columns(weights[f"{pfx}.w_hh_t"], hidden, parallel),
+    )
     bias = graph_ops.add_constant(
-        network, (1, 4 * local_hidden),
-        _slice_lstm_gate_columns(weights[f"{pfx}.bias"], hidden, parallel))
+        network,
+        (1, 4 * local_hidden),
+        _slice_lstm_gate_columns(weights[f"{pfx}.bias"], hidden, parallel),
+    )
 
     xw = network.add_matrix_multiply(x, trt.MatrixOperation.NONE, w_ih, trt.MatrixOperation.NONE)
-    hw = network.add_matrix_multiply(h_prev, trt.MatrixOperation.NONE, w_hh, trt.MatrixOperation.NONE)
-    gates = network.add_elementwise(xw.get_output(0), hw.get_output(0), trt.ElementWiseOperation.SUM)
+    hw = network.add_matrix_multiply(
+        h_prev, trt.MatrixOperation.NONE, w_hh, trt.MatrixOperation.NONE
+    )
+    gates = network.add_elementwise(
+        xw.get_output(0), hw.get_output(0), trt.ElementWiseOperation.SUM
+    )
     gates = network.add_elementwise(gates.get_output(0), bias, trt.ElementWiseOperation.SUM)
 
-    gate_i = network.add_slice(gates.get_output(0), start=(0, 0), shape=(1, local_hidden), stride=(1, 1))
+    gate_i = network.add_slice(
+        gates.get_output(0), start=(0, 0), shape=(1, local_hidden), stride=(1, 1)
+    )
     gate_f = network.add_slice(
-        gates.get_output(0), start=(0, local_hidden), shape=(1, local_hidden), stride=(1, 1))
+        gates.get_output(0), start=(0, local_hidden), shape=(1, local_hidden), stride=(1, 1)
+    )
     gate_g = network.add_slice(
-        gates.get_output(0), start=(0, 2 * local_hidden), shape=(1, local_hidden), stride=(1, 1))
+        gates.get_output(0), start=(0, 2 * local_hidden), shape=(1, local_hidden), stride=(1, 1)
+    )
     gate_o = network.add_slice(
-        gates.get_output(0), start=(0, 3 * local_hidden), shape=(1, local_hidden), stride=(1, 1))
+        gates.get_output(0), start=(0, 3 * local_hidden), shape=(1, local_hidden), stride=(1, 1)
+    )
 
     i_t = network.add_activation(gate_i.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
     f_t = network.add_activation(gate_f.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
@@ -117,11 +138,15 @@ def _add_lstm_cell_tp(network, x, h_prev, c_prev, weights, pfx: str, hidden: int
     o_t = network.add_activation(gate_o.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
 
     c_local = network.add_slice(
-        c_prev, start=(0, parallel.rank * local_hidden), shape=(1, local_hidden), stride=(1, 1))
+        c_prev, start=(0, parallel.rank * local_hidden), shape=(1, local_hidden), stride=(1, 1)
+    )
     forget = network.add_elementwise(
-        f_t, c_local.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        f_t, c_local.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
     update = network.add_elementwise(i_t, g_t, trt.ElementWiseOperation.PROD).get_output(0)
-    c_local_new = network.add_elementwise(forget, update, trt.ElementWiseOperation.SUM).get_output(0)
+    c_local_new = network.add_elementwise(forget, update, trt.ElementWiseOperation.SUM).get_output(
+        0
+    )
     tanh_c = network.add_activation(c_local_new, trt.ActivationType.TANH).get_output(0)
     h_local_new = network.add_elementwise(o_t, tanh_c, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -140,7 +165,8 @@ def build_nemotron_streaming_tp_predictor(
     if not parallel.enabled:
         raise ValueError(
             "build_nemotron_streaming_tp_predictor requires parallel.mode=tensor_parallel "
-            "and tp_size > 1")
+            "and tp_size > 1"
+        )
     _validate_predictor_tp(weights, parallel)
 
     pred_hidden = int(weights["_pred_hidden"])
@@ -154,7 +180,9 @@ def build_nemotron_streaming_tp_predictor(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 << 20)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
-    embedding = graph_ops.add_constant(network, (vocab_total, pred_hidden), weights["pred_embedding"])
+    embedding = graph_ops.add_constant(
+        network, (vocab_total, pred_hidden), weights["pred_embedding"]
+    )
     hidden = network.add_gather(embedding, token_id, 0).get_output(0)
 
     next_h = []
@@ -163,7 +191,8 @@ def build_nemotron_streaming_tp_predictor(
         h_in = network.add_input(f"state_h_{layer}", trt.float32, (1, pred_hidden))
         c_in = network.add_input(f"state_c_{layer}", trt.float32, (1, pred_hidden))
         hidden, c_new = _add_lstm_cell_tp(
-            network, hidden, h_in, c_in, weights, f"pred.{layer}", pred_hidden, parallel)
+            network, hidden, h_in, c_in, weights, f"pred.{layer}", pred_hidden, parallel
+        )
         next_h.append(hidden)
         next_c.append(c_new)
 

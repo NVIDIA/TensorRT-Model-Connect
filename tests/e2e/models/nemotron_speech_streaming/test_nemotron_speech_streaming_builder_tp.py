@@ -12,7 +12,7 @@ pytest.importorskip(
 )
 
 from tensorrt_model_connect.parallel_config import ParallelConfig
-from tensorrt_model_connect.families.nemotron_speech_streaming.predictor_tp_builder import (
+from tensorrt_model_connect.families.nemotron_speech_streaming.model.parallel import (
     _slice_lstm_gate_columns,
     _validate_predictor_tp,
 )

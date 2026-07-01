@@ -39,8 +39,7 @@ def _read_model_config(nemo_path: Path) -> dict[str, Any]:
 
 def _matches_nemotron_speech(cfg: dict[str, Any]) -> bool:
     target = " ".join(
-        str(cfg.get(key, "") or "")
-        for key in ("target", "_target_", "model_type")
+        str(cfg.get(key, "") or "") for key in ("target", "_target_", "model_type")
     ).lower()
     return any(marker in target for marker in _TARGET_MARKERS)
 
