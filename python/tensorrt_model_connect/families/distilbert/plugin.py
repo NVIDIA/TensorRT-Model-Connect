@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -37,7 +37,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .encoder_builder import build_encoder_engine
+from .model.model import build_encoder_engine
 
 
 class DistilBertPlugin:
@@ -48,7 +48,9 @@ class DistilBertPlugin:
         return model_type.lower() == "distilbert"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -63,20 +65,21 @@ class DistilBertPlugin:
         # Word embedding
         embedding = _load_tensor(readers, "distilbert.embeddings.word_embeddings.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (learned absolute)
         pos_embed = _load_tensor(readers, "distilbert.embeddings.position_embeddings.weight")
         assert pos_embed.shape == (max_pos, hidden), (
-            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})")
+            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})"
+        )
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         # DistilBERT has no token_type_embeddings. The encoder builder expects
         # one, so provide a zero table that acts as an identity under addition.
         type_vocab_size = config.raw.get("type_vocab_size", 2)
-        weights["token_type_embedding"] = np.zeros(
-            (type_vocab_size, hidden), dtype=np.float32)
+        weights["token_type_embedding"] = np.zeros((type_vocab_size, hidden), dtype=np.float32)
 
         # Embedding LayerNorm
         embed_ln_w = _load_tensor(readers, "distilbert.embeddings.LayerNorm.weight")
@@ -99,17 +102,21 @@ class DistilBertPlugin:
 
             # QKV biases
             weights[f"{prefix}.q_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.q_lin.bias").astype(np.float32)
+                readers, f"{hf_prefix}.attention.q_lin.bias"
+            ).astype(np.float32)
             weights[f"{prefix}.k_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.k_lin.bias").astype(np.float32)
+                readers, f"{hf_prefix}.attention.k_lin.bias"
+            ).astype(np.float32)
             weights[f"{prefix}.v_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.v_lin.bias").astype(np.float32)
+                readers, f"{hf_prefix}.attention.v_lin.bias"
+            ).astype(np.float32)
 
             # Output projection
             o_w = _load_tensor(readers, f"{hf_prefix}.attention.out_lin.weight")
             weights[f"{prefix}.w_o"] = np.ascontiguousarray(o_w.T.astype(np.float32))
             weights[f"{prefix}.o_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.out_lin.bias").astype(np.float32)
+                readers, f"{hf_prefix}.attention.out_lin.bias"
+            ).astype(np.float32)
 
             # Post-attention LayerNorm (sa_layer_norm)
             sa_ln_w = _load_tensor(readers, f"{hf_prefix}.sa_layer_norm.weight")
@@ -139,34 +146,43 @@ class DistilBertPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         public_module = sys.modules.get(__package__)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="DistilBERT tensor-parallel builds")
+                parallel, feature="DistilBERT tensor-parallel builds"
+            )
             if quant_ctx is not None:
-                raise ValueError(
-                    "DistilBERT tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_encoder_engine
-            builder = getattr(
-                public_module, "build_tp_encoder_engine", build_tp_encoder_engine)
+                raise ValueError("DistilBERT tensor-parallel builds do not support quantization")
+            from .model.parallel import build_tp_encoder_engine
+
+            builder = getattr(public_module, "build_tp_encoder_engine", build_tp_encoder_engine)
             return builder(
-                config, weights,
+                config,
+                weights,
                 max_seq_length=max_cache_length,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         builder = getattr(public_module, "build_encoder_engine", build_encoder_engine)
         return builder(
-            config, weights,
+            config,
+            weights,
             max_seq_length=max_cache_length,
             precision=precision,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
 
 plugin = DistilBertPlugin()
