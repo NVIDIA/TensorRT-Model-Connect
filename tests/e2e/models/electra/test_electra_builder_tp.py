@@ -35,7 +35,7 @@ _VOCAB = 24
 
 def _electra_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.electra.tp_builder",
+        "tensorrt_model_connect.families.electra.model.model",
         reason="TensorRT is required for ELECTRA TP builder tests",
     )
 
@@ -232,6 +232,30 @@ def test_electra_plugin_routes_tp_build(monkeypatch):
     assert captured["max_seq_length"] == 8
     assert captured["kwargs"]["parallel_config"].tp_size == 4
     assert captured["kwargs"]["parallel_config"].rank == 1
+
+
+def test_electra_plugin_forwards_serial_precision(monkeypatch):
+    captured = {}
+
+    def fake_build(config, weights, max_seq_length, **kwargs):
+        captured["config"] = config
+        captured["weights"] = weights
+        captured["max_seq_length"] = max_seq_length
+        captured["kwargs"] = kwargs
+        return b"electra-plan"
+
+    monkeypatch.setattr(electra_plugin, "build_encoder_engine", fake_build)
+
+    plan = ElectraPlugin().build_engine(
+        _make_config(),
+        _make_encoder_weights(),
+        max_cache_length=8,
+        precision="bf16",
+    )
+
+    assert plan == b"electra-plan"
+    assert captured["max_seq_length"] == 8
+    assert captured["kwargs"]["precision"] == "bf16"
 
 
 def test_electra_plugin_rejects_quantized_tp(monkeypatch):
