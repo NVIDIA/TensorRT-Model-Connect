@@ -14,6 +14,7 @@ Postconditions: Plugin correctly maps HF weight keys to canonical encoder-only W
 from __future__ import annotations
 
 import json
+import importlib
 
 import numpy as np
 import pytest
@@ -22,8 +23,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 try:
-    from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.roberta as roberta_mod
+    from tensorrt_model_connect.families.roberta.config import ModelConfig
+
+    roberta_mod = importlib.import_module("tensorrt_model_connect.families.roberta.plugin")
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -61,7 +63,6 @@ def _make_roberta_tensors(
     root: str,
     *,
     include_token_type: bool,
-    include_pooler: bool,
     embed_ln_style: str,
     attn_ln_style: str,
     out_ln_style: str,
@@ -111,15 +112,10 @@ def _make_roberta_tensors(
         t[f"{p}.output.LayerNorm.gamma"] = m(4)
         t[f"{p}.output.LayerNorm.beta"] = m(4)
 
-    if include_pooler:
-        t[f"{root}.pooler.dense.weight"] = m(4, 4)
-        t[f"{root}.pooler.dense.bias"] = m(4)
-
     return t
 
 
-def _install_tensor_stubs(monkeypatch: pytest.MonkeyPatch,
-                          tensors: dict[str, np.ndarray]) -> None:
+def _install_tensor_stubs(monkeypatch: pytest.MonkeyPatch, tensors: dict[str, np.ndarray]) -> None:
     monkeypatch.setattr(roberta_mod, "_open_safetensors", lambda _p: ["reader"])
     monkeypatch.setattr(roberta_mod, "_has_tensor", lambda _r, name: name in tensors)
     monkeypatch.setattr(roberta_mod, "_load_tensor", lambda _r, name: tensors[name])
@@ -170,18 +166,17 @@ def test_load_ln_falls_back_to_gamma_beta(monkeypatch: pytest.MonkeyPatch) -> No
     np.testing.assert_allclose(b, tensors["x.LayerNorm.beta"])
 
 
-def test_load_weights_with_model_prefix_and_pooler(
+def test_load_weights_with_model_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Intent: validate mapping for model.roberta prefix and optional pooler path.
+    """Intent: validate mapping for the model.roberta checkpoint prefix.
 
-    Preconditions: token-type and pooler tensors are present; embed LN uses gamma/beta.
-    Postconditions: position slicing, transposes, and optional keys are populated.
+    Preconditions: token-type tensors are present; embed LN uses gamma/beta.
+    Postconditions: position slicing and projection transposes are correct.
     """
     tensors = _make_roberta_tensors(
         "model.roberta",
         include_token_type=True,
-        include_pooler=True,
         embed_ln_style="gamma",
         attn_ln_style="gamma",
         out_ln_style="weight",
@@ -202,22 +197,19 @@ def test_load_weights_with_model_prefix_and_pooler(
         weights["layer.0.w_q"],
         tensors["model.roberta.encoder.layer.0.attention.self.query.weight"].T,
     )
-    assert "pooler_w" in weights
-    assert "pooler_bias" in weights
 
 
-def test_load_weights_without_token_type_or_pooler(
+def test_load_weights_without_token_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Intent: cover synthetic token-type table and missing-pooler branch.
+    """Intent: cover the synthetic token-type table branch.
 
-    Preconditions: token-type and pooler tensors are absent in checkpoint map.
-    Postconditions: zero token-type table is synthesized and pooler keys are absent.
+    Preconditions: token-type tensors are absent from the checkpoint map.
+    Postconditions: a zero token-type table is synthesized.
     """
     tensors = _make_roberta_tensors(
         "roberta",
         include_token_type=False,
-        include_pooler=False,
         embed_ln_style="weight",
         attn_ln_style="weight",
         out_ln_style="gamma",
@@ -232,9 +224,6 @@ def test_load_weights_without_token_type_or_pooler(
 
     assert weights["token_type_embedding"].shape == (5, 4)
     np.testing.assert_allclose(weights["token_type_embedding"], np.zeros((5, 4), dtype=np.float32))
-
-    assert "pooler_w" not in weights
-    assert "pooler_bias" not in weights
 
 
 def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +242,7 @@ def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
         calls["verbose"] = verbose
         return b"roberta-plan"
 
-    monkeypatch.setattr(roberta_mod, "build_encoder_engine", fake_builder)
+    monkeypatch.setattr(roberta_mod.encoder_model, "build_encoder_engine", fake_builder)
 
     cfg = _cfg()
     raw_weights = {"embedding": np.zeros((7, 4), dtype=np.float32)}
