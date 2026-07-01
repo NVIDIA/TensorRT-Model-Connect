@@ -16,17 +16,17 @@ import sys
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import _transpose_2d
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _resolve_vit_config
+from . import model as graph_ops
+from ..weights import _transpose_2d
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from ..plugin import _resolve_vit_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _validate_timm_vit_tp(config: "ModelConfig", parallel: "ParallelConfig") -> None:
@@ -40,7 +40,8 @@ def _validate_timm_vit_tp(config: "ModelConfig", parallel: "ParallelConfig") -> 
     if mlp_hidden % parallel.tp_size != 0:
         raise ValueError(
             "timm_vit tensor-parallel MLP requires mlp_hidden divisible by tp_size "
-            f"({mlp_hidden} vs {parallel.tp_size})")
+            f"({mlp_hidden} vs {parallel.tp_size})"
+        )
 
 
 def _slice_mlp_columns(
@@ -102,8 +103,7 @@ def build_timm_vit_tp_engine(
 
     if image_h % patch_h != 0 or image_w % patch_w != 0:
         raise ValueError(
-            f"image_size {image_h}x{image_w} must be divisible by patch "
-            f"{patch_h}x{patch_w}"
+            f"image_size {image_h}x{image_w} must be divisible by patch {patch_h}x{patch_w}"
         )
 
     grid_h = image_h // patch_h
@@ -135,17 +135,16 @@ def build_timm_vit_tp_engine(
     trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-    pixel_values = network.add_input(
-        "pixel_values", trt.float32, (1, 3, image_h, image_w))
+    pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
 
     patch = network.add_convolution_nd(
         pixel_values,
         num_output_maps=hidden_size,
         kernel_shape=(patch_h, patch_w),
-        kernel=trt.Weights(np.ascontiguousarray(
-            weights["patch_embed.proj.weight"], dtype=np.float32)),
-        bias=trt.Weights(np.ascontiguousarray(
-            weights["patch_embed.proj.bias"], dtype=np.float32)),
+        kernel=trt.Weights(
+            np.ascontiguousarray(weights["patch_embed.proj.weight"], dtype=np.float32)
+        ),
+        bias=trt.Weights(np.ascontiguousarray(weights["patch_embed.proj.bias"], dtype=np.float32)),
     )
     patch.stride_nd = (patch_h, patch_w)
 
@@ -155,19 +154,20 @@ def build_timm_vit_tp_engine(
     hidden = patches_nhwc.get_output(0)
 
     cls_token = np.ascontiguousarray(
-        weights["cls_token"].reshape(1, 1, hidden_size), dtype=np.float32)
-    cls_const = graph_ops.add_constant(
-        network, (1, 1, hidden_size), cls_token, dtype=np.float32)
+        weights["cls_token"].reshape(1, 1, hidden_size), dtype=np.float32
+    )
+    cls_const = graph_ops.add_constant(network, (1, 1, hidden_size), cls_token, dtype=np.float32)
     cat = network.add_concatenation([cls_const, hidden])
     cat.axis = 1
     hidden = cat.get_output(0)
 
     pos_embed = np.ascontiguousarray(
-        weights["pos_embed"].reshape(1, seq_len, hidden_size), dtype=np.float32)
+        weights["pos_embed"].reshape(1, seq_len, hidden_size), dtype=np.float32
+    )
     pos_const = graph_ops.add_constant(
-        network, (1, seq_len, hidden_size), pos_embed, dtype=np.float32)
-    hidden = network.add_elementwise(
-        hidden, pos_const, trt.ElementWiseOperation.SUM).get_output(0)
+        network, (1, seq_len, hidden_size), pos_embed, dtype=np.float32
+    )
+    hidden = network.add_elementwise(hidden, pos_const, trt.ElementWiseOperation.SUM).get_output(0)
 
     for layer_idx in range(depth):
         prefix = f"blocks.{layer_idx}"
@@ -230,8 +230,7 @@ def build_timm_vit_tp_engine(
             np.array([[[[1.0 / np.sqrt(head_dim)]]]], dtype=np.float32),
             dtype=np.float32,
         )
-        q_scaled = network.add_elementwise(
-            q, scale, trt.ElementWiseOperation.PROD).get_output(0)
+        q_scaled = network.add_elementwise(q, scale, trt.ElementWiseOperation.PROD).get_output(0)
         scores = network.add_matrix_multiply(
             q_scaled,
             trt.MatrixOperation.NONE,
@@ -262,8 +261,7 @@ def build_timm_vit_tp_engine(
             hidden_size,
             weights[f"{prefix}.attn.proj.bias"].astype(np.float32),
         )
-        hidden = network.add_elementwise(
-            hidden, attn, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = network.add_elementwise(hidden, attn, trt.ElementWiseOperation.SUM).get_output(0)
 
         norm2 = graph_ops.add_layer_norm_native(
             network,
@@ -311,8 +309,7 @@ def build_timm_vit_tp_engine(
             hidden_size,
             weights[f"{prefix}.mlp.fc2.bias"].astype(np.float32),
         )
-        hidden = network.add_elementwise(
-            hidden, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = network.add_elementwise(hidden, fc2, trt.ElementWiseOperation.SUM).get_output(0)
 
     hidden = graph_ops.add_layer_norm_native(
         network,
@@ -337,7 +334,8 @@ def build_timm_vit_tp_engine(
         ),
     )
     logits = graph_ops.add_bias_sum(
-        network, logits, num_classes, weights["head.bias"].astype(np.float32))
+        network, logits, num_classes, weights["head.bias"].astype(np.float32)
+    )
     flatten_logits = network.add_shuffle(logits)
     flatten_logits.reshape_dims = (1, num_classes)
     logits = flatten_logits.get_output(0)

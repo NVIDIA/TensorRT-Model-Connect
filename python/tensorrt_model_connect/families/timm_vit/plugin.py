@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import (
+from .model import model as graph_ops
+from .weights import (
     WeightDict,
     _has_tensor,
     _load_tensor,
@@ -106,7 +106,8 @@ class TimmVitPlugin:
         ):
             if _has_tensor(readers, key):
                 weights[key] = _load_tensor(readers, key).astype(
-                    np.float32 if key.endswith(("bias", "weight")) and key.startswith("norm")
+                    np.float32
+                    if key.endswith(("bias", "weight")) and key.startswith("norm")
                     else target_dtype
                 )
 
@@ -114,7 +115,8 @@ class TimmVitPlugin:
             raise KeyError("Tensor not found: head.weight")
         if "head.bias" not in weights:
             weights["head.bias"] = np.zeros(
-                int(weights["head.weight"].shape[0]), dtype=target_dtype)
+                int(weights["head.weight"].shape[0]), dtype=target_dtype
+            )
 
         depth = vit_cfg["depth"]
         for layer_idx in range(depth):
@@ -136,11 +138,11 @@ class TimmVitPlugin:
                 full_key = f"{prefix}.{key}"
                 arr = _load_tensor(readers, full_key)
                 if key.endswith("weight") and arr.ndim == 2:
-                    weights[full_key] = _transpose_2d(
-                        arr, full_key, precision=precision)
+                    weights[full_key] = _transpose_2d(arr, full_key, precision=precision)
                 else:
                     weights[full_key] = arr.astype(
-                        np.float32 if key.startswith("norm") else target_dtype)
+                        np.float32 if key.startswith("norm") else target_dtype
+                    )
 
         return weights
 
@@ -158,12 +160,16 @@ class TimmVitPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="timm_vit tensor-parallel MLP builds")
+                parallel, feature="timm_vit tensor-parallel MLP builds"
+            )
             if quant_ctx is not None:
                 raise ValueError("timm_vit tensor-parallel builds do not support quantization")
-            from .timm_vit_tp_builder import build_timm_vit_tp_engine
+            from .model.parallel import build_timm_vit_tp_engine
+
             return build_timm_vit_tp_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -188,8 +194,7 @@ class TimmVitPlugin:
 
         if image_h % patch_h != 0 or image_w % patch_w != 0:
             raise ValueError(
-                f"image_size {image_h}x{image_w} must be divisible by patch "
-                f"{patch_h}x{patch_w}"
+                f"image_size {image_h}x{image_w} must be divisible by patch {patch_h}x{patch_w}"
             )
 
         grid_h = image_h // patch_h
@@ -220,17 +225,18 @@ class TimmVitPlugin:
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-        pixel_values = network.add_input(
-            "pixel_values", trt.float32, (1, 3, image_h, image_w))
+        pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
 
         patch = network.add_convolution_nd(
             pixel_values,
             num_output_maps=hidden_size,
             kernel_shape=(patch_h, patch_w),
-            kernel=trt.Weights(np.ascontiguousarray(
-                weights["patch_embed.proj.weight"], dtype=np.float32)),
-            bias=trt.Weights(np.ascontiguousarray(
-                weights["patch_embed.proj.bias"], dtype=np.float32)),
+            kernel=trt.Weights(
+                np.ascontiguousarray(weights["patch_embed.proj.weight"], dtype=np.float32)
+            ),
+            bias=trt.Weights(
+                np.ascontiguousarray(weights["patch_embed.proj.bias"], dtype=np.float32)
+            ),
         )
         patch.stride_nd = (patch_h, patch_w)
 
@@ -240,19 +246,24 @@ class TimmVitPlugin:
         hidden = patches_nhwc.get_output(0)
 
         cls_token = np.ascontiguousarray(
-            weights["cls_token"].reshape(1, 1, hidden_size), dtype=np.float32)
+            weights["cls_token"].reshape(1, 1, hidden_size), dtype=np.float32
+        )
         cls_const = graph_ops.add_constant(
-            network, (1, 1, hidden_size), cls_token, dtype=np.float32)
+            network, (1, 1, hidden_size), cls_token, dtype=np.float32
+        )
         cat = network.add_concatenation([cls_const, hidden])
         cat.axis = 1
         hidden = cat.get_output(0)
 
         pos_embed = np.ascontiguousarray(
-            weights["pos_embed"].reshape(1, seq_len, hidden_size), dtype=np.float32)
+            weights["pos_embed"].reshape(1, seq_len, hidden_size), dtype=np.float32
+        )
         pos_const = graph_ops.add_constant(
-            network, (1, seq_len, hidden_size), pos_embed, dtype=np.float32)
+            network, (1, seq_len, hidden_size), pos_embed, dtype=np.float32
+        )
         hidden = network.add_elementwise(
-            hidden, pos_const, trt.ElementWiseOperation.SUM).get_output(0)
+            hidden, pos_const, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
         for layer_idx in range(depth):
             prefix = f"blocks.{layer_idx}"
@@ -315,8 +326,9 @@ class TimmVitPlugin:
                 np.array([[[[1.0 / np.sqrt(head_dim)]]]], dtype=np.float32),
                 dtype=np.float32,
             )
-            q_scaled = network.add_elementwise(
-                q, scale, trt.ElementWiseOperation.PROD).get_output(0)
+            q_scaled = network.add_elementwise(q, scale, trt.ElementWiseOperation.PROD).get_output(
+                0
+            )
             scores = network.add_matrix_multiply(
                 q_scaled,
                 trt.MatrixOperation.NONE,
@@ -347,8 +359,9 @@ class TimmVitPlugin:
                 hidden_size,
                 weights[f"{prefix}.attn.proj.bias"].astype(np.float32),
             )
-            hidden = network.add_elementwise(
-                hidden, attn, trt.ElementWiseOperation.SUM).get_output(0)
+            hidden = network.add_elementwise(hidden, attn, trt.ElementWiseOperation.SUM).get_output(
+                0
+            )
 
             norm2 = graph_ops.add_layer_norm_native(
                 network,
@@ -366,8 +379,8 @@ class TimmVitPlugin:
                 weights[f"{prefix}.mlp.fc1.weight"].astype(np.float32),
             )
             fc1 = graph_ops.add_bias_sum(
-                network, fc1, mlp_hidden,
-                weights[f"{prefix}.mlp.fc1.bias"].astype(np.float32))
+                network, fc1, mlp_hidden, weights[f"{prefix}.mlp.fc1.bias"].astype(np.float32)
+            )
             act = graph_ops.add_gelu_erf(network, fc1)
             fc2 = graph_ops.add_matmul_rhs_constant(
                 network,
@@ -377,10 +390,11 @@ class TimmVitPlugin:
                 weights[f"{prefix}.mlp.fc2.weight"].astype(np.float32),
             )
             fc2 = graph_ops.add_bias_sum(
-                network, fc2, hidden_size,
-                weights[f"{prefix}.mlp.fc2.bias"].astype(np.float32))
-            hidden = network.add_elementwise(
-                hidden, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+                network, fc2, hidden_size, weights[f"{prefix}.mlp.fc2.bias"].astype(np.float32)
+            )
+            hidden = network.add_elementwise(hidden, fc2, trt.ElementWiseOperation.SUM).get_output(
+                0
+            )
 
         hidden = graph_ops.add_layer_norm_native(
             network,
@@ -405,7 +419,8 @@ class TimmVitPlugin:
             ),
         )
         logits = graph_ops.add_bias_sum(
-            network, logits, num_classes, weights["head.bias"].astype(np.float32))
+            network, logits, num_classes, weights["head.bias"].astype(np.float32)
+        )
         flatten_logits = network.add_shuffle(logits)
         flatten_logits.reshape_dims = (1, num_classes)
         logits = flatten_logits.get_output(0)
