@@ -5,6 +5,7 @@
   "bundle": "bark-small.trtfb",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
+  "task_strategy": "text_to_audio",
   "reference_family": "tts_bark",
   "user_contract": "tts_audio",
   "test_type": "audio",
