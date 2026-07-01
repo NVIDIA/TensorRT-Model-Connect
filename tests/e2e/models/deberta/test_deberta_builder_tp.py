@@ -35,7 +35,7 @@ _VOCAB = 24
 
 def _deberta_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.deberta.tp_builder",
+        "tensorrt_model_connect.families.deberta.model.parallel",
         reason="TensorRT is required for DeBERTa TP builder tests",
     )
 
