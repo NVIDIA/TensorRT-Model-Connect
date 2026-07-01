@@ -23,8 +23,7 @@ from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.convbert.plugin import ConvBertPlugin
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
-convbert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.convbert.plugin")
+convbert_plugin = importlib.import_module("tensorrt_model_connect.families.convbert.plugin")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -37,10 +36,10 @@ _VOCAB = 24
 _KERNEL = 3
 
 
-def _convbert_tp_builder_module():
+def _convbert_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.convbert.tp_builder",
-        reason="TensorRT is required for ConvBERT TP builder tests",
+        "tensorrt_model_connect.families.convbert.model.model",
+        reason="TensorRT is required for ConvBERT builder tests",
     )
 
 
@@ -77,17 +76,19 @@ def _make_encoder_weights(
     mlp: int = _MLP,
     vocab: int = _VOCAB,
 ) -> WeightDict:
-    weights = WeightDict({
-        "embedding": _matrix(vocab, hidden),
-        "position_embedding": _matrix(32, hidden, 1000),
-        "token_type_embedding": np.zeros((2, hidden), dtype=np.float32),
-        "embed_norm": np.ones(hidden, dtype=np.float32),
-        "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
-        "_convbert_new_num_heads": np.array([_EFFECTIVE_HEADS], dtype=np.int32),
-        "_convbert_head_size": np.array([_HEAD_SIZE], dtype=np.int32),
-        "_convbert_all_head_size": np.array([_ALL_HEAD], dtype=np.int32),
-        "_convbert_conv_kernel_size": np.array([_KERNEL], dtype=np.int32),
-    })
+    weights = WeightDict(
+        {
+            "embedding": _matrix(vocab, hidden),
+            "position_embedding": _matrix(32, hidden, 1000),
+            "token_type_embedding": np.zeros((2, hidden), dtype=np.float32),
+            "embed_norm": np.ones(hidden, dtype=np.float32),
+            "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
+            "_convbert_new_num_heads": np.array([_EFFECTIVE_HEADS], dtype=np.int32),
+            "_convbert_head_size": np.array([_HEAD_SIZE], dtype=np.int32),
+            "_convbert_all_head_size": np.array([_ALL_HEAD], dtype=np.int32),
+            "_convbert_conv_kernel_size": np.array([_KERNEL], dtype=np.int32),
+        }
+    )
     for layer_idx in range(layers):
         prefix = f"layer.{layer_idx}"
         weights[f"{prefix}.w_q"] = _matrix(hidden, _ALL_HEAD, 10)
@@ -100,7 +101,9 @@ def _make_encoder_weights(
         weights[f"{prefix}.sep_conv_pw"] = _matrix(_ALL_HEAD, hidden, 50)
         weights[f"{prefix}.sep_conv_bias"] = np.arange(_ALL_HEAD, dtype=np.float32)
         weights[f"{prefix}.conv_kernel_w"] = _matrix(_ALL_HEAD, _EFFECTIVE_HEADS * _KERNEL, 60)
-        weights[f"{prefix}.conv_kernel_bias"] = np.arange(_EFFECTIVE_HEADS * _KERNEL, dtype=np.float32)
+        weights[f"{prefix}.conv_kernel_bias"] = np.arange(
+            _EFFECTIVE_HEADS * _KERNEL, dtype=np.float32
+        )
         weights[f"{prefix}.conv_out_w"] = _matrix(hidden, _ALL_HEAD, 70)
         weights[f"{prefix}.conv_out_bias"] = np.arange(_ALL_HEAD, dtype=np.float32)
         weights[f"{prefix}.w_o"] = _matrix(2 * _ALL_HEAD, hidden, 80)
@@ -117,7 +120,7 @@ def _make_encoder_weights(
 
 
 def test_convbert_tp_builder_rejects_single_device_mode():
-    tp_builder = _convbert_tp_builder_module()
+    tp_builder = _convbert_builder_module()
 
     with pytest.raises(ValueError, match="requires tensor_parallel mode"):
         tp_builder.build_tp_convbert_encoder_engine(
@@ -129,7 +132,7 @@ def test_convbert_tp_builder_rejects_single_device_mode():
 
 
 def test_convbert_tp_validation_rejects_tp4_for_effective_heads():
-    tp_builder = _convbert_tp_builder_module()
+    tp_builder = _convbert_builder_module()
 
     with pytest.raises(ValueError, match="effective attention heads divisible"):
         tp_builder._validate_convbert_tp(
@@ -140,7 +143,7 @@ def test_convbert_tp_validation_rejects_tp4_for_effective_heads():
 
 
 def test_convbert_tp_shards_rank_local_encoder_weights():
-    tp_builder = _convbert_tp_builder_module()
+    tp_builder = _convbert_builder_module()
     config = _make_config()
     weights = _make_encoder_weights()
     shard = tp_builder.shard_convbert_weights(
@@ -179,10 +182,13 @@ def test_convbert_tp_shards_rank_local_encoder_weights():
     )
     np.testing.assert_array_equal(
         shard["layer.0.w_o"],
-        np.concatenate([
-            weights["layer.0.w_o"][all_start:all_end, :],
-            weights["layer.0.w_o"][_ALL_HEAD + all_start:2 * _ALL_HEAD, :],
-        ], axis=0),
+        np.concatenate(
+            [
+                weights["layer.0.w_o"][all_start:all_end, :],
+                weights["layer.0.w_o"][_ALL_HEAD + all_start : 2 * _ALL_HEAD, :],
+            ],
+            axis=0,
+        ),
     )
     np.testing.assert_array_equal(
         shard["layer.0.w_fc1"],
@@ -195,7 +201,7 @@ def test_convbert_tp_shards_rank_local_encoder_weights():
 
 
 def test_convbert_plugin_routes_tp_build(monkeypatch):
-    tp_builder = _convbert_tp_builder_module()
+    tp_builder = _convbert_builder_module()
     captured = {}
 
     def fake_build(config, weights, max_seq_length, **kwargs):
@@ -224,6 +230,27 @@ def test_convbert_plugin_routes_tp_build(monkeypatch):
     assert captured["max_seq_length"] == 8
     assert captured["kwargs"]["parallel_config"].tp_size == 2
     assert captured["kwargs"]["parallel_config"].rank == 1
+    assert "precision" not in captured["kwargs"]
+
+
+def test_convbert_plugin_forwards_serial_precision(monkeypatch):
+    builder = _convbert_builder_module()
+    captured = {}
+
+    def fake_build(config, weights, max_seq_length, **kwargs):
+        captured.update(kwargs)
+        return b"convbert-plan"
+
+    monkeypatch.setattr(builder, "build_convbert_encoder_engine", fake_build)
+    plan = ConvBertPlugin().build_engine(
+        _make_config(),
+        _make_encoder_weights(),
+        max_cache_length=8,
+        precision="fp16",
+    )
+
+    assert plan == b"convbert-plan"
+    assert captured["precision"] == "fp16"
 
 
 def test_convbert_plugin_rejects_quantized_tp(monkeypatch):
