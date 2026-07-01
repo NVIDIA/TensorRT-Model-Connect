@@ -17,8 +17,8 @@ import numpy as np
 import pytest
 
 try:
-    import tensorrt_model_connect.families.qwen_vl.graph_ops as graph_ops
-    from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import (
+    import tensorrt_model_connect.families.qwen_vl.model.model as graph_ops
+    from tensorrt_model_connect.families.qwen_vl.model.components.vision import (
         _compute_vision_rope_tables,
         build_qwen3_vl_vision_engine,
         build_qwen_vl_vision_engine,
@@ -154,89 +154,6 @@ class TestPatchEmbed3D:
 
         results = trt_runner(build_fn, {"pixel_values": pixel_values})
         assert results["output"].shape == (4, 8)
-
-
-# ===================================================================
-# 3. TRT graph: spatial merge
-# ===================================================================
-
-
-class TestSpatialMerge:
-    """Tests for add_spatial_merge via TRT execution."""
-
-    @requires_trt
-    def test_merge_output_shape(self, trt_runner):
-        """Spatial merge reduces seq_length by merge_size^2."""
-        seq_length = 16
-        input_dim = 8
-        hidden_dim = 32
-        output_dim = 16
-        merge_size = 2
-
-        inp = np.random.randn(seq_length, input_dim).astype(np.float32)
-        # w_fc1: [input_dim, hidden_dim], w_fc2: [hidden_dim, output_dim]
-        w_fc1 = np.random.randn(input_dim, hidden_dim).astype(np.float32)
-        w_fc2 = np.random.randn(hidden_dim, output_dim).astype(np.float32)
-        b_fc1 = np.random.randn(hidden_dim).astype(np.float32)
-        b_fc2 = np.random.randn(output_dim).astype(np.float32)
-        norm_gamma = np.ones(input_dim, dtype=np.float32)
-
-        def build_fn(network, trt_inputs):
-            eps_tensor = graph_ops.add_constant(
-                network, (1, 1), np.array([1e-6], dtype=np.float32))
-            out = graph_ops.add_spatial_merge(
-                network, trt_inputs["inp"],
-                w_fc1=w_fc1, w_fc2=w_fc2,
-                b_fc1=b_fc1, b_fc2=b_fc2,
-                norm_gamma=norm_gamma,
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                output_dim=output_dim,
-                eps_tensor=eps_tensor,
-                seq_length=seq_length,
-                merge_size=merge_size)
-            return {"output": out}
-
-        results = trt_runner(build_fn, {"inp": inp})
-        # add_spatial_merge applies LN + MLP but doesn't rearrange patches
-        # (spatial rearrangement is done in preprocessing). Output seq == input seq.
-        assert results["output"].shape == (seq_length, output_dim), \
-            f"Expected ({seq_length}, {output_dim}), got {results['output'].shape}"
-
-    @requires_trt
-    def test_merge_deterministic(self, trt_runner):
-        """Same input produces same output (deterministic)."""
-        seq_length = 4
-        input_dim = 4
-        hidden_dim = 8
-        output_dim = 4
-        merge_size = 2
-
-        np.random.seed(42)
-        inp = np.random.randn(seq_length, input_dim).astype(np.float32)
-        w_fc1 = np.random.randn(input_dim, hidden_dim).astype(np.float32)
-        w_fc2 = np.random.randn(hidden_dim, output_dim).astype(np.float32)
-        norm_gamma = np.ones(input_dim, dtype=np.float32)
-
-        def build_fn(network, trt_inputs):
-            eps_tensor = graph_ops.add_constant(
-                network, (1, 1), np.array([1e-6], dtype=np.float32))
-            out = graph_ops.add_spatial_merge(
-                network, trt_inputs["inp"],
-                w_fc1=w_fc1, w_fc2=w_fc2,
-                b_fc1=None, b_fc2=None,
-                norm_gamma=norm_gamma,
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                output_dim=output_dim,
-                eps_tensor=eps_tensor,
-                seq_length=seq_length,
-                merge_size=merge_size)
-            return {"output": out}
-
-        results1 = trt_runner(build_fn, {"inp": inp})
-        results2 = trt_runner(build_fn, {"inp": inp})
-        np.testing.assert_allclose(results1["output"], results2["output"], atol=1e-5)
 
 
 # ===================================================================

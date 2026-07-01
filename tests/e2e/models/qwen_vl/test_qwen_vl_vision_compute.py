@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 try:
-    from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import _compute_vision_rope_tables
+    from tensorrt_model_connect.families.qwen_vl.model.components.vision import _compute_vision_rope_tables
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
