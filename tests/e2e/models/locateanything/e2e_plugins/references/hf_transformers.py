@@ -884,7 +884,7 @@ class HfTransformersReference:
             from pathlib import Path
 
             import torch
-            from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
+            from tools.families.locateanything.vl_debug_runner import (
                 preprocess_image_inputs_for_trt,
             )
             from transformers import AutoConfig, AutoModel, AutoTokenizer

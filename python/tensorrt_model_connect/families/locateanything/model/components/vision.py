@@ -17,9 +17,9 @@ from types import ModuleType
 
 import numpy as np
 
-from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
-from .config import ModelConfig
-from .onnx_vision_builder import build_engine_from_onnx
+from ...weights import _has_tensor, _load_tensor, _open_safetensors
+from ...config import ModelConfig
+from .vision_onnx import build_engine_from_onnx
 
 
 def build_locateanything_vision_engine(

@@ -43,7 +43,7 @@ def get_hf_vision_features(
     from PIL import Image
 
     from tensorrt_model_connect.families.locateanything.config import ModelConfig
-    from tensorrt_model_connect.families.locateanything.vision_builder import (
+    from tensorrt_model_connect.families.locateanything.model.components.vision import (
         _build_moonvit,
         _build_projector,
         _load_modeling_vit,
