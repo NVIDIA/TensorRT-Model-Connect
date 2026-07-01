@@ -95,14 +95,19 @@ def _get_peak_memory_mb() -> float | None:
 @lru_cache(maxsize=1)
 def _family_perf_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned performance hooks from family folders."""
-    family_root = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = (
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
     )
+    handlers: dict[str, Path] = {}
+    for root in reversed(roots):
+        handlers.update(
+            {path.parent.name: path for path in root.glob("*/perf_hooks.py")}
+        )
     modules: list[ModuleType] = []
-    for handler_path in sorted(family_root.glob("*/perf_hooks.py")):
+    for family in sorted(handlers):
+        handler_path = handlers[family]
         module_name = f"_trtmc_perf_hooks_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:

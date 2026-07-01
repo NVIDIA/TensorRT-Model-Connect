@@ -1309,7 +1309,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             resolver=_match_result("family_package", _family_models),
             covered_by=(
                 "TestFamilyPlugin.test_family_only_change",
-                "TestFamilyOwnedBuilder.test_family_local_standard_decoder_builder",
+                "TestFamilyOwnedBuilder.test_family_local_model_implementation",
             ),
         ),
         ClassificationRule(
@@ -1341,7 +1341,8 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="python_profile_requirements",
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/"
-                r"families/([^/]+)/python_profile_requirements/[^/]+\.lock\.txt$"
+                r"families/([^/]+)/(?:profiles/requirements|python_profile_requirements)/"
+                r"[^/]+\.lock\.txt$"
             ),
             resolver=_match_result("python_profile_requirements", _python_profile_models),
             covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
@@ -1715,6 +1716,33 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             }),
             resolver=_match_result("model_plugin_validation_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_model_plugin_validation_tools",),
+        ),
+        ClassificationRule(
+            priority=447,
+            name="family_development_tool",
+            matcher=_regex_rule(r"tools/families/([A-Za-z]\w*)/.+\.py$"),
+            resolver=_match_result(
+                "family_development_tool", _family_models, ["tools"], False,
+            ),
+            covered_by=("TestFamilyPlugin.test_family_development_tool",),
+        ),
+        ClassificationRule(
+            priority=448,
+            name="family_ownership_tool",
+            matcher=_path_in({
+                "tools/families/__init__.py",
+                "tools/family_source_isolation.py",
+                "tools/family_specialization.py",
+                "tools/migrate_family_layout.py",
+                "tools/prune_family_helpers.py",
+                "tools/relocate_family_development.py",
+                "tools/specialize_family.py",
+                "tools/specialize_family_switches.py",
+            }),
+            resolver=_match_result(
+                "family_ownership_tool", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestUnitTiers.test_family_ownership_tools",),
         ),
         ClassificationRule(
             priority=450,

@@ -819,6 +819,16 @@ class TestFamilyPlugin:
         assert match.rule == "family_package"
         assert match.models == ["encoder-package-core"]
 
+    def test_family_development_tool(self, imap):
+        """Family-owned development tools select only their owner models."""
+        match = test_impact.classify_file(
+            "tools/families/decoder_family/debug_runner.py", imap)
+
+        assert match.rule == "family_development_tool"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
 # ---------------------------------------------------------------------------
 # Shared module tests (broad impact)
 # ---------------------------------------------------------------------------
@@ -872,7 +882,7 @@ class TestSharedModules:
     def test_python_profile_requirements_scope(self, imap):
         """python profile locks affect only families that use that profile."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/sequence_quantile_family/python_profile_requirements/sequence_profile.lock.txt",
+            "python/tensorrt_model_connect/families/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt",
             imap,
         )
 
@@ -893,10 +903,10 @@ class TestFamilyOwnedBuilder:
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
-    def test_family_local_standard_decoder_builder(self, imap):
-        """families/decoder_family/standard_decoder_builder.py -> exactly decoder_family models."""
+    def test_family_local_model_implementation(self, imap):
+        """families/decoder_family/model/model.py -> exactly decoder_family models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/standard_decoder_builder.py",
+            "python/tensorrt_model_connect/families/decoder_family/model/model.py",
             imap,
         )
         assert match.rule == "family_package"
@@ -1491,6 +1501,24 @@ class TestUnitTiers:
             assert match.unit_tiers == ["tools"]
             assert match.rebuild_cpp is False
 
+    def test_family_ownership_tools(self, imap):
+        """Family migration and isolation tools run tools-tier validation."""
+        for path in (
+            "tools/families/__init__.py",
+            "tools/family_source_isolation.py",
+            "tools/family_specialization.py",
+            "tools/migrate_family_layout.py",
+            "tools/prune_family_helpers.py",
+            "tools/relocate_family_development.py",
+            "tools/specialize_family.py",
+            "tools/specialize_family_switches.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "family_ownership_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+            assert match.rebuild_cpp is False
+
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
         match = test_impact.classify_file(
@@ -1966,7 +1994,7 @@ diff --git a/python/tensorrt_model_connect/families/__init__.py b/python/tensorr
 diff --git a/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml b/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml
 @@ -1 +1 @@
 +python_profile_specs = [
-+  "sequence_profile|families/sequence_quantile_family/python_profile_requirements/sequence_profile.lock.txt|families/sequence_quantile_family/python_profile_verify.py|true",
++  "sequence_profile|families/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt|families/sequence_quantile_family/profiles/verify.py|true",
 +]
 +default_execution_profiles = [
 +  "build|sequence_profile",

@@ -61,20 +61,23 @@ class StrategySpec(NamedTuple):
     trust_remote_code: bool = False
 
 
-def _family_root() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+def _family_handler_paths(filename: str) -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = (
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
     )
+    handlers: dict[str, Path] = {}
+    for root in reversed(roots):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
 
 
 @lru_cache(maxsize=1)
 def _family_matrix_modules() -> tuple[ModuleType, ...]:
     """Load optional family-owned matrix specs."""
     modules: list[ModuleType] = []
-    for hook_path in sorted(_family_root().glob("*/cpu_profile_matrix.py")):
+    for hook_path in _family_handler_paths("cpu_profile_matrix.py"):
         module_name = f"_trtmc_cpu_profile_matrix_{hook_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, hook_path)
         if spec is None or spec.loader is None:

@@ -5,7 +5,7 @@
 """Denoiser validation entrypoint.
 
 Concrete validation behavior is owned by model-family modules under
-``python/tensorrt_model_connect/families/*/validate_dit.py``. This shared tool
+``tools/families/*/validate_dit.py``. This shared tool
 only discovers and dispatches to those handlers.
 """
 
@@ -20,19 +20,25 @@ from types import ModuleType
 from typing import Any
 
 
-def _family_root() -> Path:
+def _family_roots() -> tuple[Path, ...]:
+    repo_root = Path(__file__).resolve().parents[1]
     return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
     )
+
+
+def _family_handler_paths(filename: str) -> list[Path]:
+    handlers: dict[str, Path] = {}
+    for root in reversed(_family_roots()):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
 
 
 @lru_cache(maxsize=1)
 def _family_validation_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
-    for handler_path in sorted(_family_root().glob("*/validate_dit.py")):
+    for handler_path in _family_handler_paths("validate_dit.py"):
         module_name = f"_trtmc_validate_dit_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:

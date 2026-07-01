@@ -40,17 +40,23 @@ STANDARD_PROMPTS = [
 ]
 
 
+def _family_handler_paths(filename: str) -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = (
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
+    )
+    handlers: dict[str, Path] = {}
+    for root in reversed(roots):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
+
+
 @lru_cache(maxsize=1)
 def _family_diff_logits_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned logit diff hooks from family folders."""
-    family_root = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
     modules: list[ModuleType] = []
-    for handler_path in sorted(family_root.glob("*/diff_logits.py")):
+    for handler_path in _family_handler_paths("diff_logits.py"):
         module_name = f"_trtmc_diff_logits_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:

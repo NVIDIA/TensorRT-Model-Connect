@@ -198,63 +198,62 @@ def test_unknown_nemo_archive_has_no_family_adapter(tmp_path):
 
 
 def test_repo_family_builders_use_model_local_helpers():
-    """Model family builders must not import broad shared builder helpers."""
+    """Model family builders must not import broad shared builder helpers.
+
+    Families own only the helpers they use; the filtered-source isolation test
+    verifies that local imports resolve without sibling directories.
+    """
     families_dir = (
         Path(__file__).resolve().parent.parent.parent
         / "python"
         / "tensorrt_model_connect"
         / "families"
     )
-    required_helpers = {
-        "graph_ops.py",
-        "graph_blocks.py",
-        "checkpoint_mapper.py",
-        "default_decoder.py",
-        "default_dual_profile_decoder.py",
-        "default_dual_profile_decoder_tp.py",
-        "utils.py",
+    forbidden_modules = {
+        "builders",
+        "checkpoint_mapper",
+        "config",
+        "graph_blocks",
+        "graph_ops",
     }
-    forbidden_imports = (
-        "from ...checkpoint_mapper import",
-        "from ...config import",
-        "from ...graph_ops import",
-        "from ...graph_blocks import",
-        "from ...builders.",
-        "from ... import graph_ops",
-        "from ... import graph_blocks",
-        "from tensorrt_model_connect.checkpoint_mapper import",
-        "from tensorrt_model_connect.config import",
-        "from tensorrt_model_connect.graph_ops import",
-        "from tensorrt_model_connect.graph_blocks import",
-        "from tensorrt_model_connect.builders.",
-    )
 
-    missing_helpers = []
     central_imports = []
     for family_dir in sorted(families_dir.iterdir()):
         if not family_dir.is_dir() or not (family_dir / "MODEL.toml").is_file():
             continue
-        expected = set(required_helpers)
-        if family_dir.name == "elf_flow":
-            expected.add("model_config.py")
-        else:
-            expected.add("config.py")
-        missing_helpers.extend(
-            f"{family_dir.name}/{helper}"
-            for helper in sorted(expected)
-            if not (family_dir / helper).is_file()
-        )
-
-        for path in sorted(family_dir.glob("*.py")):
+        for path in sorted(family_dir.rglob("*.py")):
             if path.name == "MODEL.toml":
                 continue
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in forbidden_imports):
-                central_imports.append(
-                    path.relative_to(families_dir).as_posix()
+            relative = path.relative_to(family_dir)
+            package_depth = len(relative.parent.parts)
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if node.level == 0:
+                    parts = (node.module or "").split(".")
+                    if (
+                        len(parts) >= 2
+                        and parts[0] == "tensorrt_model_connect"
+                        and parts[1] in forbidden_modules
+                    ):
+                        central_imports.append(relative.as_posix())
+                    continue
+                levels_outside_owner = max(
+                    0,
+                    (node.level - 1) - package_depth,
                 )
+                if levels_outside_owner == 0:
+                    continue
+                modules = [node.module] if node.module else [
+                    alias.name for alias in node.names
+                ]
+                if any(
+                    module and module.split(".", 1)[0] in forbidden_modules
+                    for module in modules
+                ):
+                    central_imports.append(relative.as_posix())
 
-    assert not missing_helpers
     assert not central_imports
 
 
