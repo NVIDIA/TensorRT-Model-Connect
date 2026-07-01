@@ -20,10 +20,11 @@ import sys
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 
 trt = trt_compat.get_trt()
+
 
 def _fuse_weight_norm(g: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Fuse weight_norm: weight = g * v / ||v||_2.

@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .checkpoint_mapper import WeightDict
-from .config import ModelConfig
-from ...parallel_config import (
+from . import model as graph_ops
+from ..weights import WeightDict
+from ..config import ModelConfig
+from ....parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
 )
@@ -25,14 +25,14 @@ from ...parallel_config import (
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ...parallel_config import ParallelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_first_dim(value: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
     if value.shape[0] % tp_size != 0:
         raise ValueError(f"Cannot shard first dimension {value.shape[0]} over TP{tp_size}")
     chunk = value.shape[0] // tp_size
-    return np.ascontiguousarray(value[rank * chunk:(rank + 1) * chunk])
+    return np.ascontiguousarray(value[rank * chunk : (rank + 1) * chunk])
 
 
 def _slice_last_dim(value: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -56,13 +56,16 @@ def _validate_bark_tp(
         raise ValueError("Bark tensor-parallel builder requires an enabled parallel config")
     if hidden % parallel.tp_size != 0:
         raise ValueError(
-            f"{sub_model} hidden_size={hidden} must be divisible by TP{parallel.tp_size}")
+            f"{sub_model} hidden_size={hidden} must be divisible by TP{parallel.tp_size}"
+        )
     if num_heads % parallel.tp_size != 0:
         raise ValueError(
-            f"{sub_model} num_heads={num_heads} must be divisible by TP{parallel.tp_size}")
+            f"{sub_model} num_heads={num_heads} must be divisible by TP{parallel.tp_size}"
+        )
     if mlp_size % parallel.tp_size != 0:
         raise ValueError(
-            f"{sub_model} mlp_size={mlp_size} must be divisible by TP{parallel.tp_size}")
+            f"{sub_model} mlp_size={mlp_size} must be divisible by TP{parallel.tp_size}"
+        )
 
 
 def shard_bark_decoder_weights(
@@ -141,8 +144,7 @@ def _row_parallel_linear(
     bias: np.ndarray | None = None,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    out = graph_ops.add_matmul_rhs_constant(
-        network, inp, in_width, out_width, weight, dtype=dtype)
+    out = graph_ops.add_matmul_rhs_constant(network, inp, in_width, out_width, weight, dtype=dtype)
     out = add_all_reduce_sum(network, out, tp_size)
     if bias is not None:
         out = graph_ops.add_bias_sum(network, out, out_width, bias, dtype=dtype)
@@ -181,13 +183,19 @@ def _add_bark_tp_decoder_layer(
     )
 
     q = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden, local_attention_size, weights[f"{lp}.w_q"], dtype=dtype)
+        network, normed, hidden, local_attention_size, weights[f"{lp}.w_q"], dtype=dtype
+    )
     k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden, local_attention_size, weights[f"{lp}.w_k"], dtype=dtype)
+        network, normed, hidden, local_attention_size, weights[f"{lp}.w_k"], dtype=dtype
+    )
     v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden, local_attention_size, weights[f"{lp}.w_v"], dtype=dtype)
-    for name, width in (("q", local_attention_size), ("k", local_attention_size),
-                        ("v", local_attention_size)):
+        network, normed, hidden, local_attention_size, weights[f"{lp}.w_v"], dtype=dtype
+    )
+    for name, width in (
+        ("q", local_attention_size),
+        ("k", local_attention_size),
+        ("v", local_attention_size),
+    ):
         bias = weights.get(f"{lp}.{name}_bias")
         if bias is None:
             continue
@@ -238,7 +246,8 @@ def _add_bark_tp_decoder_layer(
         dtype=dtype,
     )
     hidden_state = network.add_elementwise(
-        hidden_state, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden_state, attn_out, trt.ElementWiseOperation.SUM
+    ).get_output(0)
 
     normed2 = graph_ops.add_layer_norm(
         network,
@@ -250,7 +259,8 @@ def _add_bark_tp_decoder_layer(
         dtype=dtype,
     )
     fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed2, hidden, local_mlp_size, weights[f"{lp}.w_fc1"], dtype=dtype)
+        network, normed2, hidden, local_mlp_size, weights[f"{lp}.w_fc1"], dtype=dtype
+    )
     fc1_bias = weights.get(f"{lp}.fc1_bias")
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, local_mlp_size, fc1_bias, dtype=dtype)
@@ -266,7 +276,8 @@ def _add_bark_tp_decoder_layer(
         dtype=dtype,
     )
     hidden_state = network.add_elementwise(
-        hidden_state, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden_state, fc2, trt.ElementWiseOperation.SUM
+    ).get_output(0)
 
     return hidden_state, present_k, present_v
 
@@ -306,7 +317,8 @@ def build_bark_tp_decoder_engine(
     local_mlp_size = mlp_size // parallel.tp_size
     attention_window = max_cache_length + 1
     rank_weights = shard_bark_decoder_weights(
-        weights, sub_model=sub_model, sub_cfg=sub_cfg, parallel_config=parallel)
+        weights, sub_model=sub_model, sub_cfg=sub_cfg, parallel_config=parallel
+    )
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -336,29 +348,35 @@ def build_bark_tp_decoder_engine(
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["embedding"])
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), rank_weights["embedding"])
     position_table = graph_ops.add_constant(
-        network, (max_position, hidden), rank_weights["position_embedding"])
+        network, (max_position, hidden), rank_weights["position_embedding"]
+    )
     token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
 
     flag = network.add_shuffle(use_input_embed)
     flag.reshape_dims = (1, 1)
     one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
     inv_flag = network.add_elementwise(
-        one, flag.get_output(0), trt.ElementWiseOperation.SUB).get_output(0)
+        one, flag.get_output(0), trt.ElementWiseOperation.SUB
+    ).get_output(0)
     token_part = network.add_elementwise(
-        token_embed, inv_flag, trt.ElementWiseOperation.PROD).get_output(0)
+        token_embed, inv_flag, trt.ElementWiseOperation.PROD
+    ).get_output(0)
     embed_part = network.add_elementwise(
-        input_embed, flag.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        input_embed, flag.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
     hidden_state = network.add_elementwise(
-        token_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
+        token_part, embed_part, trt.ElementWiseOperation.SUM
+    ).get_output(0)
     pos_embed = network.add_gather(position_table, position_id, 0).get_output(0)
     hidden_state = network.add_elementwise(
-        hidden_state, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden_state, pos_embed, trt.ElementWiseOperation.SUM
+    ).get_output(0)
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+    )
     present_k_outputs = []
     present_v_outputs = []
     for layer_idx in range(num_layers):
@@ -392,9 +410,11 @@ def build_bark_tp_decoder_engine(
     )
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, output_vocab, rank_weights["w_out"])
+        network, hidden_state, hidden, output_vocab, rank_weights["w_out"]
+    )
     logits = graph_ops.add_bias_sum(
-        network, logits, output_vocab, np.zeros(output_vocab, dtype=np.float32))
+        network, logits, output_vocab, np.zeros(output_vocab, dtype=np.float32)
+    )
     logits.name = "logits"
     network.mark_output(logits)
 
