@@ -27,7 +27,7 @@ def attach_additional_plans(plugin, model_dir, config, weights, *, verbose: bool
 
 
 def make_trt_runner(engine_plan, config, max_cache_length):
-    from tensorrt_model_connect.families.whisper.debug_runner import WhisperTrtRunner
+    from tools.families.whisper.debug_runner import WhisperTrtRunner
 
     encoder_plan = getattr(config, "_encoder_plan", None)
     if encoder_plan is None:
