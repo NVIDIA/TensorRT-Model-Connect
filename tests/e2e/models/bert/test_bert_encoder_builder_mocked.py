@@ -58,7 +58,6 @@ def _drop_imported_module(module_name: str) -> None:
 def _import_with_fake_trt(module_name: str):
     _drop_imported_module(module_name)
     if module_name.endswith("encoder_builder"):
-        _drop_imported_module("tensorrt_model_connect.graph_ops")
         _drop_imported_module("tensorrt_model_connect.graph_blocks")
     previous_trt = sys.modules.get("tensorrt")
     sys.modules["tensorrt"] = _make_fake_trt_base()
@@ -74,7 +73,7 @@ def _import_with_fake_trt(module_name: str):
 @pytest.mark.unit
 def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
     """BERT encoder layer norm uses TRT native add_normalization_v2."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model")
 
     class _FakeTensor:
         def __init__(self, name: str, dtype=np.float32, shape: tuple[int, ...] = (3, 4)):
@@ -104,13 +103,12 @@ def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
         add_constant_calls.append((tuple(shape), tuple(np.asarray(values).shape)))
         return _FakeTensor(f"const_{len(add_constant_calls)}", _kw.get("dtype", np.float32))
 
-    with patch.object(mod.graph_ops, "add_constant", side_effect=_fake_add_constant):
+    with patch.object(mod, "add_constant", side_effect=_fake_add_constant):
         net = _FakeNetwork()
         out = mod._add_seq_layer_norm(
             network=net,
             inp=_FakeTensor("in"),
             hidden_size=4,
-            seq_length=3,
             gamma=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
             beta=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
             eps=1e-6,
