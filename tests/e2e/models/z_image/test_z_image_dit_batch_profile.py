@@ -168,7 +168,7 @@ def _make_tensor(*_a, **_kw) -> _Tensor:
 
 def _patch_graph_ops(monkeypatch):
     """Replace heavy graph_ops calls with tensor-returning stubs."""
-    import tensorrt_model_connect.families.z_image.graph_ops as gops
+    import tensorrt_model_connect.families.z_image.model.model as gops
     for name in (
         "add_constant",
         "add_matmul_rhs_constant",
