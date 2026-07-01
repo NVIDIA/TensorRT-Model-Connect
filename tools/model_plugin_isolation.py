@@ -41,12 +41,21 @@ class RuntimePlugin:
 
 
 _NODE_ID_MODEL_RE = re.compile(r"::test_model_e2e\[([^\]]+)\]")
+_MISSING_FILE_RE = re.compile(
+    r"No such file or directory:\s*['\"](?P<path>[^'\"]+)['\"]"
+)
 
 _MODEL_OWNED_ROOTS = {
     Path("python/tensorrt_model_connect/families"): "builder_families",
     Path("src/runtime/models"): "runtime_plugins",
     Path("tests/e2e/models"): "e2e_families",
     Path("tests/cpp/models"): "runtime_plugins",
+}
+
+_OWNER_GROUP_LABELS = {
+    "builder_families": "model family (builder files)",
+    "runtime_plugins": "runtime model plugin",
+    "e2e_families": "model family (E2E files)",
 }
 
 _MODEL_OWNED_IMPACT_RULES = frozenset(
@@ -642,7 +651,62 @@ def _failure_causes(result: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(causes))
 
 
-def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, object]:
+def _isolation_violations(
+    causes: list[str],
+    repo_root: Path,
+    selected_owners: dict[str, set[str]],
+) -> list[dict[str, object]]:
+    violations: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for cause in causes:
+        for match in _MISSING_FILE_RE.finditer(cause):
+            missing_path = Path(match.group("path"))
+            candidate = (
+                missing_path.resolve()
+                if missing_path.is_absolute()
+                else (repo_root / missing_path).resolve()
+            )
+            try:
+                relative = candidate.relative_to(repo_root)
+            except ValueError:
+                relative = None
+                candidate_parts = candidate.parts
+                for owned_root in _MODEL_OWNED_ROOTS:
+                    root_parts = owned_root.parts
+                    for index in range(len(candidate_parts) - len(root_parts) + 1):
+                        if candidate_parts[index : index + len(root_parts)] == root_parts:
+                            relative = Path(*candidate_parts[index:])
+                            break
+                    if relative is not None:
+                        break
+                if relative is None:
+                    continue
+
+            for owned_root, owner_group in _MODEL_OWNED_ROOTS.items():
+                resource_owner = _owner_under(relative, owned_root)
+                if not resource_owner or resource_owner in selected_owners[owner_group]:
+                    continue
+                key = (relative.as_posix(), owner_group, resource_owner)
+                if key in seen:
+                    continue
+                seen.add(key)
+                violations.append(
+                    {
+                        "resource": relative.as_posix(),
+                        "owner_group": owner_group,
+                        "resource_owner": resource_owner,
+                        "selected_owners": sorted(selected_owners[owner_group]),
+                    }
+                )
+    return violations
+
+
+def _verify_model_result(
+    model_name: str,
+    artifacts_dir: Path,
+    repo_root: Path,
+    selected_owners: dict[str, set[str]],
+) -> dict[str, object]:
     result_path = artifacts_dir / model_name / "result.json"
     errors: list[str] = []
     if not result_path.is_file():
@@ -652,6 +716,7 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
             "passed": False,
             "failure_type": None,
             "failure_causes": [],
+            "isolation_violations": [],
             "errors": ["result.json is missing"],
         }
     try:
@@ -663,6 +728,7 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
             "passed": False,
             "failure_type": None,
             "failure_causes": [],
+            "isolation_violations": [],
             "errors": [f"result.json could not be read: {exc}"],
         }
     if not isinstance(result, dict):
@@ -711,14 +777,75 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
 
     errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
     errors = list(dict.fromkeys(errors))
+    failure_causes = _failure_causes(result)
     return {
         "model": model_name,
         "result_path": str(result_path),
         "passed": not errors,
         "failure_type": result.get("failure_type"),
-        "failure_causes": _failure_causes(result),
+        "failure_causes": failure_causes,
+        "isolation_violations": _isolation_violations(
+            failure_causes, repo_root, selected_owners
+        ),
         "errors": errors,
     }
+
+
+def _unique_isolation_violations(
+    results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    violations: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for result in results:
+        result_violations = result.get("isolation_violations", [])
+        if not isinstance(result_violations, list):
+            continue
+        for violation in result_violations:
+            if not isinstance(violation, dict):
+                continue
+            key = (
+                str(violation.get("resource", "")),
+                str(violation.get("owner_group", "")),
+                str(violation.get("resource_owner", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(violation)
+    return violations
+
+
+def _print_isolation_violations(violations: list[dict[str, object]]) -> None:
+    if not violations:
+        return
+    print("MODEL ISOLATION VIOLATION DETECTED", file=sys.stderr)
+    print(
+        "  CI rebuilds and runs each model family from a filtered source tree that "
+        "contains only that family's owned files plus shared/plugin infrastructure.",
+        file=sys.stderr,
+    )
+    for violation in violations:
+        owner_group = str(violation.get("owner_group", ""))
+        scope_label = _OWNER_GROUP_LABELS.get(owner_group, owner_group)
+        selected = ", ".join(
+            f"'{owner}'" for owner in violation.get("selected_owners", [])
+        ) or "<none>"
+        resource_owner = str(violation.get("resource_owner", ""))
+        resource = str(violation.get("resource", ""))
+        print(f"  Selected {scope_label}: {selected}", file=sys.stderr)
+        print(f"  Resource-owning {scope_label}: '{resource_owner}'", file=sys.stderr)
+        print(f"  Cross-family resource: {resource}", file=sys.stderr)
+        print(
+            f"  Why CI failed: {selected} used a resource owned by '{resource_owner}'. "
+            "Strict isolation intentionally removes resources owned by other model "
+            "families, so cross-family dependencies fail.",
+            file=sys.stderr,
+        )
+        print(
+            "  Required boundary: keep the dependency in the selected model family's "
+            "owned files or move it to approved shared/plugin infrastructure.",
+            file=sys.stderr,
+        )
 
 
 def command_verify_results(args: argparse.Namespace) -> int:
@@ -735,8 +862,17 @@ def command_verify_results(args: argparse.Namespace) -> int:
             "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
         )
 
+    selected_manifests = [manifests[name] for name in sorted(model_names)]
+    runtime_plugins = discover_runtime_plugins(repo_root)
+    selected_plugins = plugins_for_models(model_names, manifests, runtime_plugins)
+    selected_owners = {
+        "builder_families": {manifest.family for manifest in selected_manifests},
+        "runtime_plugins": {plugin.model_id for plugin in selected_plugins},
+        "e2e_families": {manifest.family for manifest in selected_manifests},
+    }
     results = [
-        _verify_model_result(model_name, artifacts_dir) for model_name in sorted(model_names)
+        _verify_model_result(model_name, artifacts_dir, repo_root, selected_owners)
+        for model_name in sorted(model_names)
     ]
     report = {
         "schema_version": 1,
@@ -751,6 +887,7 @@ def command_verify_results(args: argparse.Namespace) -> int:
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(report_path)
 
+    _print_isolation_violations(_unique_isolation_violations(results))
     for result in results:
         status = "PASS" if result["passed"] else "FAIL"
         failure_type = result.get("failure_type")

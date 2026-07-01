@@ -649,6 +649,15 @@ def test_verify_results_reports_build_failure_root_cause(tmp_path: Path) -> None
     artifacts_dir = tmp_path / "artifacts"
     report_path = tmp_path / "verification.json"
     result_data = _passing_result("decoder-small")
+    missing_resource = (
+        tmp_path
+        / "different-ci-projection"
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "sibling"
+        / "MODEL.toml"
+    )
     result_data.update(
         status="fail",
         failure_type="build_fail",
@@ -656,7 +665,7 @@ def test_verify_results_reports_build_failure_root_cause(tmp_path: Path) -> None
         determinism={
             "build_error": (
                 "Bundle build failed (rc=1):\n"
-                "Error: missing families/sibling/MODEL.toml"
+                f"Error: [Errno 2] No such file or directory: '{missing_resource}'"
             )
         },
     )
@@ -683,11 +692,28 @@ def test_verify_results_reports_build_failure_root_cause(tmp_path: Path) -> None
     )
 
     assert result.returncode == 1
+    assert "MODEL ISOLATION VIOLATION DETECTED" in result.stderr
+    assert "CI rebuilds and runs each model family" in result.stderr
+    assert "Selected model family (builder files): 'decoder_family'" in result.stderr
+    assert "Resource-owning model family (builder files): 'sibling'" in result.stderr
+    assert "Why CI failed:" in result.stderr
+    assert "cross-family dependencies fail" in result.stderr
     assert "FAIL decoder-small (build_fail)" in result.stderr
     assert "Root cause:" in result.stderr
-    assert "Error: missing families/sibling/MODEL.toml" in result.stderr
+    assert str(missing_resource) in result.stderr
     assert "Verification errors:" in result.stderr
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["results"][0]["failure_causes"] == [
-        "Bundle build failed (rc=1):\nError: missing families/sibling/MODEL.toml"
+        "Bundle build failed (rc=1):\n"
+        f"Error: [Errno 2] No such file or directory: '{missing_resource}'"
+    ]
+    assert report["results"][0]["isolation_violations"] == [
+        {
+            "resource": (
+                "python/tensorrt_model_connect/families/sibling/MODEL.toml"
+            ),
+            "owner_group": "builder_families",
+            "resource_owner": "sibling",
+            "selected_owners": ["decoder_family"],
+        }
     ]
