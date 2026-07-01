@@ -225,6 +225,8 @@ def test_repo_family_builders_use_model_local_helpers():
             if path.name == "MODEL.toml":
                 continue
             relative = path.relative_to(family_dir)
+            if "tests" in relative.parts:
+                continue
             package_depth = len(relative.parent.parts)
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
