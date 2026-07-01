@@ -11,22 +11,21 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from .config import ModelConfig
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
+from . import model as graph_ops
+from ..config import ModelConfig
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ....parallel_config import ParallelConfig
 
 
 def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):
     """LayerNorm without bias via TRT native normalization."""
     beta = np.zeros(hidden_size, dtype=np.float32)
-    return graph_ops.add_layer_norm_native(
-        network, inp, hidden_size, gamma, beta, eps)
+    return graph_ops.add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps)
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -52,11 +51,13 @@ def _validate_modernbert_tp(
     if config.num_attention_heads % tp != 0:
         raise ValueError(
             "ModernBERT tensor parallel requires num_attention_heads divisible by "
-            f"tp_size ({config.num_attention_heads} vs {tp})")
+            f"tp_size ({config.num_attention_heads} vs {tp})"
+        )
     if config.intermediate_size % tp != 0:
         raise ValueError(
             "ModernBERT tensor parallel requires intermediate_size divisible by "
-            f"tp_size ({config.intermediate_size} vs {tp})")
+            f"tp_size ({config.intermediate_size} vs {tp})"
+        )
 
     for layer_idx in range(config.num_hidden_layers):
         prefix = f"layer.{layer_idx}"
@@ -114,8 +115,7 @@ def build_tp_modernbert_engine(
     """Build a rank-local TensorRT engine plan for ModernBERT."""
     parallel = normalize_parallel_config(parallel_config)
     if not parallel.enabled:
-        raise ValueError(
-            "build_tp_modernbert_engine requires tensor_parallel mode and tp_size > 1")
+        raise ValueError("build_tp_modernbert_engine requires tensor_parallel mode and tp_size > 1")
     weights = shard_modernbert_weights(config, weights, parallel=parallel)
 
     hidden = config.hidden_size
@@ -141,8 +141,7 @@ def build_tp_modernbert_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -154,32 +153,37 @@ def build_tp_modernbert_engine(
     ones_c = graph_ops.add_constant(network, (1,), np.array([1.0], dtype=np.float32))
     neg_large = graph_ops.add_constant(network, (1,), np.array([-1e10], dtype=np.float32))
     inv_mask = network.add_elementwise(
-        ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB)
+        ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB
+    )
     pad_penalty = network.add_elementwise(
-        inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD)
+        inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD
+    )
     pad_mask_4d = network.add_shuffle(pad_penalty.get_output(0))
     pad_mask_4d.reshape_dims = (1, 1, 1, max_seq)
 
     rope_tables = {}
     for theta in set([full_theta, sliding_theta]):
         cos = graph_ops.add_constant(
-            network, (max_seq, head_dim // 2),
-            graph_ops.make_rope_table_half_dim(
-                max_seq, head_dim, theta, cosine=True))
+            network,
+            (max_seq, head_dim // 2),
+            graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=True),
+        )
         sin = graph_ops.add_constant(
-            network, (max_seq, head_dim // 2),
-            graph_ops.make_rope_table_half_dim(
-                max_seq, head_dim, theta, cosine=False))
+            network,
+            (max_seq, head_dim // 2),
+            graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=False),
+        )
         rope_tables[theta] = (cos, sin)
 
     pos_indices = graph_ops.add_constant(
-        network, (max_seq,), np.arange(max_seq, dtype=np.int32),
-        dtype=np.int32)
+        network, (max_seq,), np.arange(max_seq, dtype=np.int32), dtype=np.int32
+    )
 
     embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
     word_embed = network.add_gather(embed_table, input_ids, 0)
     hidden_state = _add_layernorm_no_bias(
-        network, word_embed.get_output(0), hidden, weights["embed_norm"], eps)
+        network, word_embed.get_output(0), hidden, weights["embed_norm"], eps
+    )
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
@@ -193,68 +197,97 @@ def build_tp_modernbert_engine(
 
         if f"{prefix}.attn_norm" in weights:
             attn_input = _add_layernorm_no_bias(
-                network, hidden_state, hidden,
-                weights[f"{prefix}.attn_norm"], eps)
+                network, hidden_state, hidden, weights[f"{prefix}.attn_norm"], eps
+            )
         else:
             attn_input = hidden_state
 
         q = graph_ops.add_matmul_rhs_constant(
-            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_q"])
+            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_q"]
+        )
         k = graph_ops.add_matmul_rhs_constant(
-            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_k"])
+            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_k"]
+        )
         v = graph_ops.add_matmul_rhs_constant(
-            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_v"])
+            network, attn_input, hidden, attention_size, weights[f"{prefix}.w_v"]
+        )
 
         q = graph_ops.add_apply_rope_native(
-            network, q, num_heads, head_dim,
-            cos_table, sin_table, pos_indices, head_dim,
-            sequence_length=max_seq)
+            network,
+            q,
+            num_heads,
+            head_dim,
+            cos_table,
+            sin_table,
+            pos_indices,
+            head_dim,
+            sequence_length=max_seq,
+        )
         k = graph_ops.add_apply_rope_native(
-            network, k, num_heads, head_dim,
-            cos_table, sin_table, pos_indices, head_dim,
-            sequence_length=max_seq)
+            network,
+            k,
+            num_heads,
+            head_dim,
+            cos_table,
+            sin_table,
+            pos_indices,
+            head_dim,
+            sequence_length=max_seq,
+        )
 
         context_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=num_heads, head_dim=head_dim,
-            q_seq=max_seq, kv_seq=max_seq,
-            mask=pad_mask_4d.get_output(0))
+            network,
+            q,
+            k,
+            v,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            q_seq=max_seq,
+            kv_seq=max_seq,
+            mask=pad_mask_4d.get_output(0),
+        )
 
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat, attention_size, hidden, weights[f"{prefix}.w_o"])
+            network, context_flat, attention_size, hidden, weights[f"{prefix}.w_o"]
+        )
         attn_out = add_all_reduce_sum(network, attn_out, parallel.tp_size)
 
         res1 = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
         hidden_state = res1.get_output(0)
 
         mlp_input = _add_layernorm_no_bias(
-            network, hidden_state, hidden, weights[f"{prefix}.mlp_norm"], eps)
+            network, hidden_state, hidden, weights[f"{prefix}.mlp_norm"], eps
+        )
 
         inp_proj = graph_ops.add_matmul_rhs_constant(
-            network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_input"])
+            network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_input"]
+        )
         gate_proj = graph_ops.add_matmul_rhs_constant(
-            network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_gate"])
+            network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_gate"]
+        )
         inp_act = graph_ops.add_gelu_erf(network, inp_proj)
         gated = network.add_elementwise(inp_act, gate_proj, trt.ElementWiseOperation.PROD)
 
         down = graph_ops.add_matmul_rhs_constant(
-            network, gated.get_output(0), intermediate, hidden, weights[f"{prefix}.w_down"])
+            network, gated.get_output(0), intermediate, hidden, weights[f"{prefix}.w_down"]
+        )
         down = add_all_reduce_sum(network, down, parallel.tp_size)
 
         res2 = network.add_elementwise(hidden_state, down, trt.ElementWiseOperation.SUM)
         hidden_state = res2.get_output(0)
 
-    hidden_state = _add_layernorm_no_bias(
-        network, hidden_state, hidden, weights["final_norm"], eps)
+    hidden_state = _add_layernorm_no_bias(network, hidden_state, hidden, weights["final_norm"], eps)
 
     hidden_state.name = "hidden_states"
     network.mark_output(hidden_state)
 
     if verbose:
-        print(f"[trtmc build] Building ModernBERT encoder TRT engine "
-              f"({num_layers} layers, hidden={hidden}, tp={parallel.tp_size}, "
-              f"seq_len={max_seq}) ...",
-              file=sys.stderr)
+        print(
+            f"[trtmc build] Building ModernBERT encoder TRT engine "
+            f"({num_layers} layers, hidden={hidden}, tp={parallel.tp_size}, "
+            f"seq_len={max_seq}) ...",
+            file=sys.stderr,
+        )
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
