@@ -15,13 +15,12 @@ Detection: model_type == "mpnet"
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -31,7 +30,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .encoder_builder import build_encoder_engine
+from .model import model as encoder_model
 
 
 def _detect_prefix(readers) -> str:
@@ -104,7 +103,9 @@ class MpnetPlugin:
         return model_type.lower() == "mpnet"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -112,22 +113,17 @@ class MpnetPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        _intermediate = config.intermediate_size
-        _max_pos = config.max_position_embeddings
-
         root = _detect_prefix(readers)
 
         weights = WeightDict()
 
         # Word embedding
-        embedding = _load_tensor(
-            readers, _pfx(root, "embeddings.word_embeddings.weight"))
+        embedding = _load_tensor(readers, _pfx(root, "embeddings.word_embeddings.weight"))
         assert embedding.shape == (vocab, hidden)
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding — MPNet uses padding_idx=1, positions start at 2
-        pos_embed_raw = _load_tensor(
-            readers, _pfx(root, "embeddings.position_embeddings.weight"))
+        pos_embed_raw = _load_tensor(readers, _pfx(root, "embeddings.position_embeddings.weight"))
         pad_idx = config.raw.get("pad_token_id", 1)
         pos_offset = pad_idx + 1
         pos_embed = pos_embed_raw[pos_offset:].astype(np.float32)
@@ -135,14 +131,11 @@ class MpnetPlugin:
 
         # No token type embedding — synthesize zeros matching type_vocab_size
         type_vocab_size = config.raw.get("type_vocab_size", 2)
-        weights["token_type_embedding"] = np.zeros(
-            (type_vocab_size, hidden), dtype=np.float32)
+        weights["token_type_embedding"] = np.zeros((type_vocab_size, hidden), dtype=np.float32)
 
         # Embedding LayerNorm
-        ln_w = _load_tensor(
-            readers, _pfx(root, "embeddings.LayerNorm.weight"))
-        ln_b = _load_tensor(
-            readers, _pfx(root, "embeddings.LayerNorm.bias"))
+        ln_w = _load_tensor(readers, _pfx(root, "embeddings.LayerNorm.weight"))
+        ln_b = _load_tensor(readers, _pfx(root, "embeddings.LayerNorm.bias"))
         weights["embed_norm"] = ln_w.astype(np.float32)
         weights["embed_norm_beta"] = ln_b.astype(np.float32)
 
@@ -155,32 +148,30 @@ class MpnetPlugin:
             k_w = _load_tensor(readers, f"{hf}.attention.attn.k.weight")
             v_w = _load_tensor(readers, f"{hf}.attention.attn.v.weight")
 
-            weights[f"{prefix}.w_q"] = np.ascontiguousarray(
-                q_w.T.astype(np.float32))
-            weights[f"{prefix}.w_k"] = np.ascontiguousarray(
-                k_w.T.astype(np.float32))
-            weights[f"{prefix}.w_v"] = np.ascontiguousarray(
-                v_w.T.astype(np.float32))
+            weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w.T.astype(np.float32))
+            weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
+            weights[f"{prefix}.w_v"] = np.ascontiguousarray(v_w.T.astype(np.float32))
 
             weights[f"{prefix}.q_bias"] = _load_tensor(
-                readers, f"{hf}.attention.attn.q.bias").astype(np.float32)
+                readers, f"{hf}.attention.attn.q.bias"
+            ).astype(np.float32)
             weights[f"{prefix}.k_bias"] = _load_tensor(
-                readers, f"{hf}.attention.attn.k.bias").astype(np.float32)
+                readers, f"{hf}.attention.attn.k.bias"
+            ).astype(np.float32)
             weights[f"{prefix}.v_bias"] = _load_tensor(
-                readers, f"{hf}.attention.attn.v.bias").astype(np.float32)
+                readers, f"{hf}.attention.attn.v.bias"
+            ).astype(np.float32)
 
             # Output projection — .attention.attn.o
             o_w = _load_tensor(readers, f"{hf}.attention.attn.o.weight")
-            weights[f"{prefix}.w_o"] = np.ascontiguousarray(
-                o_w.T.astype(np.float32))
+            weights[f"{prefix}.w_o"] = np.ascontiguousarray(o_w.T.astype(np.float32))
             weights[f"{prefix}.o_bias"] = _load_tensor(
-                readers, f"{hf}.attention.attn.o.bias").astype(np.float32)
+                readers, f"{hf}.attention.attn.o.bias"
+            ).astype(np.float32)
 
             # Post-attention LayerNorm — .attention.LayerNorm
-            attn_ln_w = _load_tensor(
-                readers, f"{hf}.attention.LayerNorm.weight")
-            attn_ln_b = _load_tensor(
-                readers, f"{hf}.attention.LayerNorm.bias")
+            attn_ln_w = _load_tensor(readers, f"{hf}.attention.LayerNorm.weight")
+            attn_ln_b = _load_tensor(readers, f"{hf}.attention.LayerNorm.bias")
             weights[f"{prefix}.post_attn_norm"] = attn_ln_w.astype(np.float32)
             weights[f"{prefix}.post_attn_norm_beta"] = attn_ln_b.astype(np.float32)
 
@@ -190,18 +181,14 @@ class MpnetPlugin:
             fc2_w = _load_tensor(readers, f"{hf}.output.dense.weight")
             fc2_b = _load_tensor(readers, f"{hf}.output.dense.bias")
 
-            weights[f"{prefix}.w_fc1"] = np.ascontiguousarray(
-                fc1_w.T.astype(np.float32))
+            weights[f"{prefix}.w_fc1"] = np.ascontiguousarray(fc1_w.T.astype(np.float32))
             weights[f"{prefix}.fc1_bias"] = fc1_b.astype(np.float32)
-            weights[f"{prefix}.w_fc2"] = np.ascontiguousarray(
-                fc2_w.T.astype(np.float32))
+            weights[f"{prefix}.w_fc2"] = np.ascontiguousarray(fc2_w.T.astype(np.float32))
             weights[f"{prefix}.fc2_bias"] = fc2_b.astype(np.float32)
 
             # Output LayerNorm — .output.LayerNorm
-            out_ln_w = _load_tensor(
-                readers, f"{hf}.output.LayerNorm.weight")
-            out_ln_b = _load_tensor(
-                readers, f"{hf}.output.LayerNorm.bias")
+            out_ln_w = _load_tensor(readers, f"{hf}.output.LayerNorm.weight")
+            out_ln_b = _load_tensor(readers, f"{hf}.output.LayerNorm.bias")
             weights[f"{prefix}.output_norm"] = out_ln_w.astype(np.float32)
             weights[f"{prefix}.output_norm_beta"] = out_ln_b.astype(np.float32)
 
@@ -218,46 +205,50 @@ class MpnetPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
-        public_module = sys.modules.get(__package__)
-        compute_relative_position_bias = getattr(
-            public_module,
-            "_compute_relative_position_bias",
-            _compute_relative_position_bias,
-        )
-        builder = getattr(public_module, "build_encoder_engine", build_encoder_engine)
 
         # Pre-compute relative position bias if present
         if "_relative_attention_bias" in weights:
             bias_table = weights.pop("_relative_attention_bias")
             num_buckets = weights.pop("_relative_attention_num_buckets")
             num_heads = bias_table.shape[1]
-            bias_matrix = compute_relative_position_bias(
-                max_cache_length, num_buckets, num_heads, bias_table)
+            bias_matrix = _compute_relative_position_bias(
+                max_cache_length, num_buckets, num_heads, bias_table
+            )
             weights["relative_position_bias"] = bias_matrix
 
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="MPNet tensor-parallel builds")
+                parallel, feature="MPNet tensor-parallel builds"
+            )
             if quant_ctx is not None:
                 raise ValueError("MPNet tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_encoder_engine
-            return build_tp_encoder_engine(
-                config, weights,
+            return encoder_model.build_tp_encoder_engine(
+                config,
+                weights,
                 max_seq_length=max_cache_length,
+                precision=precision,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
-        return builder(
-            config, weights,
+        return encoder_model.build_encoder_engine(
+            config,
+            weights,
             max_seq_length=max_cache_length,
             precision=precision,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
 
 plugin = MpnetPlugin()

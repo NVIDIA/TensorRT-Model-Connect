@@ -4,7 +4,7 @@
 """Unit tests for MPNet family plugin helpers and plugin behavior.
 
 Trace: ARCH-FAM-001, UD-FAM-MPNET
-Intent: Validate MPNet family plugin weight key mapping, relative position bias handling, and config parsing
+Intent: Validate MPNet family weight mapping, relative position bias, and config parsing
 Preconditions: Synthetic MPNet weight tensors with optional relative position bias are provided
 Postconditions: Plugin produces correct canonical weight keys including optional bias terms
 """
@@ -12,6 +12,7 @@ Postconditions: Plugin produces correct canonical weight keys including optional
 from __future__ import annotations
 
 import json
+import importlib
 
 import numpy as np
 import pytest
@@ -20,8 +21,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 try:
-    from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.mpnet as mpnet_mod
+    from tensorrt_model_connect.families.mpnet.config import ModelConfig
+
+    mpnet_mod = importlib.import_module("tensorrt_model_connect.families.mpnet.plugin")
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -91,8 +93,7 @@ def _make_mpnet_tensors(root: str, *, include_rel_bias: bool) -> dict[str, np.nd
     return t
 
 
-def _install_tensor_stubs(monkeypatch: pytest.MonkeyPatch,
-                          tensors: dict[str, np.ndarray]) -> None:
+def _install_tensor_stubs(monkeypatch: pytest.MonkeyPatch, tensors: dict[str, np.ndarray]) -> None:
     monkeypatch.setattr(mpnet_mod, "_open_safetensors", lambda _p: ["reader"])
     monkeypatch.setattr(mpnet_mod, "_has_tensor", lambda _r, name: name in tensors)
     monkeypatch.setattr(mpnet_mod, "_load_tensor", lambda _r, name: tensors[name])
@@ -161,7 +162,7 @@ def test_load_weights_no_prefix_with_relative_bias(
     """Intent: cover root='' loading and optional relative-bias capture.
 
     Preconditions: tensor map contains bare-key MPNet tensors plus relative bias.
-    Postconditions: standard keys load, position embeddings are offset-sliced, and metadata keys are emitted.
+    Postconditions: standard keys load, positions are offset-sliced, and metadata is emitted.
     """
     tensors = _make_mpnet_tensors("", include_rel_bias=True)
     _install_tensor_stubs(monkeypatch, tensors)
@@ -170,8 +171,12 @@ def test_load_weights_no_prefix_with_relative_bias(
     weights = mpnet_mod.plugin.load_weights("/unused", cfg)
 
     np.testing.assert_allclose(weights["embedding"], tensors["embeddings.word_embeddings.weight"])
-    np.testing.assert_allclose(weights["position_embedding"], tensors["embeddings.position_embeddings.weight"][2:])
-    np.testing.assert_allclose(weights["layer.0.w_q"], tensors["encoder.layer.0.attention.attn.q.weight"].T)
+    np.testing.assert_allclose(
+        weights["position_embedding"], tensors["embeddings.position_embeddings.weight"][2:]
+    )
+    np.testing.assert_allclose(
+        weights["layer.0.w_q"], tensors["encoder.layer.0.attention.attn.q.weight"].T
+    )
 
     assert weights["token_type_embedding"].shape == (3, 4)
     np.testing.assert_allclose(weights["token_type_embedding"], np.zeros((3, 4), dtype=np.float32))
@@ -233,7 +238,7 @@ def test_build_engine_with_relative_bias_precompute(
         return b"mpnet-plan"
 
     monkeypatch.setattr(mpnet_mod, "_compute_relative_position_bias", fake_compute)
-    monkeypatch.setattr(mpnet_mod, "build_encoder_engine", fake_builder)
+    monkeypatch.setattr(mpnet_mod.encoder_model, "build_encoder_engine", fake_builder)
 
     cfg = _cfg()
     bias_table = np.arange(16, dtype=np.float32).reshape(8, 2)
@@ -265,11 +270,17 @@ def test_build_engine_without_relative_bias_does_not_compute(
     Preconditions: _compute_relative_position_bias is patched to fail if called.
     Postconditions: build delegates directly without relative bias insertion.
     """
+
     def fail_compute(*_args, **_kwargs):
         raise AssertionError("_compute_relative_position_bias should not be called")
 
     def fake_builder(
-        _config, weights, *, max_seq_length, precision, verbose,
+        _config,
+        weights,
+        *,
+        max_seq_length,
+        precision,
+        verbose,
     ):
         assert max_seq_length == 7
         assert precision == "fp32"
@@ -278,7 +289,7 @@ def test_build_engine_without_relative_bias_does_not_compute(
         return b"mpnet-no-rel-bias"
 
     monkeypatch.setattr(mpnet_mod, "_compute_relative_position_bias", fail_compute)
-    monkeypatch.setattr(mpnet_mod, "build_encoder_engine", fake_builder)
+    monkeypatch.setattr(mpnet_mod.encoder_model, "build_encoder_engine", fake_builder)
 
     out = mpnet_mod.plugin.build_engine(
         _cfg(),
