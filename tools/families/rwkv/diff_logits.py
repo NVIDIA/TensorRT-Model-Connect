@@ -9,7 +9,7 @@ def handles_model_type(model_type: str) -> bool:
 
 def make_trt_runner(engine_plan, config, max_cache_length):
     del max_cache_length
-    from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+    from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
     return RwkvTrtRunner(
         engine_plan=engine_plan,

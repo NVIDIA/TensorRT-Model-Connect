@@ -18,7 +18,6 @@ except ImportError:
         cudart = None  # type: ignore[assignment]
 
 
-
 def _check_cuda(status):
     if cudart is None:
         raise RuntimeError("cuda-python is required for debug_runner execution")
@@ -54,12 +53,12 @@ def load_engine_from_bundle(
         sections = header.get("sections", {})
         engine_meta = sections.get(section_name)
         if engine_meta is None:
-            raise KeyError(
-                f"Bundle {bundle_path!r} does not contain section {section_name!r}")
+            raise KeyError(f"Bundle {bundle_path!r} does not contain section {section_name!r}")
         f.seek(16 + header_len + engine_meta["offset"])
         engine_plan = f.read(engine_meta["size"])
 
     return engine_plan, header
+
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
     """Load a named raw section from this family's .trtfb bundle."""
@@ -78,6 +77,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
             return None
         f.seek(16 + header_len + meta["offset"])
         return f.read(meta["size"])
+
 
 def load_config_from_bundle(bundle_path: str) -> dict:
     """Load and parse this family's config.json from a .trtfb bundle."""
@@ -143,9 +143,18 @@ class RwkvTrtRunner:
         self._d_p_den = []
         self._d_p_max = []
         for _ in range(num_layers):
-            for lst in [self._d_attn, self._d_ff, self._d_num, self._d_den,
-                        self._d_max, self._d_p_attn, self._d_p_ff,
-                        self._d_p_num, self._d_p_den, self._d_p_max]:
+            for lst in [
+                self._d_attn,
+                self._d_ff,
+                self._d_num,
+                self._d_den,
+                self._d_max,
+                self._d_p_attn,
+                self._d_p_ff,
+                self._d_p_num,
+                self._d_p_den,
+                self._d_p_max,
+            ]:
                 err, ptr = cudart.cudaMalloc(state_bytes)
                 _check_cuda(err)
                 lst.append(ptr)
@@ -168,12 +177,14 @@ class RwkvTrtRunner:
             if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
                 shape = tuple(self.engine.get_tensor_shape(name))
                 self._output_shapes[name] = shape
-                if (name != "logits"
-                        and not name.startswith("present_attn_")
-                        and not name.startswith("present_ff_")
-                        and not name.startswith("present_num_")
-                        and not name.startswith("present_den_")
-                        and not name.startswith("present_max_")):
+                if (
+                    name != "logits"
+                    and not name.startswith("present_attn_")
+                    and not name.startswith("present_ff_")
+                    and not name.startswith("present_num_")
+                    and not name.startswith("present_den_")
+                    and not name.startswith("present_max_")
+                ):
                     self._debug_output_names.append(name)
 
         self._d_debug = {}
@@ -193,8 +204,12 @@ class RwkvTrtRunner:
             # max_state init: -1e38
             h_neg_inf = np.full(self.hidden_size, -1e38, dtype=np.float32)
             cudart.cudaMemcpyAsync(
-                self._d_max[i], h_neg_inf.ctypes.data, state_bytes,
-                cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+                self._d_max[i],
+                h_neg_inf.ctypes.data,
+                state_bytes,
+                cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                self.stream,
+            )
         cudart.cudaStreamSynchronize(self.stream)
 
     def step(self, token_id: int) -> dict[str, np.ndarray]:
@@ -233,8 +248,8 @@ class RwkvTrtRunner:
                 cudart.cudaMemcpyAsync(in_lst[i], out_lst[i], state_bytes, D2D, stream)
 
         cudart.cudaMemcpyAsync(
-            self._h_logits.ctypes.data, self._d_logits,
-            self._logits_numel * 4, D2H, stream)
+            self._h_logits.ctypes.data, self._d_logits, self._logits_numel * 4, D2H, stream
+        )
         for name in self._debug_output_names:
             h = self._h_debug[name]
             cudart.cudaMemcpyAsync(h.ctypes.data, self._d_debug[name], h.nbytes, D2H, stream)
@@ -252,8 +267,12 @@ class RwkvTrtRunner:
                 _check_cuda(cudart.cudaMemsetAsync(lst[i], 0, state_bytes, self.stream)[0])
             h_neg_inf = np.full(self.hidden_size, -1e38, dtype=np.float32)
             cudart.cudaMemcpyAsync(
-                self._d_max[i], h_neg_inf.ctypes.data, state_bytes,
-                cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+                self._d_max[i],
+                h_neg_inf.ctypes.data,
+                state_bytes,
+                cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                self.stream,
+            )
         cudart.cudaStreamSynchronize(self.stream)
 
     def generate(self, input_ids: list[int], max_new_tokens: int) -> list[dict[str, np.ndarray]]:
@@ -312,6 +331,7 @@ class RwkvTrtRunner:
         if stream:
             cudart.cudaStreamDestroy(stream)
             self.stream = None
+
 
 def runner_from_bundle(
     *,

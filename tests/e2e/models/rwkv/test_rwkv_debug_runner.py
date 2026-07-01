@@ -32,7 +32,7 @@ def _make_bundle_bytes(
 
 
 def test_rwkv_engine_section_and_communicator_forwarded(tmp_path):
-    from tensorrt_model_connect.families.rwkv.debug_runner import (
+    from tensorrt_model_connect.families.rwkv.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -53,7 +53,7 @@ def test_rwkv_engine_section_and_communicator_forwarded(tmp_path):
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.rwkv.debug_runner.RwkvTrtRunner",
+        "tensorrt_model_connect.families.rwkv.model.runtime.RwkvTrtRunner",
         return_value="rwkv-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))
@@ -78,7 +78,7 @@ class TestRwkvTrtRunnerCleanup:
     """Verify RwkvTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 1
@@ -99,7 +99,7 @@ class TestRwkvTrtRunnerCleanup:
         runner.stream = 7777
 
         mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.families.rwkv.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.families.rwkv.model.runtime.cudart", mock_cudart):
             runner.__del__()
             del runner._d_logits
             runner.stream = None
@@ -110,7 +110,7 @@ class TestRwkvTrtRunnerCleanup:
         mock_cudart.cudaStreamDestroy.assert_called_once_with(7777)
 
     def test_del_with_debug_buffers(self):
-        from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 1
@@ -131,7 +131,7 @@ class TestRwkvTrtRunnerCleanup:
         runner.stream = 7777
 
         mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.families.rwkv.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.families.rwkv.model.runtime.cudart", mock_cudart):
             runner.__del__()
             del runner._d_logits
 
@@ -139,7 +139,7 @@ class TestRwkvTrtRunnerCleanup:
         assert 500 in freed
 
     def test_del_noop_before_init(self):
-        from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.__del__()
@@ -149,7 +149,7 @@ class TestRwkvStateReset:
     """Test that RwkvTrtRunner.reset() calls memset/memcpy for all states."""
 
     def test_reset_zeros_four_states_and_sets_max_neg_inf(self):
-        from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 2
@@ -167,7 +167,7 @@ class TestRwkvStateReset:
         mock_cudart.cudaMemsetAsync.return_value = (success,)
         mock_cudart.cudaMemcpyKind.cudaMemcpyHostToDevice = 1
 
-        with patch("tensorrt_model_connect.families.rwkv.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.families.rwkv.model.runtime.cudart", mock_cudart):
             runner.reset()
 
         assert mock_cudart.cudaMemsetAsync.call_count == 8
@@ -179,7 +179,7 @@ class TestRwkvTrtRunnerGenerate:
     """Verify RwkvTrtRunner.generate() calls step() correctly."""
 
     def test_generate_prefill_then_decode(self):
-        from tensorrt_model_connect.families.rwkv.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.families.rwkv.model.runtime import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         call_log = []
