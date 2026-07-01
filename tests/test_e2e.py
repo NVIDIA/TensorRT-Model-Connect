@@ -265,7 +265,6 @@ def _case_matches_e2e_model(case, filters: set[str]) -> bool:
         case.family,
         case.runtime_strategy,
         case.task_strategy,
-        Path(case.hf_id).name if case.hf_id else "",
         str(metadata.get("family", "")),
         str(metadata.get("runtime_strategy", "")),
     }
