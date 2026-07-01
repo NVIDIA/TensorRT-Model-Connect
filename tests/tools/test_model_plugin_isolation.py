@@ -616,7 +616,7 @@ def test_verify_results_rejects_incomplete_execution(
     )
 
     assert result.returncode == 1
-    assert "FAIL decoder-small" in result.stdout
+    assert "FAIL decoder-small" in result.stderr
     assert expected_error in result.stderr
 
 
@@ -642,3 +642,52 @@ def test_verify_results_rejects_missing_result(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "result.json is missing" in result.stderr
+
+
+def test_verify_results_reports_build_failure_root_cause(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    report_path = tmp_path / "verification.json"
+    result_data = _passing_result("decoder-small")
+    result_data.update(
+        status="fail",
+        failure_type="build_fail",
+        stages={},
+        determinism={
+            "build_error": (
+                "Bundle build failed (rc=1):\n"
+                "Error: missing families/sibling/MODEL.toml"
+            )
+        },
+    )
+    result_data["commands"][0]["returncode"] = 1
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-results",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--artifacts-dir",
+            str(artifacts_dir),
+            "--report",
+            str(report_path),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "FAIL decoder-small (build_fail)" in result.stderr
+    assert "Root cause:" in result.stderr
+    assert "Error: missing families/sibling/MODEL.toml" in result.stderr
+    assert "Verification errors:" in result.stderr
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["results"][0]["failure_causes"] == [
+        "Bundle build failed (rc=1):\nError: missing families/sibling/MODEL.toml"
+    ]

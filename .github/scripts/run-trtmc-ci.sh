@@ -828,7 +828,7 @@ PY
       PYTHONPATH="$source_dir/python:$source_dir" \
       LD_LIBRARY_PATH="$isolated_library_path" \
       "${HF_PYTHON:-/opt/venv/bin/python}" -m pytest \
-        "${group_test_files[@]}" -v \
+        "${group_test_files[@]}" -v --tb=short \
         --rootdir "$source_dir" \
         -c "$source_dir/pyproject.toml" \
         --engine-dir "$engine_dir" \
@@ -848,6 +848,7 @@ PY
   popd >/dev/null
 
   local verification_rc=0
+  echo "=== Isolation result verification ==="
   if python3 "$source_dir/tools/model_plugin_isolation.py" verify-results \
       --repo-root "$source_dir" \
       --models-file "$models_file" \

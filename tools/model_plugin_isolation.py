@@ -611,6 +611,37 @@ def _returncode_failures(value: object, path: str = "result") -> list[str]:
     return failures
 
 
+def _failure_causes(result: dict[str, object]) -> list[str]:
+    causes: list[str] = []
+    determinism = result.get("determinism")
+    if isinstance(determinism, dict):
+        build_error = determinism.get("build_error")
+        if isinstance(build_error, str) and build_error.strip():
+            causes.append(build_error.strip())
+
+        preflight = determinism.get("preflight")
+        if isinstance(preflight, list):
+            for check in preflight:
+                if not isinstance(check, dict) or check.get("passed") is not False:
+                    continue
+                message = check.get("message")
+                if isinstance(message, str) and message.strip():
+                    causes.append(message.strip())
+
+    stages = result.get("stages")
+    if isinstance(stages, dict):
+        for stage_name, stage in stages.items():
+            if not isinstance(stage, dict):
+                continue
+            if stage.get("status") not in {"failed", "error"}:
+                continue
+            message = stage.get("message")
+            if isinstance(message, str) and message.strip():
+                causes.append(f"{stage_name}: {message.strip()}")
+
+    return list(dict.fromkeys(causes))
+
+
 def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, object]:
     result_path = artifacts_dir / model_name / "result.json"
     errors: list[str] = []
@@ -619,6 +650,8 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
             "model": model_name,
             "result_path": str(result_path),
             "passed": False,
+            "failure_type": None,
+            "failure_causes": [],
             "errors": ["result.json is missing"],
         }
     try:
@@ -628,6 +661,8 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
             "model": model_name,
             "result_path": str(result_path),
             "passed": False,
+            "failure_type": None,
+            "failure_causes": [],
             "errors": [f"result.json could not be read: {exc}"],
         }
     if not isinstance(result, dict):
@@ -680,6 +715,8 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
         "model": model_name,
         "result_path": str(result_path),
         "passed": not errors,
+        "failure_type": result.get("failure_type"),
+        "failure_causes": _failure_causes(result),
         "errors": errors,
     }
 
@@ -716,9 +753,24 @@ def command_verify_results(args: argparse.Namespace) -> int:
 
     for result in results:
         status = "PASS" if result["passed"] else "FAIL"
-        print(f"{status} {result['model']}")
+        failure_type = result.get("failure_type")
+        suffix = f" ({failure_type})" if not result["passed"] and failure_type else ""
+        if result["passed"]:
+            print(f"{status} {result['model']}{suffix}")
+            continue
+
+        print(f"{status} {result['model']}{suffix}", file=sys.stderr)
+        causes = result.get("failure_causes", [])
+        if isinstance(causes, list) and causes:
+            print("  Root cause:", file=sys.stderr)
+            for cause in causes:
+                lines = str(cause).splitlines() or [str(cause)]
+                print(f"    - {lines[0]}", file=sys.stderr)
+                for line in lines[1:]:
+                    print(f"      {line}", file=sys.stderr)
+        print("  Verification errors:", file=sys.stderr)
         for error in result["errors"]:
-            print(f"  {error}", file=sys.stderr)
+            print(f"    - {error}", file=sys.stderr)
     return 0 if report["passed"] else 1
 
 

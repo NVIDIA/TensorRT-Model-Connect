@@ -483,6 +483,7 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert '--target trtmc trtmc_backend_trt "$model_target"' in group_runner
     assert 'PYTHONPATH="$source_dir/python:$source_dir' in group_runner
     assert 'LD_LIBRARY_PATH="$isolated_library_path"' in group_runner
+    assert '"${group_test_files[@]}" -v --tb=short' in group_runner
     assert '--trtmc-binary "$build_dir/trtmc"' in group_runner
     assert '--engine-dir "$engine_dir"' in group_runner
     assert '--model-plugin-dir "$model_plugin_dir"' in group_runner
@@ -494,6 +495,7 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert "verify-results" in group_runner
     assert "expected exactly 1" in group_runner
     assert "prepare_model_plugin_dir" not in group_runner
+    assert 'echo "=== Isolation result verification ==="' in group_runner
 
 
 def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:
