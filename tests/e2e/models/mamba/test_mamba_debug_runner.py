@@ -32,7 +32,7 @@ def _make_bundle_bytes(
 
 
 def test_mamba_engine_section_and_communicator_forwarded(tmp_path):
-    from tensorrt_model_connect.families.mamba.debug_runner import (
+    from tensorrt_model_connect.families.mamba.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -53,7 +53,7 @@ def test_mamba_engine_section_and_communicator_forwarded(tmp_path):
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.mamba.debug_runner.MambaTrtRunner",
+        "tensorrt_model_connect.families.mamba.model.runtime.MambaTrtRunner",
         return_value="mamba-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))
@@ -78,7 +78,7 @@ class TestMambaTrtRunnerCleanup:
     """Verify MambaTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.num_layers = 1
@@ -97,7 +97,7 @@ class TestMambaTrtRunnerCleanup:
         runner.engine = MagicMock()
 
         mock_cudart = MagicMock()
-        with patch("tensorrt_model_connect.families.mamba.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.families.mamba.model.runtime.cudart", mock_cudart):
             runner.__del__()
             del runner._d_token_id
 
@@ -107,7 +107,7 @@ class TestMambaTrtRunnerCleanup:
         mock_cudart.cudaStreamDestroy.assert_called_once_with(8888)
 
     def test_del_noop_before_init(self):
-        from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.__del__()
@@ -117,7 +117,7 @@ class TestMambaStateReset:
     """Test that MambaTrtRunner.reset() calls cudaMemsetAsync for all states."""
 
     def test_reset_calls_memset(self):
-        from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.num_layers = 2
@@ -133,7 +133,7 @@ class TestMambaStateReset:
         success = mock_cudart.cudaError_t.cudaSuccess
         mock_cudart.cudaMemsetAsync.return_value = (success,)
 
-        with patch("tensorrt_model_connect.families.mamba.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.families.mamba.model.runtime.cudart", mock_cudart):
             runner.reset()
 
         assert mock_cudart.cudaMemsetAsync.call_count == 4
@@ -144,7 +144,7 @@ class TestMambaTrtRunnerGenerate:
     """Verify MambaTrtRunner.generate() calls step() correctly."""
 
     def test_generate_calls_step_in_order(self):
-        from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         call_log = []

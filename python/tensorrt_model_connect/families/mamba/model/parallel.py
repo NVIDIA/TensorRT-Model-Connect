@@ -14,16 +14,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _mark_debug_output
+from . import model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from ..plugin import _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -45,20 +45,27 @@ def _validate_mamba_tp(weights: "WeightDict", parallel: "ParallelConfig") -> Non
     d_inner = int(weights["_d_inner"])
     if d_inner % tp != 0:
         raise ValueError(
-            "Mamba tensor parallel requires d_inner divisible by tp_size "
-            f"({d_inner} vs {tp})")
+            f"Mamba tensor parallel requires d_inner divisible by tp_size ({d_inner} vs {tp})"
+        )
 
     for layer_idx in range(int(weights.get("_num_layers", 0))):
         prefix = f"layer.{layer_idx}"
         for key in (
-            f"{prefix}.w_in_x", f"{prefix}.w_in_z", f"{prefix}.w_dt_out",
+            f"{prefix}.w_in_x",
+            f"{prefix}.w_in_z",
+            f"{prefix}.w_dt_out",
             f"{prefix}.dt_proj_bias",
         ):
             if weights[key].shape[-1] % tp != 0:
                 raise ValueError(f"{key} output dim is not divisible by tp_size={tp}")
         for key in (
-            f"{prefix}.conv1d_weight", f"{prefix}.conv1d_bias", f"{prefix}.w_dt_in",
-            f"{prefix}.w_B", f"{prefix}.w_C", f"{prefix}.A", f"{prefix}.D",
+            f"{prefix}.conv1d_weight",
+            f"{prefix}.conv1d_bias",
+            f"{prefix}.w_dt_in",
+            f"{prefix}.w_B",
+            f"{prefix}.w_C",
+            f"{prefix}.A",
+            f"{prefix}.D",
             f"{prefix}.w_out",
         ):
             if weights[key].shape[0] % tp != 0:
@@ -83,10 +90,18 @@ def shard_mamba_weights(
             continue
         if key.endswith((".w_in_x", ".w_in_z", ".w_dt_out", ".dt_proj_bias")):
             out[key] = _slice_last_dim(value, rank, tp)
-        elif key.endswith((
-            ".conv1d_weight", ".conv1d_bias", ".w_dt_in", ".w_B", ".w_C",
-            ".A", ".D", ".w_out",
-        )):
+        elif key.endswith(
+            (
+                ".conv1d_weight",
+                ".conv1d_bias",
+                ".w_dt_in",
+                ".w_B",
+                ".w_C",
+                ".A",
+                ".D",
+                ".w_out",
+            )
+        ):
             out[key] = _slice_first_dim(value, rank, tp)
         else:
             out[key] = value
@@ -114,12 +129,15 @@ def _add_mamba_tp_layer(
     tp_size: int,
 ):
     normed = graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights[f"{prefix}.norm"], eps_tensor)
+        network, hidden, hidden_size, weights[f"{prefix}.norm"], eps_tensor
+    )
 
     x = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, local_d_inner, weights[f"{prefix}.w_in_x"])
+        network, normed, hidden_size, local_d_inner, weights[f"{prefix}.w_in_x"]
+    )
     z = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, local_d_inner, weights[f"{prefix}.w_in_z"])
+        network, normed, hidden_size, local_d_inner, weights[f"{prefix}.w_in_z"]
+    )
 
     x_col = network.add_shuffle(x)
     x_col.reshape_dims = (local_d_inner, 1)
@@ -130,95 +148,96 @@ def _add_mamba_tp_layer(
             shape=(local_d_inner, conv_kernel - 1),
             stride=(1, 1),
         )
-        new_conv_state = network.add_concatenation(
-            [slice_layer.get_output(0), x_col.get_output(0)])
+        new_conv_state = network.add_concatenation([slice_layer.get_output(0), x_col.get_output(0)])
         new_conv_state.axis = 1
         present_conv = new_conv_state.get_output(0)
     else:
         present_conv = x_col.get_output(0)
 
     conv_w = graph_ops.add_constant(
-        network, (local_d_inner, conv_kernel), weights[f"{prefix}.conv1d_weight"])
-    conv_prod = network.add_elementwise(
-        present_conv, conv_w, trt.ElementWiseOperation.PROD)
+        network, (local_d_inner, conv_kernel), weights[f"{prefix}.conv1d_weight"]
+    )
+    conv_prod = network.add_elementwise(present_conv, conv_w, trt.ElementWiseOperation.PROD)
     conv_sum = network.add_reduce(
-        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+    )
     conv_flat = network.add_shuffle(conv_sum.get_output(0))
     conv_flat.reshape_dims = (1, local_d_inner)
     conv_out = graph_ops.add_bias_sum(
-        network, conv_flat.get_output(0), local_d_inner, weights[f"{prefix}.conv1d_bias"])
+        network, conv_flat.get_output(0), local_d_inner, weights[f"{prefix}.conv1d_bias"]
+    )
     conv_activated = graph_ops.add_activation(network, conv_out, "silu")
 
     dt_in = graph_ops.add_matmul_rhs_constant(
-        network, conv_activated, local_d_inner, dt_rank, weights[f"{prefix}.w_dt_in"])
+        network, conv_activated, local_d_inner, dt_rank, weights[f"{prefix}.w_dt_in"]
+    )
     dt_in = add_all_reduce_sum(network, dt_in, tp_size)
     B = graph_ops.add_matmul_rhs_constant(
-        network, conv_activated, local_d_inner, state_size, weights[f"{prefix}.w_B"])
+        network, conv_activated, local_d_inner, state_size, weights[f"{prefix}.w_B"]
+    )
     B = add_all_reduce_sum(network, B, tp_size)
     C = graph_ops.add_matmul_rhs_constant(
-        network, conv_activated, local_d_inner, state_size, weights[f"{prefix}.w_C"])
+        network, conv_activated, local_d_inner, state_size, weights[f"{prefix}.w_C"]
+    )
     C = add_all_reduce_sum(network, C, tp_size)
 
     dt = graph_ops.add_matmul_rhs_constant(
-        network, dt_in, dt_rank, local_d_inner, weights[f"{prefix}.w_dt_out"])
-    dt = graph_ops.add_bias_sum(
-        network, dt, local_d_inner, weights[f"{prefix}.dt_proj_bias"])
+        network, dt_in, dt_rank, local_d_inner, weights[f"{prefix}.w_dt_out"]
+    )
+    dt = graph_ops.add_bias_sum(network, dt, local_d_inner, weights[f"{prefix}.dt_proj_bias"])
 
     dt_exp = network.add_unary(dt, trt.UnaryOperation.EXP)
-    one = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
-    dt_exp_p1 = network.add_elementwise(
-        dt_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
-    dt_softplus = network.add_unary(
-        dt_exp_p1.get_output(0), trt.UnaryOperation.LOG)
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    dt_exp_p1 = network.add_elementwise(dt_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
+    dt_softplus = network.add_unary(dt_exp_p1.get_output(0), trt.UnaryOperation.LOG)
     dt_final = dt_softplus.get_output(0)
 
     dt_col = network.add_shuffle(dt_final)
     dt_col.reshape_dims = (local_d_inner, 1)
-    A_const = graph_ops.add_constant(
-        network, (local_d_inner, state_size), weights[f"{prefix}.A"])
-    dtA = network.add_elementwise(
-        dt_col.get_output(0), A_const, trt.ElementWiseOperation.PROD)
+    A_const = graph_ops.add_constant(network, (local_d_inner, state_size), weights[f"{prefix}.A"])
+    dtA = network.add_elementwise(dt_col.get_output(0), A_const, trt.ElementWiseOperation.PROD)
     A_bar = network.add_unary(dtA.get_output(0), trt.UnaryOperation.EXP)
 
     B_reshape = network.add_shuffle(B)
     B_reshape.reshape_dims = (1, state_size)
     dt_B = network.add_elementwise(
-        dt_col.get_output(0), B_reshape.get_output(0),
-        trt.ElementWiseOperation.PROD)
+        dt_col.get_output(0), B_reshape.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
     x_col2 = network.add_shuffle(conv_activated)
     x_col2.reshape_dims = (local_d_inner, 1)
     dtBx = network.add_elementwise(
-        dt_B.get_output(0), x_col2.get_output(0), trt.ElementWiseOperation.PROD)
+        dt_B.get_output(0), x_col2.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
     decay = network.add_elementwise(
-        A_bar.get_output(0), ssm_state_in, trt.ElementWiseOperation.PROD)
+        A_bar.get_output(0), ssm_state_in, trt.ElementWiseOperation.PROD
+    )
     new_ssm = network.add_elementwise(
-        decay.get_output(0), dtBx.get_output(0), trt.ElementWiseOperation.SUM)
+        decay.get_output(0), dtBx.get_output(0), trt.ElementWiseOperation.SUM
+    )
     present_ssm = new_ssm.get_output(0)
 
     C_reshape = network.add_shuffle(C)
     C_reshape.reshape_dims = (state_size, 1)
     y_matmul = network.add_matrix_multiply(
-        present_ssm, trt.MatrixOperation.NONE,
-        C_reshape.get_output(0), trt.MatrixOperation.NONE)
+        present_ssm, trt.MatrixOperation.NONE, C_reshape.get_output(0), trt.MatrixOperation.NONE
+    )
     y_flat = network.add_shuffle(y_matmul.get_output(0))
     y_flat.reshape_dims = (1, local_d_inner)
 
-    D_const = graph_ops.add_constant(
-        network, (1, local_d_inner), weights[f"{prefix}.D"])
-    Dx = network.add_elementwise(
-        D_const, conv_activated, trt.ElementWiseOperation.PROD)
+    D_const = graph_ops.add_constant(network, (1, local_d_inner), weights[f"{prefix}.D"])
+    Dx = network.add_elementwise(D_const, conv_activated, trt.ElementWiseOperation.PROD)
     y = network.add_elementwise(
-        y_flat.get_output(0), Dx.get_output(0), trt.ElementWiseOperation.SUM)
+        y_flat.get_output(0), Dx.get_output(0), trt.ElementWiseOperation.SUM
+    )
 
     z_activated = graph_ops.add_activation(network, z, "silu")
-    gated = network.add_elementwise(
-        y.get_output(0), z_activated, trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(y.get_output(0), z_activated, trt.ElementWiseOperation.PROD)
 
     out = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), local_d_inner, hidden_size, weights[f"{prefix}.w_out"])
+        network, gated.get_output(0), local_d_inner, hidden_size, weights[f"{prefix}.w_out"]
+    )
     out = add_all_reduce_sum(network, out, tp_size)
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
 
@@ -260,8 +279,7 @@ def build_mamba_tp_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -269,17 +287,25 @@ def build_mamba_tp_engine(
     conv_state_inputs = []
     ssm_state_inputs = []
     for layer_idx in range(num_layers):
-        conv_state_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("conv_state", layer_idx),
-            trt.float32, (local_d_inner, conv_kernel)))
-        ssm_state_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("ssm_state", layer_idx),
-            trt.float32, (local_d_inner, state_size)))
+        conv_state_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("conv_state", layer_idx),
+                trt.float32,
+                (local_d_inner, conv_kernel),
+            )
+        )
+        ssm_state_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("ssm_state", layer_idx),
+                trt.float32,
+                (local_d_inner, state_size),
+            )
+        )
 
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["embedding"])
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), rank_weights["embedding"])
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+    )
 
     hidden_state = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if debug_layer_outputs:
@@ -312,21 +338,20 @@ def build_mamba_tp_engine(
 
     final_norm = rank_weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = graph_ops.add_rms_norm(
-            network, hidden_state, hidden, final_norm, eps_tensor)
+        hidden_state = graph_ops.add_rms_norm(network, hidden_state, hidden, final_norm, eps_tensor)
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_lm_head"])
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        network, hidden_state, hidden, vocab, rank_weights["w_lm_head"]
+    )
+    logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
     logits.name = "logits"
     network.mark_output(logits)
 
     for layer_idx in range(num_layers):
         present_conv_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_conv", layer_idx)
-        present_ssm_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_ssm", layer_idx)
+            "present_conv", layer_idx
+        )
+        present_ssm_outputs[layer_idx].name = graph_ops.layer_tensor_name("present_ssm", layer_idx)
         network.mark_output(present_conv_outputs[layer_idx])
         network.mark_output(present_ssm_outputs[layer_idx])
 

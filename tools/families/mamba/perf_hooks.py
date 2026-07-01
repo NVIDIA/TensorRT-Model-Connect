@@ -69,7 +69,7 @@ def bench_trt(
 ) -> dict:
     """Benchmark TRT inference for Mamba/SSM recurrent state."""
     del max_cache_length
-    from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+    from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
     runner = MambaTrtRunner(
         engine_plan=engine_plan,
@@ -131,7 +131,7 @@ class TimedCpuProfileRunner:
     PHASES = ("h2d", "tensor_bind", "execute", "d2d_state", "d2h", "argmax")
 
     def __init__(self, engine_plan: bytes, num_layers: int):
-        from tensorrt_model_connect.families.mamba.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.families.mamba.model.runtime import MambaTrtRunner
 
         self._runner = MambaTrtRunner(
             engine_plan=engine_plan,

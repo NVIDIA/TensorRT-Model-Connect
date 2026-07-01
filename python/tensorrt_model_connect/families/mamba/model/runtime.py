@@ -17,6 +17,7 @@ except ImportError:
     except ImportError:  # pragma: no cover - exercised in TRT-free test envs
         cudart = None  # type: ignore[assignment]
 
+
 def _trt_nptype_safe(dtype: trt.DataType):
     """Resolve TRT dtype to a NumPy dtype, including BF16 fallback."""
     try:
@@ -25,7 +26,6 @@ def _trt_nptype_safe(dtype: trt.DataType):
         if dtype == trt.bfloat16:
             return np.uint16
         raise
-
 
 
 def _check_cuda(status):
@@ -63,12 +63,12 @@ def load_engine_from_bundle(
         sections = header.get("sections", {})
         engine_meta = sections.get(section_name)
         if engine_meta is None:
-            raise KeyError(
-                f"Bundle {bundle_path!r} does not contain section {section_name!r}")
+            raise KeyError(f"Bundle {bundle_path!r} does not contain section {section_name!r}")
         f.seek(16 + header_len + engine_meta["offset"])
         engine_plan = f.read(engine_meta["size"])
 
     return engine_plan, header
+
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
     """Load a named raw section from this family's .trtfb bundle."""
@@ -87,6 +87,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
             return None
         f.seek(16 + header_len + meta["offset"])
         return f.read(meta["size"])
+
 
 def load_config_from_bundle(bundle_path: str) -> dict:
     """Load and parse this family's config.json from a .trtfb bundle."""
@@ -167,9 +168,11 @@ class MambaTrtRunner:
                 shape = tuple(self.engine.get_tensor_shape(name))
                 self._output_names.append(name)
                 self._output_shapes[name] = shape
-                if (name != "logits"
-                        and not name.startswith("present_conv_")
-                        and not name.startswith("present_ssm_")):
+                if (
+                    name != "logits"
+                    and not name.startswith("present_conv_")
+                    and not name.startswith("present_ssm_")
+                ):
                     self._debug_output_names.append(name)
 
         # --- Persistent device state buffers ---
@@ -220,10 +223,12 @@ class MambaTrtRunner:
 
         # Zero-init device state
         for i in range(num_layers):
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0])
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0])
+            _check_cuda(
+                cudart.cudaMemsetAsync(self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0]
+            )
+            _check_cuda(
+                cudart.cudaMemsetAsync(self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0]
+            )
         cudart.cudaStreamSynchronize(self.stream)
 
     def step(self, token_id: int) -> dict[str, np.ndarray]:
@@ -241,9 +246,7 @@ class MambaTrtRunner:
         stream = self.stream
 
         self._h_token_id[0] = token_id
-        cudart.cudaMemcpyAsync(
-            self._d_token_id, self._h_token_id.ctypes.data,
-            4, H2D, stream)
+        cudart.cudaMemcpyAsync(self._d_token_id, self._h_token_id.ctypes.data, 4, H2D, stream)
 
         # Set tensor addresses
         self.context.set_tensor_address("token_id", self._d_token_id)
@@ -253,14 +256,10 @@ class MambaTrtRunner:
         ssm_state_bytes = self.d_inner * self.state_size * 4
 
         for i in range(self.num_layers):
-            self.context.set_tensor_address(
-                f"conv_state_{i}", self._d_conv_state[i])
-            self.context.set_tensor_address(
-                f"ssm_state_{i}", self._d_ssm_state[i])
-            self.context.set_tensor_address(
-                f"present_conv_{i}", self._d_present_conv[i])
-            self.context.set_tensor_address(
-                f"present_ssm_{i}", self._d_present_ssm[i])
+            self.context.set_tensor_address(f"conv_state_{i}", self._d_conv_state[i])
+            self.context.set_tensor_address(f"ssm_state_{i}", self._d_ssm_state[i])
+            self.context.set_tensor_address(f"present_conv_{i}", self._d_present_conv[i])
+            self.context.set_tensor_address(f"present_ssm_{i}", self._d_present_ssm[i])
 
         for name in self._debug_output_names:
             self.context.set_tensor_address(name, self._d_debug[name])
@@ -271,21 +270,21 @@ class MambaTrtRunner:
         # D2D state update (direct replacement — Mamba state is overwritten)
         for i in range(self.num_layers):
             cudart.cudaMemcpyAsync(
-                self._d_conv_state[i], self._d_present_conv[i],
-                conv_state_bytes, D2D, stream)
+                self._d_conv_state[i], self._d_present_conv[i], conv_state_bytes, D2D, stream
+            )
             cudart.cudaMemcpyAsync(
-                self._d_ssm_state[i], self._d_present_ssm[i],
-                ssm_state_bytes, D2D, stream)
+                self._d_ssm_state[i], self._d_present_ssm[i], ssm_state_bytes, D2D, stream
+            )
 
         # D2H: logits + debug outputs
         cudart.cudaMemcpyAsync(
-            self._h_logits.ctypes.data, self._d_logits,
-            self._logits_numel * 4, D2H, stream)
+            self._h_logits.ctypes.data, self._d_logits, self._logits_numel * 4, D2H, stream
+        )
         for name in self._debug_output_names:
             h_buf = self._h_debug[name]
             cudart.cudaMemcpyAsync(
-                h_buf.ctypes.data, self._d_debug[name],
-                h_buf.nbytes, D2H, stream)
+                h_buf.ctypes.data, self._d_debug[name], h_buf.nbytes, D2H, stream
+            )
 
         cudart.cudaStreamSynchronize(stream)
 
@@ -302,10 +301,12 @@ class MambaTrtRunner:
         conv_state_bytes = self.d_inner * self.conv_kernel * 4
         ssm_state_bytes = self.d_inner * self.state_size * 4
         for i in range(self.num_layers):
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0])
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0])
+            _check_cuda(
+                cudart.cudaMemsetAsync(self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0]
+            )
+            _check_cuda(
+                cudart.cudaMemsetAsync(self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0]
+            )
         cudart.cudaStreamSynchronize(self.stream)
 
     def generate(
@@ -360,6 +361,7 @@ class MambaTrtRunner:
             del self.context
         if hasattr(self, "engine"):
             del self.engine
+
 
 def runner_from_bundle(
     *,
