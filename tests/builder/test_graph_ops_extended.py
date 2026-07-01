@@ -760,7 +760,9 @@ class TestAddReflectPad1d:
     def test_matches_torch_reflect_padding(self, trt_runner):
         import torch
         import torch.nn.functional as F
-        from tensorrt_model_connect.families.bark import graph_ops as bark_graph_ops
+        from tests.builder.owned_graph_modules import load_family_graph_ops
+
+        bark_graph_ops = load_family_graph_ops("bark")
 
         x_np = np.arange(1, 6, dtype=np.float32).reshape(1, 1, 5)
 
@@ -783,7 +785,9 @@ class TestAddLstmUnrolled:
     def test_matches_torch_lstm(self, trt_runner):
         import torch
         import torch.nn as nn
-        from tensorrt_model_connect.families.bark import graph_ops as bark_graph_ops
+        from tests.builder.owned_graph_modules import load_family_graph_ops
+
+        bark_graph_ops = load_family_graph_ops("bark")
 
         rng = np.random.RandomState(7)
         batch, seq_length, input_size, hidden_size = 1, 4, 2, 3

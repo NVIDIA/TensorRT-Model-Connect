@@ -11,20 +11,23 @@ Postconditions: Weight shapes, dtypes, and values are correct after transpose, c
 from __future__ import annotations
 
 import json
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tensorrt_model_connect.families.qwen.checkpoint_mapper import (
-    _transpose_2d,
-    _repeat_head_norm,
-    _has_tensor,
-    _load_tensor,
-    load_standard_weights,
-)
 from tensorrt_model_connect.families.qwen.config import ModelConfig
+
+_QWEN_ROOT = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connect/families/qwen"
+_MAPPER_MODULE = "weights" if (_QWEN_ROOT / "weights/__init__.py").is_file() else "checkpoint_mapper"
+_mapper = import_module(f"tensorrt_model_connect.families.qwen.{_MAPPER_MODULE}")
+_transpose_2d = _mapper._transpose_2d
+_repeat_head_norm = _mapper._repeat_head_norm
+_has_tensor = _mapper._has_tensor
+_load_tensor = _mapper._load_tensor
+load_standard_weights = _mapper.load_standard_weights
 
 
 class TestTranspose2d:

@@ -20,10 +20,12 @@ import numpy as np
 import pytest
 
 
-# Ensure imports resolve to this workspace's Python package.
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "python"
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
+# Ensure imports resolve to this workspace's Python package and owner-local tools.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PKG_ROOT = _REPO_ROOT / "python"
+for import_root in (_REPO_ROOT, _PKG_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
 
 DIFFUSION_SCHEDULER_OWNERS = ("flux", "pixart", "wan_t2v", "z_image")
@@ -33,11 +35,15 @@ DIFFUSION_SCHEDULER_OWNERS = ("flux", "pixart", "wan_t2v", "z_image")
 def scheduler_modules(request: pytest.FixtureRequest):
     """Return the scheduler module pair owned by one diffusion family."""
     family = str(request.param)
-    package = import_module(f"tensorrt_model_connect.families.{family}.schedulers")
-    flow = import_module(
-        f"tensorrt_model_connect.families.{family}.schedulers.flow_match_euler"
+    tools_package = _REPO_ROOT / "tools/families" / family / "schedulers"
+    module_root = (
+        f"tools.families.{family}.schedulers"
+        if tools_package.is_dir()
+        else f"tensorrt_model_connect.families.{family}.schedulers"
     )
-    base = import_module(f"tensorrt_model_connect.families.{family}.schedulers.base")
+    package = import_module(module_root)
+    flow = import_module(f"{module_root}.flow_match_euler")
+    base = import_module(f"{module_root}.base")
     return family, package, flow, base
 
 

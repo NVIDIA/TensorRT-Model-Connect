@@ -2,7 +2,7 @@
 """Diffusion pipeline debug entrypoint.
 
 Concrete pipeline-debug behavior is owned by model-family modules under
-``python/tensorrt_model_connect/families/*/debug_diffusion_pipeline.py``. This
+``tools/families/*/debug_diffusion_pipeline.py``. This
 shared tool only discovers and dispatches to those handlers.
 """
 
@@ -17,19 +17,25 @@ from types import ModuleType
 from typing import Any
 
 
-def _family_root() -> Path:
+def _family_roots() -> tuple[Path, ...]:
+    repo_root = Path(__file__).resolve().parents[1]
     return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
     )
+
+
+def _family_handler_paths(filename: str) -> list[Path]:
+    handlers: dict[str, Path] = {}
+    for root in reversed(_family_roots()):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
 
 
 @lru_cache(maxsize=1)
 def _family_debug_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
-    for handler_path in sorted(_family_root().glob("*/debug_diffusion_pipeline.py")):
+    for handler_path in _family_handler_paths("debug_diffusion_pipeline.py"):
         module_name = f"_trtmc_debug_diffusion_pipeline_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:

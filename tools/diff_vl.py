@@ -58,17 +58,23 @@ def _detect_model_type(model_id: str) -> str:
     return getattr(cfg, "model_type", "unknown")
 
 
+def _family_handler_paths(filename: str) -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = (
+        repo_root / "tools/families",
+        repo_root / "python/tensorrt_model_connect/families",
+    )
+    handlers: dict[str, Path] = {}
+    for root in reversed(roots):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
+
+
 @lru_cache(maxsize=1)
 def _family_diff_vl_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned VL diff handlers from family folders."""
-    family_root = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-    )
     modules: list[ModuleType] = []
-    for handler_path in sorted(family_root.glob("*/diff_vl.py")):
+    for handler_path in _family_handler_paths("diff_vl.py"):
         module_name = f"_trtmc_diff_vl_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:
@@ -127,17 +133,18 @@ def _load_family_vl_debug_runner(bundle_path: str) -> ModuleType:
             "VL debug execution requires bundle family metadata so the "
             "owning family vl_debug_runner.py can be selected."
         )
-    module_path = (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = (
+        repo_root / "tools/families" / family / "vl_debug_runner.py",
+        repo_root
+        / "python/tensorrt_model_connect/families"
         / family
-        / "vl_debug_runner.py"
+        / "vl_debug_runner.py",
     )
-    if not module_path.is_file():
+    module_path = next((path for path in candidates if path.is_file()), None)
+    if module_path is None:
         raise RuntimeError(
-            f"Family {family!r} does not provide owned vl_debug_runner.py"
+            f"Family {family!r} does not provide an owned VL debug runner"
         )
     module_name = f"_trtmc_vl_debug_runner_{family}"
     spec = importlib.util.spec_from_file_location(module_name, module_path)

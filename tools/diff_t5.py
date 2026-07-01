@@ -2,7 +2,7 @@
 """Encoder diff entrypoint.
 
 Concrete encoder comparison behavior is owned by model-family modules under
-``python/tensorrt_model_connect/families/*/diff_t5.py``. This shared tool only
+``tools/families/*/diff_t5.py``. This shared tool only
 discovers and dispatches to those handlers.
 """
 
@@ -17,19 +17,25 @@ from types import ModuleType
 from typing import Any
 
 
-def _family_root() -> Path:
+def _family_roots() -> tuple[Path, ...]:
+    repo_root = Path(__file__).resolve().parents[1]
     return (
-        Path(__file__).resolve().parents[1]
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
+        Path(__file__).resolve().parent / "families",
+        repo_root / "python/tensorrt_model_connect/families",
     )
+
+
+def _family_handler_paths(filename: str) -> list[Path]:
+    handlers: dict[str, Path] = {}
+    for root in reversed(_family_roots()):
+        handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
+    return [handlers[family] for family in sorted(handlers)]
 
 
 @lru_cache(maxsize=1)
 def _family_encoder_diff_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
-    for handler_path in sorted(_family_root().glob("*/diff_t5.py")):
+    for handler_path in _family_handler_paths("diff_t5.py"):
         module_name = f"_trtmc_diff_t5_{handler_path.parent.name}"
         spec = importlib.util.spec_from_file_location(module_name, handler_path)
         if spec is None or spec.loader is None:
