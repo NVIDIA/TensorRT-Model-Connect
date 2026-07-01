@@ -8,16 +8,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .standard_decoder_builder import _apply_norm
+from . import model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from .model import _apply_norm
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -37,24 +37,25 @@ def _validate_deepseek_ocr_tp(
     if not parallel.enabled:
         return
     if parallel.rank < 0:
-        raise ValueError(
-            "DeepSeek-OCR tensor-parallel build requires a concrete rank")
+        raise ValueError("DeepSeek-OCR tensor-parallel build requires a concrete rank")
 
     tp = parallel.tp_size
     if int(config.num_attention_heads) % tp != 0:
         raise ValueError(
             "DeepSeek-OCR tensor parallel requires num_attention_heads "
-            f"divisible by tp_size ({config.num_attention_heads} vs {tp})")
+            f"divisible by tp_size ({config.num_attention_heads} vs {tp})"
+        )
     if int(config.num_key_value_heads) % tp != 0:
         raise ValueError(
             "DeepSeek-OCR tensor parallel requires num_key_value_heads "
-            f"divisible by tp_size ({config.num_key_value_heads} vs {tp})")
+            f"divisible by tp_size ({config.num_key_value_heads} vs {tp})"
+        )
 
     checks = {
-        "attention_size": int(weights.get(
-            "_attention_size", config.attention_size)),
-        "kv_attention_size": int(weights.get(
-            "_kv_attention_size", config.num_key_value_heads * config.head_dim)),
+        "attention_size": int(weights.get("_attention_size", config.attention_size)),
+        "kv_attention_size": int(
+            weights.get("_kv_attention_size", config.num_key_value_heads * config.head_dim)
+        ),
         "dense_intermediate_size": int(config.intermediate_size),
         "moe_intermediate_size": int(weights["_moe_intermediate_size"]),
         "shared_intermediate_size": int(weights["_shared_intermediate_size"]),
@@ -63,7 +64,8 @@ def _validate_deepseek_ocr_tp(
         if value % tp != 0:
             raise ValueError(
                 "DeepSeek-OCR tensor parallel requires "
-                f"{name} divisible by tp_size ({value} vs {tp})")
+                f"{name} divisible by tp_size ({value} vs {tp})"
+            )
 
 
 def shard_deepseek_ocr_weights(
@@ -90,14 +92,10 @@ def shard_deepseek_ocr_weights(
         else:
             out[key] = value
 
-    out["_attention_size"] = (
-        int(weights["_attention_size"]) // parallel.tp_size)
-    out["_kv_attention_size"] = (
-        int(weights["_kv_attention_size"]) // parallel.tp_size)
-    out["_moe_intermediate_size"] = (
-        int(weights["_moe_intermediate_size"]) // parallel.tp_size)
-    out["_shared_intermediate_size"] = (
-        int(weights["_shared_intermediate_size"]) // parallel.tp_size)
+    out["_attention_size"] = int(weights["_attention_size"]) // parallel.tp_size
+    out["_kv_attention_size"] = int(weights["_kv_attention_size"]) // parallel.tp_size
+    out["_moe_intermediate_size"] = int(weights["_moe_intermediate_size"]) // parallel.tp_size
+    out["_shared_intermediate_size"] = int(weights["_shared_intermediate_size"]) // parallel.tp_size
     out["_tensor_parallel_size"] = parallel.tp_size
     out["_tensor_parallel_rank"] = parallel.rank
     return out
@@ -112,17 +110,14 @@ def _add_swiglu_local(
     w_up: np.ndarray,
     w_down: np.ndarray,
 ) -> trt.ITensor:
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+    gate = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_gate)
+    up = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_up)
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
     return graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down
+    )
 
 
 def _add_swiglu_tp(
@@ -135,8 +130,7 @@ def _add_swiglu_tp(
     w_down: np.ndarray,
     tp_size: int,
 ) -> trt.ITensor:
-    local = _add_swiglu_local(
-        network, inp, hidden_size, intermediate_size, w_gate, w_up, w_down)
+    local = _add_swiglu_local(network, inp, hidden_size, intermediate_size, w_gate, w_up, w_down)
     return add_all_reduce_sum(network, local, tp_size)
 
 
@@ -155,39 +149,42 @@ def _add_moe_tp(
     routed_scaling_factor: float = 1.0,
 ) -> trt.ITensor:
     router_logits = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, n_routed_experts,
-        weights[f"{prefix}.router"])
+        network, inp, hidden_size, n_routed_experts, weights[f"{prefix}.router"]
+    )
     sm = network.add_softmax(router_logits)
     sm.axes = 1 << 1
-    topk = network.add_topk(
-        sm.get_output(0), trt.TopKOperation.MAX,
-        num_experts_per_tok, 1 << 1)
+    topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX, num_experts_per_tok, 1 << 1)
     top_values = topk.get_output(0)
     top_indices = topk.get_output(1)
 
     if norm_topk_prob:
-        sum_val = network.add_reduce(
-            top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+        sum_val = network.add_reduce(top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
         scaled_weights = network.add_elementwise(
             top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
         ).get_output(0)
     elif routed_scaling_factor != 1.0:
         scale_c = graph_ops.add_constant(
-            network, (1, 1),
-            np.array([[routed_scaling_factor]], dtype=np.float32))
+            network, (1, 1), np.array([[routed_scaling_factor]], dtype=np.float32)
+        )
         scaled_weights = network.add_elementwise(
-            top_values, scale_c, trt.ElementWiseOperation.PROD).get_output(0)
+            top_values, scale_c, trt.ElementWiseOperation.PROD
+        ).get_output(0)
     else:
         scaled_weights = top_values
 
     expert_outputs = []
     for expert_idx in range(n_routed_experts):
-        expert_outputs.append(_add_swiglu_local(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{expert_idx}.w_gate"],
-            weights[f"{prefix}.expert.{expert_idx}.w_up"],
-            weights[f"{prefix}.expert.{expert_idx}.w_down"],
-        ))
+        expert_outputs.append(
+            _add_swiglu_local(
+                network,
+                inp,
+                hidden_size,
+                moe_intermediate,
+                weights[f"{prefix}.expert.{expert_idx}.w_gate"],
+                weights[f"{prefix}.expert.{expert_idx}.w_up"],
+                weights[f"{prefix}.expert.{expert_idx}.w_down"],
+            )
+        )
 
     stacked = network.add_concatenation(expert_outputs)
     stacked.axis = 0
@@ -195,31 +192,32 @@ def _add_moe_tp(
 
     routed_local = None
     for top_idx in range(num_experts_per_tok):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
+        idx_slice = network.add_slice(top_indices, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
         idx_flat = network.add_shuffle(idx_slice.get_output(0))
         idx_flat.reshape_dims = (1,)
-        w_slice = network.add_slice(
-            scaled_weights, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
+        w_slice = network.add_slice(scaled_weights, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
         expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
         scaled = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            expert_out.get_output(0), w_slice.get_output(0), trt.ElementWiseOperation.PROD
+        )
         if routed_local is None:
             routed_local = scaled.get_output(0)
         else:
             summed = network.add_elementwise(
-                routed_local, scaled.get_output(0), trt.ElementWiseOperation.SUM)
+                routed_local, scaled.get_output(0), trt.ElementWiseOperation.SUM
+            )
             routed_local = summed.get_output(0)
 
     shared_local = _add_swiglu_local(
-        network, inp, hidden_size, shared_intermediate,
+        network,
+        inp,
+        hidden_size,
+        shared_intermediate,
         weights[f"{prefix}.shared.w_gate"],
         weights[f"{prefix}.shared.w_up"],
         weights[f"{prefix}.shared.w_down"],
     )
-    local_total = network.add_elementwise(
-        routed_local, shared_local, trt.ElementWiseOperation.SUM)
+    local_total = network.add_elementwise(routed_local, shared_local, trt.ElementWiseOperation.SUM)
     return add_all_reduce_sum(network, local_total.get_output(0), tp_size)
 
 
@@ -256,25 +254,25 @@ def _add_decoder_layer_tp(
     attention_window = max_cache_length + 1
 
     norm1 = _apply_norm(
-        network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"], None, eps_tensor, "rmsnorm")
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], None, eps_tensor, "rmsnorm"
+    )
 
     q = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
+        network, norm1, hidden_size, attention_size, weights[f"{prefix}.w_q"]
+    )
     k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"])
+        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"]
+    )
     v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"])
+        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"]
+    )
 
     q = graph_ops.add_apply_rope_native(
-        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
     k = graph_ops.add_apply_rope_native(
-        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
 
     present_k = k
     present_v = v
@@ -291,39 +289,64 @@ def _add_decoder_layer_tp(
 
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
-        network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window,
-        mask=mask_4d)
+        network,
+        q,
+        all_k.get_output(0),
+        all_v.get_output(0),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_kv_heads=num_kv_heads,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=mask_4d,
+    )
 
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat, attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+        network, context_flat, attention_size, hidden_size, weights[f"{prefix}.w_o"]
+    )
     attn_out = add_all_reduce_sum(network, attn_out, tp_size)
 
-    residual1 = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
     norm2 = _apply_norm(
-        network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"], None, eps_tensor, "rmsnorm")
+        network,
+        residual1.get_output(0),
+        hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        None,
+        eps_tensor,
+        "rmsnorm",
+    )
 
     if is_moe_layer:
         mlp_out = _add_moe_tp(
-            network, norm2, weights, prefix,
-            hidden_size, n_routed_experts, moe_intermediate,
-            num_experts_per_tok, shared_intermediate, tp_size,
+            network,
+            norm2,
+            weights,
+            prefix,
+            hidden_size,
+            n_routed_experts,
+            moe_intermediate,
+            num_experts_per_tok,
+            shared_intermediate,
+            tp_size,
             norm_topk_prob=norm_topk_prob,
-            routed_scaling_factor=routed_scaling_factor)
+            routed_scaling_factor=routed_scaling_factor,
+        )
     else:
         mlp_out = _add_swiglu_tp(
-            network, norm2, hidden_size, dense_intermediate,
+            network,
+            norm2,
+            hidden_size,
+            dense_intermediate,
             weights[f"{prefix}.w_gate"],
             weights[f"{prefix}.w_up"],
             weights[f"{prefix}.w_down"],
-            tp_size)
+            tp_size,
+        )
 
     residual2 = network.add_elementwise(
-        residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+        residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
+    )
     return {
         "hidden": residual2.get_output(0),
         "present_k": present_k,
@@ -345,8 +368,8 @@ def build_deepseek_ocr_tp_engine(
     parallel = normalize_parallel_config(parallel_config)
     if not parallel.enabled:
         raise ValueError(
-            "build_deepseek_ocr_tp_engine requires tensor_parallel mode with "
-            "tp_size > 1")
+            "build_deepseek_ocr_tp_engine requires tensor_parallel mode with tp_size > 1"
+        )
 
     image_prefill_tokens = 257
     if max_cache_length <= image_prefill_tokens:
@@ -359,13 +382,11 @@ def build_deepseek_ocr_tp_engine(
         )
     elif max_cache_length < 4096:
         print(
-            "[trtmc build] NOTE: DeepSeek-OCR-2 is more stable with "
-            "--max-cache-length 4096.",
+            "[trtmc build] NOTE: DeepSeek-OCR-2 is more stable with --max-cache-length 4096.",
             file=sys.stderr,
         )
 
-    rank_weights = shard_deepseek_ocr_weights(
-        config, weights, parallel=parallel)
+    rank_weights = shard_deepseek_ocr_weights(config, weights, parallel=parallel)
 
     hidden = int(config.hidden_size)
     vocab = int(config.vocab_size)
@@ -388,58 +409,65 @@ def build_deepseek_ocr_tp_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
-    input_embed_tensor = network.add_input(
-        "input_embed", trt.float32, (1, hidden))
-    use_input_embed_tensor = network.add_input(
-        "use_input_embed", trt.float32, (1,))
+    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+    input_embed_tensor = network.add_input("input_embed", trt.float32, (1, hidden))
+    use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (1,))
 
     cache_k_inputs = []
     cache_v_inputs = []
     for layer_idx in range(num_layers):
-        cache_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_k", layer_idx),
-            trt.float32, (max_cache_length, kv_attention_size)))
-        cache_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_v", layer_idx),
-            trt.float32, (max_cache_length, kv_attention_size)))
+        cache_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_k", layer_idx),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
+        cache_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_v", layer_idx),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
 
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["embedding"])
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), rank_weights["embedding"])
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     cos_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, True)
+        attention_window, head_dim, config.rope_theta, True
+    )
     sin_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, False)
+        attention_window, head_dim, config.rope_theta, False
+    )
     cos_half_tensor = graph_ops.add_constant(network, cos_half_np.shape, cos_half_np)
     sin_half_tensor = graph_ops.add_constant(network, sin_half_np.shape, sin_half_np)
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+    )
 
     gather = network.add_gather(embedding_table, token_id, 0)
     token_embed = gather.get_output(0)
     flag_broadcast = network.add_shuffle(use_input_embed_tensor)
     flag_broadcast.reshape_dims = (1, 1)
-    one_const = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
+    one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
     inv_flag = network.add_elementwise(
-        one_const, flag_broadcast.get_output(0), trt.ElementWiseOperation.SUB)
+        one_const, flag_broadcast.get_output(0), trt.ElementWiseOperation.SUB
+    )
     tok_part = network.add_elementwise(
-        inv_flag.get_output(0), token_embed, trt.ElementWiseOperation.PROD)
+        inv_flag.get_output(0), token_embed, trt.ElementWiseOperation.PROD
+    )
     embed_part = network.add_elementwise(
-        flag_broadcast.get_output(0), input_embed_tensor,
-        trt.ElementWiseOperation.PROD)
+        flag_broadcast.get_output(0), input_embed_tensor, trt.ElementWiseOperation.PROD
+    )
     hidden_sum = network.add_elementwise(
-        tok_part.get_output(0), embed_part.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        tok_part.get_output(0), embed_part.get_output(0), trt.ElementWiseOperation.SUM
+    )
     hidden_state = hidden_sum.get_output(0)
 
     present_k_outputs = []
@@ -482,13 +510,13 @@ def build_deepseek_ocr_tp_engine(
     final_norm = rank_weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _apply_norm(
-            network, hidden_state, hidden, final_norm,
-            None, eps_tensor, "rmsnorm")
+            network, hidden_state, hidden, final_norm, None, eps_tensor, "rmsnorm"
+        )
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_out"])
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        network, hidden_state, hidden, vocab, rank_weights["w_out"]
+    )
+    logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
     logits.name = "logits"
     network.mark_output(logits)
 
