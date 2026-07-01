@@ -380,7 +380,7 @@ def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, mon
     fake_module = types.SimpleNamespace(build_sam3_text_encoder_engine=_fake_build)
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.sam3.text_encoder_builder",
+        "tensorrt_model_connect.families.sam3.model.components.text_encoder",
         fake_module,
     )
 
@@ -411,7 +411,7 @@ def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, mo
     fake_module = types.SimpleNamespace(build_sam3_vision_encoder_engine=_fake_build)
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.sam3.vision_encoder_builder",
+        "tensorrt_model_connect.families.sam3.model.components.vision_encoder",
         fake_module,
     )
 
@@ -449,7 +449,7 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(
     fake_module = types.SimpleNamespace(build_sam3_core_engine=_fake_build)
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.sam3.core_builder",
+        "tensorrt_model_connect.families.sam3.model.model",
         fake_module,
     )
 

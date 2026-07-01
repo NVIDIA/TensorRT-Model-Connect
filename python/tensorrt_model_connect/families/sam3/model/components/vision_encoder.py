@@ -11,7 +11,7 @@ import sys
 
 import numpy as np
 
-from .checkpoint_mapper import WeightDict
+from ...weights import WeightDict
 
 
 def _trt():
@@ -21,7 +21,7 @@ def _trt():
 
 
 def _graph_ops():
-    from . import graph_ops
+    from .. import model as graph_ops
 
     return graph_ops
 
@@ -34,7 +34,8 @@ def _tile_position_embeddings(
     hidden_size: int,
 ) -> np.ndarray:
     pos = np.asarray(position_embeddings, dtype=np.float32).reshape(
-        1, pretrain_grid, pretrain_grid, hidden_size)
+        1, pretrain_grid, pretrain_grid, hidden_size
+    )
     if pretrain_grid == grid_size:
         return np.ascontiguousarray(pos.reshape(grid_size * grid_size, hidden_size))
     repeat_h = grid_size // pretrain_grid + 1
@@ -42,14 +43,16 @@ def _tile_position_embeddings(
     tiled = np.tile(pos.transpose(0, 3, 1, 2), (1, 1, repeat_h, repeat_w))
     tiled = tiled[:, :, :grid_size, :grid_size]
     return np.ascontiguousarray(
-        tiled.transpose(0, 2, 3, 1).reshape(grid_size * grid_size, hidden_size))
+        tiled.transpose(0, 2, 3, 1).reshape(grid_size * grid_size, hidden_size)
+    )
 
 
 def _window_indices(grid_size: int, window_size: int) -> tuple[np.ndarray, np.ndarray]:
     if grid_size % window_size != 0:
         raise ValueError(
             f"SAM3 vision builder requires grid_size divisible by window_size, "
-            f"got grid={grid_size}, window={window_size}")
+            f"got grid={grid_size}, window={window_size}"
+        )
     indices: list[int] = []
     for wy in range(0, grid_size, window_size):
         for wx in range(0, grid_size, window_size):
@@ -62,12 +65,12 @@ def _window_indices(grid_size: int, window_size: int) -> tuple[np.ndarray, np.nd
     return forward, inverse
 
 
-def _sam3_rope_table(end_x: int, end_y: int, head_dim: int, rope_theta: float,
-                     scale: float) -> tuple[np.ndarray, np.ndarray]:
+def _sam3_rope_table(
+    end_x: int, end_y: int, head_dim: int, rope_theta: float, scale: float
+) -> tuple[np.ndarray, np.ndarray]:
     if head_dim % 4 != 0:
         raise ValueError("SAM3 vision RoPE head_dim must be divisible by 4")
-    freqs = 1.0 / (
-        float(rope_theta) ** (np.arange(0, head_dim, 4, dtype=np.float32) / head_dim))
+    freqs = 1.0 / (float(rope_theta) ** (np.arange(0, head_dim, 4, dtype=np.float32) / head_dim))
     flat = np.arange(end_x * end_y, dtype=np.int64)
     x_pos = (flat % end_x).astype(np.float32) * scale
     y_pos = (flat // end_x).astype(np.float32) * scale
@@ -90,10 +93,12 @@ def _sam3_position_encoding(height: int, width: int, channels: int) -> np.ndarra
     dim_t = 10000.0 ** (2 * np.floor(dim_t / 2) / num_pos_feats)
     pos_x = x_embed[:, :, None] / dim_t
     pos_y = y_embed[:, :, None] / dim_t
-    pos_x = np.stack((np.sin(pos_x[:, :, 0::2]), np.cos(pos_x[:, :, 1::2])),
-                     axis=3).reshape(height, width, -1)
-    pos_y = np.stack((np.sin(pos_y[:, :, 0::2]), np.cos(pos_y[:, :, 1::2])),
-                     axis=3).reshape(height, width, -1)
+    pos_x = np.stack((np.sin(pos_x[:, :, 0::2]), np.cos(pos_x[:, :, 1::2])), axis=3).reshape(
+        height, width, -1
+    )
+    pos_y = np.stack((np.sin(pos_y[:, :, 0::2]), np.cos(pos_y[:, :, 1::2])), axis=3).reshape(
+        height, width, -1
+    )
     pos = np.concatenate((pos_y, pos_x), axis=2)
     return np.ascontiguousarray(pos.transpose(2, 0, 1)[None, :, :, :].astype(np.float32))
 
@@ -115,38 +120,51 @@ def _add_attention_with_rope(
     trt = _trt()
     graph_ops = _graph_ops()
     q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, hidden_size,
-        weights[f"{prefix}.attention.q_proj.weight"])
-    q = graph_ops.add_bias_sum(
-        network, q, hidden_size, weights[f"{prefix}.attention.q_proj.bias"])
+        network, hidden, hidden_size, hidden_size, weights[f"{prefix}.attention.q_proj.weight"]
+    )
+    q = graph_ops.add_bias_sum(network, q, hidden_size, weights[f"{prefix}.attention.q_proj.bias"])
     k = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, hidden_size,
-        weights[f"{prefix}.attention.k_proj.weight"])
-    k = graph_ops.add_bias_sum(
-        network, k, hidden_size, weights[f"{prefix}.attention.k_proj.bias"])
+        network, hidden, hidden_size, hidden_size, weights[f"{prefix}.attention.k_proj.weight"]
+    )
+    k = graph_ops.add_bias_sum(network, k, hidden_size, weights[f"{prefix}.attention.k_proj.bias"])
     v = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, hidden_size,
-        weights[f"{prefix}.attention.v_proj.weight"])
-    v = graph_ops.add_bias_sum(
-        network, v, hidden_size, weights[f"{prefix}.attention.v_proj.bias"])
+        network, hidden, hidden_size, hidden_size, weights[f"{prefix}.attention.v_proj.weight"]
+    )
+    v = graph_ops.add_bias_sum(network, v, hidden_size, weights[f"{prefix}.attention.v_proj.bias"])
 
     cos = graph_ops.add_constant(
-        network, (1, seq_len, head_dim // 2),
-        cos_table[:, 0::2].reshape(1, seq_len, -1))
+        network, (1, seq_len, head_dim // 2), cos_table[:, 0::2].reshape(1, seq_len, -1)
+    )
     sin = graph_ops.add_constant(
-        network, (1, seq_len, head_dim // 2),
-        sin_table[:, 0::2].reshape(1, seq_len, -1))
+        network, (1, seq_len, head_dim // 2), sin_table[:, 0::2].reshape(1, seq_len, -1)
+    )
     q = graph_ops.add_apply_rope_native_sequence(
-        network, q, num_heads, head_dim, cos, sin,
-        rotary_embedding_dim=head_dim, interleaved=True, sequence_length=seq_len)
+        network,
+        q,
+        num_heads,
+        head_dim,
+        cos,
+        sin,
+        rotary_embedding_dim=head_dim,
+        interleaved=True,
+        sequence_length=seq_len,
+    )
     k = graph_ops.add_apply_rope_native_sequence(
-        network, k, num_heads, head_dim, cos, sin,
-        rotary_embedding_dim=head_dim, interleaved=True, sequence_length=seq_len)
+        network,
+        k,
+        num_heads,
+        head_dim,
+        cos,
+        sin,
+        rotary_embedding_dim=head_dim,
+        interleaved=True,
+        sequence_length=seq_len,
+    )
 
     if num_windows is None:
         context = graph_ops.add_attention_from_rows(
-            network, q, k, v, num_heads=num_heads, head_dim=head_dim,
-            q_seq=seq_len, kv_seq=seq_len)
+            network, q, k, v, num_heads=num_heads, head_dim=head_dim, q_seq=seq_len, kv_seq=seq_len
+        )
     else:
         win_seq = seq_len // num_windows
         q_win = network.add_shuffle(q)
@@ -159,21 +177,22 @@ def _add_attention_with_rope(
         v_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
         v_win.second_transpose = trt.Permutation([0, 2, 1, 3])
         ctx = graph_ops.add_attention_core(
-            network, q_win.get_output(0), k_win.get_output(0), v_win.get_output(0))
+            network, q_win.get_output(0), k_win.get_output(0), v_win.get_output(0)
+        )
         flat = network.add_shuffle(ctx)
         flat.first_transpose = trt.Permutation([0, 2, 1, 3])
         flat.reshape_dims = (seq_len, hidden_size)
         context = flat.get_output(0)
 
     out = graph_ops.add_matmul_rhs_constant(
-        network, context, hidden_size, hidden_size,
-        weights[f"{prefix}.attention.o_proj.weight"])
+        network, context, hidden_size, hidden_size, weights[f"{prefix}.attention.o_proj.weight"]
+    )
     return graph_ops.add_bias_sum(
-        network, out, hidden_size, weights[f"{prefix}.attention.o_proj.bias"])
+        network, out, hidden_size, weights[f"{prefix}.attention.o_proj.bias"]
+    )
 
 
-def _add_deconv2d(network, inp, weight: np.ndarray, bias: np.ndarray,
-                  out_channels: int):
+def _add_deconv2d(network, inp, weight: np.ndarray, bias: np.ndarray, out_channels: int):
     trt = _trt()
     layer = network.add_deconvolution_nd(
         inp,
@@ -186,31 +205,55 @@ def _add_deconv2d(network, inp, weight: np.ndarray, bias: np.ndarray,
     return layer.get_output(0)
 
 
-def _add_fpn_level(network, hidden_spatial, weights: WeightDict, level: int,
-                   hidden_size: int, fpn_hidden_size: int):
+def _add_fpn_level(
+    network, hidden_spatial, weights: WeightDict, level: int, hidden_size: int, fpn_hidden_size: int
+):
     trt = _trt()
     graph_ops = _graph_ops()
     x = hidden_spatial
     if level == 0:
         x = _add_deconv2d(
-            network, x, weights["vision.fpn.0.deconv0.weight"],
-            weights["vision.fpn.0.deconv0.bias"], hidden_size // 2)
+            network,
+            x,
+            weights["vision.fpn.0.deconv0.weight"],
+            weights["vision.fpn.0.deconv0.bias"],
+            hidden_size // 2,
+        )
         x = graph_ops.add_gelu_erf(network, x)
         x = _add_deconv2d(
-            network, x, weights["vision.fpn.0.deconv1.weight"],
-            weights["vision.fpn.0.deconv1.bias"], hidden_size // 4)
+            network,
+            x,
+            weights["vision.fpn.0.deconv1.weight"],
+            weights["vision.fpn.0.deconv1.bias"],
+            hidden_size // 4,
+        )
     elif level == 1:
         x = _add_deconv2d(
-            network, x, weights["vision.fpn.1.deconv0.weight"],
-            weights["vision.fpn.1.deconv0.bias"], hidden_size // 2)
+            network,
+            x,
+            weights["vision.fpn.1.deconv0.weight"],
+            weights["vision.fpn.1.deconv0.bias"],
+            hidden_size // 2,
+        )
 
     prefix = f"vision.fpn.{level}"
     x = graph_ops.add_conv2d(
-        network, x, weights[f"{prefix}.proj1.weight"],
-        weights[f"{prefix}.proj1.bias"], fpn_hidden_size, (1, 1))
+        network,
+        x,
+        weights[f"{prefix}.proj1.weight"],
+        weights[f"{prefix}.proj1.bias"],
+        fpn_hidden_size,
+        (1, 1),
+    )
     x = graph_ops.add_conv2d(
-        network, x, weights[f"{prefix}.proj2.weight"],
-        weights[f"{prefix}.proj2.bias"], fpn_hidden_size, (3, 3), padding=(1, 1))
+        network,
+        x,
+        weights[f"{prefix}.proj2.weight"],
+        weights[f"{prefix}.proj2.bias"],
+        fpn_hidden_size,
+        (3, 3),
+        padding=(1, 1),
+    )
     cast = network.add_cast(x, trt.float32)
     out = cast.get_output(0)
     out.name = f"sam3_fpn_hidden_{level}"
@@ -260,15 +303,12 @@ def build_sam3_vision_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-    pixel_values = network.add_input(
-        "pixel_values", trt.float32, (1, 3, image_size, image_size))
-    patch_bias = weights.get(
-        "vision.patch_embed.bias", np.zeros(hidden_size, dtype=np.float32))
+    pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_size, image_size))
+    patch_bias = weights.get("vision.patch_embed.bias", np.zeros(hidden_size, dtype=np.float32))
     patch = graph_ops.add_conv2d(
         network,
         pixel_values,
@@ -290,7 +330,8 @@ def build_sam3_vision_encoder_engine(
     )
     pos_t = graph_ops.add_constant(network, (seq_len, hidden_size), pos)
     hidden = network.add_elementwise(
-        to_rows.get_output(0), pos_t, trt.ElementWiseOperation.SUM).get_output(0)
+        to_rows.get_output(0), pos_t, trt.ElementWiseOperation.SUM
+    ).get_output(0)
     hidden = graph_ops.add_layer_norm_native(
         network,
         hidden,
@@ -300,17 +341,18 @@ def build_sam3_vision_encoder_engine(
         eps,
     )
 
-    gather_window = graph_ops.add_constant(
-        network, (seq_len,), window_order, dtype=np.int32)
+    gather_window = graph_ops.add_constant(network, (seq_len,), window_order, dtype=np.int32)
     gather_inverse = graph_ops.add_constant(
-        network, (seq_len,), inverse_window_order, dtype=np.int32)
+        network, (seq_len,), inverse_window_order, dtype=np.int32
+    )
     window_cos, window_sin = _sam3_rope_table(
-        window_size, window_size, head_dim, rope_theta, scale=1.0)
+        window_size, window_size, head_dim, rope_theta, scale=1.0
+    )
     window_cos = np.tile(window_cos, (num_windows, 1))
     window_sin = np.tile(window_sin, (num_windows, 1))
     global_cos, global_sin = _sam3_rope_table(
-        grid_size, grid_size, head_dim, rope_theta,
-        scale=float(window_size) / float(grid_size))
+        grid_size, grid_size, head_dim, rope_theta, scale=float(window_size) / float(grid_size)
+    )
 
     for layer_idx in range(num_layers):
         prefix = f"vision.layers.{layer_idx}"
@@ -362,16 +404,16 @@ def build_sam3_vision_encoder_engine(
             eps,
         )
         mlp = graph_ops.add_matmul_rhs_constant(
-            network, normed2, hidden_size, intermediate_size,
-            weights[f"{prefix}.mlp.fc1.weight"])
+            network, normed2, hidden_size, intermediate_size, weights[f"{prefix}.mlp.fc1.weight"]
+        )
         mlp = graph_ops.add_bias_sum(
-            network, mlp, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"])
+            network, mlp, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"]
+        )
         mlp = _add_sam3_vision_activation(network, mlp, hidden_act)
         mlp = graph_ops.add_matmul_rhs_constant(
-            network, mlp, intermediate_size, hidden_size,
-            weights[f"{prefix}.mlp.fc2.weight"])
-        mlp = graph_ops.add_bias_sum(
-            network, mlp, hidden_size, weights[f"{prefix}.mlp.fc2.bias"])
+            network, mlp, intermediate_size, hidden_size, weights[f"{prefix}.mlp.fc2.weight"]
+        )
+        mlp = graph_ops.add_bias_sum(network, mlp, hidden_size, weights[f"{prefix}.mlp.fc2.bias"])
         hidden = network.add_elementwise(hidden, mlp, trt.ElementWiseOperation.SUM).get_output(0)
 
     spatial = network.add_shuffle(hidden)
@@ -382,10 +424,8 @@ def build_sam3_vision_encoder_engine(
 
     for level, scale in enumerate((4, 2, 1)):
         _add_fpn_level(network, hidden_spatial, weights, level, hidden_size, fpn_hidden_size)
-        pos_np = _sam3_position_encoding(
-            grid_size * scale, grid_size * scale, fpn_hidden_size)
-        pos = graph_ops.add_constant(
-            network, pos_np.shape, pos_np)
+        pos_np = _sam3_position_encoding(grid_size * scale, grid_size * scale, fpn_hidden_size)
+        pos = graph_ops.add_constant(network, pos_np.shape, pos_np)
         pos = network.add_cast(pos, trt.float32).get_output(0)
         pos.name = f"sam3_fpn_position_{level}"
         network.mark_output(pos)
