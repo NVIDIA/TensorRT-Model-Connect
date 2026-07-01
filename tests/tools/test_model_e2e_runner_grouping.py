@@ -77,6 +77,23 @@ def test_canary_runner_collects_shared_bundle_as_one_case() -> None:
     assert "canary-1b-v2-tp4" not in case_names
 
 
+def test_canary_runner_filters_exact_names_before_bundle_grouping(tmp_path) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("canary-1b-v2\n", encoding="utf-8")
+
+    case_names = canary_runner.model_case_names(
+        _Config(
+            **{
+                "--e2e-group-by-bundle": True,
+                "--e2e-models-file": str(models_file),
+                "--e2e-model": ["canary"],
+            }
+        )
+    )
+
+    assert case_names == ["canary-1b-v2"]
+
+
 def test_nemotron_speech_runner_does_not_collect_shared_bundle_as_group() -> None:
     case_names = nemotron_speech_runner.model_case_names(
         _Config(

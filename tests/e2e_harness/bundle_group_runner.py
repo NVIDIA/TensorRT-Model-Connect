@@ -12,6 +12,11 @@ import pytest
 
 from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
+from tests.e2e_harness.model_selection import (
+    BUNDLE_GROUP_PREFIX,
+    case_names_from_param,
+    select_cases_from_models_file,
+)
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 from tests.e2e_harness.python_profiles import (
     resolve_case_profile_names,
@@ -19,7 +24,6 @@ from tests.e2e_harness.python_profiles import (
 )
 
 
-_BUNDLE_GROUP_PREFIX = "bundle:"
 _GROUP_BY_BUNDLE_METADATA_KEY = "group_by_bundle"
 
 
@@ -31,19 +35,6 @@ def _parse_e2e_model_filters(values: list[str] | None) -> set[str]:
             if item:
                 filters.add(item)
     return filters
-
-
-def _read_models_file(path: str) -> set[str]:
-    names: set[str] = set()
-    with open(path, encoding="utf-8") as f:
-        for raw in f:
-            value = raw.split("#", 1)[0].strip()
-            if not value:
-                continue
-            if "[" in value and "]" in value:
-                value = value.rsplit("[", 1)[1].split("]", 1)[0]
-            names.update(_case_names_from_param(value))
-    return names
 
 
 def _group_cases_by_bundle(cases) -> list[list]:
@@ -78,14 +69,7 @@ def _case_group_id(cases) -> str:
     names = [case.name for case in cases]
     if len(names) == 1:
         return names[0]
-    return _BUNDLE_GROUP_PREFIX + "+".join(names)
-
-
-def _case_names_from_param(case_name: str) -> list[str]:
-    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
-        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
-        return [name for name in payload.split("+") if name]
-    return [case_name]
+    return BUNDLE_GROUP_PREFIX + "+".join(names)
 
 
 def model_case_names_for_dir(
@@ -119,8 +103,7 @@ def model_case_names_for_dir(
     cases = load_all_manifests(model_dir, task_strategy_filter=strategy_filter)
 
     if models_file:
-        selected_names = _read_models_file(models_file)
-        cases = [case for case in cases if case.name in selected_names]
+        cases = select_cases_from_models_file(cases, models_file)
 
     if model_filters:
         cases = [case for case in cases if case_matches_model(case, model_filters)]
@@ -158,7 +141,7 @@ def run_model_e2e_case_or_group(
     resolve_model_plugin_dir: Callable,
     model_plugin_dir_env: Callable,
 ) -> None:
-    case_names = _case_names_from_param(case_name)
+    case_names = case_names_from_param(case_name)
     if len(case_names) == 1:
         _assert_single_case(
             case_names[0],
