@@ -853,7 +853,8 @@ def _build_bark_decoder_engine(
             weights[f"{lp}.w_fc1"])
         fc1 = graph_ops.add_bias_sum(network, fc1, ffn_hidden,
             weights[f"{lp}.b_fc1"])
-        gelu = graph_ops.add_gelu_new(network, fc1)
+        # HF BarkMLP uses nn.GELU() with the exact erf formulation.
+        gelu = graph_ops.add_gelu_erf(network, fc1)
         fc2 = graph_ops.add_matmul_rhs_constant(
             network, gelu, ffn_hidden, hidden,
             weights[f"{lp}.w_fc2"])
@@ -1024,7 +1025,8 @@ def _build_bark_fine_engine(
         fc1_bias = weights.get(f"{lp}.fc1_bias")
         if fc1_bias is not None:
             fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
-        gelu = graph_ops.add_gelu_new(network, fc1)
+        # HF BarkMLP uses nn.GELU() with the exact erf formulation.
+        gelu = graph_ops.add_gelu_erf(network, fc1)
         fc2 = graph_ops.add_matmul_rhs_constant(
             network, gelu, mlp_size, hidden, weights[f"{lp}.w_fc2"])
         fc2_bias = weights.get(f"{lp}.fc2_bias")

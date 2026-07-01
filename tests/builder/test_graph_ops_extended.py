@@ -752,7 +752,73 @@ class TestAddCausalPad1d:
 
 
 # ===================================================================
-# 9. add_slice_trim_right (TRT)
+# 9. add_reflect_pad_1d (TRT)
+# ===================================================================
+
+@requires_trt
+class TestAddReflectPad1d:
+    def test_matches_torch_reflect_padding(self, trt_runner):
+        import torch
+        import torch.nn.functional as F
+        from tensorrt_model_connect.families.bark import graph_ops as bark_graph_ops
+
+        x_np = np.arange(1, 6, dtype=np.float32).reshape(1, 1, 5)
+
+        def build(net, inp):
+            out = bark_graph_ops.add_reflect_pad_1d(
+                net, inp["x"], pad_left=3, pad_right=2)
+            return {"out": out}
+
+        result = trt_runner(build, {"x": x_np})
+        expected = F.pad(torch.from_numpy(x_np), (3, 2), mode="reflect").numpy()
+        np.testing.assert_array_equal(result["out"], expected)
+
+
+# ===================================================================
+# 10. add_lstm_unrolled (TRT)
+# ===================================================================
+
+@requires_trt
+class TestAddLstmUnrolled:
+    def test_matches_torch_lstm(self, trt_runner):
+        import torch
+        import torch.nn as nn
+        from tensorrt_model_connect.families.bark import graph_ops as bark_graph_ops
+
+        rng = np.random.RandomState(7)
+        batch, seq_length, input_size, hidden_size = 1, 4, 2, 3
+        x_np = rng.randn(batch, seq_length, input_size).astype(np.float32)
+        w_ih = rng.randn(4 * hidden_size, input_size).astype(np.float32)
+        w_hh = rng.randn(4 * hidden_size, hidden_size).astype(np.float32)
+        b_ih = rng.randn(4 * hidden_size).astype(np.float32)
+        b_hh = rng.randn(4 * hidden_size).astype(np.float32)
+
+        def build(net, inp):
+            out = bark_graph_ops.add_lstm_unrolled(
+                net,
+                inp["x"],
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                hidden_size,
+                seq_length,
+            )
+            return {"out": out}
+
+        result = trt_runner(build, {"x": x_np})
+        lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+        with torch.no_grad():
+            lstm.weight_ih_l0.copy_(torch.from_numpy(w_ih))
+            lstm.weight_hh_l0.copy_(torch.from_numpy(w_hh))
+            lstm.bias_ih_l0.copy_(torch.from_numpy(b_ih))
+            lstm.bias_hh_l0.copy_(torch.from_numpy(b_hh))
+        expected = lstm(torch.from_numpy(x_np))[0].detach().numpy()
+        np.testing.assert_allclose(result["out"], expected, atol=1e-5, rtol=1e-5)
+
+
+# ===================================================================
+# 11. add_slice_trim_right (TRT)
 # ===================================================================
 
 @requires_trt
@@ -785,7 +851,7 @@ class TestAddSliceTrimRight:
 
 
 # ===================================================================
-# 10. add_batch_norm_2d (TRT)
+# 12. add_batch_norm_2d (TRT)
 # ===================================================================
 
 @requires_trt

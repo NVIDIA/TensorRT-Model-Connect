@@ -97,6 +97,8 @@ BarkConfig make_bark_config(const PipelineContext& ctx) {
             bark_cfg.dump_path = ctx.runtime_config->get<std::string>("audio_bark", "dump_path");
             bark_cfg.greedy = ctx.runtime_config->get<bool>("audio_bark", "greedy");
             bark_cfg.seed = ctx.runtime_config->get<std::int64_t>("audio_bark", "seed");
+            bark_cfg.fine_temperature =
+                ctx.runtime_config->get<float>("audio_bark", "fine_temperature");
         } catch (const std::exception&) {
             // Schema not registered or type mismatch: stay at defaults.
         }

@@ -115,32 +115,6 @@ std::vector<float> synthesize_simple_waveform(const std::vector<int32_t>& codes_
     return waveform;
 }
 
-void build_fine_input_embeddings(std::vector<float>& host_embeds, const std::vector<int32_t>& codes,
-                                 int32_t cb_idx, int32_t n_frames, int32_t actual_frames,
-                                 int32_t fine_hidden, int32_t fine_cb_size,
-                                 const std::vector<float>& fine_embed,
-                                 const std::vector<float>& fine_position_embed) {
-    std::fill(host_embeds.begin(), host_embeds.end(), 0.0F);
-    for (int32_t frame = 0; frame < actual_frames; ++frame) {
-        float* dst = host_embeds.data() + static_cast<std::size_t>(frame) * fine_hidden;
-        for (int32_t cb = 0; cb <= cb_idx; ++cb) {
-            const int32_t code = codes[static_cast<std::size_t>(cb) * n_frames + frame];
-            const float* table =
-                fine_embed.data() + static_cast<std::size_t>(cb) * fine_cb_size * fine_hidden;
-            const float* row = table + static_cast<std::size_t>(code) * fine_hidden;
-            for (int32_t h = 0; h < fine_hidden; ++h) {
-                dst[h] += row[h];
-            }
-        }
-
-        const float* pos_row =
-            fine_position_embed.data() + static_cast<std::size_t>(frame) * fine_hidden;
-        for (int32_t h = 0; h < fine_hidden; ++h) {
-            dst[h] += pos_row[h];
-        }
-    }
-}
-
 void update_fine_codes_from_logits(std::vector<int32_t>& codes,
                                    const std::vector<float>& host_logits, int32_t cb_idx,
                                    int32_t n_frames, int32_t actual_frames, int32_t fine_cb_size,
@@ -347,11 +321,14 @@ int32_t BarkPipeline::sample_top_k(const float* logits, int32_t vocab_size, floa
     top_k = std::min(top_k, vocab_size);
     std::vector<int32_t> indices(static_cast<std::size_t>(vocab_size));
     std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + top_k, indices.end(),
-                      [logits](int32_t a, int32_t b) { return logits[a] > logits[b]; });
+    if (top_k < vocab_size) {
+        std::partial_sort(indices.begin(), indices.begin() + top_k, indices.end(),
+                          [logits](int32_t a, int32_t b) { return logits[a] > logits[b]; });
+    }
 
     std::vector<float> probs(static_cast<std::size_t>(top_k));
-    float max_logit = logits[indices[0]];
+    const float max_logit =
+        top_k < vocab_size ? logits[indices[0]] : *std::max_element(logits, logits + vocab_size);
     float sum = 0.0F;
     for (int32_t i = 0; i < top_k; ++i) {
         probs[i] = std::exp((logits[indices[i]] - max_logit) / temperature);
@@ -522,8 +499,9 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
     for (int32_t cb_idx = plan.first_predicted_codebook; cb_idx < plan.last_predicted_codebook;
          ++cb_idx) {
         // Build input embeddings on host
-        build_fine_input_embeddings(host_embeds, codes, cb_idx, plan.n_frames, plan.actual_frames,
-                                    fine_hidden, fine_cb_size, fine_embed_, fine_position_embed_);
+        build_bark_fine_input_embeddings(host_embeds, codes, cb_idx, plan.n_frames,
+                                         plan.actual_frames, max_seq, fine_hidden, fine_cb_size,
+                                         cfg.codebook_size, fine_embed_, fine_position_embed_);
 
         // Build TensorMap
         Tensor embed_tensor;
@@ -551,8 +529,18 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
                      logits_tensor.nbytes());
         std::memcpy(host_logits.data(), logits_tensor.data, logits_bytes);
 
-        update_fine_codes_from_logits(codes, host_logits, cb_idx, plan.n_frames, plan.actual_frames,
-                                      fine_cb_size, cfg.codebook_size);
+        if (bark_fine_uses_sampling(cfg)) {
+            const int32_t valid_range = std::min(cfg.codebook_size, fine_cb_size);
+            for (int32_t frame = 0; frame < plan.actual_frames; ++frame) {
+                const float* frame_logits =
+                    host_logits.data() + static_cast<std::size_t>(frame) * fine_cb_size;
+                codes[static_cast<std::size_t>(cb_idx) * plan.n_frames + frame] =
+                    sample_top_k(frame_logits, valid_range, cfg.fine_temperature, valid_range);
+            }
+        } else {
+            update_fine_codes_from_logits(codes, host_logits, cb_idx, plan.n_frames,
+                                          plan.actual_frames, fine_cb_size, cfg.codebook_size);
+        }
     }
 
     std::cerr << "[trtmc] Bark fine: predicted codebooks 2-7 for " << plan.n_frames << " frames"

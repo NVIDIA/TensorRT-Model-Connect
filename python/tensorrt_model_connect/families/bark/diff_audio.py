@@ -634,7 +634,11 @@ def stage4_greedy_parity(args) -> bool:
     config = ModelConfig.from_dir(model_dir)
     plg = find_plugin(config.model_type)
     weights = plg.load_weights(model_dir, config)
-    max_cache = 256
+    # Bark semantic generation starts after a fixed 256-token text/history
+    # prefix plus the semantic infer token. Keep the full diagnostic sequence
+    # in cache so Stage 4 compares against HF full-context generation rather
+    # than introducing a TRT-only sliding window before the first token.
+    max_cache = max(1024, 257 + max_sem_tokens)
 
     sem_plan = plg.build_engine(config, weights, max_cache)
     extra = plg.build_extra_engines(config, weights, max_cache)
@@ -699,6 +703,7 @@ def stage4_greedy_parity(args) -> bool:
         hf_semantic_output = model.semantic.generate(
             inputs["input_ids"],
             semantic_generation_config=sem_gen_cfg,
+            attention_mask=inputs.get("attention_mask"),
         )
     hf_sem_all = hf_semantic_output[0].cpu().numpy()
     hf_sem_tokens = hf_sem_all[hf_sem_all < semantic_pad_token]
@@ -907,6 +912,9 @@ def stage4_greedy_parity(args) -> bool:
             model.generation_config, "fine_acoustics_config", {})
         if BarkFineGenerationConfig is not None and fine_gen_cfg_dict:
             fine_gen_cfg = BarkFineGenerationConfig(**fine_gen_cfg_dict)
+            # BarkFineModel uses argmax only when temperature is exactly 1.0;
+            # its default 0.5 path samples with torch.multinomial.
+            fine_gen_cfg.temperature = 1.0
         else:
             fine_gen_cfg = None
 
@@ -961,9 +969,10 @@ def stage4_greedy_parity(args) -> bool:
             input_embeds = np.zeros(
                 (fine_seq_length, fine_hidden), dtype=np.float32)
             actual_frames = min(n_frames, fine_seq_length)
-            for frame in range(actual_frames):
+            for frame in range(fine_seq_length):
                 for cb in range(cb_idx + 1):
-                    code = int(trt_fine_codes[cb, frame])
+                    code = (int(trt_fine_codes[cb, frame])
+                            if frame < actual_frames else codebook_size)
                     input_embeds[frame] += fine_embed[cb, code]
                 input_embeds[frame] += fine_pos_embed[frame]
 

@@ -8,7 +8,6 @@ Architecture:
   -> LSTM (unrolled for TRT)
   -> 4 upsample stages (ConvTranspose1d + 2x residual blocks with ELU)
   -> Conv1d output
-  -> Tanh
   Output: waveform [1, 1, T*320]
 
 Weight norm fusion: v * (g / ||v||_2) => fused_weight
@@ -137,7 +136,7 @@ def build_encodec_decoder_engine(
         f"{prefix}layers.0.conv.weight_g", f"{prefix}layers.0.conv.weight_v")
     input_conv_b = _to_np(f"{prefix}layers.0.conv.bias") if _has_key(
         f"{prefix}layers.0.conv.bias") else None
-    x = graph_ops.add_causal_pad_1d(network, x, 6)  # (7-1)*1 = 6
+    x = graph_ops.add_reflect_pad_1d(network, x, 6, 0)  # HF pad_mode="reflect"
     x = graph_ops.add_conv1d(network, x, input_conv_w, input_conv_b, 512, 7)
 
     # === LSTM (model.1): 2 layers, hidden_size=512, with residual ===
@@ -204,7 +203,7 @@ def build_encodec_decoder_engine(
             f"{prefix}layers.{res_idx}.block.1.conv.weight_v")
         conv1_b = _to_np(f"{prefix}layers.{res_idx}.block.1.conv.bias") if _has_key(
             f"{prefix}layers.{res_idx}.block.1.conv.bias") else None
-        x = graph_ops.add_causal_pad_1d(network, x, 2)  # (3-1)*1 = 2
+        x = graph_ops.add_reflect_pad_1d(network, x, 2, 0)
         x = graph_ops.add_conv1d(network, x, conv1_w, conv1_b, hidden_ch, 3)
 
         # block.2: ELU, block.3: SConv1d(hidden_ch -> out_ch, k=1)
@@ -228,17 +227,14 @@ def build_encodec_decoder_engine(
         x = network.add_elementwise(
             x, shortcut, trt.ElementWiseOperation.SUM).get_output(0)
 
-    # === Output: ELU + Conv1d(32 -> 1, k=7, causal) + Tanh ===
+    # === Output: ELU + Conv1d(32 -> 1, k=7, causal) ===
     x = graph_ops.add_elu(network, x)
     out_conv_w = _get_fused_conv_weight(
         f"{prefix}layers.15.conv.weight_g", f"{prefix}layers.15.conv.weight_v")
     out_conv_b = _to_np(f"{prefix}layers.15.conv.bias") if _has_key(
         f"{prefix}layers.15.conv.bias") else None
-    x = graph_ops.add_causal_pad_1d(network, x, 6)  # (7-1)*1 = 6
+    x = graph_ops.add_reflect_pad_1d(network, x, 6, 0)
     x = graph_ops.add_conv1d(network, x, out_conv_w, out_conv_b, 1, 7)
-
-    # Tanh activation
-    x = network.add_activation(x, trt.ActivationType.TANH).get_output(0)
 
     x.name = "waveform"
     network.mark_output(x)

@@ -42,6 +42,13 @@ SCHEMA = Schema(
             default=-1,  # -1 -> use default RNG state
             allowed_layers=_SESSION,
         ),
+        ConfigField(
+            name="fine_temperature",
+            type_tag="float",
+            default=0.5,
+            allowed_layers=_SESSION,
+            validator=lambda v: isinstance(v, (int, float)) and v > 0.0,
+        ),
     ),
 )
 

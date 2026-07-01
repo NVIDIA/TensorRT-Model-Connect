@@ -1997,25 +1997,34 @@ def add_reflect_pad_1d(
     pad_left: int,
     pad_right: int,
 ) -> trt.ITensor:
-    """Reflect padding for 1D tensor [N, C, L].
+    """PyTorch-compatible reflect padding for a static [N, C, L] tensor."""
+    _, _, length = inp.shape
+    if pad_left < 0 or pad_right < 0:
+        raise ValueError("reflect padding must be non-negative")
+    if pad_left >= length or pad_right >= length:
+        raise ValueError("reflect padding must be smaller than input length")
 
-    For TRT, we approximate reflect padding with replicate padding
-    since TRT does not have native reflect mode.
-    """
-    # Use slice + concatenate to implement reflect padding
-    # For simplicity, use zero padding as a fallback
-    n, c, length = inp.shape
-    reshape_in = network.add_shuffle(inp)
-    reshape_in.reshape_dims = (n, c, 1, length)
+    parts: list[trt.ITensor] = []
+    if pad_left:
+        left_indices = np.arange(pad_left, 0, -1, dtype=np.int32)
+        left_index_tensor = add_constant(
+            network, (pad_left,), left_indices, dtype=np.int32)
+        parts.append(network.add_gather(inp, left_index_tensor, 2).get_output(0))
 
-    pad = network.add_padding_nd(
-        reshape_in.get_output(0),
-        pre_padding=(0, pad_left),
-        post_padding=(0, pad_right))
+    parts.append(inp)
 
-    reshape_out = network.add_shuffle(pad.get_output(0))
-    reshape_out.reshape_dims = (n, c, length + pad_left + pad_right)
-    return reshape_out.get_output(0)
+    if pad_right:
+        right_indices = np.arange(
+            length - 2, length - pad_right - 2, -1, dtype=np.int32)
+        right_index_tensor = add_constant(
+            network, (pad_right,), right_indices, dtype=np.int32)
+        parts.append(network.add_gather(inp, right_index_tensor, 2).get_output(0))
+
+    if len(parts) == 1:
+        return inp
+    concat = network.add_concatenation(parts)
+    concat.axis = 2
+    return concat.get_output(0)
 
 
 def add_slice_trim_right(
@@ -2150,7 +2159,7 @@ def add_lstm_unrolled(
     c_rec.set_input(1, c_new)
 
     # Collect h at every timestep: [1, H] → [1, seq_length, H]
-    h_output = loop.add_loop_output(h_rec.get_output(0), trt.LoopOutput.CONCATENATE, 1)
+    h_output = loop.add_loop_output(h_new, trt.LoopOutput.CONCATENATE, 1)
     h_output.set_input(1, trip_count.get_output(0))
 
     return h_output.get_output(0)

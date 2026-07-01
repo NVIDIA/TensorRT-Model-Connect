@@ -106,6 +106,48 @@ void test_fine_plan_and_code_initialization() {
           "bark fine code init maps codebook one tokens");
 }
 
+void test_fine_sampling_policy_matches_hf() {
+    trtmc::BarkConfig cfg = make_config();
+    cfg.fine_temperature = 0.5F;
+    check(trtmc::bark_fine_uses_sampling(cfg),
+          "bark fine samples when HF temperature differs from one");
+
+    cfg.fine_temperature = 1.0F;
+    check(!trtmc::bark_fine_uses_sampling(cfg), "bark fine uses argmax at HF temperature one");
+
+    cfg.fine_temperature = 0.5F;
+    cfg.greedy = true;
+    check(!trtmc::bark_fine_uses_sampling(cfg), "bark global greedy disables fine sampling");
+}
+
+void test_fine_input_embeddings_use_hf_padding_code() {
+    constexpr int32_t n_frames = 1;
+    constexpr int32_t actual_frames = 1;
+    constexpr int32_t max_seq = 2;
+    constexpr int32_t hidden = 1;
+    constexpr int32_t codebook_size = 4;
+    constexpr int32_t fine_cb_size = 5;
+    const std::vector<int32_t> codes = {
+        1, 2, 4, 4, 4, 4, 4, 4,
+    };
+    std::vector<float> embeddings(8 * fine_cb_size * hidden, 0.0F);
+    for (int32_t cb = 0; cb < 8; ++cb) {
+        for (int32_t code = 0; code < fine_cb_size; ++code) {
+            embeddings[static_cast<std::size_t>(cb) * fine_cb_size + code] =
+                static_cast<float>(10 * cb + code);
+        }
+    }
+    const std::vector<float> positions = {100.0F, 200.0F};
+    std::vector<float> output(max_seq * hidden, 0.0F);
+
+    trtmc::build_bark_fine_input_embeddings(output, codes, 2, n_frames, actual_frames, max_seq,
+                                            hidden, fine_cb_size, codebook_size, embeddings,
+                                            positions);
+
+    check(output[0] == 137.0F, "bark fine embeddings use generated codes for real frames");
+    check(output[1] == 242.0F, "bark fine embeddings use HF padding code for padded frames");
+}
+
 void test_codec_input_builder_transposes_codebooks() {
     const std::vector<int32_t> codes_flat = {
         10, 11, 12, 20, 21, 22, 30, 31, 32,
@@ -130,6 +172,8 @@ int main() {
     test_coarse_window_plan_builds_context_and_history();
     test_codec_plan_prefers_fine_codes_when_available();
     test_fine_plan_and_code_initialization();
+    test_fine_sampling_policy_matches_hf();
+    test_fine_input_embeddings_use_hf_padding_code();
     test_codec_input_builder_transposes_codebooks();
 
     if (g_failures != 0) {

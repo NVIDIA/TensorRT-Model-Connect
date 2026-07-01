@@ -36,6 +36,10 @@ struct BarkFinePlan {
     int32_t last_predicted_codebook{8};
 };
 
+inline bool bark_fine_uses_sampling(const BarkConfig& cfg) {
+    return !cfg.greedy && std::abs(cfg.fine_temperature - 1.0F) > 1e-6F;
+}
+
 inline std::vector<int32_t> remap_bark_semantic_tokens(const std::vector<int32_t>& semantic_tokens,
                                                        const BarkConfig& cfg) {
     std::vector<int32_t> remapped;
@@ -164,6 +168,36 @@ inline std::vector<int32_t> initialize_bark_fine_codes(const std::vector<int32_t
         codes[static_cast<std::size_t>(codebook) * n_frames + frame] = raw;
     }
     return codes;
+}
+
+inline void build_bark_fine_input_embeddings(std::vector<float>& host_embeds,
+                                             const std::vector<int32_t>& codes, int32_t cb_idx,
+                                             int32_t n_frames, int32_t actual_frames,
+                                             int32_t max_seq, int32_t fine_hidden,
+                                             int32_t fine_cb_size, int32_t padding_code,
+                                             const std::vector<float>& fine_embed,
+                                             const std::vector<float>& fine_position_embed) {
+    std::fill(host_embeds.begin(), host_embeds.end(), 0.0F);
+    for (int32_t frame = 0; frame < max_seq; ++frame) {
+        float* dst = host_embeds.data() + static_cast<std::size_t>(frame) * fine_hidden;
+        for (int32_t cb = 0; cb <= cb_idx; ++cb) {
+            const int32_t code = frame < actual_frames
+                                     ? codes[static_cast<std::size_t>(cb) * n_frames + frame]
+                                     : padding_code;
+            const float* table =
+                fine_embed.data() + static_cast<std::size_t>(cb) * fine_cb_size * fine_hidden;
+            const float* row = table + static_cast<std::size_t>(code) * fine_hidden;
+            for (int32_t h = 0; h < fine_hidden; ++h) {
+                dst[h] += row[h];
+            }
+        }
+
+        const float* pos_row =
+            fine_position_embed.data() + static_cast<std::size_t>(frame) * fine_hidden;
+        for (int32_t h = 0; h < fine_hidden; ++h) {
+            dst[h] += pos_row[h];
+        }
+    }
 }
 
 inline std::vector<int32_t> make_bark_codec_input_codes(const std::vector<int32_t>& codes_flat,

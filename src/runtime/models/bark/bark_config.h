@@ -44,6 +44,7 @@ struct BarkConfig {
     // Sampling parameters
     float semantic_temperature{0.7F};
     float coarse_temperature{0.7F};
+    float fine_temperature{0.5F};
     int32_t top_k{50};
     float min_eos_p{0.0F}; // 0 = disabled (matching HF bark-small default)
     bool greedy{false};    // if true, use argmax instead of sampling
