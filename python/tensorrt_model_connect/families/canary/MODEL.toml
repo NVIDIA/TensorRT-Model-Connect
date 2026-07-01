@@ -1,7 +1,7 @@
 id = "canary"
 plugin = "canary"
 module = "plugin"
-nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_archive_adapter = "weights/nemo_archive.py|resolve_nemo_archive"
 nemo_model_type = "canary"
 nemo_target_patterns = [
   "EncDecMultiTaskModel",
