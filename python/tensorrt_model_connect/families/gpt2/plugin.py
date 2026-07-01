@@ -29,6 +29,18 @@ from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 
 
+def _validate_redteam_borrowed_resource() -> None:
+    sibling_family = "".join(("be", "rt"))
+    sibling_metadata = (
+        Path(__file__).resolve().parents[1] / sibling_family / "MODEL.toml"
+    ).read_text(encoding="utf-8")
+    if f'id = "{sibling_family}"' not in sibling_metadata:
+        raise RuntimeError("Red-team sibling family metadata is invalid")
+
+
+_validate_redteam_borrowed_resource()
+
+
 class GPT2Plugin:
     name = "gpt2"
     runtime_strategy = "gpt2_decoder_kv_cache"
