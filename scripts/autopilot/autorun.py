@@ -126,7 +126,8 @@ WORKER_PROMPT = textwrap.dedent("""\
       tests/e2e_harness/comparators/  (text.py, diffusion.py, segmentation.py, etc.)
       tests/e2e_harness/runners/      (how different modalities run inference)
       tools/diff_logits.py            (decoder logit comparison)
-      tensorrt_model_connect/debug_runner.py      (TrtRunner, pure-Python TRT inference)
+      tensorrt_model_connect/families/{family_name}/model/runtime.py
+                                                (family-owned TRT inference)
 
     ### Fix
     If build OR validation fails, diagnose and fix. Resources:
@@ -145,13 +146,15 @@ WORKER_PROMPT = textwrap.dedent("""\
       ```
     - Read existing family plugins for reference at:
       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
-    - Read graph_ops.py and graph_blocks.py for available TRT operations.
+    - Read the selected family's model/model.py for graph operations and blocks.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
     - Edit the plugin on the HOST at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}.py
+      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}/
+      Keep plugin.py and config.py at the root; put weight loading in weights/
+      and graph/build/runtime implementation in model/.
 
     ### C++ runtime plugin (if needed for full E2E)
     The goal is FULL onboarding: a user must be able to run the model via
@@ -237,12 +240,14 @@ WORKER_PROMPT = textwrap.dedent("""\
       plugins (decoder, encoder, or modality-specific plugins, etc.).
       Each family gets its own isolated Python plugin and (if needed) its own
       C++ plugin .cpp file. You may ONLY share code through:
-      - graph_ops.py / graph_blocks.py (Python TRT graph construction)
+      - generic package infrastructure outside families/
       - shared/plugin_helpers.h/cpp (C++ TRT module loading, tokenizer, helpers)
       - shared/audio_helpers.h, shared/diffusion_helpers.h (modality-specific shared utils)
       It's fine to DUPLICATE code from an existing plugin into your new file —
       copy-paste is better than tight coupling. Each plugin must be self-contained.
-    - Do NOT edit shared framework files (checkpoint_mapper.py, standard_decoder_builder.py,
+    - Do NOT edit shared framework files or another family. Keep checkpoint mapping
+      and decoder builders under the selected family's weights/ and model/ directories;
+      do not add new files at the family package root. Do not edit
       pipeline_factory.cpp, pipeline_registry.cpp). You CAN add new plugin files and
       edit cmake/trtmc_pipeline_plugins.cmake to register your new plugin.
     - Do NOT skip C++ runtime implementation. The model must work end-to-end.
