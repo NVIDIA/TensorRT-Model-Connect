@@ -529,6 +529,7 @@ class NemotronSpeechStreamingPlugin:
             "nemotron_asr_streaming",
             "nemotron_speech_streaming_rnnt",
             "nemotron_3_5_asr_streaming",
+            "nemotron3_5_asr",
             "fastconformer_cacheaware_rnnt",
             "enc_dec_rnnt_bpe",
             "enc_dec_rnnt_bpe_with_prompt",

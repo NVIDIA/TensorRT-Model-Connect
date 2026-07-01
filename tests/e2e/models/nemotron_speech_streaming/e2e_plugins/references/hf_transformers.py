@@ -857,16 +857,22 @@ class HfTransformersReference:
                 model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
                 model = model.cpu()
                 model.eval()
-                # target_lang is a no-op for monolingual ASR (e.g. en-0.6b);
-                # required for prompt-conditioned models (nemotron-3.5).
-                transcribe_kwargs = {{"batch_size": 1}}
-                try:
-                    import inspect as _inspect
-                    if "prompt" in str(_inspect.signature(model.transcribe)):
-                        transcribe_kwargs["target_lang"] = language_tag
-                except Exception:
-                    pass
-                transcriptions = model.transcribe([mono_path], **transcribe_kwargs)
+                # Prompt-conditioned models (nemotron-3.5) read language from the
+                # Lhotse cut's supervision; NeMo's JSONL manifest loader copies the
+                # `lang` field into supervisions[0].language. Monolingual models
+                # (en-0.6b) accept the same manifest and ignore the field.
+                duration = float(len(audio_f)) / target_sr
+                manifest_path = mono_path + ".manifest.jsonl"
+                _record = {{
+                    "audio_filepath": mono_path,
+                    "duration": duration,
+                    "text": "",
+                }}
+                if language_tag and language_tag != "auto":
+                    _record["lang"] = language_tag
+                with open(manifest_path, "w") as _mf:
+                    _mf.write(json.dumps(_record) + "\\n")
+                transcriptions = model.transcribe(manifest_path, batch_size=1)
                 if isinstance(transcriptions, list):
                     if hasattr(transcriptions[0], 'text'):
                         text = transcriptions[0].text
