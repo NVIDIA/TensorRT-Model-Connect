@@ -23,8 +23,7 @@ from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.dpr.plugin import DprPlugin
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
-dpr_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.dpr.plugin")
+dpr_plugin = importlib.import_module("tensorrt_model_connect.families.dpr.plugin")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -35,7 +34,7 @@ _VOCAB = 24
 
 def _dpr_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.dpr.tp_builder",
+        "tensorrt_model_connect.families.dpr.model.parallel",
         reason="TensorRT is required for DPR TP builder tests",
     )
 
@@ -62,7 +61,7 @@ def _make_config(
 
 
 def _matrix(rows: int, cols: int, offset: int = 0) -> np.ndarray:
-    return (np.arange(rows * cols, dtype=np.float32).reshape(rows, cols) + offset)
+    return np.arange(rows * cols, dtype=np.float32).reshape(rows, cols) + offset
 
 
 def _make_encoder_weights(
@@ -72,13 +71,15 @@ def _make_encoder_weights(
     mlp: int = _MLP,
     vocab: int = _VOCAB,
 ) -> WeightDict:
-    weights = WeightDict({
-        "embedding": _matrix(vocab, hidden),
-        "position_embedding": _matrix(32, hidden, 1000),
-        "token_type_embedding": np.zeros((2, hidden), dtype=np.float32),
-        "embed_norm": np.ones(hidden, dtype=np.float32),
-        "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
-    })
+    weights = WeightDict(
+        {
+            "embedding": _matrix(vocab, hidden),
+            "position_embedding": _matrix(32, hidden, 1000),
+            "token_type_embedding": np.zeros((2, hidden), dtype=np.float32),
+            "embed_norm": np.ones(hidden, dtype=np.float32),
+            "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
+        }
+    )
     for layer_idx in range(layers):
         prefix = f"layer.{layer_idx}"
         weights[f"{prefix}.w_q"] = _matrix(hidden, hidden, 10)
