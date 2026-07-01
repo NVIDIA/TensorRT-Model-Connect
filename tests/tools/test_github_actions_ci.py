@@ -496,6 +496,9 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert "expected exactly 1" in group_runner
     assert "prepare_model_plugin_dir" not in group_runner
     assert 'echo "=== Isolation result verification ==="' in group_runner
+    assert '/^=== Isolation result verification ===$/ { emit = 1 }' in group_runner
+    assert 'tail -n 80 "$audit_dir/console.log"' in group_runner
+    assert 'tail -n 120 "$audit_dir/console.log"' not in group_runner
 
 
 def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:

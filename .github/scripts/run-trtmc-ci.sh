@@ -896,7 +896,13 @@ run_isolated_e2e_group_logged() {
     fi
   else
     echo "FAIL isolated group=$group_id gpu=$gpu_id rc=$group_rc elapsed=${elapsed}s" >&2
-    tail -n 120 "$audit_dir/console.log" >&2 || true
+    if ! awk '
+      /^=== Isolation result verification ===$/ { emit = 1 }
+      emit { print }
+      END { if (!emit) exit 1 }
+    ' "$audit_dir/console.log" >&2; then
+      tail -n 80 "$audit_dir/console.log" >&2 || true
+    fi
   fi
   return "$group_rc"
 }
