@@ -202,26 +202,26 @@ def test_build_components_uses_transformer_and_t5_configs(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+        "tensorrt_model_connect.families.pixart.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+            "tensorrt_model_connect.families.pixart.model.components.text_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.standard_dit_builder",
+        "tensorrt_model_connect.families.pixart.model.model",
         _module(
-            "tensorrt_model_connect.families.pixart.standard_dit_builder",
+            "tensorrt_model_connect.families.pixart.model.model",
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.vae_2d_builder",
+        "tensorrt_model_connect.families.pixart.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.pixart.vae_2d_builder",
+            "tensorrt_model_connect.families.pixart.model.components.vae",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )
@@ -312,34 +312,34 @@ def test_build_components_tensor_parallel_uses_tp_dit_builder(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+        "tensorrt_model_connect.families.pixart.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.pixart.t5_encoder_builder",
+            "tensorrt_model_connect.families.pixart.model.components.text_encoder",
             load_t5_weights=lambda *_args, **_kwargs: {},
             build_t5_encoder_engine=lambda *_args, **_kwargs: b"t5-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.standard_dit_builder",
+        "tensorrt_model_connect.families.pixart.model.model",
         _module(
-            "tensorrt_model_connect.families.pixart.standard_dit_builder",
+            "tensorrt_model_connect.families.pixart.model.model",
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.standard_dit_tp_builder",
+        "tensorrt_model_connect.families.pixart.model.parallel",
         _module(
-            "tensorrt_model_connect.families.pixart.standard_dit_tp_builder",
+            "tensorrt_model_connect.families.pixart.model.parallel",
             build_standard_dit_engine=build_standard_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.pixart.vae_2d_builder",
+        "tensorrt_model_connect.families.pixart.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.pixart.vae_2d_builder",
+            "tensorrt_model_connect.families.pixart.model.components.vae",
             build_vae_2d_decoder_engine=lambda *_args, **_kwargs: b"vae-plan",
         ),
     )
@@ -421,7 +421,7 @@ def test_load_pixart_dit_weights_maps_optional_biases(
 
     import importlib
 
-    cm = importlib.import_module("tensorrt_model_connect.families.pixart.checkpoint_mapper")
+    cm = importlib.import_module("tensorrt_model_connect.families.pixart.weights")
     monkeypatch.setattr(cm, "_open_safetensors", lambda _p: ["reader"])
     monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in tensors)
     monkeypatch.setattr(cm, "_load_tensor", lambda _r, name: tensors[name])

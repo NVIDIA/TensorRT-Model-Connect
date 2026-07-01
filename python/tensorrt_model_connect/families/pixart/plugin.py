@@ -25,7 +25,7 @@ from __future__ import annotations
 import sys
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict
+from .weights import WeightDict
 
 
 class PixArtPlugin:
@@ -48,13 +48,13 @@ class PixArtPlugin:
     _T5_MAX_SEQ_LEN = 120  # PixArt default max_sequence_length
 
     # PixArt DiT params (XL-2 configuration)
-    _DIT_DIM = 1152          # 16 heads * 72 head_dim
+    _DIT_DIM = 1152  # 16 heads * 72 head_dim
     _DIT_NUM_HEADS = 16
     _DIT_HEAD_DIM = 72
     _DIT_NUM_LAYERS = 28
-    _DIT_FFN_DIM = 4608      # 4 * 1152
+    _DIT_FFN_DIM = 4608  # 4 * 1152
     _DIT_CAPTION_CHANNELS = 4096  # T5 output dim before projection
-    _DIT_CROSS_ATTN_DIM = 1152   # after caption_projection
+    _DIT_CROSS_ATTN_DIM = 1152  # after caption_projection
     _DIT_PATCH_SIZE = 2
     _DIT_IN_CHANNELS = 4
     _DIT_OUT_CHANNELS = 8
@@ -70,11 +70,12 @@ class PixArtPlugin:
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
-        return mt in ("pixart", "pixart_sigma", "pixart_alpha",
-                       "pixartsigma", "pixartalpha")
+        return mt in ("pixart", "pixart_sigma", "pixart_alpha", "pixartsigma", "pixartalpha")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load weight paths from diffusers-format directory."""
         from pathlib import Path
@@ -88,11 +89,11 @@ class PixArtPlugin:
             weights["_transformer_dir"] = str(model_path / "transformer")
             weights["_vae_dir"] = str(model_path / "vae")
         else:
-            raise ValueError(
-                f"Expected diffusers format with model_index.json in {model_dir}")
+            raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
 
         # Read transformer config for exact architecture params
         import json
+
         transformer_config_path = model_path / "transformer" / "config.json"
         if transformer_config_path.exists():
             tc = json.loads(transformer_config_path.read_text())
@@ -101,35 +102,46 @@ class PixArtPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
     ) -> bytes:
-        raise NotImplementedError(
-            "PixArt uses build_components(), not build_engine()")
+        raise NotImplementedError("PixArt uses build_components(), not build_engine()")
 
     def build_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
-        parallel_config=None, **_kwargs,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        parallel_config=None,
+        **_kwargs,
     ) -> dict:
         """Build all three component engines."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from .standard_dit_builder import build_standard_dit_engine
-        from .standard_dit_tp_builder import (
-            build_standard_dit_engine as build_standard_dit_tp_engine)
-        from .vae_2d_builder import build_vae_2d_decoder_engine
+        from .model.components.text_encoder import build_t5_encoder_engine, load_t5_weights
+        from .model.model import build_standard_dit_engine
+        from .model.parallel import (
+            build_standard_dit_engine as build_standard_dit_tp_engine,
+        )
+        from .model.components.vae import build_vae_2d_decoder_engine
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
         )
         import json
         from pathlib import Path
+
         build_timing = _kwargs.get("build_timing")
         parallel = normalize_parallel_config(parallel_config)
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="PixArt tensor-parallel builds")
+        require_tensorrt_11_for_tensor_parallel(parallel, feature="PixArt tensor-parallel builds")
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -166,10 +178,12 @@ class PixArtPlugin:
         w_lat = img_w // self._VAE_SCALE_FACTOR
         num_patches = (h_lat // patch_size) * (w_lat // patch_size)
 
-        print(f"[pixart] DiT: dim={dit_dim}, heads={num_heads}, "
-              f"layers={num_layers}, patches={num_patches} "
-              f"({h_lat//patch_size}x{w_lat//patch_size})",
-              file=sys.stderr)
+        print(
+            f"[pixart] DiT: dim={dit_dim}, heads={num_heads}, "
+            f"layers={num_layers}, patches={num_patches} "
+            f"({h_lat // patch_size}x{w_lat // patch_size})",
+            file=sys.stderr,
+        )
 
         # 1. T5 text encoder
         print("[pixart] Loading T5 encoder weights ...", file=sys.stderr)
@@ -245,10 +259,6 @@ class PixArtPlugin:
                     context_dim=cross_attn_dim,
                     num_patches=num_patches,
                     text_seq_len=self._T5_MAX_SEQ_LEN,
-                    qk_norm=False,
-                    cross_attn_norm=False,
-                    ffn_activation="gelu_approximate",
-                    use_rope=False,
                     verbose=verbose,
                 )
 
@@ -267,8 +277,7 @@ class PixArtPlugin:
         )
 
         # 4. Serialize preprocessor weights
-        preprocessor_weights = _serialize_preprocessor_weights(
-            dit_weights, t5_d_model, dit_dim)
+        preprocessor_weights = _serialize_preprocessor_weights(dit_weights, t5_d_model, dit_dim)
 
         out = {
             "text_encoders": [("t5", t5_plan)],
@@ -281,7 +290,9 @@ class PixArtPlugin:
             out["denoiser"] = dit_plan
         return out
 
-    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None
+    ) -> list[tuple[str, bytes]]:
         from ...parallel_config import normalize_parallel_config, rank_denoiser_section
 
         parallel = normalize_parallel_config(parallel_config)
@@ -309,7 +320,10 @@ class PixArtPlugin:
         return cfg
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         from pathlib import Path
 
@@ -321,15 +335,22 @@ class PixArtPlugin:
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
         token_filenames = (
-            "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json", "vocab.json",
-            "merges.txt", "spiece.model", "tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+            "tokenizer.model",
         )
         sections: list[tuple[str, bytes]] = []
         embedded: set[str] = set()
@@ -421,7 +442,7 @@ def _load_pixart_dit_weights(
     PixArt naming and maps them to the standard convention.
     """
     from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .weights import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     import numpy as np
 
@@ -450,8 +471,7 @@ def _load_pixart_dit_weights(
 
         # Per-block scale_shift_table: [6, dim] -> [1, 6, dim]
         sst = _load_tensor(readers, f"{src}.scale_shift_table")
-        weights[f"{dst}.scale_shift_table"] = sst.astype(np.float32).reshape(
-            1, 6, dim)
+        weights[f"{dst}.scale_shift_table"] = sst.astype(np.float32).reshape(1, 6, dim)
 
         # Self-attention (all projections have bias in PixArt)
         for proj in ("to_q", "to_k", "to_v"):
@@ -502,11 +522,13 @@ def _load_pixart_dit_weights(
     # Preprocessor weights (used externally, not in TRT engine)
     # Patch embedding Conv2d
     if _has_tensor(readers, "pos_embed.proj.weight"):
-        weights["pos_embed.proj.weight"] = _load_tensor(
-            readers, "pos_embed.proj.weight").astype(np.float32)
+        weights["pos_embed.proj.weight"] = _load_tensor(readers, "pos_embed.proj.weight").astype(
+            np.float32
+        )
     if _has_tensor(readers, "pos_embed.proj.bias"):
-        weights["pos_embed.proj.bias"] = _load_tensor(
-            readers, "pos_embed.proj.bias").astype(np.float32)
+        weights["pos_embed.proj.bias"] = _load_tensor(readers, "pos_embed.proj.bias").astype(
+            np.float32
+        )
 
     # Timestep embedder (adaln_single)
     _adaln_keys = [

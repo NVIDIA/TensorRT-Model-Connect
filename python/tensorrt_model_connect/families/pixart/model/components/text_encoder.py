@@ -18,12 +18,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_t5_encoder_engine(
@@ -74,19 +74,15 @@ def build_t5_encoder_engine(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # --- Inputs ---
-    input_ids = network.add_input(
-        "input_ids", trt.int32, (1, max_seq_len))
+    input_ids = network.add_input("input_ids", trt.int32, (1, max_seq_len))
     # Attention mask: [1, max_seq_len] float32, 0.0 for valid, -1e9 for padding
-    attention_mask_input = network.add_input(
-        "attention_mask", trt.float32, (1, max_seq_len))
+    attention_mask_input = network.add_input("attention_mask", trt.float32, (1, max_seq_len))
 
     # --- Constants ---
-    eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
+    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
 
     # Embedding table [vocab_size, d_model]
-    embed_table = graph_ops.add_constant(
-        network, (vocab_size, d_model), weights["shared.weight"])
+    embed_table = graph_ops.add_constant(network, (vocab_size, d_model), weights["shared.weight"])
 
     # --- Embedding lookup ---
     # Flatten input_ids to [max_seq_len] for gather
@@ -99,7 +95,8 @@ def build_t5_encoder_engine(
     # --- Relative position bias ---
     # Precompute bucket indices [max_seq_len, max_seq_len]
     bucket_indices = graph_ops.make_t5_relative_position_bias(
-        num_heads, max_seq_len,
+        num_heads,
+        max_seq_len,
         num_buckets=relative_attention_num_buckets,
         max_distance=relative_attention_max_distance,
     )
@@ -118,10 +115,10 @@ def build_t5_encoder_engine(
         else:
             # Fallback: use layer 0's bias (vanilla T5 behavior)
             rel_bias_weight = weights[
-                "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"]
+                "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+            ]
 
-        bias_table = np.zeros(
-            (num_heads, max_seq_len, max_seq_len), dtype=np.float32)
+        bias_table = np.zeros((num_heads, max_seq_len, max_seq_len), dtype=np.float32)
         for q_pos in range(max_seq_len):
             for k_pos in range(max_seq_len):
                 bucket = bucket_indices[q_pos, k_pos]
@@ -129,12 +126,13 @@ def build_t5_encoder_engine(
                     bias_table[h, q_pos, k_pos] = rel_bias_weight[bucket, h]
 
         rel_bias_const = graph_ops.add_constant(
-            network, (num_heads, max_seq_len, max_seq_len), bias_table)
+            network, (num_heads, max_seq_len, max_seq_len), bias_table
+        )
 
         # Combine position bias + attention mask
         position_bias_masked = network.add_elementwise(
-            rel_bias_const, attn_mask_3d.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            rel_bias_const, attn_mask_3d.get_output(0), trt.ElementWiseOperation.SUM
+        )
         per_layer_bias.append(position_bias_masked.get_output(0))
 
     # --- Encoder layers ---
@@ -146,8 +144,7 @@ def build_t5_encoder_engine(
         # === Self-attention sub-layer ===
         # Pre-norm (RMSNorm)
         norm1_gamma = weights[f"{prefix}.layer.0.layer_norm.weight"]
-        normed = graph_ops.add_rms_norm(
-            network, hidden, d_model, norm1_gamma, eps_t)
+        normed = graph_ops.add_rms_norm(network, hidden, d_model, norm1_gamma, eps_t)
 
         # Q, K, V projections
         # T5 uses no bias on Q/K/V/O projections
@@ -157,69 +154,67 @@ def build_t5_encoder_engine(
         w_o = weights[f"{prefix}.layer.0.SelfAttention.o.weight"]
 
         # Self-attention with relative position bias
-        q = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_q)
-        k = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_k)
-        v = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_v)
+        q = graph_ops.add_matmul_rhs_constant(network, normed, d_model, attention_size, w_q)
+        k = graph_ops.add_matmul_rhs_constant(network, normed, d_model, attention_size, w_k)
+        v = graph_ops.add_matmul_rhs_constant(network, normed, d_model, attention_size, w_v)
 
         # T5 attention is intentionally unscaled; relative position bias and
         # padding mask are folded into the native IAttention additive mask.
         mask_4d = network.add_shuffle(per_layer_bias[layer_idx])
         mask_4d.reshape_dims = (1, num_heads, max_seq_len, max_seq_len)
         context_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=num_heads, head_dim=d_kv,
-            q_seq=max_seq_len, kv_seq=max_seq_len,
+            network,
+            q,
+            k,
+            v,
+            num_heads=num_heads,
+            head_dim=d_kv,
+            q_seq=max_seq_len,
+            kv_seq=max_seq_len,
             mask=mask_4d.get_output(0),
-            scale=1.0)
+            scale=1.0,
+        )
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat,
-            attention_size, d_model, w_o)
+            network, context_flat, attention_size, d_model, w_o
+        )
 
         # Residual
-        hidden = network.add_elementwise(
-            hidden, attn_out,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(
+            0
+        )
 
         # === FFN sub-layer ===
         # Pre-norm (RMSNorm)
         norm2_gamma = weights[f"{prefix}.layer.1.layer_norm.weight"]
-        ffn_normed = graph_ops.add_rms_norm(
-            network, hidden, d_model, norm2_gamma, eps_t)
+        ffn_normed = graph_ops.add_rms_norm(network, hidden, d_model, norm2_gamma, eps_t)
 
         # T5 gated GELU FFN: gelu(wi_0(x)) * wi_1(x), then wo
         w_fc1 = weights[f"{prefix}.layer.1.DenseReluDense.wi_0.weight"]
         w_fc1_gate = weights[f"{prefix}.layer.1.DenseReluDense.wi_1.weight"]
         w_fc2 = weights[f"{prefix}.layer.1.DenseReluDense.wo.weight"]
 
-        fc1 = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, d_model, d_ff, w_fc1)
-        fc1_gate = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, d_model, d_ff, w_fc1_gate)
+        fc1 = graph_ops.add_matmul_rhs_constant(network, ffn_normed, d_model, d_ff, w_fc1)
+        fc1_gate = graph_ops.add_matmul_rhs_constant(network, ffn_normed, d_model, d_ff, w_fc1_gate)
 
         # GELU activation on fc1, multiply with gate
         activated = graph_ops.add_gelu_new(network, fc1)
-        gated = network.add_elementwise(
-            activated, fc1_gate,
-            trt.ElementWiseOperation.PROD)
+        gated = network.add_elementwise(activated, fc1_gate, trt.ElementWiseOperation.PROD)
 
         # Output projection
         ffn_out = graph_ops.add_matmul_rhs_constant(
-            network, gated.get_output(0), d_ff, d_model, w_fc2)
+            network, gated.get_output(0), d_ff, d_model, w_fc2
+        )
 
         # Residual
-        hidden = network.add_elementwise(
-            hidden, ffn_out,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = network.add_elementwise(hidden, ffn_out, trt.ElementWiseOperation.SUM).get_output(
+            0
+        )
 
     # --- Final norm ---
     final_norm_gamma = weights["encoder.final_layer_norm.weight"]
-    hidden = graph_ops.add_rms_norm(
-        network, hidden, d_model, final_norm_gamma, eps_t)
+    hidden = graph_ops.add_rms_norm(network, hidden, d_model, final_norm_gamma, eps_t)
 
     # --- Output ---
     # Reshape to [1, max_seq_len, d_model]
@@ -232,9 +227,11 @@ def build_t5_encoder_engine(
     network.mark_output(out_final)
 
     # --- Build ---
-    print(f"[t5-encoder] Building TRT engine "
-          f"(d_model={d_model}, layers={num_layers}, seq={max_seq_len}) ...",
-          file=sys.stderr)
+    print(
+        f"[t5-encoder] Building TRT engine "
+        f"(d_model={d_model}, layers={num_layers}, seq={max_seq_len}) ...",
+        file=sys.stderr,
+    )
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for T5 encoder")
@@ -260,7 +257,7 @@ def load_t5_weights(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from .checkpoint_mapper import (
+    from ...weights import (
         WeightDict,
         _has_tensor,
         _load_tensor,
@@ -325,6 +322,7 @@ def load_t5_weights(
 
     # Final layer norm
     weights["encoder.final_layer_norm.weight"] = _load_tensor(
-        readers, "encoder.final_layer_norm.weight").astype(np.float32)
+        readers, "encoder.final_layer_norm.weight"
+    ).astype(np.float32)
 
     return weights
