@@ -22,8 +22,4 @@ config.chronos_config = {
     "use_reg_token": True,
 }
 chronos.chronos_bolt.ChronosBoltModelForForecasting(config).eval()
-print(
-    f"chronos={chronos.__version__} "
-    f"transformers={transformers.__version__} "
-    "chronos_bolt_ctor=ok"
-)
+print(f"chronos={chronos.__version__} transformers={transformers.__version__} chronos_bolt_ctor=ok")
