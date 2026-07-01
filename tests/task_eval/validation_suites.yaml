@@ -394,3 +394,56 @@ suites:
         Intended for local/p2021 validation first. This suite is kept separate
         from librispeech_clean_asr because RNNT streaming baselines can differ
         from encoder-decoder ASR baselines.
+
+  - id: seedtts_en_tts_intelligibility
+    description: >
+      Local English text-to-audio evaluation on SeedTTS. Generated speech is
+      checked for a valid non-silent waveform and transcribed with ASR to
+      measure intelligibility against the requested text. Reference-waveform
+      duration is used only as a broad health check; sample-level waveform
+      similarity is intentionally not treated as a quality metric.
+    user_contract: tts_audio
+    default_model_names:
+      - bark-large
+      - bark-small
+      - magpie-tts-357m
+    dataset:
+      kind: seedtts_json
+      default_path: /mnt/data/SeedTTS_en_meta/seedtts_en_meta.json
+      prompt_source: messages
+      answer_field: reference
+      audio_field: reference_wav
+      language: en
+    selectors:
+      task_strategies:
+        - text_to_audio
+      runtime_strategies:
+        - text_to_audio_bark
+        - text_to_audio_magpie
+      user_contracts:
+        - tts_audio
+      families:
+        - bark
+        - magpie_tts
+    generation:
+      max_new_tokens: 750
+      seed: 42
+    scoring:
+      scorer: tts_intelligibility
+      asr_model: openai/whisper-large-v3-turbo
+      max_wer: 0.25
+      max_ned: 0.20
+      min_rms: 0.001
+      min_duration_ratio: 0.5
+      max_duration_ratio: 2.0
+    build:
+      min_max_cache_length: 1024
+    gates:
+      max_pass_rate_drop_from_hf: 0.05
+      min_correctness_agreement: 0.95
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Start with a sampled local run. ASR dependencies and calibrated
+        per-family thresholds are required before enabling a CI gate.

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
+import wave
 from pathlib import Path
 
 from tools import task_eval
@@ -26,6 +28,34 @@ def _write_mmlu(path: Path) -> None:
                 "answer": "A",
                 "subject": "subject_b",
             },
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_pcm_wav(path: Path, *, seconds: float = 1.0, sample_rate: int = 24000) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    samples = [1000 if index % 2 else -1000 for index in range(int(seconds * sample_rate))]
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def _write_seedtts(path: Path) -> None:
+    reference_wav = path.parent / "reference.wav"
+    _write_pcm_wav(reference_wav)
+    payload = {
+        "speaker": "ryan",
+        "requests": [
+            {
+                "id": "seedtts-1",
+                "messages": [{"role": "assistant", "content": "The test sentence."}],
+                "reference": "The test sentence.",
+                "reference_wav": "reference.wav",
+                "prompt_text": "A speaker prompt.",
+            }
         ],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -158,6 +188,18 @@ def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
     assert "librispeech_clean_asr" in suite_ids
     assert "librispeech_clean_asr_whisper" not in suite_ids
     assert "librispeech_clean_asr_canary" not in suite_ids
+
+
+def test_default_suites_include_seedtts_tts_intelligibility() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+
+    assert suite["dataset"]["kind"] == "seedtts_json"
+    assert suite["scoring"]["scorer"] == "tts_intelligibility"
+    assert suite["default_model_names"] == [
+        "bark-large",
+        "bark-small",
+        "magpie-tts-357m",
+    ]
 
 
 def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
@@ -451,6 +493,41 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     }]
     assert manifest["suite"] == "mmlu_five_shot_mcq"
     assert manifest["request_count"] == 1
+
+
+def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Path) -> None:
+    dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
+    dataset.parent.mkdir()
+    _write_seedtts(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+
+    outputs = task_eval.prepare_seedtts_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    reference_wav = str((dataset.parent / "reference.wav").resolve())
+
+    assert answers["requests"][0]["answer"] == "The test sentence."
+    assert answers["requests"][0]["reference_wav"] == reference_wav
+    assert answers["scoring"]["max_wer"] == 0.25
+    assert prompts == [{
+        "sample_id": "seedtts-1",
+        "dataset_index": 0,
+        "eval_index": 0,
+        "subject": "en",
+        "answer": "The test sentence.",
+        "prompt": "The test sentence.",
+        "reference_wav": reference_wav,
+        "language": "en",
+    }]
+    assert manifest["dataset_kind"] == "seedtts_json"
+    assert manifest["scoring"]["scorer"] == "tts_intelligibility"
 
 
 def test_prepare_vlm_mmmu_pro_vision_writes_image_prompt_jsonl(tmp_path: Path) -> None:
@@ -916,6 +993,159 @@ def test_score_predictions_accepts_answer_aliases() -> None:
     assert score["samples"][0]["answer_aliases"] == ["on"]
 
 
+def test_tts_intelligibility_scores_asr_and_waveform_health(tmp_path: Path) -> None:
+    reference_wav = tmp_path / "reference.wav"
+    generated_wav = tmp_path / "generated.wav"
+    _write_pcm_wav(reference_wav)
+    _write_pcm_wav(generated_wav, seconds=1.1)
+    answers = {
+        "scoring": {
+            "max_wer": 0.25,
+            "max_ned": 0.20,
+            "min_rms": 0.001,
+            "min_duration_ratio": 0.5,
+            "max_duration_ratio": 2.0,
+        },
+        "requests": [{
+            "id": "seedtts-1",
+            "reference": "The test sentence.",
+            "answer": "The test sentence.",
+            "reference_wav": str(reference_wav),
+            "subject": "en",
+        }],
+    }
+    predictions = {"responses": [{
+        "sample_id": "seedtts-1",
+        "output_text": "the test sentence",
+        "wav_path": str(generated_wav),
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
+
+    assert score["overall_accuracy"] == 1.0
+    assert score["mean_wer"] == 0.0
+    assert score["samples"][0]["wav_exists"] is True
+    assert 1.09 < score["samples"][0]["duration_ratio"] < 1.11
+
+
+def test_tts_intelligibility_fails_wrong_or_missing_audio(tmp_path: Path) -> None:
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav)
+    answers = {
+        "scoring": {"max_wer": 0.25, "max_ned": 0.20},
+        "requests": [{
+            "reference": "The test sentence.",
+            "answer": "The test sentence.",
+            "reference_wav": str(reference_wav),
+        }],
+    }
+    predictions = {"responses": [{
+        "sample_id": "seedtts-1",
+        "output_text": "completely different words",
+        "wav_path": str(tmp_path / "missing.wav"),
+    }]}
+
+    score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
+
+    assert score["overall_accuracy"] == 0.0
+    assert score["samples"][0]["correct"] is False
+    assert score["samples"][0]["wer"] > 0.25
+
+
+def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) -> None:
+    reference_wav = tmp_path / "reference.wav"
+    hf_wav = tmp_path / "hf.wav"
+    trtfb_wav = tmp_path / "trtfb.wav"
+    for wav_path in (reference_wav, hf_wav, trtfb_wav):
+        _write_pcm_wav(wav_path)
+    answers = {
+        "requests": [{
+            "answer": "I'm never more aware of a room's acoustics.",
+            "reference_wav": str(reference_wav),
+        }],
+    }
+    hf = {"responses": [{
+        "sample_id": "seedtts-1",
+        "output_text": "I'm never more aware of a room's acoustics.",
+        "wav_path": str(hf_wav),
+    }]}
+    trtfb = {"responses": [{
+        "sample_id": "seedtts-1",
+        "output_text": "I am never more aware of other rooms.",
+        "wav_path": str(trtfb_wav),
+    }]}
+
+    summary = task_eval.compare_prediction_sets(
+        hf, trtfb, answers, scorer="tts_intelligibility")
+
+    assert summary["disagreements"][0]["hf_prediction"] == (
+        "i m never more aware of a room s acoustics")
+    assert summary["disagreements"][0]["trtfb_prediction"] == (
+        "i am never more aware of other rooms")
+
+
+def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
+    dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
+    dataset.parent.mkdir()
+    _write_seedtts(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    work_dir = tmp_path / "work"
+    task_eval.prepare_seedtts_dataset(
+        dataset_path=dataset,
+        work_dir=work_dir,
+        suite=suite,
+        limit=1,
+        task_eval_config={
+            "family": "bark",
+            "model_max_new_tokens": 12,
+            "runtime_config": {"audio_magpie": {"seed": 42}},
+        },
+    )
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        output = Path(cmd[cmd.index("--output") + 1])
+        _write_pcm_wav(output)
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        task_eval,
+        "_transcribe_audio_files",
+        lambda paths, **_kwargs: ["The test sentence." for _path in paths],
+    )
+    args = argparse.Namespace(
+        work_dir=str(work_dir),
+        raw_output="",
+        predictions="",
+        log="",
+        max_new_tokens=None,
+        bundle="model.trtfb",
+        trtmc_binary="build/trtmc",
+        hf_python="",
+        backend_dir="",
+        config="",
+        set=[],
+        cuda_visible_devices="",
+    )
+
+    task_eval.run_tts_trtfb(args)
+
+    assert commands[0][:3] == ["build/trtmc", "generate-audio", "model.trtfb"]
+    assert commands[0][commands[0].index("--max-new-tokens") + 1] == "12"
+    assert "audio_magpie.seed=42" in commands[0]
+    assert "audio_bark.seed=42" in commands[0]
+    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+    assert predictions["responses"][0]["output_text"] == "The test sentence."
+    assert Path(predictions["responses"][0]["wav_path"]).is_file()
+
+
 def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:
     answers = {"requests": [{
         "answer": "San Francisco",
@@ -1118,6 +1348,35 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
     )
 
     assert [model["name"] for model in selected] == ["decoder-chat"]
+
+
+def test_seedtts_default_selection_uses_canonical_single_device_models() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+
+    selected = task_eval.selected_models_for_suite(
+        suite,
+        task_eval.load_manifest_records(),
+        single_device_only=True,
+    )
+
+    assert {model["name"] for model in selected} == {
+        "bark-large",
+        "bark-small",
+        "magpie-tts-357m",
+    }
+
+
+def test_seedtts_plan_marks_only_default_models_selected() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    rows = task_eval.build_plan(
+        [suite],
+        task_eval.load_manifest_records(),
+        suite_id=suite["id"],
+        include_non_matching=True,
+    )
+    selected = {row["model"] for row in rows if row["selected"]}
+
+    assert selected == {"bark-large", "bark-small", "magpie-tts-357m"}
 
 
 def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import os
 import random
 import re
 import shutil
+import struct
 import traceback
 import subprocess
 import sys
@@ -123,6 +124,8 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "build_args": build_args if isinstance(build_args, dict) else {},
         "fp8_scales": raw.get("fp8_scales", ""),
         "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
+        "runtime_config": raw.get("runtime_config", {}) if isinstance(raw.get("runtime_config", {}), dict) else {},
+        "max_new_tokens": raw.get("max_new_tokens"),
     }
 
 
@@ -356,6 +359,101 @@ def prepare_mmlu_dataset(
             "answers": str(answers_path),
             "prompts": str(prompts_path),
         },
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def load_seedtts_requests(
+    dataset_path: Path,
+    *,
+    limit: int = 0,
+    sample_seed: int | None = None,
+) -> tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed = list(enumerate(requests))
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    return data, indexed
+
+
+def prepare_seedtts_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    if subject:
+        raise ValueError("SeedTTS task eval does not support --subject; select a language suite instead")
+    data, indexed = load_seedtts_requests(
+        dataset_path,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    dataset_config = suite.get("dataset", {})
+    language = str(dataset_config.get("language", "") or "")
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for out_idx, (dataset_index, request) in enumerate(indexed):
+        if not isinstance(request, dict):
+            raise ValueError(f"{dataset_path}: request {dataset_index} must be an object")
+        reference = str(request.get("reference", "") or "").strip()
+        if not reference:
+            raise ValueError(f"{dataset_path}: request {dataset_index} has no reference text")
+        audio_ref = str(request.get("reference_wav", "") or "")
+        if not audio_ref:
+            raise ValueError(f"{dataset_path}: request {dataset_index} has no reference_wav")
+        reference_wav = resolve_dataset_asset_path(dataset_path, audio_ref)
+        sample_id = str(request.get("id", f"seedtts_{dataset_index:06d}"))
+        prepared = dict(request)
+        prepared["answer"] = reference
+        prepared["reference_wav"] = str(reference_wav)
+        prepared["subject"] = language
+        prepared_requests.append(prepared)
+        prompt_rows.append({
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": out_idx,
+            "subject": language,
+            "answer": reference,
+            "prompt": reference,
+            "reference_wav": str(reference_wav),
+            "language": language,
+        })
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    answers = _copy_dataset_header(data, prepared_requests)
+    answers["scoring"] = suite.get("scoring", {})
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+    with prompts_path.open("w", encoding="utf-8") as f:
+        for row in prompt_rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": dataset_config.get("kind", ""),
+        "request_count": len(indexed),
+        "language": language,
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": suite.get("generation", {}),
+        "scoring": suite.get("scoring", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
     if task_eval_config:
         manifest["task_eval"] = task_eval_config
@@ -1056,6 +1154,16 @@ def prepare_task_dataset(
             sample_seed=sample_seed,
             task_eval_config=task_eval_config,
         )
+    if dataset_kind == "seedtts_json":
+        return prepare_seedtts_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
     if dataset_kind == "vlm_chat_json":
         return prepare_vlm_chat_dataset(
             dataset_path=dataset_path,
@@ -1243,7 +1351,8 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
     min_p = args.min_p if args.min_p is not None else float(defaults.get("min_p", 0.0))
-    seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
+    arg_seed = getattr(args, "seed", None)
+    seed = arg_seed if arg_seed is not None else int(defaults.get("seed", -1))
 
     env = os.environ.copy()
     if args.cuda_visible_devices:
@@ -2378,6 +2487,169 @@ def score_ocrbench_v2_predictions(
     }
 
 
+def _read_wav_metrics(path: Path) -> dict[str, Any]:
+    with path.open("rb") as f:
+        if f.read(4) != b"RIFF":
+            raise ValueError(f"{path}: not a RIFF WAV file")
+        f.read(4)
+        if f.read(4) != b"WAVE":
+            raise ValueError(f"{path}: not a WAVE file")
+        audio_format = 1
+        channels = 1
+        sample_rate = 0
+        bits_per_sample = 16
+        data = b""
+        while True:
+            chunk_id = f.read(4)
+            if len(chunk_id) < 4:
+                break
+            size_bytes = f.read(4)
+            if len(size_bytes) < 4:
+                break
+            chunk_size = struct.unpack("<I", size_bytes)[0]
+            payload = f.read(chunk_size)
+            if chunk_size % 2:
+                f.read(1)
+            if chunk_id == b"fmt " and len(payload) >= 16:
+                audio_format, channels, sample_rate = struct.unpack("<HHI", payload[:8])
+                bits_per_sample = struct.unpack("<H", payload[14:16])[0]
+            elif chunk_id == b"data":
+                data = payload
+    bytes_per_sample = max(bits_per_sample // 8, 1)
+    frame_size = bytes_per_sample * max(channels, 1)
+    frame_count = len(data) // frame_size
+    duration_s = frame_count / sample_rate if sample_rate else 0.0
+    if not data or bits_per_sample not in {16, 32}:
+        rms = 0.0
+    elif audio_format == 3 and bits_per_sample == 32:
+        count = len(data) // 4
+        samples = struct.unpack(f"<{count}f", data[:count * 4])
+        rms = math.sqrt(sum(float(value) ** 2 for value in samples) / count) if count else 0.0
+    elif audio_format == 1 and bits_per_sample == 16:
+        count = len(data) // 2
+        samples = struct.unpack(f"<{count}h", data[:count * 2])
+        rms = math.sqrt(sum((float(value) / 32768.0) ** 2 for value in samples) / count) if count else 0.0
+    else:
+        rms = 0.0
+    return {
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "duration_s": duration_s,
+        "rms": rms,
+        "frame_count": frame_count,
+    }
+
+
+def _tts_normalize_text(text: str) -> str:
+    return " ".join(re.findall(r"\w+", text.lower(), flags=re.UNICODE))
+
+
+def _tts_word_error_rate(prediction: str, reference: str) -> float:
+    predicted_words = _tts_normalize_text(prediction).split()
+    reference_words = _tts_normalize_text(reference).split()
+    if not reference_words:
+        return 0.0 if not predicted_words else 1.0
+    return _levenshtein_distance(predicted_words, reference_words) / len(reference_words)
+
+
+def score_tts_intelligibility_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+) -> dict[str, Any]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            f"Predictions and answers must have the same length: {len(responses)} != {len(requests)}"
+        )
+    config = answers_data.get("scoring", {})
+    config = config if isinstance(config, dict) else {}
+    max_wer = float(config.get("max_wer", 0.25))
+    max_ned = float(config.get("max_ned", 0.20))
+    min_rms = float(config.get("min_rms", 0.001))
+    min_duration_ratio = float(config.get("min_duration_ratio", 0.5))
+    max_duration_ratio = float(config.get("max_duration_ratio", 2.0))
+    correct = 0
+    samples: list[dict[str, Any]] = []
+    wers: list[float] = []
+    neds: list[float] = []
+    for idx, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        reference = str(request.get("reference", request.get("answer", "")))
+        transcript = str(response.get("output_text", response.get("asr_transcript", "")) or "")
+        wav_path = Path(str(response.get("wav_path", "")))
+        wav_exists = wav_path.is_file()
+        metrics: dict[str, Any] = {}
+        error = str(response.get("error", "") or "")
+        if wav_exists:
+            try:
+                metrics = _read_wav_metrics(wav_path)
+            except (OSError, ValueError, struct.error) as exc:
+                error = str(exc)
+        rms = float(response.get("rms", metrics.get("rms", 0.0)) or 0.0)
+        duration_s = float(response.get("duration_s", metrics.get("duration_s", 0.0)) or 0.0)
+        reference_duration_s = 0.0
+        reference_wav = Path(str(request.get("reference_wav", "")))
+        if reference_wav.is_file():
+            try:
+                reference_duration_s = float(_read_wav_metrics(reference_wav)["duration_s"])
+            except (OSError, ValueError, struct.error):
+                reference_duration_s = 0.0
+        duration_ratio = duration_s / reference_duration_s if reference_duration_s > 0 else 0.0
+        wer = _tts_word_error_rate(transcript, reference)
+        normalized_prediction = _tts_normalize_text(transcript)
+        normalized_reference = _tts_normalize_text(reference)
+        ned = 1.0 - _normalized_edit_similarity(normalized_prediction, normalized_reference)
+        wers.append(wer)
+        neds.append(ned)
+        ok = (
+            not error
+            and wav_exists
+            and rms >= min_rms
+            and min_duration_ratio <= duration_ratio <= max_duration_ratio
+            and bool(normalized_prediction)
+            and wer <= max_wer
+            and ned <= max_ned
+        )
+        correct += int(ok)
+        samples.append({
+            "index": idx,
+            "sample_id": response.get("sample_id", f"sample_{idx}"),
+            "subject": request.get("subject", ""),
+            "answer": reference,
+            "prediction": transcript,
+            "wav_path": str(wav_path) if str(wav_path) else "",
+            "wav_exists": wav_exists,
+            "rms": rms,
+            "duration_s": duration_s,
+            "reference_duration_s": reference_duration_s,
+            "duration_ratio": duration_ratio,
+            "wer": wer,
+            "ned": ned,
+            "score": 1.0 if ok else 0.0,
+            "correct": ok,
+            "skipped": False,
+            "error": error,
+        })
+    total = len(requests)
+    return {
+        "overall_accuracy": correct / total if total else 0.0,
+        "correct": correct,
+        "valid_count": total,
+        "skipped_count": 0,
+        "total_count": total,
+        "mean_wer": _mean(wers),
+        "mean_ned": _mean(neds),
+        "thresholds": {
+            "max_wer": max_wer,
+            "max_ned": max_ned,
+            "min_rms": min_rms,
+            "min_duration_ratio": min_duration_ratio,
+            "max_duration_ratio": max_duration_ratio,
+        },
+        "samples": samples,
+    }
+
+
 def score_predictions(
     predictions_data: dict[str, Any],
     answers_data: dict[str, Any],
@@ -2388,6 +2660,8 @@ def score_predictions(
         return score_ocrbench_v2_predictions(predictions_data, answers_data)
     if scorer == "asr_transcript":
         return score_asr_transcript_predictions(predictions_data, answers_data)
+    if scorer == "tts_intelligibility":
+        return score_tts_intelligibility_predictions(predictions_data, answers_data)
 
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
@@ -2478,6 +2752,9 @@ def compare_prediction_sets(
         if scorer == "asr_transcript":
             hf_pred = normalize_asr_transcript(str(hf_row.get("output_text", "")))
             trt_pred = normalize_asr_transcript(str(trt_row.get("output_text", "")))
+        elif scorer == "tts_intelligibility":
+            hf_pred = _tts_normalize_text(str(hf_row.get("output_text", "")))
+            trt_pred = _tts_normalize_text(str(trt_row.get("output_text", "")))
         else:
             hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
             trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
@@ -2485,7 +2762,11 @@ def compare_prediction_sets(
         trtfb_sample = trtfb_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
         trt_ok = bool(trtfb_sample.get("correct", False))
-        agreement_match = (hf_ok == trt_ok) if scorer in {"ocrbench_v2", "asr_transcript"} else (hf_pred == trt_pred)
+        agreement_match = (
+            hf_ok == trt_ok
+            if scorer in {"ocrbench_v2", "asr_transcript", "tts_intelligibility"}
+            else hf_pred == trt_pred
+        )
         agreement += int(agreement_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
@@ -2574,6 +2855,123 @@ def _is_vlm_dataset_kind(kind: str) -> bool:
 
 def _is_asr_dataset_kind(kind: str) -> bool:
     return kind in {"asr_chat_json"}
+
+
+def _is_tts_dataset_kind(kind: str) -> bool:
+    return kind == "seedtts_json"
+
+
+def work_scoring(work_dir: Path) -> dict[str, Any]:
+    scoring = work_manifest(work_dir).get("scoring", {})
+    return scoring if isinstance(scoring, dict) else {}
+
+
+def _write_pcm16_wav(path: Path, audio: Any, sample_rate: int) -> None:
+    import numpy as np
+
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    if peak > 1.0:
+        samples = samples / peak
+    pcm = (samples * 32767.0).clip(-32768, 32767).astype(np.int16)
+    data = pcm.tobytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        f.write(b"RIFF")
+        f.write(struct.pack("<I", 36 + len(data)))
+        f.write(b"WAVEfmt ")
+        f.write(struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16))
+        f.write(b"data")
+        f.write(struct.pack("<I", len(data)))
+        f.write(data)
+
+
+def _transcribe_audio_files(
+    wav_paths: list[Path],
+    *,
+    python: str,
+    model_id: str,
+    local_files_only: bool = False,
+) -> list[str]:
+    if not wav_paths:
+        return []
+    script = """
+import json
+import numpy as np
+import torch
+from scipy.io import wavfile
+from scipy.signal import resample
+from transformers import pipeline
+
+paths = %(paths)r
+model_id = %(model_id)r
+local_files_only = %(local_files_only)r
+device = 0 if torch.cuda.is_available() else -1
+model_kwargs = {"local_files_only": True} if local_files_only else {}
+transcriber = pipeline(
+    "automatic-speech-recognition",
+    model=model_id,
+    device=device,
+    model_kwargs=model_kwargs,
+)
+target_sample_rate = int(transcriber.feature_extractor.sampling_rate)
+waveforms = []
+for path in paths:
+    sample_rate, audio = wavfile.read(path)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if np.issubdtype(audio.dtype, np.integer):
+        info = np.iinfo(audio.dtype)
+        audio = audio.astype(np.float32) / max(abs(info.min), info.max)
+    else:
+        audio = audio.astype(np.float32)
+    if sample_rate != target_sample_rate:
+        target_length = int(round(len(audio) * target_sample_rate / sample_rate))
+        audio = resample(audio, target_length).astype(np.float32)
+    waveforms.append(audio)
+outputs = transcriber(waveforms, batch_size=min(8, len(waveforms)))
+if isinstance(outputs, dict):
+    outputs = [outputs]
+print(json.dumps([str(item.get("text", "")).strip() for item in outputs]))
+""" % {
+        "paths": [str(path) for path in wav_paths],
+        "model_id": model_id,
+        "local_files_only": local_files_only,
+    }
+    proc = subprocess.run(
+        [python, "-c", script],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=max(600, 120 * len(wav_paths)),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"TTS ASR transcription failed rc={proc.returncode}: {proc.stderr[-2000:]}"
+        )
+    for line in reversed(proc.stdout.splitlines()):
+        try:
+            transcripts = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(transcripts, list) and len(transcripts) == len(wav_paths):
+            return [str(value) for value in transcripts]
+    raise RuntimeError("TTS ASR transcription produced no parseable transcript list")
+
+
+def _tts_response_row(sample_id: str, wav_path: Path, wall_ms: float, source: str) -> dict[str, Any]:
+    metrics = _read_wav_metrics(wav_path)
+    return {
+        "sample_id": sample_id,
+        "output_text": "",
+        "wav_path": str(wav_path),
+        "wav_exists": True,
+        "rms": metrics["rms"],
+        "duration_s": metrics["duration_s"],
+        "sample_rate": metrics["sample_rate"],
+        "wall_ms": wall_ms,
+        "source": source,
+    }
 
 
 def _is_canary_asr_reference(args: argparse.Namespace) -> bool:
@@ -3221,8 +3619,116 @@ def _run_nemo_asr_hf_pipeline_reference(
     write_predictions(pred_path, responses)
 
 
+def run_tts_hf_reference(args: argparse.Namespace) -> None:
+    try:
+        import numpy as np
+        import torch
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("TTS run-hf requires numpy and torch") from exc
+
+    work_dir = Path(args.work_dir)
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    if len(prompt_rows) != len(answers["requests"]):
+        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
+    defaults = generation_defaults(work_dir)
+    seed = args.seed if args.seed is not None else int(defaults.get("seed", 42))
+    device = torch.device(args.device)
+    output_dir = work_dir / "hf_audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    is_magpie = "magpie" in args.model.lower()
+
+    if is_magpie:
+        try:
+            from nemo.collections.tts.models import MagpieTTSModel
+        except Exception as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("Magpie TTS reference requires NeMo MagpieTTSModel") from exc
+        model = MagpieTTSModel.from_pretrained(args.model).eval().to(device)
+        processor = None
+    else:
+        try:
+            from transformers import AutoProcessor, BarkModel, logging
+        except Exception as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("Bark TTS reference requires transformers BarkModel") from exc
+        logging.set_verbosity_error()
+        processor = AutoProcessor.from_pretrained(
+            args.model,
+            trust_remote_code=args.trust_remote_code,
+            local_files_only=args.local_files_only,
+        )
+        dtype = _model_dtype(torch, args.dtype)
+        model = BarkModel.from_pretrained(
+            args.model,
+            trust_remote_code=args.trust_remote_code,
+            local_files_only=args.local_files_only,
+            torch_dtype=dtype,
+        ).eval().to(device)
+
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            prompt = str(prompt_row.get("prompt", ""))
+            sample_id = str(prompt_row.get("sample_id", f"seedtts_{idx:06d}"))
+            sample_seed = seed + idx
+            random.seed(sample_seed)
+            np.random.seed(sample_seed)
+            torch.manual_seed(sample_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(sample_seed)
+            start = time.perf_counter()
+            with torch.inference_mode():
+                if is_magpie:
+                    audio_tensor, audio_len = model.do_tts(
+                        transcript=prompt,
+                        language=str(prompt_row.get("language", "en") or "en"),
+                        use_cfg=True,
+                    )
+                    audio = audio_tensor.detach().cpu().numpy().reshape(-1)
+                    actual_len = int(audio_len.item()) if audio_len.numel() else len(audio)
+                    audio = audio[:actual_len]
+                    sample_rate = 22050
+                else:
+                    inputs = processor(prompt, return_tensors="pt")
+                    inputs = _to_device(inputs, device)
+                    audio_values = model.generate(**inputs)
+                    audio = audio_values.detach().cpu().numpy().reshape(-1)
+                    sample_rate = int(model.generation_config.sample_rate)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            wav_path = output_dir / f"{_safe_sample_filename(sample_id, '.wav')}"
+            _write_pcm16_wav(wav_path, np.asarray(audio), sample_rate)
+            row = _tts_response_row(sample_id, wav_path, wall_ms, "hf")
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.tts_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    scoring = work_scoring(work_dir)
+    transcripts = _transcribe_audio_files(
+        [Path(row["wav_path"]) for row in responses],
+        python=sys.executable,
+        model_id=str(scoring.get("asr_model", "openai/whisper-large-v3-turbo")),
+        local_files_only=args.local_files_only,
+    )
+    for row, transcript in zip(responses, transcripts, strict=True):
+        row["output_text"] = transcript
+        row["asr_transcript"] = transcript
+    write_predictions(pred_path, responses)
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for row in responses:
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def run_hf_reference(args: argparse.Namespace) -> None:
     dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_tts_dataset_kind(dataset_kind):
+        run_tts_hf_reference(args)
+        return
     if _is_vlm_dataset_kind(dataset_kind):
         run_vlm_hf_reference(args)
         return
@@ -3342,9 +3848,119 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
+def _runtime_config_tokens(config: dict[str, Any], prefix: str = "") -> list[str]:
+    tokens: list[str] = []
+    for key, value in config.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            tokens.extend(_runtime_config_tokens(value, name))
+        elif isinstance(value, bool):
+            tokens.append(f"{name}={'true' if value else 'false'}")
+        elif value is not None:
+            tokens.append(f"{name}={value}")
+    return tokens
+
+
+def run_tts_trtfb(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    defaults = generation_defaults(work_dir)
+    task_config = work_manifest(work_dir).get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    output_dir = work_dir / "trtfb_audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    model_max_new_tokens = task_config.get("model_max_new_tokens")
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(model_max_new_tokens if model_max_new_tokens is not None else defaults.get("max_new_tokens", 0))
+    )
+    runtime_config = task_config.get("runtime_config", {})
+    runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
+    set_tokens = _runtime_config_tokens(runtime_config) + list(args.set or [])
+    family = str(task_config.get("family", "") or "")
+    arg_seed = getattr(args, "seed", None)
+    seed = arg_seed if arg_seed is not None else int(defaults.get("seed", -1))
+    has_explicit_bark_seed = any(
+        token.split("=", 1)[0] == "audio_bark.seed" for token in set_tokens
+    )
+    env = os.environ.copy()
+    if args.cuda_visible_devices:
+        env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+    responses: list[dict[str, Any]] = []
+    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            sample_id = str(prompt_row.get("sample_id", f"seedtts_{idx:06d}"))
+            wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
+            cmd = [
+                _trtmc_binary_from_args(args),
+                "generate-audio",
+                args.bundle,
+                "--prompt",
+                str(prompt_row.get("prompt", "")),
+                "--output",
+                str(wav_path),
+            ]
+            if max_new_tokens > 0:
+                cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+            if args.hf_python:
+                cmd.extend(["--hf-python", args.hf_python])
+            if args.backend_dir:
+                cmd.extend(["--backend-dir", args.backend_dir])
+            if args.config:
+                cmd.extend(["--config", args.config])
+            sample_set_tokens = list(set_tokens)
+            if family == "bark" and seed >= 0 and not has_explicit_bark_seed:
+                sample_set_tokens.append(f"audio_bark.seed={seed + idx}")
+            for token in sample_set_tokens:
+                cmd.extend(["--set", token])
+            log_f.write(f"$ {' '.join(cmd)}\n")
+            start = time.perf_counter()
+            proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            if proc.stdout:
+                log_f.write(proc.stdout)
+                if not proc.stdout.endswith("\n"):
+                    log_f.write("\n")
+            if proc.stderr:
+                log_f.write(proc.stderr)
+                if not proc.stderr.endswith("\n"):
+                    log_f.write("\n")
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"TRTFB TTS task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                )
+            if not wav_path.is_file():
+                raise RuntimeError(f"TRTFB TTS task eval produced no WAV for sample {idx}: {wav_path}")
+            row = _tts_response_row(sample_id, wav_path, wall_ms, "trtfb")
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(f"[task_eval.tts_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+    scoring = work_scoring(work_dir)
+    transcripts = _transcribe_audio_files(
+        [Path(row["wav_path"]) for row in responses],
+        python=str(args.hf_python or sys.executable),
+        model_id=str(scoring.get("asr_model", "openai/whisper-large-v3-turbo")),
+    )
+    for row, transcript in zip(responses, transcripts, strict=True):
+        row["output_text"] = transcript
+        row["asr_transcript"] = transcript
+    write_predictions(predictions, responses)
+    with raw_output.open("w", encoding="utf-8") as raw_f:
+        for row in responses:
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_tts_dataset_kind(dataset_kind):
+        run_tts_trtfb(args)
+        return
     if _is_vlm_dataset_kind(dataset_kind):
         run_vlm_trtfb(args)
         return
@@ -3724,8 +4340,15 @@ def eval_one_model(
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
     task_eval_config = model.get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
+    task_eval_config = dict(task_eval_config) if isinstance(task_eval_config, dict) else {}
+    model_family = str(model.get("family", "") or "")
+    if model_family:
+        task_eval_config["family"] = model_family
+    runtime_config = model.get("runtime_config", {})
+    if isinstance(runtime_config, dict) and runtime_config:
+        task_eval_config["runtime_config"] = runtime_config
+    if model.get("max_new_tokens") is not None:
+        task_eval_config["model_max_new_tokens"] = model["max_new_tokens"]
     prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
@@ -3753,7 +4376,11 @@ def eval_one_model(
         bundle_path = engine_dir / str(model["bundle"])
 
     max_prompt_len = None
-    if not args.skip_prompt_length_check and not _is_asr_dataset_kind(dataset_kind):
+    if (
+        not args.skip_prompt_length_check
+        and not _is_asr_dataset_kind(dataset_kind)
+        and not _is_tts_dataset_kind(dataset_kind)
+    ):
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
             model_id=str(model["hf_id"]),
@@ -4565,7 +5192,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind not in {"mmlu_five_shot_json", "vlm_chat_json", "vlm_unified_json", "asr_chat_json"}:
+    if dataset_kind not in {
+        "mmlu_five_shot_json",
+        "vlm_chat_json",
+        "vlm_unified_json",
+        "asr_chat_json",
+        "seedtts_json",
+    }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
     waives = load_waives(Path(args.waives), args.waive_platform) if args.waives else {}
