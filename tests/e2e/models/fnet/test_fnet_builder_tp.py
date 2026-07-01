@@ -23,8 +23,7 @@ from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.fnet.plugin import FNetPlugin
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
-fnet_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.fnet.plugin")
+fnet_plugin = importlib.import_module("tensorrt_model_connect.families.fnet.plugin")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -34,7 +33,7 @@ _VOCAB = 24
 
 def _fnet_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.fnet.tp_builder",
+        "tensorrt_model_connect.families.fnet.model.model",
         reason="TensorRT is required for FNet TP builder tests",
     )
 
@@ -70,15 +69,17 @@ def _make_encoder_weights(
     mlp: int = _MLP,
     vocab: int = _VOCAB,
 ) -> WeightDict:
-    weights = WeightDict({
-        "embedding": _matrix(vocab, hidden),
-        "position_embedding": _matrix(32, hidden, 1000),
-        "token_type_embedding": np.zeros((4, hidden), dtype=np.float32),
-        "embed_norm": np.ones(hidden, dtype=np.float32),
-        "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
-        "embed_projection": _matrix(hidden, hidden, 2000),
-        "embed_projection_bias": np.zeros(hidden, dtype=np.float32),
-    })
+    weights = WeightDict(
+        {
+            "embedding": _matrix(vocab, hidden),
+            "position_embedding": _matrix(32, hidden, 1000),
+            "token_type_embedding": np.zeros((4, hidden), dtype=np.float32),
+            "embed_norm": np.ones(hidden, dtype=np.float32),
+            "embed_norm_beta": np.zeros(hidden, dtype=np.float32),
+            "embed_projection": _matrix(hidden, hidden, 2000),
+            "embed_projection_bias": np.zeros(hidden, dtype=np.float32),
+        }
+    )
     for layer_idx in range(layers):
         prefix = f"layer.{layer_idx}"
         weights[f"{prefix}.post_attn_norm"] = np.ones(hidden, dtype=np.float32)

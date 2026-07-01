@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -29,6 +29,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
+from .model import model as encoder_model
 
 
 def _load_ln(readers, prefix):
@@ -46,7 +47,9 @@ class FNetPlugin:
         return model_type.lower() == "fnet"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -54,7 +57,6 @@ class FNetPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        _intermediate = config.intermediate_size
         max_pos = config.max_position_embeddings
         type_vocab_size = config.raw.get("type_vocab_size", 4)
 
@@ -74,19 +76,22 @@ class FNetPlugin:
         # Word embedding
         embedding = _load_tensor(readers, _pfx("embeddings.word_embeddings.weight"))
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (learned absolute)
         pos_embed = _load_tensor(readers, _pfx("embeddings.position_embeddings.weight"))
         assert pos_embed.shape == (max_pos, hidden), (
-            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})")
+            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})"
+        )
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         # Token type embedding
         tt_embed = _load_tensor(readers, _pfx("embeddings.token_type_embeddings.weight"))
         assert tt_embed.shape == (type_vocab_size, hidden), (
-            f"Token type embedding shape {tt_embed.shape} != ({type_vocab_size}, {hidden})")
+            f"Token type embedding shape {tt_embed.shape} != ({type_vocab_size}, {hidden})"
+        )
         weights["token_type_embedding"] = tt_embed.astype(np.float32)
 
         # Embedding LayerNorm
@@ -105,8 +110,7 @@ class FNetPlugin:
             hf_prefix = _pfx(f"encoder.layer.{layer_idx}")
 
             # Post-Fourier LayerNorm
-            fourier_ln_w, fourier_ln_b = _load_ln(
-                readers, f"{hf_prefix}.fourier.output.LayerNorm")
+            fourier_ln_w, fourier_ln_b = _load_ln(readers, f"{hf_prefix}.fourier.output.LayerNorm")
             weights[f"{prefix}.post_attn_norm"] = fourier_ln_w
             weights[f"{prefix}.post_attn_norm_beta"] = fourier_ln_b
 
@@ -126,41 +130,40 @@ class FNetPlugin:
             weights[f"{prefix}.output_norm"] = out_ln_w
             weights[f"{prefix}.output_norm_beta"] = out_ln_b
 
-        # Pooler (optional)
-        pooler_key = _pfx("pooler.dense.weight")
-        if _has_tensor(readers, pooler_key):
-            pooler_w = _load_tensor(readers, pooler_key)
-            pooler_b = _load_tensor(readers, _pfx("pooler.dense.bias"))
-            weights["pooler_w"] = np.ascontiguousarray(pooler_w.T.astype(np.float32))
-            weights["pooler_bias"] = pooler_b.astype(np.float32)
-
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="FNet tensor-parallel builds")
+            require_tensorrt_11_for_tensor_parallel(parallel, feature="FNet tensor-parallel builds")
             if quant_ctx is not None:
                 raise ValueError("FNet tensor-parallel builds do not support quantization")
-            from .tp_builder import build_tp_fnet_encoder_engine
-            return build_tp_fnet_encoder_engine(
-                config, weights,
+            return encoder_model.build_tp_fnet_encoder_engine(
+                config,
+                weights,
                 max_seq_length=max_cache_length,
+                precision=precision,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
-        from .fnet_encoder_builder import build_fnet_encoder_engine
-        return build_fnet_encoder_engine(
-            config, weights,
+        return encoder_model.build_fnet_encoder_engine(
+            config,
+            weights,
             max_seq_length=max_cache_length,
             precision=precision,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
 
 plugin = FNetPlugin()
