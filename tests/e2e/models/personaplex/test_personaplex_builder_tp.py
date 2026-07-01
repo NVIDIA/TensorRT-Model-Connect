@@ -33,7 +33,7 @@ _VOCAB = 32
 
 def _personaplex_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.personaplex.decoder_tp_builder",
+        "tensorrt_model_connect.families.personaplex.model.parallel",
         reason="TensorRT is required for PersonaPlex TP builder tests",
     )
 

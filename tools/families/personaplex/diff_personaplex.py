@@ -10,7 +10,7 @@ and compares intermediate values at each stage:
 
 Usage:
     # Stage-by-stage comparison (needs GPU + official repo installed)
-    python -m tensorrt_model_connect.families.personaplex.diff_personaplex \
+    python -m tools.families.personaplex.diff_personaplex \
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.trtfb \
         --trtmc-binary ./build/trtmc \
@@ -18,13 +18,13 @@ Usage:
         --official-repo /path/to/personaplex/moshi
 
     # Quick reference-only run (no TRT needed, dumps official intermediate values)
-    python -m tensorrt_model_connect.families.personaplex.diff_personaplex \
+    python -m tools.families.personaplex.diff_personaplex \
         --input-wav test_input.wav \
         --official-repo /path/to/personaplex/moshi \
         --reference-only
 
     # TRT-only run (compares against saved reference)
-    python -m tensorrt_model_connect.families.personaplex.diff_personaplex \
+    python -m tools.families.personaplex.diff_personaplex \
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.trtfb \
         --trtmc-binary ./build/trtmc \
