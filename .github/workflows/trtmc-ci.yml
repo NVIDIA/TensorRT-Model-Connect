@@ -114,7 +114,13 @@ jobs:
           base=""
           case "${GITHUB_EVENT_NAME}" in
             pull_request)
-              base="${{ github.event.pull_request.base.sha }}"
+              # The checked-out PR ref is a synthetic merge commit. Its first
+              # parent is the exact base snapshot used to create that ref.
+              if ! git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+                echo "::error::Expected pull_request checkout to be a merge commit"
+                exit 1
+              fi
+              base="$(git rev-parse HEAD^1)"
               ;;
             push)
               base="${{ github.event.before }}"

@@ -222,6 +222,17 @@ def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
     assert "github.rest.issues.removeLabel" not in text
 
 
+def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    base_block = text.split("- name: Resolve comparison base", maxsplit=1)[1].split(
+        "- name: Report CI mode", maxsplit=1
+    )[0]
+
+    assert "git rev-parse --verify HEAD^2" in base_block
+    assert 'base="$(git rev-parse HEAD^1)"' in base_block
+    assert "github.event.pull_request.base.sha" not in base_block
+
+
 def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     checkout_block = text.split("- name: Check out source", maxsplit=1)[1].split(
