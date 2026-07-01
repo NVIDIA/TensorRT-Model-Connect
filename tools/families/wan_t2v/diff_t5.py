@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _PYTHON_DIR = _REPO_ROOT / "python"
 
 
@@ -78,7 +78,7 @@ def main():
     print("[diff-t5] Building TRT T5 engine ...", file=sys.stderr)
     if str(_PYTHON_DIR) not in sys.path:
         sys.path.insert(0, str(_PYTHON_DIR))
-    from tensorrt_model_connect.families.wan_t2v.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+    from tensorrt_model_connect.families.wan_t2v.model.components.text_encoder import build_t5_encoder_engine, load_t5_weights
 
     config = hf_model.config
     t5_weights = load_t5_weights(

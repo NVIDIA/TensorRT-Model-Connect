@@ -136,27 +136,27 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.components.text_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.model",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.model",
             load_dit_weights=load_dit_weights,
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.components.vae",
             load_vae_weights=load_vae_weights,
             build_causal_vae_3d_engine=build_causal_vae_3d_engine,
             count_vae_caches=lambda **_kwargs: 0,
@@ -236,35 +236,35 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.t5_encoder_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.components.text_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.model",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.standard_dit_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.model",
             load_dit_weights=load_dit_weights,
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.standard_dit_tp_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.parallel",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.standard_dit_tp_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.parallel",
             build_standard_dit_engine=build_standard_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.components.vae",
             load_vae_weights=load_vae_weights,
             build_causal_vae_3d_engine=build_causal_vae_3d_engine,
             count_vae_caches=lambda **_kwargs: 0,
@@ -309,9 +309,9 @@ def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPa
     """
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+        "tensorrt_model_connect.families.wan_t2v.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.wan_t2v.causal_vae_3d_builder",
+            "tensorrt_model_connect.families.wan_t2v.model.components.vae",
             count_vae_caches=lambda **_kwargs: 13,
         ),
     )

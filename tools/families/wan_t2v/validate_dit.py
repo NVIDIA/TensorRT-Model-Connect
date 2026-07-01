@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _PYTHON_DIR = _REPO_ROOT / "python"
 _TOOLS_DIR = _REPO_ROOT / "tools"
 if str(_TOOLS_DIR) not in sys.path:
@@ -139,7 +139,7 @@ def main():
           file=sys.stderr)
     if str(_PYTHON_DIR) not in sys.path:
         sys.path.insert(0, str(_PYTHON_DIR))
-    from tensorrt_model_connect.families.wan_t2v.standard_dit_builder import build_standard_dit_engine, load_dit_weights
+    from tensorrt_model_connect.families.wan_t2v.model.model import build_standard_dit_engine, load_dit_weights
 
     t0 = time.time()
     weights = load_dit_weights(dit_dir, dim=DIM, num_heads=NUM_HEADS,

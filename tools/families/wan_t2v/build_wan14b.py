@@ -2,7 +2,7 @@
 """Build Wan2.1-T2V-14B bundle with configurable frame count.
 
 Usage (inside container):
-    /opt/venv/bin/python -m tensorrt_model_connect.families.wan_t2v.build_wan14b --frames 33 \
+    /opt/venv/bin/python -m tools.families.wan_t2v.build_wan14b --frames 33 \
         -o /workspace/users/yifeif/tensorrt-model-connect/engines/wan21-14b-33fr.trtfb
 """
 import argparse

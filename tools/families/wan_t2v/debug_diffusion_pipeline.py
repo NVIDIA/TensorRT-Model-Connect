@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLS_DIR = _REPO_ROOT / "tools"
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
@@ -185,7 +185,7 @@ def step3_t5_and_text_proj(bundle_path: str, pp: dict, atol: float) -> bool:
     print(f"  Tokens (first 8): {input_ids[0, :8].tolist()}")
 
     # TRT T5 (our bundle's engine)
-    from tensorrt_model_connect.families.wan_t2v.diffusion_runner import DiffusionRunner
+    from tools.families.wan_t2v.diffusion_runner import DiffusionRunner
     print("  Loading TRT engines ...", file=sys.stderr)
     runner = DiffusionRunner(bundle_path)
     ctx.runner = runner
@@ -402,7 +402,7 @@ def step8_scheduler_sigmas(bundle_path: str, atol: float) -> bool:
     hf_timesteps = hf_sched.timesteps.numpy()
 
     num_steps = 30
-    from tensorrt_model_connect.families.wan_t2v.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tools.families.wan_t2v.schedulers.flow_match_euler import FlowMatchEulerScheduler
     our_sched = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=shift)
     our_sched.set_timesteps(num_steps)
     sigmas = our_sched._sigmas
@@ -467,7 +467,7 @@ def step9_full_pipeline(bundle_path: str, pp: dict, num_steps: int, atol: float)
     hf_latents = noise_torch.clone()
 
     # Our scheduler (matching C++ and HF)
-    from tensorrt_model_connect.families.wan_t2v.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tools.families.wan_t2v.schedulers.flow_match_euler import FlowMatchEulerScheduler
     our_sched = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=shift)
     our_sched.set_timesteps(num_steps)
     sigmas = our_sched._sigmas
