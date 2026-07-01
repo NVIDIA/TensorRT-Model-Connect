@@ -4,7 +4,7 @@ Compares per-pixel class predictions and logit values between the TRT
 engine (via SegmentationTrtRunner) and HF transformers SegformerForSemanticSegmentation.
 
 Usage:
-    python -m tensorrt_model_connect.families.segformer.diff_segmentation \
+    python -m tools.families.segformer.diff_segmentation \
       --model nvidia/segformer-b0-finetuned-ade-512-512 \
       --image tests/assets/test_image.jpg --atol 0.5
 """
@@ -50,8 +50,8 @@ def main():
 
     if args.bundle:
         # TRT comparison via bundle
-        sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-        from tensorrt_model_connect.families.segformer.debug_runner import (
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "python"))
+        from tools.families.segformer.debug_runner import (
             VisionTrtRunner,
             load_section_from_bundle,
         )

@@ -12,7 +12,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 from tensorrt_model_connect.parallel_config import ParallelConfig
-from tensorrt_model_connect.families.segformer.segformer_tp_builder import (
+from tensorrt_model_connect.families.segformer.model.parallel import (
     _slice_mlp_columns,
     _slice_mlp_rows,
     _validate_segformer_tp,

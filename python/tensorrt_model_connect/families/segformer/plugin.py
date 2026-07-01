@@ -42,22 +42,23 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from .model import model as graph_ops
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .segformer_tp_builder import build_segformer_tp_engine
+from .model.parallel import build_segformer_tp_engine
 
 
 trt = trt_compat.get_trt()
+
 
 def _resolve_image_size(model_dir: str) -> int:
     """Read preprocessor_config.json for the actual image size."""
@@ -84,7 +85,9 @@ class SegformerPlugin:
         return model_type.lower() in ("segformer",)
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load SegFormer weights from safetensors."""
         model_dir_path = Path(model_dir)
@@ -108,13 +111,17 @@ class SegformerPlugin:
             # Overlap patch embedding
             pe_prefix = f"segformer.encoder.patch_embeddings.{stage_idx}"
             weights[f"stage{stage_idx}.patch_embed.proj.weight"] = _load_tensor(
-                readers, f"{pe_prefix}.proj.weight").astype(np.float32)
+                readers, f"{pe_prefix}.proj.weight"
+            ).astype(np.float32)
             weights[f"stage{stage_idx}.patch_embed.proj.bias"] = _load_tensor(
-                readers, f"{pe_prefix}.proj.bias").astype(np.float32)
+                readers, f"{pe_prefix}.proj.bias"
+            ).astype(np.float32)
             weights[f"stage{stage_idx}.patch_embed.norm.weight"] = _load_tensor(
-                readers, f"{pe_prefix}.layer_norm.weight").astype(np.float32)
+                readers, f"{pe_prefix}.layer_norm.weight"
+            ).astype(np.float32)
             weights[f"stage{stage_idx}.patch_embed.norm.bias"] = _load_tensor(
-                readers, f"{pe_prefix}.layer_norm.bias").astype(np.float32)
+                readers, f"{pe_prefix}.layer_norm.bias"
+            ).astype(np.float32)
 
             for block_idx in range(n_blocks):
                 blk_prefix = f"segformer.encoder.block.{stage_idx}.{block_idx}"
@@ -122,13 +129,17 @@ class SegformerPlugin:
 
                 # Layer norms
                 weights[f"{w_prefix}.norm1.weight"] = _load_tensor(
-                    readers, f"{blk_prefix}.layer_norm_1.weight").astype(np.float32)
+                    readers, f"{blk_prefix}.layer_norm_1.weight"
+                ).astype(np.float32)
                 weights[f"{w_prefix}.norm1.bias"] = _load_tensor(
-                    readers, f"{blk_prefix}.layer_norm_1.bias").astype(np.float32)
+                    readers, f"{blk_prefix}.layer_norm_1.bias"
+                ).astype(np.float32)
                 weights[f"{w_prefix}.norm2.weight"] = _load_tensor(
-                    readers, f"{blk_prefix}.layer_norm_2.weight").astype(np.float32)
+                    readers, f"{blk_prefix}.layer_norm_2.weight"
+                ).astype(np.float32)
                 weights[f"{w_prefix}.norm2.bias"] = _load_tensor(
-                    readers, f"{blk_prefix}.layer_norm_2.bias").astype(np.float32)
+                    readers, f"{blk_prefix}.layer_norm_2.bias"
+                ).astype(np.float32)
 
                 # Attention Q/K/V/O
                 for proj in ("query", "key", "value"):
@@ -149,7 +160,9 @@ class SegformerPlugin:
                     weights[f"{w_prefix}.attn.sr.weight"] = sr_w.astype(np.float32)
                     weights[f"{w_prefix}.attn.sr.bias"] = sr_b.astype(np.float32)
 
-                    sr_ln_w = _load_tensor(readers, f"{blk_prefix}.attention.self.layer_norm.weight")
+                    sr_ln_w = _load_tensor(
+                        readers, f"{blk_prefix}.attention.self.layer_norm.weight"
+                    )
                     sr_ln_b = _load_tensor(readers, f"{blk_prefix}.attention.self.layer_norm.bias")
                     weights[f"{w_prefix}.attn.sr_norm.weight"] = sr_ln_w.astype(np.float32)
                     weights[f"{w_prefix}.attn.sr_norm.bias"] = sr_ln_b.astype(np.float32)
@@ -174,9 +187,11 @@ class SegformerPlugin:
             # Per-stage final LayerNorm
             ln_prefix = f"segformer.encoder.layer_norm.{stage_idx}"
             weights[f"stage{stage_idx}.final_norm.weight"] = _load_tensor(
-                readers, f"{ln_prefix}.weight").astype(np.float32)
+                readers, f"{ln_prefix}.weight"
+            ).astype(np.float32)
             weights[f"stage{stage_idx}.final_norm.bias"] = _load_tensor(
-                readers, f"{ln_prefix}.bias").astype(np.float32)
+                readers, f"{ln_prefix}.bias"
+            ).astype(np.float32)
 
         # Decode head
         for i in range(4):
@@ -187,36 +202,49 @@ class SegformerPlugin:
 
         # Fuse conv (1x1)
         weights["decode_head.fuse.weight"] = _load_tensor(
-            readers, "decode_head.linear_fuse.weight").astype(np.float32)
+            readers, "decode_head.linear_fuse.weight"
+        ).astype(np.float32)
         if _has_tensor(readers, "decode_head.linear_fuse.bias"):
             weights["decode_head.fuse.bias"] = _load_tensor(
-                readers, "decode_head.linear_fuse.bias").astype(np.float32)
+                readers, "decode_head.linear_fuse.bias"
+            ).astype(np.float32)
         else:
             out_ch = weights["decode_head.fuse.weight"].shape[0]
             weights["decode_head.fuse.bias"] = np.zeros(out_ch, dtype=np.float32)
 
         # BatchNorm
         weights["decode_head.bn.weight"] = _load_tensor(
-            readers, "decode_head.batch_norm.weight").astype(np.float32)
+            readers, "decode_head.batch_norm.weight"
+        ).astype(np.float32)
         weights["decode_head.bn.bias"] = _load_tensor(
-            readers, "decode_head.batch_norm.bias").astype(np.float32)
+            readers, "decode_head.batch_norm.bias"
+        ).astype(np.float32)
         weights["decode_head.bn.running_mean"] = _load_tensor(
-            readers, "decode_head.batch_norm.running_mean").astype(np.float32)
+            readers, "decode_head.batch_norm.running_mean"
+        ).astype(np.float32)
         weights["decode_head.bn.running_var"] = _load_tensor(
-            readers, "decode_head.batch_norm.running_var").astype(np.float32)
+            readers, "decode_head.batch_norm.running_var"
+        ).astype(np.float32)
 
         # Classifier conv
         weights["decode_head.classifier.weight"] = _load_tensor(
-            readers, "decode_head.classifier.weight").astype(np.float32)
+            readers, "decode_head.classifier.weight"
+        ).astype(np.float32)
         weights["decode_head.classifier.bias"] = _load_tensor(
-            readers, "decode_head.classifier.bias").astype(np.float32)
+            readers, "decode_head.classifier.bias"
+        ).astype(np.float32)
 
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -228,11 +256,14 @@ class SegformerPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="SegFormer tensor-parallel Mix-FFN builds")
+                parallel, feature="SegFormer tensor-parallel Mix-FFN builds"
+            )
             if quant_ctx is not None:
                 raise ValueError("SegFormer tensor-parallel builds do not support quantization")
             return build_segformer_tp_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -297,10 +328,12 @@ class SegformerPlugin:
             pe_b = weights[f"stage{stage_idx}.patch_embed.proj.bias"]
 
             conv = network.add_convolution_nd(
-                x, num_output_maps=hidden,
+                x,
+                num_output_maps=hidden,
                 kernel_shape=(patch_size, patch_size),
                 kernel=trt.Weights(np.ascontiguousarray(pe_w)),
-                bias=trt.Weights(np.ascontiguousarray(pe_b)))
+                bias=trt.Weights(np.ascontiguousarray(pe_b)),
+            )
             conv.stride_nd = (stride, stride)
             conv.padding_nd = (padding, padding)
 
@@ -318,8 +351,8 @@ class SegformerPlugin:
             pe_ln_b = weights[f"stage{stage_idx}.patch_embed.norm.bias"]
             eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
             hidden_state = graph_ops.add_layer_norm(
-                network, reshape_to_seq.get_output(0), hidden,
-                pe_ln_w, pe_ln_b, eps_t)
+                network, reshape_to_seq.get_output(0), hidden, pe_ln_w, pe_ln_b, eps_t
+            )
 
             # Debug: patch embed output as NCHW [1, hidden, H', W']
             if debug_layer_outputs:
@@ -327,8 +360,7 @@ class SegformerPlugin:
                 pe_dbg.reshape_dims = (1, cur_H, cur_W, hidden)
                 pe_dbg_t = network.add_shuffle(pe_dbg.get_output(0))
                 pe_dbg_t.first_transpose = trt.Permutation([0, 3, 1, 2])
-                _mark_debug(pe_dbg_t.get_output(0),
-                            f"debug_stage{stage_idx}_patch_embed")
+                _mark_debug(pe_dbg_t.get_output(0), f"debug_stage{stage_idx}_patch_embed")
 
             # --- Transformer blocks ---
             for block_idx in range(n_blocks):
@@ -338,8 +370,8 @@ class SegformerPlugin:
                 norm1_w = weights[f"{w_prefix}.norm1.weight"]
                 norm1_b = weights[f"{w_prefix}.norm1.bias"]
                 normed = graph_ops.add_layer_norm(
-                    network, hidden_state, hidden,
-                    norm1_w, norm1_b, eps_t)
+                    network, hidden_state, hidden, norm1_w, norm1_b, eps_t
+                )
 
                 # SR: sequence reduction for K,V
                 if sr > 1:
@@ -356,7 +388,8 @@ class SegformerPlugin:
                         num_output_maps=hidden,
                         kernel_shape=(sr, sr),
                         kernel=trt.Weights(np.ascontiguousarray(sr_w)),
-                        bias=trt.Weights(np.ascontiguousarray(sr_b)))
+                        bias=trt.Weights(np.ascontiguousarray(sr_b)),
+                    )
                     sr_conv.stride_nd = (sr, sr)
 
                     sr_H = cur_H // sr
@@ -371,8 +404,8 @@ class SegformerPlugin:
                     sr_ln_w = weights[f"{w_prefix}.attn.sr_norm.weight"]
                     sr_ln_b = weights[f"{w_prefix}.attn.sr_norm.bias"]
                     kv_input = graph_ops.add_layer_norm(
-                        network, sr_reshape.get_output(0), hidden,
-                        sr_ln_w, sr_ln_b, eps_t)
+                        network, sr_reshape.get_output(0), hidden, sr_ln_w, sr_ln_b, eps_t
+                    )
                     kv_seq_len = sr_seq
                 else:
                     kv_input = normed
@@ -383,55 +416,58 @@ class SegformerPlugin:
 
                 # Q from normed [seq_len, hidden]
                 q = graph_ops.add_matmul_rhs_constant(
-                    network, normed, hidden, hidden,
-                    weights[f"{w_prefix}.attn.q.weight"])
-                q = graph_ops.add_bias_sum(network, q, hidden,
-                    weights[f"{w_prefix}.attn.q.bias"])
+                    network, normed, hidden, hidden, weights[f"{w_prefix}.attn.q.weight"]
+                )
+                q = graph_ops.add_bias_sum(network, q, hidden, weights[f"{w_prefix}.attn.q.bias"])
 
                 # K, V from kv_input [kv_seq_len, hidden]
                 k = graph_ops.add_matmul_rhs_constant(
-                    network, kv_input, hidden, hidden,
-                    weights[f"{w_prefix}.attn.k.weight"])
-                k = graph_ops.add_bias_sum(network, k, hidden,
-                    weights[f"{w_prefix}.attn.k.bias"])
+                    network, kv_input, hidden, hidden, weights[f"{w_prefix}.attn.k.weight"]
+                )
+                k = graph_ops.add_bias_sum(network, k, hidden, weights[f"{w_prefix}.attn.k.bias"])
                 v = graph_ops.add_matmul_rhs_constant(
-                    network, kv_input, hidden, hidden,
-                    weights[f"{w_prefix}.attn.v.weight"])
-                v = graph_ops.add_bias_sum(network, v, hidden,
-                    weights[f"{w_prefix}.attn.v.bias"])
+                    network, kv_input, hidden, hidden, weights[f"{w_prefix}.attn.v.weight"]
+                )
+                v = graph_ops.add_bias_sum(network, v, hidden, weights[f"{w_prefix}.attn.v.bias"])
 
                 ctx_flat = graph_ops.add_attention_from_rows(
-                    network, q, k, v,
-                    num_heads=n_heads, head_dim=head_dim,
-                    q_seq=seq_len, kv_seq=kv_seq_len,
-                    scale=attn_scale)
+                    network,
+                    q,
+                    k,
+                    v,
+                    num_heads=n_heads,
+                    head_dim=head_dim,
+                    q_seq=seq_len,
+                    kv_seq=kv_seq_len,
+                    scale=attn_scale,
+                )
 
                 # Output projection
                 attn_out = graph_ops.add_matmul_rhs_constant(
-                    network, ctx_flat, hidden, hidden,
-                    weights[f"{w_prefix}.attn.o.weight"])
+                    network, ctx_flat, hidden, hidden, weights[f"{w_prefix}.attn.o.weight"]
+                )
                 attn_out = graph_ops.add_bias_sum(
-                    network, attn_out, hidden,
-                    weights[f"{w_prefix}.attn.o.bias"])
+                    network, attn_out, hidden, weights[f"{w_prefix}.attn.o.bias"]
+                )
 
                 # Residual
-                res1 = network.add_elementwise(
-                    hidden_state, attn_out, trt.ElementWiseOperation.SUM)
+                res1 = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
                 hidden_state = res1.get_output(0)
 
                 # -- Mix-FFN --
                 norm2_w = weights[f"{w_prefix}.norm2.weight"]
                 norm2_b = weights[f"{w_prefix}.norm2.bias"]
                 normed2 = graph_ops.add_layer_norm(
-                    network, hidden_state, hidden,
-                    norm2_w, norm2_b, eps_t)
+                    network, hidden_state, hidden, norm2_w, norm2_b, eps_t
+                )
 
                 # FC1: [seq, hidden] -> [seq, ffn_hidden]
                 fc1 = graph_ops.add_matmul_rhs_constant(
-                    network, normed2, hidden, ffn_hidden,
-                    weights[f"{w_prefix}.mlp.fc1.weight"])
-                fc1 = graph_ops.add_bias_sum(network, fc1, ffn_hidden,
-                    weights[f"{w_prefix}.mlp.fc1.bias"])
+                    network, normed2, hidden, ffn_hidden, weights[f"{w_prefix}.mlp.fc1.weight"]
+                )
+                fc1 = graph_ops.add_bias_sum(
+                    network, fc1, ffn_hidden, weights[f"{w_prefix}.mlp.fc1.bias"]
+                )
 
                 # DWConv3x3: reshape to 4D for depthwise conv
                 dw_reshape = network.add_shuffle(fc1)
@@ -446,7 +482,8 @@ class SegformerPlugin:
                     num_output_maps=ffn_hidden,
                     kernel_shape=(3, 3),
                     kernel=trt.Weights(np.ascontiguousarray(dw_w)),
-                    bias=trt.Weights(np.ascontiguousarray(dw_b)))
+                    bias=trt.Weights(np.ascontiguousarray(dw_b)),
+                )
                 dwconv.stride_nd = (1, 1)
                 dwconv.padding_nd = (1, 1)
                 dwconv.num_groups = ffn_hidden  # depthwise
@@ -461,14 +498,14 @@ class SegformerPlugin:
 
                 # FC2: [seq, ffn_hidden] -> [seq, hidden]
                 fc2 = graph_ops.add_matmul_rhs_constant(
-                    network, gelu_out, ffn_hidden, hidden,
-                    weights[f"{w_prefix}.mlp.fc2.weight"])
-                fc2 = graph_ops.add_bias_sum(network, fc2, hidden,
-                    weights[f"{w_prefix}.mlp.fc2.bias"])
+                    network, gelu_out, ffn_hidden, hidden, weights[f"{w_prefix}.mlp.fc2.weight"]
+                )
+                fc2 = graph_ops.add_bias_sum(
+                    network, fc2, hidden, weights[f"{w_prefix}.mlp.fc2.bias"]
+                )
 
                 # Residual
-                res2 = network.add_elementwise(
-                    hidden_state, fc2, trt.ElementWiseOperation.SUM)
+                res2 = network.add_elementwise(hidden_state, fc2, trt.ElementWiseOperation.SUM)
                 hidden_state = res2.get_output(0)
 
                 # Debug: per-block output as NCHW [1, hidden, H', W']
@@ -477,15 +514,14 @@ class SegformerPlugin:
                     blk_dbg.reshape_dims = (1, cur_H, cur_W, hidden)
                     blk_dbg_t = network.add_shuffle(blk_dbg.get_output(0))
                     blk_dbg_t.first_transpose = trt.Permutation([0, 3, 1, 2])
-                    _mark_debug(blk_dbg_t.get_output(0),
-                                f"debug_stage{stage_idx}_block{block_idx}")
+                    _mark_debug(blk_dbg_t.get_output(0), f"debug_stage{stage_idx}_block{block_idx}")
 
             # Per-stage final LayerNorm (encoder.layer_norm[i])
             final_ln_w = weights[f"stage{stage_idx}.final_norm.weight"]
             final_ln_b = weights[f"stage{stage_idx}.final_norm.bias"]
             hidden_state = graph_ops.add_layer_norm(
-                network, hidden_state, hidden,
-                final_ln_w, final_ln_b, eps_t)
+                network, hidden_state, hidden, final_ln_w, final_ln_b, eps_t
+            )
 
             # Reshape back to 4D: [seq_len, hidden] -> [1, hidden, H', W']
             to_4d = network.add_shuffle(hidden_state)
@@ -510,11 +546,15 @@ class SegformerPlugin:
 
             # Linear projection
             proj = graph_ops.add_matmul_rhs_constant(
-                network, to_2d.get_output(0), feat_hidden, decoder_hidden_size,
-                weights[f"decode_head.linear_c{i}.weight"])
+                network,
+                to_2d.get_output(0),
+                feat_hidden,
+                decoder_hidden_size,
+                weights[f"decode_head.linear_c{i}.weight"],
+            )
             proj = graph_ops.add_bias_sum(
-                network, proj, decoder_hidden_size,
-                weights[f"decode_head.linear_c{i}.bias"])
+                network, proj, decoder_hidden_size, weights[f"decode_head.linear_c{i}.bias"]
+            )
 
             # Reshape to 4D: [H*W, D] -> [1, D, H, W]
             to_4d2 = network.add_shuffle(proj)
@@ -547,7 +587,8 @@ class SegformerPlugin:
             num_output_maps=decoder_hidden_size,
             kernel_shape=(1, 1),
             kernel=trt.Weights(np.ascontiguousarray(fuse_w)),
-            bias=trt.Weights(np.ascontiguousarray(fuse_b)))
+            bias=trt.Weights(np.ascontiguousarray(fuse_b)),
+        )
 
         # BatchNorm (fused: gamma * (x - mean) / sqrt(var + eps) + beta)
         bn_w = weights["decode_head.bn.weight"]
@@ -558,18 +599,18 @@ class SegformerPlugin:
         bn_shift = bn_b - bn_mean * bn_scale
 
         bn_scale_t = graph_ops.add_constant(
-            network, (1, decoder_hidden_size, 1, 1),
-            bn_scale.reshape(1, -1, 1, 1))
+            network, (1, decoder_hidden_size, 1, 1), bn_scale.reshape(1, -1, 1, 1)
+        )
         bn_shift_t = graph_ops.add_constant(
-            network, (1, decoder_hidden_size, 1, 1),
-            bn_shift.reshape(1, -1, 1, 1))
+            network, (1, decoder_hidden_size, 1, 1), bn_shift.reshape(1, -1, 1, 1)
+        )
 
         bn_scaled = network.add_elementwise(
-            fuse_conv.get_output(0), bn_scale_t,
-            trt.ElementWiseOperation.PROD)
+            fuse_conv.get_output(0), bn_scale_t, trt.ElementWiseOperation.PROD
+        )
         bn_out = network.add_elementwise(
-            bn_scaled.get_output(0), bn_shift_t,
-            trt.ElementWiseOperation.SUM)
+            bn_scaled.get_output(0), bn_shift_t, trt.ElementWiseOperation.SUM
+        )
 
         # ReLU
         relu = network.add_activation(bn_out.get_output(0), trt.ActivationType.RELU)
@@ -582,7 +623,8 @@ class SegformerPlugin:
             num_output_maps=num_classes,
             kernel_shape=(1, 1),
             kernel=trt.Weights(np.ascontiguousarray(cls_w)),
-            bias=trt.Weights(np.ascontiguousarray(cls_b)))
+            bias=trt.Weights(np.ascontiguousarray(cls_b)),
+        )
 
         # Output: [1, num_classes, H/4, W/4]
         logits = cls_conv.get_output(0)
@@ -590,9 +632,11 @@ class SegformerPlugin:
         network.mark_output(logits)
 
         if verbose:
-            print(f"[trtmc build] Building SegFormer engine "
-                  f"(image={H_in}x{W_in}, classes={num_classes}) ...",
-                  file=sys.stderr)
+            print(
+                f"[trtmc build] Building SegFormer engine "
+                f"(image={H_in}x{W_in}, classes={num_classes}) ...",
+                file=sys.stderr,
+            )
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
